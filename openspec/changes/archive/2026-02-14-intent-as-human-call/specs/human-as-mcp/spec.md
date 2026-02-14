@@ -1,8 +1,5 @@
-# human-as-mcp Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change se3-core-framework. Update Purpose after archive.
-## Requirements
 ### Requirement: Human Call Interface
 系统SHALL定义标准的人类调用接口，支持同步和异步两种模式。
 
@@ -68,4 +65,3 @@ TBD - created by archiving change se3-core-framework. Update Purpose after archi
 #### Scenario: 决策类调用
 - **WHEN** agent需要人类在多个方案中做出选择
 - **THEN** 调用请求中列出所有选项及其优劣分析，人类选择后记录决策理由
-

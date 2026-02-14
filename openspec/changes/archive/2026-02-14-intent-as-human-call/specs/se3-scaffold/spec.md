@@ -1,21 +1,4 @@
-# se3-scaffold Specification
-
-## Purpose
-TBD - created by archiving change se3-core-framework. Update Purpose after archive.
-## Requirements
-### Requirement: CLAUDE.md Template System
-系统SHALL产出一套可复用的CLAUDE.md模板，作为SE 3.0框架在Claude Code上的主要实现载体。
-
-模板MUST包含：
-- 标准流程定义（启动流程、执行流程、结束流程）
-- 特别文件规定（intentions.md、demands.md、progress.md等）
-- 约定行为定义（自行迭代、change管理等）
-- Human-as-MCP调用规范
-- Agent Team协作规范
-
-#### Scenario: 新项目采用SE 3.0
-- **WHEN** 用户在新项目中初始化SE 3.0框架
-- **THEN** 生成完整的CLAUDE.md模板和配套文件结构
+## MODIFIED Requirements
 
 ### Requirement: SE 3.0 Project Structure
 系统SHALL定义标准的SE 3.0项目文件结构。
@@ -63,4 +46,3 @@ project/
 #### Scenario: 完整交付
 - **WHEN** SE 3.0框架设计完成
 - **THEN** 所有交付物齐备，用户可以直接在新项目中使用
-

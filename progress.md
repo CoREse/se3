@@ -1,32 +1,28 @@
 # Progress
 
-<!-- 按时间倒序记录每个session的工作内容 -->
-
-## 2026-02-14 Session 1
+## 2026-02-14 Session 1 (continued)
 
 ### 工作内容
-- 项目初始化：创建git仓库、初始化openspec
-- 基于intentions.md创建demands.md（5大需求领域，15个子需求）
-- 学习Anthropic《Effective Harnesses for Long-Running Agents》文章，提取核心理念
-- 完成Change `se3-core-framework`：
-  - 设计并实现5个capability的spec（session-protocol、incremental-dev-flow、human-as-mcp、agent-team、se3-scaffold）
-  - 创建完整的SE 3.0 CLAUDE.md模板（output/CLAUDE.md）
-  - 创建标准项目文件结构（progress.md、human-calls/、agent-comms/）
-  - 创建human-call示例文件
-  - 编写README.md和最佳实践指南
-- 完成Change `se3-config-and-skills`：
-  - 创建se3.config.yaml配置文件模板
-  - 创建SE 3.0初始化Skill (SKILL.md)
-  - 更新CLAUDE.md模板增加配置系统
+- 根据用户反馈重新设计框架核心：移除 intentions.md，统一 Human-as-MCP
+- 完成 Change `intent-as-human-call`：
+  - 重写 output/CLAUDE.md v2：渐进式启动协议 + Human call 同步/异步双模式
+  - 更新 demands.md 移除所有 intentions.md 引用
+  - 更新 README.md 和 best-practices.md
+  - 更新 init Skill 移除 intentions.md 创建
 
 ### 完成的Change
-- `se3-core-framework`: 已归档 (2026-02-14-se3-core-framework)
-- `se3-config-and-skills`: 已归档 (2026-02-14-se3-config-and-skills)
+- `se3-core-framework`: 已归档
+- `se3-config-and-skills`: 已归档
+- `intent-as-human-call`: 已归档
+
+### 设计决策
+- **移除 intentions.md**：项目意图通过首次 human call 获取，不再要求预置文件
+- **渐进式启动**：只读 progress.md + git log 定位状态，按需加载其他文件
+- **Human call 双模式**：同步（人在场直接问）+ 异步（人不在写文件）
 
 ### 遗留问题
 - 无
 
 ### 下一步建议
-- 在实际项目中测试SE 3.0框架，验证CLAUDE.md模板的有效性
-- 根据实践反馈迭代改进框架设计
-- 考虑是否需要更精细的agent角色指定机制
+- 在实际项目中测试 SE 3.0 v2 框架
+- 验证渐进式启动在真实项目中的效果

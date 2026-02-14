@@ -1,9 +1,9 @@
 ---
 name: se3-init
-description: Initialize SE 3.0 framework in the current project. Creates standard file structure, configuration, and CLAUDE.md template for AI-first development.
+description: Initialize SE 3.0 framework in the current project. Creates standard file structure and CLAUDE.md template for AI-first development.
 metadata:
   author: se3
-  version: "1.0"
+  version: "2.0"
 ---
 
 Initialize the SE 3.0 (Software Engineering 3.0) development framework in the current project.
@@ -13,7 +13,6 @@ Initialize the SE 3.0 (Software Engineering 3.0) development framework in the cu
 1. **Check existing project state**
 
    Check if the following already exist:
-   - `intentions.md`
    - `demands.md`
    - `progress.md`
    - `se3.config.yaml`
@@ -24,7 +23,6 @@ Initialize the SE 3.0 (Software Engineering 3.0) development framework in the cu
 
 2. **Create missing directories**
 
-   Create any missing directories:
    ```bash
    mkdir -p human-calls agent-comms
    ```
@@ -38,13 +36,6 @@ Initialize the SE 3.0 (Software Engineering 3.0) development framework in the cu
 
 4. **Create missing files (do NOT overwrite existing files)**
 
-   - `intentions.md` (if missing): Create with template:
-     ```markdown
-     # 意图
-
-     [在此描述项目的核心意图]
-     ```
-
    - `progress.md` (if missing): Create with template:
      ```markdown
      # Progress
@@ -52,11 +43,13 @@ Initialize the SE 3.0 (Software Engineering 3.0) development framework in the cu
      <!-- 按时间倒序记录每个session的工作内容 -->
      ```
 
-   - `se3.config.yaml` (if missing): Create with default SE 3.0 configuration (see output/se3.config.yaml for template)
+   - `se3.config.yaml` (if missing): Create with default SE 3.0 configuration
+
+   Note: Do NOT create `demands.md` — it will be created through the first human call when the agent starts working.
 
 5. **Set up CLAUDE.md**
 
-   If `.claude/CLAUDE.md` doesn't exist, create it with the SE 3.0 template (see output/CLAUDE.md for the full template).
+   If `.claude/CLAUDE.md` doesn't exist, create it with the SE 3.0 template.
 
    If it already exists, inform the user that they may want to merge SE 3.0 instructions into their existing CLAUDE.md.
 
@@ -70,11 +63,10 @@ Initialize the SE 3.0 (Software Engineering 3.0) development framework in the cu
 7. **Output summary**
 
    Summarize what was created/skipped and provide next steps:
-   - Edit `intentions.md` to describe your project intent
-   - Run `自行迭代` to start AI-driven development
-   - Check `human-calls/` for any pending human requests
+   - Run `自行迭代` to start — the agent will ask you about the project intent via human call
+   - Check `human-calls/` for any pending async requests
 
 **Guardrails**
-- NEVER overwrite existing files - only create missing ones
+- NEVER overwrite existing files — only create missing ones
 - NEVER modify existing CLAUDE.md without user confirmation
-- Always inform user what was created vs. what was skipped
+- Do NOT create intentions.md — project intent is obtained through human calls

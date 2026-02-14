@@ -1,8 +1,5 @@
-# session-protocol Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change se3-core-framework. Update Purpose after archive.
-## Requirements
 ### Requirement: Session Startup Protocol
 系统SHALL定义渐进式的session启动协议。agent进入项目时MUST通过最小信息快速定位状态，按需加载更多上下文。
 
