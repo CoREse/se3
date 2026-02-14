@@ -6,7 +6,7 @@
 
 1. **Human-as-MCP**: All human input obtained on-demand via human calls. No pre-written requirement files.
 2. **Progressive Loading**: Start with `progress.md` + `git log`. Load deeper only when the task needs it.
-3. **Specs as Truth**: OpenSpec specs are the single source of truth. Agents MUST NOT weaken or delete existing requirements without explicit human approval.
+3. **Specs as Truth**: OpenSpec specs are the source of truth for **requirements**. Agents MUST NOT weaken or delete existing requirements without explicit human approval.
 4. **Verify Before Done**: Never mark a feature complete without running tests. Spec scenarios are acceptance criteria, not documentation.
 5. **Incremental Development**: Work in openspec changes. Each session stays within a bounded scope.
 
@@ -21,7 +21,7 @@
 - If it fails, diagnose and fix before proceeding
 
 **Step 1 — Read status**:
-- Read `status.md` for current session state (single source of truth)
+- Read `status.md` for current session state (runtime dashboard)
 - If status shows `blocked` or `error`, diagnose and resolve first
 - If status shows `waiting-human`, check `human-calls/` for response
 
@@ -204,7 +204,7 @@ created: YYYY-MM-DD
 
 ## SDD (Spec Driven Development)
 
-OpenSpec specs = single source of truth for project requirements.
+OpenSpec specs = source of truth for **requirements**.
 
 ### Adaptive Formality
 
@@ -282,14 +282,14 @@ When instructed to self-iterate, execute without stopping until step 5:
 ```
 project/
 ├── init.sh                # optional: environment setup script
-├── status.md              # current session state (single source of truth)
+├── status.md              # runtime dashboard (current session state)
 ├── progress.md            # cross-session history
 ├── se3.config.yaml        # optional
 ├── README.md
 ├── human-calls/           # async human call queue
 ├── .e2e-baselines/        # optional: visual regression baselines
 ├── openspec/
-│   ├── specs/             # source of truth (guardrails apply)
+│   ├── specs/             # source of truth for requirements (guardrails apply)
 │   ├── changes/
 │   └── archive/
 └── .claude/

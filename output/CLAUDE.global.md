@@ -42,6 +42,6 @@ All projects use SDD with openspec unless stated otherwise.
 
 ## Session State
 
-- Use `status.md` at project root as the **single source of truth** for current session state.
+- Use `status.md` at project root as the **runtime dashboard** for current session state.
 - Update after every significant action or state change.
 - Read `status.md` first on startup to understand: Active Change, Current Task, Status (ready/blocked/error), Blockers.

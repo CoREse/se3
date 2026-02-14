@@ -1,7 +1,7 @@
 # Session Status
 
-> Single source of truth for current session state.
-> Auto-updated by agent. Human reads this first to diagnose issues.
+> Runtime dashboard for current session state.
+> Updated continuously by agent. Human reads this first to diagnose issues.
 
 ## Current State
 

@@ -9,7 +9,7 @@ SE 3.0 combines Anthropic's [long-running agent best practices](https://www.anth
 ### Core Principles
 
 - **Human-as-MCP**: All human input (including initial project intent) obtained on-demand via human calls. Sync (ask directly) or async (write file). No pre-written requirement files.
-- **Specs as Truth**: OpenSpec specs are the single source of truth. In agent team mode, specs are contracts between agents.
+- **Specs as Truth**: OpenSpec specs are the source of truth for **requirements**. In agent team mode, specs are contracts between agents.
 - **Adaptive Formality**: Full openspec workflow for large changes; skip ceremony for small ones. Match process to scope.
 - **Progressive Loading**: Sessions start with `progress.md` + `git log`. Everything else loads on demand.
 - **Verify Before Done**: Never mark a feature complete without running tests. Spec scenarios are acceptance criteria.
@@ -53,7 +53,7 @@ Check `human-calls/` for pending requests. Fill in `## Response`.
 ```
 project/
 ├── init.sh                 # Environment setup (optional)
-├── status.md               # Current session state (single source of truth)
+├── status.md               # Runtime dashboard (current session state)
 ├── progress.md             # Cross-session history
 ├── se3.config.yaml         # Configuration (optional)
 ├── README.md

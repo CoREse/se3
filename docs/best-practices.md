@@ -26,7 +26,7 @@
 ## 2. Specs and Adaptive Formality
 
 ### Specs as source of truth
-- OpenSpec specs are the single authoritative record of what the project should do
+- OpenSpec specs are the **source of truth for requirements**
 - In agent team mode, specs are **contracts between agents** — write them precisely enough that an agent with no other context can implement from them
 - Use `openspec list --specs` for a full requirements overview
 
@@ -70,7 +70,7 @@ Next: finish remaining tasks, focus on error handling
 ## 5. Session Management
 
 ### Progressive startup
-- Read `status.md` first for current session state (single source of truth)
+- Read `status.md` first for current session state (runtime dashboard)
 - Read `progress.md` latest entry for cross-session history
 - Read `git log --oneline -5`
 - Don't pre-read specs — load them when the task needs them
