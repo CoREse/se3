@@ -59,9 +59,13 @@ def initialize_project(
     # Create .claude directory (no-op if it already exists)
     claude_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. Create SE3.md (copy from CLAUDE.md with version and metadata)
-    # Use the main CLAUDE.md as the SE3.md content
-    se3_content = Path("/data/cre/workspace/se3.0/CLAUDE.md").read_text(encoding="utf-8")
+    # 1. Create SE3.md (from template with version and metadata)
+    # Locate template directory relative to package location
+    project_root = Path(__file__).parent.parent.parent.parent
+    templates_dir = project_root / "output"
+
+    se3_template_path = templates_dir / "SE3.md.template"
+    se3_content = se3_template_path.read_text(encoding="utf-8")
 
     # Add metadata
     metadata = (
@@ -77,7 +81,7 @@ def initialize_project(
     typer.echo(f"Created {se3_path}")
 
     # 2. Create CLAUDE.md from minimal template
-    minimal_template_path = Path("/data/cre/workspace/se3.0/output/CLAUDE.minimal.md.template")
+    minimal_template_path = templates_dir / "CLAUDE.minimal.md.template"
     claude_content = minimal_template_path.read_text(encoding="utf-8")
 
     # Replace placeholders
