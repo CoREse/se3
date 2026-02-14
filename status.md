@@ -6,7 +6,7 @@
 ## Current State
 
 **Active Change**: `none`
-**Current Task**: `idle`
+ **Current Task**: `terminology-clarification`
 **Status**: `ready`
 **Blocked Since**: `-`
 **Context Budget**: `moderate`
@@ -28,9 +28,9 @@ Session complete. v5.1 committed with status.md diagnostic framework.
 
 ## Recent History (last 3 actions)
 
-1. `[2026-02-14 13:35]` - Committed v5.1 (status.md diagnostic framework)
-2. `[2026-02-14 13:30]` - Created and integrated status.md across framework
-3. `[2026-02-14 13:25]` - Completed E2E baseline management docs and config
+1. `[2026-02-14 13:40]` - Clarified terminology: specs = requirements source of truth, status.md = runtime dashboard
+2. `[2026-02-14 13:35]` - Committed v5.1 (status.md diagnostic framework)
+3. `[2026-02-14 13:30]` - Created and integrated status.md across framework
 
 ## Quick Diagnosis
 
