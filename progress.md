@@ -1,5 +1,28 @@
 # Progress
 
+## 2026-02-14 Session 5 (Requirement Capture)
+
+### Done
+- Created `requirement-capture` openspec change with full artifacts
+- Defined three-source requirement intake mechanism:
+  - `autonomous-discovery`: Agent identifies need during implementation
+  - `human-mcp`: Human responds to agent's request for input
+  - `human-initiated`: Human proactively provides requirement (any interaction context)
+- Clarified "human-initiated" includes both true interrupts and natural turn boundaries
+- Created detailed usage examples for all three sources
+- Archived change, applied `requirement-intake` spec to main specs/
+- Updated status.md and progress.md
+
+### Changes
+- `requirement-capture`: completed and archived
+
+### Open Issues
+- None
+
+### Next Steps
+- Use requirement-intake spec for new changes going forward
+- Apply `[Source: ...]` markers in proposals to track requirement origins
+
 ## 2026-02-14 Session 4 (Toolize SE 3.0)
 
 ### Done

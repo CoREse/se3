@@ -134,6 +134,7 @@ See `output/TOOLS.md` for detailed documentation.
 
 ## Version History
 
+- v6.0 — 2026-02-14 — CLI tools: se3 lint, sync, verify, status for enforceable framework
 - v5.1 — 2026-02-14 — Diagnostic dashboard: status.md for single-source-of-truth session state
 - v5.0 — 2026-02-14 — Verification protocol, spec guardrails, init.sh environment automation
 - v4.1 — 2026-02-14 — Adaptive formality: match SDD ceremony to change scope, specs as agent contracts
