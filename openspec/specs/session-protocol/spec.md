@@ -7,11 +7,12 @@ TBD - created by archiving change se3-core-framework. Update Purpose after archi
 The system SHALL define a progressive session startup protocol. The agent MUST locate current state with minimal context, then load more on demand.
 
 Startup steps:
-1. Read the latest entry in `progress.md` + `git log --oneline -5`
-2. Scan `human-calls/` for responded but unprocessed requests
-3. Check `openspec/changes/` for active changes and `openspec/specs/` for current capabilities
-4. Determine session scope based on progress "next steps" + active changes
-5. Load additional files only when the task requires them
+1. Read `status.md` for current session state (runtime dashboard)
+2. Read the latest entry in `progress.md` + `git log --oneline -5`
+3. Scan `human-calls/` for responded but unprocessed requests
+4. Check `openspec/changes/` for active changes and `openspec/specs/` for current capabilities
+5. Determine session scope based on progress "next steps" + active changes
+6. Load additional files only when the task requires them
 
 If step 1 finds no progress.md and no git history → **first-time bootstrap**:
 - Ask the human (sync human call): "What should this project do?"

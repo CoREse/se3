@@ -290,8 +290,8 @@ project/
 ├── .e2e-baselines/        # optional: visual regression baselines
 ├── openspec/
 │   ├── specs/             # source of truth for requirements (guardrails apply)
-│   ├── changes/
-│   └── archive/
+│   └── changes/
+│       └── archive/
 └── .claude/
     └── CLAUDE.md           # this file
 ```

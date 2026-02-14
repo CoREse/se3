@@ -61,8 +61,8 @@ project/
 ├── .e2e-baselines/         # Visual regression baselines (optional)
 ├── openspec/
 │   ├── specs/              # Source of truth for requirements
-│   ├── changes/
-│   └── archive/
+│   └── changes/
+│       └── archive/
 └── .claude/
     └── CLAUDE.md            # SE 3.0 project config
 ```

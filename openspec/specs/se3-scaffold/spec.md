@@ -8,7 +8,7 @@ TBD - created by archiving change se3-core-framework. Update Purpose after archi
 
 模板MUST包含：
 - 标准流程定义（启动流程、执行流程、结束流程）
-- 特别文件规定（intentions.md、demands.md、progress.md等）
+- 特别文件规定（status.md、progress.md、human-calls/等）
 - 约定行为定义（自行迭代、change管理等）
 - Human-as-MCP调用规范
 - Agent Team协作规范
@@ -20,17 +20,19 @@ TBD - created by archiving change se3-core-framework. Update Purpose after archi
 ### Requirement: SE 3.0 Project Structure
 The system SHALL define the standard SE 3.0 project file structure.
 
-Standard structure (demands.md removed):
+Standard structure:
 ```
 project/
+├── init.sh                # Environment setup (optional)
+├── status.md              # Runtime dashboard (current session state)
 ├── progress.md            # Cross-session progress tracking
 ├── se3.config.yaml        # Framework configuration (optional)
 ├── README.md              # Project documentation
 ├── human-calls/           # Async human call queue
 ├── openspec/
 │   ├── specs/             # Source of truth for requirements
-│   ├── changes/
-│   └── archive/
+│   └── changes/
+│       └── archive/
 └── .claude/
     └── CLAUDE.md          # SE 3.0 framework (project-level)
 ```
