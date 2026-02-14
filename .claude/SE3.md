@@ -1,3 +1,7 @@
+<!-- Generated on 2026-02-14 -->
+<!-- SE3 Version: 1.0 -->
+<!-- Checksum: a8c347df360d53695a4ce127b8e9c0d2acfe1755a3af789499e55829c828e58c -->
+
 # SE 3.0 Framework
 
 > Place at `.claude/CLAUDE.md` in your project.
