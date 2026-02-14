@@ -1,7 +1,7 @@
 # human-as-mcp Specification
 
 ## Purpose
-TBD - created by archiving change se3-core-framework. Update Purpose after archive.
+Define the Human-as-MCP interface for obtaining human input on-demand. This spec governs sync and async human call modes, call persistence, non-blocking execution, and the first-time bootstrap flow where project intent is captured directly from human input without pre-written requirement files.
 ## Requirements
 ### Requirement: Human Call Interface
 The system SHALL define a standard human call interface supporting sync and async modes.

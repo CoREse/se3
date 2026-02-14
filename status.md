@@ -6,19 +6,19 @@
 ## Current State
 
 **Active Change**: `none`
- **Current Task**: `terminology-clarification`
+ **Current Task**: `spec-cleanup`
 **Status**: `ready`
 **Blocked Since**: `-`
 **Context Budget**: `moderate`
 
 ## What's Happening Now
 
-Session complete. v5.1 committed with status.md diagnostic framework.
+Spec cleanup complete. Removed 2 obsolete specs, filled all Purpose fields, unified language to English.
 
 ## Immediate Next Steps
 
-1. Await human input for next session direction
-2. Potential: Test SE 3.0 framework in a real project
+1. Commit changes to git
+2. Await human input for next session direction
 
 ## Blockers
 
@@ -28,9 +28,9 @@ Session complete. v5.1 committed with status.md diagnostic framework.
 
 ## Recent History (last 3 actions)
 
-1. `[2026-02-14 13:40]` - Clarified terminology: specs = requirements source of truth, status.md = runtime dashboard
-2. `[2026-02-14 13:35]` - Committed v5.1 (status.md diagnostic framework)
-3. `[2026-02-14 13:30]` - Created and integrated status.md across framework
+1. `[2026-02-14 14:15]` - Updated session-protocol/spec.md Purpose and translated to English
+2. `[2026-02-14 14:14]` - Deleted obsolete specs: incremental-dev-flow, se3-init-skill
+3. `[2026-02-14 14:12]` - Filled Purpose fields and translated specs to English
 
 ## Quick Diagnosis
 
@@ -39,7 +39,7 @@ If agent appears stuck, check:
 2. `Blockers` table — any unresolved issues?
 3. `human-calls/` — pending async calls?
 4. `git status` — uncommitted work?
-5. Latest `progress.md` entry — context from previous session
+5. Latest `progress.md` entry — context from previous sessions
 
 ---
 

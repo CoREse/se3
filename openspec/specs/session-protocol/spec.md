@@ -1,7 +1,7 @@
 # session-protocol Specification
 
 ## Purpose
-TBD - created by archiving change se3-core-framework. Update Purpose after archive.
+Define the session lifecycle protocol for SE 3.0 agents. This spec governs progressive startup (status.md → progress.md → scope determination), execution boundaries, shutdown procedures, and progress tracking across sessions.
 ## Requirements
 ### Requirement: Session Startup Protocol
 The system SHALL define a progressive session startup protocol. The agent MUST locate current state with minimal context, then load more on demand.
@@ -33,11 +33,11 @@ If step 1 finds no progress.md and no git history → **first-time bootstrap**:
 - **THEN** agent reads the relevant spec file at that point, not during startup
 
 ### Requirement: Session Execution Boundary
-每个session MUST聚焦于有限范围的工作，不得尝试在单个session中完成过多任务。
+Each session MUST focus on a limited scope of work and MUST NOT attempt to complete too many tasks in a single session.
 
-#### Scenario: Session工作范围限定
-- **WHEN** agent通过启动协议确定了工作范围
-- **THEN** agent仅执行该范围内的任务，不主动扩展范围
+#### Scenario: Session scope limitation
+- **WHEN** the agent has determined the work scope through the startup protocol
+- **THEN** the agent only executes tasks within that scope and does not actively expand the scope
 
 ### Requirement: Session Shutdown Protocol
 Session ending MUST leave code in a mergeable state and update knowledge transfer files.

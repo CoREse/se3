@@ -1,5 +1,24 @@
 # Progress
 
+## 2026-02-14 Session 3 (Spec Cleanup)
+
+### Done
+- Deleted obsolete `incremental-dev-flow/spec.md` (referenced removed demands.md/intentions.md)
+- Deleted obsolete `se3-init-skill/` directory (init now handled by startup protocol)
+- Filled Purpose fields for all remaining specs
+- Translated all specs to English (was Chinese/English mix)
+- Verified output/se3.config.yaml already has e2e configuration
+
+### Changes
+- Direct edits (no openspec change — spec maintenance only)
+
+### Open Issues
+- None
+
+### Next Steps
+- Commit cleanup changes
+- Consider adding spec lint tool to prevent future drift
+
 ## 2026-02-14 Session 2 (v5.1)
 
 ### Done

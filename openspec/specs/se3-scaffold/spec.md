@@ -1,21 +1,21 @@
 # se3-scaffold Specification
 
 ## Purpose
-TBD - created by archiving change se3-core-framework. Update Purpose after archive.
+Define the SE 3.0 project scaffold system, including the CLAUDE.md template system, standard project structure, configuration system, and self-iterate workflow. This spec governs how SE 3.0 generates its output artifacts and how new projects adopt the framework.
 ## Requirements
 ### Requirement: CLAUDE.md Template System
-系统SHALL产出一套可复用的CLAUDE.md模板，作为SE 3.0框架在Claude Code上的主要实现载体。
+The system SHALL produce a reusable CLAUDE.md template as the primary implementation vehicle for the SE 3.0 framework on Claude Code.
 
-模板MUST包含：
-- 标准流程定义（启动流程、执行流程、结束流程）
-- 特别文件规定（status.md、progress.md、human-calls/等）
-- 约定行为定义（自行迭代、change管理等）
-- Human-as-MCP调用规范
-- Agent Team协作规范
+The template MUST include:
+- Standard process definitions (startup, execution, shutdown protocols)
+- Special file specifications (status.md, progress.md, human-calls/, etc.)
+- Conventional behavior definitions (self-iterate, change management, etc.)
+- Human-as-MCP invocation specifications
+- Agent Team collaboration specifications
 
-#### Scenario: 新项目采用SE 3.0
-- **WHEN** 用户在新项目中初始化SE 3.0框架
-- **THEN** 生成完整的CLAUDE.md模板和配套文件结构
+#### Scenario: New project adopts SE 3.0
+- **WHEN** a user initializes SE 3.0 framework in a new project
+- **THEN** the system generates the complete CLAUDE.md template and supporting file structure
 
 ### Requirement: SE 3.0 Project Structure
 The system SHALL define the standard SE 3.0 project file structure.
@@ -44,17 +44,17 @@ OpenSpec specs serve as the single source of truth for project requirements. No 
 - **THEN** the standard file structure is created without demands.md
 
 ### Requirement: Configuration System
-系统SHALL支持通过 `se3.config.yaml` 配置框架行为。
+The system SHALL support configuring framework behavior via `se3.config.yaml`.
 
-可配置项包括：
-- `max_tasks_per_change`: 每个change的最大任务数（默认5）
-- `human_call.timeout_days`: human-call的默认超时天数（默认7）
-- `agent_team.roles`: 启用的agent角色列表
-- `session.max_progress_entries`: progress中保留的最大session记录数（默认20）
+Configuration options include:
+- `max_tasks_per_change`: Maximum tasks per change (default: 5)
+- `human_call.timeout_days`: Default timeout days for human calls (default: 7)
+- `agent_team.roles`: List of enabled agent roles
+- `session.max_progress_entries`: Maximum session records to keep in progress (default: 20)
 
-#### Scenario: 使用默认配置
-- **WHEN** 项目中没有se3.config.yaml文件
-- **THEN** 框架使用内置默认值运行
+#### Scenario: Using default configuration
+- **WHEN** no se3.config.yaml file exists in the project
+- **THEN** the framework runs with built-in default values
 
 ### Requirement: Output Artifacts
 The system SHALL produce the following deliverables:

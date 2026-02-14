@@ -1,25 +1,26 @@
 # se3-config Specification
 
 ## Purpose
-TBD - created by archiving change se3-config-and-skills. Update Purpose after archive.
+Define the SE 3.0 framework configuration system via `se3.config.yaml`. This spec governs configurable parameters, default values, and how the framework adapts its behavior based on project-specific settings.
 ## Requirements
 ### Requirement: Configuration File Format
-系统SHALL支持通过 `se3.config.yaml` 文件配置框架行为。
+The system SHALL support configuring framework behavior via `se3.config.yaml`.
 
-配置文件位于项目根目录，使用YAML格式。所有配置项MUST有合理的默认值。
+The configuration file is located at the project root using YAML format. All configuration items MUST have sensible defaults.
 
-可配置项包括：
-- `max_tasks_per_change`: 每个change的最大任务数（默认5）
-- `progress_format`: progress.md的记录格式
-- `human_call_timeout_days`: human-call的默认超时天数（默认7）
-- `agent_roles`: 启用的agent角色列表
-- `auto_archive`: change完成后是否自动归档（默认false）
+Configurable options include:
+- `max_tasks_per_change`: Maximum number of tasks per change (default: 5)
+- `human_call.timeout_days`: Default timeout days for human calls (default: 7)
+- `session.max_progress_entries`: Maximum session records to retain in progress (default: 20)
+- `e2e.baseline_dir`: Directory for storing baseline screenshots
+- `e2e.diff_threshold`: Pixel difference threshold for visual regression (0.0 - 1.0)
+- `e2e.default_viewport`: Default browser viewport size for screenshots
 
-#### Scenario: 使用默认配置
-- **WHEN** 项目中没有se3.config.yaml文件
-- **THEN** 框架使用内置默认值运行
+#### Scenario: Using default configuration
+- **WHEN** no se3.config.yaml file exists in the project
+- **THEN** the framework runs with built-in default values
 
-#### Scenario: 自定义配置
-- **WHEN** 项目中存在se3.config.yaml且指定了max_tasks_per_change为3
-- **THEN** 框架在创建change时限制每组最多3个任务
+#### Scenario: Custom configuration
+- **WHEN** se3.config.yaml exists and specifies max_tasks_per_change as 3
+- **THEN** the framework limits each change to maximum 3 tasks when creating changes
 

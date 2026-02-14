@@ -1,7 +1,7 @@
 # agent-team Specification
 
 ## Purpose
-TBD - created by archiving change se3-core-framework. Update Purpose after archive.
+Define the multi-agent task coordination system using Claude Code's native Task tool. This spec governs how parent agents distribute work to sub-agents, how role differentiation works through prompts, and how change-level isolation enables safe parallel execution.
 ## Requirements
 ### Requirement: Multi-Agent Task Coordination
 The system SHALL support multi-agent parallel work using Claude Code's native Task tool with sub-agents.
