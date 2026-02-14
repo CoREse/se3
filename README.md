@@ -19,10 +19,10 @@ SE 3.0 combines Anthropic's [long-running agent best practices](https://www.anth
 
 ## Quick Start
 
-### 1. Global conventions (one-time)
+### 1. Install SE 3.0 CLI
 
 ```bash
-cp output/CLAUDE.global.md ~/.claude/CLAUDE.md
+pip install se3
 ```
 
 ### 2. Initialize a project
@@ -30,9 +30,15 @@ cp output/CLAUDE.global.md ~/.claude/CLAUDE.md
 ```bash
 mkdir my-project && cd my-project
 git init
-openspec init --tools claude
-mkdir -p human-calls
-cp path/to/se3.0/output/CLAUDE.md .claude/CLAUDE.md
+se3 init
+```
+
+This creates:
+
+```
+.claude/
+├── CLAUDE.md    # Project-specific conventions (~25 lines)
+└── SE3.md       # Complete SE 3.0 framework (~300 lines, managed by se3)
 ```
 
 ### 3. Start developing
@@ -40,13 +46,21 @@ cp path/to/se3.0/output/CLAUDE.md .claude/CLAUDE.md
 Tell Claude Code: `self-iterate`
 
 The agent will:
-1. Detect an empty project → ask "What should this project do?" (human call)
-2. Create an openspec change from your answer (proposal = intent, specs = formalization)
-3. Implement incrementally, calling you only when it needs decisions or actions
+1. Read `.claude/CLAUDE.md` for project configuration
+2. Read `.claude/SE3.md` for framework rules
+3. Detect an empty project → ask "What should this project do?" (human call)
+4. Create an openspec change from your answer (proposal = intent, specs = formalization)
+5. Implement incrementally, calling you only when it needs decisions or actions
 
-### 4. Respond to async human calls
+### 4. Maintain SE3.md
 
-Check `human-calls/` for pending requests. Fill in `## Response`.
+```bash
+# Check if SE3.md is up to date
+se3 doctor
+
+# Update to latest SE3 version
+se3 upgrade
+```
 
 ## Project Structure
 
@@ -64,8 +78,42 @@ project/
 │   └── changes/
 │       └── archive/
 └── .claude/
-    └── CLAUDE.md            # SE 3.0 project config
+    ├── CLAUDE.md           # Project-specific conventions (editable)
+    └── SE3.md              # SE 3.0 framework reference (managed by se3)
 ```
+
+## SE 3.0 CLI Tools
+
+SE 3.0 includes CLI tools to validate and enforce framework conventions:
+
+```bash
+# Install tools
+pip install se3
+
+# Initialize a new SE 3.0 project
+se3 init
+
+# Validate specs
+se3 lint
+
+# Sync output/ directory with source
+se3 sync --dry-run   # Preview changes
+se3 sync --apply     # Apply changes
+
+# Verify change implementation
+se3 verify --change <change-name>
+
+# Diagnose session state
+se3 status
+
+# Check SE3.md health
+se3 doctor
+
+# Update SE3.md to latest version
+se3 upgrade
+```
+
+See `output/TOOLS.md` for detailed documentation.
 
 ## Key Concepts
 
@@ -88,6 +136,20 @@ Progressive startup: `status.md` (current state) → `progress.md` (history) + `
 | Sync | Human present | Ask directly (AskUserQuestion) |
 | Async | Human absent / offline action needed | Write to `human-calls/` |
 
+### SE3.md Module System
+
+SE 3.0 uses a two-file architecture to separate framework conventions from project-specific configurations:
+
+| File | Purpose | Editable | Managed by |
+|------|---------|----------|------------|
+| `.claude/SE3.md` | Complete SE 3.0 framework specification | ❌ No | `se3` CLI |
+| `.claude/CLAUDE.md` | Project-specific conventions and overrides | ✅ Yes | Project team |
+
+This separation allows:
+- **Framework updates**: `se3 upgrade` updates SE3.md without touching project-specific configurations
+- **Minimal project setup**: CLAUDE.md can be as short as 25 lines for simple projects
+- **Version consistency**: SE3.md includes version and checksum for validation
+
 ### Adaptive Conventions
 
 - **Commit**: When meaningful work is done. Not tied to /new.
@@ -101,39 +163,17 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | File | Purpose |
 |------|---------|
-| `output/CLAUDE.md` | Project-level template → `.claude/CLAUDE.md` |
+| `output/SE3.md.template` | SE3 framework template → `.claude/SE3.md` (via `se3 init`) |
+| `output/CLAUDE.minimal.md.template` | Minimal CLAUDE.md template (25 lines) |
 | `output/CLAUDE.global.md` | Global conventions → `~/.claude/CLAUDE.md` |
 | `output/se3.config.yaml` | Configuration template |
 | `output/status.md` | Session status template → project root `status.md` |
 | `output/TOOLS.md` | CLI tools documentation |
 | `docs/best-practices.md` | Best practices guide |
 
-## SE 3.0 CLI Tools
-
-SE 3.0 includes CLI tools to validate and enforce framework conventions:
-
-```bash
-# Install tools
-cd tools/ && pip install -e .
-
-# Validate specs
-se3 lint
-
-# Sync output/ directory with source
-se3 sync --dry-run   # Preview changes
-se3 sync --apply     # Apply changes
-
-# Verify change implementation
-se3 verify --change <change-name>
-
-# Diagnose session state
-se3 status
-```
-
-See `output/TOOLS.md` for detailed documentation.
-
 ## Version History
 
+- v7.0 — 2026-02-14 — SE3 Module System: Separate framework (SE3.md) from project config (CLAUDE.md), `se3 init` command
 - v6.1 — 2026-02-14 — Requirement intake: three-source taxonomy (autonomous-discovery, human-mcp, human-initiated) for structured requirement capture
 - v6.0 — 2026-02-14 — CLI tools: se3 lint, sync, verify, status for enforceable framework
 - v5.1 — 2026-02-14 — Diagnostic dashboard: status.md for single-source-of-truth session state
