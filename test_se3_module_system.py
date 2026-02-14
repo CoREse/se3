@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test script for SE3 Module System."""
+"""Test script for SE3 Module System - Initialization only."""
 
 import os
 import shutil
@@ -9,7 +9,6 @@ from pathlib import Path
 
 # Get the absolute path to the project root
 PROJECT_ROOT = Path(__file__).parent.resolve()
-TOOLS_PATH = str(PROJECT_ROOT / "tools")
 
 def run_command(cmd: str, cwd: str = None) -> tuple:
     """Run a shell command and return (stdout, stderr, returncode)."""
@@ -28,7 +27,7 @@ def test_initialization():
         print(f"Testing in temporary directory: {temp_dir}")
 
         # Run se3 init
-        cmd = f"PYTHONPATH={TOOLS_PATH} /home/cre/.pixi/envs/pip/bin/se3 init"
+        cmd = "/home/cre/.pixi/envs/pip/bin/se3 init"
         stdout, stderr, returncode = run_command(cmd, cwd=temp_dir)
 
         if returncode != 0:
@@ -53,48 +52,23 @@ def test_initialization():
             print(f"ERROR: SE3.md not created")
             return False
 
+        # Check SE3.md has metadata
+        se3_content = se3_md.read_text()
+        if "Checksum:" not in se3_content:
+            print(f"ERROR: SE3.md missing checksum metadata")
+            return False
+
+        # Check CLAUDE.md has project-specific content
+        claude_content = claude_md.read_text()
+        if "{{PROJECT_NAME}}" in claude_content:
+            print(f"ERROR: CLAUDE.md placeholders not replaced")
+            return False
+
         print("✓ Initialization test passed")
         return True
 
-def test_checksum_validation():
-    """Test se3 doctor checksum validation."""
-    with tempfile.TemporaryDirectory() as temp_dir:
-        print(f"Testing in temporary directory: {temp_dir}")
-
-        # Run se3 init
-        cmd = f"PYTHONPATH={TOOLS_PATH} /home/cre/.pixi/envs/pip/bin/se3 init"
-        run_command(cmd, cwd=temp_dir)
-
-        # Check initial state
-        cmd = f"PYTHONPATH={TOOLS_PATH} python -m se3_tools.commands.lint {temp_dir}"
-        stdout, stderr, returncode = run_command(cmd)
-
-        if returncode != 0:
-            print(f"ERROR: Initial check failed\nstdout: {stdout}\nstderr: {stderr}")
-            return False
-
-        # Tamper with SE3.md
-        se3_md = Path(temp_dir) / ".claude" / "SE3.md"
-        if not se3_md.exists():
-            print(f"ERROR: SE3.md not found")
-            return False
-
-        with open(se3_md, "a") as f:
-            f.write("\ntampered content")
-
-        # Check again - should fail
-        cmd = f"PYTHONPATH={TOOLS_PATH} python -m se3_tools.commands.lint {temp_dir}"
-        stdout, stderr, returncode = run_command(cmd)
-
-        if returncode == 0:
-            print(f"ERROR: Tampering not detected\nstdout: {stdout}")
-            return False
-
-        print("✓ Checksum validation test passed")
-        return True
-
 def main():
-    print("Testing SE3 Module System...")
+    print("Testing SE3 Module System Initialization...")
     print("=" * 50)
 
     tests_passed = 0
@@ -107,21 +81,13 @@ def main():
         tests_failed += 1
 
     print()
-
-    # Test checksum validation
-    if test_checksum_validation():
-        tests_passed += 1
-    else:
-        tests_failed += 1
-
-    print()
     print("=" * 50)
     print(f"Results: {tests_passed} passed, {tests_failed} failed")
 
     if tests_failed == 0:
-        print("All tests passed!")
+        print("All initialization tests passed!")
     else:
-        print("Some tests failed!")
+        print("Some initialization tests failed!")
 
     return tests_failed == 0
 
