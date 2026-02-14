@@ -144,6 +144,20 @@ When available, use browser automation (Puppeteer MCP, etc.) to test user-facing
 | Database queries | | ✓ |
 | Checkout/payment flow | ✓ | |
 
+#### Baseline management
+
+**Storage**: Store baseline screenshots in `.e2e-baselines/` (git-ignored or tracked depending on stability needs).
+
+**Workflow**:
+1. **First run**: Generate baseline → manually verify correctness → commit to baseline dir
+2. **Subsequent runs**: Screenshot → compare with baseline → fail if diff > threshold
+3. **Update baseline**: When UI intentionally changes, delete/recreate baseline after human approval
+
+**Config** (in `se3.config.yaml`):
+- `e2e.baseline_dir`: Where to store baseline screenshots
+- `e2e.diff_threshold`: Pixel difference tolerance (0.0 - 1.0)
+- `e2e.default_viewport`: Browser viewport for consistent screenshots
+
 ## 8. Spec Guardrails
 
 ### What agents MUST NOT do

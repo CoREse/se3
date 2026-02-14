@@ -57,6 +57,7 @@ project/
 ├── se3.config.yaml         # Configuration (optional)
 ├── README.md
 ├── human-calls/            # Async human call queue
+├── .e2e-baselines/         # Visual regression baselines (optional)
 ├── openspec/
 │   ├── specs/              # Source of truth for requirements
 │   ├── changes/

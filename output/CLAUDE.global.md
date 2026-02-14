@@ -38,6 +38,7 @@ All projects use SDD with openspec unless stated otherwise.
 - Never mark a feature complete without running tests that prove it works.
 - Spec scenarios (WHEN/THEN) are acceptance criteria — verify each one.
 - Run tests before committing. Do not commit with failing tests.
+- **Visual/E2E testing**: For user-facing features, use browser automation (Puppeteer MCP) to screenshot and verify UI. Visual regression catches layout breaks that unit tests miss.
 
 ## Documentation
 

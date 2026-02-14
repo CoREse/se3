@@ -279,7 +279,8 @@ project/
 ├── progress.md
 ├── se3.config.yaml        # optional
 ├── README.md
-├── human-calls/
+├── human-calls/           # async human call queue
+├── .e2e-baselines/        # optional: visual regression baselines
 ├── openspec/
 │   ├── specs/             # source of truth (guardrails apply)
 │   ├── changes/
