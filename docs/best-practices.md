@@ -114,7 +114,35 @@ Next: finish remaining tasks, focus on error handling
 Each WHEN/THEN scenario in a spec is a test case. Before marking a change complete, verify every scenario — either with automated tests or manual exercise.
 
 ### E2E testing
-When available, use browser automation (Puppeteer MCP, etc.) to test user-facing features. Visual verification catches issues that unit tests miss.
+
+When available, use browser automation (Puppeteer MCP, etc.) to test user-facing features.
+
+#### Visual regression workflow
+
+1. **Navigate** to the feature URL via MCP
+2. **Screenshot** the critical UI state (initial load, after interaction, error states)
+3. **Verify** key elements exist and are visible
+4. **Interact**: click buttons, fill forms, navigate
+5. **Assert**: check console for errors, verify URL changes, confirm visual state
+
+#### What visual testing catches (that unit tests don't)
+
+- Layout breaks (overlapping elements, overflow)
+- Text truncation or wrapping issues
+- CSS regressions (colors, spacing, fonts)
+- Missing images or broken assets
+- Responsive issues at different viewports
+
+#### When to use E2E vs unit tests
+
+| Scenario | Use E2E | Use Unit Tests |
+|----------|---------|----------------|
+| API endpoint logic | | ✓ |
+| UI component rendering | ✓ | |
+| Form validation rules | | ✓ |
+| Form submission flow | ✓ | |
+| Database queries | | ✓ |
+| Checkout/payment flow | ✓ | |
 
 ## 8. Spec Guardrails
 

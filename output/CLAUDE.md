@@ -101,7 +101,19 @@ Without this rule, agents will over-report completion. This is the single most c
 
 2. **Prefer automated tests**. Write tests for spec scenarios when possible. Run them. A passing test suite is the only reliable proof of completion.
 
-3. **E2E testing for user-facing features**. When available, use browser automation (Puppeteer MCP, etc.) to test as a user would. Visual verification catches issues that unit tests miss.
+3. **E2E testing for user-facing features**. Visual regression testing catches issues that unit tests miss.
+
+   **With Puppeteer MCP** (recommended):
+   - Navigate to the feature URL
+   - Screenshot the critical UI state
+   - Compare with baseline or verify key elements exist
+   - Test user flows: click → wait → screenshot → assert
+
+   **Visual verification checklist**:
+   - Layout not broken (no overlapping elements)
+   - Critical text visible and not truncated
+   - Interactive elements clickable
+   - No console errors during interaction
 
 4. **Manual verification as fallback**. If no automated testing is feasible, manually exercise the feature and document the result.
 
