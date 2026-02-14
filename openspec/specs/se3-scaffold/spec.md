@@ -62,10 +62,28 @@ The system SHALL produce the following deliverables:
 2. Global CLAUDE.md template for ~/.claude/CLAUDE.md (English)
 3. Configuration file template
 4. Documentation and best practices guide
+5. CLI tools documentation (TOOLS.md)
 
 #### Scenario: Complete delivery
 - **WHEN** SE 3.0 framework design is complete
 - **THEN** all deliverables are available for direct use in new projects
+
+### Requirement: CLI Tools
+The system SHALL provide CLI tools for validating and enforcing SE 3.0 conventions.
+
+Tools include:
+- `se3 lint` — Validate spec file format and content
+- `se3 sync` — Synchronize output/ directory with source files
+- `se3 verify` — Verify change implementation covers all spec scenarios
+- `se3 status` — Diagnose session state and identify issues
+
+#### Scenario: Spec validation
+- **WHEN** a developer runs `se3 lint`
+- **THEN** the tool validates all specs and reports any format violations
+
+#### Scenario: Change verification
+- **WHEN** an agent completes implementing a change
+- **THEN** `se3 verify --change <name>` confirms all scenarios are covered before archiving
 
 ### Requirement: Self-Iterate Flow
 The system SHALL define a self-iterate behavior that drives the project from human intent to working implementation.

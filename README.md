@@ -105,7 +105,32 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 | `output/CLAUDE.global.md` | Global conventions → `~/.claude/CLAUDE.md` |
 | `output/se3.config.yaml` | Configuration template |
 | `output/status.md` | Session status template → project root `status.md` |
+| `output/TOOLS.md` | CLI tools documentation |
 | `docs/best-practices.md` | Best practices guide |
+
+## SE 3.0 CLI Tools
+
+SE 3.0 includes CLI tools to validate and enforce framework conventions:
+
+```bash
+# Install tools
+cd tools/ && pip install -e .
+
+# Validate specs
+se3 lint
+
+# Sync output/ directory with source
+se3 sync --dry-run   # Preview changes
+se3 sync --apply     # Apply changes
+
+# Verify change implementation
+se3 verify --change <change-name>
+
+# Diagnose session state
+se3 status
+```
+
+See `output/TOOLS.md` for detailed documentation.
 
 ## Version History
 
