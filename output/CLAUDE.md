@@ -130,10 +130,39 @@ created: YYYY-MM-DD
 
 ## SDD (Spec Driven Development)
 
-- OpenSpec specs = single source of truth for project requirements
-- Human call results drive openspec changes directly (proposal = the demand, specs = formalization)
+OpenSpec specs = single source of truth for project requirements.
+
+### Adaptive Formality
+
+Not every change needs full ceremony. Match the process to the scope:
+
+**Large** (new capability, agent team, cross-cutting):
+- Full openspec change: proposal → specs → design → tasks → code
+- Specs are detailed with scenarios — they serve as **contracts between agents**
+- Design doc captures architecture decisions that sub-agents need
+
+**Medium** (single agent, moderate scope):
+- Openspec change with: proposal (brief) → specs (if requirements change) → tasks
+- Skip design unless there are real architecture decisions
+- Proposal can be 2-3 sentences
+
+**Small** (bug fix, tweak, simple addition):
+- No openspec change needed
+- Edit code directly, update the relevant spec file if behavior changed, commit
+
+### Specs as Agent Contracts
+
+In agent team mode, specs are the interface between agents:
+- Parent (architect) writes the spec defining **what** to build
+- Sub-agent (implementer) reads the spec and implements against it
+- Sub-agent (reviewer) verifies the implementation matches the spec
+- The spec must be precise enough that an agent with no other context can implement from it
+
+### Change Workflow
+
 - Each change: max 5 tasks per group with strong logical dependencies
 - Context clearing between groups only when context is saturated
+- Archive applies spec deltas back to main specs automatically — this is the key value of the openspec workflow
 
 ---
 
@@ -144,8 +173,20 @@ Uses Claude Code's native **Task tool**.
 - Parent spawns sub-agents via Task tool with appropriate `subagent_type`
 - Each sub-agent works on a different openspec change (natural file isolation)
 - Results return directly — no file-based communication
-- Roles expressed in prompts: architect / implementer / reviewer
-- Default: single agent. Multi-agent only when independent changes can be parallelized.
+- Specs on the file system serve as shared context accessible to all agents
+
+### Roles
+
+Expressed in Task tool prompts:
+
+- **architect**: "Design the spec for change X. Define requirements with scenarios detailed enough for another agent to implement."
+- **implementer**: "Implement tasks 1-3 of change X. Read `openspec/specs/` for requirements. Do not deviate from the spec."
+- **reviewer**: "Verify change X. Read the spec, read the implementation, report any gaps."
+
+### When to Use
+
+- **Single agent** (default): One agent handles all roles. Most work.
+- **Multi-agent**: When multiple independent changes can be parallelized. Parent distributes one change per sub-agent.
 
 ---
 

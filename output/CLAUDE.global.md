@@ -20,7 +20,10 @@
 All projects use SDD with openspec unless stated otherwise.
 
 - OpenSpec specs are the single source of truth for project requirements.
-- Changes that affect specs MUST go through openspec changes.
+- Match process to scope:
+  - **Large changes** (new capability, cross-cutting): full openspec change (proposal → specs → design → tasks)
+  - **Medium changes**: openspec change with brief proposal + tasks, specs if requirements change, skip design
+  - **Small changes** (bug fix, tweak): no openspec change — edit code, update spec if behavior changed, commit
 - Each change: tasks grouped into max 5 with strong logical dependencies.
 
 ## Documentation

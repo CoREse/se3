@@ -23,12 +23,28 @@
 - Already specified in openspec specs
 - Answerable through docs or code search
 
-## 2. Specs as Source of Truth
+## 2. Specs and Adaptive Formality
 
+### Specs as source of truth
 - OpenSpec specs are the single authoritative record of what the project should do
-- Human call results go directly into openspec change proposals — no intermediate file
-- The proposal IS the demand. Specs formalize it. Archives preserve history.
+- In agent team mode, specs are **contracts between agents** — write them precisely enough that an agent with no other context can implement from them
 - Use `openspec list --specs` for a full requirements overview
+
+### Match process to scope
+- **Don't over-formalize**: a bug fix doesn't need a proposal, specs, design, and tasks
+- **Don't under-formalize**: a new capability that sub-agents will implement needs detailed specs with scenarios
+- Rule of thumb: if you can describe the change fully in a commit message, skip the openspec change
+
+### When to write a design doc
+- Cross-cutting changes affecting multiple modules
+- Architecture decisions where sub-agents need to make consistent choices
+- New external dependencies or significant data model changes
+- Skip for everything else
+
+### Writing good specs (agent contracts)
+- Each requirement must be implementable by an agent reading only the spec
+- Scenarios (WHEN/THEN) serve as acceptance criteria — a reviewer agent uses them to verify
+- Avoid vague language: "should handle errors gracefully" → "SHALL return HTTP 400 with error detail when input validation fails"
 
 ## 3. Commits
 
@@ -70,12 +86,18 @@ Next: finish remaining tasks, focus on error handling
 
 ### When to use multi-agent
 - Multiple independent openspec changes can run in parallel
-- Otherwise: single agent is simpler
+- Otherwise: single agent is simpler and sufficient
 
 ### Task tool usage
-- Include role in prompt: "As implementer, execute tasks..."
-- Each sub-agent gets a separate change
-- Results return directly — no file coordination
+- **Architect prompt**: "Design the spec for change X. Requirements must be detailed enough for another agent to implement."
+- **Implementer prompt**: "Implement tasks 1-3 of change X. Read `openspec/specs/` for requirements. Do not deviate from the spec."
+- **Reviewer prompt**: "Verify change X. Read the spec, read the implementation, report gaps."
+- Each sub-agent gets a separate change — natural file isolation
+
+### Specs as the agent interface
+- Without good specs, the parent must stuff everything into the Task prompt (limited context)
+- With good specs, the prompt can be short: "implement change X per spec" — the sub-agent reads the spec file itself
+- This is the core reason SDD works well with agent teams
 
 ## 7. Common Issues
 

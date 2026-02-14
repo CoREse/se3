@@ -9,10 +9,11 @@ SE 3.0 combines Anthropic's [long-running agent best practices](https://www.anth
 ### Core Principles
 
 - **Human-as-MCP**: All human input (including initial project intent) obtained on-demand via human calls. Sync (ask directly) or async (write file). No pre-written requirement files.
-- **Specs as Truth**: OpenSpec specs are the single source of truth. No intermediate demands/requirements layer.
+- **Specs as Truth**: OpenSpec specs are the single source of truth. In agent team mode, specs are contracts between agents.
+- **Adaptive Formality**: Full openspec workflow for large changes; skip ceremony for small ones. Match process to scope.
 - **Progressive Loading**: Sessions start with `progress.md` + `git log`. Everything else loads on demand.
 - **Adaptive Conventions**: Commit when work is meaningful, clear context when saturated — not on mechanical schedules.
-- **Native Agent Team**: Multi-agent via Claude Code's built-in Task tool. No custom communication layer.
+- **Native Agent Team**: Multi-agent via Claude Code's built-in Task tool. Specs serve as shared context for sub-agents.
 
 ## Quick Start
 
@@ -66,10 +67,10 @@ project/
 ### Flow
 
 ```
-human call → openspec change (proposal = demand) → specs → code
+human call → openspec change (proposal → specs → code) → archive updates main specs
 ```
 
-No intermediate requirements file. The proposal captures what's needed; specs formalize it; archived changes are the historical record.
+Proposal captures intent, specs formalize it, archives preserve history. For small changes, skip the openspec workflow entirely — edit code, update spec if behavior changed, commit.
 
 ### Session Protocol
 
@@ -89,7 +90,7 @@ Progressive startup: `progress.md` latest entry + `git log` → determine scope 
 
 ### Agent Team
 
-Native Task tool. Parent spawns sub-agents per openspec change. Results return directly.
+Native Task tool. Parent spawns sub-agents per openspec change. Specs on the file system serve as contracts — sub-agents read them to know what to implement. Results return directly.
 
 ## Output Files
 
@@ -102,6 +103,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Results return d
 
 ## Version History
 
+- v4.1 — 2026-02-14 — Adaptive formality: match SDD ceremony to change scope, specs as agent contracts
 - v4.0 — 2026-02-14 — Remove demands.md, specs as truth, adaptive commit/context rules
 - v3.0 — 2026-02-14 — English rewrite, native agent team, global CLAUDE.md
 - v2.0 — 2026-02-14 — Remove intentions.md, unified Human-as-MCP, progressive startup
