@@ -72,19 +72,34 @@
 1. Run all tests — do NOT proceed to commit if tests fail
 2. **Update `status.md`**: Set Status to `ready`, clear Blockers, update Next Steps
 3. Prepend session record to `progress.md`
-4. Git commit (see commit rules below)
+4. Git commit
 5. Update openspec change status if applicable
 
-### Commit Rules
+### Commit Cadence
 
+Commit during the session when a distinct, working unit of change is complete — do not accumulate unrelated changes into a single commit.
+
+**When to commit mid-session:**
+- After completing a coherent unit of work that passes tests
+- Before starting a substantially different task that would muddy the commit message
+- Before context clearing (/new) if there are completed changes to preserve
+
+**Commit sequence:**
+1. Run tests — do NOT commit with failing tests
+2. Stage files: `git add <specific-files>` (avoid `git add .`)
+3. Write message with context for next session:
+   ```
+   [context] Summary of what changed
+
+   Status: where things stand
+   Next: what the next session should do
+   ```
+4. Commit
+
+**Commit Rules:**
 - Commit when a **meaningful unit of work** is complete — not tied to /new or any mechanical trigger
-- Message format:
-  ```
-  [context] Summary of what changed
-
-  Status: where things stand
-  Next: what the next session should do
-  ```
+- Do not batch unrelated changes into one commit
+- Commit messages must include context for the next session
 
 ### Context Clearing (/new)
 

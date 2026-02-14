@@ -53,12 +53,42 @@ Session ending MUST leave code in a mergeable state and update knowledge transfe
 Shutdown steps:
 1. Ensure all modified code runs correctly
 2. Prepend this session's record to `progress.md`
-3. Git commit with meaningful message (see commit convention below)
+3. Git commit
 4. Update openspec change status if applicable
 
-**Commit convention**: Commit when a meaningful unit of work is complete. A commit message MUST include a summary of changes and context for the next session. Do NOT commit just because of /new — only commit when there is something meaningful to record.
+### Requirement: Session Commit Cadence
 
-**Context clearing (/new)**: Clear context when it approaches saturation or when switching to a substantially different task. Do NOT mechanically clear after every task group — continue if there is context budget and the next task benefits from current context.
+The system SHALL define when commits occur during a session.
+
+Commits SHOULD occur mid-session when a distinct, working unit of change is complete — not accumulated into a single commit with unrelated changes.
+
+**When to commit mid-session:**
+- After completing a coherent unit of work that passes tests
+- Before starting a substantially different task that would muddy the commit message
+- Before context clearing (/new) if there are completed changes to preserve
+
+**Commit sequence:**
+1. Run tests — do NOT commit with failing tests
+2. Stage files
+3. Write message with context for next session
+4. Commit
+
+**Commit Rules:**
+- Commit when a meaningful unit of work is complete — not tied to /new or any mechanical trigger
+- Do not batch unrelated changes into one commit
+- Commit messages MUST include summary of changes and context for the next session
+
+#### Scenario: Mid-session commit
+- **WHEN** a distinct unit of work is complete and tested
+- **THEN** agent commits before starting the next unit
+
+### Requirement: Session Context Clearing
+
+The system SHALL define when context is cleared during a session.
+
+Context SHOULD be cleared when it approaches saturation or when switching to a substantially different task.
+
+Context SHOULD NOT be cleared mechanically after every task group — agents SHOULD continue if there is context budget and the next task benefits from current context.
 
 #### Scenario: Normal shutdown
 - **WHEN** agent completes the current scope
