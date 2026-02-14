@@ -1,13 +1,13 @@
 # SE 3.0 Framework
 
-> Place this file at `.claude/CLAUDE.md` in your project.
+> Place at `.claude/CLAUDE.md` in your project.
 
 ## Core Principles
 
-1. **Human-as-MCP**: All human input (including project intent) is obtained on-demand via human calls. No pre-written files required.
-2. **Progressive Loading**: Load only the minimum context needed. Read deeper only when the task demands it.
-3. **Incremental Development**: Work in openspec changes. Each session focuses on a bounded scope.
-4. **File as Interface**: All cross-session state lives in the file system (progress.md, git history, openspec).
+1. **Human-as-MCP**: All human input obtained on-demand via human calls. No pre-written requirement files.
+2. **Progressive Loading**: Start with `progress.md` + `git log`. Load deeper only when the task needs it.
+3. **Specs as Truth**: OpenSpec specs are the single source of truth for what the project should do.
+4. **Incremental Development**: Work in openspec changes. Each session stays within a bounded scope.
 
 ---
 
@@ -15,35 +15,48 @@
 
 ### Startup
 
-**Step 1 — Locate current state** (always do this first):
-- Read the latest entry in `progress.md`
+**Step 1 — Locate state**:
+- Read latest entry in `progress.md`
 - Read `git log --oneline -5`
 - If neither exists → **First-time bootstrap** (see below)
 
 **Step 2 — Check pending items**:
-- Scan `human-calls/` for files with `status: responded` that haven't been processed
+- Scan `human-calls/` for `status: responded` files not yet processed
 - Check `openspec/changes/` for active changes
 
 **Step 3 — Determine scope**:
-- Follow "next steps" from the latest progress entry + active changes
-- Load specs, demands, or other files only when the work requires them
+- Follow "next steps" from progress + active changes
+- Read specs or other files only when the work requires them
 
 **First-time bootstrap** (empty project):
 1. Ask the human (sync human call): "What should this project do?"
-2. Write their response into `demands.md`
+2. Create an openspec change from their response — the proposal captures the intent, specs formalize it
 3. Create `progress.md`
-4. Initialize openspec if needed (`openspec init --tools claude`)
+4. Initialize openspec if needed
 5. Create `human-calls/` directory
 
 ### Shutdown
 
-Before ending a session, MUST:
-1. Ensure all modified code runs correctly
-2. Prepend this session's record to `progress.md`
-3. Git commit with a message containing:
-   - Summary of changes
-   - Context for the next session (current state, caveats, suggested next steps)
+1. Ensure modified code runs correctly
+2. Prepend session record to `progress.md`
+3. Git commit (see commit rules below)
 4. Update openspec change status if applicable
+
+### Commit Rules
+
+- Commit when a **meaningful unit of work** is complete — not tied to /new or any mechanical trigger
+- Message format:
+  ```
+  [context] Summary of what changed
+
+  Status: where things stand
+  Next: what the next session should do
+  ```
+
+### Context Clearing (/new)
+
+- Clear when context **approaches saturation** or when switching to a **substantially different task**
+- Do NOT clear mechanically after every task group — continue if there is budget and the next task benefits from current context
 
 ### Progress File Format
 
@@ -67,19 +80,19 @@ Before ending a session, MUST:
 
 ## Human-as-MCP
 
-All human input enters the system through human calls. Two modes:
+All human input enters through human calls. Two modes:
 
 ### Sync Mode (default)
 
-When the human is present, ask directly via conversation (AskUserQuestion).
+Human is present → ask directly (AskUserQuestion).
 
-Use for: project intent (first bootstrap), immediate decisions, requirement clarification.
+Use for: project direction, immediate decisions, requirement clarification.
 
 ### Async Mode
 
-When the human is unavailable or the request needs offline action, write a file to `human-calls/`.
+Human unavailable → write file to `human-calls/`.
 
-Use for: operations the human must perform offline (deploy, create accounts), questions arising after the human has left, cross-session pending requests.
+Use for: offline operations (deploy, create accounts), cross-session pending requests.
 
 **File format** (filename: `{YYYYMMDD}-{HHmmss}-{short-description}.md`):
 
@@ -110,80 +123,41 @@ created: YYYY-MM-DD
 
 ### Non-Blocking Rule
 
-- After issuing a human call, mark dependent tasks as `waiting-human`
-- Continue working on tasks that do not depend on this call
-- **MUST NOT** block unrelated work while waiting for a human response
+- Mark dependent tasks as `waiting-human`, continue other work
+- **MUST NOT** block unrelated tasks
 
 ---
 
 ## SDD (Spec Driven Development)
 
-- Use openspec to manage specs and changes
-- Each change's tasks: max 5 per group with strong logical dependencies
-- When applying a change, clear context after each task group before starting the next
-- After completion: verify, archive, commit
+- OpenSpec specs = single source of truth for project requirements
+- Human call results drive openspec changes directly (proposal = the demand, specs = formalization)
+- Each change: max 5 tasks per group with strong logical dependencies
+- Context clearing between groups only when context is saturated
 
 ---
 
 ## Agent Team
 
-Uses Claude Code's native **Task tool** for multi-agent work.
+Uses Claude Code's native **Task tool**.
 
-### How It Works
-
-- The parent agent spawns sub-agents via the `Task` tool with appropriate `subagent_type`
-- Sub-agents share the same file system and return results directly — no file-based message passing needed
-- Isolation: each sub-agent works on a different openspec change, naturally avoiding file conflicts
-
-### Roles
-
-Roles are expressed in the Task tool prompt:
-
-| Role | Responsibility | Example prompt prefix |
-|------|---------------|----------------------|
-| architect | Spec design, proposals, architecture | "As architect, design the spec for..." |
-| implementer | Code implementation per spec | "As implementer, execute tasks 1-3 of change..." |
-| reviewer | Verify implementation matches spec | "As reviewer, verify change X against its spec..." |
-
-### When to Use Agent Team
-
-- **Single agent** (default): Most work. One agent handles all roles.
-- **Multi-agent**: When multiple independent changes can be parallelized. Parent spawns one sub-agent per change.
+- Parent spawns sub-agents via Task tool with appropriate `subagent_type`
+- Each sub-agent works on a different openspec change (natural file isolation)
+- Results return directly — no file-based communication
+- Roles expressed in prompts: architect / implementer / reviewer
+- Default: single agent. Multi-agent only when independent changes can be parallelized.
 
 ---
 
-## Key Files
-
-| File | Purpose | Managed by |
-|------|---------|-----------|
-| `demands.md` | Project requirements (obtained via human calls) | AI + human |
-| `progress.md` | Cross-session progress | AI |
-| `human-calls/` | Async human call queue | AI creates, human responds |
-| `se3.config.yaml` | Framework config (optional) | Human |
-
----
-
-## Conventions
-
-### Self-Iterate
+## Self-Iterate
 
 When instructed to self-iterate, execute without stopping until step 5:
 
-1. Obtain/update requirements via human call → write to `demands.md`
-2. Align project to `demands.md` (through openspec changes)
-3. Check alignment — if incomplete, go to 2
-4. Check if all requirements are fulfilled — if not, go to 1
+1. Obtain direction via human call → create openspec change
+2. Implement the change (proposal → specs → design → tasks → code)
+3. Verify implementation against specs, archive the change
+4. Check if specs fully cover project goals — if gaps, go to 1
 5. Update project documentation
-
-### Commit Messages
-
-```
-[change-name] Completed XYZ
-
-Status: 3/5 tasks done in this change
-Note: edge case in module Y needs attention
-Next: finish remaining tasks, focus on error handling
-```
 
 ---
 
@@ -191,13 +165,12 @@ Next: finish remaining tasks, focus on error handling
 
 ```
 project/
-├── demands.md
 ├── progress.md
 ├── se3.config.yaml        # optional
 ├── README.md
 ├── human-calls/
 ├── openspec/
-│   ├── specs/
+│   ├── specs/             # source of truth
 │   ├── changes/
 │   └── archive/
 └── .claude/
@@ -208,8 +181,8 @@ project/
 
 ## Configuration
 
-Optional `se3.config.yaml` in project root. All settings have defaults.
+Optional `se3.config.yaml`. All settings have defaults.
 
 - `max_tasks_per_change`: Max tasks per group (default: 5)
-- `human_call.timeout_days`: Async call timeout in days (default: 7)
-- `session.max_progress_entries`: Max entries in progress.md before archiving (default: 20)
+- `human_call.timeout_days`: Async call timeout (default: 7)
+- `session.max_progress_entries`: Max progress entries before archiving (default: 20)

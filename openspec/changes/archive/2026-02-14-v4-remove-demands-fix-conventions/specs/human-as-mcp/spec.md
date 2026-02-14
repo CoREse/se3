@@ -1,8 +1,5 @@
-# human-as-mcp Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change se3-core-framework. Update Purpose after archive.
-## Requirements
 ### Requirement: Human Call Interface
 The system SHALL define a standard human call interface supporting sync and async modes.
 
@@ -54,4 +51,3 @@ The system SHALL support three types: decision, action, information.
 #### Scenario: Decision call
 - **WHEN** agent needs the human to choose between options
 - **THEN** the call lists all options with trade-off analysis
-

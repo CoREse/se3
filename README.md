@@ -4,24 +4,25 @@ An AI-first long-horizon development framework for Claude Code.
 
 ## Overview
 
-SE 3.0 combines Anthropic's [long-running agent best practices](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents) with Spec Driven Development ([OpenSpec](https://github.com/Fission-AI/OpenSpec)) into a coherent development system.
+SE 3.0 combines Anthropic's [long-running agent best practices](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents) with Spec Driven Development ([OpenSpec](https://github.com/Fission-AI/OpenSpec)) into a coherent system where AI agents drive development autonomously, calling humans only when needed.
 
 ### Core Principles
 
-- **Human-as-MCP**: All human input (including project intent) enters through on-demand human calls — sync (ask directly) or async (write file). No pre-written intent files.
-- **Progressive Loading**: Sessions start by reading only `progress.md` + `git log`. Everything else loads on demand.
-- **Incremental Development**: Work in openspec changes. Each session stays within a bounded scope.
-- **Native Agent Team**: Multi-agent work uses Claude Code's built-in Task tool. No custom communication layer.
+- **Human-as-MCP**: All human input (including initial project intent) obtained on-demand via human calls. Sync (ask directly) or async (write file). No pre-written requirement files.
+- **Specs as Truth**: OpenSpec specs are the single source of truth. No intermediate demands/requirements layer.
+- **Progressive Loading**: Sessions start with `progress.md` + `git log`. Everything else loads on demand.
+- **Adaptive Conventions**: Commit when work is meaningful, clear context when saturated — not on mechanical schedules.
+- **Native Agent Team**: Multi-agent via Claude Code's built-in Task tool. No custom communication layer.
 
 ## Quick Start
 
-### 1. Set up global conventions
+### 1. Global conventions (one-time)
 
 ```bash
 cp output/CLAUDE.global.md ~/.claude/CLAUDE.md
 ```
 
-### 2. Initialize a new project
+### 2. Initialize a project
 
 ```bash
 mkdir my-project && cd my-project
@@ -36,66 +37,72 @@ cp path/to/se3.0/output/CLAUDE.md .claude/CLAUDE.md
 Tell Claude Code: `self-iterate`
 
 The agent will:
-1. Detect an empty project → ask you "What should this project do?" (human call)
-2. Write your answer into `demands.md`
-3. Implement requirements incrementally through openspec changes
-4. Ask you when it needs decisions, information, or actions (human call)
+1. Detect an empty project → ask "What should this project do?" (human call)
+2. Create an openspec change from your answer (proposal = intent, specs = formalization)
+3. Implement incrementally, calling you only when it needs decisions or actions
 
 ### 4. Respond to async human calls
 
-Check `human-calls/` for pending requests. Fill in the `## Response` section.
+Check `human-calls/` for pending requests. Fill in `## Response`.
 
 ## Project Structure
 
 ```
 project/
-├── demands.md             # Requirements (obtained via human calls)
-├── progress.md            # Cross-session progress
-├── se3.config.yaml        # Configuration (optional)
+├── progress.md             # Cross-session progress
+├── se3.config.yaml         # Configuration (optional)
 ├── README.md
-├── human-calls/           # Async human call queue
+├── human-calls/            # Async human call queue
 ├── openspec/
-│   ├── specs/
+│   ├── specs/              # Source of truth for requirements
 │   ├── changes/
 │   └── archive/
 └── .claude/
-    └── CLAUDE.md           # SE 3.0 project-level config
+    └── CLAUDE.md            # SE 3.0 project config
 ```
-
-## Output Files
-
-| File | Purpose |
-|------|---------|
-| `output/CLAUDE.md` | Project-level SE 3.0 template → `.claude/CLAUDE.md` |
-| `output/CLAUDE.global.md` | Global conventions template → `~/.claude/CLAUDE.md` |
-| `output/se3.config.yaml` | Configuration template |
-| `docs/best-practices.md` | Best practices guide |
 
 ## Key Concepts
 
+### Flow
+
+```
+human call → openspec change (proposal = demand) → specs → code
+```
+
+No intermediate requirements file. The proposal captures what's needed; specs formalize it; archived changes are the historical record.
+
 ### Session Protocol
 
-Progressive startup: read `progress.md` latest entry + `git log` → determine scope → load more only as needed. First-time: ask the human what to build via human call.
+Progressive startup: `progress.md` latest entry + `git log` → determine scope → load more only as needed. First-time: ask the human via human call.
 
 ### Human-as-MCP
 
 | Mode | When | How |
 |------|------|-----|
-| Sync | Human is present | Ask directly (AskUserQuestion) |
-| Async | Human unavailable / needs offline action | Write to `human-calls/` |
+| Sync | Human present | Ask directly (AskUserQuestion) |
+| Async | Human absent / offline action needed | Write to `human-calls/` |
 
-Types: `decision` (choose between options), `action` (do something offline), `information` (provide knowledge).
+### Adaptive Conventions
+
+- **Commit**: When meaningful work is done. Not tied to /new.
+- **Context clear**: When saturated or switching tasks. Not after every task group.
 
 ### Agent Team
 
-Uses Claude Code's native Task tool. Parent spawns sub-agents, each working on a separate openspec change. No file-based communication — results return directly through the Task tool.
+Native Task tool. Parent spawns sub-agents per openspec change. Results return directly.
 
-### SDD Flow
+## Output Files
 
-`demands.md` → openspec specs → openspec changes → code
+| File | Purpose |
+|------|---------|
+| `output/CLAUDE.md` | Project-level template → `.claude/CLAUDE.md` |
+| `output/CLAUDE.global.md` | Global conventions → `~/.claude/CLAUDE.md` |
+| `output/se3.config.yaml` | Configuration template |
+| `docs/best-practices.md` | Best practices guide |
 
 ## Version History
 
-- v3.0 — 2026-02-14 — English rewrite, native agent team, global CLAUDE.md, remove se3-init
+- v4.0 — 2026-02-14 — Remove demands.md, specs as truth, adaptive commit/context rules
+- v3.0 — 2026-02-14 — English rewrite, native agent team, global CLAUDE.md
 - v2.0 — 2026-02-14 — Remove intentions.md, unified Human-as-MCP, progressive startup
 - v1.0 — 2026-02-14 — Initial version

@@ -4,53 +4,39 @@
 
 ### When to use sync mode
 - Human is present and can answer immediately
-- Project intent (first bootstrap)
-- Quick decisions (A or B?)
-- Requirement confirmation
+- Project direction (first bootstrap)
+- Quick decisions, requirement clarification
 
 ### When to use async mode
-- Human must perform offline operations (deploy, create accounts)
-- Human explicitly left ("I'm done for today")
-- Question needs research before answering
+- Offline operations (deploy, create accounts)
+- Human has left for the day
+- Question needs research time
 - Cross-session pending requests
 
 ### Writing good human calls
-- Provide full context (why is human input needed?)
-- For decisions: list all options with trade-off analysis
-- Set correct priority
-- State which tasks are blocked by this call
+- Provide full context (why is input needed?)
+- For decisions: list options with trade-off analysis
+- State which tasks are blocked
 
 ### When NOT to issue a human call
-- Pure implementation details (agent decides)
-- Already specified in demands.md
-- Answerable through docs or search
+- Pure implementation details
+- Already specified in openspec specs
+- Answerable through docs or code search
 
-## 2. Managing demands.md
+## 2. Specs as Source of Truth
 
-- Single source of project requirements
-- Initial content comes from the first human call
-- Additive only — remove entries only if explicitly deprecated
-- Use numbered hierarchy (D1, D1.1) for tracking
-- Each requirement should be verifiable (you can tell if it's done)
+- OpenSpec specs are the single authoritative record of what the project should do
+- Human call results go directly into openspec change proposals — no intermediate file
+- The proposal IS the demand. Specs formalize it. Archives preserve history.
+- Use `openspec list --specs` for a full requirements overview
 
-## 3. Session Management
+## 3. Commits
 
-### Progressive startup
-- Read only `progress.md` latest entry + `git log` to start
-- Don't pre-read all files — wastes context window
-- Load specs/demands only when the current task needs them
+- Commit when a **meaningful unit of work** is complete
+- NOT on a timer, NOT tied to /new, NOT after every task group
+- A good commit represents a coherent change that makes sense on its own
+- Message must include context for the next session
 
-### Scope control
-- Focus each session on 1-2 openspec changes
-- If scope grows too large, split into more changes
-- Don't try to finish the whole project in one session
-
-### Effective progress records
-- Record **outcomes**, not process ("Implemented X" not "Modified a.js")
-- **Open issues** are more important than completed items
-- **Next steps** must be specific and actionable
-
-### Commit messages
 ```
 [change-name] Completed XYZ
 
@@ -59,33 +45,48 @@ Note: edge case in module Y needs attention
 Next: finish remaining tasks, focus on error handling
 ```
 
-## 4. Agent Team
+## 4. Context Management
+
+- Clear context (/new) when **saturated** or when **switching to a different task domain**
+- Do NOT clear mechanically — if the next task benefits from current context, continue
+- Before clearing, ensure you've committed if there's meaningful work
+
+## 5. Session Management
+
+### Progressive startup
+- Read only `progress.md` latest entry + `git log`
+- Don't pre-read specs — load them when the task needs them
+
+### Scope control
+- 1-2 openspec changes per session
+- Split if scope grows too large
+
+### Effective progress records
+- Record **outcomes** not process
+- **Open issues** matter more than completed items
+- **Next steps** must be specific and actionable
+
+## 6. Agent Team
 
 ### When to use multi-agent
 - Multiple independent openspec changes can run in parallel
-- Large project with clear separation of concerns
-- Otherwise: single agent is simpler and sufficient
+- Otherwise: single agent is simpler
 
 ### Task tool usage
-- Parent assigns each sub-agent a specific change
-- Include role in the prompt: "As implementer, execute tasks..."
-- Sub-agents return results directly — no file coordination needed
+- Include role in prompt: "As implementer, execute tasks..."
+- Each sub-agent gets a separate change
+- Results return directly — no file coordination
 
-### Avoiding conflicts
-- Each change should touch a disjoint set of files
-- If two changes must touch the same file, sequence them instead of parallelizing
+## 7. Common Issues
 
-## 5. Common Issues
-
-### Context window exhaustion
+### Context exhaustion
 - **Prevent**: Scope control + progressive loading
-- **Handle**: Prioritize shutdown protocol (commit + update progress.md)
-- **Recover**: Next session picks up from progress.md
+- **Handle**: Commit + update progress.md before context runs out
 
-### Implementation drifts from spec
-- Run `openspec verify` after completing a change
-- Create a new corrective change — don't patch the current one
+### Drift from spec
+- `openspec verify` after completing a change
+- Create a corrective change — don't patch the current one
 
-### progress.md grows too large
+### progress.md grows large
 - Archive old entries to `docs/progress-archive/`
-- Keep only the latest ~20 session records
+- Keep ~20 most recent records

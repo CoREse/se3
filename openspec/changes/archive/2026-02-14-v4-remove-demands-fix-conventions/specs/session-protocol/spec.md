@@ -1,8 +1,5 @@
-# session-protocol Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change se3-core-framework. Update Purpose after archive.
-## Requirements
 ### Requirement: Session Startup Protocol
 The system SHALL define a progressive session startup protocol. The agent MUST locate current state with minimal context, then load more on demand.
 
@@ -30,13 +27,6 @@ If step 1 finds no progress.md and no git history → **first-time bootstrap**:
 #### Scenario: On-demand deep loading
 - **WHEN** agent needs details about a specific capability during execution
 - **THEN** agent reads the relevant spec file at that point, not during startup
-
-### Requirement: Session Execution Boundary
-每个session MUST聚焦于有限范围的工作，不得尝试在单个session中完成过多任务。
-
-#### Scenario: Session工作范围限定
-- **WHEN** agent通过启动协议确定了工作范围
-- **THEN** agent仅执行该范围内的任务，不主动扩展范围
 
 ### Requirement: Session Shutdown Protocol
 Session ending MUST leave code in a mergeable state and update knowledge transfer files.
@@ -69,4 +59,3 @@ progress.md MUST contain:
 #### Scenario: Update progress
 - **WHEN** session shutdown is executed
 - **THEN** a new record is prepended to progress.md
-
