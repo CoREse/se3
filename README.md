@@ -72,6 +72,8 @@ project/
 ├── se3.config.yaml         # Configuration (optional)
 ├── README.md
 ├── human-calls/            # Async human call queue
+├── tests/                  # Test files
+├── tools/                  # CLI tools (se3 command)
 ├── .e2e-baselines/         # Visual regression baselines (optional)
 ├── openspec/
 │   ├── specs/              # Source of truth for requirements
@@ -165,9 +167,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 |------|---------|
 | `output/SE3.md.template` | SE3 framework template → `.claude/SE3.md` (via `se3 init`) |
 | `output/CLAUDE.minimal.md.template` | Minimal CLAUDE.md template (25 lines) |
-| `output/CLAUDE.global.md` | Global conventions → `~/.claude/CLAUDE.md` |
-| `output/se3.config.yaml` | Configuration template |
-| `output/status.md` | Session status template → project root `status.md` |
+| `output/status.md.template` | Session status template → project root `status.md` |
 | `output/TOOLS.md` | CLI tools documentation |
 | `docs/best-practices.md` | Best practices guide |
 

@@ -41,29 +41,17 @@ se3 lint /path/to/specs
 
 ### `se3 sync` — Output Synchronization
 
-Keeps `output/` directory synchronized with source files.
+Manages `output/` directory. With the SE3 module system, `output/` only contains templates for `se3 init` — runtime files are no longer synced.
 
 ```bash
-# Preview changes (default)
+# Preview orphaned files
 se3 sync --dry-run
-
-# Apply changes
-se3 sync --apply
 
 # Remove orphaned output files
 se3 sync --apply --prune
 ```
 
-**Synchronizes:**
-- `CLAUDE.md` → `output/CLAUDE.md`
-- `~/.claude/CLAUDE.md` → `output/CLAUDE.global.md`
-- `se3.config.yaml` → `output/se3.config.yaml`
-- `status.md` → `output/status.md`
-
-**Workflow:**
-1. Always run `--dry-run` first to preview
-2. Review the changes
-3. Run `--apply` to synchronize
+**Note:** Runtime file sync (CLAUDE.md, status.md, etc.) was removed in v7.0 in favor of the SE3 module system.
 
 ---
 

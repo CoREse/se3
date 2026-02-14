@@ -220,35 +220,17 @@ def copy_file(src: Path, dst: Path) -> None:
 def get_source_mappings(project_root: Path) -> dict:
     """Get mapping of source files to output files.
 
+    With the SE3 module system, output/ only contains templates for `se3 init`.
+    Runtime files (CLAUDE.md, status.md, se3.config.yaml) are no longer synced.
+
     Args:
         project_root: Root of the SE 3.0 project
 
     Returns:
         Dict mapping output paths to source paths
     """
-    mappings = {}
-
-    # CLAUDE.md -> output/CLAUDE.md
-    claude_md = project_root / "CLAUDE.md"
-    if claude_md.exists():
-        mappings[project_root / "output" / "CLAUDE.md"] = claude_md
-
-    # Global CLAUDE.md -> output/CLAUDE.global.md
-    global_claude = Path.home() / ".claude" / "CLAUDE.md"
-    if global_claude.exists():
-        mappings[project_root / "output" / "CLAUDE.global.md"] = global_claude
-
-    # se3.config.yaml -> output/se3.config.yaml
-    config = project_root / "se3.config.yaml"
-    if config.exists():
-        mappings[project_root / "output" / "se3.config.yaml"] = config
-
-    # status.md -> output/status.md
-    status = project_root / "status.md"
-    if status.exists():
-        mappings[project_root / "output" / "status.md"] = status
-
-    return mappings
+    # No runtime sync mappings — output/ now only holds templates
+    return {}
 
 
 def discover_changes(path: str = "openspec/changes") -> List[str]:

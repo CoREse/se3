@@ -288,6 +288,8 @@ project/
 ├── se3.config.yaml        # optional
 ├── README.md
 ├── human-calls/           # async human call queue
+├── tests/                 # test files
+├── tools/                 # CLI tools (se3 command)
 ├── .e2e-baselines/        # optional: visual regression baselines
 ├── openspec/
 │   ├── specs/             # source of truth for requirements (guardrails apply)
