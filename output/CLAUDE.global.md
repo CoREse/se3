@@ -40,7 +40,8 @@ All projects use SDD with openspec unless stated otherwise.
 - Run tests before committing. Do not commit with failing tests.
 - **Visual/E2E testing**: For user-facing features, use browser automation (Puppeteer MCP) to screenshot and verify UI. Visual regression catches layout breaks that unit tests miss.
 
-## Documentation
+## Session State
 
-- Project docs in `README.md`. Additional docs in `docs/` if needed.
-- README should include: project overview, usage, notable design choices, version info as appropriate.
+- Use `status.md` at project root as the **single source of truth** for current session state.
+- Update after every significant action or state change.
+- Read `status.md` first on startup to understand: Active Change, Current Task, Status (ready/blocked/error), Blockers.

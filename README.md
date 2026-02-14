@@ -79,7 +79,7 @@ Proposal captures intent, specs formalize it, archives preserve history. For sma
 
 ### Session Protocol
 
-Progressive startup: `progress.md` latest entry + `git log` → determine scope → load more only as needed. First-time: ask the human via human call.
+Progressive startup: `status.md` (current state) → `progress.md` (history) + `git log` → determine scope → load more only as needed. First-time: ask the human via human call.
 
 ### Human-as-MCP
 
@@ -104,10 +104,12 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 | `output/CLAUDE.md` | Project-level template → `.claude/CLAUDE.md` |
 | `output/CLAUDE.global.md` | Global conventions → `~/.claude/CLAUDE.md` |
 | `output/se3.config.yaml` | Configuration template |
+| `output/status.md` | Session status template → project root `status.md` |
 | `docs/best-practices.md` | Best practices guide |
 
 ## Version History
 
+- v5.1 — 2026-02-14 — Diagnostic dashboard: status.md for single-source-of-truth session state
 - v5.0 — 2026-02-14 — Verification protocol, spec guardrails, init.sh environment automation
 - v4.1 — 2026-02-14 — Adaptive formality: match SDD ceremony to change scope, specs as agent contracts
 - v4.0 — 2026-02-14 — Remove demands.md, specs as truth, adaptive commit/context rules
