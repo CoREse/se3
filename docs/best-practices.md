@@ -70,8 +70,34 @@ Next: finish remaining tasks, focus on error handling
 ## 5. Session Management
 
 ### Progressive startup
-- Read only `progress.md` latest entry + `git log`
+- Read `status.md` first for current session state (single source of truth)
+- Read `progress.md` latest entry for cross-session history
+- Read `git log --oneline -5`
 - Don't pre-read specs — load them when the task needs them
+
+### status.md — the diagnostic dashboard
+
+**Purpose**: One file to answer "what is happening right now?"
+
+**When to update**:
+- After every significant action (task complete, blocker encountered, error occurred)
+- Before context clearing (/new)
+- At session shutdown
+
+**Key fields for debugging**:
+- `Status`: `ready` / `blocked` / `error` / `waiting-human` — immediate indicator of health
+- `Active Change`: Should match `openspec/changes/` directory
+- `Blockers`: Table of why work cannot proceed
+- `Context Budget`: `fresh` / `moderate` / `saturated` — helps decide when to /new
+
+**Human diagnosis workflow**:
+1. `cat status.md` — is Status `ready`? If not, check Blockers table
+2. `ls openspec/changes/` — does Active Change match reality?
+3. `ls human-calls/` — any pending async calls?
+4. `git status` — uncommitted work?
+5. `head -30 progress.md` — context from previous sessions
+
+This is the SE 3.0 equivalent of Anthropic's `todo.md + log.md` — one file for immediate state comprehension.
 
 ### Scope control
 - 1-2 openspec changes per session

@@ -20,20 +20,25 @@
 - If `init.sh` exists at project root, run it to start the dev environment (servers, databases, build watchers)
 - If it fails, diagnose and fix before proceeding
 
-**Step 1 — Locate state**:
-- Read latest entry in `progress.md`
+**Step 1 — Read status**:
+- Read `status.md` for current session state (single source of truth)
+- If status shows `blocked` or `error`, diagnose and resolve first
+- If status shows `waiting-human`, check `human-calls/` for response
+
+**Step 2 — Load context**:
+- Read latest entry in `progress.md` for cross-session history
 - Read `git log --oneline -5`
 - If neither exists → **First-time bootstrap** (see below)
 
-**Step 2 — Check pending items**:
+**Step 3 — Check pending items**:
 - Scan `human-calls/` for `status: responded` files not yet processed
-- Check `openspec/changes/` for active changes
+- Check `openspec/changes/` for active changes (should match `status.md` Active Change)
 
-**Step 3 — Baseline verification**:
+**Step 4 — Baseline verification**:
 - Run existing tests to confirm the project is in a working state before making changes
 - If tests fail, fix them first — do not build on a broken foundation
 
-**Step 4 — Determine scope**:
+**Step 5 — Determine scope**:
 - Follow "next steps" from progress + active changes
 - Read specs or other files only when the work requires them
 
@@ -47,9 +52,10 @@
 ### Shutdown
 
 1. Run all tests — do NOT proceed to commit if tests fail
-2. Prepend session record to `progress.md`
-3. Git commit (see commit rules below)
-4. Update openspec change status if applicable
+2. **Update `status.md`**: Set Status to `ready`, clear Blockers, update Next Steps
+3. Prepend session record to `progress.md`
+4. Git commit (see commit rules below)
+5. Update openspec change status if applicable
 
 ### Commit Rules
 
@@ -276,7 +282,8 @@ When instructed to self-iterate, execute without stopping until step 5:
 ```
 project/
 ├── init.sh                # optional: environment setup script
-├── progress.md
+├── status.md              # current session state (single source of truth)
+├── progress.md            # cross-session history
 ├── se3.config.yaml        # optional
 ├── README.md
 ├── human-calls/           # async human call queue

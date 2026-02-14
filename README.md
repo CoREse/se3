@@ -53,7 +53,8 @@ Check `human-calls/` for pending requests. Fill in `## Response`.
 ```
 project/
 ├── init.sh                 # Environment setup (optional)
-├── progress.md             # Cross-session progress
+├── status.md               # Current session state (single source of truth)
+├── progress.md             # Cross-session history
 ├── se3.config.yaml         # Configuration (optional)
 ├── README.md
 ├── human-calls/            # Async human call queue

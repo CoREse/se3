@@ -1,5 +1,24 @@
 # Progress
 
+## 2026-02-14 Session 2 (v5.1)
+
+### Done
+- Added `status.md` as single source of truth for current session state
+- Updated Session Protocol: Step 1 now reads status.md first
+- Updated Shutdown: Step 2 updates status.md
+- Updated project structure docs (CLAUDE.md, README.md)
+- Added status.md best practices (diagnostic dashboard)
+
+### Changes
+- v5.1 applied directly (small change, no openspec needed)
+
+### Open Issues
+- None
+
+### Next Steps
+- Test SE 3.0 v5.1 in a real project
+- Validate status.md enables quick diagnosis of stuck agents
+
 ## 2026-02-14 Session 2 (v5.0)
 
 ### Done
