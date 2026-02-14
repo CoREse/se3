@@ -1,21 +1,33 @@
 # se3-scaffold Specification
 
 ## Purpose
-Define the SE 3.0 project scaffold system, including the CLAUDE.md template system, standard project structure, configuration system, and self-iterate workflow. This spec governs how SE 3.0 generates its output artifacts and how new projects adopt the framework.
+Define the SE 3.0 project scaffold system, including the CLAUDE.md + SE3.md template system, standard project structure, configuration system, and self-iterate workflow. This spec governs how SE 3.0 generates its output artifacts and how new projects adopt the framework.
 ## Requirements
-### Requirement: CLAUDE.md Template System
-The system SHALL produce a reusable CLAUDE.md template as the primary implementation vehicle for the SE 3.0 framework on Claude Code.
+### Requirement: CLAUDE.md + SE3.md Template System
+The system SHALL produce a two-part template system:
+1. **CLAUDE.md** - Minimal project-level configuration file with core framework references
+2. **SE3.md** - Complete framework implementation with all process definitions
 
-The template MUST include:
-- Standard process definitions (startup, execution, shutdown protocols)
-- Special file specifications (status.md, progress.md, human-calls/, etc.)
-- Conventional behavior definitions (self-iterate, change management, etc.)
+The **CLAUDE.md template MUST include**:
+- Core principles references
+- Session protocol references
+- Minimal project structure specification
+- Reference to SE3.md for complete framework documentation
+
+The **SE3.md template MUST include**:
+- Complete standard process definitions (startup, execution, shutdown protocols)
+- Detailed special file specifications (status.md, progress.md, human-calls/, etc.)
+- Full conventional behavior definitions (self-iterate, change management, etc.)
 - Human-as-MCP invocation specifications
 - Agent Team collaboration specifications
+- Verification protocol
+- Spec guardrails
+- SDD process
+- Configuration system details
 
 #### Scenario: New project adopts SE 3.0
 - **WHEN** a user initializes SE 3.0 framework in a new project
-- **THEN** the system generates the complete CLAUDE.md template and supporting file structure
+- **THEN** the system generates both CLAUDE.md (minimal) and SE3.md (complete) in the .claude/ directory
 
 ### Requirement: SE 3.0 Project Structure
 The system SHALL define the standard SE 3.0 project file structure.
@@ -34,14 +46,15 @@ project/
 │   └── changes/
 │       └── archive/
 └── .claude/
-    └── CLAUDE.md          # SE 3.0 framework (project-level)
+    ├── CLAUDE.md          # SE 3.0 minimal framework reference (project-level)
+    └── SE3.md             # Complete SE 3.0 framework implementation
 ```
 
 OpenSpec specs serve as the single source of truth for project requirements. No separate demands/requirements file is needed.
 
 #### Scenario: Project initialization
 - **WHEN** SE 3.0 is initialized in a directory
-- **THEN** the standard file structure is created without demands.md
+- **THEN** the standard file structure is created with both CLAUDE.md and SE3.md
 
 ### Requirement: Configuration System
 The system SHALL support configuring framework behavior via `se3.config.yaml`.
@@ -56,17 +69,37 @@ Configuration options include:
 - **WHEN** no se3.config.yaml file exists in the project
 - **THEN** the framework runs with built-in default values
 
+### Requirement: SE3.md Generation via se3 init
+The system SHALL generate SE3.md file via the `se3 init` command.
+
+The `se3 init` command MUST:
+1. Create the .claude/ directory if it doesn't exist
+2. Generate SE3.md with the complete framework implementation
+3. Generate CLAUDE.md with minimal framework references
+4. Ensure both files are properly formatted
+5. Preserve existing files if they already exist
+
+#### Scenario: SE3.md generation on initialization
+- **WHEN** a user runs `se3 init` in a project directory
+- **THEN** the system creates .claude/SE3.md with the complete framework and .claude/CLAUDE.md with minimal content
+
 ### Requirement: Output Artifacts
 The system SHALL produce the following deliverables:
-1. Project-level CLAUDE.md template (English)
-2. Global CLAUDE.md template for ~/.claude/CLAUDE.md (English)
-3. Configuration file template
-4. Documentation and best practices guide
-5. CLI tools documentation (TOOLS.md)
+1. Project-level CLAUDE.md template (minimal, English)
+2. Project-level SE3.md template (complete, English)
+3. Global CLAUDE.md template for ~/.claude/CLAUDE.md (English)
+4. Global SE3.md template for ~/.claude/SE3.md (English)
+5. Configuration file template
+6. Documentation and best practices guide
+7. CLI tools documentation (TOOLS.md)
 
 #### Scenario: Complete delivery
 - **WHEN** SE 3.0 framework design is complete
 - **THEN** all deliverables are available for direct use in new projects
+
+#### Scenario: Backward compatibility
+- **WHEN** a project has an existing CLAUDE.md without SE3.md
+- **THEN** the framework continues to function with the existing CLAUDE.md file
 
 ### Requirement: CLI Tools
 The system SHALL provide CLI tools for validating and enforcing SE 3.0 conventions.

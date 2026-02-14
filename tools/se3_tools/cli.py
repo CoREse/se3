@@ -12,11 +12,13 @@ from .commands.sync import sync
 from .commands.lint import run_lint
 from .commands.verify import main as verify_main
 from .commands.status import main as status_main
+from .commands.init import init
 
 app = typer.Typer(help="SE 3.0 Framework Tools")
 
 # Register commands
 app.command(name="sync")(sync)
+app.command(name="init")(init)
 
 
 @app.callback()
@@ -24,6 +26,7 @@ def main():
     """SE 3.0 Framework Tools CLI.
 
     Tools for managing SE 3.0 projects:
+    - init: Initialize a new SE 3.0 project
     - sync: Synchronize output/ directory with source files
     - lint: Validate spec files
     - verify: Check scenario coverage for a change
