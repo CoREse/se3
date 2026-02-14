@@ -8,7 +8,8 @@
 2. **Progressive Loading**: Start with `progress.md` + `git log`. Load deeper only when the task needs it.
 3. **Specs as Truth**: OpenSpec specs are the source of truth for **requirements**. Agents MUST NOT weaken or delete existing requirements without explicit human approval.
 4. **Verify Before Done**: Never mark a feature complete without running tests. Spec scenarios are acceptance criteria, not documentation.
-5. **Incremental Development**: Work in openspec changes. Each session stays within a bounded scope.
+5. **Tool-Assisted Enforcement**: Use CLI tools (`se3 lint`, `se3 verify`, `se3 status`) to validate specs, verify coverage, and diagnose issues. Tools make rules enforceable, not just documented.
+6. **Incremental Development**: Work in openspec changes. Each session stays within a bounded scope.
 
 ---
 

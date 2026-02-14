@@ -12,16 +12,20 @@
 
 ## What's Happening Now
 
-Session complete. Requirement-capture change archived. Three-source requirement intake mechanism now in main specs:
-- `autonomous-discovery` — Agent identifies need during implementation
-- `human-mcp` — Human responds to agent's request for input
-- `human-initiated` — Human proactively provides requirement (any interaction context)
+Session complete. All changes archived:
+- v6.0: CLI tools (se3 lint, sync, verify, status)
+- v6.1: Requirement intake (three-source taxonomy)
+
+Framework now supports structured requirement capture from:
+- autonomous-discovery (agent finds gap)
+- human-mcp (agent asks, human replies)
+- human-initiated (human proactively proposes)
 
 ## Immediate Next Steps
 
-1. Use requirement-intake spec for new changes going forward
-2. Apply `[Source: ...]` markers in proposals
-3. Continue using CLI tools (`se3 lint`, `se3 verify`) for validation
+1. Use `[Source: ...]` markers in new changes
+2. Continue using CLI tools for validation
+3. Apply requirement-intake spec going forward
 
 ## Blockers
 
@@ -31,8 +35,8 @@ Session complete. Requirement-capture change archived. Three-source requirement 
 
 ## Recent History
 
-1. `[2026-02-14 16:00]` - Archived requirement-capture change to main specs
-2. `[2026-02-14 15:40]` - Completed requirement-intake spec with three-source taxonomy
+1. `[2026-02-14 16:30]` - Archived requirement-capture change, updated README v6.1
+2. `[2026-02-14 16:00]` - Completed requirement-intake spec with examples
 3. `[2026-02-14 14:40]` - Committed toolize-se3 changes
 
 ---
