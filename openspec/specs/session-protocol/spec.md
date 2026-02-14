@@ -7,18 +7,26 @@ Define the session lifecycle protocol for SE 3.0 agents. This spec governs progr
 The system SHALL define a progressive session startup protocol. The agent MUST locate current state with minimal context, then load more on demand.
 
 Startup steps:
-1. Read `status.md` for current session state (runtime dashboard)
-2. Read the latest entry in `progress.md` + `git log --oneline -5`
-3. Scan `human-calls/` for responded but unprocessed requests
-4. Check `openspec/changes/` for active changes and `openspec/specs/` for current capabilities
-5. Determine session scope based on progress "next steps" + active changes
-6. Load additional files only when the task requires them
+1. Verify `openspec` CLI is available; if not, ask the human to install it. If available but `openspec/` directory does not exist, run `openspec init`.
+2. Read `status.md` for current session state (runtime dashboard)
+3. Read the latest entry in `progress.md` + `git log --oneline -5`
+4. Scan `human-calls/` for responded but unprocessed requests
+5. Check `openspec/changes/` for active changes and `openspec/specs/` for current capabilities
+6. Determine session scope based on progress "next steps" + active changes
+7. Load additional files only when the task requires them
 
-If step 1 finds no progress.md and no git history → **first-time bootstrap**:
+If step 2 finds no progress.md and no git history → **first-time bootstrap**:
 - Ask the human (sync human call): "What should this project do?"
 - Create an openspec change from the response (proposal captures the intent)
 - Create `progress.md`
-- Initialize openspec if needed
+
+#### Scenario: OpenSpec not installed
+- **WHEN** agent starts a session and `openspec` command is not found
+- **THEN** agent asks the human to install it via sync human call and does not proceed with spec-related work until resolved
+
+#### Scenario: OpenSpec not initialized
+- **WHEN** agent starts a session and `openspec` is available but `openspec/` directory does not exist
+- **THEN** agent runs `openspec init` before proceeding
 
 #### Scenario: Mature project startup
 - **WHEN** agent starts a session with existing progress.md and git history

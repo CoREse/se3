@@ -53,10 +53,10 @@ def initialize_project(
                 )
             )
             raise typer.Exit(1)
-        # Remove existing .claude directory if force is True
-        shutil.rmtree(claude_dir)
+        # Force mode: only overwrite SE3.md and CLAUDE.md, preserve everything else
+        typer.echo("Force mode: overwriting SE3.md and CLAUDE.md in .claude/")
 
-    # Create .claude directory
+    # Create .claude directory (no-op if it already exists)
     claude_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Create SE3.md (copy from CLAUDE.md with version and metadata)
