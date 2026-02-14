@@ -1,87 +1,91 @@
-# SE 3.0 最佳实践指南
+# SE 3.0 Best Practices
 
-## 1. Human Call 最佳实践
+## 1. Human Calls
 
-### 何时使用同步模式
-- 人类在场且问题可以即时回答
-- 项目意图获取（首次启动）
-- 快速决策（A还是B？）
-- 需求确认（"你的意思是...？"）
+### When to use sync mode
+- Human is present and can answer immediately
+- Project intent (first bootstrap)
+- Quick decisions (A or B?)
+- Requirement confirmation
 
-### 何时使用异步模式
-- 需要人类离线执行操作（部署、申请账号）
-- 人类明确表示不在了
-- 问题需要人类花时间调研后回答
-- 跨session的未决请求
+### When to use async mode
+- Human must perform offline operations (deploy, create accounts)
+- Human explicitly left ("I'm done for today")
+- Question needs research before answering
+- Cross-session pending requests
 
-### 编写好的 Human Call
-- 提供充分上下文（为什么需要人类介入）
-- decision类型要列出选项和优劣分析
-- 标注正确的优先级
-- 说明对哪些任务有影响
+### Writing good human calls
+- Provide full context (why is human input needed?)
+- For decisions: list all options with trade-off analysis
+- Set correct priority
+- State which tasks are blocked by this call
 
-### 不应发起 Human Call 的场景
-- 纯技术实现细节（agent自行决定）
-- 已在 demands.md 中明确的需求
-- 可通过搜索或文档解决的问题
+### When NOT to issue a human call
+- Pure implementation details (agent decides)
+- Already specified in demands.md
+- Answerable through docs or search
 
-## 2. 管理 demands.md
+## 2. Managing demands.md
 
-- demands.md 是项目需求的唯一来源
-- 初始内容通过首次 human call 获取，后续通过更多 human call 迭代
-- 只增不减（除非需求被明确废弃）
-- 层次清晰：用编号标识（D1、D1.1等）
-- 每个需求应可验证
+- Single source of project requirements
+- Initial content comes from the first human call
+- Additive only — remove entries only if explicitly deprecated
+- Use numbered hierarchy (D1, D1.1) for tracking
+- Each requirement should be verifiable (you can tell if it's done)
 
-## 3. Session 管理
+## 3. Session Management
 
-### 渐进式启动
-- 只读 progress.md 最近记录 + git log 就开始工作
-- 不要预读所有文件浪费 context
-- 需要某个 spec 的细节时再去读
+### Progressive startup
+- Read only `progress.md` latest entry + `git log` to start
+- Don't pre-read all files — wastes context window
+- Load specs/demands only when the current task needs them
 
-### 控制 Session 范围
-- 每个 session 聚焦1-2个 openspec change
-- 发现 scope 太大时主动拆分
-- 不要在一个 session 中尝试完成整个项目
+### Scope control
+- Focus each session on 1-2 openspec changes
+- If scope grows too large, split into more changes
+- Don't try to finish the whole project in one session
 
-### 有效的 Progress 记录
-- 记录**结果**而非过程
-- 记录**遗留问题**比记录完成的工作更重要
-- **下一步建议**要具体可执行
+### Effective progress records
+- Record **outcomes**, not process ("Implemented X" not "Modified a.js")
+- **Open issues** are more important than completed items
+- **Next steps** must be specific and actionable
 
-### Commit Message 规范
+### Commit messages
 ```
-[Change名] 完成了XYZ功能
+[change-name] Completed XYZ
 
-状态：change中3/5个任务已完成
-注意：Y模块的Z功能还需要处理边界情况
-下一步：继续完成剩余2个任务，特别关注错误处理
+Status: 3/5 tasks done
+Note: edge case in module Y needs attention
+Next: finish remaining tasks, focus on error handling
 ```
 
-## 4. Agent Team 协作
+## 4. Agent Team
 
-### Change 隔离策略
-- 每个 change 应修改尽量独立的文件集
-- 两个 change 必须修改同一文件时，考虑合并或排序执行
+### When to use multi-agent
+- Multiple independent openspec changes can run in parallel
+- Large project with clear separation of concerns
+- Otherwise: single agent is simpler and sufficient
 
-### 角色使用建议
-- 小型项目：单 agent 承担所有角色
-- 中型项目：architect + implementer 分工
-- 大型项目：完整三角色分工
+### Task tool usage
+- Parent assigns each sub-agent a specific change
+- Include role in the prompt: "As implementer, execute tasks..."
+- Sub-agents return results directly — no file coordination needed
 
-## 5. 常见问题
+### Avoiding conflicts
+- Each change should touch a disjoint set of files
+- If two changes must touch the same file, sequence them instead of parallelizing
 
-### Context Window 耗尽
-- **预防**：控制工作范围 + 渐进式加载
-- **应对**：优先执行 shutdown 协议
-- **恢复**：下一个 session 通过 progress.md 快速恢复
+## 5. Common Issues
 
-### Change 实现偏离 Spec
-- 完成后用 openspec verify 检查
-- 发现偏离时创建新 change 修正
-- 不在当前 change 中修补
+### Context window exhaustion
+- **Prevent**: Scope control + progressive loading
+- **Handle**: Prioritize shutdown protocol (commit + update progress.md)
+- **Recover**: Next session picks up from progress.md
 
-### Progress 文件过大
-- 定期归档旧记录到 docs/progress-archive/
-- 只保留最近20个 session 的记录
+### Implementation drifts from spec
+- Run `openspec verify` after completing a change
+- Create a new corrective change — don't patch the current one
+
+### progress.md grows too large
+- Archive old entries to `docs/progress-archive/`
+- Keep only the latest ~20 session records

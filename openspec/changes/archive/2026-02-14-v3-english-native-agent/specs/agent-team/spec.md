@@ -1,8 +1,5 @@
-# agent-team Specification
+## MODIFIED Requirements
 
-## Purpose
-TBD - created by archiving change se3-core-framework. Update Purpose after archive.
-## Requirements
 ### Requirement: Multi-Agent Task Coordination
 The system SHALL support multi-agent parallel work using Claude Code's native Task tool with sub-agents.
 
@@ -29,4 +26,3 @@ Roles are expressed in the prompt given to sub-agents, not through separate conf
 #### Scenario: Role assignment via prompt
 - **WHEN** a parent agent spawns a sub-agent for implementation work
 - **THEN** the prompt specifies the role (e.g., "As an implementer, execute tasks 1-3 of change X")
-
