@@ -1,5 +1,25 @@
 # Progress
 
+## 2026-02-14 Session 2 (v5.0)
+
+### Done
+- Added verification protocol to CLAUDE.md: "never mark complete without tests", baseline testing at startup, tests before commit
+- Added spec guardrails to CLAUDE.md and CLAUDE.global.md: agents MUST NOT delete/weaken requirements, implementers MUST NOT modify the spec they implement against
+- Added init.sh to startup protocol (Step 0) and project structure
+- Updated best-practices.md with verification, guardrails, and init.sh sections
+- Updated README.md with new principles and version history
+
+### Changes
+- `v5-testing-guardrails-init`: completed
+
+### Open Issues
+- None
+
+### Next Steps
+- Test SE 3.0 v5.0 in a real project
+- Validate verification protocol catches under-tested completions
+- Validate spec guardrails prevent requirement drift
+
 ## 2026-02-14 Session 1 (v4.1)
 
 ### Done

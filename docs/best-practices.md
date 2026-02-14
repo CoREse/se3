@@ -99,7 +99,48 @@ Next: finish remaining tasks, focus on error handling
 - With good specs, the prompt can be short: "implement change X per spec" — the sub-agent reads the spec file itself
 - This is the core reason SDD works well with agent teams
 
-## 7. Common Issues
+## 7. Verification
+
+### The rule
+**Never mark a feature or change as complete without running tests that prove it works.** Without this rule, agents will over-report completion — the single most common failure mode in long-running agent systems.
+
+### When to run tests
+- **Startup**: Run existing tests to establish a baseline before making changes
+- **After implementation**: Run tests for the specific change
+- **Before commit**: Run the full test suite — do not commit if tests fail
+- **Before archiving a change**: Verify all spec scenarios pass
+
+### Spec scenarios as acceptance criteria
+Each WHEN/THEN scenario in a spec is a test case. Before marking a change complete, verify every scenario — either with automated tests or manual exercise.
+
+### E2E testing
+When available, use browser automation (Puppeteer MCP, etc.) to test user-facing features. Visual verification catches issues that unit tests miss.
+
+## 8. Spec Guardrails
+
+### What agents MUST NOT do
+- **Delete** an existing spec requirement without explicit human approval
+- **Weaken** a requirement (e.g., "SHALL validate all inputs" → "SHOULD validate inputs")
+- **Modify** the spec they are implementing against — the implementer doesn't get to change the contract
+
+### What agents CAN do
+- **Add** new requirements
+- **Modify** requirements they are not currently implementing (via a change proposal)
+- **Deprecate** requirements with a human-approved reason and migration path
+
+### Post-archive check
+After archiving a change, review the git diff of `openspec/specs/` to confirm no requirements were inappropriately weakened or removed. If spec drift is detected, revert and investigate.
+
+## 9. Environment Setup (init.sh)
+
+If your project has a `init.sh` at the project root, the SE 3.0 startup protocol will run it as Step 0 — before reading progress or checking changes. Use it for:
+- Starting dev servers, databases, build watchers
+- Ensuring required services are running
+- Setting environment variables
+
+If `init.sh` fails, the agent should diagnose and fix before proceeding with the session.
+
+## 10. Common Issues
 
 ### Context exhaustion
 - **Prevent**: Scope control + progressive loading

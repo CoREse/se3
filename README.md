@@ -12,6 +12,8 @@ SE 3.0 combines Anthropic's [long-running agent best practices](https://www.anth
 - **Specs as Truth**: OpenSpec specs are the single source of truth. In agent team mode, specs are contracts between agents.
 - **Adaptive Formality**: Full openspec workflow for large changes; skip ceremony for small ones. Match process to scope.
 - **Progressive Loading**: Sessions start with `progress.md` + `git log`. Everything else loads on demand.
+- **Verify Before Done**: Never mark a feature complete without running tests. Spec scenarios are acceptance criteria.
+- **Spec Guardrails**: Agents MUST NOT weaken or delete existing requirements without human approval.
 - **Adaptive Conventions**: Commit when work is meaningful, clear context when saturated — not on mechanical schedules.
 - **Native Agent Team**: Multi-agent via Claude Code's built-in Task tool. Specs serve as shared context for sub-agents.
 
@@ -50,6 +52,7 @@ Check `human-calls/` for pending requests. Fill in `## Response`.
 
 ```
 project/
+├── init.sh                 # Environment setup (optional)
 ├── progress.md             # Cross-session progress
 ├── se3.config.yaml         # Configuration (optional)
 ├── README.md
@@ -103,6 +106,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 ## Version History
 
+- v5.0 — 2026-02-14 — Verification protocol, spec guardrails, init.sh environment automation
 - v4.1 — 2026-02-14 — Adaptive formality: match SDD ceremony to change scope, specs as agent contracts
 - v4.0 — 2026-02-14 — Remove demands.md, specs as truth, adaptive commit/context rules
 - v3.0 — 2026-02-14 — English rewrite, native agent team, global CLAUDE.md

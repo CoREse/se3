@@ -6,14 +6,19 @@
 
 1. **Human-as-MCP**: All human input obtained on-demand via human calls. No pre-written requirement files.
 2. **Progressive Loading**: Start with `progress.md` + `git log`. Load deeper only when the task needs it.
-3. **Specs as Truth**: OpenSpec specs are the single source of truth for what the project should do.
-4. **Incremental Development**: Work in openspec changes. Each session stays within a bounded scope.
+3. **Specs as Truth**: OpenSpec specs are the single source of truth. Agents MUST NOT weaken or delete existing requirements without explicit human approval.
+4. **Verify Before Done**: Never mark a feature complete without running tests. Spec scenarios are acceptance criteria, not documentation.
+5. **Incremental Development**: Work in openspec changes. Each session stays within a bounded scope.
 
 ---
 
 ## Session Protocol
 
 ### Startup
+
+**Step 0 — Environment setup**:
+- If `init.sh` exists at project root, run it to start the dev environment (servers, databases, build watchers)
+- If it fails, diagnose and fix before proceeding
 
 **Step 1 — Locate state**:
 - Read latest entry in `progress.md`
@@ -24,20 +29,24 @@
 - Scan `human-calls/` for `status: responded` files not yet processed
 - Check `openspec/changes/` for active changes
 
-**Step 3 — Determine scope**:
+**Step 3 — Baseline verification**:
+- Run existing tests to confirm the project is in a working state before making changes
+- If tests fail, fix them first — do not build on a broken foundation
+
+**Step 4 — Determine scope**:
 - Follow "next steps" from progress + active changes
 - Read specs or other files only when the work requires them
 
 **First-time bootstrap** (empty project):
 1. Ask the human (sync human call): "What should this project do?"
-2. Create an openspec change from their response — the proposal captures the intent, specs formalize it
+2. Create an openspec change from their response
 3. Create `progress.md`
 4. Initialize openspec if needed
 5. Create `human-calls/` directory
 
 ### Shutdown
 
-1. Ensure modified code runs correctly
+1. Run all tests — do NOT proceed to commit if tests fail
 2. Prepend session record to `progress.md`
 3. Git commit (see commit rules below)
 4. Update openspec change status if applicable
@@ -75,6 +84,53 @@
 ### Next Steps
 - [specific actionable suggestions]
 ```
+
+---
+
+## Verification Protocol
+
+### The Rule
+
+**Never mark a feature or change as complete without running tests that prove it works.**
+
+Without this rule, agents will over-report completion. This is the single most common failure mode in long-running agent systems.
+
+### How to Verify
+
+1. **Spec scenarios = acceptance criteria**. Each WHEN/THEN scenario in a spec is a test case. Before marking a change complete, verify every scenario.
+
+2. **Prefer automated tests**. Write tests for spec scenarios when possible. Run them. A passing test suite is the only reliable proof of completion.
+
+3. **E2E testing for user-facing features**. When available, use browser automation (Puppeteer MCP, etc.) to test as a user would. Visual verification catches issues that unit tests miss.
+
+4. **Manual verification as fallback**. If no automated testing is feasible, manually exercise the feature and document the result.
+
+### When to Run Tests
+
+- **Startup**: Run existing tests to establish a baseline before making changes
+- **After implementation**: Run tests for the specific change
+- **Before commit**: Run the full test suite — do not commit if tests fail
+- **Before archiving a change**: Verify all spec scenarios pass
+
+---
+
+## Spec Guardrails
+
+### What Agents MUST NOT Do
+
+- **MUST NOT delete** an existing spec requirement without explicit human approval (via human call)
+- **MUST NOT weaken** a requirement (e.g., changing "SHALL validate all inputs" to "SHOULD validate inputs")
+- **MUST NOT modify** the description or scenarios of a requirement they are implementing — the implementer does not get to change the spec they're building against
+
+### What Agents CAN Do
+
+- **ADD** new requirements
+- **MODIFY** requirements they are not currently implementing (with a change proposal)
+- **Mark requirements as deprecated** with a human-approved reason and migration path
+
+### Enforcement
+
+After archiving a change, review the git diff of `openspec/specs/` to confirm no requirements were inappropriately weakened or removed. If spec drift is detected, revert and investigate.
 
 ---
 
@@ -137,25 +193,25 @@ OpenSpec specs = single source of truth for project requirements.
 Not every change needs full ceremony. Match the process to the scope:
 
 **Large** (new capability, agent team, cross-cutting):
-- Full openspec change: proposal → specs → design → tasks → code
+- Full openspec change: proposal → specs → design → tasks → code → **verify**
 - Specs are detailed with scenarios — they serve as **contracts between agents**
 - Design doc captures architecture decisions that sub-agents need
 
 **Medium** (single agent, moderate scope):
-- Openspec change with: proposal (brief) → specs (if requirements change) → tasks
+- Openspec change with: proposal (brief) → specs (if requirements change) → tasks → **verify**
 - Skip design unless there are real architecture decisions
 - Proposal can be 2-3 sentences
 
 **Small** (bug fix, tweak, simple addition):
 - No openspec change needed
-- Edit code directly, update the relevant spec file if behavior changed, commit
+- Edit code directly, update the relevant spec file if behavior changed, **run tests**, commit
 
 ### Specs as Agent Contracts
 
 In agent team mode, specs are the interface between agents:
 - Parent (architect) writes the spec defining **what** to build
-- Sub-agent (implementer) reads the spec and implements against it
-- Sub-agent (reviewer) verifies the implementation matches the spec
+- Sub-agent (implementer) reads the spec and implements against it — **MUST NOT modify the spec**
+- Sub-agent (reviewer) verifies the implementation matches the spec by testing each scenario
 - The spec must be precise enough that an agent with no other context can implement from it
 
 ### Change Workflow
@@ -163,6 +219,7 @@ In agent team mode, specs are the interface between agents:
 - Each change: max 5 tasks per group with strong logical dependencies
 - Context clearing between groups only when context is saturated
 - Archive applies spec deltas back to main specs automatically — this is the key value of the openspec workflow
+- **Before archiving**: verify all spec scenarios pass
 
 ---
 
@@ -180,8 +237,8 @@ Uses Claude Code's native **Task tool**.
 Expressed in Task tool prompts:
 
 - **architect**: "Design the spec for change X. Define requirements with scenarios detailed enough for another agent to implement."
-- **implementer**: "Implement tasks 1-3 of change X. Read `openspec/specs/` for requirements. Do not deviate from the spec."
-- **reviewer**: "Verify change X. Read the spec, read the implementation, report any gaps."
+- **implementer**: "Implement tasks 1-3 of change X. Read `openspec/specs/` for requirements. Do not deviate from the spec. Do not modify spec files."
+- **reviewer**: "Verify change X. Read the spec, run tests for each scenario, report any gaps between spec and implementation."
 
 ### When to Use
 
@@ -196,7 +253,7 @@ When instructed to self-iterate, execute without stopping until step 5:
 
 1. Obtain direction via human call → create openspec change
 2. Implement the change (proposal → specs → design → tasks → code)
-3. Verify implementation against specs, archive the change
+3. **Verify** implementation against specs (run tests, check each scenario), archive the change
 4. Check if specs fully cover project goals — if gaps, go to 1
 5. Update project documentation
 
@@ -206,12 +263,13 @@ When instructed to self-iterate, execute without stopping until step 5:
 
 ```
 project/
+├── init.sh                # optional: environment setup script
 ├── progress.md
 ├── se3.config.yaml        # optional
 ├── README.md
 ├── human-calls/
 ├── openspec/
-│   ├── specs/             # source of truth
+│   ├── specs/             # source of truth (guardrails apply)
 │   ├── changes/
 │   └── archive/
 └── .claude/
