@@ -5,28 +5,26 @@
 
 ## Current State
 
-**Active Change**: `toolize-se3`
- **Current Task**: `archive-change`
+**Active Change**: `none`
+ **Current Task**: `ready`
 **Status**: `ready`
 **Blocked Since**: `-`
-**Context Budget**: `moderate`
+**Context Budget**: `fresh`
 
 ## What's Happening Now
 
-Toolize SE 3.0 implementation complete. All four CLI tools working:
+Session complete. Toolize SE 3.0 change archived. All four CLI tools implemented and tested:
 - `se3 lint` — 9/9 specs pass validation
 - `se3 sync` — Output directory in sync
-- `se3 verify` — 23 scenarios detected, 12 covered (52%)
-- `se3 status` — Diagnostics showing 1 warning (unprocessed human call)
-
-Ready to archive change.
+- `se3 verify` — Pre-archive scenario coverage check
+- `se3 status` — Session diagnostics
 
 ## Immediate Next Steps
 
-1. Run `openspec archive-change toolize-se3`
-2. Verify specs delta applied correctly
-3. Commit all changes
-4. Update progress.md
+1. Use `se3 lint` before committing spec changes
+2. Use `se3 sync --dry-run` to check output drift
+3. Use `se3 verify --change <name>` before archiving
+4. Use `se3 status` to diagnose session issues
 
 ## Blockers
 
@@ -36,9 +34,9 @@ Ready to archive change.
 
 ## Recent History (last 3 actions)
 
-1. `[2026-02-14 14:35]` - All four CLI tools implemented and tested
-2. `[2026-02-14 14:33]` - Added TOOLS.md documentation to output/
-3. `[2026-02-14 14:32]` - Updated README with tools section
+1. `[2026-02-14 14:40]` - Committed toolize-se3 changes (34 files, 2177 insertions)
+2. `[2026-02-14 14:38]` - Archived toolize-se3 change to main specs
+3. `[2026-02-14 14:35]` - All CLI tools tested and working
 
 ## Quick Diagnosis
 
