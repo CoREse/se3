@@ -25,8 +25,10 @@ from se3_tools.commands.commit import (
     detect_test_command,
     check_sensitive_files,
     get_changed_files,
-    generate_message_from_diff,
+    generate_message_fallback,
+    validate_message,
     SENSITIVE_PATTERNS,
+    MIN_MESSAGE_LENGTH,
 )
 
 
@@ -191,12 +193,12 @@ class TestGitIntegration:
         """Should generate message with single file name."""
         (Path(self.tmpdir) / "README.md").write_text("# Changed\n")
         subprocess.run(["git", "add", "README.md"], cwd=self.tmpdir, capture_output=True)
-        msg = generate_message_from_diff(Path(self.tmpdir))
+        msg = generate_message_fallback(Path(self.tmpdir))
         assert "README.md" in msg
 
     def test_generate_message_no_staged(self):
         """Should return default message when nothing staged."""
-        msg = generate_message_from_diff(Path(self.tmpdir))
+        msg = generate_message_fallback(Path(self.tmpdir))
         assert "Update" in msg
 
 
@@ -292,3 +294,70 @@ class TestCommitCli:
         )
         assert result.returncode != 0
         assert "FAILED" in result.stdout or "Tests FAILED" in result.stdout
+
+
+# =============================================================================
+# Message Validation Tests
+# =============================================================================
+
+class TestMessageValidation:
+    """Test commit message quality validation."""
+
+    def test_good_message_no_warnings(self):
+        """A well-formed message should produce no warnings."""
+        msg = """Add user authentication with JWT tokens
+
+Implemented login/logout endpoints, token refresh, and middleware.
+
+Status: auth module complete, all 15 tests passing
+Next: integrate with frontend login form"""
+        warnings = validate_message(msg)
+        assert len(warnings) == 0
+
+    def test_short_message_warns(self):
+        """Very short messages should trigger a warning."""
+        warnings = validate_message("fix bug")
+        assert any("too short" in w.lower() for w in warnings)
+
+    def test_missing_status_warns(self):
+        """Missing Status: line should trigger a suggestion."""
+        msg = "Add authentication module\n\nNext: integrate with frontend"
+        warnings = validate_message(msg)
+        assert any("Status:" in w for w in warnings)
+
+    def test_missing_next_warns(self):
+        """Missing Next: line should trigger a suggestion."""
+        msg = "Add authentication module\n\nStatus: complete"
+        warnings = validate_message(msg)
+        assert any("Next:" in w for w in warnings)
+
+    def test_long_first_line_warns(self):
+        """Very long first lines should trigger a warning."""
+        msg = "A" * 130 + "\n\nStatus: done\nNext: nothing"
+        warnings = validate_message(msg)
+        assert any("first line" in w.lower() for w in warnings)
+
+    def test_adequate_short_message(self):
+        """A short but adequate message should only get context suggestions."""
+        msg = "Fix off-by-one in pagination logic"
+        warnings = validate_message(msg)
+        # Should warn about missing Status/Next, but not about length
+        assert not any("too short" in w.lower() for w in warnings)
+
+    def test_complete_message_format(self):
+        """The ideal SE3 message format should pass all checks."""
+        msg = """Refactor database connection pooling for better concurrency
+
+Replaced single connection with pool of 10, added health checks.
+
+Status: pool working in dev, load test shows 3x throughput improvement
+Next: add pool size to se3.config.yaml, test under production load"""
+        warnings = validate_message(msg)
+        assert len(warnings) == 0
+
+    def test_validation_is_warnings_not_errors(self):
+        """Validation should always return a list (never raise)."""
+        # Even empty string should return warnings, not crash
+        warnings = validate_message("")
+        assert isinstance(warnings, list)
+        assert len(warnings) > 0

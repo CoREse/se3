@@ -3,21 +3,19 @@
 Replaces direct `git commit` usage. Enforces:
 - Tests must pass before commit (no override without explicit flag)
 - Sensitive files are blocked (.env, credentials, secrets)
-- Commit message follows SE3 conventions
+- Commit message follows SE3 conventions (context for next session)
 - Only tracked/specified files are staged
 
-Usage by AI agents:
-    se3 commit -m "Add auth module" --files "src/auth.py tests/test_auth.py"
-
-Usage interactively:
-    se3 commit                    # auto-detect changes, prompt for message
-    se3 commit --dry-run          # preview what would be committed
-    se3 commit --skip-tests       # escape hatch (logged as warning)
+Message generation:
+- Without -m: uses `claude -p` to generate a context-rich message from the diff
+- With -m: validates the message meets minimum quality standards
+- Both paths ensure the message contains actionable context for the next session
 """
 
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -43,6 +41,45 @@ SENSITIVE_PATTERNS = [
     "token.json",
     "service-account*.json",
 ]
+
+# Minimum message quality thresholds
+MIN_MESSAGE_LENGTH = 20
+MESSAGE_QUALITY_WARNINGS = [
+    ("Status:", "Consider adding 'Status:' line describing where things stand"),
+    ("Next:", "Consider adding 'Next:' line for what the next session should do"),
+]
+
+# Prompt for AI-generated commit messages
+COMMIT_MESSAGE_PROMPT = """You are generating a git commit message for an SE3 project.
+
+Below is the diff of staged changes. Write a commit message following this exact format:
+
+<first-line>
+A concise summary of WHAT changed and WHY (under 72 chars).
+Do NOT just list file names. Describe the intent.
+
+<body>
+After a blank line, provide:
+
+Status: where the project stands after this commit
+Next: what the next development session should do
+
+IMPORTANT:
+- The first line should describe the PURPOSE, not just "Update X files"
+- Status and Next lines give future developers context to continue efficiently
+- Be specific and actionable in the Next line
+
+Example:
+Add health monitoring for collab workers via git activity checks
+
+Status: collab orchestrator detects stale workers, all 38 tests pass
+Next: integrate with se3 collab CLI and test with real claude -p processes
+
+Now generate the message for this diff:
+
+{diff}
+
+Respond with ONLY the commit message text. No markdown fences, no explanation."""
 
 
 def find_project_root() -> Path:
@@ -198,16 +235,62 @@ def stage_files(project_root: Path, files: Optional[List[str]] = None) -> List[s
         return to_stage
 
 
-def generate_message_from_diff(project_root: Path) -> str:
-    """Generate a basic commit message from the staged diff."""
-    result = run_command(["git", "diff", "--cached", "--stat"], cwd=project_root)
-    if result.returncode != 0 or not result.stdout.strip():
+def get_staged_diff(project_root: Path, stat_only: bool = False) -> str:
+    """Get the diff of staged changes."""
+    cmd = ["git", "diff", "--cached"]
+    if stat_only:
+        cmd.append("--stat")
+    result = run_command(cmd, cwd=project_root)
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def generate_message_ai(project_root: Path) -> Optional[str]:
+    """Generate a commit message using claude -p from the staged diff.
+
+    Returns the generated message, or None if AI generation fails/unavailable.
+    """
+    if not shutil.which("claude"):
+        return None
+
+    diff = get_staged_diff(project_root)
+    if not diff:
+        return None
+
+    # Truncate very large diffs to avoid context overflow
+    max_diff_chars = 8000
+    if len(diff) > max_diff_chars:
+        diff = diff[:max_diff_chars] + "\n\n... (diff truncated, showing first 8000 chars)"
+
+    prompt = COMMIT_MESSAGE_PROMPT.format(diff=diff)
+
+    try:
+        result = subprocess.run(
+            ["claude", "-p", prompt, "--max-turns", "1"],
+            capture_output=True, text=True, timeout=60,
+            cwd=project_root,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            msg = result.stdout.strip()
+            # Clean up any markdown fences the AI might add
+            msg = re.sub(r'^```\w*\n?', '', msg)
+            msg = re.sub(r'\n?```$', '', msg)
+            return msg.strip()
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        pass
+
+    return None
+
+
+def generate_message_fallback(project_root: Path) -> str:
+    """Generate a basic commit message from diff stats.
+
+    Fallback when AI generation is unavailable.
+    """
+    diff_stat = get_staged_diff(project_root, stat_only=True)
+    if not diff_stat:
         return "Update files"
 
-    lines = result.stdout.strip().split("\n")
-    # Last line is the summary like " 3 files changed, 10 insertions(+), 2 deletions(-)"
-    summary = lines[-1].strip() if lines else "Update files"
-    # Get the list of changed files
+    lines = diff_stat.strip().split("\n")
     changed_files = [l.strip().split("|")[0].strip() for l in lines[:-1] if "|" in l]
 
     if len(changed_files) == 1:
@@ -215,7 +298,37 @@ def generate_message_from_diff(project_root: Path) -> str:
     elif len(changed_files) <= 3:
         return f"Update {', '.join(changed_files)}"
     else:
+        summary = lines[-1].strip() if lines else ""
         return f"Update {len(changed_files)} files ({summary})"
+
+
+def validate_message(message: str) -> List[str]:
+    """Validate a commit message meets SE3 quality standards.
+
+    Returns list of warnings (empty = good).
+    """
+    warnings = []
+
+    if len(message.strip()) < MIN_MESSAGE_LENGTH:
+        warnings.append(
+            f"Message too short ({len(message.strip())} chars). "
+            f"Minimum {MIN_MESSAGE_LENGTH} chars for meaningful context."
+        )
+
+    # Check first line length
+    first_line = message.strip().split("\n")[0]
+    if len(first_line) > 120:
+        warnings.append(
+            f"First line too long ({len(first_line)} chars). "
+            "Keep the summary under 72 chars, use body for details."
+        )
+
+    # Check for context markers (only warn, don't block)
+    for marker, suggestion in MESSAGE_QUALITY_WARNINGS:
+        if marker not in message:
+            warnings.append(suggestion)
+
+    return warnings
 
 
 def do_commit(project_root: Path, message: str) -> tuple[bool, str]:
@@ -247,6 +360,10 @@ def commit(
         False, "--dry-run",
         help="Preview what would be committed without doing it"
     ),
+    no_ai: bool = typer.Option(
+        False, "--no-ai",
+        help="Skip AI message generation, use fallback"
+    ),
     project_root: Optional[str] = typer.Option(
         None, "--project-root", "-p",
         help="Project root directory"
@@ -254,7 +371,7 @@ def commit(
 ):
     """Commit changes with SE3 verification.
 
-    Runs tests, checks for sensitive files, then commits.
+    Runs tests, checks for sensitive files, generates/validates commit message.
     This is the ONLY way to commit in SE3 projects.
     """
     root = Path(project_root) if project_root else find_project_root()
@@ -264,7 +381,7 @@ def commit(
     typer.echo("=" * 50)
 
     # Step 1: Check for changes
-    typer.echo("\n[1/4] Checking for changes...")
+    typer.echo("\n[1/5] Checking for changes...")
     changes = get_changed_files(root)
     total_changes = len(changes["staged"]) + len(changes["modified"]) + len(changes["untracked"])
 
@@ -280,7 +397,7 @@ def commit(
         typer.echo(f"  Untracked: {len(changes['untracked'])} file(s) (will not be auto-staged)")
 
     # Step 2: Run tests
-    typer.echo("\n[2/4] Running tests...")
+    typer.echo("\n[2/5] Running tests...")
     if skip_tests:
         typer.echo("  WARNING: Tests skipped by --skip-tests flag")
         test_passed = True
@@ -296,11 +413,10 @@ def commit(
             raise typer.Exit(1)
 
     # Step 3: Stage files and check sensitive
-    typer.echo("\n[3/4] Staging files...")
+    typer.echo("\n[3/5] Staging files...")
     staged = stage_files(root, file_list)
 
     if not staged:
-        # Check if there were already staged files
         result = run_command(["git", "diff", "--cached", "--name-only"], cwd=root)
         if not result.stdout.strip():
             typer.echo("  No files to commit after staging.")
@@ -317,11 +433,8 @@ def commit(
         typer.echo(f"  BLOCKED: Sensitive files detected:")
         for f in blocked:
             typer.echo(f"    - {f}")
-        typer.echo("\n  Remove these files from staging with: git reset HEAD <file>")
-        # Unstage the sensitive files
         run_command(["git", "reset", "HEAD"] + blocked, cwd=root)
         typer.echo(f"  Auto-unstaged {len(blocked)} sensitive file(s).")
-        # If nothing left, abort
         result = run_command(["git", "diff", "--cached", "--name-only"], cwd=root)
         if not result.stdout.strip():
             typer.echo("  No files remaining after removing sensitive files.")
@@ -334,26 +447,51 @@ def commit(
     if len(actual_staged) > 10:
         typer.echo(f"    ... and {len(actual_staged) - 10} more")
 
-    # Step 4: Commit
-    typer.echo("\n[4/4] Committing...")
-    if not message:
-        message = generate_message_from_diff(root)
-        typer.echo(f"  Auto-generated message: {message}")
+    # Step 4: Generate/validate commit message
+    typer.echo("\n[4/5] Preparing commit message...")
+    if message:
+        # Validate user-provided message
+        warnings = validate_message(message)
+        if warnings:
+            typer.echo("  Message quality warnings:")
+            for w in warnings:
+                typer.echo(f"    - {w}")
+            typer.echo("  (Proceeding anyway — these are suggestions, not blockers)")
+        else:
+            typer.echo("  Message validates OK.")
+    else:
+        # Generate message
+        if not no_ai:
+            typer.echo("  Generating message with AI...")
+            message = generate_message_ai(root)
+            if message:
+                typer.echo(f"  AI-generated message:")
+                for line in message.split("\n"):
+                    typer.echo(f"    {line}")
+            else:
+                typer.echo("  AI generation unavailable, using fallback.")
+
+        if not message:
+            message = generate_message_fallback(root)
+            typer.echo(f"  Fallback message: {message}")
+            typer.echo("  WARNING: Fallback messages lack context. Consider providing -m.")
+
+    # Step 5: Commit
+    typer.echo("\n[5/5] Committing...")
 
     if dry_run:
         typer.echo(f"\n  [DRY RUN] Would commit with message:")
-        typer.echo(f"  {message}")
+        for line in message.split("\n"):
+            typer.echo(f"    {line}")
         typer.echo(f"\n  Files:")
         for f in actual_staged:
             typer.echo(f"    {f}")
-        # Unstage to leave state clean
         run_command(["git", "reset", "HEAD"] + actual_staged, cwd=root)
         raise typer.Exit(0)
 
     success, output = do_commit(root, message)
     if success:
         typer.echo(f"  Committed successfully.")
-        # Show the commit hash
         result = run_command(["git", "log", "--oneline", "-1"], cwd=root)
         if result.returncode == 0:
             typer.echo(f"  {result.stdout.strip()}")
