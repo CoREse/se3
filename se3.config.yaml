@@ -6,6 +6,7 @@ max_tasks_per_change: 5
 human_call:
   timeout_days: 7
   directory: human-calls
+  language: zh-CN  # Language for human call messages (e.g., zh-CN, en-US)
 
 session:
   progress_file: progress.md
