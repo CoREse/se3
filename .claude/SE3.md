@@ -1,6 +1,6 @@
 <!-- Generated on 2026-02-15 -->
-<!-- SE3 Version: 1.0 -->
-<!-- Checksum: 3384ff4884a662e340ec22102655f5afb25649602aae7040a940321027b1f550 -->
+<!-- SE3 Version: 1.1 -->
+<!-- Checksum: d3351863c6d33d2804e0f59a06fd832cb2988c6d8ee1b888ddc33b23a058fdd4 -->
 
 <!--
   SE 3.0 Framework Reference File
@@ -507,3 +507,21 @@ Optional `se3.config.yaml`. All settings have defaults.
 - `max_tasks_per_change`: Max tasks per group (default: 5)
 - `human_call.timeout_days`: Async call timeout (default: 7)
 - `session.max_progress_entries`: Max progress entries before archiving (default: 20)
+
+---
+
+## Versioning
+
+SE3 uses `MAJOR.MINOR` semantic versioning.
+
+- **MAJOR** (e.g. 1.0 → 2.0): Breaking changes. Existing projects need manual review before upgrading.
+- **MINOR** (e.g. 1.0 → 1.1): Backward-compatible additions. Safe to `se3 update`.
+
+The version is embedded in `.claude/SE3.md` metadata:
+```
+<!-- SE3 Version: 1.1 -->
+```
+
+**Upgrade path**: `se3 update --se3-version X.Y` reads `output/SE3.md.template`, stamps it with version metadata, and writes to `.claude/SE3.md`.
+
+**Self-hosted projects** (developing SE3 itself): MUST NOT edit `.claude/SE3.md` directly. All changes go through `output/SE3.md.template` → `se3 update`.
