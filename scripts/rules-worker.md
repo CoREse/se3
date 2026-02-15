@@ -65,3 +65,4 @@ Verified: which spec scenarios pass"
 - Do NOT explore unrelated parts of the codebase
 - Focus exclusively on files relevant to your task
 - Read only the spec files referenced in your task
+- When reading large files, use `offset` and `limit` to read only the relevant sections (e.g., `offset: 50, limit: 30` reads lines 50-80)
