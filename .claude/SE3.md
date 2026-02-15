@@ -17,6 +17,73 @@
 
 ---
 
+## Input Classification & Stage Routing
+
+**Principle**: ALL human input related to the project SHALL be processed through SE3 stage routing. No input is handled outside the framework.
+
+### Input Classifier
+
+For every human message, classify its intent:
+
+| Intent Type | Description | Stage Entry |
+|-------------|-------------|-------------|
+| `directive` | Explicit self-iterate, "implement X", "start feature Y" | Full SDD workflow |
+| `bug-report` | Error description, stack trace, broken behavior | Bug fix workflow |
+| `feature-request` | New capability, enhancement idea | Feature proposal workflow |
+| `question` | How does X work? Why Y? | Knowledge query |
+| `review` | "Check this", "What do you think", "Is this correct" | Review workflow |
+| `clarification` | Follow-up on previous topic | Resume/continue workflow |
+| `meta` | About the project/process itself | Meta workflow |
+| `off-topic` | Not related to project | Answer without modifying project files |
+
+### Stage Decision Matrix
+
+```
+Input + Current State → Stage Decision
+
+IF intent == bug-report:
+  IF status.md has active_change AND active_change relates to bug:
+    → Continue active change (add bug fix task)
+  ELSE:
+    → Create new change: "bugfix/{description}"
+    → Stage: Analyze → Fix → Verify
+
+IF intent == feature-request:
+  IF complexity == small AND no spec change needed:
+    → Direct implementation (Small workflow)
+  ELSE:
+    → Create new change: "feature/{description}"
+    → Stage: Proposal → Specs → Design → Tasks → Code → Verify
+
+IF intent == question:
+  IF answer requires code investigation:
+    → Quick exploration (no change created)
+  ELSE:
+    → Direct answer from existing knowledge
+
+IF intent == review:
+  → Review workflow: Check → Report → Optional fix
+
+IF intent == clarification:
+  → Continue previous context
+  OR if new context: treat as new input
+```
+
+### Routing Execution
+
+```python
+# Pseudocode for every input
+intent = classify_input(user_message)
+route = determine_stage(intent, current_status)
+execute_stage(route, user_message)
+```
+
+**MUST NOT**: Handle input outside of SE3 workflow
+**MUST**: Create appropriate change record for any code modification
+**MUST**: Update status.md to reflect current stage
+
+---
+
 ## Session Protocol
 
 ### Startup
@@ -43,8 +110,16 @@
 - Run existing tests to confirm the project is in a working state before making changes
 - If tests fail, fix them first — do not build on a broken foundation
 
-**Step 5 — Determine scope**:
-- Follow "next steps" from progress + active changes
+**Step 5 — Classify input & Route to stage**:
+- **ALWAYS** classify the current user message using Input Classifier
+- If classified as `bug-report`, `feature-request`, `review`: Route to appropriate stage
+- If classified as `directive`: Follow explicit instruction
+- If classified as `question`: Answer directly (may explore code if needed)
+- If classified as `off-topic`: Answer conversationally, do not modify project files
+- Update `status.md` to reflect current Stage before proceeding
+
+**Step 6 — Execute stage workflow**:
+- Follow the determined stage's protocol
 - Read specs or other files only when the work requires them
 
 **First-time bootstrap** (empty project):
@@ -237,6 +312,90 @@ In agent team mode, specs are the interface between agents:
 - Sub-agent (reviewer) verifies the implementation matches the spec by testing each scenario
 - The spec must be precise enough that an agent with no other context can implement from it
 
+### Input-Driven Workflows
+
+#### Bug Fix Workflow (triggered by bug-report)
+
+```
+1. ANALYZE (current session)
+   - Reproduce the bug
+   - Identify root cause
+   - Determine affected components
+   - Update status.md: Stage = analyzing
+
+2. FIX (openspec/change or direct)
+   IF complexity > small:
+     - Create openspec/change/bugfix-{id}/
+     - Write fix-spec.md: expected behavior, test cases
+     - Implement fix
+     - Run tests to verify
+   ELSE:
+     - Fix directly
+     - Run tests
+
+3. VERIFY
+   - Confirm bug is resolved
+   - Run regression tests
+   - Update relevant specs if behavior changed
+   - Archive change (if created)
+   - Update status.md: Stage = ready
+```
+
+#### Feature Request Workflow (triggered by feature-request)
+
+```
+1. CLARIFY (human call if needed)
+   - Understand the request
+   - Ask clarifying questions
+   - Determine scope and priority
+   - Update status.md: Stage = clarifying
+
+2. PROPOSE (openspec/change/)
+   - Create openspec/change/feature-{id}/
+   - Write proposal.md: what, why, acceptance criteria
+   - Get human approval (if significant)
+   - Update status.md: Stage = proposing
+
+3. SPEC (if requirements change)
+   - Write/update specs in openspec/specs/
+   - Define scenarios (WHEN/THEN)
+   - Run se3 lint to validate
+   - Update status.md: Stage = spec-writing
+
+4. DESIGN (if needed)
+   - Write design.md for complex changes
+   - Update status.md: Stage = designing
+
+5. IMPLEMENT
+   - Break into tasks (max 5 per group)
+   - Implement incrementally
+   - Run tests continuously
+   - Update status.md: Stage = implementing
+
+6. VERIFY
+   - Run all tests
+   - Verify each spec scenario
+   - Archive change
+   - Update status.md: Stage = ready
+```
+
+#### Review Workflow (triggered by review)
+
+```
+1. INSPECT
+   - Read the code/file in question
+   - Check against specs
+   - Identify issues
+
+2. REPORT
+   - Provide findings to human
+   - Categorize: critical / warning / suggestion
+
+3. FIX (optional, if requested)
+   - IF fix approved: route to Bug Fix or Feature workflow
+   - ELSE: end here
+```
+
 ### Change Workflow
 
 - Each change: max 5 tasks per group with strong logical dependencies
@@ -272,7 +431,9 @@ Expressed in Task tool prompts:
 
 ## Self-Iterate
 
-When instructed to self-iterate, execute without stopping until step 5:
+Self-iterate is the **directive** input type handler — when explicitly instructed to continue development.
+
+When the input classifier detects a `directive` intent (e.g., "self-iterate", "implement X", "continue"), execute without stopping until step 5:
 
 1. Obtain direction via human call → create openspec change
 2. Implement the change (proposal → specs → design → tasks → code)

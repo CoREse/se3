@@ -22,6 +22,10 @@ from datetime import datetime, timedelta
 
 from ..utils import parse_status_md, discover_human_calls, discover_changes
 
+import typer
+
+app = typer.Typer(invoke_without_command=True)
+
 
 def check_active_change(status: Dict[str, Any], project_root: Path) -> Optional[Dict[str, Any]]:
     """Check if active change exists in openspec/changes/.
@@ -304,3 +308,13 @@ def main(format: str = "text", project_root: str = ".") -> int:
         print_text_report(results)
 
     return 0 if results['healthy'] else 1
+
+
+@app.callback()
+def status(
+    format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
+    project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
+):
+    """Check project status and run diagnostics."""
+    exit_code = main(format, project_root)
+    raise typer.Exit(code=exit_code)

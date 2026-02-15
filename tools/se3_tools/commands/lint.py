@@ -4,7 +4,11 @@ import re
 from pathlib import Path
 from typing import Dict, List, Any
 
+import typer
+
 from se3_tools.utils import discover_specs, parse_spec, get_exit_code
+
+app = typer.Typer(invoke_without_command=True)
 
 
 def validate_spec(filepath: str) -> List[Dict[str, Any]]:
@@ -141,3 +145,10 @@ def run_lint(path: str) -> int:
         print(f"All {len(spec_files)} spec(s) passed validation.")
 
     return get_exit_code(all_results)
+
+
+@app.callback()
+def lint(path: str = "."):
+    """Lint OpenSpec files in the given path."""
+    exit_code = run_lint(path)
+    raise typer.Exit(code=exit_code)

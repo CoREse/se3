@@ -19,6 +19,10 @@ from typing import List, Dict, Any, Optional
 
 from ..utils import discover_specs_in_change, parse_spec, find_verification_markers
 
+import typer
+
+app = typer.Typer(invoke_without_command=True)
+
 
 def extract_scenarios_with_skips(spec_path: str) -> List[Dict[str, Any]]:
     """Extract scenarios from a spec file, including skip annotations.
@@ -223,3 +227,14 @@ def main(change: str, format: str = "text", project_root: str = ".") -> int:
         print_text_report(results)
 
     return 0 if results.get('success', False) else 1
+
+
+@app.callback()
+def verify(
+    change: str = typer.Argument(..., help="Name of the change to verify"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
+    project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
+):
+    """Verify spec coverage for a change."""
+    exit_code = main(change, format, project_root)
+    raise typer.Exit(code=exit_code)
