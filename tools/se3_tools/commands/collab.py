@@ -156,6 +156,9 @@ def collab(
     no_watchdog: bool = typer.Option(
         False, "--no-watchdog", help="Run without watchdog (testing)"
     ),
+    mock: bool = typer.Option(
+        False, "--mock", help="Use mock claude for testing (no real AI)"
+    ),
     project_root: str = typer.Option(
         None, "--project-root", "-p", help="Project root directory"
     ),
@@ -187,6 +190,8 @@ def collab(
         cmd.append("--resume")
     if no_watchdog:
         cmd.append("--no-watchdog")
+    if mock:
+        cmd.append("--mock")
     if objective:
         cmd.append(objective)
 

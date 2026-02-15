@@ -12,6 +12,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="${PROJECT_ROOT:-$(pwd)}"
 
+# --- Setup jq (system or Python fallback) ---
+export JQ_CMD="jq"
+if ! command -v jq &>/dev/null; then
+  JQ_CMD="python3 $SCRIPT_DIR/jq-complete.py"
+fi
+
 # --- Configuration (defaults, overridden by se3.config.yaml) ---
 MAX_PARALLEL_WORKERS=3
 WORKER_TIMEOUT_MINUTES=60
@@ -36,10 +42,10 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-log_info()  { echo -e "${BLUE}[orch]${NC} $*"; }
-log_ok()    { echo -e "${GREEN}[orch]${NC} $*"; }
-log_warn()  { echo -e "${YELLOW}[orch]${NC} $*"; }
-log_error() { echo -e "${RED}[orch]${NC} $*"; }
+log_info()  { echo -e "${BLUE}[orch]${NC} $*" >&2; }
+log_ok()    { echo -e "${GREEN}[orch]${NC} $*" >&2; }
+log_warn()  { echo -e "${YELLOW}[orch]${NC} $*" >&2; }
+log_error() { echo -e "${RED}[orch]${NC} $*" >&2; }
 
 # --- Load config from se3.config.yaml if available ---
 load_config() {
@@ -128,7 +134,7 @@ invoke_manager() {
 
 ## Current State
 Project root: $PROJECT_ROOT
-Base branch: $(cat "$COLLAB_DIR/config.json" 2>/dev/null | jq -r '.base_branch // "master"')
+Base branch: $(cat "$COLLAB_DIR/config.json" 2>/dev/null | $JQ_CMD -r '.base_branch // "master"')
 
 ## All Tasks
 $tasks_summary
@@ -171,11 +177,13 @@ Rules:
     [ -n "$MANAGER_MODEL" ] && claude_args+=(--model "$MANAGER_MODEL")
     [ -n "$MCP_CONFIG" ] && claude_args+=(--mcp-config "$MCP_CONFIG")
 
+    local cmd_to_run="claude"
+    [ "$MOCK_MODE" = "true" ] && cmd_to_run="$SCRIPT_DIR/mock-claude"
     if result=$(SE3_AGENT_ROLE="manager" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
-      timeout "$timeout_seconds" claude "${claude_args[@]}" 2>"$logfile"); then
+      timeout "$timeout_seconds" "$cmd_to_run" "${claude_args[@]}" 2>"$logfile"); then
       # Validate JSON
-      if echo "$result" | jq -e '.action' &>/dev/null; then
-        log_ok "Manager responded: $(echo "$result" | jq -r '.action')"
+      if echo "$result" | $JQ_CMD -e '.action' &>/dev/null; then
+        log_ok "Manager responded: $(echo "$result" | $JQ_CMD -r '.action')"
         echo "$result"
         return 0
       else
@@ -218,10 +226,10 @@ spawn_worker() {
   local task_file="$COLLAB_DIR/tasks/${task_id}.json"
 
   local branch worktree task_prompt prompt timeout_min
-  branch=$(jq -r '.branch' "$task_file")
-  worktree=$(jq -r '.worktree' "$task_file")
-  task_prompt=$(jq -r '.prompt' "$task_file")
-  timeout_min=$(jq -r '.health.timeout_minutes // 60' "$task_file")
+  branch=$($JQ_CMD -r '.branch' "$task_file")
+  worktree=$($JQ_CMD -r '.worktree' "$task_file")
+  task_prompt=$($JQ_CMD -r '.prompt' "$task_file")
+  timeout_min=$($JQ_CMD -r '.health.timeout_minutes // 60' "$task_file")
 
   # Inject worker rules before the task-specific prompt
   prompt="$WORKER_RULES
@@ -238,7 +246,7 @@ $task_prompt"
   # Create worktree if not exists
   if [ ! -d "$worktree" ]; then
     local base_branch
-    base_branch=$(jq -r '.base_branch // "master"' "$COLLAB_DIR/config.json")
+    base_branch=$($JQ_CMD -r '.base_branch // "master"' "$COLLAB_DIR/config.json")
     log_info "Creating worktree: $worktree (branch: $branch from $base_branch)"
     git -C "$PROJECT_ROOT" worktree add "$worktree" -b "$branch" "$base_branch"
   fi
@@ -255,10 +263,12 @@ $task_prompt"
   [ -n "$MCP_CONFIG" ] && claude_args+=(--mcp-config "$MCP_CONFIG")
 
   # Spawn worker in background with role env vars for MCP server
+  local cmd_to_run="claude"
+  [ "$MOCK_MODE" = "true" ] && cmd_to_run="$SCRIPT_DIR/mock-claude"
   (
     cd "$worktree"
     SE3_TASK_ID="$task_id" SE3_AGENT_ROLE="worker" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
-      timeout "$timeout_seconds" claude "${claude_args[@]}" > "$logfile" 2>&1
+      timeout "$timeout_seconds" "$cmd_to_run" "${claude_args[@]}" > "$logfile" 2>&1
     echo $? > "$COLLAB_DIR/tasks/.exitcode-${task_id}"
   ) &
 
@@ -281,8 +291,8 @@ count_active_workers() {
   for task_file in "$COLLAB_DIR/tasks"/task-*.json; do
     [ -f "$task_file" ] || continue
     local status pid
-    status=$(jq -r '.status' "$task_file")
-    pid=$(jq -r '.worker_pid // 0' "$task_file")
+    status=$($JQ_CMD -r '.status' "$task_file")
+    pid=$($JQ_CMD -r '.worker_pid // 0' "$task_file")
     if [ "$status" = "in_progress" ] && [ "$pid" != "0" ] && [ "$pid" != "null" ] && kill -0 "$pid" 2>/dev/null; then
       count=$((count + 1))
     fi
@@ -295,9 +305,9 @@ find_task_by_pid() {
   for task_file in "$COLLAB_DIR/tasks"/task-*.json; do
     [ -f "$task_file" ] || continue
     local pid
-    pid=$(jq -r '.worker_pid // 0' "$task_file")
+    pid=$($JQ_CMD -r '.worker_pid // 0' "$task_file")
     if [ "$pid" = "$target_pid" ]; then
-      jq -r '.id' "$task_file"
+      $JQ_CMD -r '.id' "$task_file"
       return 0
     fi
   done
@@ -314,13 +324,13 @@ update_task() {
   local task_file="$COLLAB_DIR/tasks/${task_id}.json"
 
   local tmp="${task_file}.tmp"
-  jq "$jq_expr" "$task_file" > "$tmp" && mv "$tmp" "$task_file"
+  $JQ_CMD "$jq_expr" "$task_file" > "$tmp" && mv "$tmp" "$task_file"
 }
 
 summarize_tasks() {
   for task_file in "$COLLAB_DIR/tasks"/task-*.json; do
     [ -f "$task_file" ] || continue
-    jq -r '"- \(.id): [\(.status)] \(.title) (branch: \(.branch), attempts: \(.health.attempts)/\(.health.max_attempts))"' "$task_file"
+    $JQ_CMD -r '[.id, .status, .title, .branch] | @tsv' "$task_file"
   done
 }
 
@@ -328,9 +338,9 @@ get_pending_tasks() {
   for task_file in "$COLLAB_DIR/tasks"/task-*.json; do
     [ -f "$task_file" ] || continue
     local status
-    status=$(jq -r '.status' "$task_file")
+    status=$($JQ_CMD -r '.status' "$task_file")
     if [ "$status" = "pending" ]; then
-      jq -r '.id' "$task_file"
+      $JQ_CMD -r '.id' "$task_file"
     fi
   done
 }
@@ -340,7 +350,7 @@ all_tasks_terminal() {
   for task_file in "$COLLAB_DIR/tasks"/task-*.json; do
     [ -f "$task_file" ] || continue
     local status
-    status=$(jq -r '.status' "$task_file")
+    status=$($JQ_CMD -r '.status' "$task_file")
     case "$status" in
       done|failed|escalated) continue ;;
       *) return 1 ;;
@@ -360,8 +370,8 @@ health_check_workers() {
   for task_file in "$COLLAB_DIR/tasks"/task-*.json; do
     [ -f "$task_file" ] || continue
     local status pid worktree stale_min
-    status=$(jq -r '.status' "$task_file")
-    pid=$(jq -r '.worker_pid // 0' "$task_file")
+    status=$($JQ_CMD -r '.status' "$task_file")
+    pid=$($JQ_CMD -r '.worker_pid // 0' "$task_file")
 
     [ "$status" != "in_progress" ] && continue
     [ "$pid" = "0" ] || [ "$pid" = "null" ] && continue
@@ -369,14 +379,14 @@ health_check_workers() {
     # Check if process is alive
     if ! kill -0 "$pid" 2>/dev/null; then
       local task_id
-      task_id=$(jq -r '.id' "$task_file")
+      task_id=$($JQ_CMD -r '.id' "$task_file")
       log_warn "Worker $task_id (PID $pid) died unexpectedly"
       handle_worker_exit "$task_id" 1
       continue
     fi
 
     # Check git activity for staleness
-    worktree=$(jq -r '.worktree' "$task_file")
+    worktree=$($JQ_CMD -r '.worktree' "$task_file")
     [ "${worktree:0:1}" != "/" ] && worktree="$PROJECT_ROOT/$worktree"
     stale_min=$STALE_THRESHOLD_MINUTES
 
@@ -384,14 +394,14 @@ health_check_workers() {
       local last_commit
       last_commit=$(git -C "$worktree" log -1 --format=%ct 2>/dev/null || echo 0)
       local started_at
-      started_at=$(jq -r '.started_at // 0' "$task_file")
+      started_at=$($JQ_CMD -r '.started_at // 0' "$task_file")
       # Use started_at if no commits yet
       [ "$last_commit" = "0" ] && last_commit=$(date -d "$started_at" +%s 2>/dev/null || echo "$now")
 
       local elapsed=$(( (now - last_commit) / 60 ))
       if [ $elapsed -gt $stale_min ]; then
         local task_id
-        task_id=$(jq -r '.id' "$task_file")
+        task_id=$($JQ_CMD -r '.id' "$task_file")
         log_warn "Worker $task_id stale (${elapsed}m since last activity). Killing."
         kill -TERM "$pid" 2>/dev/null
         sleep 10
@@ -429,11 +439,11 @@ handle_worker_exit() {
     # Success — ask manager to review
     update_task "$task_id" '.status = "done"'
     local branch
-    branch=$(jq -r '.branch' "$task_file")
+    branch=$($JQ_CMD -r '.branch' "$task_file")
 
     # Collect branch diff for manager review
     local diff_summary
-    diff_summary=$(git -C "$PROJECT_ROOT" diff "$(jq -r .base_branch "$COLLAB_DIR/config.json")...$branch" --stat 2>/dev/null || echo "(no diff available)")
+    diff_summary=$(git -C "$PROJECT_ROOT" diff "$($JQ_CMD -r .base_branch "$COLLAB_DIR/config.json")...$branch" --stat 2>/dev/null || echo "(no diff available)")
 
     local worker_log
     local latest_log
@@ -455,7 +465,7 @@ $worker_log")
     # Blocked — worker needs human/manager input
     update_task "$task_id" '.status = "blocked"'
     local blocked_reason
-    blocked_reason=$(jq -r '.blocked_reason // "unknown"' "$task_file")
+    blocked_reason=$($JQ_CMD -r '.blocked_reason // "unknown"' "$task_file")
 
     local manager_result
     manager_result=$(invoke_manager "blocked" "Task $task_id is blocked.
@@ -467,8 +477,8 @@ Reason: $blocked_reason")
     # Timeout
     update_task "$task_id" '.status = "timeout"'
     local attempts max_attempts
-    attempts=$(jq -r '.health.attempts' "$task_file")
-    max_attempts=$(jq -r '.health.max_attempts' "$task_file")
+    attempts=$($JQ_CMD -r '.health.attempts' "$task_file")
+    max_attempts=$($JQ_CMD -r '.health.max_attempts' "$task_file")
 
     local manager_result
     manager_result=$(invoke_manager "timeout" "Task $task_id timed out.
@@ -496,7 +506,7 @@ $worker_log")
 process_manager_decision() {
   local decision="$1"
   local action
-  action=$(echo "$decision" | jq -r '.action')
+  action=$(echo "$decision" | $JQ_CMD -r '.action')
 
   case "$action" in
     merge)
@@ -532,24 +542,35 @@ process_manager_decision() {
 
 do_plan() {
   local decision="$1"
-  local tasks
-  tasks=$(echo "$decision" | jq -c '.tasks[]')
+  local task_json
 
-  while IFS= read -r task_json; do
-    local task_id
-    task_id=$(echo "$task_json" | jq -r '.id')
-    echo "$task_json" > "$COLLAB_DIR/tasks/${task_id}.json"
-    log_info "Created task: $task_id — $(echo "$task_json" | jq -r '.title')"
-  done <<< "$tasks"
+  # Try single .task first, then .tasks[]
+  task_json=$(echo "$decision" | $JQ_CMD -c '.task // empty')
+  if [ -z "$task_json" ] || [ "$task_json" = "null" ]; then
+    # Fallback to array format
+    task_json=$(echo "$decision" | $JQ_CMD -c '.tasks[0] // empty')
+  fi
+
+  if [ -z "$task_json" ] || [ "$task_json" = "null" ]; then
+    log_warn "No task found in plan decision"
+    return 1
+  fi
+
+  local task_id
+  task_id=$(echo "$task_json" | $JQ_CMD -r '.id')
+  [ "$task_id" = "null" ] && return 1
+
+  echo "$task_json" > "$COLLAB_DIR/tasks/${task_id}.json"
+  log_info "Created task: $task_id — $(echo "$task_json" | $JQ_CMD -r '.title')"
 }
 
 do_merge() {
   local decision="$1"
   local task_id branch
-  task_id=$(echo "$decision" | jq -r '.target_task')
-  branch=$(echo "$decision" | jq -r '.merge_branch')
+  task_id=$(echo "$decision" | $JQ_CMD -r '.target_task')
+  branch=$(echo "$decision" | $JQ_CMD -r '.merge_branch')
   local base_branch
-  base_branch=$(jq -r '.base_branch // "master"' "$COLLAB_DIR/config.json")
+  base_branch=$($JQ_CMD -r '.base_branch // "master"' "$COLLAB_DIR/config.json")
 
   log_info "Merging $branch into $base_branch..."
 
@@ -576,50 +597,50 @@ $(git -C "$PROJECT_ROOT" merge --no-commit "$branch" 2>&1; git -C "$PROJECT_ROOT
 do_reject() {
   local decision="$1"
   local task_id reason
-  task_id=$(echo "$decision" | jq -r '.target_task')
-  reason=$(echo "$decision" | jq -r '.reason')
+  task_id=$(echo "$decision" | $JQ_CMD -r '.target_task')
+  reason=$(echo "$decision" | $JQ_CMD -r '.reason')
 
   log_warn "Rejected $task_id: $reason"
 
   # Get current prompt and append feedback
   local task_file="$COLLAB_DIR/tasks/${task_id}.json"
   local original_prompt
-  original_prompt=$(jq -r '.prompt' "$task_file")
+  original_prompt=$($JQ_CMD -r '.prompt' "$task_file")
 
   update_task "$task_id" "
     .status = \"pending\" |
     .review.status = \"changes_requested\" |
-    .review.comments = $(echo "$reason" | jq -Rs .) |
+    .review.comments = $(echo "$reason" | $JQ_CMD -Rs .) |
     .prompt = $(echo "${original_prompt}
 
 IMPORTANT FEEDBACK FROM REVIEWER:
 ${reason}
-Please address this feedback in your implementation." | jq -Rs .)
+Please address this feedback in your implementation." | $JQ_CMD -Rs .)
   "
 }
 
 do_retry() {
   local decision="$1"
   local task_id retry_prompt
-  task_id=$(echo "$decision" | jq -r '.target_task')
-  retry_prompt=$(echo "$decision" | jq -r '.retry_prompt // empty')
+  task_id=$(echo "$decision" | $JQ_CMD -r '.target_task')
+  retry_prompt=$(echo "$decision" | $JQ_CMD -r '.retry_prompt // empty')
 
   local task_file="$COLLAB_DIR/tasks/${task_id}.json"
   local attempts max_attempts
-  attempts=$(jq -r '.health.attempts' "$task_file")
-  max_attempts=$(jq -r '.health.max_attempts' "$task_file")
+  attempts=$($JQ_CMD -r '.health.attempts' "$task_file")
+  max_attempts=$($JQ_CMD -r '.health.max_attempts' "$task_file")
 
   if [ "$attempts" -ge "$max_attempts" ]; then
     log_error "Task $task_id exceeded max attempts ($max_attempts). Escalating."
     escalate_to_human "Task Exceeded Max Attempts" \
       "Task $task_id has failed $attempts times (max: $max_attempts).
-Last prompt: $(jq -r '.prompt' "$task_file")"
+Last prompt: $($JQ_CMD -r '.prompt' "$task_file")"
     update_task "$task_id" '.status = "escalated"'
     return
   fi
 
   if [ -n "$retry_prompt" ]; then
-    update_task "$task_id" ".prompt = $(echo "$retry_prompt" | jq -Rs .) | .status = \"pending\""
+    update_task "$task_id" ".prompt = $(echo "$retry_prompt" | $JQ_CMD -Rs .) | .status = \"pending\""
   else
     update_task "$task_id" '.status = "pending"'
   fi
@@ -630,7 +651,7 @@ Last prompt: $(jq -r '.prompt' "$task_file")"
 do_split() {
   local decision="$1"
   local task_id
-  task_id=$(echo "$decision" | jq -r '.target_task')
+  task_id=$(echo "$decision" | $JQ_CMD -r '.target_task')
 
   # Mark original task as superseded
   update_task "$task_id" '.status = "done" | .result_summary = "split into sub-tasks"'
@@ -643,9 +664,9 @@ do_split() {
 do_escalate() {
   local decision="$1"
   local reason
-  reason=$(echo "$decision" | jq -r '.reason')
+  reason=$(echo "$decision" | $JQ_CMD -r '.reason')
   local task_id
-  task_id=$(echo "$decision" | jq -r '.target_task // "none"')
+  task_id=$(echo "$decision" | $JQ_CMD -r '.target_task // "none"')
 
   [ "$task_id" != "none" ] && [ "$task_id" != "null" ] && \
     update_task "$task_id" '.status = "escalated"'
@@ -656,12 +677,12 @@ do_escalate() {
 do_complete() {
   local decision="$1"
   local summary
-  summary=$(echo "$decision" | jq -r '.summary')
+  summary=$(echo "$decision" | $JQ_CMD -r '.summary')
   log_ok "=== Collaboration Complete ==="
   log_ok "$summary"
 
   # Update session config
-  jq '.status = "completed"' "$COLLAB_DIR/config.json" > "$COLLAB_DIR/config.json.tmp" && \
+  $JQ_CMD '.status = "completed"' "$COLLAB_DIR/config.json" > "$COLLAB_DIR/config.json.tmp" && \
     mv "$COLLAB_DIR/config.json.tmp" "$COLLAB_DIR/config.json"
 }
 
@@ -673,8 +694,8 @@ cleanup_worktree() {
   local task_id="$1"
   local task_file="$COLLAB_DIR/tasks/${task_id}.json"
   local worktree branch
-  worktree=$(jq -r '.worktree' "$task_file")
-  branch=$(jq -r '.branch' "$task_file")
+  worktree=$($JQ_CMD -r '.worktree' "$task_file")
+  branch=$($JQ_CMD -r '.branch' "$task_file")
 
   [ "${worktree:0:1}" != "/" ] && worktree="$PROJECT_ROOT/$worktree"
 
@@ -722,14 +743,15 @@ EOF
 run_main() {
   local objective="$1"
   local resume="${2:-false}"
+  local health_pid=""
 
   load_config
   init_dirs
   check_already_running
   write_pid
 
-  # Trap cleanup
-  trap 'log_info "Orchestrator shutting down..."; rm -f "$COLLAB_DIR/orchestrator.pid"' EXIT
+  # Trap cleanup - health_pid will be set later, use :- to handle unset
+  trap 'log_info "Orchestrator shutting down..."; _pid="${health_pid:-}"; if [ -n "$_pid" ]; then kill "$_pid" 2>/dev/null || true; fi; unset _pid; rm -f "$COLLAB_DIR/orchestrator.pid"' EXIT
 
   if [ "$resume" = "true" ]; then
     log_info "Resuming collaboration session..."
@@ -743,7 +765,7 @@ run_main() {
     cat > "$COLLAB_DIR/config.json" << EOF
 {
   "session_id": "collab-$(date +%Y%m%d-%H%M%S)",
-  "objective": $(echo "$objective" | jq -Rs .),
+  "objective": $(echo "$objective" | $JQ_CMD -Rs .),
   "base_branch": "$base_branch",
   "created_at": "$(date -Iseconds)",
   "max_parallel_workers": $MAX_PARALLEL_WORKERS,
@@ -778,8 +800,8 @@ Respond with action 'plan' and include the full task array.")
       health_check_workers
     done
   ) &
-  local health_pid=$!
-  trap 'kill $health_pid 2>/dev/null; rm -f "$COLLAB_DIR/orchestrator.pid"' EXIT
+  health_pid=$!
+  # Trap already set at function start, health_pid now has value
 
   # Phase 2: Main event loop
   while true; do
@@ -793,7 +815,7 @@ $(summarize_tasks)
 If all work is complete, respond with action 'complete'. If there are follow-up tasks needed, respond with action 'plan'.")
 
       local final_action
-      final_action=$(echo "$complete_result" | jq -r '.action')
+      final_action=$(echo "$complete_result" | $JQ_CMD -r '.action')
       process_manager_decision "$complete_result"
 
       [ "$final_action" = "complete" ] && break
@@ -827,7 +849,7 @@ If all work is complete, respond with action 'complete'. If there are follow-up 
       for task_file in "$COLLAB_DIR/tasks"/task-*.json; do
         [ -f "$task_file" ] || continue
         local status
-        status=$(jq -r '.status' "$task_file")
+        status=$($JQ_CMD -r '.status' "$task_file")
         if [ "$status" = "blocked" ] || [ "$status" = "escalated" ]; then
           has_blocked=true
           break
@@ -931,13 +953,14 @@ main() {
     case "$1" in
       --resume)     resume=true; shift ;;
       --status)     summarize_tasks; exit 0 ;;
+      --mock)       MOCK_MODE=true; export MOCK_MODE; shift ;;
       --abort)
         log_warn "Aborting collaboration session..."
         # Kill all workers
         for task_file in "$COLLAB_DIR/tasks"/task-*.json; do
           [ -f "$task_file" ] || continue
           local pid
-          pid=$(jq -r '.worker_pid // 0' "$task_file" 2>/dev/null)
+          pid=$($JQ_CMD -r '.worker_pid // 0' "$task_file" 2>/dev/null)
           [ "$pid" != "0" ] && [ "$pid" != "null" ] && kill -TERM "$pid" 2>/dev/null || true
         done
         # Cleanup worktrees
