@@ -22,7 +22,8 @@ SE 3.0 combines Anthropic's [long-running agent best practices](https://www.anth
 ### 1. Install SE 3.0 CLI
 
 ```bash
-pip install se3
+enter tools
+pip install -e .
 ```
 
 ### 2. Initialize a project
