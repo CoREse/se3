@@ -134,10 +134,10 @@ def update(
         help="Update even if already on latest version",
     ),
     se3_version: str = typer.Option(
-        "1.0",
+        "1.0.0",
         "--se3-version",
         "-v",
-        help="Target SE3 version to update to",
+        help="Target SE3 version to update to (format: MAJOR.MINOR.PATCH)",
     ),
 ) -> None:
     """Update existing SE 3.0 project to latest framework version."""

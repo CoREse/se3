@@ -1,6 +1,6 @@
-<!-- Generated on 2026-02-15 -->
-<!-- SE3 Version: 1.1 -->
-<!-- Checksum: d3351863c6d33d2804e0f59a06fd832cb2988c6d8ee1b888ddc33b23a058fdd4 -->
+<!-- Generated on 2026-02-16 -->
+<!-- SE3 Version: 1.1.0 -->
+<!-- Checksum: c073fb18eb7cec69024cbb18400c4445867165d6eb8647983c3fa52ba6a6ba3e -->
 
 <!--
   SE 3.0 Framework Reference File
@@ -512,16 +512,20 @@ Optional `se3.config.yaml`. All settings have defaults.
 
 ## Versioning
 
-SE3 uses `MAJOR.MINOR` semantic versioning.
+SE3 follows [Semantic Versioning 2.0.0](https://semver.org/) with version format `MAJOR.MINOR.PATCH`:
 
-- **MAJOR** (e.g. 1.0 → 2.0): Breaking changes. Existing projects need manual review before upgrading.
-- **MINOR** (e.g. 1.0 → 1.1): Backward-compatible additions. Safe to `se3 update`.
+- **MAJOR** (e.g. 1.0.0 → 2.0.0): Breaking changes. Existing projects need manual review before upgrading.
+  - Example: Removing or renaming core concepts, changing session protocol flow
+- **MINOR** (e.g. 1.0.0 → 1.1.0): Backward-compatible additions. Safe to `se3 update`.
+  - Example: New CLI commands, new optional specs, new framework capabilities
+- **PATCH** (e.g. 1.1.0 → 1.1.1): Backward-compatible bug fixes. Behavior unchanged.
+  - Example: CLI bug fixes, documentation corrections, rule clarifications
 
 The version is embedded in `.claude/SE3.md` metadata:
 ```
-<!-- SE3 Version: 1.1 -->
+<!-- SE3 Version: 1.1.0 -->
 ```
 
-**Upgrade path**: `se3 update --se3-version X.Y` reads `output/SE3.md.template`, stamps it with version metadata, and writes to `.claude/SE3.md`.
+**Upgrade path**: `se3 update --se3-version X.Y.Z` reads `output/SE3.md.template`, stamps it with version metadata, and writes to `.claude/SE3.md`.
 
 **Self-hosted projects** (developing SE3 itself): MUST NOT edit `.claude/SE3.md` directly. All changes go through `output/SE3.md.template` → `se3 update`.

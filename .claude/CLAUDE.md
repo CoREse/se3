@@ -17,14 +17,16 @@
 
 ## 版本规则
 
-SE3 框架使用语义化版本号 `MAJOR.MINOR`：
+SE3 框架遵循 [Semantic Versioning 2.0.0](https://semver.org/) 规范，版本号格式为 `MAJOR.MINOR.PATCH`：
 
-- **MAJOR**（如 1.0 → 2.0）：不向后兼容的框架变更。现有项目的 `.claude/SE3.md` 需要人工审核后才能升级。
+- **MAJOR**（如 1.0.0 → 2.0.0）：不向后兼容的框架变更。现有项目的 `.claude/SE3.md` 需要人工审核后才能升级。
   - 例：删除或重命名核心概念、改变 session protocol 的基本流程
-- **MINOR**（如 1.0 → 1.1）：向后兼容的增量变更。现有项目可以直接 `se3 update` 升级。
-  - 例：新增 CLI 命令、新增可选 spec、改进已有功能
+- **MINOR**（如 1.0.0 → 1.1.0）：向后兼容的新功能。现有项目可以直接 `se3 update` 升级。
+  - 例：新增 CLI 命令、新增可选 spec、新增框架能力
+- **PATCH**（如 1.1.0 → 1.1.1）：向后兼容的缺陷修复。不改变行为语义。
+  - 例：修复 CLI bug、修正文档错误、修复规则表述歧义
 
-**版本来源**：`output/SE3.md.template` 是框架的开发版本。`se3 update --se3-version X.Y` 将其发布为正式版本写入 `.claude/SE3.md`。
+**版本来源**：`output/SE3.md.template` 是框架的开发版本。`se3 update --se3-version X.Y.Z` 将其发布为正式版本写入 `.claude/SE3.md`。
 
 **变更记录**：每次版本升级时，在 `README.md` 的 Version History 中追加条目。
 
