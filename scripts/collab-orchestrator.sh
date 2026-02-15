@@ -31,6 +31,7 @@ WORKER_MODEL="sonnet"
 WORKTREE_DIR="$PROJECT_ROOT/.worktrees"
 COLLAB_DIR="$PROJECT_ROOT/.collab"
 HUMAN_CALLS_DIR="$PROJECT_ROOT/human-calls"
+HUMAN_CALL_LANGUAGE="en"  # Default language for human call messages
 MCP_CONFIG=""  # Set if collab MCP server config exists
 WORKER_RULES=""
 MANAGER_RULES=""
@@ -55,9 +56,14 @@ load_config() {
 import yaml, sys
 try:
     with open('$config') as f:
-        c = yaml.safe_load(f).get('collab', {})
+        cfg = yaml.safe_load(f)
+        c = cfg.get('collab', {})
     for k, v in c.items():
         print(f'{k.upper()}=\"{v}\"')
+    # Load human_call language setting
+    hc = cfg.get('human_call', {})
+    if 'language' in hc:
+        print(f'HUMAN_CALL_LANGUAGE=\"{hc[\"language\"]}\"')
 except:
     pass
 ")"
@@ -717,20 +723,38 @@ escalate_to_human() {
   local filename
   filename="$(date +%Y%m%d-%H%M%S)-$(echo "$title" | tr ' ' '-' | tr '[:upper:]' '[:lower:]').md"
 
+  # Generate template based on language setting
+  local header_type header_urgency header_context header_tasks header_response prompt_text
+  if [[ "$HUMAN_CALL_LANGUAGE" == zh* ]]; then
+    header_type="类型"
+    header_urgency="紧急程度"
+    header_context="上下文"
+    header_tasks="当前任务状态"
+    header_response="回复"
+    prompt_text="<!-- 人类：请在下方输入您的回复 -->"
+  else
+    header_type="Type"
+    header_urgency="Urgency"
+    header_context="Context"
+    header_tasks="Current Task States"
+    header_response="Response"
+    prompt_text="<!-- Human: write your response below -->"
+  fi
+
   cat > "$HUMAN_CALLS_DIR/$filename" << EOF
 ## Request: $title
-**Type**: action
-**Urgency**: high
+**$header_type**: action
+**$header_urgency**: high
 **Source**: collab-orchestrator
 
-### Context
+### $header_context
 $context
 
-### Current Task States
+### $header_tasks
 $(summarize_tasks)
 
-### Response
-<!-- Human: write your response below -->
+### $header_response
+$prompt_text
 EOF
 
   log_warn "Human call written: $HUMAN_CALLS_DIR/$filename"
@@ -873,12 +897,28 @@ If all work is complete, respond with action 'complete'. If there are follow-up 
 
 check_human_responses() {
   # Check if any human-call files have been answered
+  # Support multiple languages: English and Chinese
+  local default_prompts=("^<!-- Human: write your response below -->"
+                         "^<!-- 人类：请在下方输入您的回复 -->")
+
   for call_file in "$HUMAN_CALLS_DIR"/*.md; do
     [ -f "$call_file" ] || continue
-    if grep -q "^<!-- Human:" "$call_file" && ! grep -q "^<!-- Human: write your response below -->" "$call_file"; then
+
+    # Check if file has any human response marker (starts with <!-- Human: or <!-- 人类：)
+    if grep -qE "^<!-- (Human|人类)：" "$call_file"; then
+      # Check if it's not just the default prompt
+      local is_default=false
+      for prompt in "${default_prompts[@]}"; do
+        if grep -qE "$prompt" "$call_file"; then
+          is_default=true
+          break
+        fi
+      done
+      $is_default && continue
       # Human has written a response — notify manager
       local response
-      response=$(sed -n '/^### Response/,$ p' "$call_file" | tail -n +2)
+      # Support both English and Chinese Response headers
+      response=$(sed -n '/^### \(Response\|回复\)/,$ p' "$call_file" | tail -n +2)
 
       if [ -n "$response" ]; then
         log_info "Human response detected in $(basename "$call_file")"
