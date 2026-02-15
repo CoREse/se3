@@ -8,6 +8,7 @@ import shutil
 import typer
 
 from ..utils import copy_file
+from .. import SE3_FRAMEWORK_VERSION
 
 app = typer.Typer()
 
@@ -31,7 +32,7 @@ def initialize_project(
     force: bool = False,
     offline: bool = False,
     with_config: bool = False,
-    se3_version: str = "1.0.0",
+    se3_version: str = SE3_FRAMEWORK_VERSION,
 ) -> None:
     """
     Initialize an SE 3.0 project.
@@ -132,7 +133,7 @@ def init(
         help="Create se3.config.yaml",
     ),
     se3_version: str = typer.Option(
-        "1.0",
+        SE3_FRAMEWORK_VERSION,
         "--se3-version",
         "-v",
         help="Specify SE3 version to use",

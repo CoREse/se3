@@ -6,6 +6,7 @@ from pathlib import Path
 import typer
 
 from ..utils import copy_file
+from .. import SE3_FRAMEWORK_VERSION
 
 app = typer.Typer()
 
@@ -37,7 +38,7 @@ def get_installed_se3_version() -> str:
 def update_project(
     dry_run: bool = False,
     force: bool = False,
-    se3_version: str = "1.0.0",
+    se3_version: str = SE3_FRAMEWORK_VERSION,
 ) -> None:
     """
     Update an SE 3.0 project to the latest framework version.
@@ -134,7 +135,7 @@ def update(
         help="Update even if already on latest version",
     ),
     se3_version: str = typer.Option(
-        "1.0.0",
+        SE3_FRAMEWORK_VERSION,
         "--se3-version",
         "-v",
         help="Target SE3 version to update to (format: MAJOR.MINOR.PATCH)",
