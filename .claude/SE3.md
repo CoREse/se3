@@ -158,22 +158,26 @@ execute_stage(route, user_message)
 
 Commit during the session when a distinct, working unit of change is complete — do not accumulate unrelated changes into a single commit.
 
+**All commits MUST go through `se3 commit`.** Do NOT use `git commit` directly. `se3 commit` enforces test verification, sensitive file blocking, and message conventions.
+
 **When to commit mid-session:**
 - After completing a coherent unit of work that passes tests
 - Before starting a substantially different task that would muddy the commit message
 - Before context clearing (/new) if there are completed changes to preserve
 
-**Commit sequence:**
-1. Run tests — do NOT commit with failing tests
-2. Stage files: `git add <specific-files>` (avoid `git add .`)
-3. Write message with context for next session:
-   ```
-   [context] Summary of what changed
+**Commit command:**
+```bash
+se3 commit -m "[context] Summary of what changed
 
-   Status: where things stand
-   Next: what the next session should do
-   ```
-4. Commit
+Status: where things stand
+Next: what the next session should do" -f "file1.py file2.py"
+```
+
+`se3 commit` will automatically:
+1. Run tests — blocks commit if tests fail
+2. Check for sensitive files — auto-unstages .env, credentials, keys
+3. Stage specified files (or all tracked changes if no -f flag)
+4. Execute the commit
 
 **Commit Rules:**
 - Commit when a **meaningful unit of work** is complete — not tied to /new or any mechanical trigger

@@ -2,7 +2,7 @@
 
 import typer
 
-from .commands import init, lint, status, sync, verify, update, collab
+from .commands import init, lint, status, sync, verify, update, collab, commit
 
 app = typer.Typer(
     name="se3",
@@ -18,6 +18,7 @@ app.add_typer(sync.app, name="sync", help="Sync output files")
 app.add_typer(verify.app, name="verify", help="Verify spec coverage")
 app.add_typer(update.app, name="update", help="Update SE 3.0 framework to latest version")
 app.add_typer(collab.app, name="collab", help="Manage git-worktree multi-agent collaboration")
+app.add_typer(commit.app, name="commit", help="Commit changes with SE3 verification")
 
 
 if __name__ == "__main__":

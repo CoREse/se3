@@ -4,14 +4,24 @@
 本项目采用 SE 3.0 框架。
 完整规范参见 [.claude/SE3.md](.claude/SE3.md)
 
-## Git Commit 规则（覆盖默认行为）
+## Git Commit 规则
 
-本项目遵循 SE3 commit 规范。当一个有意义的工作单元完成且测试通过时，**必须主动提交**，不需要等待用户显式要求。这覆盖 Claude Code 默认的"不主动提交"行为。
+**所有 commit 必须通过 `se3 commit` 命令执行，禁止直接使用 `git commit`。**
 
-具体规则：
-- 测试通过后主动 commit
-- 不要将不相关的改动混入同一个 commit
-- commit message 必须包含下一次 session 的上下文
+`se3 commit` 会自动：运行测试 → 检查敏感文件 → 暂存 → 提交。
+
+```bash
+# 标准用法
+se3 commit -m "Add auth module" -f "src/auth.py tests/test_auth.py"
+
+# 自动暂存所有已跟踪的修改
+se3 commit -m "Fix login bug"
+
+# 预览（不实际提交）
+se3 commit --dry-run
+```
+
+当一个有意义的工作单元完成时，主动调用 `se3 commit`，不需要等待用户显式要求。
 
 ## 技术栈
 - 语言: Python 3

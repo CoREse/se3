@@ -36,16 +36,16 @@ You ONLY do implementation work. You do NOT:
 
 ## Commit Convention
 
-```
-[collab:{task-id}] Summary of what changed
+**Use `se3 commit` for all commits. Do NOT use `git commit` directly.**
+
+```bash
+se3 commit -m "[collab:{task-id}] Summary of what changed
 
 What: specific changes made
-Verified: which spec scenarios pass
+Verified: which spec scenarios pass"
 ```
 
-- Commit when a meaningful unit of work is complete
-- Do not commit with failing tests
-- Use `git add <specific-files>` (avoid `git add .`)
+`se3 commit` automatically runs tests and blocks the commit if they fail. Commit when a meaningful unit of work is complete.
 
 ## MCP Tools Available
 
