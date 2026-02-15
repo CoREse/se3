@@ -1,6 +1,6 @@
 <!-- Generated on 2026-02-16 -->
 <!-- SE3 Version: 1.0.0 -->
-<!-- Checksum: c073fb18eb7cec69024cbb18400c4445867165d6eb8647983c3fa52ba6a6ba3e -->
+<!-- Checksum: ba85cb96ba60acc2b155e792cbf68538f1ca07ad7ad22521aedececca393c59b -->
 
 <!--
   SE 3.0 Framework Reference File
@@ -181,6 +181,7 @@ Next: what the next session should do" -f "file1.py file2.py"
 
 **Commit Rules:**
 - Commit when a **meaningful unit of work** is complete — not tied to /new or any mechanical trigger
+- **Before handing control to human**: Always commit all changes. Humans may close the session at any time; uncommitted work will be lost. This is equivalent to committing before `/new` — session end requires persistence.
 - Do not batch unrelated changes into one commit
 - Commit messages must include context for the next session
 
