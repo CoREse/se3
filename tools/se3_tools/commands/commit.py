@@ -302,6 +302,51 @@ def generate_message_fallback(project_root: Path) -> str:
         return f"Update {len(changed_files)} files ({summary})"
 
 
+def check_version_consistency(project_root: Path) -> List[str]:
+    """Check if SE3 version needs update when framework rules change.
+
+    Returns list of warnings/errors (empty = OK).
+    """
+    warnings = []
+
+    # Check if SE3.md.template or SE3.md is being modified
+    result = run_command(["git", "diff", "--cached", "--name-only"], cwd=project_root)
+    staged_files = result.stdout.strip().split("\n") if result.returncode == 0 else []
+
+    se3_framework_files = ["output/SE3.md.template", ".claude/SE3.md"]
+    has_framework_change = any(f in staged_files for f in se3_framework_files)
+
+    if has_framework_change:
+        # Check if README.md Version History was updated
+        readme_path = project_root / "README.md"
+        if readme_path.exists():
+            readme_content = readme_path.read_text()
+            # Check if there's a version entry for today
+            from datetime import datetime
+            today = datetime.now().strftime("%Y-%m-%d")
+            if today not in readme_content:
+                warnings.append(
+                    f"Framework file changed but README.md Version History not updated. "
+                    f"Add entry for {today} with version bump following SemVer."
+                )
+
+        # Check if __init__.py version was updated (for SE3 framework itself)
+        init_file = project_root / "tools" / "se3_tools" / "__init__.py"
+        if init_file.exists():
+            # Check if version line was modified
+            result = run_command(
+                ["git", "diff", "--cached", "-L", "/SE3_FRAMEWORK_VERSION/", str(init_file)],
+                cwd=project_root
+            )
+            if "SE3_FRAMEWORK_VERSION" not in result.stdout:
+                warnings.append(
+                    "Framework file changed but SE3_FRAMEWORK_VERSION not updated. "
+                    "Update version in tools/se3_tools/__init__.py following SemVer."
+                )
+
+    return warnings
+
+
 def validate_message(message: str) -> List[str]:
     """Validate a commit message meets SE3 quality standards.
 
@@ -381,7 +426,7 @@ def commit(
     typer.echo("=" * 50)
 
     # Step 1: Check for changes
-    typer.echo("\n[1/5] Checking for changes...")
+    typer.echo("\n[1/6] Checking for changes...")
     changes = get_changed_files(root)
     total_changes = len(changes["staged"]) + len(changes["modified"]) + len(changes["untracked"])
 
@@ -397,7 +442,7 @@ def commit(
         typer.echo(f"  Untracked: {len(changes['untracked'])} file(s) (will not be auto-staged)")
 
     # Step 2: Run tests
-    typer.echo("\n[2/5] Running tests...")
+    typer.echo("\n[2/6] Running tests...")
     if skip_tests:
         typer.echo("  WARNING: Tests skipped by --skip-tests flag")
         test_passed = True
@@ -413,7 +458,7 @@ def commit(
             raise typer.Exit(1)
 
     # Step 3: Stage files and check sensitive
-    typer.echo("\n[3/5] Staging files...")
+    typer.echo("\n[3/6] Staging files...")
     staged = stage_files(root, file_list)
 
     if not staged:
@@ -447,8 +492,19 @@ def commit(
     if len(actual_staged) > 10:
         typer.echo(f"    ... and {len(actual_staged) - 10} more")
 
-    # Step 4: Generate/validate commit message
-    typer.echo("\n[4/5] Preparing commit message...")
+    # Step 4: Version consistency check (for framework changes)
+    typer.echo("\n[4/6] Checking version consistency...")
+    version_warnings = check_version_consistency(root)
+    if version_warnings:
+        typer.echo("  Version warnings:")
+        for w in version_warnings:
+            typer.echo(f"    - {w}")
+        typer.echo("  (Proceeding — verify version bump is intentional)")
+    else:
+        typer.echo("  Version check OK.")
+
+    # Step 5: Generate/validate commit message
+    typer.echo("\n[5/6] Preparing commit message...")
     if message:
         # Validate user-provided message
         warnings = validate_message(message)
@@ -476,8 +532,8 @@ def commit(
             typer.echo(f"  Fallback message: {message}")
             typer.echo("  WARNING: Fallback messages lack context. Consider providing -m.")
 
-    # Step 5: Commit
-    typer.echo("\n[5/5] Committing...")
+    # Step 6: Commit
+    typer.echo("\n[6/6] Committing...")
 
     if dry_run:
         typer.echo(f"\n  [DRY RUN] Would commit with message:")
