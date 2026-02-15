@@ -211,3 +211,4 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 <!-- Test comment from collab at 2026-02-16T00:53:41+08:00 -->
 <!-- Test comment from collab at 2026-02-16T00:53:42+08:00 -->
 <!-- Test comment from collab at 2026-02-16T00:53:44+08:00 -->
+<!-- Test comment from collab at 2026-02-16T00:53:45+08:00 -->
