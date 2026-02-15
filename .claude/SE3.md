@@ -1,6 +1,19 @@
-<!-- Generated on 2026-02-14 -->
+<!-- Generated on 2026-02-15 -->
 <!-- SE3 Version: 1.0 -->
-<!-- Checksum: a8c347df360d53695a4ce127b8e9c0d2acfe1755a3af789499e55829c828e58c -->
+<!-- Checksum: 3384ff4884a662e340ec22102655f5afb25649602aae7040a940321027b1f550 -->
+
+<!--
+  SE 3.0 Framework Reference File
+  ===============================
+  This file is installed by `se3 init` and serves as the official framework specification.
+  It is a read-only reference for agents working on SE 3.0 projects.
+
+  Generated File: DO NOT MODIFY DIRECTLY
+  Version: {{SE3_VERSION}}
+  Checksum: {{CHECKSUM}}
+
+  For more information, visit: https://github.com/CoREse/se3
+-->
 
 # SE 3.0 Framework
 
@@ -92,25 +105,30 @@ execute_stage(route, user_message)
 - If `init.sh` exists at project root, run it to start the dev environment (servers, databases, build watchers)
 - If it fails, diagnose and fix before proceeding
 
-**Step 1 — Read status**:
+**Step 1 — OpenSpec check**:
+- If `openspec` command is not found → ask the human to install it (sync human call). Do not proceed with spec-related work until resolved.
+- If `openspec` is available but `openspec/` directory does not exist → run `openspec init` to initialize
+- This ensures agents always have access to spec templates and format guidance via `openspec instructions`
+
+**Step 2 — Read status**:
 - Read `status.md` for current session state (runtime dashboard)
 - If status shows `blocked` or `error`, diagnose and resolve first
 - If status shows `waiting-human`, check `human-calls/` for response
 
-**Step 2 — Load context**:
+**Step 3 — Load context**:
 - Read latest entry in `progress.md` for cross-session history
 - Read `git log --oneline -5`
 - If neither exists → **First-time bootstrap** (see below)
 
-**Step 3 — Check pending items**:
+**Step 4 — Check pending items**:
 - Scan `human-calls/` for `status: responded` files not yet processed
 - Check `openspec/changes/` for active changes (should match `status.md` Active Change)
 
-**Step 4 — Baseline verification**:
+**Step 5 — Baseline verification**:
 - Run existing tests to confirm the project is in a working state before making changes
 - If tests fail, fix them first — do not build on a broken foundation
 
-**Step 5 — Classify input & Route to stage**:
+**Step 6 — Classify input & Route to stage**:
 - **ALWAYS** classify the current user message using Input Classifier
 - If classified as `bug-report`, `feature-request`, `review`: Route to appropriate stage
 - If classified as `directive`: Follow explicit instruction
@@ -118,7 +136,7 @@ execute_stage(route, user_message)
 - If classified as `off-topic`: Answer conversationally, do not modify project files
 - Update `status.md` to reflect current Stage before proceeding
 
-**Step 6 — Execute stage workflow**:
+**Step 7 — Execute stage workflow**:
 - Follow the determined stage's protocol
 - Read specs or other files only when the work requires them
 
@@ -126,27 +144,41 @@ execute_stage(route, user_message)
 1. Ask the human (sync human call): "What should this project do?"
 2. Create an openspec change from their response
 3. Create `progress.md`
-4. Initialize openspec if needed
-5. Create `human-calls/` directory
+4. Create `human-calls/` directory
 
 ### Shutdown
 
 1. Run all tests — do NOT proceed to commit if tests fail
 2. **Update `status.md`**: Set Status to `ready`, clear Blockers, update Next Steps
 3. Prepend session record to `progress.md`
-4. Git commit (see commit rules below)
+4. Git commit
 5. Update openspec change status if applicable
 
-### Commit Rules
+### Commit Cadence
 
+Commit during the session when a distinct, working unit of change is complete — do not accumulate unrelated changes into a single commit.
+
+**When to commit mid-session:**
+- After completing a coherent unit of work that passes tests
+- Before starting a substantially different task that would muddy the commit message
+- Before context clearing (/new) if there are completed changes to preserve
+
+**Commit sequence:**
+1. Run tests — do NOT commit with failing tests
+2. Stage files: `git add <specific-files>` (avoid `git add .`)
+3. Write message with context for next session:
+   ```
+   [context] Summary of what changed
+
+   Status: where things stand
+   Next: what the next session should do
+   ```
+4. Commit
+
+**Commit Rules:**
 - Commit when a **meaningful unit of work** is complete — not tied to /new or any mechanical trigger
-- Message format:
-  ```
-  [context] Summary of what changed
-
-  Status: where things stand
-  Next: what the next session should do
-  ```
+- Do not batch unrelated changes into one commit
+- Commit messages must include context for the next session
 
 ### Context Clearing (/new)
 
@@ -453,8 +485,6 @@ project/
 ├── se3.config.yaml        # optional
 ├── README.md
 ├── human-calls/           # async human call queue
-├── tests/                 # test files
-├── tools/                 # CLI tools (se3 command)
 ├── .e2e-baselines/        # optional: visual regression baselines
 ├── openspec/
 │   ├── specs/             # source of truth for requirements (guardrails apply)
