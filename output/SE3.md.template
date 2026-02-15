@@ -440,6 +440,8 @@ In agent team mode, specs are the interface between agents:
 
 ## Agent Team
 
+### Mode 1: Task Tool (Default)
+
 Uses Claude Code's native **Task tool**.
 
 - Parent spawns sub-agents via Task tool with appropriate `subagent_type`
@@ -447,18 +449,84 @@ Uses Claude Code's native **Task tool**.
 - Results return directly — no file-based communication
 - Specs on the file system serve as shared context accessible to all agents
 
-### Roles
-
-Expressed in Task tool prompts:
+**Roles** (expressed in Task tool prompts):
 
 - **architect**: "Design the spec for change X. Define requirements with scenarios detailed enough for another agent to implement."
 - **implementer**: "Implement tasks 1-3 of change X. Read `openspec/specs/` for requirements. Do not deviate from the spec. Do not modify spec files."
 - **reviewer**: "Verify change X. Read the spec, run tests for each scenario, report any gaps between spec and implementation."
 
-### When to Use
+**When to Use**: Single agent (default) for most work. Multi-agent when multiple independent changes can be parallelized.
 
-- **Single agent** (default): One agent handles all roles. Most work.
-- **Multi-agent**: When multiple independent changes can be parallelized. Parent distributes one change per sub-agent.
+### Mode 2: Git Worktree Collaboration (se3 collab)
+
+**Purpose**: Long-running multi-agent collaboration with full isolation and independent context windows.
+
+**Architecture**:
+- **Orchestrator** (bash): Manages task state, health checks, launches manager/worker processes
+- **Manager** (`kclaude -p`): Analyzes state, creates tasks, reviews work, makes merge decisions
+- **Worker** (`kclaude -p`): Implements tasks in isolated worktrees
+
+**Directory Structure**:
+```
+.collab/
+├── config.json           # session configuration
+├── tasks/                # task definitions (task-*.json)
+├── logs/                 # manager/worker logs
+└── events/               # event queue
+
+.worktrees/
+└── {task-id}/           # per-task git worktrees
+```
+
+**Task State Machine**:
+```
+pending → in_progress → done/failed/timeout/blocked/escalated
+```
+
+**Launch Modes**:
+
+1. **Daemon mode** (`--daemon`): Fully automatic, orchestrator manages everything
+2. **Manual mode** (`--manual`): Generate task files, user launches manager/worker manually
+3. **Direct mode** (default): Run orchestrator in foreground (for testing)
+
+**Commands**:
+```bash
+se3 collab --daemon "Implement feature X"          # Start automatic collaboration
+se3 collab --manual "Implement feature X"          # Generate plan, manual execution
+se3 collab --launch-manager plan                   # Launch manager for event
+se3 collab --launch-worker task-001                # Launch worker for task
+se3 collab --status                                # Check session status
+se3 collab --abort                                 # Stop and cleanup
+```
+
+**Worker Task JSON**:
+```json
+{
+  "id": "task-001",
+  "status": "pending",
+  "title": "Implement auth",
+  "branch": "collab/auth",
+  "worktree": ".worktrees/auth",
+  "prompt": "Implement user authentication...",
+  "base_branch": "master",
+  "spec_refs": ["auth-spec.md"],
+  "dependencies": [],
+  "health": {"timeout_minutes": 60, "attempts": 0, "max_attempts": 3}
+}
+```
+
+**Manager Decision JSON**:
+```json
+{
+  "action": "plan|merge|reject|retry|split|escalate|complete",
+  "tasks": [...],
+  "target_task": "task-id",
+  "merge_branch": "branch-name",
+  "retry_prompt": "...",
+  "reason": "...",
+  "summary": "..."
+}
+```
 
 ---
 
