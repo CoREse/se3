@@ -1,21 +1,32 @@
 """Git Worktree Collaboration command for SE 3.0.
 
-Implements the git-worktree-collab spec:
-- Launches the orchestrator to manage multi-agent collaboration
-- Manager and workers run as independent claude -p processes
-- Each worker gets its own git worktree with full context window
-- Health monitoring at all layers with automatic recovery
+Independent Entry Mode Architecture:
+- Orchestrator runs as daemon (pure bash, no AI)
+- Manager and workers are launched as independent Claude sessions
+- Communication via file system (.collab/) and MCP
+
+Usage modes:
+1. --daemon: Start orchestrator daemon (runs in background)
+2. --manual: Generate task files, print commands for manual execution
+3. --launch-manager: Launch manager for a task (internal use)
+4. --launch-worker: Launch worker for a task (internal use)
 """
 
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from datetime import datetime
+from typing import Optional, List
 
 import typer
 
 app = typer.Typer(invoke_without_command=True)
+
+# Claude CLI command - can be configured via env var or config
+CLAUDE_CMD = os.environ.get("SE3_CLAUDE_CMD", "kclaude")
 
 
 def find_project_root() -> Path:
@@ -30,6 +41,26 @@ def find_project_root() -> Path:
 
 def get_collab_dir(project_root: Path) -> Path:
     return project_root / ".collab"
+
+
+def load_config(project_root: Path) -> dict:
+    """Load se3.config.yaml if exists."""
+    config_file = project_root / "se3.config.yaml"
+    if config_file.exists():
+        try:
+            import yaml
+            with open(config_file) as f:
+                return yaml.safe_load(f) or {}
+        except Exception:
+            pass
+    return {}
+
+
+def ensure_collab_structure(project_root: Path):
+    """Ensure .collab directory structure exists."""
+    collab_dir = get_collab_dir(project_root)
+    for subdir in ["tasks", "logs", "events", "pending", "completed"]:
+        (collab_dir / subdir).mkdir(parents=True, exist_ok=True)
 
 
 def print_status(project_root: Path):
@@ -82,7 +113,6 @@ def print_status(project_root: Path):
     if pid_file.exists():
         pid = pid_file.read_text().strip()
         try:
-            # Check if process exists
             subprocess.run(
                 ["kill", "-0", pid],
                 capture_output=True,
@@ -147,23 +177,304 @@ def abort_session(project_root: Path):
     typer.echo("Collaboration session aborted.")
 
 
+def generate_manager_prompt(project_root: Path, event_type: str, context: str) -> str:
+    """Generate prompt for manager agent."""
+    collab_dir = get_collab_dir(project_root)
+
+    # Load manager rules
+    rules_file = project_root / "scripts" / "rules-manager.md"
+    if rules_file.exists():
+        rules = rules_file.read_text()
+    else:
+        rules = "You are a manager agent. Respond with valid JSON."
+
+    # Load current tasks summary
+    tasks_summary = []
+    tasks_dir = collab_dir / "tasks"
+    if tasks_dir.exists():
+        for tf in sorted(tasks_dir.glob("task-*.json")):
+            task = json.loads(tf.read_text())
+            tasks_summary.append(
+                f"- {task['id']}: [{task['status']}] {task.get('title', '')}"
+            )
+
+    config_file = collab_dir / "config.json"
+    base_branch = "master"
+    if config_file.exists():
+        config = json.loads(config_file.read_text())
+        base_branch = config.get("base_branch", "master")
+
+    return f"""{rules}
+
+---
+
+## Current State
+Project root: {project_root}
+Base branch: {base_branch}
+
+## All Tasks
+{chr(10).join(tasks_summary) if tasks_summary else "(no tasks yet)"}
+
+## Event
+Type: {event_type}
+Context:
+{context}
+
+## Instructions
+Analyze the event and decide the next action. Respond ONLY with valid JSON matching this schema:
+{{
+  "action": "plan|merge|reject|retry|split|escalate|complete",
+  "tasks": [...],
+  "target_task": "task-id",
+  "merge_branch": "branch-name",
+  "retry_prompt": "adjusted prompt for retry",
+  "reason": "explanation",
+  "summary": "human-readable summary of decision"
+}}
+
+Rules:
+- For 'plan': include full task definitions in 'tasks' array
+- For 'merge': set target_task and merge_branch
+- For 'reject': set target_task and reason (becomes feedback for worker retry)
+- For 'retry': set target_task and retry_prompt
+- For 'split': set target_task and new sub-tasks in 'tasks'
+- For 'escalate': set reason (will be sent to human)
+- For 'complete': when all tasks are merged and done
+- If unsure, use 'escalate' rather than guessing
+"""
+
+
+def generate_worker_prompt(project_root: Path, task_id: str) -> str:
+    """Generate prompt for worker agent."""
+    collab_dir = get_collab_dir(project_root)
+    task_file = collab_dir / "tasks" / f"{task_id}.json"
+
+    # Load worker rules
+    rules_file = project_root / "scripts" / "rules-worker.md"
+    if rules_file.exists():
+        rules = rules_file.read_text()
+    else:
+        rules = "You are a worker agent. Implement the task, run tests, commit."
+
+    task = json.loads(task_file.read_text())
+    task_prompt = task.get("prompt", "")
+
+    return f"""{rules}
+
+---
+
+## Your Task (ID: {task_id})
+
+{task_prompt}
+
+## Important
+- Work in the provided worktree directory
+- Commit your changes when done
+- Exit with code 0 on success, non-zero on failure
+"""
+
+
+def launch_manager(project_root: Path, event_type: str, context: str) -> subprocess.Popen:
+    """Launch manager as independent Claude process."""
+    prompt = generate_manager_prompt(project_root, event_type, context)
+
+    # Write prompt to file for reference
+    collab_dir = get_collab_dir(project_root)
+    prompt_file = collab_dir / "logs" / f"manager-{event_type}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.prompt"
+    prompt_file.write_text(prompt)
+
+    # Launch Claude with the prompt
+    cmd = [
+        CLAUDE_CMD,
+        "-p", prompt,
+        "--output-format", "json",
+        "--max-turns", "30"
+    ]
+
+    env = {**dict(os.environ), "SE3_AGENT_ROLE": "manager", "SE3_PROJECT_ROOT": str(project_root)}
+
+    log_file = collab_dir / "logs" / f"manager-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+
+    # Use tee to both display and log output
+    return subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        cwd=project_root,
+        bufsize=1,
+        universal_newlines=True
+    )
+
+
+def launch_worker(project_root: Path, task_id: str) -> subprocess.Popen:
+    """Launch worker as independent Claude process in worktree."""
+    collab_dir = get_collab_dir(project_root)
+    task_file = collab_dir / "tasks" / f"{task_id}.json"
+    task = json.loads(task_file.read_text())
+
+    worktree = task.get("worktree", f".worktrees/{task_id}")
+    if not worktree.startswith("/"):
+        worktree = str(project_root / worktree)
+
+    # Ensure worktree exists
+    if not Path(worktree).exists():
+        branch = task.get("branch", f"collab/{task_id}")
+        base_branch = task.get("base_branch", "master")
+        subprocess.run(
+            ["git", "worktree", "add", worktree, "-b", branch, base_branch],
+            cwd=project_root,
+            capture_output=True
+        )
+
+    prompt = generate_worker_prompt(project_root, task_id)
+
+    # Write prompt to file
+    prompt_file = collab_dir / "logs" / f"worker-{task_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.prompt"
+    prompt_file.write_text(prompt)
+
+    # Launch Claude with the prompt
+    cmd = [
+        CLAUDE_CMD,
+        "-p", prompt,
+        "--max-turns", "50"
+    ]
+
+    env = {
+        **dict(os.environ),
+        "SE3_TASK_ID": task_id,
+        "SE3_AGENT_ROLE": "worker",
+        "SE3_PROJECT_ROOT": str(project_root)
+    }
+
+    log_file = collab_dir / "logs" / f"worker-{task_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+
+    return subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=open(log_file, "w"),
+        env=env,
+        cwd=worktree
+    )
+
+
+def start_daemon(project_root: Path, objective: str, resume: bool = False):
+    """Start orchestrator daemon mode."""
+    ensure_collab_structure(project_root)
+    collab_dir = get_collab_dir(project_root)
+
+    if not resume:
+        # Create session config
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=project_root,
+            capture_output=True,
+            text=True
+        )
+        base_branch = result.stdout.strip() or "master"
+
+        config = {
+            "session_id": f"collab-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+            "objective": objective,
+            "base_branch": base_branch,
+            "created_at": datetime.now().isoformat(),
+            "max_parallel_workers": 3,
+            "status": "active"
+        }
+        (collab_dir / "config.json").write_text(json.dumps(config, indent=2))
+
+        typer.echo(f"Created collaboration session: {config['session_id']}")
+        typer.echo(f"Objective: {objective}")
+
+    # Start the orchestrator daemon
+    script = project_root / "scripts" / "collab-orchestrator.sh"
+    if not script.exists():
+        typer.echo(f"Error: orchestrator script not found at {script}")
+        raise typer.Exit(1)
+
+    cmd = ["bash", str(script), "--daemon"]
+    if resume:
+        cmd.append("--resume")
+
+    env = {**dict(os.environ), "PROJECT_ROOT": str(project_root)}
+
+    # Start in background
+    subprocess.Popen(
+        cmd,
+        stdout=open(collab_dir / "logs" / "orchestrator.log", "w"),
+        stderr=subprocess.STDOUT,
+        env=env,
+        cwd=project_root,
+        start_new_session=True  # Detach from terminal
+    )
+
+    typer.echo(f"Orchestrator daemon started.")
+    typer.echo(f"Use 'se3 collab --status' to check progress")
+    typer.echo(f"Use 'se3 collab --abort' to stop")
+
+
+def run_manual_mode(project_root: Path, objective: str):
+    """Manual mode: generate initial plan, print commands for user to execute."""
+    ensure_collab_structure(project_root)
+    collab_dir = get_collab_dir(project_root)
+
+    # Get base branch
+    result = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=project_root,
+        capture_output=True,
+        text=True
+    )
+    base_branch = result.stdout.strip() or "master"
+
+    # Create session config
+    config = {
+        "session_id": f"collab-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+        "objective": objective,
+        "base_branch": base_branch,
+        "created_at": datetime.now().isoformat(),
+        "max_parallel_workers": 3,
+        "status": "manual"
+    }
+    (collab_dir / "config.json").write_text(json.dumps(config, indent=2))
+
+    typer.echo(f"\n{'=' * 60}")
+    typer.echo("SE3 Collaboration - Manual Mode")
+    typer.echo(f"{'=' * 60}")
+    typer.echo(f"\nObjective: {objective}")
+    typer.echo(f"Base branch: {base_branch}")
+    typer.echo(f"\nStep 1: Launch Manager to create plan")
+    typer.echo(f"  se3 collab --launch-manager plan")
+    typer.echo(f"\nStep 2: After manager creates tasks, launch workers:")
+    typer.echo(f"  se3 collab --launch-worker task-001")
+    typer.echo(f"\nStep 3: When worker completes, review with manager:")
+    typer.echo(f"  se3 collab --launch-manager review")
+    typer.echo(f"\nOr use daemon mode for automatic execution:")
+    typer.echo(f"  se3 collab --daemon \"{objective}\"")
+    typer.echo(f"{'=' * 60}\n")
+
+
 @app.callback()
 def collab(
     objective: str = typer.Argument(None, help="Collaboration objective"),
     resume: bool = typer.Option(False, "--resume", help="Resume a previous session"),
     status: bool = typer.Option(False, "--status", help="Show collaboration status"),
     abort: bool = typer.Option(False, "--abort", help="Abort and cleanup"),
-    no_watchdog: bool = typer.Option(
-        False, "--no-watchdog", help="Run without watchdog (testing)"
-    ),
-    mock: bool = typer.Option(
-        False, "--mock", help="Use mock claude for testing (no real AI)"
-    ),
-    project_root: str = typer.Option(
-        None, "--project-root", "-p", help="Project root directory"
-    ),
+    daemon: bool = typer.Option(False, "--daemon", help="Start orchestrator daemon (auto mode)"),
+    manual: bool = typer.Option(False, "--manual", help="Manual mode: generate plan, print commands"),
+    launch_manager_flag: bool = typer.Option(False, "--launch-manager", help="Launch manager for event type (internal)"),
+    launch_worker_flag: bool = typer.Option(False, "--launch-worker", help="Launch worker for task (internal)"),
+    event_type: str = typer.Option("plan", "--event", help="Event type for manager"),
+    task_id: str = typer.Option(None, "--task", help="Task ID for worker"),
+    mock: bool = typer.Option(False, "--mock", help="Use mock for testing"),
+    project_root: str = typer.Option(None, "--project-root", "-p", help="Project root directory"),
 ):
-    """Manage git-worktree based multi-agent collaboration."""
+    """Manage git-worktree based multi-agent collaboration.
+
+    Independent Entry Mode:
+    - Use --daemon for automatic execution (orchestrator manages everything)
+    - Use --manual to generate plan and execute manually
+    """
     root = Path(project_root) if project_root else find_project_root()
 
     if status:
@@ -174,39 +485,57 @@ def collab(
         abort_session(root)
         raise typer.Exit(0)
 
+    if launch_manager_flag:
+        # Internal: launch manager process
+        context = objective if objective else ""
+        proc = launch_manager(root, event_type, context)
+        stdout, _ = proc.communicate(timeout=900)  # 15 min timeout
+        if proc.returncode == 0 and stdout:
+            print(stdout.decode() if isinstance(stdout, bytes) else stdout)
+        raise typer.Exit(proc.returncode)
+
+    if launch_worker_flag:
+        # Internal: launch worker process
+        if not task_id:
+            typer.echo("Error: --task required for --launch-worker")
+            raise typer.Exit(1)
+        proc = launch_worker(root, task_id)
+        stdout, _ = proc.communicate(timeout=3600)  # 60 min timeout
+        raise typer.Exit(proc.returncode)
+
+    if daemon:
+        if not resume and not objective:
+            typer.echo("Error: provide an objective or use --resume")
+            raise typer.Exit(1)
+        start_daemon(root, objective or "", resume)
+        raise typer.Exit(0)
+
+    if manual:
+        if not objective:
+            typer.echo("Error: provide an objective")
+            raise typer.Exit(1)
+        run_manual_mode(root, objective)
+        raise typer.Exit(0)
+
+    # Default: run orchestrator directly (legacy mode, for testing)
     if not resume and not objective:
-        typer.echo("Error: provide an objective or use --resume")
+        typer.echo("Error: provide an objective, use --daemon, --manual, or --resume")
         raise typer.Exit(1)
 
-    # Find orchestrator script
     script = root / "scripts" / "collab-orchestrator.sh"
     if not script.exists():
         typer.echo(f"Error: orchestrator script not found at {script}")
         raise typer.Exit(1)
 
-    # Build command
     cmd = ["bash", str(script)]
     if resume:
         cmd.append("--resume")
-    if no_watchdog:
-        cmd.append("--no-watchdog")
     if mock:
         cmd.append("--mock")
     if objective:
         cmd.append(objective)
 
-    # Launch orchestrator
-    typer.echo(f"Launching collaboration orchestrator...")
-    typer.echo(f"  Project: {root}")
-    if objective:
-        typer.echo(f"  Objective: {objective}")
-    typer.echo(f"  Script: {script}")
-    typer.echo()
-
-    env = {
-        **dict(subprocess.os.environ),
-        "PROJECT_ROOT": str(root),
-    }
+    env = {**dict(os.environ), "PROJECT_ROOT": str(root)}
 
     try:
         result = subprocess.run(cmd, env=env, cwd=root)

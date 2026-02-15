@@ -977,6 +977,7 @@ usage() {
   echo "Usage: collab-orchestrator.sh [OPTIONS] [OBJECTIVE]"
   echo ""
   echo "Options:"
+  echo "  --daemon     Run as daemon (background, no terminal)"
   echo "  --resume     Resume a crashed/paused session"
   echo "  --status     Show current collaboration status"
   echo "  --abort      Abort session and cleanup worktrees"
@@ -987,10 +988,12 @@ usage() {
 main() {
   local resume=false
   local no_watchdog=false
+  local daemon=false
   local objective=""
 
   while [ $# -gt 0 ]; do
     case "$1" in
+      --daemon)     daemon=true; shift ;;
       --resume)     resume=true; shift ;;
       --status)     summarize_tasks; exit 0 ;;
       --mock)       MOCK_MODE=true; export MOCK_MODE; shift ;;
