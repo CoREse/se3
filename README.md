@@ -174,13 +174,24 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 ## Version History
 
+### SE3 Framework Version
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 1.0.0 | 2026-02-16 | Initial stable release: `se3 init`, `se3 update`, `se3 commit`, `se3 collab`, Semantic Versioning 2.0.0 |
+
+<details>
+<summary>Pre-1.0 Development History (archived)</summary>
+
 - v7.0 — 2026-02-14 — SE3 Module System: Separate framework (SE3.md) from project config (CLAUDE.md), `se3 init` command
-- v6.1 — 2026-02-14 — Requirement intake: three-source taxonomy (autonomous-discovery, human-mcp, human-initiated) for structured requirement capture
+- v6.1 — 2026-02-14 — Requirement intake: three-source taxonomy for structured requirement capture
 - v6.0 — 2026-02-14 — CLI tools: se3 lint, sync, verify, status for enforceable framework
 - v5.1 — 2026-02-14 — Diagnostic dashboard: status.md for single-source-of-truth session state
 - v5.0 — 2026-02-14 — Verification protocol, spec guardrails, init.sh environment automation
-- v4.1 — 2026-02-14 — Adaptive formality: match SDD ceremony to change scope, specs as agent contracts
+- v4.1 — 2026-02-14 — Adaptive formality: match SDD ceremony to change scope
 - v4.0 — 2026-02-14 — Remove demands.md, specs as truth, adaptive commit/context rules
 - v3.0 — 2026-02-14 — English rewrite, native agent team, global CLAUDE.md
 - v2.0 — 2026-02-14 — Remove intentions.md, unified Human-as-MCP, progressive startup
-- v1.0 — 2026-02-14 — Initial version
+- v1.0 — 2026-02-14 — Initial concept
+
+</details>

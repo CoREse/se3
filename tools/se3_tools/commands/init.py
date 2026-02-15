@@ -31,7 +31,7 @@ def initialize_project(
     force: bool = False,
     offline: bool = False,
     with_config: bool = False,
-    se3_version: str = "1.0",
+    se3_version: str = "1.0.0",
 ) -> None:
     """
     Initialize an SE 3.0 project.

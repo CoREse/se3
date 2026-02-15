@@ -37,7 +37,7 @@ def get_installed_se3_version() -> str:
 def update_project(
     dry_run: bool = False,
     force: bool = False,
-    se3_version: str = "1.0",
+    se3_version: str = "1.0.0",
 ) -> None:
     """
     Update an SE 3.0 project to the latest framework version.

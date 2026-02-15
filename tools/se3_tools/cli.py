@@ -2,13 +2,41 @@
 
 import typer
 
+from . import __version__, SE3_FRAMEWORK_VERSION
 from .commands import init, lint, status, sync, verify, update, collab, commit
+from .commands.update import get_installed_se3_version
 
 app = typer.Typer(
     name="se3",
     help="SE 3.0 framework CLI tools",
-    no_args_is_help=True,
+    invoke_without_command=True,
 )
+
+def _version_callback(value: bool):
+    """Handle --version flag."""
+    if value:
+        typer.echo(f"se3 CLI version: {__version__}")
+        typer.echo(f"SE3 Framework version: {SE3_FRAMEWORK_VERSION}")
+        try:
+            installed = get_installed_se3_version()
+            if installed != "0.0.0":
+                typer.echo(f"Project SE3 version: {installed}")
+        except Exception:
+            pass
+        raise typer.Exit()
+
+@app.callback()
+def main(
+    ctx: typer.Context,
+    version: bool = typer.Option(
+        False, "--version", "-v", help="Show version information", callback=_version_callback, is_eager=True
+    ),
+):
+    """SE 3.0 framework CLI tools."""
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit()
+
 
 # Register commands
 app.add_typer(init.app, name="init", help="Initialize a new SE 3.0 project")

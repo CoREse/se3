@@ -1,5 +1,5 @@
 <!-- Generated on 2026-02-16 -->
-<!-- SE3 Version: 1.1.0 -->
+<!-- SE3 Version: 1.0.0 -->
 <!-- Checksum: c073fb18eb7cec69024cbb18400c4445867165d6eb8647983c3fa52ba6a6ba3e -->
 
 <!--
