@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Mock claude for testing collab in nested environments
+
+role="${SE3_AGENT_ROLE:-worker}"
+echo "[MOCK] Running as $role" >&2
+
+# Parse arguments to find -p value
+prompt=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -p)
+            prompt="$2"
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+if [ "$role" = "manager" ]; then
+    # Check prompt content to determine action
+    echo "[MOCK] Prompt starts with: ${prompt:0:50}..." >&2
+    # Detect action based on event type in prompt
+    # Order matters: check more specific patterns first
+    if echo "$prompt" | grep -q "Type: review"; then
+        action="review"
+    elif echo "$prompt" | grep -q "Type: all_tasks_terminal"; then
+        action="complete"
+    elif echo "$prompt" | grep -q "Type: plan"; then
+        action="plan"
+    else
+        action="plan"  # default
+    fi
+    echo "[MOCK] Detected action: $action" >&2
+
+    if [ "$action" = "plan" ]; then
+        # Return single task as .task (not .tasks[])
+        echo '{"action": "plan", "task": {"id": "task-001", "status": "pending", "branch": "collab/test-task", "worktree": ".worktrees/test-task", "title": "Test task", "prompt": "Create a test marker file at .collab/test-marker.txt with timestamp content", "spec_refs": [], "dependencies": [], "health": {"timeout_minutes": 5, "attempts": 0, "max_attempts": 3}}, "summary": "Created one test task"}'
+    elif [ "$action" = "review" ]; then
+        echo '{"action": "merge", "target_task": "task-001", "merge_branch": "collab/test-task", "summary": "Code looks good"}'
+    else
+        echo '{"action": "complete", "summary": "All done"}'
+    fi
+else
+    # Worker - make actual changes to isolated test file (not README.md)
+    cd "$SE3_PROJECT_ROOT" 2>/dev/null || true
+    local test_marker=".collab/test-marker.txt"
+    mkdir -p "$(dirname "$test_marker")"
+    echo "Test marker from collab at $(date -Iseconds)" >> "$test_marker"
+    git add "$test_marker"
+    git commit -m "[collab:task-001] Add test marker"
+    echo "Worker: Added marker to $test_marker"
+fi
