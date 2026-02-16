@@ -161,13 +161,18 @@ def main():
         if args.exit_status:
             sys.exit(1)
         print('null')
-    elif isinstance(data, (dict, list)):
-        if args.raw_output and isinstance(data, str):
+    elif isinstance(data, str):
+        if args.raw_output:
             print(data)
         else:
             print(json.dumps(data))
+    elif isinstance(data, (dict, list)):
+        print(json.dumps(data))
+    elif isinstance(data, bool):
+        print('true' if data else 'false')
     else:
-        print(data)
+        # numbers
+        print(json.dumps(data))
 
 if __name__ == '__main__':
     main()

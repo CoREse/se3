@@ -356,6 +356,25 @@ collab:
   max_manager_retries: 2
 ```
 
+## Design Principle: Minimize External Dependencies
+
+The orchestrator layer (bash scripts) SHALL minimize external tool dependencies. Python 3 is the only required runtime beyond standard POSIX tools.
+
+**Rationale:**
+- Collab runs in diverse environments; every additional `apt install` raises the barrier to use
+- SE3's tech stack is Python — reuse it rather than adding system-level dependencies
+
+**Current application — `jq-complete.py`:**
+- Shell scripts use `$JQ_CMD` which auto-detects system `jq`, falling back to `scripts/jq-complete.py`
+- The Python fallback covers the subset of jq used by the orchestrator (field access, defaults, assignment)
+- It is NOT a full jq replacement — complex expressions like `select()`, `map()`, `if-then-else` are unsupported
+
+**Future direction:**
+- When JSON processing logic in shell scripts grows complex enough to need advanced jq features, migrate that logic to Python modules instead of extending `jq-complete.py`
+- Shell scripts should stay as thin orchestration glue; non-trivial data processing belongs in Python
+
+---
+
 ## Migration from v2 (External Controller)
 
 **To be removed:**
