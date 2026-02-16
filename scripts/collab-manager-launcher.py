@@ -118,11 +118,13 @@ Rules:
 """
 
     # Build claude args
+    # Note: -p/--print is a flag (no value), prompt is a positional argument
     claude_args = [
         "--dangerously-skip-permissions",
-        "-p", prompt,
+        "--print",
         "--output-format", "json",
         "--max-turns", "3",
+        prompt,  # positional argument
     ]
     if args.model:
         claude_args.extend(["--model", args.model])

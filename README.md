@@ -181,6 +181,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.7.3 | 2026-02-16 | Fix collab: `-p` is a flag not an option; pass prompt as positional arg
 | 1.7.2 | 2026-02-16 | Fix collab: remove bash alias support (too complex), remove error_max_turns from usage limit detection
 | 1.7.1 | 2026-02-16 | Fix collab: support bash aliases/functions for claude commands (use bash -i)
 | 1.7.0 | 2026-02-16 | Fix collab: skip missing commands (exit 127), improve JSON extraction from Claude envelope
