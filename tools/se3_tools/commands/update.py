@@ -1,6 +1,7 @@
 """SE 3.0 update command - Update existing SE 3.0 project to latest framework."""
 
 import hashlib
+import re
 from datetime import datetime
 from pathlib import Path
 import typer
@@ -118,6 +119,21 @@ def update_project(
     )
     if current_version != se3_version:
         typer.echo(f"  Previous version: {current_version}")
+
+    # Update template version if this is the SE3 framework development project
+    # (i.e., if output/SE3.md.template exists in the project)
+    template_file = project_root / "output" / "SE3.md.template"
+    if template_file.exists() and not dry_run:
+        template_content = template_file.read_text(encoding="utf-8")
+        # Update the version comment in the template
+        updated_content = re.sub(
+            r'<!-- SE3 Version: \d+\.\d+\.\d+ -->',
+            f'<!-- SE3 Version: {se3_version} -->',
+            template_content
+        )
+        if updated_content != template_content:
+            template_file.write_text(updated_content, encoding="utf-8")
+            typer.echo(f"  Updated output/SE3.md.template version to {se3_version}")
 
 
 @app.command()

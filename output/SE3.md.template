@@ -588,7 +588,7 @@ SE3 follows [Semantic Versioning 2.0.0](https://semver.org/) with version format
 
 The version is embedded in `.claude/SE3.md` metadata:
 ```
-<!-- SE3 Version: 1.1.0 -->
+<!-- SE3 Version: 1.7.8 -->
 ```
 
 **Upgrade path**: `se3 update --se3-version X.Y.Z` reads `output/SE3.md.template`, stamps it with version metadata, and writes to `.claude/SE3.md`.
