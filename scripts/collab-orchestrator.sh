@@ -62,7 +62,7 @@ resolve_next_claude_cmd() {
 }
 
 is_usage_limit() {
-  # Check if output indicates a usage/rate limit or max-turns (often caused by limit).
+  # Check if output indicates a usage/rate limit.
   local output="$1"
   local lower
   lower=$(echo "$output" | tr '[:upper:]' '[:lower:]')
@@ -70,10 +70,6 @@ is_usage_limit() {
     *"usage limit"*|*"rate limit"*|*"too many requests"*|*"rate_limit"*|*"overloaded"*|*"capacity"*)
       return 0 ;;
   esac
-  # error_max_turns often indicates internal limit/throttling
-  if echo "$output" | grep -q '"subtype":"error_max_turns"'; then
-    return 0
-  fi
   return 1
 }
 
@@ -215,111 +211,85 @@ Rules:
 
   local timeout_seconds=$((MANAGER_TIMEOUT_MINUTES * 60))
 
-  while [ $attempt -le $MAX_MANAGER_RETRIES ]; do
-    log_info "Invoking manager (attempt $((attempt+1))): event=$event_type"
+  # Use Python launcher with activity-based monitoring
+  local logfile="$COLLAB_DIR/logs/manager-$(date +%Y%m%d-%H%M%S).log"
+  local context_file="$COLLAB_DIR/.manager-context.txt"
+  local tasks_file="$COLLAB_DIR/.manager-tasks.txt"
+  local rules_file="$SCRIPT_DIR/rules-manager.md"
 
-    local logfile="$COLLAB_DIR/logs/manager-$(date +%Y%m%d-%H%M%S).log"
+  # Write context and tasks to temp files
+  echo "$event_context" > "$context_file"
+  echo "$tasks_summary" > "$tasks_file"
 
-    local claude_args=(--dangerously-skip-permissions -p "$prompt" --output-format json --max-turns 3)
-    [ -n "$MANAGER_MODEL" ] && claude_args+=(--model "$MANAGER_MODEL")
-    [ -n "$MCP_CONFIG" ] && claude_args+=(--mcp-config "$MCP_CONFIG")
+  local base_branch
+  base_branch=$($JQ_CMD -r '.base_branch // "master"' "$COLLAB_DIR/config.json" 2>/dev/null)
 
-    local cmd_to_run
-    cmd_to_run=$(resolve_claude_cmd)
-    # Clear CLAUDECODE env var to avoid nested session detection
-    unset CLAUDECODE
+  local launcher_args=(
+    "$event_type"
+    "@$context_file"
+    --log-file "$logfile"
+    --wall-timeout "$timeout_seconds"
+    --inactivity-timeout "120"
+    --project-root "$PROJECT_ROOT"
+    --base-branch "$base_branch"
+    --tasks-file "$tasks_file"
+  )
+  [ -f "$rules_file" ] && launcher_args+=(--rules-file "$rules_file")
+  [ -n "$MANAGER_MODEL" ] && launcher_args+=(--model "$MANAGER_MODEL")
+  [ -n "$MCP_CONFIG" ] && launcher_args+=(--mcp-config "$MCP_CONFIG")
+  [ -f "$PROJECT_ROOT/se3.config.yaml" ] && launcher_args+=(--config-file "$PROJECT_ROOT/se3.config.yaml")
 
-    # Inner loop: try each claude command on usage limit / timeout
-    while [ -n "$cmd_to_run" ]; do
-      if raw_result=$(SE3_AGENT_ROLE="manager" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
-        timeout "$timeout_seconds" "$cmd_to_run" "${claude_args[@]}" 2>"$logfile"); then
-        # Check for error_max_turns (often indicates internal limit)
-        if echo "$raw_result" | grep -q '"subtype":"error_max_turns"'; then
-          log_warn "Manager hit max-turns limit (likely internal limit), trying next command..."
-          echo "$raw_result" > "$COLLAB_DIR/logs/manager-raw-$(date +%Y%m%d-%H%M%S).txt"
-          # Try next command
-          local next_cmd
-          next_cmd=$(resolve_next_claude_cmd "$cmd_to_run")
-          if [ -n "$next_cmd" ]; then
-            log_info "Switching to '$next_cmd'"
-            cmd_to_run="$next_cmd"
-            continue
-          fi
-          break  # No more commands
-        fi
+  # Run manager with launcher (handles command switching internally)
+  log_info "Invoking manager: event=$event_type"
+  raw_result=$(python3 "$SCRIPT_DIR/collab-manager-launcher.py" "${launcher_args[@]}" 2>>"$logfile")
+  local exit_code=$?
 
-        # Extract .result from Claude CLI JSON envelope, then parse manager JSON from it
-        # Uses Python because jq-complete doesn't handle nested JSON extraction well
-        result=$(python3 -c "
+  # Clean up temp files
+  rm -f "$context_file" "$tasks_file"
+
+  if [ $exit_code -eq 0 ] && [ -n "$raw_result" ]; then
+    # Parse JSON from launcher output
+    result=$(echo "$raw_result" | python3 -c "
 import json, sys, re
 raw = sys.stdin.read()
 try:
-    envelope = json.loads(raw)
-    text = envelope.get('result', raw)
+    # Try to parse as JSON directly
+    obj = json.loads(raw)
+    if 'action' in obj:
+        print(json.dumps(obj))
+        sys.exit(0)
 except:
-    text = raw
-# Strip markdown code fences if present
-text = text.strip()
-m = re.search(r'\`\`\`(?:json)?\s*\n(.*?)\n\`\`\`', text, re.DOTALL)
+    pass
+# Try to extract JSON object from text
+m = re.search(r'\{.*\}', raw, re.DOTALL)
 if m:
-    text = m.group(1)
-# Try to find JSON object in text
-m2 = re.search(r'\{.*\}', text, re.DOTALL)
-if m2:
-    text = m2.group(0)
-# Validate it's proper JSON with action field
-obj = json.loads(text)
-assert 'action' in obj
-print(json.dumps(obj))
-" <<< "$raw_result" 2>/dev/null)
+    try:
+        obj = json.loads(m.group(0))
+        if 'action' in obj:
+            print(json.dumps(obj))
+            sys.exit(0)
+    except:
+        pass
+sys.exit(1)
+" 2>/dev/null)
 
-        if [ $? -eq 0 ] && [ -n "$result" ]; then
-          local action
-          action=$(echo "$result" | $JQ_CMD -r '.action')
-          log_ok "Manager responded: $action"
-          echo "$result"
-          return 0
-        else
-          log_warn "Manager returned invalid JSON (attempt $((attempt+1)))"
-          # Log what we got for debugging
-          echo "$raw_result" > "$COLLAB_DIR/logs/manager-raw-$(date +%Y%m%d-%H%M%S).txt"
-          prompt="CRITICAL: You MUST respond with ONLY a JSON object. No explanation, no markdown, no text before or after. Just a raw JSON object starting with { and ending with }.
+    if [ $? -eq 0 ] && [ -n "$result" ]; then
+      local action
+      action=$(echo "$result" | $JQ_CMD -r '.action')
+      log_ok "Manager responded: $action"
+      echo "$result"
+      return 0
+    fi
+  fi
 
-$prompt"
-          # Try next command on JSON parse error
-          local next_cmd
-          next_cmd=$(resolve_next_claude_cmd "$cmd_to_run")
-          if [ -n "$next_cmd" ]; then
-            log_info "Switching to '$next_cmd' after JSON error"
-            cmd_to_run="$next_cmd"
-            continue
-          fi
-          break  # No more commands, retry with same
-        fi
-      else
-        local exit_code=$?
-        if [ $exit_code -eq 124 ]; then
-          log_warn "Manager timed out with '$cmd_to_run' (attempt $((attempt+1)))"
-        elif is_usage_limit "$(cat "$logfile" 2>/dev/null)"; then
-          log_warn "Usage limit hit with '$cmd_to_run', trying next command..."
-        else
-          log_warn "Manager failed with exit code $exit_code (attempt $((attempt+1)))"
-          break  # Non-limit failure, don't try next command
-        fi
-        # Try next claude command
-        local next_cmd
-        next_cmd=$(resolve_next_claude_cmd "$cmd_to_run")
-        if [ -n "$next_cmd" ]; then
-          log_info "Switching to '$next_cmd'"
-          cmd_to_run="$next_cmd"
-          continue
-        fi
-        break  # No more commands
-      fi
-    done
-
-    attempt=$((attempt + 1))
-  done
+  # Check if we got error_max_turns in raw output
+  if echo "$raw_result" | grep -q '"subtype":"error_max_turns"'; then
+    log_warn "Manager hit max-turns limit"
+  elif [ $exit_code -eq 124 ]; then
+    log_warn "Manager timed out or was inactive"
+  else
+    log_warn "Manager failed with exit code $exit_code"
+  fi
 
   # All retries exhausted — escalate to human
   log_error "Manager failed after $MAX_MANAGER_RETRIES retries. Escalating to human."
