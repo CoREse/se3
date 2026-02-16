@@ -181,7 +181,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 1.7.9 | 2026-02-16 | Fix version management: improve git worktree support, fix Python module import path resolution, ensure version consistency between cli.py, version.py, and update.py
+| 1.8.0 | 2026-02-16 | Enhance Claude command runner: add @file syntax for prompt files, improve command fallback mechanism, add activity-based timeout for collab workers
 | 1.7.8 | 2026-02-16 | 优化 human calls 检测和处理机制：使用文件系统事件和缓存提升变更检测效率，增强响应完整性检查（重复内容检测、结构验证、长度限制），改进处理流程（批量处理、状态管理优化）
 | 1.7.7 | 2026-02-16 | Fix collab: set max-turns to 0 (unlimited) instead of arbitrary limits; rely on timeout for control
 | 1.7.6 | 2026-02-16 | Fix collab: increase manager max-turns from 3 to 10 (was hitting limit when reading files for planning)
