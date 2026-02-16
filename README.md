@@ -181,6 +181,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.8.4 | 2026-02-16 | Fix collab: detect_usage_limit() only checks last 3000 chars / 20 lines to avoid false positives from source code
 | 1.8.3 | 2026-02-16 | Fix collab: detect_usage_limit() returns False when returncode=0 to avoid false positives from source code content
 | 1.8.2 | 2026-02-16 | Fix: Resolve git merge conflict in claude_runner.py docstring
 | 1.8.1 | 2026-02-16 | Fix framework version management: update SE3_FRAMEWORK_VERSION to 1.8.1, add version history entry

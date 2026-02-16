@@ -202,7 +202,8 @@ class TestDetectUsageLimit:
         assert ClaudeRunner.detect_usage_limit(2, "", "error: rate limit") is True
 
     def test_exit_code_2_without_keywords(self):
-        assert ClaudeRunner.detect_usage_limit(2, "", "some other error") is True
+        # Exit code 2 without explicit rate limit keywords should NOT be usage limit
+        assert ClaudeRunner.detect_usage_limit(2, "", "some other error") is False
 
     def test_none_stdout_stderr(self):
         assert ClaudeRunner.detect_usage_limit(0, None, None) is False

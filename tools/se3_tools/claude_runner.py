@@ -347,25 +347,36 @@ class ClaudeRunner:
     def detect_usage_limit(returncode: int, stdout: str, stderr: str) -> bool:
         """Detect if the failure is due to usage/rate limit.
 
-        Checks exit code and output for known limit indicators.
-        Only checks when returncode is non-zero to avoid false positives
-        from source code content (e.g., reading claude_runner.py).
+        Checks the last part of output for known limit indicators.
+        Only checks when returncode is non-zero and only examines
+        the last few lines to avoid false positives from source code.
         """
         # Only check for usage limit if command actually failed
-        # This avoids false positives when worker reads source files
-        # containing keywords like "usage limit" in docstrings
         if returncode == 0:
             return False
 
-        combined = (stdout or "").lower() + (stderr or "").lower()
+        # Only check the last part of output (last 3000 chars or last 20 lines)
+        # Error messages are typically at the end, while source code reading
+        # (like claude_runner.py docstrings) appears earlier in the output
+        combined = (stdout or "") + (stderr or "")
+
+        # Get last 3000 characters
+        tail_content = combined[-3000:].lower()
+
+        # Also get last 20 lines for line-based filtering
+        lines = combined.split('\n')
+        last_lines = '\n'.join(lines[-20:]).lower()
 
         for keyword in USAGE_LIMIT_KEYWORDS:
-            if keyword in combined:
+            # Check both tail content and last lines for robustness
+            if keyword in tail_content or keyword in last_lines:
                 return True
 
         # Exit code 2 is sometimes used for API errors including rate limits
-        if returncode == 2 and ("error" in combined or "limit" in combined):
-            return True
+        if returncode == 2:
+            tail_lower = tail_content.lower()
+            if "rate_limit" in tail_lower or "usage limit" in tail_lower:
+                return True
 
         return False
 
