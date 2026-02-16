@@ -62,7 +62,7 @@ resolve_next_claude_cmd() {
 }
 
 is_usage_limit() {
-  # Check if output indicates a usage/rate limit.
+  # Check if output indicates a usage/rate limit or max-turns (often caused by limit).
   local output="$1"
   local lower
   lower=$(echo "$output" | tr '[:upper:]' '[:lower:]')
@@ -70,6 +70,10 @@ is_usage_limit() {
     *"usage limit"*|*"rate limit"*|*"too many requests"*|*"rate_limit"*|*"overloaded"*|*"capacity"*)
       return 0 ;;
   esac
+  # error_max_turns often indicates internal limit/throttling
+  if echo "$output" | grep -q '"subtype":"error_max_turns"'; then
+    return 0
+  fi
   return 1
 }
 
@@ -211,14 +215,12 @@ Rules:
 
   local timeout_seconds=$((MANAGER_TIMEOUT_MINUTES * 60))
 
-  local manager_max_turns=3
-
   while [ $attempt -le $MAX_MANAGER_RETRIES ]; do
     log_info "Invoking manager (attempt $((attempt+1))): event=$event_type"
 
     local logfile="$COLLAB_DIR/logs/manager-$(date +%Y%m%d-%H%M%S).log"
 
-    local claude_args=(--dangerously-skip-permissions -p "$prompt" --output-format json --max-turns $manager_max_turns)
+    local claude_args=(--dangerously-skip-permissions -p "$prompt" --output-format json --max-turns 3)
     [ -n "$MANAGER_MODEL" ] && claude_args+=(--model "$MANAGER_MODEL")
     [ -n "$MCP_CONFIG" ] && claude_args+=(--mcp-config "$MCP_CONFIG")
 
@@ -231,12 +233,19 @@ Rules:
     while [ -n "$cmd_to_run" ]; do
       if raw_result=$(SE3_AGENT_ROLE="manager" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
         timeout "$timeout_seconds" "$cmd_to_run" "${claude_args[@]}" 2>"$logfile"); then
-        # Check for error_max_turns in envelope
+        # Check for error_max_turns (often indicates internal limit)
         if echo "$raw_result" | grep -q '"subtype":"error_max_turns"'; then
-          log_warn "Manager hit max-turns limit ($manager_max_turns), increasing and retrying..."
-          manager_max_turns=$((manager_max_turns + 5))
+          log_warn "Manager hit max-turns limit (likely internal limit), trying next command..."
           echo "$raw_result" > "$COLLAB_DIR/logs/manager-raw-$(date +%Y%m%d-%H%M%S).txt"
-          continue  # Retry with increased max-turns
+          # Try next command
+          local next_cmd
+          next_cmd=$(resolve_next_claude_cmd "$cmd_to_run")
+          if [ -n "$next_cmd" ]; then
+            log_info "Switching to '$next_cmd'"
+            cmd_to_run="$next_cmd"
+            continue
+          fi
+          break  # No more commands
         fi
 
         # Extract .result from Claude CLI JSON envelope, then parse manager JSON from it

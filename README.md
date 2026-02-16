@@ -181,7 +181,8 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 1.6.1 | 2026-02-16 | Fix collab orchestrator: detect `error_max_turns` and auto-increase, clear CLAUDECODE on daemon start, command switch on JSON parse error |
+| 1.6.2 | 2026-02-16 | Fix collab orchestrator: treat `error_max_turns` as usage limit and switch command |
+| 1.6.1 | 2026-02-16 | Fix collab orchestrator: clear CLAUDECODE on daemon start, command switch on JSON parse error |
 | 1.6.0 | 2026-02-16 | Activity-based timeout for collab workers: real-time I/O monitoring, automatic command fallback on inactivity, `run_with_monitor()` API |
 | 1.5.5 | 2026-02-16 | Fix collab orchestrator: extract JSON from Claude CLI envelope via Python, add --dangerously-skip-permissions for daemon mode, reduce manager max-turns |
 | 1.5.4 | 2026-02-16 | Fix do_plan: use Python for task extraction instead of jq-complete (which lacks length/iteration support) |
