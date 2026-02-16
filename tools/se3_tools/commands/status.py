@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 
-from ..utils import parse_status_md, discover_human_calls, discover_changes
+from ..utils import parse_status_md, discover_changes
+from ..human_calls import HumanCallStore, CallStatus
 
 import typer
 
@@ -135,6 +136,8 @@ def check_git_status(project_root: Path) -> Optional[Dict[str, Any]]:
 def check_human_calls(project_root: Path, timeout_days: int = 7) -> List[Dict[str, Any]]:
     """Check human-calls directory for pending/responded files.
 
+    Uses HumanCallStore for optimized detection and validation.
+
     Args:
         project_root: Project root path
         timeout_days: Days after which a pending call is considered stale
@@ -143,44 +146,51 @@ def check_human_calls(project_root: Path, timeout_days: int = 7) -> List[Dict[st
         List of issue dicts
     """
     issues = []
-    calls = discover_human_calls(str(project_root / "human-calls"))
+    calls_dir = project_root / "human-calls"
 
-    for call in calls:
-        status = call.get('status')
+    if not calls_dir.exists():
+        return issues
 
-        if status == 'pending':
-            created = call.get('created')
-            if created:
-                try:
-                    created_date = datetime.strptime(created, '%Y-%m-%d')
-                    if datetime.now() - created_date > timedelta(days=timeout_days):
-                        issues.append({
-                            'severity': 'warning',
-                            'check': 'human_calls',
-                            'message': f"Long-pending human call: {call['file']} ({created})",
-                            'suggestion': "Follow up on the pending request or close it"
-                        })
-                    else:
-                        issues.append({
-                            'severity': 'info',
-                            'check': 'human_calls',
-                            'message': f"Pending human call: {call['file']}",
-                            'suggestion': "Awaiting human response"
-                        })
-                except ValueError:
-                    issues.append({
-                        'severity': 'info',
-                        'check': 'human_calls',
-                        'message': f"Pending human call: {call['file']}",
-                        'suggestion': "Awaiting human response"
-                    })
+    store = HumanCallStore(calls_dir)
 
-        elif status == 'responded':
+    # Get stale calls (pending for too long)
+    stale_calls = store.get_stale_calls(timeout_days)
+    for call in stale_calls:
+        issues.append({
+            'severity': 'warning',
+            'check': 'human_calls',
+            'message': f"Long-pending human call: {call.file_path.name} ({call.created.strftime('%Y-%m-%d')})",
+            'suggestion': "Follow up on the pending request or close it"
+        })
+
+    # Get pending calls (not stale)
+    all_pending = store.get_pending_calls()
+    fresh_pending = [c for c in all_pending if c not in stale_calls]
+    for call in fresh_pending:
+        issues.append({
+            'severity': 'info',
+            'check': 'human_calls',
+            'message': f"Pending human call: {call.file_path.name}",
+            'suggestion': "Awaiting human response"
+        })
+
+    # Get responded calls with validation
+    responded_calls = store.get_responded_calls()
+    for call in responded_calls:
+        is_valid, reason = store.validate_response(call)
+        if is_valid:
             issues.append({
                 'severity': 'warning',
                 'check': 'human_calls',
-                'message': f"Unprocessed response: {call['file']}",
+                'message': f"Unprocessed response: {call.file_path.name}",
                 'suggestion': "Process the response and update the call status"
+            })
+        else:
+            issues.append({
+                'severity': 'info',
+                'check': 'human_calls',
+                'message': f"Incomplete response in {call.file_path.name}: {reason}",
+                'suggestion': "Wait for human to complete their response"
             })
 
     return issues
