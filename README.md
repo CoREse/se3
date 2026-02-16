@@ -181,6 +181,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.5.5 | 2026-02-16 | Fix collab orchestrator: extract JSON from Claude CLI envelope via Python, add --dangerously-skip-permissions for daemon mode, reduce manager max-turns |
 | 1.5.4 | 2026-02-16 | Fix do_plan: use Python for task extraction instead of jq-complete (which lacks length/iteration support) |
 | 1.5.3 | 2026-02-16 | Fix collab orchestrator: clean stale tasks on new session, handle empty task list, do_plan supports full tasks array |
 | 1.5.2 | 2026-02-16 | Fix collab manager: use text output format, strip markdown fences from Claude response before JSON parsing |

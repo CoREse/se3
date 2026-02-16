@@ -216,7 +216,7 @@ Rules:
 
     local logfile="$COLLAB_DIR/logs/manager-$(date +%Y%m%d-%H%M%S).log"
 
-    local claude_args=(-p "$prompt" --output-format text --max-turns 30)
+    local claude_args=(--dangerously-skip-permissions -p "$prompt" --output-format json --max-turns 3)
     [ -n "$MANAGER_MODEL" ] && claude_args+=(--model "$MANAGER_MODEL")
     [ -n "$MCP_CONFIG" ] && claude_args+=(--mcp-config "$MCP_CONFIG")
 
@@ -229,21 +229,44 @@ Rules:
     while [ -n "$cmd_to_run" ]; do
       if raw_result=$(SE3_AGENT_ROLE="manager" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
         timeout "$timeout_seconds" "$cmd_to_run" "${claude_args[@]}" 2>"$logfile"); then
-        # Strip markdown code fences if present (```json ... ```)
-        result=$(echo "$raw_result" | sed -n '/^```/{n; :a; /^```/q; p; n; ba}')
-        # If no fences found, use raw output
-        [ -z "$result" ] && result="$raw_result"
-        # Validate JSON
-        if echo "$result" | $JQ_CMD -e '.action' &>/dev/null; then
-          log_ok "Manager responded: $(echo "$result" | $JQ_CMD -r '.action')"
+        # Extract .result from Claude CLI JSON envelope, then parse manager JSON from it
+        # Uses Python because jq-complete doesn't handle nested JSON extraction well
+        result=$(python3 -c "
+import json, sys, re
+raw = sys.stdin.read()
+try:
+    envelope = json.loads(raw)
+    text = envelope.get('result', raw)
+except:
+    text = raw
+# Strip markdown code fences if present
+text = text.strip()
+m = re.search(r'\`\`\`(?:json)?\s*\n(.*?)\n\`\`\`', text, re.DOTALL)
+if m:
+    text = m.group(1)
+# Try to find JSON object in text
+m2 = re.search(r'\{.*\}', text, re.DOTALL)
+if m2:
+    text = m2.group(0)
+# Validate it's proper JSON with action field
+obj = json.loads(text)
+assert 'action' in obj
+print(json.dumps(obj))
+" <<< "$raw_result" 2>/dev/null)
+
+        if [ $? -eq 0 ] && [ -n "$result" ]; then
+          local action
+          action=$(echo "$result" | $JQ_CMD -r '.action')
+          log_ok "Manager responded: $action"
           echo "$result"
           return 0
         else
           log_warn "Manager returned invalid JSON (attempt $((attempt+1)))"
-          prompt="Your previous response was not valid JSON. Please respond with ONLY valid JSON matching the schema. Previous response was:
-$result
+          # Log what we got for debugging
+          echo "$raw_result" > "$COLLAB_DIR/logs/manager-raw-$(date +%Y%m%d-%H%M%S).txt"
+          prompt="CRITICAL: You MUST respond with ONLY a JSON object. No explanation, no markdown, no text before or after. Just a raw JSON object starting with { and ending with }.
 
-Respond with valid JSON only."
+$prompt"
           break  # Retry with same command on JSON error
         fi
       else
@@ -324,7 +347,7 @@ $task_prompt"
   local logfile="$COLLAB_DIR/logs/worker-${task_id}-$(date +%Y%m%d-%H%M%S).log"
 
   # Build claude args
-  local claude_args=(-p "$prompt" --max-turns 50)
+  local claude_args=(--dangerously-skip-permissions -p "$prompt" --max-turns 50)
   [ -n "$WORKER_MODEL" ] && claude_args+=(--model "$WORKER_MODEL")
   [ -n "$MCP_CONFIG" ] && claude_args+=(--mcp-config "$MCP_CONFIG")
 
