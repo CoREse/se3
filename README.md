@@ -22,7 +22,7 @@ SE 3.0 combines Anthropic's [long-running agent best practices](https://www.anth
 ### 1. Install SE 3.0 CLI
 
 ```bash
-enter tools
+cd tools
 pip install -e .
 ```
 
@@ -56,11 +56,8 @@ The agent will:
 ### 4. Maintain SE3.md
 
 ```bash
-# Check if SE3.md is up to date
-se3 doctor
-
 # Update to latest SE3 version
-se3 upgrade
+se3 update
 ```
 
 ## Project Structure
@@ -91,7 +88,7 @@ SE 3.0 includes CLI tools to validate and enforce framework conventions:
 
 ```bash
 # Install tools
-pip install se3
+cd tools && pip install -e .
 
 # Initialize a new SE 3.0 project
 se3 init
@@ -109,11 +106,17 @@ se3 verify --change <change-name>
 # Diagnose session state
 se3 status
 
-# Check SE3.md health
-se3 doctor
-
 # Update SE3.md to latest version
-se3 upgrade
+se3 update
+
+# Commit with test verification
+se3 commit -m "Add feature"
+
+# Multi-agent collaboration
+se3 collab --daemon "Implement feature"
+
+# Show Claude command resolution
+se3 claude-cmd
 ```
 
 See `output/TOOLS.md` for detailed documentation.
@@ -149,7 +152,7 @@ SE 3.0 uses a two-file architecture to separate framework conventions from proje
 | `.claude/CLAUDE.md` | Project-specific conventions and overrides | ✅ Yes | Project team |
 
 This separation allows:
-- **Framework updates**: `se3 upgrade` updates SE3.md without touching project-specific configurations
+- **Framework updates**: `se3 update` updates SE3.md without touching project-specific configurations
 - **Minimal project setup**: CLAUDE.md can be as short as 25 lines for simple projects
 - **Version consistency**: SE3.md includes version and checksum for validation
 

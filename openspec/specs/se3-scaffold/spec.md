@@ -87,11 +87,9 @@ The `se3 init` command MUST:
 The system SHALL produce the following deliverables:
 1. Project-level CLAUDE.md template (minimal, English)
 2. Project-level SE3.md template (complete, English)
-3. Global CLAUDE.md template for ~/.claude/CLAUDE.md (English)
-4. Global SE3.md template for ~/.claude/SE3.md (English)
-5. Configuration file template
-6. Documentation and best practices guide
-7. CLI tools documentation (TOOLS.md)
+3. Configuration file template
+4. Documentation and best practices guide
+5. CLI tools documentation (TOOLS.md)
 
 #### Scenario: Complete delivery
 - **WHEN** SE 3.0 framework design is complete
@@ -105,10 +103,15 @@ The system SHALL produce the following deliverables:
 The system SHALL provide CLI tools for validating and enforcing SE 3.0 conventions.
 
 Tools include:
+- `se3 init` — Initialize a new SE 3.0 project
 - `se3 lint` — Validate spec file format and content
 - `se3 sync` — Synchronize output/ directory with source files
 - `se3 verify` — Verify change implementation covers all spec scenarios
 - `se3 status` — Diagnose session state and identify issues
+- `se3 update` — Update SE3.md to the latest framework version
+- `se3 commit` — Commit changes with test verification and sensitive file checks
+- `se3 collab` — Manage git-worktree multi-agent collaboration
+- `se3 claude-cmd` — Show configured Claude commands by priority
 
 #### Scenario: Spec validation
 - **WHEN** a developer runs `se3 lint`

@@ -28,7 +28,7 @@ project/
 
 #### Scenario: Detecting redundant content
 - **WHEN** CLAUDE.md contains duplicate content from SE3.md
-- **THEN** se3 doctor SHALL warn about redundancy
+- **THEN** `se3 lint` SHALL warn about redundancy
 
 ### Requirement: CLAUDE.md (Project-Specific Conventions)
 
@@ -56,12 +56,8 @@ The SE3.md file SHALL provide the core SE 3.0 framework conventions that apply t
 - SE3.md SHALL be managed exclusively through the se3 tool commands
 - SE3.md SHALL include version metadata for checksum validation
 
-#### Scenario: Detecting manual modifications
-- **WHEN** SE3.md is modified manually
-- **THEN** se3 doctor SHALL detect the tampering and fail the check
-
 #### Scenario: Updating framework conventions
-- **WHEN** se3 upgrade is run
+- **WHEN** `se3 update` is run
 - **THEN** SE3.md SHALL be updated to the latest version
 
 ### Requirement: se3 init Command Behavior
@@ -89,73 +85,23 @@ The se3 init command SHALL initialize a new or existing project as an SE 3.0 pro
 - **WHEN** se3 init is run with --force
 - **THEN** it SHALL overwrite existing configuration files
 
-### Requirement: se3 upgrade Command Behavior
+### Requirement: se3 update Command Behavior
 
-The se3 upgrade command SHALL upgrade the SE 3.0 framework conventions in an existing project.
+The `se3 update` command SHALL update the SE 3.0 framework conventions in an existing project.
 
-- se3 upgrade SHALL check for updates to the SE3.md framework file
-- se3 upgrade SHALL compare local SE3.md version with latest available
-- se3 upgrade SHALL download and install the latest version if available
-- se3 upgrade SHALL update the checksum for the new SE3.md
-- se3 upgrade SHALL preserve CLAUDE.md (project-specific configuration)
-- se3 upgrade SHALL display a summary of changes during upgrade
-- se3 upgrade SHALL handle errors during download/installation gracefully
+- `se3 update` SHALL regenerate SE3.md from the installed framework template
+- `se3 update` SHALL compare local SE3.md version with latest available
+- `se3 update` SHALL update the checksum for the new SE3.md
+- `se3 update` SHALL preserve CLAUDE.md (project-specific configuration)
+- `se3 update` SHALL display a summary of changes during update
 
-#### Scenario: Upgrading to latest version
-- **WHEN** se3 upgrade is run and a newer version exists
+#### Scenario: Updating to latest version
+- **WHEN** `se3 update` is run and a newer version exists
 - **THEN** it SHALL replace SE3.md with the latest version
 
 #### Scenario: Already on latest version
-- **WHEN** se3 upgrade is run and already on latest version
+- **WHEN** `se3 update` is run and already on latest version
 - **THEN** it SHALL display "Already on latest version" message
-
-#### Scenario: Download failure
-- **WHEN** se3 upgrade fails to download
-- **THEN** it SHALL display an error message and preserve existing SE3.md
-
-### Requirement: se3 doctor Checksum Validation
-
-The se3 doctor command SHALL verify the integrity of the SE3.md framework file.
-
-- se3 doctor SHALL compute a SHA-256 checksum of the current SE3.md file
-- se3 doctor SHALL compare computed checksum with stored checksum
-- se3 doctor SHALL detect tampering or corruption of SE3.md
-- se3 doctor SHALL display detailed error information if check fails
-- se3 doctor SHALL provide instructions for remediation (run se3 upgrade)
-- se3 doctor SHALL include checksum validation in the overall health check
-
-#### Scenario: Valid SE3.md check
-- **WHEN** SE3.md is unmodified and checksum matches
-- **THEN** se3 doctor SHALL pass the checksum validation
-
-#### Scenario: Tampered SE3.md check
-- **WHEN** SE3.md is manually modified
-- **THEN** se3 doctor SHALL fail and report tampering
-
-#### Scenario: Missing checksum
-- **WHEN** checksum file is missing
-- **THEN** se3 doctor SHALL fail and suggest running se3 init
-
-### Requirement: Backward Compatibility
-
-The SE3 Module System SHALL support projects with existing single CLAUDE.md files (pre-module system).
-
-- The system SHALL provide automated migration when upgrading from older versions
-- The system SHALL maintain compatibility with existing se3 tool commands
-- The system SHALL preserve project-specific configurations during migration
-- The system SHALL display clear migration instructions
-
-#### Scenario: Migrating pre-module system project
-- **WHEN** upgrading a pre-module system project
-- **THEN** se3 upgrade SHALL automatically split CLAUDE.md into CLAUDE.md + SE3.md
-
-#### Scenario: Running commands on legacy projects
-- **WHEN** se3 commands are run on pre-module system projects
-- **THEN** they SHALL continue to function correctly with appropriate warnings
-
-#### Scenario: Migration failure
-- **WHEN** a migration fails
-- **THEN** the tool SHALL provide rollback instructions
 
 ## Verification Tests
 
@@ -168,22 +114,7 @@ To verify the module system functionality:
    ls -la .claude/  # Should contain CLAUDE.md and SE3.md
    ```
 
-2. **Checksum Validation Test**:
+2. **Update Test**:
    ```bash
-   se3 doctor  # Should pass
-   echo "tampered" >> .claude/SE3.md
-   se3 doctor  # Should fail with tampering error
-   ```
-
-3. **Upgrade Test**:
-   ```bash
-   se3 upgrade  # Should check and update to latest version
-   ```
-
-4. **Migration Test**:
-   ```bash
-   # Create a pre-module system project
-   mkdir legacy-project && cd legacy-project
-   mkdir .claude && echo "legacy content" > .claude/CLAUDE.md
-   se3 upgrade  # Should split into CLAUDE.md (legacy content) and SE3.md (framework)
+   se3 update  # Should check and update to latest version
    ```

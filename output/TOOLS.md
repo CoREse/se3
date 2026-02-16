@@ -13,6 +13,22 @@ This installs the `se3` command-line tool.
 
 ## Commands
 
+### `se3 init` — Project Initialization
+
+Initialize a new SE 3.0 project in the current directory.
+
+```bash
+se3 init
+```
+
+**Creates:**
+- `.claude/CLAUDE.md` — Project-specific conventions (minimal template)
+- `.claude/SE3.md` — Complete SE 3.0 framework specification
+
+Existing files are preserved unless `--force` is used.
+
+---
+
 ### `se3 lint` — Spec Validation
 
 Validates that spec files conform to SE 3.0 format requirements.
@@ -50,8 +66,6 @@ se3 sync --dry-run
 # Remove orphaned output files
 se3 sync --apply --prune
 ```
-
-**Note:** Runtime file sync (CLAUDE.md, status.md, etc.) was removed in v7.0 in favor of the SE3 module system.
 
 ---
 
@@ -106,6 +120,88 @@ se3 status --format json
 
 ---
 
+### `se3 update` — Framework Update
+
+Update `.claude/SE3.md` to the latest framework version.
+
+```bash
+se3 update
+```
+
+Regenerates SE3.md from the installed framework template. Preserves `.claude/CLAUDE.md` (project-specific configuration).
+
+---
+
+### `se3 commit` — Verified Commit
+
+Commit changes with automatic test verification and sensitive file checks.
+
+```bash
+# Commit with message
+se3 commit -m "Add auth module"
+
+# Commit specific files
+se3 commit -m "Fix login bug" -f "src/auth.py tests/test_auth.py"
+
+# Preview without committing
+se3 commit --dry-run
+
+# Skip tests (use with caution)
+se3 commit -m "Fix typo" --skip-tests
+```
+
+**What it does:**
+1. Runs test suite (auto-detects `pytest`, or uses `commit.test_command` from config)
+2. Checks for sensitive files (`.env`, credentials, etc.)
+3. Stages files (specified via `-f`, or all tracked changes)
+4. Creates the commit
+
+---
+
+### `se3 collab` — Multi-Agent Collaboration
+
+Manage git-worktree-based multi-agent collaboration sessions.
+
+```bash
+# Start in daemon mode (auto-orchestrated)
+se3 collab --daemon "Implement authentication system"
+
+# Start in manual mode (prints commands to run)
+se3 collab --manual "Implement authentication system"
+
+# Check status
+se3 collab --status
+
+# Resume previous session
+se3 collab --resume
+
+# Abort and cleanup
+se3 collab --abort
+```
+
+Uses git worktrees so each worker agent operates in an isolated directory on its own branch. A bash orchestrator coordinates planning, task distribution, and merge.
+
+---
+
+### `se3 claude-cmd` — Claude Command Resolution
+
+Show configured Claude commands sorted by priority. Used by bash scripts to resolve which Claude binary to invoke.
+
+```bash
+# Show highest-priority command
+se3 claude-cmd
+
+# Show all commands as JSON
+se3 claude-cmd --all
+
+# Get next fallback after a specific command
+se3 claude-cmd --next "claude"
+```
+
+Commands are configured in `se3.config.yaml` or `~/.se3/config.yaml` under the `claude_commands` key.
+
+---
+
 ## Integration Workflow
 
 ### Pre-commit checks
@@ -134,13 +230,19 @@ Tools are located in `tools/se3_tools/`:
 tools/
 ├── pyproject.toml
 └── se3_tools/
-    ├── cli.py         # Main CLI entry point
-    ├── utils.py       # Shared utilities
+    ├── cli.py           # Main CLI entry point
+    ├── config.py        # Unified configuration loading
+    ├── utils.py         # Shared utilities
     └── commands/
-        ├── lint.py    # se3 lint
-        ├── sync.py    # se3 sync
-        ├── verify.py  # se3 verify
-        └── status.py  # se3 status
+        ├── init.py      # se3 init
+        ├── lint.py      # se3 lint
+        ├── sync.py      # se3 sync
+        ├── verify.py    # se3 verify
+        ├── status.py    # se3 status
+        ├── update.py    # se3 update
+        ├── commit.py    # se3 commit
+        ├── collab.py    # se3 collab
+        └── version.py   # se3 claude-cmd
 ```
 
 **Dependencies:**
