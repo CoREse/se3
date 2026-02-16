@@ -17,6 +17,15 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .config import load_claude_commands
 
+# Platform-specific imports for process resource monitoring
+try:
+    if sys.platform.startswith('linux'):
+        import psutil
+    else:
+        psutil = None
+except ImportError:
+    psutil = None
+
 # Keywords indicating usage/rate limit in Claude CLI output
 USAGE_LIMIT_KEYWORDS = [
     "usage limit",
@@ -276,7 +285,7 @@ class ClaudeRunner:
         - Records last activity timestamp (any output)
         - If no output for inactivity_timeout seconds, kills process and tries next command
         - Optionally writes all output to log file in real-time
-        - Automatically switches to next configured command on usage limit / inactivity
+        - Automatically switches to next configured command on usage limit / inactivity / hang
 
         Args:
             args: Arguments to pass after the claude command.
@@ -310,12 +319,58 @@ class ClaudeRunner:
                 on_output=on_output,
                 on_activity=on_activity,
                 start_time=start_time,
+            print(
+                f"[claude-runner] Attempting command {cmd_index + 1}/{len(self.commands)}: '{cmd_name}'",
+                file=sys.stderr,
             )
 
-            all_outputs.append(f"=== Command: {cmd_name} ===")
-            all_outputs.append(result.output)
+            try:
+                result = self._run_single_with_monitor(
+                    full_cmd=full_cmd,
+                    cmd_name=cmd_name,
+                    cmd_index=cmd_index,
+                    log_file=log_file,
+                    wall_timeout=wall_timeout,
+                    inactivity_timeout=inactivity_timeout,
+                    cwd=cwd,
+                    env=env,
+                    on_output=on_output,
+                    on_activity=on_activity,
+                    start_time=start_time,
+                )
 
-            if result.success:
+                all_outputs.append(f"=== Command: {cmd_name} ===")
+                all_outputs.append(result.output)
+
+                if result.success:
+                    print(
+                        f"[claude-runner] Command '{cmd_name}' succeeded",
+                        file=sys.stderr,
+                    )
+                    return MonitoredResult(
+                        returncode=result.returncode,
+                        output="\n".join(all_outputs),
+                        cmd_used=cmd_name,
+                        cmd_index=cmd_index,
+                        was_retry=cmd_index > 0,
+                    )
+
+                # Check if we should retry
+                if result.should_retry and cmd_index < len(self.commands) - 1:
+                    print(
+                        f"[claude-runner] Command '{cmd_name}' failed (will retry next command): "
+                        f"Exit code {result.returncode}",
+                        file=sys.stderr,
+                    )
+                    # Add a small delay between retries to avoid rapid fire switching
+                    time.sleep(2)
+                    continue
+
+                # Final command failed
+                print(
+                    f"[claude-runner] Command '{cmd_name}' failed and no more commands to retry",
+                    file=sys.stderr,
+                )
                 return MonitoredResult(
                     returncode=result.returncode,
                     output="\n".join(all_outputs),
@@ -324,23 +379,27 @@ class ClaudeRunner:
                     was_retry=cmd_index > 0,
                 )
 
-            # Check if we should retry
-            if result.should_retry and cmd_index < len(self.commands) - 1:
-                print(
-                    f"[claude-runner] Switching from '{cmd_name}' to "
-                    f"'{self.commands[cmd_index + 1]['cmd']}'...",
-                    file=sys.stderr,
-                )
-                continue
+            except Exception as e:
+                msg = f"[claude-runner] Error running command '{cmd_name}': {e}"
+                print(msg, file=sys.stderr)
+                all_outputs.append(f"=== Command: {cmd_name} ===")
+                all_outputs.append(msg)
 
-            # Final command failed
-            return MonitoredResult(
-                returncode=result.returncode,
-                output="\n".join(all_outputs),
-                cmd_used=cmd_name,
-                cmd_index=cmd_index,
-                was_retry=cmd_index > 0,
-            )
+                if cmd_index < len(self.commands) - 1:
+                    print(
+                        f"[claude-runner] Will retry with next command...",
+                        file=sys.stderr,
+                    )
+                    time.sleep(2)
+                    continue
+                else:
+                    return MonitoredResult(
+                        returncode=1,
+                        output="\n".join(all_outputs),
+                        cmd_used=cmd_name,
+                        cmd_index=cmd_index,
+                        was_retry=cmd_index > 0,
+                    )
 
         # Should not reach here
         return MonitoredResult(
@@ -365,7 +424,7 @@ class ClaudeRunner:
         on_activity: Optional[Callable[[], None]],
         start_time: float,
     ) -> "_SingleRunResult":
-        """Run a single command with monitoring."""
+        """Run a single command with monitoring and enhanced hang detection."""
 
         # Check if command exists
         import shutil
@@ -395,6 +454,7 @@ class ClaudeRunner:
         output_buffer = []
         last_activity = time.time()
         log_fh = None
+        hang_detected = False
 
         if log_file:
             log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -445,25 +505,65 @@ class ClaudeRunner:
                     except Exception:
                         pass
                 else:
-                    # No output available - check inactivity
+                    # No output available - check inactivity and detect possible hang
                     inactive_time = time.time() - last_activity
                     if inactive_time > inactivity_timeout:
-                        proc.kill()
-                        proc.wait()
-                        msg = (
-                            f"\n[claude-runner] Inactivity timeout "
-                            f"({inactivity_timeout}s) - no output for {int(inactive_time)}s\n"
-                        )
-                        output_buffer.append(msg)
-                        if log_fh:
-                            log_fh.write(msg)
-                            log_fh.flush()
-                        return _SingleRunResult(
-                            returncode=124,
-                            output="".join(output_buffer),
-                            success=False,
-                            should_retry=True,
-                        )
+                        # Enhanced hang detection
+                        hang_confirmed = False
+
+                        # Check if process is consuming excessive resources (CPU/memory) without output
+                        if psutil:
+                            try:
+                                p = psutil.Process(proc.pid)
+                                cpu_percent = p.cpu_percent(interval=0.5)
+                                mem_info = p.memory_info()
+                                # Check for high CPU usage without output (potential hang)
+                                if cpu_percent > 80.0:
+                                    msg = (
+                                        f"\n[claude-runner] Hang detected - high CPU usage "
+                                        f"({cpu_percent:.1f}%) without output for {int(inactive_time)}s\n"
+                                    )
+                                    hang_confirmed = True
+                                # Check for excessive memory growth without output
+                                elif mem_info.rss > 1024 * 1024 * 1024:  # 1GB
+                                    msg = (
+                                        f"\n[claude-runner] Hang detected - excessive memory usage "
+                                        f"({mem_info.rss // (1024*1024)}MB) without output for {int(inactive_time)}s\n"
+                                    )
+                                    hang_confirmed = True
+                            except Exception:
+                                pass
+
+                        if not hang_confirmed:
+                            # Default to inactivity timeout
+                            msg = (
+                                f"\n[claude-runner] Hang detected - inactivity timeout "
+                                f"({inactivity_timeout}s) - no output for {int(inactive_time)}s\n"
+                            )
+                            hang_confirmed = True
+
+                        if hang_confirmed:
+                            try:
+                                proc.kill()
+                                proc.wait(timeout=10)  # Wait for process to terminate
+                            except Exception:
+                                try:
+                                    proc.terminate()
+                                    proc.wait(timeout=5)
+                                except Exception:
+                                    pass
+
+                            output_buffer.append(msg)
+                            if log_fh:
+                                log_fh.write(msg)
+                                log_fh.flush()
+                            hang_detected = True
+                            return _SingleRunResult(
+                                returncode=124,
+                                output="".join(output_buffer),
+                                success=False,
+                                should_retry=True,
+                            )
 
             # Process finished - read remaining output
             remaining = proc.stdout.read()
@@ -489,6 +589,17 @@ class ClaudeRunner:
                     success=False,
                     should_retry=True,
                 )
+
+            # Check if process terminated with unusual exit codes that might indicate a hang
+            if returncode in [1, 137, 143]:  # 137=SIGKILL, 143=SIGTERM
+                # If we have output but process terminated with error, check if it was a hang
+                if hang_detected or (len(output_buffer) > 0 and "timeout" in output.lower()):
+                    return _SingleRunResult(
+                        returncode=returncode,
+                        output=output,
+                        success=False,
+                        should_retry=True,
+                    )
 
             return _SingleRunResult(
                 returncode=returncode,
