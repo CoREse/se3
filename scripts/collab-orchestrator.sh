@@ -222,6 +222,8 @@ Rules:
 
     local cmd_to_run
     cmd_to_run=$(resolve_claude_cmd)
+    # Clear CLAUDECODE env var to avoid nested session detection
+    unset CLAUDECODE
 
     # Inner loop: try each claude command on usage limit / timeout
     while [ -n "$cmd_to_run" ]; do
@@ -327,6 +329,8 @@ $task_prompt"
   cmd_to_run=$(resolve_claude_cmd)
   (
     cd "$worktree"
+    # Clear CLAUDECODE env var to avoid nested session detection
+    unset CLAUDECODE
     local worker_exit=0
     while [ -n "$cmd_to_run" ]; do
       SE3_TASK_ID="$task_id" SE3_AGENT_ROLE="worker" SE3_PROJECT_ROOT="$PROJECT_ROOT" \

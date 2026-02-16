@@ -288,6 +288,7 @@ def launch_manager(project_root: Path, event_type: str, context: str) -> subproc
 
     args = ["--dangerously-skip-permissions", "-p", prompt, "--output-format", "json", "--max-turns", "30"]
     env = {**dict(os.environ), "SE3_AGENT_ROLE": "manager", "SE3_PROJECT_ROOT": str(project_root)}
+    env.pop("CLAUDECODE", None)  # Avoid nested session detection
 
     runner = ClaudeRunner(project_root)
     proc, _ = runner.popen(
@@ -340,6 +341,7 @@ def launch_worker(project_root: Path, task_id: str) -> subprocess.Popen:
         "SE3_AGENT_ROLE": "worker",
         "SE3_PROJECT_ROOT": str(project_root)
     }
+    env.pop("CLAUDECODE", None)  # Avoid nested session detection
 
     log_file = collab_dir / "logs" / f"worker-{task_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
 
@@ -391,6 +393,8 @@ def start_daemon(project_root: Path, objective: str, resume: bool = False):
     cmd = ["bash", str(script), "--daemon"]
     if resume:
         cmd.append("--resume")
+    elif objective:
+        cmd.append(objective)
 
     env = {**dict(os.environ), "PROJECT_ROOT": str(project_root)}
 
