@@ -306,9 +306,11 @@ def launch_manager(project_root: Path, event_type: str, context: str) -> subproc
 def launch_worker(project_root: Path, task_id: str) -> subprocess.Popen:
     """Launch worker as independent Claude process in worktree.
 
-    Uses ClaudeRunner for priority-based command selection.
+    Uses ClaudeRunner for priority-based command selection with activity monitoring.
+
+    Returns a Popen-like object with wait() and returncode for compatibility.
     """
-    from ..claude_runner import ClaudeRunner
+    from ..claude_runner import ClaudeRunner, MonitoredResult
 
     collab_dir = get_collab_dir(project_root)
     task_file = collab_dir / "tasks" / f"{task_id}.json"
@@ -344,16 +346,35 @@ def launch_worker(project_root: Path, task_id: str) -> subprocess.Popen:
     env.pop("CLAUDECODE", None)  # Avoid nested session detection
 
     log_file = collab_dir / "logs" / f"worker-{task_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
+    timeout_min = task.get("health", {}).get("timeout_minutes", 60)
 
     runner = ClaudeRunner(project_root)
-    proc, _ = runner.popen(
+
+    # Use run_with_monitor for activity-based monitoring and command fallback
+    result = runner.run_with_monitor(
         args=args,
+        log_file=log_file,
+        wall_timeout=timeout_min * 60,
+        inactivity_timeout=300,  # 5 minutes without output = stuck
         cwd=Path(worktree),
         env=env,
-        stdout=subprocess.PIPE,
-        stderr=open(log_file, "w"),
     )
-    return proc
+
+    # Create a simple wrapper object for compatibility
+    class WorkerResult:
+        def __init__(self, returncode: int):
+            self.returncode = returncode
+
+        def wait(self) -> int:
+            return self.returncode
+
+        def communicate(self, timeout=None) -> tuple:
+            return (b"", b"")
+
+        def poll(self) -> int:
+            return self.returncode
+
+    return WorkerResult(result.returncode)
 
 
 def start_daemon(project_root: Path, objective: str, resume: bool = False):
@@ -503,13 +524,12 @@ def collab(
         raise typer.Exit(proc.returncode)
 
     if launch_worker_flag:
-        # Internal: launch worker process
+        # Internal: launch worker process with activity monitoring
         if not task_id:
             typer.echo("Error: --task required for --launch-worker")
             raise typer.Exit(1)
-        proc = launch_worker(root, task_id)
-        stdout, _ = proc.communicate(timeout=3600)  # 60 min timeout
-        raise typer.Exit(proc.returncode)
+        result = launch_worker(root, task_id)
+        raise typer.Exit(result.returncode)
 
     if daemon:
         if not resume and not objective:

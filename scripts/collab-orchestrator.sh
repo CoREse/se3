@@ -343,48 +343,39 @@ $task_prompt"
   # Update task status
   update_task "$task_id" '.status = "in_progress" | .started_at = now | .health.attempts += 1'
 
-  local timeout_seconds=$((timeout_min * 60))
+  local wall_timeout=$((timeout_min * 60))
   local logfile="$COLLAB_DIR/logs/worker-${task_id}-$(date +%Y%m%d-%H%M%S).log"
 
-  # Build claude args
-  local claude_args=(--dangerously-skip-permissions -p "$prompt" --max-turns 50)
-  [ -n "$WORKER_MODEL" ] && claude_args+=(--model "$WORKER_MODEL")
-  [ -n "$MCP_CONFIG" ] && claude_args+=(--mcp-config "$MCP_CONFIG")
+  # Write prompt to temp file for launcher
+  local prompt_file="$COLLAB_DIR/tasks/.prompt-${task_id}.txt"
+  echo "$prompt" > "$prompt_file"
 
-  # Spawn worker in background with role env vars for MCP server
-  local cmd_to_run
-  cmd_to_run=$(resolve_claude_cmd)
+  # Build launcher args
+  local launcher_args=(
+    "$task_id"
+    "$worktree"
+    "@$prompt_file"
+    --log-file "$logfile"
+    --wall-timeout "$wall_timeout"
+    --inactivity-timeout "300"
+    --project-root "$PROJECT_ROOT"
+  )
+  [ -n "$WORKER_MODEL" ] && launcher_args+=(--model "$WORKER_MODEL")
+  [ -n "$MCP_CONFIG" ] && launcher_args+=(--mcp-config "$MCP_CONFIG")
+  [ -f "$PROJECT_ROOT/se3.config.yaml" ] && launcher_args+=(--config-file "$PROJECT_ROOT/se3.config.yaml")
+
+  # Spawn worker using Python launcher with activity monitoring
   (
     cd "$worktree"
-    # Clear CLAUDECODE env var to avoid nested session detection
-    unset CLAUDECODE
-    local worker_exit=0
-    while [ -n "$cmd_to_run" ]; do
-      SE3_TASK_ID="$task_id" SE3_AGENT_ROLE="worker" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
-        timeout "$timeout_seconds" "$cmd_to_run" "${claude_args[@]}" > "$logfile" 2>&1
-      worker_exit=$?
-      if [ $worker_exit -eq 0 ]; then
-        break
-      fi
-      # Check for usage limit or timeout — try next command
-      if [ $worker_exit -eq 124 ] || is_usage_limit "$(cat "$logfile" 2>/dev/null)"; then
-        local next_cmd
-        next_cmd=$(resolve_next_claude_cmd "$cmd_to_run")
-        if [ -n "$next_cmd" ]; then
-          echo "[worker] Switching from '$cmd_to_run' to '$next_cmd'" >> "$logfile"
-          cmd_to_run="$next_cmd"
-          continue
-        fi
-      fi
-      break
-    done
-    echo $worker_exit > "$COLLAB_DIR/tasks/.exitcode-${task_id}"
+    python3 "$SCRIPT_DIR/collab-worker-launcher.py" "${launcher_args[@]}" 2>> "$logfile"
+    # Clean up prompt file
+    rm -f "$prompt_file"
   ) &
 
   local pid=$!
   update_task "$task_id" ".worker_pid = $pid"
 
-  log_info "Spawned worker for $task_id (PID $pid, timeout ${timeout_min}m)"
+  log_info "Spawned worker for $task_id (PID $pid, timeout ${timeout_min}m, inactivity 5m)"
 }
 
 wait_for_worker() {

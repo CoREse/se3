@@ -5,8 +5,13 @@ Supports multiple configured commands with automatic fallback on
 usage limits or timeouts.
 """
 
+import os
+import select
 import subprocess
 import sys
+import threading
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -250,3 +255,247 @@ class ClaudeRunner:
         Exit code 124 is the standard timeout(1) exit code.
         """
         return returncode == 124
+
+    def run_with_monitor(
+        self,
+        args: List[str],
+        log_file: Optional[Path] = None,
+        wall_timeout: Optional[int] = None,
+        inactivity_timeout: int = 300,
+        cwd: Optional[Path] = None,
+        env: Optional[Dict[str, str]] = None,
+        on_output: Optional[Callable[[str], None]] = None,
+    ) -> "MonitoredResult":
+        """Run Claude with activity-based monitoring and automatic command fallback.
+
+        This method provides real-time monitoring of the Claude process:
+        - Reads stdout/stderr continuously to detect "stuck" state
+        - Records last activity timestamp (any output)
+        - If no output for inactivity_timeout seconds, kills process and tries next command
+        - Optionally writes all output to log file in real-time
+        - Automatically switches to next configured command on usage limit / inactivity
+
+        Args:
+            args: Arguments to pass after the claude command.
+            log_file: Optional path to write all output (real-time).
+            wall_timeout: Maximum total runtime in seconds (None for no limit).
+            inactivity_timeout: Seconds without output before considering stuck.
+            cwd: Working directory.
+            env: Environment variables.
+            on_output: Optional callback for each line of output.
+
+        Returns:
+            MonitoredResult with exit code, output, and metadata.
+        """
+        start_time = time.time()
+        all_outputs = []
+
+        for cmd_index, cmd_entry in enumerate(self.commands):
+            cmd_name = cmd_entry["cmd"]
+            full_cmd = [cmd_name] + args
+
+            result = self._run_single_with_monitor(
+                full_cmd=full_cmd,
+                cmd_name=cmd_name,
+                cmd_index=cmd_index,
+                log_file=log_file,
+                wall_timeout=wall_timeout,
+                inactivity_timeout=inactivity_timeout,
+                cwd=cwd,
+                env=env,
+                on_output=on_output,
+                start_time=start_time,
+            )
+
+            all_outputs.append(f"=== Command: {cmd_name} ===")
+            all_outputs.append(result.output)
+
+            if result.success:
+                return MonitoredResult(
+                    returncode=result.returncode,
+                    output="\n".join(all_outputs),
+                    cmd_used=cmd_name,
+                    cmd_index=cmd_index,
+                    was_retry=cmd_index > 0,
+                )
+
+            # Check if we should retry
+            if result.should_retry and cmd_index < len(self.commands) - 1:
+                print(
+                    f"[claude-runner] Switching from '{cmd_name}' to "
+                    f"'{self.commands[cmd_index + 1]['cmd']}'...",
+                    file=sys.stderr,
+                )
+                continue
+
+            # Final command failed
+            return MonitoredResult(
+                returncode=result.returncode,
+                output="\n".join(all_outputs),
+                cmd_used=cmd_name,
+                cmd_index=cmd_index,
+                was_retry=cmd_index > 0,
+            )
+
+        # Should not reach here
+        return MonitoredResult(
+            returncode=1,
+            output="\n".join(all_outputs),
+            cmd_used="none",
+            cmd_index=-1,
+            was_retry=False,
+        )
+
+    def _run_single_with_monitor(
+        self,
+        full_cmd: List[str],
+        cmd_name: str,
+        cmd_index: int,
+        log_file: Optional[Path],
+        wall_timeout: Optional[int],
+        inactivity_timeout: int,
+        cwd: Optional[Path],
+        env: Optional[Dict[str, str]],
+        on_output: Optional[Callable[[str], None]],
+        start_time: float,
+    ) -> "_SingleRunResult":
+        """Run a single command with monitoring."""
+
+        proc = subprocess.Popen(
+            full_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=cwd,
+            env=env,
+            bufsize=1,
+            universal_newlines=True,
+        )
+
+        output_buffer = []
+        last_activity = time.time()
+        log_fh = None
+
+        if log_file:
+            log_file.parent.mkdir(parents=True, exist_ok=True)
+            log_fh = open(log_file, "a", encoding="utf-8")
+            log_fh.write(f"\n=== Starting: {' '.join(full_cmd)} ===\n")
+            log_fh.flush()
+
+        try:
+            while proc.poll() is None:
+                # Check wall timeout
+                if wall_timeout and (time.time() - start_time) > wall_timeout:
+                    proc.kill()
+                    proc.wait()
+                    msg = f"\n[claude-runner] Wall timeout ({wall_timeout}s) exceeded\n"
+                    output_buffer.append(msg)
+                    if log_fh:
+                        log_fh.write(msg)
+                        log_fh.flush()
+                    return _SingleRunResult(
+                        returncode=124,
+                        output="".join(output_buffer),
+                        success=False,
+                        should_retry=True,
+                    )
+
+                # Check for output with timeout
+                ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+
+                if ready:
+                    try:
+                        line = proc.stdout.readline()
+                        if line:
+                            last_activity = time.time()
+                            output_buffer.append(line)
+                            if log_fh:
+                                log_fh.write(line)
+                                log_fh.flush()
+                            if on_output:
+                                on_output(line)
+                    except Exception:
+                        pass
+                else:
+                    # No output available - check inactivity
+                    inactive_time = time.time() - last_activity
+                    if inactive_time > inactivity_timeout:
+                        proc.kill()
+                        proc.wait()
+                        msg = (
+                            f"\n[claude-runner] Inactivity timeout "
+                            f"({inactivity_timeout}s) - no output for {int(inactive_time)}s\n"
+                        )
+                        output_buffer.append(msg)
+                        if log_fh:
+                            log_fh.write(msg)
+                            log_fh.flush()
+                        return _SingleRunResult(
+                            returncode=124,
+                            output="".join(output_buffer),
+                            success=False,
+                            should_retry=True,
+                        )
+
+            # Process finished - read remaining output
+            remaining = proc.stdout.read()
+            if remaining:
+                output_buffer.append(remaining)
+                if log_fh:
+                    log_fh.write(remaining)
+                    log_fh.flush()
+
+            returncode = proc.returncode
+            output = "".join(output_buffer)
+
+            # Check for usage limit in output
+            if self.detect_usage_limit(returncode, output, ""):
+                msg = f"\n[claude-runner] Usage limit detected for '{cmd_name}'\n"
+                output += msg
+                if log_fh:
+                    log_fh.write(msg)
+                    log_fh.flush()
+                return _SingleRunResult(
+                    returncode=returncode,
+                    output=output,
+                    success=False,
+                    should_retry=True,
+                )
+
+            return _SingleRunResult(
+                returncode=returncode,
+                output=output,
+                success=returncode == 0,
+                should_retry=False,
+            )
+
+        finally:
+            if log_fh:
+                log_fh.close()
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+
+
+@dataclass
+class MonitoredResult:
+    """Result from run_with_monitor."""
+
+    returncode: int
+    output: str
+    cmd_used: str
+    cmd_index: int
+    was_retry: bool
+
+    @property
+    def success(self) -> bool:
+        return self.returncode == 0
+
+
+@dataclass
+class _SingleRunResult:
+    """Internal result from a single command run."""
+
+    returncode: int
+    output: str
+    success: bool
+    should_retry: bool
