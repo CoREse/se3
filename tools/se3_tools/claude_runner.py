@@ -348,7 +348,15 @@ class ClaudeRunner:
         """Detect if the failure is due to usage/rate limit.
 
         Checks exit code and output for known limit indicators.
+        Only checks when returncode is non-zero to avoid false positives
+        from source code content (e.g., reading claude_runner.py).
         """
+        # Only check for usage limit if command actually failed
+        # This avoids false positives when worker reads source files
+        # containing keywords like "usage limit" in docstrings
+        if returncode == 0:
+            return False
+
         combined = (stdout or "").lower() + (stderr or "").lower()
 
         for keyword in USAGE_LIMIT_KEYWORDS:

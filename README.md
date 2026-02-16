@@ -181,6 +181,8 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.8.3 | 2026-02-16 | Fix collab: detect_usage_limit() returns False when returncode=0 to avoid false positives from source code content
+| 1.8.2 | 2026-02-16 | Fix: Resolve git merge conflict in claude_runner.py docstring
 | 1.8.1 | 2026-02-16 | Fix framework version management: update SE3_FRAMEWORK_VERSION to 1.8.1, add version history entry
 | 1.7.8 | 2026-02-16 | 优化 human calls 检测和处理机制：使用文件系统事件和缓存提升变更检测效率，增强响应完整性检查（重复内容检测、结构验证、长度限制），改进处理流程（批量处理、状态管理优化）
 | 1.7.7 | 2026-02-16 | Fix collab: set max-turns to 0 (unlimited) instead of arbitrary limits; rely on timeout for control
