@@ -387,8 +387,7 @@ class ClaudeRunner:
         - Records last activity timestamp (any output)
         - If no output for inactivity_timeout seconds, kills process and tries next command
         - Optionally writes all output to log file in real-time
-<<<<<<< HEAD
-        - Automatically switches to next configured command on usage limit / inactivity / hang
+        - Automatically switches to next configured command on usage limit / inactivity
         - Handles @file syntax for prompt files
 
         Args:
