@@ -237,17 +237,12 @@ class ClaudeRunner:
         """Detect if the failure is due to usage/rate limit.
 
         Checks exit code and output for known limit indicators.
-        Also detects error_max_turns which often indicates internal throttling.
         """
         combined = (stdout or "").lower() + (stderr or "").lower()
 
         for keyword in USAGE_LIMIT_KEYWORDS:
             if keyword in combined:
                 return True
-
-        # Check for error_max_turns in JSON output (indicates internal limit/throttling)
-        if '"subtype":"error_max_turns"' in (stdout or ""):
-            return True
 
         # Exit code 2 is sometimes used for API errors including rate limits
         if returncode == 2 and ("error" in combined or "limit" in combined):
@@ -368,59 +363,30 @@ class ClaudeRunner:
     ) -> "_SingleRunResult":
         """Run a single command with monitoring."""
 
-        # Check if command exists (as executable or shell alias/function)
+        # Check if command exists
         import shutil
-        cmd_path = shutil.which(full_cmd[0])
-        is_alias = False
+        if not shutil.which(full_cmd[0]):
+            msg = f"\n[claude-runner] Command '{cmd_name}' not found, skipping...\n"
+            if log_file:
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(msg)
+            return _SingleRunResult(
+                returncode=127,  # Command not found
+                output=msg,
+                success=False,
+                should_retry=True,
+            )
 
-        if not cmd_path:
-            # Check if it's a shell alias or function by running bash -c type
-            check_result = subprocess.run(
-                ["bash", "-i", "-c", f"type {full_cmd[0]} 2>/dev/null || echo NOT_FOUND"],
-                capture_output=True,
-                text=True,
-                cwd=cwd,
-                env=env,
-            )
-            if "NOT_FOUND" not in check_result.stdout and check_result.returncode == 0:
-                is_alias = True
-                cmd_path = full_cmd[0]  # Use the alias name, will run via bash -i
-            else:
-                msg = f"\n[claude-runner] Command '{cmd_name}' not found, skipping...\n"
-                if log_file:
-                    log_file.parent.mkdir(parents=True, exist_ok=True)
-                    with open(log_file, "a", encoding="utf-8") as f:
-                        f.write(msg)
-                return _SingleRunResult(
-                    returncode=127,  # Command not found
-                    output=msg,
-                    success=False,
-                    should_retry=True,
-                )
-
-        # If it's an alias/function, run via bash -i to load ~/.bashrc
-        if is_alias:
-            # Escape the command and args for shell execution
-            escaped_args = ' '.join(subprocess.list2cmdline([arg]) for arg in full_cmd)
-            proc = subprocess.Popen(
-                ["bash", "-i", "-c", escaped_args],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                cwd=cwd,
-                env=env,
-                bufsize=1,
-                universal_newlines=True,
-            )
-        else:
-            proc = subprocess.Popen(
-                full_cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                cwd=cwd,
-                env=env,
-                bufsize=1,
-                universal_newlines=True,
-            )
+        proc = subprocess.Popen(
+            full_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=cwd,
+            env=env,
+            bufsize=1,
+            universal_newlines=True,
+        )
 
         output_buffer = []
         last_activity = time.time()
