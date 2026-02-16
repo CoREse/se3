@@ -129,7 +129,7 @@ Rules:
         "--print",
         "--output-format", "stream-json",
         "--verbose",
-        "--max-turns", "10",
+        "--max-turns", "0",  # 0 = unlimited, rely on timeout instead
         f"@{prompt_file}",  # Use file syntax to avoid CLI parsing issues
     ]
     if args.model:
