@@ -7,6 +7,7 @@ usage limits or timeouts.
 
 import os
 import select
+import signal
 import subprocess
 import sys
 import threading
@@ -371,6 +372,20 @@ class ClaudeRunner:
             universal_newlines=True,
         )
 
+        # Set up signal handlers to properly terminate child on SIGTERM/SIGINT
+        def signal_handler(signum, frame):
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+            sys.exit(128 + signum)
+
+        old_term = signal.signal(signal.SIGTERM, signal_handler)
+        old_int = signal.signal(signal.SIGINT, signal_handler)
+
         output_buffer = []
         last_activity = time.time()
         log_fh = None
@@ -469,6 +484,9 @@ class ClaudeRunner:
             )
 
         finally:
+            # Restore signal handlers
+            signal.signal(signal.SIGTERM, old_term)
+            signal.signal(signal.SIGINT, old_int)
             if log_fh:
                 log_fh.close()
             if proc.poll() is None:

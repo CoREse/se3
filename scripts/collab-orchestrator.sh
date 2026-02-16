@@ -213,13 +213,15 @@ Rules:
 
   # Use Python launcher with activity-based monitoring
   local logfile="$COLLAB_DIR/logs/manager-$(date +%Y%m%d-%H%M%S).log"
-  local context_file="$COLLAB_DIR/.manager-context.txt"
-  local tasks_file="$COLLAB_DIR/.manager-tasks.txt"
+  # Use unique temp files to avoid race conditions with multiple managers
+  local tmp_id="$$-$(date +%s%N)"
+  local context_file="$COLLAB_DIR/.manager-context-${tmp_id}.txt"
+  local tasks_file="$COLLAB_DIR/.manager-tasks-${tmp_id}.txt"
   local rules_file="$SCRIPT_DIR/rules-manager.md"
 
   # Write context and tasks to temp files
-  echo "$event_context" > "$context_file"
-  echo "$tasks_summary" > "$tasks_file"
+  printf '%s\n' "$event_context" > "$context_file" || { log_error "Failed to write context file"; return 1; }
+  printf '%s\n' "$tasks_summary" > "$tasks_file" || { log_error "Failed to write tasks file"; rm -f "$context_file"; return 1; }
 
   local base_branch
   base_branch=$($JQ_CMD -r '.base_branch // "master"' "$COLLAB_DIR/config.json" 2>/dev/null)
@@ -241,11 +243,13 @@ Rules:
 
   # Run manager with launcher (handles command switching internally)
   log_info "Invoking manager: event=$event_type"
-  raw_result=$(python3 "$SCRIPT_DIR/collab-manager-launcher.py" "${launcher_args[@]}" 2>>"$logfile")
+  # Launcher handles its own logging, capture stderr separately for errors
+  local stderr_file="$COLLAB_DIR/.manager-stderr-${tmp_id}.log"
+  raw_result=$(python3 "$SCRIPT_DIR/collab-manager-launcher.py" "${launcher_args[@]}" 2>"$stderr_file")
   local exit_code=$?
 
   # Clean up temp files
-  rm -f "$context_file" "$tasks_file"
+  rm -f "$context_file" "$tasks_file" "$stderr_file"
 
   if [ $exit_code -eq 0 ] && [ -n "$raw_result" ]; then
     # Parse JSON from launcher output
@@ -362,11 +366,14 @@ $task_prompt"
   [ -f "$PROJECT_ROOT/se3.config.yaml" ] && launcher_args+=(--config-file "$PROJECT_ROOT/se3.config.yaml")
 
   # Spawn worker using Python launcher with activity monitoring
+  # Launcher handles its own logging internally
   (
     cd "$worktree"
-    python3 "$SCRIPT_DIR/collab-worker-launcher.py" "${launcher_args[@]}" 2>> "$logfile"
+    python3 "$SCRIPT_DIR/collab-worker-launcher.py" "${launcher_args[@]}"
+    local worker_exit=$?
     # Clean up prompt file
     rm -f "$prompt_file"
+    exit $worker_exit
   ) &
 
   local pid=$!
