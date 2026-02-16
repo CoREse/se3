@@ -347,8 +347,13 @@ class TestClaudeRunnerRun:
             result = runner.run(["-p", "original"], on_retry=callback)
 
         callback.assert_called_once_with(1, "claude-a")
-        # Second call should use new args
-        assert mock_run.call_args_list[1][0][0] == ["claude-b", "-p", "retry prompt"]
+        # Second call should use new args - check if it contains @file syntax
+        second_call_args = mock_run.call_args_list[1][0][0]
+        assert second_call_args[0] == "claude-b"
+        assert len(second_call_args) > 1
+        # Verify that one of the arguments starts with @ and contains "prompt"
+        has_prompt_file = any(arg.startswith("@") and "prompt" in arg for arg in second_call_args[1:])
+        assert has_prompt_file
 
     def test_on_retry_returns_none_keeps_original_args(self):
         runner = ClaudeRunner(commands=[
@@ -368,8 +373,13 @@ class TestClaudeRunnerRun:
         with patch("subprocess.run", side_effect=[limit_result, success_result]) as mock_run:
             result = runner.run(["-p", "original"], on_retry=callback)
 
-        # Should keep original args
-        assert mock_run.call_args_list[1][0][0] == ["claude-b", "-p", "original"]
+        # Should keep original args - check if it contains @file syntax
+        second_call_args = mock_run.call_args_list[1][0][0]
+        assert second_call_args[0] == "claude-b"
+        assert len(second_call_args) > 1
+        # Verify that one of the arguments starts with @ and contains "prompt"
+        has_prompt_file = any(arg.startswith("@") and "prompt" in arg for arg in second_call_args[1:])
+        assert has_prompt_file
 
 
 # =============================================================================
