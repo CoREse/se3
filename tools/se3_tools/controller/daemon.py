@@ -145,16 +145,21 @@ class SessionController:
         self.session_id: Optional[str] = None
 
     def start_interactive(self, objective: Optional[str] = None):
-        """Start an interactive Claude session."""
+        """Start an interactive Claude session.
+
+        Uses ClaudeRunner for priority-based command selection.
+        """
+        from ..claude_runner import ClaudeRunner
+
         self.session_id = f"session-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
         # Build initial prompt
         prompt = self._build_prompt(objective)
 
-        # Start Claude in interactive mode
-        cmd = ["claude"]
+        runner = ClaudeRunner(self.project_root)
+        args = []
         if prompt:
-            cmd.extend(["-p", prompt])
+            args.extend(["-p", prompt])
 
         print(f"[controller] Starting session: {self.session_id}")
 
@@ -162,10 +167,12 @@ class SessionController:
         self.watcher.start()
 
         try:
-            # Run Claude interactively
-            self.claude_process = subprocess.Popen(
-                cmd,
+            # Run Claude interactively (no capture, pass through to terminal)
+            self.claude_process, _ = runner.popen(
+                args=args,
                 cwd=self.project_root,
+                stdout=None,
+                stderr=None,
             )
             self.claude_process.wait()
         except KeyboardInterrupt:
@@ -260,21 +267,24 @@ class CollaborationController:
         self._event_loop()
 
     def _spawn_manager(self, event_type: str, context: str):
-        """Spawn manager agent as separate Claude process."""
+        """Spawn manager agent as separate Claude process.
+
+        Uses ClaudeRunner for priority-based command selection.
+        """
+        from ..claude_runner import ClaudeRunner
+
         print(f"[collab] Spawning manager for {event_type}")
 
-        cmd = [
-            "claude",
+        args = [
             "-p", f"You are SE3 Collaboration Manager. Event: {event_type}\nContext: {context}",
             "--output-format", "json",
             "--max-turns", "30",
         ]
 
-        proc = subprocess.Popen(
-            cmd,
+        runner = ClaudeRunner(self.project_root)
+        proc, _ = runner.popen(
+            args=args,
             cwd=self.project_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
         )
 
         # Wait for completion and process result
@@ -282,13 +292,19 @@ class CollaborationController:
 
         if proc.returncode == 0:
             try:
-                result = json.loads(stdout.decode())
+                result = json.loads(stdout.decode() if isinstance(stdout, bytes) else stdout)
                 self._process_manager_result(result)
             except json.JSONDecodeError:
-                print(f"[collab] Manager returned invalid JSON: {stdout.decode()[:200]}")
+                output = stdout.decode() if isinstance(stdout, bytes) else stdout
+                print(f"[collab] Manager returned invalid JSON: {output[:200]}")
 
     def _spawn_worker(self, task_id: str, prompt: str):
-        """Spawn worker agent as separate Claude process."""
+        """Spawn worker agent as separate Claude process.
+
+        Uses ClaudeRunner for priority-based command selection.
+        """
+        from ..claude_runner import ClaudeRunner
+
         print(f"[collab] Spawning worker for {task_id}")
 
         # Create worktree
@@ -302,17 +318,12 @@ class CollaborationController:
                 check=True,
             )
 
-        cmd = [
-            "claude",
-            "-p", prompt,
-            "--max-turns", "50",
-        ]
+        args = ["-p", prompt, "--max-turns", "50"]
 
-        proc = subprocess.Popen(
-            cmd,
+        runner = ClaudeRunner(self.project_root)
+        proc, _ = runner.popen(
+            args=args,
             cwd=worktree,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
         )
 
         self.active_workers[task_id] = proc

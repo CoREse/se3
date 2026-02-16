@@ -12,6 +12,17 @@ session:
   progress_file: progress.md
   max_progress_entries: 20
 
+# Claude command resolution (optional)
+# Multiple commands with priority-based fallback on usage limit / timeout
+# Higher priority = tried first. Project-level overrides global (~/.se3/config.yaml)
+# claude_commands:
+#   - cmd: "claude"
+#     priority: 10
+#   - cmd: "kclaude"
+#     priority: 5
+#   - cmd: "/usr/local/bin/claude-alt"
+#     priority: 1
+
 # E2E / Visual regression testing (optional)
 # Requires Puppeteer MCP or similar browser automation tool
 e2e:

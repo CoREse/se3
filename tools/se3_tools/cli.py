@@ -1,5 +1,9 @@
 """SE 3.0 CLI - Main entry point for se3 commands."""
 
+import json
+from pathlib import Path
+from typing import Optional
+
 import typer
 
 from . import __version__, SE3_FRAMEWORK_VERSION
@@ -53,6 +57,40 @@ app.add_typer(commit.app, name="commit", help="Commit changes with SE3 verificat
 app.command(name="daemon")(controller_daemon.daemon)
 app.command(name="session")(controller_daemon.session)
 app.command(name="collab-v2")(controller_daemon.collab)
+
+
+@app.command(name="claude-cmd")
+def claude_cmd(
+    all_cmds: bool = typer.Option(False, "--all", help="Output all commands as JSON sorted by priority"),
+    next_after: Optional[str] = typer.Option(None, "--next", help="Output the next command after the given one"),
+    project_root: Optional[str] = typer.Option(None, "--project-root", "-p", help="Project root directory"),
+):
+    """Show configured Claude commands by priority.
+
+    Used by bash scripts to resolve which Claude command to use.
+    """
+    from .config import load_claude_commands
+
+    root = Path(project_root) if project_root else Path.cwd()
+    commands = load_claude_commands(root)
+
+    if all_cmds:
+        typer.echo(json.dumps(commands))
+    elif next_after:
+        found = False
+        for i, entry in enumerate(commands):
+            if entry["cmd"] == next_after:
+                if i + 1 < len(commands):
+                    typer.echo(commands[i + 1]["cmd"])
+                else:
+                    typer.echo("")  # No next command
+                found = True
+                break
+        if not found:
+            typer.echo("")  # Command not in list
+    else:
+        # Default: output highest-priority command
+        typer.echo(commands[0]["cmd"])
 
 
 if __name__ == "__main__":

@@ -15,7 +15,6 @@ Message generation:
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -248,9 +247,9 @@ def generate_message_ai(project_root: Path) -> Optional[str]:
     """Generate a commit message using claude -p from the staged diff.
 
     Returns the generated message, or None if AI generation fails/unavailable.
+    Uses ClaudeRunner for priority-based command fallback.
     """
-    if not shutil.which("claude"):
-        return None
+    from ..claude_runner import ClaudeRunner
 
     diff = get_staged_diff(project_root)
     if not diff:
@@ -264,9 +263,10 @@ def generate_message_ai(project_root: Path) -> Optional[str]:
     prompt = COMMIT_MESSAGE_PROMPT.format(diff=diff)
 
     try:
-        result = subprocess.run(
-            ["claude", "-p", prompt, "--max-turns", "1"],
-            capture_output=True, text=True, timeout=60,
+        runner = ClaudeRunner(project_root)
+        result = runner.run(
+            args=["-p", prompt, "--max-turns", "1"],
+            timeout=60,
             cwd=project_root,
         )
         if result.returncode == 0 and result.stdout.strip():

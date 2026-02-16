@@ -25,8 +25,6 @@ import typer
 
 app = typer.Typer(invoke_without_command=True)
 
-# Claude CLI command - can be configured via env var or config
-CLAUDE_CMD = os.environ.get("SE3_CLAUDE_CMD", "kclaude")
 
 
 def find_project_root() -> Path:
@@ -275,7 +273,12 @@ def generate_worker_prompt(project_root: Path, task_id: str) -> str:
 
 
 def launch_manager(project_root: Path, event_type: str, context: str) -> subprocess.Popen:
-    """Launch manager as independent Claude process."""
+    """Launch manager as independent Claude process.
+
+    Uses ClaudeRunner for priority-based command selection.
+    """
+    from ..claude_runner import ClaudeRunner
+
     prompt = generate_manager_prompt(project_root, event_type, context)
 
     # Write prompt to file for reference
@@ -283,32 +286,29 @@ def launch_manager(project_root: Path, event_type: str, context: str) -> subproc
     prompt_file = collab_dir / "logs" / f"manager-{event_type}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.prompt"
     prompt_file.write_text(prompt)
 
-    # Launch Claude with the prompt
-    cmd = [
-        CLAUDE_CMD,
-        "-p", prompt,
-        "--output-format", "json",
-        "--max-turns", "30"
-    ]
-
+    args = ["-p", prompt, "--output-format", "json", "--max-turns", "30"]
     env = {**dict(os.environ), "SE3_AGENT_ROLE": "manager", "SE3_PROJECT_ROOT": str(project_root)}
 
-    log_file = collab_dir / "logs" / f"manager-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
-
-    # Use tee to both display and log output
-    return subprocess.Popen(
-        cmd,
+    runner = ClaudeRunner(project_root)
+    proc, _ = runner.popen(
+        args=args,
+        cwd=project_root,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        env=env,
-        cwd=project_root,
         bufsize=1,
-        universal_newlines=True
+        universal_newlines=True,
     )
+    return proc
 
 
 def launch_worker(project_root: Path, task_id: str) -> subprocess.Popen:
-    """Launch worker as independent Claude process in worktree."""
+    """Launch worker as independent Claude process in worktree.
+
+    Uses ClaudeRunner for priority-based command selection.
+    """
+    from ..claude_runner import ClaudeRunner
+
     collab_dir = get_collab_dir(project_root)
     task_file = collab_dir / "tasks" / f"{task_id}.json"
     task = json.loads(task_file.read_text())
@@ -333,13 +333,7 @@ def launch_worker(project_root: Path, task_id: str) -> subprocess.Popen:
     prompt_file = collab_dir / "logs" / f"worker-{task_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.prompt"
     prompt_file.write_text(prompt)
 
-    # Launch Claude with the prompt
-    cmd = [
-        CLAUDE_CMD,
-        "-p", prompt,
-        "--max-turns", "50"
-    ]
-
+    args = ["-p", prompt, "--max-turns", "50"]
     env = {
         **dict(os.environ),
         "SE3_TASK_ID": task_id,
@@ -349,13 +343,15 @@ def launch_worker(project_root: Path, task_id: str) -> subprocess.Popen:
 
     log_file = collab_dir / "logs" / f"worker-{task_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
 
-    return subprocess.Popen(
-        cmd,
+    runner = ClaudeRunner(project_root)
+    proc, _ = runner.popen(
+        args=args,
+        cwd=Path(worktree),
+        env=env,
         stdout=subprocess.PIPE,
         stderr=open(log_file, "w"),
-        env=env,
-        cwd=worktree
     )
+    return proc
 
 
 def start_daemon(project_root: Path, objective: str, resume: bool = False):

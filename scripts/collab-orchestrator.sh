@@ -37,6 +37,42 @@ WORKER_RULES=""
 MANAGER_RULES=""
 MOCK_MODE="${MOCK_MODE:-false}"  # Set to true for testing with mock-claude
 
+# --- Claude command resolution via se3 claude-cmd ---
+resolve_claude_cmd() {
+  # Returns the highest-priority configured Claude command.
+  # Falls back to "claude" if se3 claude-cmd is unavailable.
+  if [ "$MOCK_MODE" = "true" ]; then
+    echo "$SCRIPT_DIR/mock-claude"
+    return
+  fi
+  local resolved
+  resolved=$(se3 claude-cmd -p "$PROJECT_ROOT" 2>/dev/null) || resolved="claude"
+  echo "${resolved:-claude}"
+}
+
+resolve_next_claude_cmd() {
+  # Returns the next Claude command after the given one.
+  # Empty string if no more commands available.
+  local current="$1"
+  if [ "$MOCK_MODE" = "true" ]; then
+    echo ""
+    return
+  fi
+  se3 claude-cmd --next "$current" -p "$PROJECT_ROOT" 2>/dev/null || echo ""
+}
+
+is_usage_limit() {
+  # Check if output indicates a usage/rate limit.
+  local output="$1"
+  local lower
+  lower=$(echo "$output" | tr '[:upper:]' '[:lower:]')
+  case "$lower" in
+    *"usage limit"*|*"rate limit"*|*"too many requests"*|*"rate_limit"*|*"overloaded"*|*"capacity"*)
+      return 0 ;;
+  esac
+  return 1
+}
+
 # --- Color output ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -184,30 +220,47 @@ Rules:
     [ -n "$MANAGER_MODEL" ] && claude_args+=(--model "$MANAGER_MODEL")
     [ -n "$MCP_CONFIG" ] && claude_args+=(--mcp-config "$MCP_CONFIG")
 
-    local cmd_to_run="claude"
-    [ "$MOCK_MODE" = "true" ] && cmd_to_run="$SCRIPT_DIR/mock-claude"
-    if result=$(SE3_AGENT_ROLE="manager" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
-      timeout "$timeout_seconds" "$cmd_to_run" "${claude_args[@]}" 2>"$logfile"); then
-      # Validate JSON
-      if echo "$result" | $JQ_CMD -e '.action' &>/dev/null; then
-        log_ok "Manager responded: $(echo "$result" | $JQ_CMD -r '.action')"
-        echo "$result"
-        return 0
-      else
-        log_warn "Manager returned invalid JSON (attempt $((attempt+1)))"
-        prompt="Your previous response was not valid JSON. Please respond with ONLY valid JSON matching the schema. Previous response was:
+    local cmd_to_run
+    cmd_to_run=$(resolve_claude_cmd)
+
+    # Inner loop: try each claude command on usage limit / timeout
+    while [ -n "$cmd_to_run" ]; do
+      if result=$(SE3_AGENT_ROLE="manager" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
+        timeout "$timeout_seconds" "$cmd_to_run" "${claude_args[@]}" 2>"$logfile"); then
+        # Validate JSON
+        if echo "$result" | $JQ_CMD -e '.action' &>/dev/null; then
+          log_ok "Manager responded: $(echo "$result" | $JQ_CMD -r '.action')"
+          echo "$result"
+          return 0
+        else
+          log_warn "Manager returned invalid JSON (attempt $((attempt+1)))"
+          prompt="Your previous response was not valid JSON. Please respond with ONLY valid JSON matching the schema. Previous response was:
 $result
 
 Respond with valid JSON only."
-      fi
-    else
-      local exit_code=$?
-      if [ $exit_code -eq 124 ]; then
-        log_warn "Manager timed out (attempt $((attempt+1)))"
+          break  # Retry with same command on JSON error
+        fi
       else
-        log_warn "Manager failed with exit code $exit_code (attempt $((attempt+1)))"
+        local exit_code=$?
+        if [ $exit_code -eq 124 ]; then
+          log_warn "Manager timed out with '$cmd_to_run' (attempt $((attempt+1)))"
+        elif is_usage_limit "$(cat "$logfile" 2>/dev/null)"; then
+          log_warn "Usage limit hit with '$cmd_to_run', trying next command..."
+        else
+          log_warn "Manager failed with exit code $exit_code (attempt $((attempt+1)))"
+          break  # Non-limit failure, don't try next command
+        fi
+        # Try next claude command
+        local next_cmd
+        next_cmd=$(resolve_next_claude_cmd "$cmd_to_run")
+        if [ -n "$next_cmd" ]; then
+          log_info "Switching to '$next_cmd'"
+          cmd_to_run="$next_cmd"
+          continue
+        fi
+        break  # No more commands
       fi
-    fi
+    done
 
     attempt=$((attempt + 1))
   done
@@ -270,13 +323,31 @@ $task_prompt"
   [ -n "$MCP_CONFIG" ] && claude_args+=(--mcp-config "$MCP_CONFIG")
 
   # Spawn worker in background with role env vars for MCP server
-  local cmd_to_run="claude"
-  [ "$MOCK_MODE" = "true" ] && cmd_to_run="$SCRIPT_DIR/mock-claude"
+  local cmd_to_run
+  cmd_to_run=$(resolve_claude_cmd)
   (
     cd "$worktree"
-    SE3_TASK_ID="$task_id" SE3_AGENT_ROLE="worker" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
-      timeout "$timeout_seconds" "$cmd_to_run" "${claude_args[@]}" > "$logfile" 2>&1
-    echo $? > "$COLLAB_DIR/tasks/.exitcode-${task_id}"
+    local worker_exit=0
+    while [ -n "$cmd_to_run" ]; do
+      SE3_TASK_ID="$task_id" SE3_AGENT_ROLE="worker" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
+        timeout "$timeout_seconds" "$cmd_to_run" "${claude_args[@]}" > "$logfile" 2>&1
+      worker_exit=$?
+      if [ $worker_exit -eq 0 ]; then
+        break
+      fi
+      # Check for usage limit or timeout — try next command
+      if [ $worker_exit -eq 124 ] || is_usage_limit "$(cat "$logfile" 2>/dev/null)"; then
+        local next_cmd
+        next_cmd=$(resolve_next_claude_cmd "$cmd_to_run")
+        if [ -n "$next_cmd" ]; then
+          echo "[worker] Switching from '$cmd_to_run' to '$next_cmd'" >> "$logfile"
+          cmd_to_run="$next_cmd"
+          continue
+        fi
+      fi
+      break
+    done
+    echo $worker_exit > "$COLLAB_DIR/tasks/.exitcode-${task_id}"
   ) &
 
   local pid=$!
