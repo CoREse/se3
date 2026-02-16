@@ -181,6 +181,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.5.3 | 2026-02-16 | Fix collab orchestrator: clean stale tasks on new session, handle empty task list, do_plan supports full tasks array |
 | 1.5.2 | 2026-02-16 | Fix collab manager: use text output format, strip markdown fences from Claude response before JSON parsing |
 | 1.5.1 | 2026-02-16 | Fix collab daemon: pass objective to orchestrator script, clear CLAUDECODE env to prevent nested session error |
 | 1.5.0 | 2026-02-16 | Simplified collab: removed External Controller v2 (daemon, API, MCP). Bash orchestrator only. File-based async communication. |

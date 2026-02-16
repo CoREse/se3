@@ -433,8 +433,11 @@ get_pending_tasks() {
 
 all_tasks_terminal() {
   # Returns 0 if all tasks are in terminal state (done, failed, escalated)
+  # Returns 1 if no tasks exist (not terminal — still waiting for plan)
+  local has_tasks=false
   for task_file in "$COLLAB_DIR/tasks"/task-*.json; do
     [ -f "$task_file" ] || continue
+    has_tasks=true
     local status
     status=$($JQ_CMD -r '.status' "$task_file")
     case "$status" in
@@ -442,6 +445,8 @@ all_tasks_terminal() {
       *) return 1 ;;
     esac
   done
+  # If no tasks exist at all, not terminal
+  $has_tasks || return 1
   return 0
 }
 
@@ -628,26 +633,50 @@ process_manager_decision() {
 
 do_plan() {
   local decision="$1"
-  local task_json
+  local created=0
 
-  # Try single .task first, then .tasks[]
-  task_json=$(echo "$decision" | $JQ_CMD -c '.task // empty')
-  if [ -z "$task_json" ] || [ "$task_json" = "null" ]; then
-    # Fallback to array format
-    task_json=$(echo "$decision" | $JQ_CMD -c '.tasks[0] // empty')
+  # Try .tasks[] array first (multiple tasks)
+  local task_count
+  task_count=$(echo "$decision" | $JQ_CMD -r '.tasks | length // 0' 2>/dev/null || echo 0)
+
+  if [ "$task_count" -gt 0 ]; then
+    local i=0
+    while [ $i -lt "$task_count" ]; do
+      local task_json
+      task_json=$(echo "$decision" | $JQ_CMD -c ".tasks[$i]")
+      local task_id
+      task_id=$(echo "$task_json" | $JQ_CMD -r '.id')
+      if [ -n "$task_id" ] && [ "$task_id" != "null" ]; then
+        echo "$task_json" > "$COLLAB_DIR/tasks/${task_id}.json"
+        log_info "Created task: $task_id — $(echo "$task_json" | $JQ_CMD -r '.title')"
+        created=$((created + 1))
+      fi
+      i=$((i + 1))
+    done
   fi
 
-  if [ -z "$task_json" ] || [ "$task_json" = "null" ]; then
-    log_warn "No task found in plan decision"
+  # Fallback: try single .task object
+  if [ $created -eq 0 ]; then
+    local task_json
+    task_json=$(echo "$decision" | $JQ_CMD -c '.task // empty')
+    if [ -n "$task_json" ] && [ "$task_json" != "null" ]; then
+      local task_id
+      task_id=$(echo "$task_json" | $JQ_CMD -r '.id')
+      if [ -n "$task_id" ] && [ "$task_id" != "null" ]; then
+        echo "$task_json" > "$COLLAB_DIR/tasks/${task_id}.json"
+        log_info "Created task: $task_id — $(echo "$task_json" | $JQ_CMD -r '.title')"
+        created=$((created + 1))
+      fi
+    fi
+  fi
+
+  if [ $created -eq 0 ]; then
+    log_warn "No tasks found in plan decision"
+    log_warn "Decision was: $decision"
     return 1
   fi
 
-  local task_id
-  task_id=$(echo "$task_json" | $JQ_CMD -r '.id')
-  [ "$task_id" = "null" ] && return 1
-
-  echo "$task_json" > "$COLLAB_DIR/tasks/${task_id}.json"
-  log_info "Created task: $task_id — $(echo "$task_json" | $JQ_CMD -r '.title')"
+  log_info "Created $created task(s) from plan"
 }
 
 do_merge() {
@@ -862,6 +891,10 @@ run_main() {
     # State already in .collab/ — just re-enter the event loop
   else
     log_info "Starting collaboration session: $objective"
+
+    # Clean up old tasks from previous sessions
+    rm -f "$COLLAB_DIR/tasks"/task-*.json 2>/dev/null
+    rm -f "$COLLAB_DIR/tasks"/.exitcode-* 2>/dev/null
 
     # Create session config
     local base_branch

@@ -362,6 +362,14 @@ def start_daemon(project_root: Path, objective: str, resume: bool = False):
     collab_dir = get_collab_dir(project_root)
 
     if not resume:
+        # Clean up old tasks from previous sessions
+        tasks_dir = collab_dir / "tasks"
+        if tasks_dir.exists():
+            for f in tasks_dir.glob("task-*.json"):
+                f.unlink()
+            for f in tasks_dir.glob(".exitcode-*"):
+                f.unlink()
+
         # Create session config
         result = subprocess.run(
             ["git", "branch", "--show-current"],
