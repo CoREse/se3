@@ -178,6 +178,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.1.2 | 2026-02-16 | Fix collab orchestrator: jq-complete pipe assignments (`|`) and `+=` operator, MOCK_MODE unbound variable |
 | 1.1.1 | 2026-02-16 | Version management module with strict enforcement rules |
 | 1.1.0 | 2026-02-16 | Git Worktree Collaboration: independent entry mode (`--daemon`, `--manual`), multi-language human calls, version consistency check |
 | 1.0.0 | 2026-02-16 | Initial stable release: `se3 init`, `se3 update`, `se3 commit`, `se3 collab`, Semantic Versioning 2.0.0 |

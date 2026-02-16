@@ -35,6 +35,7 @@ HUMAN_CALL_LANGUAGE="en"  # Default language for human call messages
 MCP_CONFIG=""  # Set if collab MCP server config exists
 WORKER_RULES=""
 MANAGER_RULES=""
+MOCK_MODE="${MOCK_MODE:-false}"  # Set to true for testing with mock-claude
 
 # --- Color output ---
 RED='\033[0;31m'
