@@ -58,6 +58,89 @@ class ClaudeRunner:
         else:
             self.commands = load_claude_commands(project_root)
 
+    @staticmethod
+    def _resolve_args(args: List[str], cwd: Optional[Path] = None) -> List[str]:
+        """Resolve arguments, handling @file syntax for prompt files.
+
+        If an argument starts with "@", treat it as a file path and read the
+        contents. This handles cases where prompt content is too long for
+        command-line arguments.
+
+        Args:
+            args: Original arguments list
+            cwd: Working directory for relative paths
+
+        Returns:
+            Resolved arguments list with @file syntax replaced
+        """
+        resolved = []
+        i = 0
+        while i < len(args):
+            arg = args[i]
+
+            # Handle @file syntax
+            if arg.startswith("@"):
+                file_path = Path(arg[1:])
+                # If path is relative, use cwd if provided
+                if not file_path.is_absolute() and cwd:
+                    file_path = cwd / file_path
+
+                if file_path.exists():
+                    # Write content to temp file and use @ syntax
+                    # This avoids command line length limitations
+                    import tempfile
+                    temp_dir = cwd or Path.cwd()
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.prompt',
+                                                   dir=temp_dir, delete=False,
+                                                   encoding='utf-8') as f:
+                        f.write(file_path.read_text(encoding='utf-8'))
+                        temp_file = Path(f.name)
+                    resolved.append(f"@{temp_file}")
+                else:
+                    # If file not found, keep original arg
+                    resolved.append(arg)
+            elif arg in ["-p", "--prompt"] and (i + 1) < len(args):
+                # Handle -p/--prompt with file content
+                i += 1
+                prompt_arg = args[i]
+
+                if prompt_arg.startswith("@"):
+                    file_path = Path(prompt_arg[1:])
+                    if not file_path.is_absolute() and cwd:
+                        file_path = cwd / file_path
+
+                    if file_path.exists():
+                        # Write content to temp file and use @ syntax
+                        import tempfile
+                        temp_dir = cwd or Path.cwd()
+                        with tempfile.NamedTemporaryFile(mode='w', suffix='.prompt',
+                                                       dir=temp_dir, delete=False,
+                                                       encoding='utf-8') as f:
+                            f.write(file_path.read_text(encoding='utf-8'))
+                            temp_file = Path(f.name)
+                        resolved.append(arg)
+                        resolved.append(f"@{temp_file}")
+                    else:
+                        resolved.append(arg)
+                        resolved.append(prompt_arg)
+                else:
+                    # Regular prompt text - write to temp file to avoid CLI issues
+                    import tempfile
+                    temp_dir = cwd or Path.cwd()
+                    with tempfile.NamedTemporaryFile(mode='w', suffix='.prompt',
+                                                   dir=temp_dir, delete=False,
+                                                   encoding='utf-8') as f:
+                        f.write(prompt_arg)
+                        temp_file = Path(f.name)
+                    resolved.append(arg)
+                    resolved.append(f"@{temp_file}")
+            else:
+                resolved.append(arg)
+
+            i += 1
+
+        return resolved
+
     def run(
         self,
         args: List[str],
@@ -69,10 +152,10 @@ class ClaudeRunner:
         """Run Claude synchronously with fallback.
 
         Tries each command in priority order. On usage limit or timeout,
-        switches to the next command.
+        switches to the next command. Handles @file syntax for prompt files.
 
         Args:
-            args: Arguments to pass after the claude command (e.g. ["-p", prompt]).
+            args: Arguments to pass after the claude command (e.g. ["-p", prompt] or ["@prompt.txt"]).
             timeout: Timeout in seconds.
             cwd: Working directory.
             env: Environment variables.
@@ -87,6 +170,7 @@ class ClaudeRunner:
             AllCommandsExhausted: If all commands fail with usage limit/timeout.
         """
         last_result = None
+        temp_files = []
 
         for i, cmd_entry in enumerate(self.commands):
             cmd_name = cmd_entry["cmd"]
@@ -98,7 +182,14 @@ class ClaudeRunner:
                 if new_args is not None:
                     current_args = new_args
 
-            full_cmd = [cmd_name] + current_args
+            # Resolve arguments (handle @file syntax)
+            resolved_args = self._resolve_args(current_args, cwd)
+            # Collect temp files to clean up later
+            for arg in resolved_args:
+                if arg.startswith("@"):
+                    temp_files.append(Path(arg[1:]))
+
+            full_cmd = [cmd_name] + resolved_args
 
             try:
                 result = subprocess.run(
@@ -139,6 +230,13 @@ class ClaudeRunner:
         if last_result is not None:
             return last_result
 
+        # Clean up temp files
+        for temp_file in temp_files:
+            try:
+                temp_file.unlink(missing_ok=True)
+            except Exception:
+                pass
+
         # Should not reach here, but just in case
         return subprocess.CompletedProcess(
             args=[], returncode=1, stdout="", stderr="No claude commands configured"
@@ -156,8 +254,10 @@ class ClaudeRunner:
     ) -> Tuple[subprocess.Popen, int]:
         """Start Claude asynchronously (for collab workers/managers).
 
+        Handles @file syntax for prompt files to avoid command-line length issues.
+
         Args:
-            args: Arguments to pass after the claude command.
+            args: Arguments to pass after the claude command (e.g. ["-p", prompt] or ["@prompt.txt"]).
             cwd: Working directory.
             env: Environment variables.
             stdout: stdout handling (default PIPE).
@@ -172,7 +272,9 @@ class ClaudeRunner:
             cmd_index = len(self.commands) - 1
 
         cmd_entry = self.commands[cmd_index]
-        full_cmd = [cmd_entry["cmd"]] + args
+        # Resolve arguments (handle @file syntax)
+        resolved_args = self._resolve_args(args, cwd)
+        full_cmd = [cmd_entry["cmd"]] + resolved_args
 
         proc = subprocess.Popen(
             full_cmd,
@@ -285,10 +387,12 @@ class ClaudeRunner:
         - Records last activity timestamp (any output)
         - If no output for inactivity_timeout seconds, kills process and tries next command
         - Optionally writes all output to log file in real-time
+<<<<<<< HEAD
         - Automatically switches to next configured command on usage limit / inactivity / hang
+        - Handles @file syntax for prompt files
 
         Args:
-            args: Arguments to pass after the claude command.
+            args: Arguments to pass after the claude command (e.g. ["-p", prompt] or ["@prompt.txt"]).
             log_file: Optional path to write all output (real-time).
             wall_timeout: Maximum total runtime in seconds (None for no limit).
             inactivity_timeout: Seconds without output before considering stuck.
@@ -303,27 +407,23 @@ class ClaudeRunner:
         start_time = time.time()
         all_outputs = []
 
+        temp_files = []
         for cmd_index, cmd_entry in enumerate(self.commands):
             cmd_name = cmd_entry["cmd"]
-            full_cmd = [cmd_name] + args
 
-            result = self._run_single_with_monitor(
-                full_cmd=full_cmd,
-                cmd_name=cmd_name,
-                cmd_index=cmd_index,
-                log_file=log_file,
-                wall_timeout=wall_timeout,
-                inactivity_timeout=inactivity_timeout,
-                cwd=cwd,
-                env=env,
-                on_output=on_output,
-                on_activity=on_activity,
-                start_time=start_time,
+            # Resolve arguments (handle @file syntax)
+            resolved_args = self._resolve_args(args, cwd)
+            # Collect temp files to clean up later
+            for arg in resolved_args:
+                if arg.startswith("@"):
+                    temp_files.append(Path(arg[1:]))
+
+            full_cmd = [cmd_name] + resolved_args
+
             print(
                 f"[claude-runner] Attempting command {cmd_index + 1}/{len(self.commands)}: '{cmd_name}'",
                 file=sys.stderr,
             )
-
             try:
                 result = self._run_single_with_monitor(
                     full_cmd=full_cmd,
@@ -400,6 +500,13 @@ class ClaudeRunner:
                         cmd_index=cmd_index,
                         was_retry=cmd_index > 0,
                     )
+
+        # Clean up temp files
+        for temp_file in temp_files:
+            try:
+                temp_file.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         # Should not reach here
         return MonitoredResult(
