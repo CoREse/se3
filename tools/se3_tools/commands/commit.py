@@ -265,7 +265,7 @@ def generate_message_ai(project_root: Path) -> Optional[str]:
     try:
         runner = ClaudeRunner(project_root)
         result = runner.run(
-            args=["-p", prompt, "--max-turns", "1"],
+            args=["--dangerously-skip-permissions", "-p", prompt, "--max-turns", "1"],
             timeout=60,
             cwd=project_root,
         )

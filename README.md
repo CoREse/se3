@@ -178,6 +178,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.5.0 | 2026-02-16 | Simplified collab: removed External Controller v2 (daemon, API, MCP). Bash orchestrator only. File-based async communication. |
 | 1.4.0 | 2026-02-16 | Claude Command Resolver: priority-based multi-command fallback on usage limit/timeout, unified config module, `se3 claude-cmd` CLI |
 | 1.3.0 | 2026-02-16 | Complete External Controller: MCP server, HTTP API, session persistence, auto-commit, collab v2 integration |
 | 1.2.0 | 2026-02-16 | External Controller: session daemon with auto-commit, collaboration outside Claude (fixes nested process limitation) |
