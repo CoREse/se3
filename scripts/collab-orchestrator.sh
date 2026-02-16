@@ -484,7 +484,7 @@ health_check_workers() {
 
   for task_file in "$COLLAB_DIR/tasks"/task-*.json; do
     [ -f "$task_file" ] || continue
-    local status pid worktree stale_min
+    local status pid worktree stale_min last_activity
     status=$($JQ_CMD -r '.status' "$task_file")
     pid=$($JQ_CMD -r '.worker_pid // 0' "$task_file")
 
@@ -500,30 +500,34 @@ health_check_workers() {
       continue
     fi
 
-    # Check git activity for staleness
-    worktree=$($JQ_CMD -r '.worktree' "$task_file")
-    [ "${worktree:0:1}" != "/" ] && worktree="$PROJECT_ROOT/$worktree"
+    # Check activity for staleness based on last_activity timestamp
     stale_min=$STALE_THRESHOLD_MINUTES
 
-    if [ -d "$worktree/.git" ] || [ -f "$worktree/.git" ]; then
-      local last_commit
-      last_commit=$(git -C "$worktree" log -1 --format=%ct 2>/dev/null || echo 0)
-      local started_at
-      started_at=$($JQ_CMD -r '.started_at // 0' "$task_file")
-      # Use started_at if no commits yet
-      [ "$last_commit" = "0" ] && last_commit=$(date -d "$started_at" +%s 2>/dev/null || echo "$now")
+    # Get last_activity or fall back to started_at
+    last_activity=$($JQ_CMD -r '.health.last_activity // .started_at // ""' "$task_file")
+    if [ -z "$last_activity" ] || [ "$last_activity" = "null" ]; then
+      log_warn "Task $task_file has no last_activity or started_at, skipping staleness check"
+      continue
+    fi
 
-      local elapsed=$(( (now - last_commit) / 60 ))
-      if [ $elapsed -gt $stale_min ]; then
-        local task_id
-        task_id=$($JQ_CMD -r '.id' "$task_file")
-        log_warn "Worker $task_id stale (${elapsed}m since last activity). Killing."
-        kill -TERM "$pid" 2>/dev/null
-        sleep 10
-        kill -KILL "$pid" 2>/dev/null || true
-        update_task "$task_id" '.status = "timeout" | .completed_at = now'
-        handle_worker_exit "$task_id" 124
-      fi
+    # Convert ISO8601 to timestamp (seconds since epoch)
+    local last_activity_ts
+    last_activity_ts=$(date -d "$last_activity" +%s 2>/dev/null || echo 0)
+    if [ "$last_activity_ts" -eq 0 ]; then
+      log_warn "Failed to parse last_activity: $last_activity"
+      continue
+    fi
+
+    local elapsed_min=$(( (now - last_activity_ts) / 60 ))
+    if [ "$elapsed_min" -gt "$stale_min" ]; then
+      local task_id
+      task_id=$($JQ_CMD -r '.id' "$task_file")
+      log_warn "Worker $task_id stale (${elapsed_min}m since last activity). Killing."
+      kill -TERM "$pid" 2>/dev/null
+      sleep 10
+      kill -KILL "$pid" 2>/dev/null || true
+      update_task "$task_id" '.status = "timeout" | .completed_at = now'
+      handle_worker_exit "$task_id" 124
     fi
   done
 }

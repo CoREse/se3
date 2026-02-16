@@ -348,6 +348,22 @@ def launch_worker(project_root: Path, task_id: str) -> subprocess.Popen:
     log_file = collab_dir / "logs" / f"worker-{task_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
     timeout_min = task.get("health", {}).get("timeout_minutes", 60)
 
+    # Initialize last_activity if not present
+    if "last_activity" not in task.get("health", {}):
+        task["health"]["last_activity"] = datetime.now().isoformat()
+        task_file.write_text(json.dumps(task, indent=2))
+
+    # Activity callback: update task's last_activity timestamp whenever output is received
+    def on_activity():
+        try:
+            with open(task_file, "r", encoding="utf-8") as f:
+                current_task = json.load(f)
+            current_task["health"]["last_activity"] = datetime.now().isoformat()
+            with open(task_file, "w", encoding="utf-8") as f:
+                json.dump(current_task, f, indent=2)
+        except Exception as e:
+            print(f"[collab] Failed to update last_activity: {e}", file=sys.stderr)
+
     runner = ClaudeRunner(project_root)
 
     # Use run_with_monitor for activity-based monitoring and command fallback
@@ -358,6 +374,7 @@ def launch_worker(project_root: Path, task_id: str) -> subprocess.Popen:
         inactivity_timeout=300,  # 5 minutes without output = stuck
         cwd=Path(worktree),
         env=env,
+        on_activity=on_activity,
     )
 
     # Create a simple wrapper object for compatibility
