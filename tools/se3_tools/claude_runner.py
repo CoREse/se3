@@ -237,12 +237,17 @@ class ClaudeRunner:
         """Detect if the failure is due to usage/rate limit.
 
         Checks exit code and output for known limit indicators.
+        Also detects error_max_turns which often indicates internal throttling.
         """
         combined = (stdout or "").lower() + (stderr or "").lower()
 
         for keyword in USAGE_LIMIT_KEYWORDS:
             if keyword in combined:
                 return True
+
+        # Check for error_max_turns in JSON output (indicates internal limit/throttling)
+        if '"subtype":"error_max_turns"' in (stdout or ""):
+            return True
 
         # Exit code 2 is sometimes used for API errors including rate limits
         if returncode == 2 and ("error" in combined or "limit" in combined):
