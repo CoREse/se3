@@ -30,7 +30,9 @@ def load_project_config(project_root: Path) -> Dict[str, Any]:
             import yaml
             with open(config_file) as f:
                 return yaml.safe_load(f) or {}
-        except Exception:
+        except Exception as e:
+            import sys
+            print(f"[se3-config] Warning: Failed to parse {config_file}: {e}", file=sys.stderr)
             pass
     return {}
 
