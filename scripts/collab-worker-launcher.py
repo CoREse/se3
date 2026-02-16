@@ -68,9 +68,12 @@ def main():
 
     # Build claude args
     # Note: -p/--print is a flag (no value), prompt is a positional argument
+    # Use stream-json for real-time output (enables activity-based timeout)
     claude_args = [
         "--dangerously-skip-permissions",
         "--print",
+        "--output-format", "stream-json",
+        "--verbose",
         "--max-turns", "50",
         prompt,  # positional argument
     ]
