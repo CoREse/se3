@@ -181,6 +181,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.7.6 | 2026-02-16 | Fix collab: increase manager max-turns from 3 to 10 (was hitting limit when reading files for planning)
 | 1.7.5 | 2026-02-16 | Fix collab: use `@file` syntax for prompt passing to avoid CLI parsing issues (manager/worker launchers)
 | 1.7.4 | 2026-02-16 | Fix collab: use `--output-format stream-json --verbose` for real-time output (enables activity-based timeout)
 | 1.7.3 | 2026-02-16 | Fix collab: `-p` is a flag not an option; pass prompt as positional arg
