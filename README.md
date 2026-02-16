@@ -181,6 +181,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.7.0 | 2026-02-16 | Fix collab: skip missing commands (exit 127), improve JSON extraction from Claude envelope
 | 1.6.9 | 2026-02-16 | Fix collab: add `error_max_turns` to usage limit detection (was preventing command switch)
 | 1.6.8 | 2026-02-16 | Fix collab: launcher crash handling, select() EINTR handling, worker exit code capture
 | 1.6.7 | 2026-02-16 | Fix collab: add YAML parse error warning; fix se3.config.yaml comment format

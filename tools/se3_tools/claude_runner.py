@@ -368,6 +368,21 @@ class ClaudeRunner:
     ) -> "_SingleRunResult":
         """Run a single command with monitoring."""
 
+        # Check if command exists before running
+        import shutil
+        if not shutil.which(full_cmd[0]):
+            msg = f"\n[claude-runner] Command '{cmd_name}' not found, skipping...\n"
+            if log_file:
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(log_file, "a", encoding="utf-8") as f:
+                    f.write(msg)
+            return _SingleRunResult(
+                returncode=127,  # Command not found
+                output=msg,
+                success=False,
+                should_retry=True,
+            )
+
         proc = subprocess.Popen(
             full_cmd,
             stdout=subprocess.PIPE,

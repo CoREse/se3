@@ -182,26 +182,103 @@ Rules:
 
         # Output the result JSON to stdout for orchestrator to parse (only on success)
         if result.success and result.output:
-            # Try to extract JSON from the output using regex to find complete objects
+            # Try to extract JSON from the output
             import re
             try:
-                # Find all JSON objects in the output (non-greedy match)
-                json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
-                matches = list(re.finditer(json_pattern, result.output, re.DOTALL))
+                # First, try to find JSON in the Claude CLI envelope's "result" field
+                envelope_match = re.search(r'\{[^{}]*"type"\s*:\s*"result"[^{}]*"result"\s*:\s*"([^"]*)"', result.output.replace('\n', ' '), re.DOTALL)
+                if not envelope_match:
+                    # Try without newlines removed
+                    envelope_match = re.search(r'\{[^}]*"type"\s*:\s*"result"[^}]*"result"\s*:', result.output, re.DOTALL)
 
-                # Try each match from the end (most likely to be the actual response)
-                found = False
-                for match in reversed(matches):
+                search_text = result.output
+                if envelope_match:
+                    # Try to parse the envelope to get the result field
                     try:
-                        obj = json.loads(match.group(0))
-                        if 'action' in obj:  # Must have action field
-                            print(json.dumps(obj))  # Output normalized JSON
-                            found = True
-                            break
-                    except json.JSONDecodeError:
-                        continue
+                        # Find the full envelope JSON
+                        env_start = result.output.find('{"type":"result"')
+                        if env_start >= 0:
+                            # Find the matching closing brace
+                            depth = 0
+                            env_end = env_start
+                            in_string = False
+                            escape_next = False
+                            for i, c in enumerate(result.output[env_start:]):
+                                if escape_next:
+                                    escape_next = False
+                                    continue
+                                if c == '\\':
+                                    escape_next = True
+                                    continue
+                                if c == '"' and not in_string:
+                                    in_string = True
+                                elif c == '"' and in_string:
+                                    in_string = False
+                                elif not in_string:
+                                    if c == '{':
+                                        depth += 1
+                                    elif c == '}':
+                                        depth -= 1
+                                        if depth == 0:
+                                            env_end = env_start + i + 1
+                                            break
+
+                            envelope_str = result.output[env_start:env_end]
+                            envelope = json.loads(envelope_str)
+                            search_text = envelope.get('result', result.output)
+                    except Exception:
+                        pass
+
+                # Strip markdown code fences
+                text = search_text.strip()
+                text = re.sub(r'^```json\s*\n', '', text)
+                text = re.sub(r'\n```\s*$', '', text)
+                text = text.strip()
+
+                # Find all JSON objects (handle nested braces)
+                found = False
+                # Try to find the outermost JSON object with "action" field
+                # by scanning from the start for valid JSON
+                i = 0
+                while i < len(text):
+                    if text[i] == '{':
+                        # Try to find matching closing brace
+                        depth = 0
+                        for j in range(i, len(text)):
+                            if text[j] == '{':
+                                depth += 1
+                            elif text[j] == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    # Found a complete object
+                                    try:
+                                        obj = json.loads(text[i:j+1])
+                                        if 'action' in obj:
+                                            print(json.dumps(obj))
+                                            found = True
+                                            break
+                                    except json.JSONDecodeError:
+                                        pass
+                                    break
+                    if found:
+                        break
+                    i += 1
+
                 if not found:
-                    # No valid JSON found in successful output - this shouldn't happen
+                    # Fallback: try regex approach
+                    json_pattern = r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}'
+                    matches = list(re.finditer(json_pattern, text, re.DOTALL))
+                    for match in reversed(matches):
+                        try:
+                            obj = json.loads(match.group(0))
+                            if 'action' in obj:
+                                print(json.dumps(obj))
+                                found = True
+                                break
+                        except json.JSONDecodeError:
+                            continue
+
+                if not found:
                     print(f'{{"action": "escalate", "reason": "Manager output did not contain valid JSON"}}', file=sys.stderr)
             except Exception as e:
                 print(f'{{"action": "escalate", "reason": "Failed to parse manager output: {e}"}}', file=sys.stderr)
