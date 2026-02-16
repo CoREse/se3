@@ -25,6 +25,8 @@ USAGE_LIMIT_KEYWORDS = [
     "rate_limit",
     "overloaded",
     "capacity",
+    "hit your limit",
+    "you've hit your limit",
 ]
 
 
