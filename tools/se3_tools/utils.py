@@ -387,49 +387,28 @@ def parse_status_md(filepath: str = "./status.md") -> Dict[str, Any]:
 def discover_human_calls(path: str = "human-calls") -> List[Dict[str, Any]]:
     """Discover all human call files and their status.
 
+    Legacy compatibility function. Uses the new HumanCallStore internally.
+
     Args:
         path: Path to human-calls directory
 
     Returns:
         List of dicts with file info and parsed frontmatter
     """
-    calls = []
-    calls_path = Path(path)
+    from .human_calls import HumanCallStore
+    store = HumanCallStore(Path(path))
+    calls = store.get_all_calls(include_completed=True)
 
-    if not calls_path.exists():
-        return calls
+    result = []
+    for call in calls:
+        result.append({
+            'file': call.file_path.name,
+            'path': str(call.file_path),
+            'type': call.call_type.value,
+            'priority': call.priority.value,
+            'status': call.status.value,
+            'created': call.created.strftime('%Y-%m-%d'),
+            'title': call.title,
+        })
 
-    for item in calls_path.glob("*.md"):
-        try:
-            content = item.read_text(encoding='utf-8')
-
-            call_info = {
-                'file': item.name,
-                'path': str(item),
-                'type': None,
-                'priority': None,
-                'status': None,
-                'created': None
-            }
-
-            type_match = re.search(r'^type:\s*(\w+)', content, re.MULTILINE)
-            if type_match:
-                call_info['type'] = type_match.group(1)
-
-            priority_match = re.search(r'^priority:\s*(\w+)', content, re.MULTILINE)
-            if priority_match:
-                call_info['priority'] = priority_match.group(1)
-
-            status_match = re.search(r'^status:\s*(\w+)', content, re.MULTILINE)
-            if status_match:
-                call_info['status'] = status_match.group(1)
-
-            created_match = re.search(r'^created:\s*(\S+)', content, re.MULTILINE)
-            if created_match:
-                call_info['created'] = created_match.group(1)
-
-            calls.append(call_info)
-        except (IOError, UnicodeDecodeError):
-            continue
-
-    return calls
+    return result

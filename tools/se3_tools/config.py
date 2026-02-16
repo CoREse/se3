@@ -84,3 +84,81 @@ def load_claude_commands(project_root: Optional[Path] = None) -> List[Dict[str, 
     normalized.sort(key=lambda x: -x["priority"])
 
     return normalized
+
+
+def load_human_call_config(project_root: Optional[Path] = None) -> Dict[str, Any]:
+    """Load human call configuration from config.
+
+    Resolution order:
+    1. Project se3.config.yaml human_call (if present, overrides global)
+    2. Global ~/.se3/config.yaml human_call
+    3. Default values
+
+    Returns dict with:
+        - language: Language code (default: "en")
+        - timeout_days: Async call timeout in days (default: 7)
+        - directory: Human calls directory (default: "human-calls")
+    """
+    global_cfg = load_global_config()
+    project_cfg = load_project_config(project_root) if project_root else {}
+
+    # Merge human_call configs: project overrides global
+    global_hc = global_cfg.get("human_call", {})
+    project_hc = project_cfg.get("human_call", {})
+
+    merged = dict(global_hc)
+    merged.update(project_hc)
+
+    return {
+        "language": merged.get("language", "en"),
+        "timeout_days": merged.get("timeout_days", 7),
+        "directory": merged.get("directory", "human-calls"),
+    }
+
+
+def get_language_labels(language: str) -> Dict[str, str]:
+    """Get human call template labels for a given language.
+
+    Args:
+        language: Language code (e.g., "en", "zh-CN", "zh-TW")
+
+    Returns dict with localized labels for human call templates.
+    """
+    # Normalize language code
+    lang_lower = language.lower()
+
+    # Chinese variants (zh-CN, zh-TW, zh-HK, zh, etc.)
+    if lang_lower.startswith("zh"):
+        return {
+            "type": "类型",
+            "urgency": "紧急程度",
+            "context": "上下文",
+            "tasks": "当前任务状态",
+            "response": "回复",
+            "prompt": "<!-- 人类：请在下方输入您的回复 -->",
+            "request_prefix": "请求",
+            "source": "来源",
+        }
+
+    # Default to English
+    return {
+        "type": "Type",
+        "urgency": "Urgency",
+        "context": "Context",
+        "tasks": "Current Task States",
+        "response": "Response",
+        "prompt": "<!-- Human: write your response below -->",
+        "request_prefix": "Request",
+        "source": "Source",
+    }
+
+
+def is_chinese_language(language: str) -> bool:
+    """Check if the language code is a Chinese variant.
+
+    Args:
+        language: Language code (e.g., "zh-CN", "zh-TW", "en-US")
+
+    Returns True if the language is a Chinese variant.
+    """
+    return language.lower().startswith("zh")
