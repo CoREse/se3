@@ -267,6 +267,7 @@ class ClaudeRunner:
         cwd: Optional[Path] = None,
         env: Optional[Dict[str, str]] = None,
         on_output: Optional[Callable[[str], None]] = None,
+        on_activity: Optional[Callable[[], None]] = None,
     ) -> "MonitoredResult":
         """Run Claude with activity-based monitoring and automatic command fallback.
 
@@ -285,6 +286,7 @@ class ClaudeRunner:
             cwd: Working directory.
             env: Environment variables.
             on_output: Optional callback for each line of output.
+            on_activity: Optional callback called whenever activity is detected (output received).
 
         Returns:
             MonitoredResult with exit code, output, and metadata.
@@ -306,6 +308,7 @@ class ClaudeRunner:
                 cwd=cwd,
                 env=env,
                 on_output=on_output,
+                on_activity=on_activity,
                 start_time=start_time,
             )
 
@@ -359,6 +362,7 @@ class ClaudeRunner:
         cwd: Optional[Path],
         env: Optional[Dict[str, str]],
         on_output: Optional[Callable[[str], None]],
+        on_activity: Optional[Callable[[], None]],
         start_time: float,
     ) -> "_SingleRunResult":
         """Run a single command with monitoring."""
@@ -436,6 +440,8 @@ class ClaudeRunner:
                                 log_fh.flush()
                             if on_output:
                                 on_output(line)
+                            if on_activity:
+                                on_activity()
                     except Exception:
                         pass
                 else:
