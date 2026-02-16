@@ -385,9 +385,14 @@ $task_prompt"
 
 wait_for_worker() {
   # Wait for any child worker to exit
-  # Returns the PID that exited
+  # Returns the PID that exited (and sets exit_code global)
   local pid
-  wait -n -p pid 2>/dev/null || true
+  exit_code=0
+  if wait -n -p pid 2>/dev/null; then
+    exit_code=$?
+  else
+    exit_code=$?
+  fi
   echo "$pid"
 }
 
@@ -992,7 +997,12 @@ If all work is complete, respond with action 'complete'. If there are follow-up 
       if [ -n "$exited_pid" ] && [ "$exited_pid" != "0" ]; then
         local task_id
         if task_id=$(find_task_by_pid "$exited_pid"); then
-          handle_worker_exit "$task_id"
+          # Use exit code from wait if available, otherwise let handle_worker_exit read from file
+          if [ -n "$exit_code" ] && [ "$exit_code" != "0" ]; then
+            handle_worker_exit "$task_id" "$exit_code"
+          else
+            handle_worker_exit "$task_id"
+          fi
         fi
       fi
     else

@@ -401,8 +401,14 @@ class ClaudeRunner:
                         should_retry=True,
                     )
 
-                # Check for output with timeout
-                ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+                # Check for output with timeout (handle EINTR from signals)
+                try:
+                    ready, _, _ = select.select([proc.stdout], [], [], 1.0)
+                except InterruptedError:
+                    continue  # Signal received, retry
+                except Exception as e:
+                    output_buffer.append(f"\n[claude-runner] select() error: {e}\n")
+                    continue
 
                 if ready:
                     try:

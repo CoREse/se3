@@ -181,6 +181,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.6.8 | 2026-02-16 | Fix collab: launcher crash handling, select() EINTR handling, worker exit code capture
 | 1.6.7 | 2026-02-16 | Fix collab: add YAML parse error warning; fix se3.config.yaml comment format
 | 1.6.6 | 2026-02-16 | Fix collab: add "hit your limit" to usage limit detection keywords (was causing command not to switch)
 | 1.6.5 | 2026-02-16 | Fix collab: manager launcher outputs valid JSON on failure, signal handling moved to launcher, import error handling, escalation JSON
