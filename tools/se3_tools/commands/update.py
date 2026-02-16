@@ -7,7 +7,25 @@ from pathlib import Path
 import typer
 
 from ..utils import copy_file
-from .. import SE3_FRAMEWORK_VERSION
+def get_framework_version() -> str:
+    """Get current framework version from single source of truth (direct file read for git worktree compatibility)."""
+    import os
+    from pathlib import Path
+
+    # Get the path to __init__.py in the current working tree
+    init_file = Path(__file__).parent.parent / "__init__.py"
+    if not init_file.exists():
+        raise FileNotFoundError(f"Cannot find se3_tools __init__.py at {init_file}")
+
+    with open(init_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    import re
+    match = re.search(r'SE3_FRAMEWORK_VERSION\s*=\s*"([\d]+\.[\d]+\.[\d]+)"', content)
+    if not match:
+        raise ValueError("Cannot find SE3_FRAMEWORK_VERSION definition in __init__.py")
+
+    return match.group(1)
 
 app = typer.Typer()
 
@@ -23,13 +41,18 @@ def get_current_date() -> str:
 
 
 def get_installed_se3_version() -> str:
-    """Get currently installed SE3 version from .claude/SE3.md."""
+    """Get currently installed SE3 version from .claude/SE3.md (direct file read for consistency)."""
     se3_path = Path(".claude/SE3.md")
     if not se3_path.exists():
         return "0.0.0"  # Not initialized
 
     content = se3_path.read_text(encoding="utf-8")
     # Parse version from metadata comment
+    import re
+    match = re.search(r'<!-- SE3 Version: ([\d]+\.[\d]+\.[\d]+) -->', content)
+    if match:
+        return match.group(1)
+    # Fallback to old format parsing
     for line in content.split("\n")[:5]:
         if "SE3 Version:" in line:
             return line.split("SE3 Version:")[1].strip().rstrip(" -->")
@@ -39,8 +62,18 @@ def get_installed_se3_version() -> str:
 def update_project(
     dry_run: bool = False,
     force: bool = False,
-    se3_version: str = SE3_FRAMEWORK_VERSION,
+    se3_version: str = None,
 ) -> None:
+    """
+    Update an SE 3.0 project to the latest framework version.
+
+    Args:
+        dry_run: Show what would be updated without making changes
+        force: Update even if already on latest version
+        se3_version: Target SE 3.0 version
+    """
+    if se3_version is None:
+        se3_version = get_framework_version()
     """
     Update an SE 3.0 project to the latest framework version.
 
@@ -73,8 +106,18 @@ def update_project(
         )
         raise typer.Exit(0)
 
-    # Locate template directory relative to package location
-    project_root = Path(__file__).parent.parent.parent.parent
+    # Locate project root and template directory (using same method as version.py for consistency)
+    def find_project_root() -> Path:
+        """Find project root by looking for .git (directory or file in worktrees)."""
+        current = Path.cwd()
+        while current != current.parent:
+            git_path = current / ".git"
+            if git_path.exists():
+                return current
+            current = current.parent
+        return Path.cwd()
+
+    project_root = find_project_root()
     templates_dir = project_root / "output"
 
     se3_template_path = templates_dir / "SE3.md.template"
@@ -151,7 +194,7 @@ def update(
         help="Update even if already on latest version",
     ),
     se3_version: str = typer.Option(
-        SE3_FRAMEWORK_VERSION,
+        None,
         "--se3-version",
         "-v",
         help="Target SE3 version to update to (format: MAJOR.MINOR.PATCH)",
@@ -159,6 +202,8 @@ def update(
 ) -> None:
     """Update existing SE 3.0 project to latest framework version."""
     try:
+        if se3_version is None:
+            se3_version = get_framework_version()
         update_project(dry_run, force, se3_version)
     except Exception as e:
         typer.echo(

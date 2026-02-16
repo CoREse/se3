@@ -181,6 +181,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.7.9 | 2026-02-16 | Fix version management: improve git worktree support, fix Python module import path resolution, ensure version consistency between cli.py, version.py, and update.py
 | 1.7.8 | 2026-02-16 | Fix version management: update template version, improve consistency checks, fix git worktree support
 | 1.7.7 | 2026-02-16 | Fix collab: set max-turns to 0 (unlimited) instead of arbitrary limits; rely on timeout for control
 | 1.7.6 | 2026-02-16 | Fix collab: increase manager max-turns from 3 to 10 (was hitting limit when reading files for planning)

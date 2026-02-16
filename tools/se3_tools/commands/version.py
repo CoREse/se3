@@ -10,9 +10,24 @@ from typing import List, Tuple, Optional
 
 
 def get_framework_version() -> str:
-    """Get current framework version from single source of truth."""
-    from se3_tools import SE3_FRAMEWORK_VERSION
-    return SE3_FRAMEWORK_VERSION
+    """Get current framework version from single source of truth (direct file read for git worktree compatibility)."""
+    import os
+    from pathlib import Path
+
+    # Get the path to __init__.py in the current working tree
+    init_file = Path(__file__).parent.parent / "__init__.py"
+    if not init_file.exists():
+        raise FileNotFoundError(f"Cannot find se3_tools __init__.py at {init_file}")
+
+    with open(init_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    import re
+    match = re.search(r'SE3_FRAMEWORK_VERSION\s*=\s*"([\d]+\.[\d]+\.[\d]+)"', content)
+    if not match:
+        raise ValueError("Cannot find SE3_FRAMEWORK_VERSION definition in __init__.py")
+
+    return match.group(1)
 
 
 def get_template_version(project_root: Path) -> Optional[str]:
