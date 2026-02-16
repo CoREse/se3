@@ -1,6 +1,6 @@
 <!-- Generated on 2026-02-16 -->
-<!-- SE3 Version: 1.0.0 -->
-<!-- Checksum: ba85cb96ba60acc2b155e792cbf68538f1ca07ad7ad22521aedececca393c59b -->
+<!-- SE3 Version: 1.4.0 -->
+<!-- Checksum: 5a46e76693095121db208ff5d30dace1ae7ca0aeb86d867d9ee3f0daeff0cf77 -->
 
 <!--
   SE 3.0 Framework Reference File
@@ -444,6 +444,8 @@ In agent team mode, specs are the interface between agents:
 
 ## Agent Team
 
+### Mode 1: Task Tool (Default)
+
 Uses Claude Code's native **Task tool**.
 
 - Parent spawns sub-agents via Task tool with appropriate `subagent_type`
@@ -451,18 +453,84 @@ Uses Claude Code's native **Task tool**.
 - Results return directly — no file-based communication
 - Specs on the file system serve as shared context accessible to all agents
 
-### Roles
-
-Expressed in Task tool prompts:
+**Roles** (expressed in Task tool prompts):
 
 - **architect**: "Design the spec for change X. Define requirements with scenarios detailed enough for another agent to implement."
 - **implementer**: "Implement tasks 1-3 of change X. Read `openspec/specs/` for requirements. Do not deviate from the spec. Do not modify spec files."
 - **reviewer**: "Verify change X. Read the spec, run tests for each scenario, report any gaps between spec and implementation."
 
-### When to Use
+**When to Use**: Single agent (default) for most work. Multi-agent when multiple independent changes can be parallelized.
 
-- **Single agent** (default): One agent handles all roles. Most work.
-- **Multi-agent**: When multiple independent changes can be parallelized. Parent distributes one change per sub-agent.
+### Mode 2: Git Worktree Collaboration (se3 collab)
+
+**Purpose**: Long-running multi-agent collaboration with full isolation and independent context windows.
+
+**Architecture**:
+- **Orchestrator** (bash): Manages task state, health checks, launches manager/worker processes
+- **Manager** (`kclaude -p`): Analyzes state, creates tasks, reviews work, makes merge decisions
+- **Worker** (`kclaude -p`): Implements tasks in isolated worktrees
+
+**Directory Structure**:
+```
+.collab/
+├── config.json           # session configuration
+├── tasks/                # task definitions (task-*.json)
+├── logs/                 # manager/worker logs
+└── events/               # event queue
+
+.worktrees/
+└── {task-id}/           # per-task git worktrees
+```
+
+**Task State Machine**:
+```
+pending → in_progress → done/failed/timeout/blocked/escalated
+```
+
+**Launch Modes**:
+
+1. **Daemon mode** (`--daemon`): Fully automatic, orchestrator manages everything
+2. **Manual mode** (`--manual`): Generate task files, user launches manager/worker manually
+3. **Direct mode** (default): Run orchestrator in foreground (for testing)
+
+**Commands**:
+```bash
+se3 collab --daemon "Implement feature X"          # Start automatic collaboration
+se3 collab --manual "Implement feature X"          # Generate plan, manual execution
+se3 collab --launch-manager plan                   # Launch manager for event
+se3 collab --launch-worker task-001                # Launch worker for task
+se3 collab --status                                # Check session status
+se3 collab --abort                                 # Stop and cleanup
+```
+
+**Worker Task JSON**:
+```json
+{
+  "id": "task-001",
+  "status": "pending",
+  "title": "Implement auth",
+  "branch": "collab/auth",
+  "worktree": ".worktrees/auth",
+  "prompt": "Implement user authentication...",
+  "base_branch": "master",
+  "spec_refs": ["auth-spec.md"],
+  "dependencies": [],
+  "health": {"timeout_minutes": 60, "attempts": 0, "max_attempts": 3}
+}
+```
+
+**Manager Decision JSON**:
+```json
+{
+  "action": "plan|merge|reject|retry|split|escalate|complete",
+  "tasks": [...],
+  "target_task": "task-id",
+  "merge_branch": "branch-name",
+  "retry_prompt": "...",
+  "reason": "...",
+  "summary": "..."
+}
+```
 
 ---
 
@@ -530,3 +598,22 @@ The version is embedded in `.claude/SE3.md` metadata:
 **Upgrade path**: `se3 update --se3-version X.Y.Z` reads `output/SE3.md.template`, stamps it with version metadata, and writes to `.claude/SE3.md`.
 
 **Self-hosted projects** (developing SE3 itself): MUST NOT edit `.claude/SE3.md` directly. All changes go through `output/SE3.md.template` → `se3 update`.
+
+### Version Management Rules
+
+**Single Source of Truth**: `tools/se3_tools/__init__.py:SE3_FRAMEWORK_VERSION`
+
+**When to bump version**:
+| Change Type | Version Bump | Example |
+|-------------|--------------|---------|
+| Fix typo, docs correction | PATCH | 1.0.0 → 1.0.1 |
+| New feature, new CLI command | MINOR | 1.0.0 → 1.1.0 |
+| Breaking change, rename concept | MAJOR | 1.0.0 → 2.0.0 |
+
+**Mandatory version update checklist**:
+1. Update `SE3_FRAMEWORK_VERSION` in `tools/se3_tools/__init__.py`
+2. Add entry to `README.md` Version History
+3. Update `output/SE3.md.template` version comment
+4. Run `se3 update` to regenerate `.claude/SE3.md`
+
+**Enforcement**: `se3 commit` checks for framework file changes and warns if version not updated.
