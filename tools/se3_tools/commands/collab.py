@@ -425,9 +425,10 @@ def start_daemon(project_root: Path, objective: str, resume: bool = False):
     elif objective:
         cmd.append(objective)
 
+    # Start in background - MUST clear CLAUDECODE to avoid nested session detection
     env = {**dict(os.environ), "PROJECT_ROOT": str(project_root)}
+    env.pop("CLAUDECODE", None)  # Clear to allow manager/worker to run Claude
 
-    # Start in background
     subprocess.Popen(
         cmd,
         stdout=open(collab_dir / "logs" / "orchestrator.log", "w"),

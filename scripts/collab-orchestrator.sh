@@ -211,12 +211,14 @@ Rules:
 
   local timeout_seconds=$((MANAGER_TIMEOUT_MINUTES * 60))
 
+  local manager_max_turns=3
+
   while [ $attempt -le $MAX_MANAGER_RETRIES ]; do
     log_info "Invoking manager (attempt $((attempt+1))): event=$event_type"
 
     local logfile="$COLLAB_DIR/logs/manager-$(date +%Y%m%d-%H%M%S).log"
 
-    local claude_args=(--dangerously-skip-permissions -p "$prompt" --output-format json --max-turns 3)
+    local claude_args=(--dangerously-skip-permissions -p "$prompt" --output-format json --max-turns $manager_max_turns)
     [ -n "$MANAGER_MODEL" ] && claude_args+=(--model "$MANAGER_MODEL")
     [ -n "$MCP_CONFIG" ] && claude_args+=(--mcp-config "$MCP_CONFIG")
 
@@ -229,6 +231,14 @@ Rules:
     while [ -n "$cmd_to_run" ]; do
       if raw_result=$(SE3_AGENT_ROLE="manager" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
         timeout "$timeout_seconds" "$cmd_to_run" "${claude_args[@]}" 2>"$logfile"); then
+        # Check for error_max_turns in envelope
+        if echo "$raw_result" | grep -q '"subtype":"error_max_turns"'; then
+          log_warn "Manager hit max-turns limit ($manager_max_turns), increasing and retrying..."
+          manager_max_turns=$((manager_max_turns + 5))
+          echo "$raw_result" > "$COLLAB_DIR/logs/manager-raw-$(date +%Y%m%d-%H%M%S).txt"
+          continue  # Retry with increased max-turns
+        fi
+
         # Extract .result from Claude CLI JSON envelope, then parse manager JSON from it
         # Uses Python because jq-complete doesn't handle nested JSON extraction well
         result=$(python3 -c "
@@ -267,7 +277,15 @@ print(json.dumps(obj))
           prompt="CRITICAL: You MUST respond with ONLY a JSON object. No explanation, no markdown, no text before or after. Just a raw JSON object starting with { and ending with }.
 
 $prompt"
-          break  # Retry with same command on JSON error
+          # Try next command on JSON parse error
+          local next_cmd
+          next_cmd=$(resolve_next_claude_cmd "$cmd_to_run")
+          if [ -n "$next_cmd" ]; then
+            log_info "Switching to '$next_cmd' after JSON error"
+            cmd_to_run="$next_cmd"
+            continue
+          fi
+          break  # No more commands, retry with same
         fi
       else
         local exit_code=$?
