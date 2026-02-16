@@ -849,8 +849,12 @@ cleanup_worktree() {
 escalate_to_human() {
   local title="$1"
   local context="$2"
+  local call_type="${3:-action}"
+  local priority="${4:-high}"
   local filename
-  filename="$(date +%Y%m%d-%H%M%S)-$(echo "$title" | tr ' ' '-' | tr '[:upper:]' '[:lower:]').md"
+  local call_id
+  call_id="$(date +%Y%m%d-%H%M%S)-$(echo "$title" | tr ' ' '-' | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]-' | head -c 30)"
+  filename="${call_id}.md"
 
   # Generate template based on language setting
   local header_type header_urgency header_context header_tasks header_response prompt_text
@@ -870,20 +874,36 @@ escalate_to_human() {
     prompt_text="<!-- Human: write your response below -->"
   fi
 
+  # Generate ISO timestamp
+  local created
+  created="$(date -Iseconds)"
+
+  # Create structured human call with frontmatter
   cat > "$HUMAN_CALLS_DIR/$filename" << EOF
+---
+id: ${call_id}
+type: ${call_type}
+priority: ${priority}
+status: pending
+created: ${created}
+source: collab-orchestrator
+language: ${HUMAN_CALL_LANGUAGE}
+---
+
 ## Request: $title
-**$header_type**: action
-**$header_urgency**: high
+
+**${header_type}**: ${call_type}
+**${header_urgency}**: ${priority}
 **Source**: collab-orchestrator
 
-### $header_context
-$context
+### ${header_context}
+${context}
 
-### $header_tasks
+### ${header_tasks}
 $(summarize_tasks)
 
-### $header_response
-$prompt_text
+### ${header_response}
+${prompt_text}
 EOF
 
   log_warn "Human call written: $HUMAN_CALLS_DIR/$filename"
@@ -1035,6 +1055,65 @@ If all work is complete, respond with action 'complete'. If there are follow-up 
 
 check_human_responses() {
   # Check if any human-call files have been answered
+  # Uses Python helper for optimized detection and validation
+  local checker_script="$SCRIPT_DIR/check-human-responses.py"
+
+  if [ -f "$checker_script" ]; then
+    # Use optimized Python checker
+    local responses
+    responses=$(python3 "$checker_script" 2>/dev/null)
+    local exit_code=$?
+
+    if [ $exit_code -eq 1 ] && [ -n "$responses" ] && [ "$responses" != "[]" ]; then
+      # Parse each response using Python for reliability
+      local response_count
+      response_count=$(echo "$responses" | python3 -c "import sys, json; print(len(json.load(sys.stdin)))")
+
+      log_info "Detected $response_count human response(s)"
+
+      # Process each response
+      echo "$responses" | python3 -c "
+import sys, json
+responses = json.load(sys.stdin)
+for resp in responses:
+    print(f'FILE:{resp[\"file\"]}')
+    print(f'RESPONSE:{resp[\"response\"][:500]}')  # Limit to 500 chars
+    print('---')
+" | while IFS= read -r line; do
+        if [[ "$line" == FILE:* ]]; then
+          current_file="${line#FILE:}"
+        elif [[ "$line" == RESPONSE:* ]]; then
+          current_response="${line#RESPONSE:}"
+        elif [ "$line" == "---" ] && [ -n "$current_file" ] && [ -n "$current_response" ]; then
+          log_info "Processing response from $current_file"
+
+          local manager_result
+          manager_result=$(invoke_manager "human_response" "Human responded to escalation.
+File: $current_file
+Response: $current_response")
+
+          # Rename to processed
+          local full_path="$HUMAN_CALLS_DIR/$current_file"
+          if [ -f "$full_path" ]; then
+            mv "$full_path" "${full_path%.md}.responded.md"
+          fi
+
+          process_manager_decision "$manager_result"
+
+          current_file=""
+          current_response=""
+        fi
+      done
+    fi
+  else
+    # Fallback to legacy bash implementation
+    log_warn "Python checker not found, using legacy detection"
+    _check_human_responses_legacy
+  fi
+}
+
+_check_human_responses_legacy() {
+  # Legacy bash implementation (fallback)
   # Support multiple languages: English and Chinese
   local default_prompts=("^<!-- Human: write your response below -->"
                          "^<!-- 人类：请在下方输入您的回复 -->")

@@ -6,6 +6,9 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 import shutil
 
+# Re-export human_calls functions for backwards compatibility
+from .human_calls import discover_human_calls, HumanCallStore
+
 
 def discover_specs(path: str) -> List[str]:
     """
@@ -384,52 +387,3 @@ def parse_status_md(filepath: str = "./status.md") -> Dict[str, Any]:
     return result
 
 
-def discover_human_calls(path: str = "human-calls") -> List[Dict[str, Any]]:
-    """Discover all human call files and their status.
-
-    Args:
-        path: Path to human-calls directory
-
-    Returns:
-        List of dicts with file info and parsed frontmatter
-    """
-    calls = []
-    calls_path = Path(path)
-
-    if not calls_path.exists():
-        return calls
-
-    for item in calls_path.glob("*.md"):
-        try:
-            content = item.read_text(encoding='utf-8')
-
-            call_info = {
-                'file': item.name,
-                'path': str(item),
-                'type': None,
-                'priority': None,
-                'status': None,
-                'created': None
-            }
-
-            type_match = re.search(r'^type:\s*(\w+)', content, re.MULTILINE)
-            if type_match:
-                call_info['type'] = type_match.group(1)
-
-            priority_match = re.search(r'^priority:\s*(\w+)', content, re.MULTILINE)
-            if priority_match:
-                call_info['priority'] = priority_match.group(1)
-
-            status_match = re.search(r'^status:\s*(\w+)', content, re.MULTILINE)
-            if status_match:
-                call_info['status'] = status_match.group(1)
-
-            created_match = re.search(r'^created:\s*(\S+)', content, re.MULTILINE)
-            if created_match:
-                call_info['created'] = created_match.group(1)
-
-            calls.append(call_info)
-        except (IOError, UnicodeDecodeError):
-            continue
-
-    return calls
