@@ -302,49 +302,83 @@ def generate_message_fallback(project_root: Path) -> str:
         return f"Update {len(changed_files)} files ({summary})"
 
 
-def check_version_consistency(project_root: Path) -> List[str]:
-    """Check if SE3 version needs update when framework rules change.
-
-    Returns list of warnings/errors (empty = OK).
+def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
     """
-    warnings = []
+    STRICT version check for SE3 framework development.
 
-    # Check if SE3.md.template or SE3.md is being modified
+    Returns: (can_commit, list of issues)
+    If framework files changed, version MUST be bumped.
+    """
+    issues = []
+
+    # Check if framework files are being modified
     result = run_command(["git", "diff", "--cached", "--name-only"], cwd=project_root)
     staged_files = result.stdout.strip().split("\n") if result.returncode == 0 else []
 
-    se3_framework_files = ["output/SE3.md.template", ".claude/SE3.md"]
-    has_framework_change = any(f in staged_files for f in se3_framework_files)
+    # Extended list of framework files that require version bump
+    framework_patterns = [
+        "output/SE3.md.template",
+        "tools/se3_tools/__init__.py",
+        "tools/se3_tools/commands/",
+        "scripts/collab-",
+        "scripts/rules-",
+        "scripts/mcp-",
+    ]
 
-    if has_framework_change:
-        # Check if README.md Version History was updated
-        readme_path = project_root / "README.md"
-        if readme_path.exists():
-            readme_content = readme_path.read_text()
-            # Check if there's a version entry for today
-            from datetime import datetime
-            today = datetime.now().strftime("%Y-%m-%d")
-            if today not in readme_content:
-                warnings.append(
-                    f"Framework file changed but README.md Version History not updated. "
-                    f"Add entry for {today} with version bump following SemVer."
-                )
+    has_framework_change = False
+    changed_framework_files = []
 
-        # Check if __init__.py version was updated (for SE3 framework itself)
-        init_file = project_root / "tools" / "se3_tools" / "__init__.py"
-        if init_file.exists():
-            # Check if version line was modified
-            result = run_command(
-                ["git", "diff", "--cached", "-L", "/SE3_FRAMEWORK_VERSION/", str(init_file)],
-                cwd=project_root
+    for f in staged_files:
+        for pattern in framework_patterns:
+            if f.startswith(pattern):
+                has_framework_change = True
+                changed_framework_files.append(f)
+                break
+
+    if not has_framework_change:
+        return True, []  # No framework changes, no version check needed
+
+    # Check if version was updated
+    init_file = project_root / "tools" / "se3_tools" / "__init__.py"
+    if init_file.exists():
+        result = run_command(
+            ["git", "diff", "--cached", str(init_file)],
+            cwd=project_root
+        )
+        version_updated = "SE3_FRAMEWORK_VERSION" in result.stdout
+    else:
+        version_updated = False
+
+    if not version_updated:
+        issues.append(
+            f"BLOCKING: Framework files changed but version not bumped.\n"
+            f"  Changed files: {', '.join(changed_framework_files)}\n"
+            f"  Required action: Update SE3_FRAMEWORK_VERSION in tools/se3_tools/__init__.py\n"
+            f"  Version rules:\n"
+            f"    - PATCH (X.Y.Z+1): Bug fixes, docs corrections\n"
+            f"    - MINOR (X.Y+1.0): New features, new commands\n"
+            f"    - MAJOR (X+1.0.0): Breaking changes\n"
+            f"  Also update README.md Version History."
+        )
+        return False, issues  # BLOCK COMMIT
+
+    # Check README.md Version History
+    readme_path = project_root / "README.md"
+    if readme_path.exists():
+        readme_content = readme_path.read_text()
+        # Extract current version from __init__.py
+        init_content = init_file.read_text()
+        import re
+        version_match = re.search(r'SE3_FRAMEWORK_VERSION = "(\d+\.\d+\.\d+)"', init_content)
+        current_version = version_match.group(1) if version_match else None
+
+        if current_version and current_version not in readme_content:
+            issues.append(
+                f"WARNING: Version {current_version} not found in README.md Version History.\n"
+                f"  Add entry to the version table in README.md."
             )
-            if "SE3_FRAMEWORK_VERSION" not in result.stdout:
-                warnings.append(
-                    "Framework file changed but SE3_FRAMEWORK_VERSION not updated. "
-                    "Update version in tools/se3_tools/__init__.py following SemVer."
-                )
 
-    return warnings
+    return True, issues  # Allow commit with warnings
 
 
 def validate_message(message: str) -> List[str]:
@@ -494,12 +528,18 @@ def commit(
 
     # Step 4: Version consistency check (for framework changes)
     typer.echo("\n[4/6] Checking version consistency...")
-    version_warnings = check_version_consistency(root)
-    if version_warnings:
-        typer.echo("  Version warnings:")
-        for w in version_warnings:
-            typer.echo(f"    - {w}")
-        typer.echo("  (Proceeding — verify version bump is intentional)")
+    can_commit, version_issues = check_version_consistency(root)
+    if version_issues:
+        if not can_commit:
+            typer.echo("  Version BLOCKING issues:")
+            for issue in version_issues:
+                typer.echo(f"    {issue}")
+            typer.echo("\n  Commit BLOCKED. Please fix version issues above.")
+            raise typer.Exit(1)
+        else:
+            typer.echo("  Version warnings:")
+            for issue in version_issues:
+                typer.echo(f"    - {issue}")
     else:
         typer.echo("  Version check OK.")
 

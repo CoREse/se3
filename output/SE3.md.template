@@ -594,3 +594,22 @@ The version is embedded in `.claude/SE3.md` metadata:
 **Upgrade path**: `se3 update --se3-version X.Y.Z` reads `output/SE3.md.template`, stamps it with version metadata, and writes to `.claude/SE3.md`.
 
 **Self-hosted projects** (developing SE3 itself): MUST NOT edit `.claude/SE3.md` directly. All changes go through `output/SE3.md.template` → `se3 update`.
+
+### Version Management Rules
+
+**Single Source of Truth**: `tools/se3_tools/__init__.py:SE3_FRAMEWORK_VERSION`
+
+**When to bump version**:
+| Change Type | Version Bump | Example |
+|-------------|--------------|---------|
+| Fix typo, docs correction | PATCH | 1.0.0 → 1.0.1 |
+| New feature, new CLI command | MINOR | 1.0.0 → 1.1.0 |
+| Breaking change, rename concept | MAJOR | 1.0.0 → 2.0.0 |
+
+**Mandatory version update checklist**:
+1. Update `SE3_FRAMEWORK_VERSION` in `tools/se3_tools/__init__.py`
+2. Add entry to `README.md` Version History
+3. Update `output/SE3.md.template` version comment
+4. Run `se3 update` to regenerate `.claude/SE3.md`
+
+**Enforcement**: `se3 commit` checks for framework file changes and warns if version not updated.
