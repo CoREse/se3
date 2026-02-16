@@ -1,6 +1,6 @@
-<!-- Generated on 2026-02-16 -->
-<!-- SE3 Version: 1.8.1 -->
-<!-- Checksum: 73d6d81c7d42080f9a406239f1edc7ef2650ff0acd1b470b475a61dcc1b6c6fa -->
+<!-- Generated on 2026-02-17 -->
+<!-- SE3 Version: 1.8.5 -->
+<!-- Checksum: cd49c2dfc98f957cc192e154854cd61e36c9274910c389d299f9d7e0b0d8059a -->
 
 <!--
   SE 3.0 Framework Reference File
@@ -592,7 +592,7 @@ SE3 follows [Semantic Versioning 2.0.0](https://semver.org/) with version format
 
 The version is embedded in `.claude/SE3.md` metadata:
 ```
-<!-- SE3 Version: 1.8.0 -->
+<!-- SE3 Version: 1.8.1 -->
 ```
 
 **Upgrade path**: `se3 update --se3-version X.Y.Z` reads `output/SE3.md.template`, stamps it with version metadata, and writes to `.claude/SE3.md`.
