@@ -216,7 +216,7 @@ Rules:
 
     local logfile="$COLLAB_DIR/logs/manager-$(date +%Y%m%d-%H%M%S).log"
 
-    local claude_args=(-p "$prompt" --output-format json --max-turns 30)
+    local claude_args=(-p "$prompt" --output-format text --max-turns 30)
     [ -n "$MANAGER_MODEL" ] && claude_args+=(--model "$MANAGER_MODEL")
     [ -n "$MCP_CONFIG" ] && claude_args+=(--mcp-config "$MCP_CONFIG")
 
@@ -227,8 +227,12 @@ Rules:
 
     # Inner loop: try each claude command on usage limit / timeout
     while [ -n "$cmd_to_run" ]; do
-      if result=$(SE3_AGENT_ROLE="manager" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
+      if raw_result=$(SE3_AGENT_ROLE="manager" SE3_PROJECT_ROOT="$PROJECT_ROOT" \
         timeout "$timeout_seconds" "$cmd_to_run" "${claude_args[@]}" 2>"$logfile"); then
+        # Strip markdown code fences if present (```json ... ```)
+        result=$(echo "$raw_result" | sed -n '/^```/{n; :a; /^```/q; p; n; ba}')
+        # If no fences found, use raw output
+        [ -z "$result" ] && result="$raw_result"
         # Validate JSON
         if echo "$result" | $JQ_CMD -e '.action' &>/dev/null; then
           log_ok "Manager responded: $(echo "$result" | $JQ_CMD -r '.action')"
