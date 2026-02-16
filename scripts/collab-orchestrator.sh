@@ -635,48 +635,44 @@ do_plan() {
   local decision="$1"
   local created=0
 
-  # Try .tasks[] array first (multiple tasks)
-  local task_count
-  task_count=$(echo "$decision" | $JQ_CMD -r '.tasks | length // 0' 2>/dev/null || echo 0)
+  # Extract tasks using Python (jq-complete doesn't support length/iteration well)
+  # Write decision to temp file for reliable parsing
+  local tmp_decision="$COLLAB_DIR/tasks/.tmp-decision.json"
+  echo "$decision" > "$tmp_decision"
 
-  if [ "$task_count" -gt 0 ]; then
-    local i=0
-    while [ $i -lt "$task_count" ]; do
-      local task_json
-      task_json=$(echo "$decision" | $JQ_CMD -c ".tasks[$i]")
-      local task_id
-      task_id=$(echo "$task_json" | $JQ_CMD -r '.id')
-      if [ -n "$task_id" ] && [ "$task_id" != "null" ]; then
-        echo "$task_json" > "$COLLAB_DIR/tasks/${task_id}.json"
-        log_info "Created task: $task_id — $(echo "$task_json" | $JQ_CMD -r '.title')"
-        created=$((created + 1))
-      fi
-      i=$((i + 1))
-    done
-  fi
+  # Use Python to extract and write individual task files
+  python3 -c "
+import json, sys
+with open('$tmp_decision') as f:
+    data = json.load(f)
+tasks = data.get('tasks', [])
+if not tasks:
+    task = data.get('task')
+    if task:
+        tasks = [task]
+for task in tasks:
+    tid = task.get('id')
+    if tid:
+        with open('$COLLAB_DIR/tasks/' + tid + '.json', 'w') as out:
+            json.dump(task, out, ensure_ascii=False)
+        print(tid + '|' + task.get('title', ''))
+" 2>/dev/null | while IFS='|' read -r task_id title; do
+    log_info "Created task: $task_id — $title"
+    created=$((created + 1))
+  done
 
-  # Fallback: try single .task object
-  if [ $created -eq 0 ]; then
-    local task_json
-    task_json=$(echo "$decision" | $JQ_CMD -c '.task // empty')
-    if [ -n "$task_json" ] && [ "$task_json" != "null" ]; then
-      local task_id
-      task_id=$(echo "$task_json" | $JQ_CMD -r '.id')
-      if [ -n "$task_id" ] && [ "$task_id" != "null" ]; then
-        echo "$task_json" > "$COLLAB_DIR/tasks/${task_id}.json"
-        log_info "Created task: $task_id — $(echo "$task_json" | $JQ_CMD -r '.title')"
-        created=$((created + 1))
-      fi
-    fi
-  fi
+  rm -f "$tmp_decision"
 
-  if [ $created -eq 0 ]; then
+  # Verify tasks were created
+  local task_files
+  task_files=$(ls "$COLLAB_DIR/tasks"/task-*.json 2>/dev/null | wc -l)
+  if [ "$task_files" -eq 0 ]; then
     log_warn "No tasks found in plan decision"
     log_warn "Decision was: $decision"
     return 1
   fi
 
-  log_info "Created $created task(s) from plan"
+  log_info "Created $task_files task(s) from plan"
 }
 
 do_merge() {
