@@ -117,8 +117,12 @@ Rules:
 - If unsure, use 'escalate' rather than guessing
 """
 
+    # Write prompt to temp file to avoid command line length issues
+    prompt_file = project_root / ".collab" / ".manager-prompt-tmp.txt"
+    prompt_file.write_text(prompt, encoding="utf-8")
+
     # Build claude args
-    # Note: -p/--print is a flag (no value), prompt is a positional argument
+    # Note: -p/--print is a flag (no value), prompt file is passed via @ syntax
     # Use stream-json for real-time output (enables activity-based timeout)
     claude_args = [
         "--dangerously-skip-permissions",
@@ -126,7 +130,7 @@ Rules:
         "--output-format", "stream-json",
         "--verbose",
         "--max-turns", "3",
-        prompt,  # positional argument
+        f"@{prompt_file}",  # Use file syntax to avoid CLI parsing issues
     ]
     if args.model:
         claude_args.extend(["--model", args.model])
@@ -162,6 +166,7 @@ Rules:
     cmd_info_file = project_root / ".collab" / ".manager-cmdinfo.json"
     cmd_info_file.parent.mkdir(parents=True, exist_ok=True)
 
+    result = None
     try:
         result = runner.run_with_monitor(
             args=claude_args,
@@ -256,15 +261,18 @@ Rules:
         import traceback
         traceback.print_exc(file=sys.stderr)
         cmd_info_file.write_text(json.dumps({
-            "cmd_used": "none",
-            "cmd_index": -1,
-            "was_retry": False,
+            "cmd_used": result.cmd_used if result else "none",
+            "cmd_index": result.cmd_index if result else -1,
+            "was_retry": result.was_retry if result else False,
             "event_type": args.event_type,
             "error": str(e),
         }))
         # Output valid escalation JSON to stdout for orchestrator
         print(f'{{"action": "escalate", "reason": "Manager launcher crashed: {e}"}}')
         sys.exit(1)
+    finally:
+        # Clean up temp prompt file
+        prompt_file.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

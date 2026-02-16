@@ -66,8 +66,12 @@ def main():
             print(f"Error: Prompt file not found: {prompt_file}", file=sys.stderr)
             sys.exit(1)
 
+    # Write prompt to temp file to avoid command line length issues
+    tmp_prompt_file = project_root / ".collab" / f".worker-prompt-tmp-{args.task_id}.txt"
+    tmp_prompt_file.write_text(prompt, encoding="utf-8")
+
     # Build claude args
-    # Note: -p/--print is a flag (no value), prompt is a positional argument
+    # Note: -p/--print is a flag (no value), prompt file is passed via @ syntax
     # Use stream-json for real-time output (enables activity-based timeout)
     claude_args = [
         "--dangerously-skip-permissions",
@@ -75,7 +79,7 @@ def main():
         "--output-format", "stream-json",
         "--verbose",
         "--max-turns", "50",
-        prompt,  # positional argument
+        f"@{tmp_prompt_file}",  # Use file syntax to avoid CLI parsing issues
     ]
     if args.model:
         claude_args.extend(["--model", args.model])
@@ -114,6 +118,7 @@ def main():
     cmd_info_file = project_root / ".collab" / "tasks" / f".cmdinfo-{args.task_id}"
     exitcode_file.parent.mkdir(parents=True, exist_ok=True)
 
+    result = None
     try:
         result = runner.run_with_monitor(
             args=claude_args,
@@ -147,12 +152,15 @@ def main():
         traceback.print_exc(file=sys.stderr)
         exitcode_file.write_text("1")
         cmd_info_file.write_text(json.dumps({
-            "cmd_used": "none",
-            "cmd_index": -1,
-            "was_retry": False,
+            "cmd_used": result.cmd_used if result else "none",
+            "cmd_index": result.cmd_index if result else -1,
+            "was_retry": result.was_retry if result else False,
             "error": str(e),
         }))
         sys.exit(1)
+    finally:
+        # Clean up temp prompt file
+        tmp_prompt_file.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
