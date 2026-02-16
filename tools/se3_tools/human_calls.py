@@ -300,26 +300,9 @@ class HumanCallStore:
         call_id = self._generate_call_id(title)
         filepath = self.calls_dir / f"{call_id}.md"
 
-        # Multi-language templates
-        templates = {
-            "zh": {
-                "type_label": "类型",
-                "urgency_label": "紧急程度",
-                "context_label": "上下文",
-                "response_label": "回复",
-                "prompt": "<!-- 人类：请在下方输入您的回复 -->",
-            },
-            "en": {
-                "type_label": "Type",
-                "urgency_label": "Urgency",
-                "context_label": "Context",
-                "response_label": "Response",
-                "prompt": "<!-- Human: write your response below -->",
-            },
-        }
-        t = templates.get(language, templates["en"])
-
-        # Build frontmatter and content
+        # Load language labels from config module
+        from .config import get_language_labels
+        t = get_language_labels(language)        # Build frontmatter and content
         content = f"""---
 id: {call_id}
 type: {call_type.value}
@@ -332,14 +315,14 @@ language: {language}
 
 ## Request: {title}
 
-**{t['type_label']}**: {call_type.value}
-**{t['urgency_label']}**: {priority.value}
-**Source**: {source}
+**{t['type']}**: {call_type.value}
+**{t['urgency']}**: {priority.value}
+**{t['source']}**: {source}
 
-### {t['context_label']}
+### {t['context']}
 {context}
 
-### {t['response_label']}
+### {t['response']}
 {t['prompt']}
 """
 
