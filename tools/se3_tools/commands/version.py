@@ -10,9 +10,24 @@ from typing import List, Tuple, Optional
 
 
 def get_framework_version() -> str:
-    """Get current framework version from single source of truth."""
-    from se3_tools import SE3_FRAMEWORK_VERSION
-    return SE3_FRAMEWORK_VERSION
+    """Get current framework version from single source of truth (direct file read for git worktree compatibility)."""
+    import os
+    from pathlib import Path
+
+    # Get the path to __init__.py in the current working tree
+    init_file = Path(__file__).parent.parent / "__init__.py"
+    if not init_file.exists():
+        raise FileNotFoundError(f"Cannot find se3_tools __init__.py at {init_file}")
+
+    with open(init_file, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    import re
+    match = re.search(r'SE3_FRAMEWORK_VERSION\s*=\s*"([\d]+\.[\d]+\.[\d]+)"', content)
+    if not match:
+        raise ValueError("Cannot find SE3_FRAMEWORK_VERSION definition in __init__.py")
+
+    return match.group(1)
 
 
 def get_template_version(project_root: Path) -> Optional[str]:
@@ -75,18 +90,23 @@ def check_version_consistency(project_root: Path) -> Tuple[bool, List[str]]:
     return len(issues) == 0, issues
 
 
-def get_changed_framework_files(project_root: Path) -> List[str]:
-    """Get list of framework files that have been modified."""
+def get_changed_framework_files(project_root: Path, since_ref: str = "HEAD~1") -> List[str]:
+    """Get list of framework files that have been modified since a git ref.
+
+    Args:
+        project_root: Path to the project root
+        since_ref: Git ref to compare against (default: HEAD~1 for last commit)
+    """
     framework_patterns = [
         "output/SE3.md.template",
         "tools/se3_tools/__init__.py",
-        "tools/se3_tools/commands/*.py",
-        "scripts/collab-*.sh",
-        "scripts/rules-*.md",
+        "tools/se3_tools/commands/",
+        "scripts/collab-",
+        "scripts/rules-",
     ]
 
     result = subprocess.run(
-        ["git", "diff", "--name-only", "HEAD"],
+        ["git", "diff", "--name-only", since_ref, "HEAD"],
         cwd=project_root,
         capture_output=True,
         text=True
@@ -97,13 +117,7 @@ def get_changed_framework_files(project_root: Path) -> List[str]:
     framework_files = []
     for f in changed:
         for pattern in framework_patterns:
-            # Simple pattern matching
-            if pattern.endswith('*.py') or pattern.endswith('*.sh') or pattern.endswith('*.md'):
-                prefix = pattern.rsplit('/', 1)[0]
-                if f.startswith(prefix):
-                    framework_files.append(f)
-                    break
-            elif f == pattern:
+            if f.startswith(pattern):
                 framework_files.append(f)
                 break
 
@@ -112,8 +126,9 @@ def get_changed_framework_files(project_root: Path) -> List[str]:
 
 def version_bumped(project_root: Path, current_version: str) -> bool:
     """Check if version has been bumped in the latest commit."""
+    init_file = project_root / "tools" / "se3_tools" / "__init__.py"
     result = subprocess.run(
-        ["git", "diff", "HEAD", "--", "tools/se3_tools/__init__.py"],
+        ["git", "diff", "HEAD~1", "HEAD", "--", str(init_file)],
         cwd=project_root,
         capture_output=True,
         text=True
@@ -176,12 +191,23 @@ def validate_version_bump(project_root: Path) -> Tuple[bool, List[str]]:
     return len(issues) == 0, issues
 
 
+def find_project_root() -> Path:
+    """Find project root by looking for .git (directory or file in worktrees)."""
+    current = Path.cwd()
+    while current != current.parent:
+        git_path = current / ".git"
+        if git_path.exists():
+            return current
+        current = current.parent
+    return Path.cwd()
+
+
 if __name__ == "__main__":
     # Simple CLI for testing
     import sys
     from pathlib import Path
 
-    project_root = Path.cwd()
+    project_root = find_project_root()
     is_valid, issues = check_version_consistency(project_root)
 
     if not is_valid:
