@@ -295,13 +295,14 @@ sys.exit(1)
     log_warn "Manager failed with exit code $exit_code"
   fi
 
-  # All retries exhausted — escalate to human
-  log_error "Manager failed after $MAX_MANAGER_RETRIES retries. Escalating to human."
+  # All commands exhausted — escalate to human
+  log_error "Manager failed (all commands exhausted). Escalating to human."
   escalate_to_human "Manager Failure" \
-    "The manager agent failed to respond after $MAX_MANAGER_RETRIES attempts.
+    "The manager agent failed after trying all available Claude commands.
 Event type: $event_type
 Event context: $event_context
-Last output: $result"
+Last output: $(echo "$raw_result" | head -c 1000)
+Exit code: $exit_code"
 
   echo '{"action": "escalate", "reason": "manager_failure"}'
   return 1

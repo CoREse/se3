@@ -181,6 +181,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.6.5 | 2026-02-16 | Fix collab: manager launcher outputs valid JSON on failure, signal handling moved to launcher, import error handling, escalation JSON
 | 1.6.4 | 2026-02-16 | Fix collab launchers: JSON extraction, race conditions, signal handling, task dir creation, stderr handling |
 | 1.6.3 | 2026-02-16 | Fix collab orchestrator: manager now uses activity-based monitoring via launcher, proper limit detection |
 | 1.6.2 | 2026-02-16 | Fix collab orchestrator: treat `error_max_turns` as usage limit and switch command |
