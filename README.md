@@ -178,6 +178,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.2.0 | 2026-02-16 | External Controller: session daemon with auto-commit, collaboration outside Claude (fixes nested process limitation) |
 | 1.1.2 | 2026-02-16 | Fix collab orchestrator: jq-complete pipe assignments (`|`) and `+=` operator, MOCK_MODE unbound variable |
 | 1.1.1 | 2026-02-16 | Version management module with strict enforcement rules |
 | 1.1.0 | 2026-02-16 | Git Worktree Collaboration: independent entry mode (`--daemon`, `--manual`), multi-language human calls, version consistency check |

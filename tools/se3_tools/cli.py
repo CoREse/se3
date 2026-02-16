@@ -4,6 +4,7 @@ import typer
 
 from . import __version__, SE3_FRAMEWORK_VERSION
 from .commands import init, lint, status, sync, verify, update, collab, commit
+from .controller import daemon as controller_daemon
 from .commands.update import get_installed_se3_version
 
 app = typer.Typer(
@@ -47,6 +48,11 @@ app.add_typer(verify.app, name="verify", help="Verify spec coverage")
 app.add_typer(update.app, name="update", help="Update SE 3.0 framework to latest version")
 app.add_typer(collab.app, name="collab", help="Manage git-worktree multi-agent collaboration")
 app.add_typer(commit.app, name="commit", help="Commit changes with SE3 verification")
+
+# Register controller commands (external daemon)
+app.command(name="daemon")(controller_daemon.daemon)
+app.command(name="session")(controller_daemon.session)
+app.command(name="collab-v2")(controller_daemon.collab)
 
 
 if __name__ == "__main__":

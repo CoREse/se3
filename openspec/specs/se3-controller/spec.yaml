@@ -1,0 +1,165 @@
+openapi: 3.0.0
+info:
+  title: SE3 External Controller
+  version: 1.0.0
+  description: |
+    External control daemon for SE3 framework.
+    Manages Claude sessions, auto-commit, and multi-agent collaboration.
+
+paths:
+  # Session Management
+  /session/start:
+    post:
+      summary: Start new interactive session
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                objective:
+                  type: string
+                mode:
+                  type: string
+                  enum: [interactive, worker, manager]
+      responses:
+        200:
+          description: Session started
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id:
+                    type: string
+                  pid:
+                    type: integer
+
+  /session/stop:
+    post:
+      summary: Stop session with commit
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                force:
+                  type: boolean
+                skip_commit:
+                  type: boolean
+      responses:
+        200:
+          description: Session stopped
+
+  /session/status:
+    get:
+      summary: Get current session status
+      responses:
+        200:
+          description: Session status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session_id:
+                    type: string
+                  status:
+                    type: string
+                    enum: [active, paused, stopping]
+                  pending_commits:
+                    type: boolean
+
+  # Auto-Commit Control
+  /commit/trigger:
+    post:
+      summary: Trigger immediate commit
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+                message:
+                  type: string
+      responses:
+        200:
+          description: Commit result
+
+  /commit/config:
+    get:
+      summary: Get auto-commit configuration
+      responses:
+        200:
+          description: Configuration
+    put:
+      summary: Update auto-commit configuration
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                silence_timeout:
+                  type: integer
+                  description: Seconds of inactivity before auto-commit
+                commit_on_test_pass:
+                  type: boolean
+                commit_on_session_end:
+                  type: boolean
+
+  # Collaboration
+  /collab/start:
+    post:
+      summary: Start collaboration session
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                objective:
+                  type: string
+                max_workers:
+                  type: integer
+      responses:
+        200:
+          description: Collaboration started
+
+  /collab/spawn:
+    post:
+      summary: Spawn worker/manager process
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                role:
+                  type: string
+                  enum: [worker, manager]
+                task_id:
+                  type: string
+                prompt:
+                  type: string
+      responses:
+        200:
+          description: Process spawned
+
+components:
+  schemas:
+    Session:
+      type: object
+      properties:
+        session_id:
+          type: string
+        pid:
+          type: integer
+        mode:
+          type: string
+        start_time:
+          type: string
+          format: date-time
