@@ -474,6 +474,16 @@ all_tasks_terminal() {
   return 0
 }
 
+has_pending_human_calls() {
+  for call_file in "$HUMAN_CALLS_DIR"/*.md; do
+    [ -f "$call_file" ] || continue
+    if grep -q "^status: pending" "$call_file"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 # =============================================================================
 # Health Monitoring
 # =============================================================================
@@ -1045,6 +1055,10 @@ If all work is complete, respond with action 'complete'. If there are follow-up 
       if $has_blocked; then
         log_warn "All tasks blocked/escalated. Waiting for human response..."
         # Check for human responses every 30s
+        sleep 30
+        check_human_responses
+      elif has_pending_human_calls; then
+        log_warn "No tasks but pending human calls. Waiting for human response..."
         sleep 30
         check_human_responses
       else

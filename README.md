@@ -181,6 +181,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.8.6 | 2026-02-17 | Fix: collab orchestrator no longer exits when escalation happens before tasks exist
 | 1.8.5 | 2026-02-17 | Fix: se3 update no longer writes back to output/SE3.md.template, preserving one-way data flow
 | 1.8.4 | 2026-02-16 | Fix collab: detect_usage_limit() only checks last 3000 chars / 20 lines to avoid false positives from source code
 | 1.8.3 | 2026-02-16 | Fix collab: detect_usage_limit() returns False when returncode=0 to avoid false positives from source code content
