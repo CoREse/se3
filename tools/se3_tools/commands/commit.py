@@ -591,6 +591,14 @@ def commit(
         result = run_command(["git", "log", "--oneline", "-1"], cwd=root)
         if result.returncode == 0:
             typer.echo(f"  {result.stdout.strip()}")
+
+        # Auto-append progress entry
+        try:
+            from ..progress import append_commit_entry
+            append_commit_entry(root)
+            typer.echo(f"  Progress entry appended to progress.md")
+        except Exception as e:
+            typer.echo(f"  Warning: could not append progress entry: {e}")
     else:
         typer.echo(f"  Commit failed:")
         typer.echo(f"  {output}")

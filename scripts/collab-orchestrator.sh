@@ -839,6 +839,112 @@ do_complete() {
   # Update session config
   $JQ_CMD '.status = "completed"' "$COLLAB_DIR/config.json" > "$COLLAB_DIR/config.json.tmp" && \
     mv "$COLLAB_DIR/config.json.tmp" "$COLLAB_DIR/config.json"
+
+  # Generate collab report and append to progress.md
+  generate_collab_report "$summary"
+}
+
+generate_collab_report() {
+  local manager_summary="${1:-}"
+  local report_file="$COLLAB_DIR/report.md"
+  local progress_file="$PROJECT_ROOT/progress.md"
+  local objective
+  objective=$($JQ_CMD -r '.objective // "unknown"' "$COLLAB_DIR/config.json")
+  local today
+  today=$(date +%Y-%m-%d)
+
+  # Build report header
+  cat > "$report_file" <<EOF
+## $today Collab Session: $objective
+
+### Tasks Completed
+| Task | Branch | Status | Summary |
+|------|--------|--------|---------|
+EOF
+
+  # Collect task info
+  local task_file task_id task_status task_branch task_title task_summary
+  local has_findings=false
+  local findings_section=""
+  local failed_section=""
+
+  for task_file in "$COLLAB_DIR/tasks"/task-*.json; do
+    [ -f "$task_file" ] || continue
+    task_id=$($JQ_CMD -r '.id' "$task_file")
+    task_status=$($JQ_CMD -r '.status' "$task_file")
+    task_branch=$($JQ_CMD -r '.branch // "-"' "$task_file")
+    task_title=$($JQ_CMD -r '.title // "-"' "$task_file")
+    task_summary=$($JQ_CMD -r '.result_summary // "-"' "$task_file")
+
+    # Determine merge status
+    local merge_status="$task_status"
+    local review_status
+    review_status=$($JQ_CMD -r '.review.status // "pending"' "$task_file")
+    if [ "$task_status" = "done" ] && [ "$review_status" = "merged" ]; then
+      merge_status="done (merged)"
+    fi
+
+    echo "| $task_id | $task_branch | $merge_status | $task_summary |" >> "$report_file"
+
+    # Check for FINDINGS.md in worktree
+    local worktree_path
+    worktree_path=$($JQ_CMD -r '.worktree // ""' "$task_file")
+    [ "${worktree_path:0:1}" != "/" ] && worktree_path="$PROJECT_ROOT/$worktree_path"
+    if [ -f "$worktree_path/FINDINGS.md" ]; then
+      has_findings=true
+      local finding_summary
+      finding_summary=$(head -20 "$worktree_path/FINDINGS.md" 2>/dev/null || echo "(could not read)")
+      findings_section="${findings_section}\n#### $task_id\n\n$finding_summary\n"
+    fi
+
+    # Track failures
+    if [ "$task_status" = "failed" ] || [ "$task_status" = "escalated" ]; then
+      local reason
+      reason=$($JQ_CMD -r '.blocked_reason // .result_summary // "unknown"' "$task_file")
+      failed_section="${failed_section}\n- $task_id: $task_status — $reason"
+    fi
+  done
+
+  # Add findings section if any
+  if [ "$has_findings" = true ]; then
+    printf "\n### Investigation Findings\n%b\n" "$findings_section" >> "$report_file"
+  fi
+
+  # Add failed section if any
+  if [ -n "$failed_section" ]; then
+    printf "\n### Failed/Escalated\n%b\n" "$failed_section" >> "$report_file"
+  fi
+
+  # Add overall summary
+  cat >> "$report_file" <<EOF
+
+### Overall
+$manager_summary
+EOF
+
+  log_ok "Collab report written to $report_file"
+
+  # Append to progress.md
+  if [ -f "$progress_file" ]; then
+    local report_content
+    report_content=$(cat "$report_file")
+    # Use python to safely append (handles Current Session section)
+    python3 -c "
+import sys
+sys.path.insert(0, '$PROJECT_ROOT/tools')
+try:
+    from se3_tools.progress import append_collab_report
+    from pathlib import Path
+    report = open('$report_file').read()
+    append_collab_report(Path('$PROJECT_ROOT'), report)
+    print('Collab report appended to progress.md')
+except Exception as e:
+    # Fallback: just append to end
+    with open('$progress_file', 'a') as f:
+        f.write('\n\n' + open('$report_file').read() + '\n')
+    print(f'Collab report appended (fallback): {e}')
+" 2>&1 | while read -r line; do log_info "$line"; done
+  fi
 }
 
 # =============================================================================

@@ -1,150 +1,127 @@
 """Status diagnostics command for SE 3.0 tools.
 
-Implements the status-diagnostics spec:
-- Parses status.md
-- Checks consistency against project state
-- Checks human-calls directory
-- Provides diagnostic output in text or JSON format
+Computes project status in real-time from:
+- git status / git log (uncommitted changes, recent activity)
+- openspec/changes/ (active changes)
+- .collab/ (collaboration session state)
+- human-calls/ (pending/responded requests)
+
+No longer depends on status.md — all state is computed live.
 """
 
-# Verify: status-diagnostics/Find status file
-# Verify: status-diagnostics/Mismatched active change
-# Verify: status-diagnostics/Stale blockers
+# Verify: status-diagnostics/Compute git status
+# Verify: status-diagnostics/Detect active changes
 # Verify: status-diagnostics/Unprocessed response
 # Verify: status-diagnostics/Long-pending call
 # Verify: status-diagnostics/Healthy project
 # Verify: status-diagnostics/Issues found
 
+import json
 import subprocess
 from pathlib import Path
 from typing import List, Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from ..utils import parse_status_md, discover_changes
-from ..human_calls import HumanCallStore, CallStatus
+from ..utils import discover_changes
+from ..human_calls import HumanCallStore
 
 import typer
 
 app = typer.Typer(invoke_without_command=True)
 
 
-def check_active_change(status: Dict[str, Any], project_root: Path) -> Optional[Dict[str, Any]]:
-    """Check if active change exists in openspec/changes/.
+def compute_git_status(project_root: Path) -> Dict[str, Any]:
+    """Compute current git state.
 
-    Args:
-        status: Parsed status dict
-        project_root: Project root path
-
-    Returns:
-        Issue dict if problem found, None otherwise
+    Returns dict with branch, uncommitted changes count, last commit info.
     """
-    active_change = status.get('active_change')
+    info = {
+        "branch": "unknown",
+        "uncommitted_count": 0,
+        "uncommitted_details": "",
+        "last_commits": [],
+    }
 
-    if not active_change or active_change == '-':
+    # Branch
+    result = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=project_root, capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        info["branch"] = result.stdout.strip() or "(detached HEAD)"
+
+    # Uncommitted changes
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=project_root, capture_output=True, text=True
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        lines = result.stdout.strip().split("\n")
+        info["uncommitted_count"] = len(lines)
+        info["uncommitted_details"] = result.stdout.strip()
+
+    # Recent commits
+    result = subprocess.run(
+        ["git", "log", "--oneline", "-5"],
+        cwd=project_root, capture_output=True, text=True
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        info["last_commits"] = result.stdout.strip().split("\n")
+
+    return info
+
+
+def compute_active_changes(project_root: Path) -> List[str]:
+    """Find active (non-archived) openspec changes."""
+    changes_dir = project_root / "openspec" / "changes"
+    if not changes_dir.exists():
+        return []
+
+    active = []
+    for item in changes_dir.iterdir():
+        if item.is_dir() and item.name != "archive":
+            active.append(item.name)
+    return sorted(active)
+
+
+def compute_collab_status(project_root: Path) -> Optional[Dict[str, Any]]:
+    """Compute collaboration session status from .collab/ files."""
+    collab_dir = project_root / ".collab"
+    config_file = collab_dir / "config.json"
+
+    if not config_file.exists():
         return None
 
-    changes = discover_changes(str(project_root / "openspec" / "changes"))
-
-    if active_change not in changes:
-        return {
-            'severity': 'error',
-            'check': 'active_change',
-            'message': f"Active change '{active_change}' does not exist in openspec/changes/",
-            'suggestion': f"Available changes: {', '.join(changes) if changes else 'None'}"
-        }
-
-    return None
-
-
-def check_blockers_consistency(status: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Check if status field matches blockers table.
-
-    Args:
-        status: Parsed status dict
-
-    Returns:
-        Issue dict if problem found, None otherwise
-    """
-    status_value = status.get('status', '').lower()
-    blockers = status.get('blockers', [])
-
-    if status_value == 'ready' and blockers:
-        return {
-            'severity': 'warning',
-            'check': 'blockers_consistency',
-            'message': "Status is 'ready' but blockers table is not empty",
-            'suggestion': "Clear blockers table or change status to 'blocked'"
-        }
-
-    if status_value == 'blocked' and not blockers:
-        return {
-            'severity': 'warning',
-            'check': 'blockers_consistency',
-            'message': "Status is 'blocked' but no blockers are listed",
-            'suggestion': "Add blockers to table or change status to 'ready'"
-        }
-
-    return None
-
-
-def check_git_status(project_root: Path) -> Optional[Dict[str, Any]]:
-    """Check git status for uncommitted work.
-
-    Args:
-        project_root: Project root path
-
-    Returns:
-        Issue dict if problem found, None otherwise
-    """
     try:
-        result = subprocess.run(
-            ['git', 'status', '--porcelain'],
-            cwd=project_root,
-            capture_output=True,
-            text=True
-        )
+        config = json.loads(config_file.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {"status": "error", "message": "Cannot read .collab/config.json"}
 
-        if result.returncode != 0:
-            return {
-                'severity': 'warning',
-                'check': 'git_status',
-                'message': "Could not check git status",
-                'suggestion': "Ensure this is a git repository"
-            }
+    result = {
+        "status": config.get("status", "unknown"),
+        "objective": config.get("objective", ""),
+        "session_id": config.get("session_id", ""),
+        "tasks": [],
+    }
 
-        uncommitted = result.stdout.strip()
-        if uncommitted:
-            lines = uncommitted.split('\n')
-            return {
-                'severity': 'info',
-                'check': 'git_status',
-                'message': f"{len(lines)} uncommitted change(s) in working directory",
-                'suggestion': "Run 'git status' to see details"
-            }
+    tasks_dir = collab_dir / "tasks"
+    if tasks_dir.exists():
+        for tf in sorted(tasks_dir.glob("task-*.json")):
+            try:
+                task = json.loads(tf.read_text())
+                result["tasks"].append({
+                    "id": task.get("id", tf.stem),
+                    "status": task.get("status", "unknown"),
+                    "title": task.get("title", ""),
+                })
+            except (json.JSONDecodeError, OSError):
+                continue
 
-    except FileNotFoundError:
-        return {
-            'severity': 'warning',
-            'check': 'git_status',
-            'message': "Git not found",
-            'suggestion': "Install git to enable git status checks"
-        }
-
-    return None
+    return result
 
 
 def check_human_calls(project_root: Path, timeout_days: int = 7) -> List[Dict[str, Any]]:
-    """Check human-calls directory for pending/responded files.
-
-    Uses HumanCallStore for optimized detection and validation.
-
-    Args:
-        project_root: Project root path
-        timeout_days: Days after which a pending call is considered stale
-
-    Returns:
-        List of issue dicts
-    """
+    """Check human-calls directory for pending/responded files."""
     issues = []
     calls_dir = project_root / "human-calls"
 
@@ -153,7 +130,7 @@ def check_human_calls(project_root: Path, timeout_days: int = 7) -> List[Dict[st
 
     store = HumanCallStore(calls_dir)
 
-    # Get stale calls (pending for too long)
+    # Stale calls
     stale_calls = store.get_stale_calls(timeout_days)
     for call in stale_calls:
         issues.append({
@@ -163,7 +140,7 @@ def check_human_calls(project_root: Path, timeout_days: int = 7) -> List[Dict[st
             'suggestion': "Follow up on the pending request or close it"
         })
 
-    # Get pending calls (not stale)
+    # Fresh pending
     all_pending = store.get_pending_calls()
     fresh_pending = [c for c in all_pending if c not in stale_calls]
     for call in fresh_pending:
@@ -174,7 +151,7 @@ def check_human_calls(project_root: Path, timeout_days: int = 7) -> List[Dict[st
             'suggestion': "Awaiting human response"
         })
 
-    # Get responded calls with validation
+    # Responded
     responded_calls = store.get_responded_calls()
     for call in responded_calls:
         is_valid, reason = store.validate_response(call)
@@ -197,37 +174,56 @@ def check_human_calls(project_root: Path, timeout_days: int = 7) -> List[Dict[st
 
 
 def run_diagnostics(project_root: str = ".") -> Dict[str, Any]:
-    """Run all diagnostics checks.
+    """Run all diagnostics by computing live state.
 
-    Args:
-        project_root: Root directory of the project
-
-    Returns:
-        Dict with diagnostic results
+    Returns dict with computed status and diagnostic issues.
     """
     root = Path(project_root).resolve()
-
-    # Parse status.md
-    status = parse_status_md(str(root / "status.md"))
-
     issues = []
 
-    # Check active change
-    issue = check_active_change(status, root)
-    if issue:
-        issues.append(issue)
+    # Compute live state
+    git_info = compute_git_status(root)
+    active_changes = compute_active_changes(root)
+    collab = compute_collab_status(root)
 
-    # Check blockers consistency
-    issue = check_blockers_consistency(status)
-    if issue:
-        issues.append(issue)
+    # Build computed status
+    status = {
+        "branch": git_info["branch"],
+        "uncommitted_changes": git_info["uncommitted_count"],
+        "active_changes": active_changes,
+        "collab": collab,
+        "last_commits": git_info["last_commits"],
+    }
 
-    # Check git status
-    issue = check_git_status(root)
-    if issue:
-        issues.append(issue)
+    # Diagnostics: uncommitted changes
+    if git_info["uncommitted_count"] > 0:
+        issues.append({
+            'severity': 'info',
+            'check': 'git_status',
+            'message': f"{git_info['uncommitted_count']} uncommitted change(s) in working directory",
+            'suggestion': "Run 'se3 commit' to commit changes"
+        })
 
-    # Check human calls
+    # Diagnostics: collab session issues
+    if collab and collab.get("status") == "active":
+        failed = [t for t in collab.get("tasks", []) if t["status"] in ("failed", "escalated")]
+        blocked = [t for t in collab.get("tasks", []) if t["status"] == "blocked"]
+        if failed:
+            issues.append({
+                'severity': 'warning',
+                'check': 'collab_tasks',
+                'message': f"{len(failed)} failed/escalated collab task(s): {', '.join(t['id'] for t in failed)}",
+                'suggestion': "Review failed tasks and retry or escalate"
+            })
+        if blocked:
+            issues.append({
+                'severity': 'warning',
+                'check': 'collab_tasks',
+                'message': f"{len(blocked)} blocked collab task(s): {', '.join(t['id'] for t in blocked)}",
+                'suggestion': "Check blocked_reason in task files"
+            })
+
+    # Diagnostics: human calls
     issues.extend(check_human_calls(root))
 
     # Count by severity
@@ -248,41 +244,60 @@ def run_diagnostics(project_root: str = ".") -> Dict[str, Any]:
 
 
 def print_text_report(results: Dict[str, Any]) -> None:
-    """Print a human-readable diagnostic report.
-
-    Args:
-        results: Diagnostic results dict
-    """
+    """Print a human-readable status report computed from live state."""
     print(f"\n{'=' * 60}")
-    print("SE 3.0 Status Diagnostics")
+    print("SE 3.0 Project Status")
     print(f"{'=' * 60}")
 
     status = results['status']
 
-    print(f"\nCurrent Status:")
-    print(f"  Active Change: {status.get('active_change', 'N/A')}")
-    print(f"  Current Task: {status.get('current_task', 'N/A')}")
-    print(f"  Status: {status.get('status', 'N/A')}")
-    if status.get('blocked_since') and status['blocked_since'] != '-':
-        print(f"  Blocked Since: {status['blocked_since']}")
+    # Git info
+    print(f"\nBranch: {status.get('branch', 'N/A')}")
+    uncommitted = status.get('uncommitted_changes', 0)
+    if uncommitted > 0:
+        print(f"Uncommitted Changes: {uncommitted}")
+    else:
+        print(f"Working Tree: clean")
 
-    if status.get('blockers'):
-        print(f"\n  Blockers:")
-        for blocker in status['blockers']:
-            print(f"    - {blocker['issue']} ({blocker['type']})")
+    # Active changes
+    changes = status.get('active_changes', [])
+    if changes:
+        print(f"\nActive Changes:")
+        for c in changes:
+            print(f"  - {c}")
+    else:
+        print(f"\nActive Changes: (none)")
 
+    # Collab status
+    collab = status.get('collab')
+    if collab:
+        print(f"\nCollab Session: {collab.get('status', 'unknown')}")
+        print(f"  Objective: {collab.get('objective', 'N/A')}")
+        tasks = collab.get('tasks', [])
+        if tasks:
+            for t in tasks:
+                print(f"  - {t['id']}: {t['status']} — {t['title']}")
+
+    # Recent activity
+    commits = status.get('last_commits', [])
+    if commits:
+        print(f"\nRecent Commits:")
+        for c in commits:
+            print(f"  {c}")
+
+    # Diagnostic issues
     print(f"\n{'-' * 60}")
-    print("Diagnostic Results:")
+    print("Diagnostics:")
     print(f"{'-' * 60}")
 
-    if results['healthy']:
-        print("\n  ✓ All diagnostics passed")
+    if results['healthy'] and not results['issues']:
+        print("\n  All diagnostics passed")
     else:
         for issue in results['issues']:
-            icon = '✗' if issue['severity'] == 'error' else '⚠' if issue['severity'] == 'warning' else 'ℹ'
-            print(f"\n  {icon} [{issue['severity'].upper()}] {issue['check']}")
-            print(f"     {issue['message']}")
-            print(f"     Suggestion: {issue['suggestion']}")
+            icon = 'x' if issue['severity'] == 'error' else '!' if issue['severity'] == 'warning' else 'i'
+            print(f"\n  [{icon}] [{issue['severity'].upper()}] {issue['check']}")
+            print(f"      {issue['message']}")
+            print(f"      Suggestion: {issue['suggestion']}")
 
     summary = results['summary']
     print(f"\n{'-' * 60}")
@@ -291,25 +306,12 @@ def print_text_report(results: Dict[str, Any]) -> None:
 
 
 def print_json_report(results: Dict[str, Any]) -> None:
-    """Print JSON diagnostic report.
-
-    Args:
-        results: Diagnostic results dict
-    """
-    import json
+    """Print JSON diagnostic report."""
     print(json.dumps(results, indent=2, default=str))
 
 
 def main(format: str = "text", project_root: str = ".") -> int:
-    """Main entry point for status command.
-
-    Args:
-        format: Output format (text or json)
-        project_root: Root directory of the project
-
-    Returns:
-        Exit code (0 = healthy, 1 = issues found)
-    """
+    """Main entry point for status command."""
     results = run_diagnostics(project_root)
 
     if format == "json":
@@ -325,6 +327,6 @@ def status(
     format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
 ):
-    """Check project status and run diagnostics."""
+    """Check project status and run diagnostics (computed live, no status.md needed)."""
     exit_code = main(format, project_root)
     raise typer.Exit(code=exit_code)

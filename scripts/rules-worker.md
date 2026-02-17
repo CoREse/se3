@@ -9,7 +9,7 @@ You ONLY do implementation work. You do NOT:
 - Manage other agents or tasks
 - Modify specs you implement against
 - Merge branches
-- Update session tracking files (status.md, session history)
+- Update session tracking files (progress.md, session history)
 - Make decisions about project direction
 
 ## Workflow
@@ -53,6 +53,25 @@ Verified: which spec scenarios pass"
 - **ask_human(question, options?, urgent?)** — When you need clarification. Blocks until a response arrives. If it times out, exit with code 2 (blocked).
 - **notify_human(message, level)** — Non-blocking notification. Use for progress updates.
 
+## Investigation Tasks
+
+For non-code-change tasks (research, investigation, analysis):
+- Create `FINDINGS.md` in the worktree root with your findings
+- Commit it with: `se3 commit -m "[collab:{task-id}] Investigation: {topic}"`
+- FINDINGS.md format:
+  ```
+  # {Investigation Topic}
+
+  ## Summary
+  {1-3 sentence summary}
+
+  ## Findings
+  {detailed findings}
+
+  ## Recommendations
+  {actionable recommendations if applicable}
+  ```
+
 ## Exit Codes
 
 - **0** — Task completed successfully, all tests pass
@@ -61,7 +80,7 @@ Verified: which spec scenarios pass"
 
 ## What NOT to Waste Context On
 
-- Do NOT read framework management files (status.md, SE3.md, session history)
+- Do NOT read framework management files (SE3.md, session history)
 - Do NOT explore unrelated parts of the codebase
 - Focus exclusively on files relevant to your task
 - Read only the spec files referenced in your task

@@ -5,7 +5,7 @@ Usage:
 
 Environment detection:
     - If SE3_AGENT_ROLE is set (collab mode): creates human-call for orchestrator
-    - Otherwise (direct usage): commits changes and generates handoff report
+    - Otherwise (direct usage): commits changes, generates session summary in progress.md
 
 This command enforces the SE3 rule: "All modifications must be committed before
 transferring control to humans."
@@ -74,17 +74,10 @@ def get_changed_files_summary(project_root: Path) -> str:
 
 
 def is_in_collab_mode(project_root: Path) -> bool:
-    """Detect if we're running under se3 collab.
-
-    Checks:
-    1. SE3_AGENT_ROLE environment variable
-    2. .collab/config.json exists and is active
-    """
-    # Check environment variable
+    """Detect if we're running under se3 collab."""
     if os.environ.get("SE3_AGENT_ROLE"):
         return True
 
-    # Check collab session exists
     collab_config = project_root / ".collab" / "config.json"
     if collab_config.exists():
         try:
@@ -108,10 +101,7 @@ def get_collab_info(project_root: Path) -> dict:
 
 
 def create_human_call(project_root: Path, reason: str, context: str, agent_role: str = "worker"):
-    """Create a human-call file for the orchestrator.
-
-    This is used when running under collab mode.
-    """
+    """Create a human-call file for the orchestrator."""
     human_calls_dir = project_root / "human-calls"
     human_calls_dir.mkdir(exist_ok=True)
 
@@ -119,7 +109,6 @@ def create_human_call(project_root: Path, reason: str, context: str, agent_role:
     filename = f"{timestamp}-{agent_role}-handoff.md"
     filepath = human_calls_dir / filename
 
-    # Get session info
     collab_info = get_collab_info(project_root)
     session_id = collab_info.get("session_id", "unknown")
 
@@ -135,21 +124,21 @@ language: en-US
 
 ## Request: Agent Handoff
 
-**类型**: action
-**紧急程度**: medium
+**Type**: action
+**Urgency**: medium
 **Source**: collab-{agent_role}
 **Session**: {session_id}
 
-### 上下文
+### Context
 {context}
 
-### 移交原因
+### Handoff Reason
 {reason}
 
-### 当前任务状态
+### Current Task Status
 
 
-### 回复
+### Response
 <!-- Human: write your response below -->
 """
 
@@ -171,7 +160,7 @@ def run_se3_commit(project_root: Path, message: Optional[str] = None) -> Tuple[b
 
 
 def generate_handoff_report(project_root: Path, commit_output: str) -> str:
-    """Generate a handoff report summarizing the current state."""
+    """Generate a handoff report with session summary from progress.md."""
     # Get last commit info
     result = run_command(
         ["git", "log", "-1", "--format=%h %s (%ar)"],
@@ -183,6 +172,14 @@ def generate_handoff_report(project_root: Path, commit_output: str) -> str:
     result = run_command(["git", "branch", "--show-current"], cwd=project_root)
     branch = result.stdout.strip() if result.returncode == 0 else "(unknown)"
 
+    # Finalize session in progress.md
+    session_report = ""
+    try:
+        from ..progress import finalize_session
+        session_report = finalize_session(project_root)
+    except Exception as e:
+        session_report = f"(could not generate session summary: {e})"
+
     # Check for uncommitted changes (should be none after commit)
     has_changes, change_details = has_uncommitted_changes(project_root)
 
@@ -190,14 +187,13 @@ def generate_handoff_report(project_root: Path, commit_output: str) -> str:
 ============================================================
 SE3 Handoff Report
 ============================================================
-Branch:     {branch}
+Branch:      {branch}
 Last Commit: {last_commit}
 
 Changes Committed: {'Yes' if not has_changes else 'WARNING: ' + change_details}
 
-Commit Output:
-{commit_output}
-
+Session Summary:
+{session_report}
 ============================================================
 """
     return report
@@ -215,7 +211,8 @@ def handoff(
     In direct mode (se3 handoff):
         1. Checks for uncommitted changes
         2. Runs se3 commit (if changes exist)
-        3. Generates handoff report
+        3. Finalizes session in progress.md (replaces Current Session with formal record)
+        4. Generates handoff report
 
     In collab mode (SE3_AGENT_ROLE set):
         Creates human-call for orchestrator to handle handoff
@@ -258,7 +255,7 @@ The agent has completed its assigned task and is handing off to human for:
         raise typer.Exit(0)
 
     else:
-        # Direct mode: commit then report
+        # Direct mode: commit then generate session summary
         typer.echo("\n[Direct Mode]")
 
         # Check for changes
@@ -266,8 +263,18 @@ The agent has completed its assigned task and is handing off to human for:
 
         if not has_changes:
             typer.echo("  No uncommitted changes found.")
-            typer.echo("  Handoff complete (nothing to commit).")
+            # Still finalize session even without new commit
+            try:
+                from ..progress import finalize_session
+                report = finalize_session(root)
+                if report and not report.startswith("(no"):
+                    typer.echo("\n  Session summary written to progress.md")
+                    typer.echo(report)
+            except Exception as e:
+                typer.echo(f"  Warning: could not finalize session: {e}")
+
             typer.echo(f"\n{'=' * 50}")
+            typer.echo("Handoff complete.")
             raise typer.Exit(0)
 
         typer.echo(f"  Uncommitted changes detected: {change_details}")
@@ -300,7 +307,7 @@ The agent has completed its assigned task and is handing off to human for:
                 typer.echo("\n  Fix issues and retry, or use --skip-commit to bypass (not recommended).")
                 raise typer.Exit(1)
 
-            # Generate report
+            # Generate report with session summary
             report = generate_handoff_report(root, output)
             typer.echo(report)
 

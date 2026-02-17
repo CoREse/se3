@@ -480,6 +480,8 @@ class TestRulesFiles:
         assert "MCP Tools Available" in content
         assert "Exit Codes" in content
         assert "report_progress" in content
+        assert "Investigation Tasks" in content
+        assert "FINDINGS.md" in content
 
     def test_manager_rules_content(self):
         """Manager rules should contain key sections."""
@@ -498,7 +500,6 @@ class TestRulesFiles:
         assert "Input Classification" not in content
         assert "Stage Routing" not in content
         assert "Self-Iterate" not in content
-        assert "progress.md" not in content
 
     def test_manager_rules_no_implementation_concerns(self):
         """Manager rules should NOT contain implementation details."""
@@ -506,6 +507,15 @@ class TestRulesFiles:
         # Manager rules focus on decisions, not writing code
         assert "Verification Protocol" not in content
         assert "Commit Convention" not in content
+
+    def test_worker_rules_findings_convention(self):
+        """Worker rules should document FINDINGS.md convention for investigation tasks."""
+        content = (self.SCRIPTS_DIR / "rules-worker.md").read_text()
+        assert "Investigation Tasks" in content
+        assert "FINDINGS.md" in content
+        assert "## Summary" in content
+        assert "## Findings" in content
+        assert "## Recommendations" in content
 
     def test_worker_rules_concise(self):
         """Worker rules should be concise (under 150 lines)."""
