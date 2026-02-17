@@ -137,3 +137,5 @@
 - `9dd15e3` Add Chinese language guidance to human calls context content (5 files)
 - `394f349` Update progress.md with recent commits (1 files)
 - `ea576fd` Add human-calls/ and issues.md to gitignore (1 files)
+- `c75d4df` Add mandatory 2.x execution rules to CLAUDE.md (1 files)
+- `d16bba9` Add Session Guard and simplify templates for 2.x manual trigger mode (7 files)

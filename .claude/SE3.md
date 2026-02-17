@@ -1,128 +1,49 @@
-<!-- Generated on 2026-02-17 -->
-<!-- SE3 Version: 2.0.0 -->
-<!-- Checksum: ee057fb4fa6d4830e8ace73144caacecfbc53479353d0c09bc59324b0dad3cde -->
-
 <!--
   SE 3.0 Framework Reference File
   ===============================
   This file is installed by `se3 init` and serves as the official framework specification.
-  It is a read-only reference for agents working on SE 3.0 projects.
 
   Generated File: DO NOT MODIFY DIRECTLY
-  Version: {{SE3_VERSION}}
-  Checksum: {{CHECKSUM}}
-
-  For more information, visit: https://github.com/CoREse/se3
+  Version: 2.2.0
+  Checksum: manual-update
 -->
 
 # SE 3.0 Framework
 
-> Place at `.claude/CLAUDE.md` in your project.
+> **Note**: SE3 2.x+ 采用"手动触发"模式。不再指望 agent 自觉遵循，而是通过 command 调用。
 
-## Core Principles
+## Command 入口
 
-1. **Specs as Truth**: OpenSpec specs are the source of truth for **requirements**. Agents MUST NOT weaken or delete existing requirements without explicit human approval.
-2. **Verify Before Done**: Never mark a feature complete without running tests. Spec scenarios are acceptance criteria, not documentation.
-3. **All Commits via `se3 commit`**: Enforces tests, sensitive file blocking, and message quality. Do NOT use `git commit` directly.
-4. **Incremental Development**: Work in openspec changes. Each session stays within a bounded scope.
+| Command | 用途 |
+|---------|------|
+| `/se3:start` | 开始会话 - 返回 JSON actions 供执行 |
+| `/se3:work <描述>` | 开始/继续工作 - 返回 JSON actions 供执行 |
+| `/se3:done` | 结束会话 - 返回 JSON actions 供执行 |
 
-## Workflow Entry Points
+所有工作流通过 CLI (`se3 start`, `se3 work`, `se3 done`) 程序化驱动，返回 JSON actions 数组。
 
-SE3 workflows are driven by CLI commands that return JSON `actions` arrays. Use these skills:
+## Session Guard (2.1+)
 
-| Skill | When | What it does |
-|-------|------|-------------|
-| `/se3:start` | Session begin | Environment setup, load context, baseline tests, check pending items |
-| `/se3:work [desc]` | Start/continue work | Guides through bugfix/feature/review/directive workflow with step tracking |
-| `/se3:done` | Session end | Tests → commit → handoff with session summary |
+- `se3 work` 和 `se3 done` 会检查 session 是否已通过 `se3 start` 启动
+- 未启动时返回错误，提示先运行 `se3 start`
 
-The CLI commands (`se3 start`, `se3 work`, `se3 done`) encode all workflow logic. Skills are thin wrappers that call CLI and execute the returned actions.
-
-## Spec Guardrails
-
-- **MUST NOT** delete an existing spec requirement without explicit human approval
-- **MUST NOT** weaken a requirement (e.g., changing "SHALL" to "SHOULD")
-- **MUST NOT** modify the description or scenarios of a requirement you are implementing
-- **CAN** add new requirements
-- **CAN** mark requirements as deprecated with human-approved reason and migration path
-
-After archiving a change, review the git diff of `openspec/specs/` to confirm no inappropriate weakening.
-
-## Human-as-MCP
-
-- **Present**: Use AskUserQuestion (sync)
-- **Absent**: Write file to `human-calls/` (async)
-
-**File format** (`{YYYYMMDD}-{HHmmss}-{desc}.md`):
-```yaml
----
-type: decision | action | information
-priority: high | medium | low
-status: pending | responded
-created: YYYY-MM-DD
----
-
-# [Title]
-
-## Context
-[Why human input is needed]
-
-## Request
-[What is being asked]
-
-## Options (for decision type)
-- **A**: [option + trade-offs]
-- **B**: [option + trade-offs]
-
----
-## Response (filled by human)
-```
-
-**Non-blocking**: Mark dependent tasks `waiting-human`, continue other work.
-
-## Agent Team
-
-- **Default**: Task tool — parent spawns sub-agents, specs on filesystem as shared context
-- **Long-running**: `se3 collab` — orchestrator + manager + workers in git worktrees
-
-## Project Structure
+## 项目结构
 
 ```
 project/
 ├── init.sh                # optional: environment setup
-├── progress.md            # cross-session history (auto-maintained)
+├── progress.md            # cross-session history
 ├── se3.config.yaml        # optional configuration
-├── README.md
 ├── human-calls/           # async human call queue
 ├── openspec/
 │   ├── specs/             # source of truth for requirements
 │   └── changes/           # active changes
-│       └── archive/
 └── .claude/
-    ├── CLAUDE.md          # this file
-    └── commands/se3/      # workflow skills (start.md, work.md, done.md)
+    ├── CLAUDE.md          # project conventions
+    └── commands/se3/      # workflow skills
 ```
-
-## Context Clearing
-
-Clear when context **approaches saturation** or when switching to a **substantially different task**. Do NOT clear mechanically after every task group.
-
-## Configuration
-
-Optional `se3.config.yaml`:
-- `max_tasks_per_change`: Max tasks per group (default: 5)
-- `human_call.timeout_days`: Async call timeout (default: 7)
-- `session.max_progress_entries`: Max progress entries before archiving (default: 20)
 
 ## Versioning
 
-SE3 follows [Semantic Versioning 2.0.0](https://semver.org/):
-- **MAJOR**: Breaking changes (existing projects need manual review)
-- **MINOR**: Backward-compatible additions (safe to `se3 update`)
-- **PATCH**: Backward-compatible bug fixes
-
-**Single Source of Truth**: `tools/se3_tools/__init__.py:SE3_FRAMEWORK_VERSION`
-
-**Upgrade path**: `se3 update --se3-version X.Y.Z` reads `output/SE3.md.template` and writes to `.claude/SE3.md`.
-
-**Self-hosted projects** (developing SE3 itself): MUST NOT edit `.claude/SE3.md` directly. Changes go through `output/SE3.md.template` → `se3 update`.
+- **Single Source of Truth**: `tools/se3_tools/__init__.py:SE3_FRAMEWORK_VERSION`
+- **Upgrade**: `se3 update`
