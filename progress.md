@@ -139,3 +139,4 @@
 - `ea576fd` Add human-calls/ and issues.md to gitignore (1 files)
 - `c75d4df` Add mandatory 2.x execution rules to CLAUDE.md (1 files)
 - `d16bba9` Add Session Guard and simplify templates for 2.x manual trigger mode (7 files)
+- `5e1bb56` Merge CLAUDE.md into SE3.md, remove CLAUDE.md.template (v2.3.0) (13 files)
