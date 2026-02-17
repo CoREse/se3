@@ -135,3 +135,5 @@
 - `2a2bd03` Update .claude/SE3.md to v1.10.0 with tool-enforced progress tracking (1 files)
 - `0ad0fd6` Update 6 files (6 files changed, 155 insertions(+), 540 deletions(-)) (6 files)
 - `9dd15e3` Add Chinese language guidance to human calls context content (5 files)
+- `394f349` Update progress.md with recent commits (1 files)
+- `ea576fd` Add human-calls/ and issues.md to gitignore (1 files)
