@@ -140,6 +140,34 @@ def done_cmd(
         print_text_report(state)
     raise typer.Exit(code=0)
 
+@app.command(name="full-cycle")
+def full_cycle_cmd(
+    description: str = typer.Argument(..., help="Description of the work to do"),
+    project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
+    quick: bool = typer.Option(False, "--quick", "-q", help="Quick mode - skip formal change creation, use 'small' workflow"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
+):
+    """Run the complete start-work-done workflow in one command.
+
+    This command streamlines simple/quick tasks by combining:
+    1. se3 start - Initialize the session
+    2. se3 work --new - Create a change for the work
+    3. Implementation (performed by agent)
+    4. se3 done - Complete the session
+
+    Examples:
+        se3 full-cycle "fix login bug"
+        se3 full-cycle "add user profile page" --quick
+        se3 full-cycle "update documentation" -q --json
+    """
+    from .commands.fullcycle import run_full_cycle, print_text_report as fullcycle_print_text, print_json_report as fullcycle_print_json
+    result = run_full_cycle(description, project_root, quick)
+    if format == "json":
+        fullcycle_print_json(result)
+    else:
+        fullcycle_print_text(result)
+    raise typer.Exit(code=0 if result.get("success") else 1)
+
 # Register handoff as a direct command (not a sub-typer)
 @app.command(name="handoff")
 def handoff_cmd(
