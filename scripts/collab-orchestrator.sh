@@ -984,6 +984,7 @@ escalate_to_human() {
 
   # Generate template based on language setting
   local header_type header_urgency header_context header_tasks header_response prompt_text
+  local language_note
   if [[ "$HUMAN_CALL_LANGUAGE" == zh* ]]; then
     header_type="类型"
     header_urgency="紧急程度"
@@ -991,6 +992,7 @@ escalate_to_human() {
     header_tasks="当前任务状态"
     header_response="回复"
     prompt_text="<!-- 人类：请在下方输入您的回复 -->"
+    language_note="\n\n**注意**：请用中文回复。"
   else
     header_type="Type"
     header_urgency="Urgency"
@@ -998,6 +1000,7 @@ escalate_to_human() {
     header_tasks="Current Task States"
     header_response="Response"
     prompt_text="<!-- Human: write your response below -->"
+    language_note=""
   fi
 
   # Generate ISO timestamp
@@ -1023,7 +1026,7 @@ language: ${HUMAN_CALL_LANGUAGE}
 **Source**: collab-orchestrator
 
 ### ${header_context}
-${context}
+${context}${language_note}
 
 ### ${header_tasks}
 $(summarize_tasks)

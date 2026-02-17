@@ -301,8 +301,16 @@ class HumanCallStore:
         filepath = self.calls_dir / f"{call_id}.md"
 
         # Load language labels from config module
-        from .config import get_language_labels
-        t = get_language_labels(language)        # Build frontmatter and content
+        from .config import get_language_labels, is_chinese_language
+        t = get_language_labels(language)
+
+        # Add language guidance for context content
+        if is_chinese_language(language):
+            language_note = "\n\n**注意**：请用中文回复。"
+        else:
+            language_note = ""
+
+        # Build frontmatter and content
         content = f"""---
 id: {call_id}
 type: {call_type.value}
@@ -320,7 +328,7 @@ language: {language}
 **{t['source']}**: {source}
 
 ### {t['context']}
-{context}
+{context}{language_note}
 
 ### {t['response']}
 {t['prompt']}

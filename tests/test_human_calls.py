@@ -312,6 +312,22 @@ class TestHumanCallStore:
         assert "上下文" in content
         assert "回复" in content
         assert "人类：请在下方输入您的回复" in content
+        # Verify language guidance is added for Chinese
+        assert "请用中文回复" in content
+
+        # English should not have Chinese language note
+        en_call = self.store.create_call(
+            title="English Test",
+            context="This is a test",
+            language="en",
+        )
+
+        en_content = en_call.file_path.read_text()
+        assert "Type" in en_content
+        assert "Context" in en_content
+        assert "Response" in en_content
+        # Verify no Chinese language guidance in English call
+        assert "请用中文回复" not in en_content
 
 
 class TestLegacyCompatibility:
