@@ -115,6 +115,13 @@ Rules:
 - For 'escalate': set reason (will be sent to human)
 - For 'complete': when all tasks are merged and done
 - If unsure, use 'escalate' rather than guessing
+
+CRITICAL CONSTRAINTS:
+1. You have LIMITED turns (30 max) - use tools efficiently, decide quickly
+2. Your FINAL message must contain ONLY a valid JSON object with an "action" field
+3. No markdown, no explanation, no analysis text — ONLY the JSON object
+4. DO NOT use TodoWrite or other tools in your final turn - output JSON directly
+5. If you cannot complete research in time, use "action": "escalate" with reason
 """
 
     # Write prompt to temp file to avoid command line length issues
@@ -124,12 +131,13 @@ Rules:
     # Build claude args
     # Note: -p/--print is a flag (no value), prompt file is passed via @ syntax
     # Use stream-json for real-time output (enables activity-based timeout)
+    # Use limited max-turns to force JSON output; unlimited turns leads to verbose analysis
     claude_args = [
         "--dangerously-skip-permissions",
         "--print",
         "--output-format", "stream-json",
         "--verbose",
-        "--max-turns", "0",  # 0 = unlimited, rely on timeout instead
+        "--max-turns", "30",  # Limited turns to force JSON output (unlimited leads to verbose analysis)
         f"@{prompt_file}",  # Use file syntax to avoid CLI parsing issues
     ]
     if args.model:
@@ -188,63 +196,84 @@ Rules:
 
         print(f"[manager-launcher] Exit code: {result.returncode}", file=sys.stderr)
         print(f"[manager-launcher] Command used: {result.cmd_used}", file=sys.stderr)
+        print(f"[manager-launcher] Output length: {len(result.output) if result.output else 0}", file=sys.stderr)
+        print(f"[manager-launcher] Success: {result.success}", file=sys.stderr)
 
         # Output the result JSON to stdout for orchestrator to parse (only on success)
         if result.success and result.output:
-            # For stream-json format, parse the last line (type=result) and extract the result field
             import re
+
+            def find_action_json(text):
+                """Find a JSON object with 'action' field in text."""
+                text = text.strip()
+                text = re.sub(r'^```json\s*\n', '', text)
+                text = re.sub(r'\n```\s*$', '', text)
+                text = text.strip()
+
+                i = 0
+                while i < len(text):
+                    if text[i] == '{':
+                        depth = 0
+                        for j in range(i, len(text)):
+                            if text[j] == '{':
+                                depth += 1
+                            elif text[j] == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    try:
+                                        obj = json.loads(text[i:j+1])
+                                        if 'action' in obj:
+                                            return obj
+                                    except json.JSONDecodeError:
+                                        pass
+                                    break
+                    i += 1
+                return None
+
             try:
-                # Find the last line with type=result
-                result_line = None
-                for line in reversed(result.output.strip().split('\n')):
+                found_obj = None
+                lines = result.output.strip().split('\n')
+
+                # Strategy 1: Check the type=result line
+                for line in reversed(lines):
                     line = line.strip()
                     if line and '"type":"result"' in line:
-                        result_line = line
+                        try:
+                            envelope = json.loads(line)
+                            search_text = envelope.get('result', '')
+                            found_obj = find_action_json(search_text)
+                        except json.JSONDecodeError:
+                            pass
                         break
 
-                if result_line:
-                    envelope = json.loads(result_line)
-                    # The actual manager response is in the "result" field
-                    search_text = envelope.get('result', '')
+                # Strategy 2: Check assistant messages (last first) for JSON
+                if not found_obj:
+                    for line in reversed(lines):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            msg = json.loads(line)
+                            if msg.get('type') == 'assistant':
+                                content = msg.get('message', {}).get('content', [])
+                                for block in content:
+                                    if block.get('type') == 'text':
+                                        found_obj = find_action_json(block['text'])
+                                        if found_obj:
+                                            break
+                            if found_obj:
+                                break
+                        except (json.JSONDecodeError, KeyError, TypeError):
+                            continue
 
-                    # Strip markdown code fences
-                    text = search_text.strip()
-                    text = re.sub(r'^```json\s*\n', '', text)
-                    text = re.sub(r'\n```\s*$', '', text)
-                    text = text.strip()
-
-                    # Find the JSON object with "action" field
-                    found = False
-                    # Try to find by scanning for balanced braces
-                    i = 0
-                    while i < len(text):
-                        if text[i] == '{':
-                            depth = 0
-                            for j in range(i, len(text)):
-                                if text[j] == '{':
-                                    depth += 1
-                                elif text[j] == '}':
-                                    depth -= 1
-                                    if depth == 0:
-                                        try:
-                                            obj = json.loads(text[i:j+1])
-                                            if 'action' in obj:
-                                                print(json.dumps(obj))
-                                                found = True
-                                                break
-                                        except json.JSONDecodeError:
-                                            pass
-                                        break
-                        if found:
-                            break
-                        i += 1
-
-                    if not found:
-                        print(f'{{"action": "escalate", "reason": "Manager output did not contain valid JSON"}}', file=sys.stderr)
+                if found_obj:
+                    print(json.dumps(found_obj))
                 else:
-                    print(f'{{"action": "escalate", "reason": "No result line found in output"}}', file=sys.stderr)
+                    print(f'{{"action": "escalate", "reason": "Manager output did not contain valid JSON"}}')
+                    sys.exit(1)
             except Exception as e:
-                print(f'{{"action": "escalate", "reason": "Failed to parse manager output: {e}"}}', file=sys.stderr)
+                print(f'{{"action": "escalate", "reason": "Failed to parse manager output: {e}"}}')
+                sys.exit(1)
         elif not result.success:
             # On failure, output escalation JSON so orchestrator can handle it
             # The actual error details are in stderr/log

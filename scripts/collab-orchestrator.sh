@@ -248,8 +248,14 @@ Rules:
   raw_result=$(python3 "$SCRIPT_DIR/collab-manager-launcher.py" "${launcher_args[@]}" 2>"$stderr_file")
   local exit_code=$?
 
-  # Clean up temp files
-  rm -f "$context_file" "$tasks_file" "$stderr_file"
+  # Debug: Save raw_result for inspection
+  echo "$raw_result" > "$COLLAB_DIR/logs/manager-raw-result-latest.log"
+
+  # Clean up temp files (keep stderr for debugging)
+  rm -f "$context_file" "$tasks_file"
+  [ -f "$stderr_file" ] && cp "$stderr_file" "$COLLAB_DIR/logs/manager-stderr-latest.log" && rm -f "$stderr_file"
+
+  log_info "Manager exit_code=$exit_code raw_result_length=${#raw_result}"
 
   if [ $exit_code -eq 0 ] && [ -n "$raw_result" ]; then
     # Parse JSON from launcher output
@@ -950,6 +956,15 @@ run_main() {
     rm -f "$COLLAB_DIR/tasks"/task-*.json 2>/dev/null
     rm -f "$COLLAB_DIR/tasks"/.exitcode-* 2>/dev/null
 
+    # Clean up old human-calls from previous sessions
+    if [ -d "$HUMAN_CALLS_DIR" ]; then
+      for old_call in "$HUMAN_CALLS_DIR"/*.md; do
+        [ -f "$old_call" ] || continue
+        log_info "Archiving old human-call: $(basename "$old_call")"
+        mv "$old_call" "${old_call}.archived"
+      done
+    fi
+
     # Create session config
     local base_branch
     base_branch=$(git -C "$PROJECT_ROOT" branch --show-current)
@@ -1132,41 +1147,34 @@ Response: $current_response")
 
 _check_human_responses_legacy() {
   # Legacy bash implementation (fallback)
-  # Support multiple languages: English and Chinese
-  local default_prompts=("^<!-- Human: write your response below -->"
-                         "^<!-- 人类：请在下方输入您的回复 -->")
+  # Check for human responses in pending human-call files.
+  # A response is detected when there's non-whitespace content after the
+  # response section header (### Response / ### 回复), excluding the
+  # default prompt comment.
 
   for call_file in "$HUMAN_CALLS_DIR"/*.md; do
     [ -f "$call_file" ] || continue
 
-    # Check if file has any human response marker (starts with <!-- Human: or <!-- 人类：)
-    if grep -qE "^<!-- (Human|人类)：" "$call_file"; then
-      # Check if it's not just the default prompt
-      local is_default=false
-      for prompt in "${default_prompts[@]}"; do
-        if grep -qE "$prompt" "$call_file"; then
-          is_default=true
-          break
-        fi
-      done
-      $is_default && continue
-      # Human has written a response — notify manager
-      local response
-      # Support both English and Chinese Response headers
-      response=$(sed -n '/^### \(Response\|回复\)/,$ p' "$call_file" | tail -n +2)
+    # Only check files with pending status
+    grep -q "^status: pending" "$call_file" || continue
 
-      if [ -n "$response" ]; then
-        log_info "Human response detected in $(basename "$call_file")"
-        local manager_result
-        manager_result=$(invoke_manager "human_response" "Human responded to escalation.
+    # Extract content after ### Response / ### 回复 header, skip default prompt comment
+    local response
+    response=$(sed -n '/^### \(Response\|回复\)/,$ p' "$call_file" | tail -n +2 \
+      | grep -v '^<!-- \(Human: write your response below\|人类：请在下方输入您的回复\) -->' \
+      | sed '/^[[:space:]]*$/d')
+
+    if [ -n "$response" ]; then
+      log_info "Human response detected in $(basename "$call_file")"
+      local manager_result
+      manager_result=$(invoke_manager "human_response" "Human responded to escalation.
 File: $(basename "$call_file")
 Response: $response")
 
-        # Rename to processed
-        mv "$call_file" "${call_file%.md}.responded.md"
+      # Rename to processed
+      mv "$call_file" "${call_file%.md}.responded.md"
 
-        process_manager_decision "$manager_result"
-      fi
+      process_manager_decision "$manager_result"
     fi
   done
 }
