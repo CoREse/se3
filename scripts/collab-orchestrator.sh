@@ -17,6 +17,10 @@ export JQ_CMD="jq"
 if ! command -v jq &>/dev/null; then
   JQ_CMD="python3 $SCRIPT_DIR/jq-complete.py"
 fi
+# Ensure JQ_CMD is never empty
+if [ -z "$JQ_CMD" ]; then
+  JQ_CMD="python3 $SCRIPT_DIR/jq-complete.py"
+fi
 
 # --- Configuration (defaults, overridden by se3.config.yaml) ---
 MAX_PARALLEL_WORKERS=3
@@ -259,18 +263,20 @@ Rules:
 
   if [ $exit_code -eq 0 ] && [ -n "$raw_result" ]; then
     # Parse JSON from launcher output
-    result=$(echo "$raw_result" | python3 -c "
+    # Use temp file to avoid pipe issues with large data
+    local tmp_json="$COLLAB_DIR/.tmp-manager-result-$$.json"
+    echo "$raw_result" > "$tmp_json"
+    result=$(python3 -c "
 import json, sys, re
-raw = sys.stdin.read()
+with open('$tmp_json') as f:
+    raw = f.read()
 try:
-    # Try to parse as JSON directly
     obj = json.loads(raw)
     if 'action' in obj:
         print(json.dumps(obj))
         sys.exit(0)
 except:
     pass
-# Try to extract JSON object from text
 m = re.search(r'\{.*\}', raw, re.DOTALL)
 if m:
     try:
@@ -282,8 +288,10 @@ if m:
         pass
 sys.exit(1)
 " 2>/dev/null)
+    parse_exit=$?
+    rm -f "$tmp_json"
 
-    if [ $? -eq 0 ] && [ -n "$result" ]; then
+    if [ $parse_exit -eq 0 ] && [ -n "$result" ]; then
       local action
       action=$(echo "$result" | $JQ_CMD -r '.action')
       log_ok "Manager responded: $action"
