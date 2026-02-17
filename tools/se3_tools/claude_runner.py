@@ -172,75 +172,75 @@ class ClaudeRunner:
         last_result = None
         temp_files = []
 
-        for i, cmd_entry in enumerate(self.commands):
-            cmd_name = cmd_entry["cmd"]
-            current_args = args
+        try:
+            for i, cmd_entry in enumerate(self.commands):
+                cmd_name = cmd_entry["cmd"]
+                current_args = args
 
-            # If retrying (not first attempt), consult callback
-            if i > 0 and on_retry is not None:
-                new_args = on_retry(i, self.commands[i - 1]["cmd"])
-                if new_args is not None:
-                    current_args = new_args
+                # If retrying (not first attempt), consult callback
+                if i > 0 and on_retry is not None:
+                    new_args = on_retry(i, self.commands[i - 1]["cmd"])
+                    if new_args is not None:
+                        current_args = new_args
 
-            # Resolve arguments (handle @file syntax)
-            resolved_args = self._resolve_args(current_args, cwd)
-            # Collect temp files to clean up later
-            for arg in resolved_args:
-                if arg.startswith("@"):
-                    temp_files.append(Path(arg[1:]))
+                # Resolve arguments (handle @file syntax)
+                resolved_args = self._resolve_args(current_args, cwd)
+                # Collect temp files to clean up later
+                for arg in resolved_args:
+                    if arg.startswith("@"):
+                        temp_files.append(Path(arg[1:]))
 
-            full_cmd = [cmd_name] + resolved_args
+                full_cmd = [cmd_name] + resolved_args
 
-            try:
-                result = subprocess.run(
-                    full_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=cwd,
-                    env=env,
-                )
-                last_result = result
+                try:
+                    result = subprocess.run(
+                        full_cmd,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout,
+                        cwd=cwd,
+                        env=env,
+                    )
+                    last_result = result
 
-                # Check for usage limit
-                if self.detect_usage_limit(result.returncode, result.stdout, result.stderr):
+                    # Check for usage limit
+                    if self.detect_usage_limit(result.returncode, result.stdout, result.stderr):
+                        print(
+                            f"[claude-runner] Usage limit hit with '{cmd_name}', "
+                            f"trying next command...",
+                            file=sys.stderr,
+                        )
+                        continue
+
+                    # Success or non-limit failure — return as-is
+                    return result
+
+                except subprocess.TimeoutExpired:
                     print(
-                        f"[claude-runner] Usage limit hit with '{cmd_name}', "
+                        f"[claude-runner] Timeout with '{cmd_name}', "
                         f"trying next command...",
                         file=sys.stderr,
                     )
+                    # Create a synthetic CompletedProcess for the timeout case
+                    last_result = subprocess.CompletedProcess(
+                        args=full_cmd, returncode=124, stdout="", stderr="timeout"
+                    )
                     continue
 
-                # Success or non-limit failure — return as-is
-                return result
+            # All commands exhausted
+            if last_result is not None:
+                return last_result
 
-            except subprocess.TimeoutExpired:
-                print(
-                    f"[claude-runner] Timeout with '{cmd_name}', "
-                    f"trying next command...",
-                    file=sys.stderr,
-                )
-                # Create a synthetic CompletedProcess for the timeout case
-                last_result = subprocess.CompletedProcess(
-                    args=full_cmd, returncode=124, stdout="", stderr="timeout"
-                )
-                continue
-
-        # All commands exhausted
-        if last_result is not None:
-            return last_result
-
-        # Clean up temp files
-        for temp_file in temp_files:
-            try:
-                temp_file.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-        # Should not reach here, but just in case
-        return subprocess.CompletedProcess(
-            args=[], returncode=1, stdout="", stderr="No claude commands configured"
-        )
+            # Should not reach here, but just in case
+            return subprocess.CompletedProcess(
+                args=[], returncode=1, stdout="", stderr="No claude commands configured"
+            )
+        finally:
+            for temp_file in temp_files:
+                try:
+                    temp_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def popen(
         self,
@@ -426,43 +426,68 @@ class ClaudeRunner:
         all_outputs = []
 
         temp_files = []
-        for cmd_index, cmd_entry in enumerate(self.commands):
-            cmd_name = cmd_entry["cmd"]
+        try:
+            for cmd_index, cmd_entry in enumerate(self.commands):
+                cmd_name = cmd_entry["cmd"]
 
-            # Resolve arguments (handle @file syntax)
-            resolved_args = self._resolve_args(args, cwd)
-            # Collect temp files to clean up later
-            for arg in resolved_args:
-                if arg.startswith("@"):
-                    temp_files.append(Path(arg[1:]))
+                # Resolve arguments (handle @file syntax)
+                resolved_args = self._resolve_args(args, cwd)
+                # Collect temp files to clean up later
+                for arg in resolved_args:
+                    if arg.startswith("@"):
+                        temp_files.append(Path(arg[1:]))
 
-            full_cmd = [cmd_name] + resolved_args
+                full_cmd = [cmd_name] + resolved_args
 
-            print(
-                f"[claude-runner] Attempting command {cmd_index + 1}/{len(self.commands)}: '{cmd_name}'",
-                file=sys.stderr,
-            )
-            try:
-                result = self._run_single_with_monitor(
-                    full_cmd=full_cmd,
-                    cmd_name=cmd_name,
-                    cmd_index=cmd_index,
-                    log_file=log_file,
-                    wall_timeout=wall_timeout,
-                    inactivity_timeout=inactivity_timeout,
-                    cwd=cwd,
-                    env=env,
-                    on_output=on_output,
-                    on_activity=on_activity,
-                    start_time=start_time,
+                print(
+                    f"[claude-runner] Attempting command {cmd_index + 1}/{len(self.commands)}: '{cmd_name}'",
+                    file=sys.stderr,
                 )
+                try:
+                    result = self._run_single_with_monitor(
+                        full_cmd=full_cmd,
+                        cmd_name=cmd_name,
+                        cmd_index=cmd_index,
+                        log_file=log_file,
+                        wall_timeout=wall_timeout,
+                        inactivity_timeout=inactivity_timeout,
+                        cwd=cwd,
+                        env=env,
+                        on_output=on_output,
+                        on_activity=on_activity,
+                        start_time=start_time,
+                    )
 
-                all_outputs.append(f"=== Command: {cmd_name} ===")
-                all_outputs.append(result.output)
+                    all_outputs.append(f"=== Command: {cmd_name} ===")
+                    all_outputs.append(result.output)
 
-                if result.success:
+                    if result.success:
+                        print(
+                            f"[claude-runner] Command '{cmd_name}' succeeded",
+                            file=sys.stderr,
+                        )
+                        return MonitoredResult(
+                            returncode=result.returncode,
+                            output="\n".join(all_outputs),
+                            cmd_used=cmd_name,
+                            cmd_index=cmd_index,
+                            was_retry=cmd_index > 0,
+                        )
+
+                    # Check if we should retry
+                    if result.should_retry and cmd_index < len(self.commands) - 1:
+                        print(
+                            f"[claude-runner] Command '{cmd_name}' failed (will retry next command): "
+                            f"Exit code {result.returncode}",
+                            file=sys.stderr,
+                        )
+                        # Add a small delay between retries to avoid rapid fire switching
+                        time.sleep(2)
+                        continue
+
+                    # Final command failed
                     print(
-                        f"[claude-runner] Command '{cmd_name}' succeeded",
+                        f"[claude-runner] Command '{cmd_name}' failed and no more commands to retry",
                         file=sys.stderr,
                     )
                     return MonitoredResult(
@@ -473,67 +498,42 @@ class ClaudeRunner:
                         was_retry=cmd_index > 0,
                     )
 
-                # Check if we should retry
-                if result.should_retry and cmd_index < len(self.commands) - 1:
-                    print(
-                        f"[claude-runner] Command '{cmd_name}' failed (will retry next command): "
-                        f"Exit code {result.returncode}",
-                        file=sys.stderr,
-                    )
-                    # Add a small delay between retries to avoid rapid fire switching
-                    time.sleep(2)
-                    continue
+                except Exception as e:
+                    msg = f"[claude-runner] Error running command '{cmd_name}': {e}"
+                    print(msg, file=sys.stderr)
+                    all_outputs.append(f"=== Command: {cmd_name} ===")
+                    all_outputs.append(msg)
 
-                # Final command failed
-                print(
-                    f"[claude-runner] Command '{cmd_name}' failed and no more commands to retry",
-                    file=sys.stderr,
-                )
-                return MonitoredResult(
-                    returncode=result.returncode,
-                    output="\n".join(all_outputs),
-                    cmd_used=cmd_name,
-                    cmd_index=cmd_index,
-                    was_retry=cmd_index > 0,
-                )
+                    if cmd_index < len(self.commands) - 1:
+                        print(
+                            f"[claude-runner] Will retry with next command...",
+                            file=sys.stderr,
+                        )
+                        time.sleep(2)
+                        continue
+                    else:
+                        return MonitoredResult(
+                            returncode=1,
+                            output="\n".join(all_outputs),
+                            cmd_used=cmd_name,
+                            cmd_index=cmd_index,
+                            was_retry=cmd_index > 0,
+                        )
 
-            except Exception as e:
-                msg = f"[claude-runner] Error running command '{cmd_name}': {e}"
-                print(msg, file=sys.stderr)
-                all_outputs.append(f"=== Command: {cmd_name} ===")
-                all_outputs.append(msg)
-
-                if cmd_index < len(self.commands) - 1:
-                    print(
-                        f"[claude-runner] Will retry with next command...",
-                        file=sys.stderr,
-                    )
-                    time.sleep(2)
-                    continue
-                else:
-                    return MonitoredResult(
-                        returncode=1,
-                        output="\n".join(all_outputs),
-                        cmd_used=cmd_name,
-                        cmd_index=cmd_index,
-                        was_retry=cmd_index > 0,
-                    )
-
-        # Clean up temp files
-        for temp_file in temp_files:
-            try:
-                temp_file.unlink(missing_ok=True)
-            except Exception:
-                pass
-
-        # Should not reach here
-        return MonitoredResult(
-            returncode=1,
-            output="\n".join(all_outputs),
-            cmd_used="none",
-            cmd_index=-1,
-            was_retry=False,
-        )
+            # Should not reach here
+            return MonitoredResult(
+                returncode=1,
+                output="\n".join(all_outputs),
+                cmd_used="none",
+                cmd_index=-1,
+                was_retry=False,
+            )
+        finally:
+            for temp_file in temp_files:
+                try:
+                    temp_file.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def _run_single_with_monitor(
         self,
