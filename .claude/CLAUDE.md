@@ -1,8 +1,21 @@
-# se3.0
+# SE3 自举项目
 
-## SE3 Command 入口
+## 项目性质
 
-本项目使用 SE3 工具集，可通过以下 command 调用：
+这是一个**自举项目（Bootstrapping Project）**：
+
+- **目的**：生成新的 SE3 规范
+- **现状**：同时使用已发布的 SE3 规范进行开发
+
+## 重要约束
+
+生成新规范时：**不得更改项目使用的已发布规范**
+
+- 已发布的规范位于 `.claude/` 目录中
+- 开发依赖的规范文件应保持不变
+- 新规范输出到独立的目录或文件
+
+## SE3 命令入口
 
 | Command | 用途 |
 |---------|------|
@@ -12,27 +25,8 @@
 
 ## Git Commit
 
-使用 `se3 commit` 代替 `git commit`。
+使用 `se3 commit` 代替 `git commit`：
 
 ```bash
 se3 commit -m "描述" -f "file1.py file2.py"
 ```
-
-## 项目约定
-
-<!-- 取消注释并自定义以下内容 -->
-
-<!-- ## 技术栈
-- 语言: JavaScript / TypeScript
-- 框架: React / Vue
-- 构建工具: Vite / Webpack
-- 测试: Vitest / Jest -->
-
-<!-- ## 团队约定
-- 代码风格: ESLint + Prettier
-- Git 流程: GitHub Flow
-- 每日站会: 09:30 在线会议 -->
-
-<!-- ## 自定义规则
-- 提交信息格式: [类型] 描述
-- 代码审查: 至少 1 人审核 -->
