@@ -1,6 +1,6 @@
 <!-- Generated on 2026-02-17 -->
-<!-- SE3 Version: 1.8.5 -->
-<!-- Checksum: cd49c2dfc98f957cc192e154854cd61e36c9274910c389d299f9d7e0b0d8059a -->
+<!-- SE3 Version: 1.10.0 -->
+<!-- Checksum: 117e3ea6b5274d8dc3b0f15ed593d53f7165b60b1916539b0da871d88b9d43f1 -->
 
 <!--
   SE 3.0 Framework Reference File
@@ -55,7 +55,7 @@ For every human message, classify its intent:
 Input + Current State → Stage Decision
 
 IF intent == bug-report:
-  IF status.md has active_change AND active_change relates to bug:
+  IF openspec/changes/ has active change AND it relates to bug:
     → Continue active change (add bug fix task)
   ELSE:
     → Create new change: "bugfix/{description}"
@@ -93,7 +93,6 @@ execute_stage(route, user_message)
 
 **MUST NOT**: Handle input outside of SE3 workflow
 **MUST**: Create appropriate change record for any code modification
-**MUST**: Update status.md to reflect current stage
 
 ---
 
@@ -110,19 +109,18 @@ execute_stage(route, user_message)
 - If `openspec` is available but `openspec/` directory does not exist → run `openspec init` to initialize
 - This ensures agents always have access to spec templates and format guidance via `openspec instructions`
 
-**Step 2 — Read status**:
-- Read `status.md` for current session state (runtime dashboard)
-- If status shows `blocked` or `error`, diagnose and resolve first
-- If status shows `waiting-human`, check `human-calls/` for response
+**Step 2 — Check status**:
+- Run `se3 status` for computed project state (git, collab, human-calls)
+- If issues are reported, diagnose and resolve first
 
 **Step 3 — Load context**:
-- Read latest entry in `progress.md` for cross-session history
+- Read `head -50 progress.md` for cross-session history (auto-maintained by SE3 tools)
 - Read `git log --oneline -5`
 - If neither exists → **First-time bootstrap** (see below)
 
 **Step 4 — Check pending items**:
 - Scan `human-calls/` for `status: responded` files not yet processed
-- Check `openspec/changes/` for active changes (should match `status.md` Active Change)
+- Check `openspec/changes/` for active changes
 
 **Step 5 — Baseline verification**:
 - Run existing tests to confirm the project is in a working state before making changes
@@ -134,7 +132,6 @@ execute_stage(route, user_message)
 - If classified as `directive`: Follow explicit instruction
 - If classified as `question`: Answer directly (may explore code if needed)
 - If classified as `off-topic`: Answer conversationally, do not modify project files
-- Update `status.md` to reflect current Stage before proceeding
 
 **Step 7 — Execute stage workflow**:
 - Follow the determined stage's protocol
@@ -149,10 +146,8 @@ execute_stage(route, user_message)
 ### Shutdown
 
 1. Run all tests — do NOT proceed to commit if tests fail
-2. **Update `status.md`**: Set Status to `ready`, clear Blockers, update Next Steps
-3. Prepend session record to `progress.md`
-4. Git commit
-5. Update openspec change status if applicable
+2. Run `se3 handoff` — automatically commits and generates session summary in progress.md
+3. Update openspec change status if applicable
 
 ### Commit Cadence
 
@@ -358,7 +353,7 @@ In agent team mode, specs are the interface between agents:
    - Reproduce the bug
    - Identify root cause
    - Determine affected components
-   - Update status.md: Stage = analyzing
+   - Analyze root cause
 
 2. FIX (openspec/change or direct)
    IF complexity > small:
@@ -375,7 +370,7 @@ In agent team mode, specs are the interface between agents:
    - Run regression tests
    - Update relevant specs if behavior changed
    - Archive change (if created)
-   - Update status.md: Stage = ready
+   - Verify complete
 ```
 
 #### Feature Request Workflow (triggered by feature-request)
@@ -385,35 +380,35 @@ In agent team mode, specs are the interface between agents:
    - Understand the request
    - Ask clarifying questions
    - Determine scope and priority
-   - Update status.md: Stage = clarifying
+   - Clarify requirements
 
 2. PROPOSE (openspec/change/)
    - Create openspec/change/feature-{id}/
    - Write proposal.md: what, why, acceptance criteria
    - Get human approval (if significant)
-   - Update status.md: Stage = proposing
+   - Create proposal
 
 3. SPEC (if requirements change)
    - Write/update specs in openspec/specs/
    - Define scenarios (WHEN/THEN)
    - Run se3 lint to validate
-   - Update status.md: Stage = spec-writing
+   - Write specs
 
 4. DESIGN (if needed)
    - Write design.md for complex changes
-   - Update status.md: Stage = designing
+   - Design architecture
 
 5. IMPLEMENT
    - Break into tasks (max 5 per group)
    - Implement incrementally
    - Run tests continuously
-   - Update status.md: Stage = implementing
+   - Implement changes
 
 6. VERIFY
    - Run all tests
    - Verify each spec scenario
    - Archive change
-   - Update status.md: Stage = ready
+   - Verify complete
 ```
 
 #### Review Workflow (triggered by review)
@@ -553,8 +548,7 @@ When the input classifier detects a `directive` intent (e.g., "self-iterate", "i
 ```
 project/
 ├── init.sh                # optional: environment setup script
-├── status.md              # runtime dashboard (current session state)
-├── progress.md            # cross-session history
+├── progress.md            # cross-session history (auto-maintained by SE3 tools)
 ├── se3.config.yaml        # optional
 ├── README.md
 ├── human-calls/           # async human call queue
