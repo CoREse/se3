@@ -44,14 +44,21 @@ This creates:
 
 ### 3. Start developing
 
-Tell Claude Code: `self-iterate`
+Use the SE3 workflow skills:
+
+```
+/se3:start   # Initialize session, check environment, load context
+/se3:work    # Start or continue working on a change
+/se3:done    # End session: tests, commit, handoff
+```
 
 The agent will:
-1. Read `.claude/CLAUDE.md` for project configuration
-2. Read `.claude/SE3.md` for framework rules
-3. Detect an empty project → ask "What should this project do?" (human call)
-4. Create an openspec change from your answer (proposal = intent, specs = formalization)
-5. Implement incrementally, calling you only when it needs decisions or actions
+1. Run `se3 start --json` to compute session state and actions
+2. Execute the returned actions (environment setup, baseline tests, etc.)
+3. For `/se3:work`: Guide through bugfix/feature/review workflows with step tracking
+4. For `/se3:done`: Run tests, commit changes, generate session summary
+
+All workflow logic is encoded in CLI commands that return JSON action arrays — the agent follows the program, not prose.
 
 ### 4. Maintain SE3.md
 
@@ -78,7 +85,8 @@ project/
 │       └── archive/
 └── .claude/
     ├── CLAUDE.md           # Project-specific conventions (editable)
-    └── SE3.md              # SE 3.0 framework reference (managed by se3)
+    ├── SE3.md              # SE 3.0 framework reference (managed by se3)
+    └── commands/se3/       # Workflow skills: start.md, work.md, done.md
 ```
 
 ## SE 3.0 CLI Tools
@@ -104,6 +112,12 @@ se3 verify --change <change-name>
 
 # Diagnose session state
 se3 status
+
+# Workflow driver commands (return JSON actions arrays)
+se3 start --json       # Session initialization
+se3 work --json        # List active changes or continue work
+se3 work feature/auth --json   # Work on specific change
+se3 done --json        # Session shutdown
 
 # Update SE3.md to latest version
 se3 update
@@ -179,6 +193,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.0.0 | 2026-02-17 | **BREAKING**: Programmatic workflow driver architecture. SE3.md reduced to ~80 lines (principles + entry points). All workflows encoded in CLI (`se3 start`, `se3 work`, `se3 done`) returning JSON actions arrays. Skills (`/se3:start`, `/se3:work`, `/se3:done`) are thin wrappers. Eliminates agent-interpreted prose in favor of CLI-driven execution. |
 | 1.10.0 | 2026-02-17 | Tool-enforced progress tracking: `se3 commit` auto-appends to progress.md, `se3 handoff` generates session summaries, `se3 status` computes live state (removes status.md dependency), collab do_complete generates reports, worker FINDINGS.md convention
 | 1.9.0 | 2026-02-17 | Add `se3 handoff` command — enforces commit-before-handoff rule, supports both direct usage (auto-commits) and collab mode (creates human-call)
 | 1.8.8 | 2026-02-17 | Fix collab: archive old human-calls on startup, fix JSON extraction from manager, fix escalation output to stdout, limit manager turns to prevent verbose analysis loops

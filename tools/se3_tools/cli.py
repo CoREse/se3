@@ -6,7 +6,7 @@ from typing import Optional
 
 import typer
 
-from . import __version__
+from . import __version__, SE3_FRAMEWORK_VERSION
 
 def get_framework_version() -> str:
     """Get current framework version from single source of truth (direct file read for git worktree compatibility)."""
@@ -27,8 +27,9 @@ def get_framework_version() -> str:
         raise ValueError("Cannot find SE3_FRAMEWORK_VERSION definition in __init__.py")
 
     return match.group(1)
-from .commands import init, lint, status, sync, verify, update, collab, commit
+from .commands import lint, status, sync, verify, update, collab, commit
 from .commands.update import get_installed_se3_version
+from .commands.init import initialize_project
 
 app = typer.Typer(
     name="se3",
@@ -62,8 +63,27 @@ def main(
         raise typer.Exit()
 
 
-# Register commands
-app.add_typer(init.app, name="init", help="Initialize a new SE 3.0 project")
+# Register direct commands
+@app.command(name="init")
+def init_cmd(
+    force: bool = typer.Option(False, "--force", "-f", help="Reinitialize even if already initialized"),
+    offline: bool = typer.Option(False, "--offline", "-o", help="Use local templates without network"),
+    with_config: bool = typer.Option(False, "--with-config", "-c", help="Create se3.config.yaml"),
+    se3_version: str = typer.Option(SE3_FRAMEWORK_VERSION, "--se3-version", "-v", help="Specify SE3 version to use"),
+):
+    """Initialize a new SE 3.0 project."""
+    try:
+        initialize_project(force, offline, with_config, se3_version)
+    except Exception as e:
+        typer.echo(
+            typer.style(
+                f"Error during initialization: {str(e)}",
+                fg=typer.colors.RED,
+            )
+        )
+        raise typer.Exit(1)
+
+# Register sub-typer commands (complex multi-command tools)
 app.add_typer(lint.app, name="lint", help="Lint OpenSpec files")
 app.add_typer(status.app, name="status", help="Check project status")
 app.add_typer(sync.app, name="sync", help="Sync output files")
@@ -71,7 +91,56 @@ app.add_typer(verify.app, name="verify", help="Verify spec coverage")
 app.add_typer(update.app, name="update", help="Update SE 3.0 framework to latest version")
 app.add_typer(collab.app, name="collab", help="Manage git-worktree multi-agent collaboration")
 app.add_typer(commit.app, name="commit", help="Commit changes with SE3 verification")
-# Register handoff as a direct command (not a sub-typer) to avoid argument parsing issues
+
+# Register direct commands (simple single-command tools with positional args)
+# These are registered as direct commands to avoid sub-typer nesting issues
+@app.command(name="start")
+def start_cmd(
+    format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
+    project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
+):
+    """Start an SE3 session — compute state and return actions for the agent."""
+    from .commands.start import run_session_start, print_text_report, print_json_report
+    import json
+    state = run_session_start(project_root)
+    if format == "json":
+        print_json_report(state)
+    else:
+        print_text_report(state)
+    raise typer.Exit(code=0 if not state.get("actions") else 1)
+
+@app.command(name="work")
+def work_cmd(
+    change_name: Optional[str] = typer.Argument(None, help="Name of the change to work on"),
+    project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
+    new: Optional[str] = typer.Option(None, "--new", help="Create new change with workflow type (bugfix/feature/review/directive)"),
+    advance: bool = typer.Option(False, "--advance", "-a", help="Mark current step complete and advance to next"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
+):
+    """Start or continue working on a change — the SDD workflow driver."""
+    from .commands.work import run_work, print_text_report, print_json_report
+    result = run_work(project_root, change_name, new, advance)
+    if format == "json":
+        print_json_report(result)
+    else:
+        print_text_report(result)
+    raise typer.Exit(code=0 if result.get("change") else 1)
+
+@app.command(name="done")
+def done_cmd(
+    project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
+):
+    """End an SE3 session — compute shutdown actions for the agent."""
+    from .commands.done import run_session_done, print_text_report, print_json_report
+    state = run_session_done(project_root)
+    if format == "json":
+        print_json_report(state)
+    else:
+        print_text_report(state)
+    raise typer.Exit(code=0)
+
+# Register handoff as a direct command (not a sub-typer)
 @app.command(name="handoff")
 def handoff_cmd(
     message: Optional[str] = typer.Argument(None, help="Handoff message describing what was done"),

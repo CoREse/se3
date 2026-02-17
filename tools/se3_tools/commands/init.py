@@ -104,12 +104,23 @@ def initialize_project(
         dir_path = Path(dir_name)
         dir_path.mkdir(parents=True, exist_ok=True)
 
+    # 5. Install SE3 workflow skills to .claude/commands/se3/
+    skills_source = templates_dir / "commands" / "se3"
+    skills_dest = claude_dir / "commands" / "se3"
+    if skills_source.exists():
+        skills_dest.mkdir(parents=True, exist_ok=True)
+        for skill_file in skills_source.glob("*.md"):
+            dest_file = skills_dest / skill_file.name
+            shutil.copy2(skill_file, dest_file)
+            typer.echo(f"Installed skill: {dest_file}")
+
     typer.echo(
         typer.style(
             "SE 3.0 project initialized successfully!",
             fg=typer.colors.GREEN,
         )
     )
+    typer.echo("\nStart working with: /se3:start")
 
 
 @app.command()
