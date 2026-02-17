@@ -8,3 +8,5 @@ __pycache__/
 .worktrees/
 .collab/
 *.egg-info/
+human-calls/
+issues.md
