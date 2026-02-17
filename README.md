@@ -181,6 +181,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 1.9.0 | 2026-02-17 | Add `se3 handoff` command — enforces commit-before-handoff rule, supports both direct usage (auto-commits) and collab mode (creates human-call)
 | 1.8.8 | 2026-02-17 | Fix collab: archive old human-calls on startup, fix JSON extraction from manager, fix escalation output to stdout, limit manager turns to prevent verbose analysis loops
 | 1.8.7 | 2026-02-17 | Fix: claude_runner temp .prompt files leaked due to unreachable cleanup code
 | 1.8.6 | 2026-02-17 | Fix: collab orchestrator no longer exits when escalation happens before tasks exist

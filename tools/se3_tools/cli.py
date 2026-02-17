@@ -71,6 +71,17 @@ app.add_typer(verify.app, name="verify", help="Verify spec coverage")
 app.add_typer(update.app, name="update", help="Update SE 3.0 framework to latest version")
 app.add_typer(collab.app, name="collab", help="Manage git-worktree multi-agent collaboration")
 app.add_typer(commit.app, name="commit", help="Commit changes with SE3 verification")
+# Register handoff as a direct command (not a sub-typer) to avoid argument parsing issues
+@app.command(name="handoff")
+def handoff_cmd(
+    message: Optional[str] = typer.Argument(None, help="Handoff message describing what was done"),
+    project_root: Optional[str] = typer.Option(None, "--project-root", "-p", help="Project root directory"),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview what would happen without executing"),
+    skip_commit: bool = typer.Option(False, "--skip-commit", help="Skip automatic commit (use with caution)"),
+):
+    """Handoff control to human — enforcing SE3 commit-before-handoff rule."""
+    from .commands.handoff import handoff
+    handoff(message=message, project_root=project_root, dry_run=dry_run, skip_commit=skip_commit)
 
 
 @app.command(name="claude-cmd")
