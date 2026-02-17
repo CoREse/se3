@@ -409,6 +409,56 @@ def compute_formality(change_path: Path, workflow: str) -> str:
     return "medium"
 
 
+def check_session_state(project_root: Path) -> Optional[Dict[str, Any]]:
+    """Check if session is properly started.
+
+    Returns None if session is valid, otherwise returns error dict with actions.
+    """
+    session_file = project_root / ".claude" / ".session.json"
+
+    if not session_file.exists():
+        return {
+            "error": "SESSION_NOT_STARTED",
+            "message": "No active session. Run 'se3 start' first.",
+            "actions": [
+                {
+                    "type": "run_command",
+                    "command": "se3 start --json",
+                    "reason": "Session guard: Must start session before working",
+                }
+            ],
+        }
+
+    try:
+        session = json.loads(session_file.read_text())
+        if session.get("status") != "active":
+            return {
+                "error": "SESSION_NOT_ACTIVE",
+                "message": f"Session status is '{session.get('status')}'. Run 'se3 start' to resume.",
+                "actions": [
+                    {
+                        "type": "run_command",
+                        "command": "se3 start --json",
+                        "reason": "Session guard: Must activate session before working",
+                    }
+                ],
+            }
+    except (json.JSONDecodeError, OSError):
+        return {
+            "error": "SESSION_INVALID",
+            "message": "Session file is corrupted. Run 'se3 start' to recreate.",
+            "actions": [
+                {
+                    "type": "run_command",
+                    "command": "se3 start --json",
+                    "reason": "Session guard: Must recreate valid session",
+                }
+            ],
+        }
+
+    return None
+
+
 def run_work(
     project_root: str = ".",
     change_name: Optional[str] = None,
@@ -417,6 +467,12 @@ def run_work(
 ) -> Dict[str, Any]:
     """Run the work command and return JSON with actions."""
     root = Path(project_root).resolve()
+
+    # Session Guard: Check session state before proceeding
+    session_error = check_session_state(root)
+    if session_error:
+        return session_error
+
     openspec_dir = root / "openspec" / "changes"
 
     # Handle --new flag (create new change)

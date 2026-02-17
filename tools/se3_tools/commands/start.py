@@ -339,7 +339,21 @@ def run_session_start(project_root: str = ".") -> Dict[str, Any]:
     # Compute actions
     state["actions"] = compute_actions(state)
 
+    # Create session file to mark session as started
+    create_session_file(root)
+
     return state
+
+
+def create_session_file(project_root: Path) -> None:
+    """Create .session.json to mark session as active."""
+    session_file = project_root / ".claude" / ".session.json"
+    session_data = {
+        "status": "active",
+        "started_at": datetime.now().isoformat(),
+        "pid": os.getpid(),
+    }
+    session_file.write_text(json.dumps(session_data, indent=2), encoding="utf-8")
 
 
 def print_text_report(state: Dict[str, Any]) -> None:

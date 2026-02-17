@@ -198,7 +198,50 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
         "reason": "Generate session summary in progress.md and transfer control to human",
     })
 
+    # 5. Clear session file
+    actions.append({
+        "type": "clear_session",
+        "reason": "Mark session as ended",
+    })
+
     return actions
+
+
+def check_session_state(project_root: Path) -> Optional[Dict[str, Any]]:
+    """Check if session is properly started.
+
+    Returns None if session is valid, otherwise returns error dict with actions.
+    """
+    session_file = project_root / ".claude" / ".session.json"
+
+    if not session_file.exists():
+        return {
+            "error": "SESSION_NOT_STARTED",
+            "message": "No active session. Run 'se3 start' first.",
+            "actions": [
+                {
+                    "type": "run_command",
+                    "command": "se3 start --json",
+                    "reason": "Session guard: Must start session before ending",
+                }
+            ],
+        }
+
+    return None
+
+
+def clear_session_file(project_root: Path) -> None:
+    """Clear the session file to mark session as ended."""
+    session_file = project_root / ".claude" / ".session.json"
+    if session_file.exists():
+        try:
+            session_data = json.loads(session_file.read_text())
+            session_data["status"] = "ended"
+            session_data["ended_at"] = datetime.now().isoformat()
+            session_file.write_text(json.dumps(session_data, indent=2), encoding="utf-8")
+        except (json.JSONDecodeError, OSError):
+            # If file is corrupted, just remove it
+            session_file.unlink(missing_ok=True)
 
 
 def run_session_done(project_root: str = ".") -> Dict[str, Any]:
@@ -208,6 +251,11 @@ def run_session_done(project_root: str = ".") -> Dict[str, Any]:
     what actions the agent should take to properly end the session.
     """
     root = Path(project_root).resolve()
+
+    # Session Guard: Check session state before proceeding
+    session_error = check_session_state(root)
+    if session_error:
+        return session_error
 
     # Compute state
     has_changes, uncommitted_info = has_uncommitted_changes(root)
