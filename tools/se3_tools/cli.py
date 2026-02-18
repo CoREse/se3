@@ -140,6 +140,22 @@ def done_cmd(
         print_text_report(state)
     raise typer.Exit(code=0)
 
+def _full_cycle_cmd_impl(
+    description: str,
+    project_root: str,
+    quick: bool,
+    format: str,
+):
+    """Implementation of full-cycle command."""
+    from .commands.fullcycle import run_full_cycle, print_text_report as fullcycle_print_text, print_json_report as fullcycle_print_json
+    result = run_full_cycle(description, project_root, quick)
+    if format == "json":
+        fullcycle_print_json(result)
+    else:
+        fullcycle_print_text(result)
+    raise typer.Exit(code=0 if result.get("success") else 1)
+
+
 @app.command(name="full-cycle")
 def full_cycle_cmd(
     description: str = typer.Argument(..., help="Description of the work to do"),
@@ -160,13 +176,18 @@ def full_cycle_cmd(
         se3 full-cycle "add user profile page" --quick
         se3 full-cycle "update documentation" -q --json
     """
-    from .commands.fullcycle import run_full_cycle, print_text_report as fullcycle_print_text, print_json_report as fullcycle_print_json
-    result = run_full_cycle(description, project_root, quick)
-    if format == "json":
-        fullcycle_print_json(result)
-    else:
-        fullcycle_print_text(result)
-    raise typer.Exit(code=0 if result.get("success") else 1)
+    _full_cycle_cmd_impl(description, project_root, quick, format)
+
+
+@app.command(name="fc")
+def fc_cmd(
+    description: str = typer.Argument(..., help="Description of the work to do"),
+    project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
+    quick: bool = typer.Option(False, "--quick", "-q", help="Quick mode - skip formal change creation, use 'small' workflow"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
+):
+    """Alias for 'full-cycle' - Run the complete start-work-done workflow in one command."""
+    _full_cycle_cmd_impl(description, project_root, quick, format)
 
 # Register handoff as a direct command (not a sub-typer)
 @app.command(name="handoff")

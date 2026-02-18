@@ -11,7 +11,7 @@ import re
 import os
 import json
 from dataclasses import dataclass, field, asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Callable, Set, Tuple
@@ -386,14 +386,20 @@ language: {language}
                 status = CallStatus.RESPONDED
                 # Try to get response timestamp from file mtime
                 stat = filepath.stat()
-                response_timestamp = datetime.fromtimestamp(stat.st_mtime)
+                response_timestamp = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
 
             # Parse created timestamp
             created_str = frontmatter.get("created", "")
             try:
-                created = datetime.fromisoformat(created_str) if created_str else datetime.fromtimestamp(filepath.stat().st_ctime)
+                if created_str:
+                    created = datetime.fromisoformat(created_str)
+                    # Ensure timezone-aware (default to UTC if naive)
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                else:
+                    created = datetime.fromtimestamp(filepath.stat().st_ctime, tz=timezone.utc)
             except ValueError:
-                created = datetime.fromtimestamp(filepath.stat().st_ctime)
+                created = datetime.fromtimestamp(filepath.stat().st_ctime, tz=timezone.utc)
 
             return HumanCall(
                 id=call_id,
@@ -760,7 +766,7 @@ language: {language}
         Returns:
             List of stale HumanCall objects
         """
-        cutoff = datetime.now() - timedelta(days=timeout_days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=timeout_days)
         return [
             c for c in self.get_all_calls()
             if c.status == CallStatus.PENDING and c.created < cutoff
