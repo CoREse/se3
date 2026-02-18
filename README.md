@@ -193,6 +193,8 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.6.0 | 2026-02-18 | Add "Interpretation & Recommendations" section to human calls. Explains what the call is about, how to handle it, and how to respond. Supports Chinese and English. |
+| 2.5.0 | 2026-02-18 | Add `check-human-responses.py` script for optimized human call detection in collab mode. Fixes issue where orchestrator couldn't detect human replies. |
 | 2.4.0 | 2026-02-18 | Add `se3 full-cycle` command — runs complete start-work-done workflow in one command. Supports `--quick` flag for small tasks using 'small' workflow. Streamlines simple/quick tasks by combining session initialization, change creation, implementation, and shutdown. |
 | 2.3.0 | 2026-02-18 | Merge CLAUDE.md into SE3.md, remove CLAUDE.md.template. Session Guard and simplified templates for 2.x manual trigger mode. |
 | 2.2.0 | 2026-02-17 | Add Session Guard mechanism. `se3 work` and `se3 done` now check if session was started via `se3 start`. If not, return error with prompt to start session first. Simplified SE3.md.template and CLAUDE.md.template to reflect "manual trigger" philosophy (no longer expecting agent自觉性). |
