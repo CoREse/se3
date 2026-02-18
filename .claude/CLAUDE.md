@@ -30,3 +30,21 @@
 ```bash
 se3 commit -m "描述" -f "file1.py file2.py"
 ```
+
+## 常见陷阱（Lessons Learned）
+
+### 规范输出位置混淆
+
+**错误**：
+- ❌ `.claude/commands/se3/fc.md` — 这是已发布的规范目录，不能修改
+- ❌ `openspec/specs/se3-commands/spec.md` — 这是项目自身的规范定义，不是产出
+
+**正确**：
+- ✅ `output/commands/se3/fc.md` — 新规范产出目录
+- ✅ `tools/` — 工具实现代码
+
+**记忆方法**：
+- `.claude/` = 开发依赖的框架规范（只读）
+- `openspec/` = 本项目定义的规范（只读，是项目的spec本身）
+- `output/` = 生成的新规范产出（可写）
+- `tools/` = 工具实现（可写）
