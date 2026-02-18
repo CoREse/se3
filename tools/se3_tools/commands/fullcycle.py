@@ -133,48 +133,63 @@ def run_full_cycle(
             return result
 
     # === PHASE 2: WORK ===
-    # Generate change name from description
-    change_name = sanitize_change_name(description)
-
     # Determine workflow type
     workflow_type = "small" if quick else "feature"
 
-    # Create the change
-    openspec_dir = root / "openspec" / "changes"
-    change_path = openspec_dir / change_name
+    # Initialize variables to avoid reference errors
+    change_name = None
+    change_path = None
+    steps = None
+    state_file = None
+    state = None
 
-    # If change already exists, append timestamp
-    if change_path.exists():
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        change_name = f"{change_name}-{timestamp}"
+    if quick:
+        # Quick mode: skip formal change creation per spec
+        result["phases"]["work"] = {
+            "change": None,
+            "workflow": workflow_type,
+            "note": "Quick mode: formal change creation skipped",
+        }
+    else:
+        # Generate change name from description
+        change_name = sanitize_change_name(description)
+
+        # Create the change
+        openspec_dir = root / "openspec" / "changes"
         change_path = openspec_dir / change_name
 
-    change_path.mkdir(parents=True, exist_ok=True)
+        # If change already exists, append timestamp
+        if change_path.exists():
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            change_name = f"{change_name}-{timestamp}"
+            change_path = openspec_dir / change_name
 
-    # Initialize workflow state
-    steps = WORKFLOWS.get(workflow_type, WORKFLOWS["feature"])
-    state = {
-        "workflow": workflow_type,
-        "current_step": steps[0],
-        "steps": {step: StepStatus.PENDING.value for step in steps},
-        "step_history": [],
-        "created_at": datetime.now().isoformat(),
-        "updated_at": datetime.now().isoformat(),
-        "description": description,
-    }
+        change_path.mkdir(parents=True, exist_ok=True)
 
-    state_file = change_path / ".se3-state.json"
-    state_file.write_text(json.dumps(state, indent=2, default=str))
+        # Initialize workflow state
+        steps = WORKFLOWS.get(workflow_type, WORKFLOWS["feature"])
+        state = {
+            "workflow": workflow_type,
+            "current_step": steps[0],
+            "steps": {step: StepStatus.PENDING.value for step in steps},
+            "step_history": [],
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "description": description,
+        }
 
-    # Create a simple tasks.md for the work
-    tasks_file = change_path / "tasks.md"
-    tasks_file.write_text(f"# {description}\n\n## Tasks\n\n- [ ] {description}\n")
+        state_file = change_path / ".se3-state.json"
+        state_file.write_text(json.dumps(state, indent=2, default=str))
 
-    result["phases"]["work"] = {
-        "change": change_name,
-        "workflow": workflow_type,
-        "change_path": str(change_path),
-    }
+        # Create a simple tasks.md for the work
+        tasks_file = change_path / "tasks.md"
+        tasks_file.write_text(f"# {description}\n\n## Tasks\n\n- [ ] {description}\n")
+
+        result["phases"]["work"] = {
+            "change": change_name,
+            "workflow": workflow_type,
+            "change_path": str(change_path),
+        }
 
     # === PHASE 3: IMPLEMENTATION ===
     # The actual implementation is done by the agent
@@ -223,8 +238,8 @@ def run_full_cycle(
         "reason": "Full-cycle: Complete session and handoff",
     })
 
-    # Mark change as complete for quick mode
-    if quick:
+    # Mark change as complete for non-quick mode
+    if not quick and change_path:
         state["current_step"] = None
         state["complete"] = True
         state["steps"] = {step: StepStatus.DONE.value for step in steps}

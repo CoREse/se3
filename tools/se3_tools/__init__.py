@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.12.19"  # Fix: Add missing meta and off-topic intent classification
+SE3_FRAMEWORK_VERSION = "2.12.20"  # Fix: se3:fc --quick and se3:loop --quick now correctly skip formal change creation per spec. Fixed Chinese text in loop.py.

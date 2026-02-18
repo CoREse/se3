@@ -340,46 +340,52 @@ def run_exclusive_loop(
         print(f"{BOLD}Iteration {iteration} / {iterations}{RESET}")
         print(f"{BOLD}{'─' * 60}{RESET}\n")
 
-        # Generate unique change name
-        change_name = f"{base_name}-{iteration:02d}"
-        counter = 1
-        while (root / "openspec" / "changes" / change_name).exists():
-            change_name = f"{base_name}-{iteration:02d}-{counter}"
-            counter += 1
+        change_name = None
+        change_dir = None
 
-        print(f"{CYAN}[SE3 Loop] Creating change: {change_name}{RESET}")
+        if not quick:
+            # Generate unique change name
+            change_name = f"{base_name}-{iteration:02d}"
+            counter = 1
+            while (root / "openspec" / "changes" / change_name).exists():
+                change_name = f"{base_name}-{iteration:02d}-{counter}"
+                counter += 1
 
-        # Create change
-        result = subprocess.run(
-            [openspec_cmd, "new", "change", change_name],
-            cwd=root,
-            capture_output=True,
-            text=True
-        )
-        if result.returncode != 0:
-            print(f"{YELLOW}[SE3 Loop] Failed to create change{RESET}")
-            if result.stderr:
-                print(f"{YELLOW}Error: {result.stderr.strip()}{RESET}")
-            if result.stdout:
-                print(f"{YELLOW}Output: {result.stdout.strip()}{RESET}")
-            print(f"{YELLOW}Retrying in 2 seconds...{RESET}")
-            time.sleep(2)
-            continue
+            print(f"{CYAN}[SE3 Loop] Creating change: {change_name}{RESET}")
 
-        # Create tasks.md
-        tasks_file = root / "openspec" / "changes" / change_name / "tasks.md"
-        tasks_file.write_text(f"""# {prompt} (Iteration {iteration}/{iterations})
+            # Create change
+            result = subprocess.run(
+                [openspec_cmd, "new", "change", change_name],
+                cwd=root,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode != 0:
+                print(f"{YELLOW}[SE3 Loop] Failed to create change{RESET}")
+                if result.stderr:
+                    print(f"{YELLOW}Error: {result.stderr.strip()}{RESET}")
+                if result.stdout:
+                    print(f"{YELLOW}Output: {result.stdout.strip()}{RESET}")
+                print(f"{YELLOW}Retrying in 2 seconds...{RESET}")
+                time.sleep(2)
+                continue
+
+            # Create tasks.md
+            tasks_file = root / "openspec" / "changes" / change_name / "tasks.md"
+            tasks_file.write_text(f"""# {prompt} (Iteration {iteration}/{iterations})
 
 ## Tasks
 
 - [ ] {prompt}
 """)
+        else:
+            print(f"{CYAN}[SE3 Loop] Quick mode: skipping formal change creation{RESET}")
 
         # Build prompt content with previous summary if available
         previous_summary_section = ""
         if previous_summary:
             previous_summary_section = f"""
-## 上一次迭代总结
+## Previous Iteration Summary
 
 {previous_summary}
 
@@ -388,16 +394,29 @@ def run_exclusive_loop(
 
         # Create prompt file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.md', prefix='se3-loop-prompt-', delete=False) as f:
-            f.write(f"""/se3:work {change_name}
+            if quick:
+                # Quick mode: use se3:fc (full-cycle) instead of se3:work to skip formal change creation
+                f.write(f"""/se3:fc {prompt}
+{previous_summary_section}
+
+(This is SE3 Loop iteration {iteration} / {iterations}. Please complete this work using the full-cycle workflow:
+1. Read relevant specs
+2. Implement the requirements
+3. Run tests
+4. Commit changes
+5. Run /se3:done to end the session)
+""")
+            else:
+                f.write(f"""/se3:work {change_name}
 {previous_summary_section}
 {prompt}
 
-(这是 SE3 Loop 的迭代 {iteration} / {iterations}。请按照 SE3 流程完成这个 change：
-1. 读取相关 spec
-2. 实现需求
-3. 运行测试
-4. 提交更改
-5. 运行 /se3:done 结束会话)
+(This is SE3 Loop iteration {iteration} / {iterations}. Please complete this change following the SE3 process:
+1. Read relevant specs
+2. Implement the requirements
+3. Run tests
+4. Commit changes
+5. Run /se3:done to end the session)
 """)
             prompt_file = Path(f.name)
 
@@ -426,10 +445,14 @@ def run_exclusive_loop(
 
         # Generate summary for next iteration (if not disabled and not the last iteration)
         if not no_summary and iteration < iterations and exit_code == 0:
-            change_dir = root / "openspec" / "changes" / change_name
-            print(f"\n{CYAN}[SE3 Loop] Generating summary for next iteration...{RESET}")
-            previous_summary = run_claude_summary(claude_cmd, change_dir)
-            print(f"{GRAY}{DIM}Summary: {previous_summary[:100]}{'...' if len(previous_summary) > 100 else ''}{RESET}")
+            if not quick and change_name:
+                change_dir = root / "openspec" / "changes" / change_name
+                print(f"\n{CYAN}[SE3 Loop] Generating summary for next iteration...{RESET}")
+                previous_summary = run_claude_summary(claude_cmd, change_dir)
+                print(f"{GRAY}{DIM}Summary: {previous_summary[:100]}{'...' if len(previous_summary) > 100 else ''}{RESET}")
+            else:
+                # Quick mode: use a simpler summary approach
+                previous_summary = f"Iteration {iteration} completed successfully."
 
         if iteration < iterations:
             print(f"\n[SE3 Loop] Continuing in 2 seconds...")
