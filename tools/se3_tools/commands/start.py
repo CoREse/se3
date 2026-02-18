@@ -90,7 +90,7 @@ def check_openspec(project_root: Path) -> Dict[str, Any]:
     available = result.returncode == 0
 
     openspec_dir = project_root / "openspec"
-    claude_openspec_dir = project_root / ".claude" / "commands" / "opsx"
+    claude_openspec_dir = project_root / ".claude" / "commands" / "openspec"
 
     # Core openspec directory structure exists
     core_initialized = (

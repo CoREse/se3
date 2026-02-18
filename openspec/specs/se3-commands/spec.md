@@ -263,13 +263,13 @@ se3 update [--dry-run] [--force] [--se3-version X.Y.Z]
 - **THEN** it reports "Already on SE3 version X.Y.Z"
 - **AND** suggests using `--force` to update anyway
 
-### Requirement: se3 work guardrails Command
+### Requirement: se3 guardrails Command
 
-The `se3 work guardrails` command SHALL check spec files against SE3 Spec Guardrails to verify requirements were not inappropriately weakened or deleted.
+The `se3 guardrails` command SHALL check spec files against SE3 Spec Guardrails to verify requirements were not inappropriately weakened or deleted.
 
 **Interface:**
 ```bash
-se3 work guardrails <spec-file> [--original <original-file>]
+se3 guardrails <spec-file> [--original <original-file>]
 ```
 
 **Guardrail Checks:**
@@ -282,7 +282,7 @@ se3 work guardrails <spec-file> [--original <original-file>]
 - Check for weakened language patterns
 
 #### Scenario: Guardrails pass
-- **WHEN** `se3 work guardrails openspec/specs/auth/spec.md` is executed
+- **WHEN** `se3 guardrails openspec/specs/auth/spec.md` is executed
 - **AND** no requirements were deleted or weakened
 - **THEN** it reports "✓ All guardrails passed"
 

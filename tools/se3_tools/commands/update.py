@@ -140,14 +140,6 @@ def update_project(
     """
     if se3_version is None:
         se3_version = get_framework_version()
-    """
-    Update an SE 3.0 project to the latest framework version.
-
-    Args:
-        dry_run: Show what would be updated without making changes
-        force: Update even if already on latest version
-        se3_version: Target SE 3.0 version
-    """
     claude_dir = Path(".claude")
 
     # Check if project is initialized
