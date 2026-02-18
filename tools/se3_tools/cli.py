@@ -27,6 +27,33 @@ def get_framework_version() -> str:
         raise ValueError("Cannot find SE3_FRAMEWORK_VERSION definition in __init__.py")
 
     return match.group(1)
+
+
+def get_installed_se3_version(project_root: Path = None) -> str:
+    """Get the SE3 version installed in the project.
+
+    Reads the version from .claude/SE3.md metadata.
+    Returns "0.0.0" if not installed or version cannot be determined.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+
+    se3_md = project_root / ".claude" / "SE3.md"
+    if not se3_md.exists():
+        return "0.0.0"
+
+    try:
+        content = se3_md.read_text(encoding="utf-8")
+        # Look for version in metadata comment: <!-- SE3 Version: X.Y.Z -->
+        import re
+        match = re.search(r'<!--\s*SE3 Version:\s*([\d]+\.[\d]+\.[\d]+)\s*-->', content)
+        if match:
+            return match.group(1)
+        return "0.0.0"
+    except Exception:
+        return "0.0.0"
+
+
 from .commands import lint, status, sync, verify, update, collab, commit, human_calls_cmd, human_input, work
 from .commands.init import initialize_project
 
