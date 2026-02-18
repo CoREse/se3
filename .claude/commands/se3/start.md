@@ -26,7 +26,7 @@ Start a new SE3 work session. This skill runs the full startup protocol and guid
 
    - `ask_user`: Use AskUserQuestion tool with the provided question
    - `run_script`: Execute the command (e.g., `bash init.sh`)
-   - `init_openspec`: Run `openspec init`
+   - `init_openspec`: Run `openspec init --tools claude`
    - `run_tests`: Run tests to establish baseline
    - `process_human_call`: Read the specified file in `human-calls/` and act on the response
    - `create_progress`: Create `progress.md` file

@@ -28,7 +28,7 @@ description: Start or continue working on a change (feature, bugfix, review, dir
 
    For each action in `actions`:
    - `ask_user`: Ask clarifying questions using AskUserQuestion
-   - `create_change`: Run `openspec new change <name>`
+   - `create_change`: Run `se3 work --new <type>/<name>` to create a new change
    - `write_proposal`: Create `proposal.md` in the change directory
    - `write_spec`: Create/update specs in `openspec/specs/` with WHEN/THEN scenarios
    - `write_design`: Create `design.md` (only if complexity warrants it)

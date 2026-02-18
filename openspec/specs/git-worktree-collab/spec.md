@@ -309,19 +309,17 @@ main_loop() {
 
 Workers and Manager SHALL interact with human directly via `human-calls/` directory.
 
-**Worker blocked:**
-1. Worker writes `human-calls/{task-id}-{question}.md`
-2. Worker exits with code 2
-3. Orchestrator sets task status to `blocked`
-4. Orchestrator continues other tasks
-5. When human responds, orchestrator re-spawns worker
+#### Scenario: Worker blocked on ambiguity
+- **WHEN** a worker encounters an unclear requirement
+- **THEN** the worker writes to `human-calls/{task-id}-clarification.md`
+- **AND** the worker exits with code 2
+- **AND** the orchestrator sets status to `blocked`
 
-**Manager escalates:**
-1. Manager writes `human-calls/escalate-{timestamp}.md`
-2. Manager returns `{"action": "escalate", ...}`
-3. Orchestrator pauses session, waits for human
-
-**NO MCP server required** — direct file I/O.
+#### Scenario: Manager escalates to human
+- **WHEN** a manager needs human intervention
+- **THEN** the manager writes to `human-calls/escalate-{timestamp}.md`
+- **AND** the manager returns `{"action": "escalate"}`
+- **AND** the orchestrator pauses the session
 
 ---
 
