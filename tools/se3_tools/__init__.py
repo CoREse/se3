@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.10.6"  # Fix loop: use temp file instead of pipe to avoid stopped processes
+SE3_FRAMEWORK_VERSION = "2.10.7"  # Refactor loop: eliminate bash script generation, run directly in Python

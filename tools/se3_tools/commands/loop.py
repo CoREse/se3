@@ -13,26 +13,25 @@ import os
 import re
 import subprocess
 import shutil
+import sys
+import tempfile
 from pathlib import Path
 from datetime import datetime
 
 from ..config import load_claude_commands
 
 
-# Python script for rendering --output-format stream-json output (embedded in bash)
-STREAM_JSON_RENDERER = '''import sys
-import json
-
 # ANSI colors
-CYAN = "\\033[36m"
-GREEN = "\\033[32m"
-YELLOW = "\\033[33m"
-BLUE = "\\033[34m"
-MAGENTA = "\\033[35m"
-GRAY = "\\033[90m"
-RESET = "\\033[0m"
-BOLD = "\\033[1m"
-DIM = "\\033[2m"
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
+MAGENTA = "\033[35m"
+GRAY = "\033[90m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+
 
 def truncate_text(text, max_len=200):
     """Truncate long text for preview."""
@@ -42,57 +41,53 @@ def truncate_text(text, max_len=200):
         return text[:max_len] + "..."
     return text
 
-def render_stream():
-    """Render stream-json output from Claude Code."""
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            msg = json.loads(line)
-        except json.JSONDecodeError:
-            continue
 
-        msg_type = msg.get("type", "")
+def render_stream_json_line(line: str) -> None:
+    """Render a single stream-json line."""
+    line = line.strip()
+    if not line:
+        return
+    try:
+        msg = json.loads(line)
+    except json.JSONDecodeError:
+        return
 
-        if msg_type == "thinking":
-            thinking = msg.get("thinking", "")
-            if thinking:
-                print(f"{GRAY}{DIM}💭 {truncate_text(thinking)}{RESET}", flush=True)
+    msg_type = msg.get("type", "")
 
-        elif msg_type == "tool_use":
-            name = msg.get("name", "unknown")
-            params = msg.get("parameters", {})
-            print(f"{CYAN}🔧 {name}{RESET}", flush=True)
-            for key, value in list(params.items())[:3]:
-                preview = truncate_text(str(value), 80)
-                print(f"{DIM}  {key}: {preview}{RESET}", flush=True)
+    if msg_type == "thinking":
+        thinking = msg.get("thinking", "")
+        if thinking:
+            print(f"{GRAY}{DIM}💭 {truncate_text(thinking)}{RESET}", flush=True)
 
-        elif msg_type == "tool_result":
-            name = msg.get("name", "unknown")
-            error = msg.get("error")
-            if error:
-                print(f"{MAGENTA}❌ {name} failed: {truncate_text(str(error))}{RESET}", flush=True)
-            else:
-                print(f"{GREEN}✓ {name} complete{RESET}", flush=True)
+    elif msg_type == "tool_use":
+        name = msg.get("name", "unknown")
+        params = msg.get("parameters", {})
+        print(f"{CYAN}🔧 {name}{RESET}", flush=True)
+        for key, value in list(params.items())[:3]:
+            preview = truncate_text(str(value), 80)
+            print(f"{DIM}  {key}: {preview}{RESET}", flush=True)
 
-        elif msg_type == "output":
-            content = msg.get("content", "")
-            if content:
-                print(f"{RESET}{content}{RESET}", end="", flush=True)
+    elif msg_type == "tool_result":
+        name = msg.get("name", "unknown")
+        error = msg.get("error")
+        if error:
+            print(f"{MAGENTA}❌ {name} failed: {truncate_text(str(error))}{RESET}", flush=True)
+        else:
+            print(f"{GREEN}✓ {name} complete{RESET}", flush=True)
 
-        elif msg_type == "message":
-            content = msg.get("content", "")
-            if content:
-                print(f"{RESET}{content}{RESET}", flush=True)
+    elif msg_type == "output":
+        content = msg.get("content", "")
+        if content:
+            print(f"{RESET}{content}{RESET}", end="", flush=True)
 
-        elif msg_type == "error":
-            error_msg = msg.get("error", "Unknown error")
-            print(f"{MAGENTA}❌ Error: {error_msg}{RESET}", flush=True)
+    elif msg_type == "message":
+        content = msg.get("content", "")
+        if content:
+            print(f"{RESET}{content}{RESET}", flush=True)
 
-if __name__ == "__main__":
-    render_stream()
-'''
+    elif msg_type == "error":
+        error_msg = msg.get("error", "Unknown error")
+        print(f"{MAGENTA}❌ Error: {error_msg}{RESET}", flush=True)
 
 
 def sanitize_change_name(description: str) -> str:
@@ -112,166 +107,52 @@ def sanitize_change_name(description: str) -> str:
     return name.strip("-")
 
 
-def generate_loop_script(
-    prompt: str,
-    project_root: str,
-    iterations: int,
-    quick: bool,
-    base_name: str,
-    claude_cmd: str,
-) -> str:
-    """Generate the bash loop script for execution."""
-    from .work import WORKFLOWS
+def run_claude_with_renderer(claude_cmd: str, prompt_file: Path, timeout_sec: int = 1800) -> int:
+    """Run claude and render output in real-time.
 
-    workflow_type = "small" if quick else "feature"
-    steps = WORKFLOWS.get(workflow_type, WORKFLOWS["feature"])
-    first_step = steps[0] if steps else "analyze"
+    Returns the exit code.
+    """
+    env = {**dict(os.environ)}
+    env.pop("CLAUDECODE", None)  # Avoid nested session detection
 
-    quick_flag = "--quick" if quick else ""
+    cmd = [
+        claude_cmd,
+        "--dangerously-skip-permissions",
+        "--print",
+        "--output-format", "stream-json",
+        "--max-turns", "0",
+        str(prompt_file)
+    ]
 
-    # Embed the Python renderer script
-    renderer_script = STREAM_JSON_RENDERER
+    print(f"[SE3 Loop] Executing: {' '.join(cmd[:5])} ... --max-turns 0 {prompt_file}")
+    print("")
 
-    script = f'''#!/bin/bash
-#
-# SE3 Loop - Auto-generated execution script
-#
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+        )
 
-set -e
-set -o pipefail
-set +m  # Disable job control to prevent processes from being stopped
+        # Read and render output line by line
+        for line in proc.stdout:
+            render_stream_json_line(line)
 
-PROMPT="{prompt.replace('"', '\\"')}"
-ITERATIONS={iterations}
-PROJECT_ROOT="{project_root}"
-QUICK_FLAG="{quick_flag}"
-CLAUDE_CMD="{claude_cmd}"
+        proc.wait(timeout=timeout_sec)
+        return proc.returncode
 
-echo "============================================================"
-echo "SE3 Loop"
-echo "============================================================"
-echo ""
-echo "Prompt: $PROMPT"
-echo "Iterations: $ITERATIONS"
-echo "Project: $PROJECT_ROOT"
-echo "Claude Command: $CLAUDE_CMD"
-echo ""
-echo "Press Ctrl+C to stop at any time."
-echo "============================================================"
-echo ""
-
-# Check for claude command
-if ! command -v "$CLAUDE_CMD" &> /dev/null; then
-    echo "❌ Error: '$CLAUDE_CMD' command not found in PATH"
-    exit 1
-fi
-
-cd "$PROJECT_ROOT"
-
-ITERATION=0
-while [ $ITERATION -lt $ITERATIONS ]; do
-    ITERATION=$((ITERATION + 1))
-
-    echo ""
-    echo "╔════════════════════════════════════════════════════════════╗"
-    echo "║  Iteration $ITERATION / $ITERATIONS"
-    echo "╚════════════════════════════════════════════════════════════╝"
-    echo ""
-
-    # Use pre-sanitized base name from Python (handles non-ASCII characters)
-    BASE_NAME="{base_name}"
-    CHANGE_NAME="${{BASE_NAME}}-$(printf '%02d' $ITERATION)"
-
-    # Ensure unique name
-    COUNTER=1
-    while [ -d "openspec/changes/$CHANGE_NAME" ]; do
-        CHANGE_NAME="${{BASE_NAME}}-$(printf '%02d' $ITERATION)-$COUNTER"
-        COUNTER=$((COUNTER + 1))
-    done
-
-    echo "[SE3 Loop] Creating change: $CHANGE_NAME"
-
-    # Create the change using openspec
-    if ! openspec new change "$CHANGE_NAME" 2>/dev/null; then
-        echo "[SE3 Loop] Failed to create change, retrying..."
-        sleep 2
-        continue
-    fi
-
-    # Create tasks.md
-    cat > "openspec/changes/$CHANGE_NAME/tasks.md" << EOF
-# $PROMPT (Iteration $ITERATION/$ITERATIONS)
-
-## Tasks
-
-- [ ] $PROMPT
-EOF
-
-    echo "[SE3 Loop] Starting Claude Code..."
-    echo ""
-
-    # Create the prompt file for Claude
-    PROMPT_FILE=$(mktemp /tmp/se3-loop-prompt-XXXXXX.md)
-    cat > "$PROMPT_FILE" << CLAUDE_EOF
-/se3:work $CHANGE_NAME
-
-$PROMPT
-
-(这是 SE3 Loop 的迭代 $ITERATION / $ITERATIONS。请按照 SE3 流程完成这个 change：
-1. 读取相关 spec
-2. 实现需求
-3. 运行测试
-4. 提交更改
-5. 运行 /se3:done 结束会话)
-CLAUDE_EOF
-
-    # Create the Python stream renderer
-    RENDERER_FILE=$(mktemp /tmp/se3-loop-renderer-XXXXXX.py)
-    cat > "$RENDERER_FILE" << 'RENDERER_EOF'
-''' + renderer_script + '''RENDERER_EOF
-
-    # Execute Claude Code with --output-format stream-json and render output
-    # Timeout after 30 minutes to prevent infinite hanging
-    echo "------------------------------------------------------------"
-    echo "[SE3 Loop] Executing: $CLAUDE_CMD --print --output-format stream-json --max-turns 0"
-    echo "[SE3 Loop] Renderer: $RENDERER_FILE"
-    echo ""
-
-    EXIT_CODE=0
-    # Run claude with output to temp file, then render
-    OUTPUT_FILE=$(mktemp /tmp/se3-loop-output-XXXXXX.jsonl)
-    timeout 1800 "$CLAUDE_CMD" --dangerously-skip-permissions --print --output-format stream-json --max-turns 0 "$PROMPT_FILE" > "$OUTPUT_FILE" 2>&1 || EXIT_CODE=$?
-    python3 "$RENDERER_FILE" < "$OUTPUT_FILE"
-    rm -f "$OUTPUT_FILE"
-
-    echo ""
-    echo "------------------------------------------------------------"
-
-    if [ $EXIT_CODE -eq 0 ]; then
-        echo "[Claude] Session completed"
-    elif [ $EXIT_CODE -eq 124 ]; then
-        echo "[Claude] Session timed out (30 min limit)"
-    else
-        echo "[Claude] Session exited (code: $EXIT_CODE)"
-    fi
-
-    rm -f "$PROMPT_FILE" "$RENDERER_FILE"
-
-    echo ""
-    echo "[SE3 Loop] Iteration $ITERATION complete"
-
-    if [ $ITERATION -lt $ITERATIONS ]; then
-        echo "[SE3 Loop] Continuing..."
-        sleep 2
-    fi
-done
-
-echo ""
-echo "============================================================"
-echo "SE3 Loop Complete - $ITERATION iterations"
-echo "============================================================"
-'''
-    return script
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        print(f"\n{YELLOW}[Claude] Session timed out ({timeout_sec}s limit){RESET}")
+        return 124
+    except FileNotFoundError:
+        print(f"\n{MAGENTA}❌ Error: '{claude_cmd}' not found{RESET}")
+        return 127
+    except Exception as e:
+        print(f"\n{MAGENTA}❌ Error running claude: {e}{RESET}")
+        return 1
 
 
 def run_exclusive_loop(
@@ -280,23 +161,20 @@ def run_exclusive_loop(
     iterations: int = 10,
     quick: bool = False,
 ) -> None:
-    """Run the loop - generates and executes bash script."""
+    """Run the loop - directly in Python without bash scripts."""
     root = Path(project_root).resolve()
 
-    print(f"\n{'=' * 60}")
-    print("SE3 Loop")
-    print(f"{'=' * 60}")
+    print(f"\n{BOLD}{'=' * 60}{RESET}")
+    print(f"{BOLD}SE3 Loop{RESET}")
+    print(f"{BOLD}{'=' * 60}{RESET}")
     print("")
     print(f"Prompt: {prompt}")
     print(f"Iterations: {iterations}")
     print(f"Project: {root}")
     print("")
-    print("Generating loop script...")
-
-    # Generate base_name in Python (shell tr can't handle non-ASCII)
-    base_name = sanitize_change_name(prompt)
-    if not base_name:
-        base_name = "loop-task"
+    print("Press Ctrl+C to stop at any time.")
+    print(f"{BOLD}{'=' * 60}{RESET}")
+    print("")
 
     # Load claude command from config (priority-based)
     commands = load_claude_commands(root)
@@ -304,39 +182,99 @@ def run_exclusive_loop(
 
     # Verify the command exists
     if not shutil.which(claude_cmd):
-        print(f"\n❌ Error: Configured claude command '{claude_cmd}' not found in PATH")
+        print(f"\n{MAGENTA}❌ Error: Configured claude command '{claude_cmd}' not found in PATH{RESET}")
         print("Please check your se3.config.yaml or install the required CLI.")
         return
 
-    # Generate the script
-    script_content = generate_loop_script(prompt, str(root), iterations, quick, base_name, claude_cmd)
+    # Generate base_name
+    base_name = sanitize_change_name(prompt)
+    if not base_name:
+        base_name = "loop-task"
 
-    # Write to temporary file
-    script_path = root / ".se3-loop-exec.sh"
-    script_path.write_text(script_content)
-    script_path.chmod(0o755)
-
-    print(f"Script created: {script_path}")
-    print("")
-    print("Starting loop execution...")
-    print("This will takeover the terminal and run Claude Code repeatedly.")
-    print("Press Ctrl+C to stop at any time.")
-    print("")
-    print(f"{'=' * 60}")
-    print("")
-
-    # Execute the script with modified environment (clear CLAUDECODE for nested sessions)
-    # Use 'bash' explicitly with +B flag to disable brace expansion and ensure non-interactive mode
-    env = {**dict(os.environ)}
-    env.pop("CLAUDECODE", None)  # Avoid nested session detection
-
-    try:
-        # Use bash in POSIX mode to minimize job control issues
-        subprocess.run(["bash", "-c", f'set +m; source "{script_path}"'], check=False, env=env)
-    except KeyboardInterrupt:
+    for iteration in range(1, iterations + 1):
         print("")
-        print("\n[SE3 Loop] Interrupted by user")
-    finally:
-        # Clean up script
-        if script_path.exists():
-            script_path.unlink()
+        print(f"{BOLD}╔{'═' * 60}╗{RESET}")
+        print(f"{BOLD}║  Iteration {iteration} / {iterations}{RESET}")
+        print(f"{BOLD}╚{'═' * 60}╝{RESET}")
+        print("")
+
+        # Generate change name
+        change_name = f"{base_name}-{iteration:02d}"
+        counter = 1
+        while (root / "openspec" / "changes" / change_name).exists():
+            change_name = f"{base_name}-{iteration:02d}-{counter}"
+            counter += 1
+
+        print(f"{CYAN}[SE3 Loop] Creating change: {change_name}{RESET}")
+
+        # Create the change using openspec
+        result = subprocess.run(
+            ["openspec", "new", "change", change_name],
+            cwd=root,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            print(f"{YELLOW}[SE3 Loop] Failed to create change, retrying...{RESET}")
+            import time
+            time.sleep(2)
+            continue
+
+        # Create tasks.md
+        tasks_file = root / "openspec" / "changes" / change_name / "tasks.md"
+        tasks_content = f"""# {prompt} (Iteration {iteration}/{iterations})
+
+## Tasks
+
+- [ ] {prompt}
+"""
+        tasks_file.write_text(tasks_content)
+
+        # Create the prompt file for Claude
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', prefix='se3-loop-prompt-', delete=False) as f:
+            prompt_content = f"""/se3:work {change_name}
+
+{prompt}
+
+(这是 SE3 Loop 的迭代 {iteration} / {iterations}。请按照 SE3 流程完成这个 change：
+1. 读取相关 spec
+2. 实现需求
+3. 运行测试
+4. 提交更改
+5. 运行 /se3:done 结束会话)
+"""
+            f.write(prompt_content)
+            prompt_file = Path(f.name)
+
+        print(f"{CYAN}[SE3 Loop] Starting Claude Code...{RESET}")
+        print("")
+        print("-" * 60)
+
+        try:
+            exit_code = run_claude_with_renderer(claude_cmd, prompt_file)
+        finally:
+            # Clean up prompt file
+            prompt_file.unlink(missing_ok=True)
+
+        print("")
+        print("-" * 60)
+
+        if exit_code == 0:
+            print(f"{GREEN}[Claude] Session completed{RESET}")
+        elif exit_code == 124:
+            print(f"{YELLOW}[Claude] Session timed out (30 min limit){RESET}")
+        else:
+            print(f"{YELLOW}[Claude] Session exited (code: {exit_code}){RESET}")
+
+        print("")
+        print(f"{GREEN}[SE3 Loop] Iteration {iteration} complete{RESET}")
+
+        if iteration < iterations:
+            print(f"[SE3 Loop] Continuing...")
+            import time
+            time.sleep(2)
+
+    print("")
+    print(f"{BOLD}{'=' * 60}{RESET}")
+    print(f"{BOLD}SE3 Loop Complete - {iterations} iterations{RESET}")
+    print(f"{BOLD}{'=' * 60}{RESET}")
