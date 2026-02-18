@@ -364,3 +364,7 @@
 ## Current Session
 <!-- current-session -->
 - `0cca973` chore: bump SE3 framework to 2.10.13 (3 files)
+- `1debf37` docs: add missing SE3 1.x details to command specs (3 files)
+- `126f45d` docs: mark task complete for se3 1.x details check (1 files)
+- `fc88453` chore: archive completed change se31xse3mdse3se3startcommandse3se3md-02-1 (4 files)
+- `950561a` feat(loop): add iteration summary feature (4 files)
