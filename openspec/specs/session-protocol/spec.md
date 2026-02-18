@@ -2,7 +2,32 @@
 
 ## Purpose
 Define the session lifecycle protocol for SE 3.0 agents. This spec governs progressive startup (se3 status → progress.md → scope determination), execution boundaries, shutdown procedures, and tool-enforced progress tracking across sessions.
+
 ## Requirements
+
+### Requirement: Core Principles
+
+The system SHALL adhere to the following core principles that govern all SE3 operations:
+
+**1. Human-as-MCP**: All human input is obtained on-demand via human calls. No pre-written requirement files.
+
+**2. Progressive Loading**: Start with `progress.md` + `git log`. Load deeper only when the task needs it.
+
+**3. Specs as Truth**: OpenSpec specs are the single source of truth for requirements. Agents MUST NOT weaken or delete existing requirements without explicit human approval.
+
+**4. Verify Before Done**: Never mark a feature complete without running tests. Spec scenarios are acceptance criteria, not documentation.
+
+**5. Tool-Assisted Enforcement**: Use CLI tools (`se3 lint`, `se3 verify`, `se3 status`) to validate specs, verify coverage, and diagnose issues. Tools make rules enforceable, not just documented.
+
+**6. Incremental Development**: Work in openspec changes. Each session stays within a bounded scope.
+
+#### Scenario: Agent follows core principles
+- **WHEN** an agent is working on a change
+- **THEN** the agent follows all six core principles throughout the session
+
+#### Scenario: Spec violation detected
+- **WHEN** an agent attempts to modify a spec they are implementing against
+- **THEN** the system blocks the change and reports a guardrail violation
 ### Requirement: Session Startup Protocol
 The system SHALL define a progressive session startup protocol. The agent MUST locate current state with minimal context, then load more on demand.
 
