@@ -27,7 +27,7 @@ def get_framework_version() -> str:
 
     return match.group(1)
 
-app = typer.Typer()
+app = typer.Typer(invoke_without_command=True)
 
 
 def compute_checksum(content: str) -> str:
@@ -236,7 +236,7 @@ def update_project(
 
 
 
-@app.command()
+@app.callback()
 def update(
     dry_run: bool = typer.Option(
         False,

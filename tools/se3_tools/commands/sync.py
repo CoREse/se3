@@ -9,7 +9,7 @@ import typer
 
 from ..utils import get_file_mtime, copy_file, get_source_mappings, discover_outputs
 
-app = typer.Typer()
+app = typer.Typer(invoke_without_command=True)
 
 
 class SyncResult:
@@ -60,7 +60,7 @@ def analyze_sync(project_root: Path) -> SyncResult:
     return result
 
 
-@app.command()
+@app.callback()
 def sync(
     dry_run: bool = typer.Option(
         True,
