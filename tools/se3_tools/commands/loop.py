@@ -120,6 +120,7 @@ def run_claude_with_renderer(claude_cmd: str, prompt_file: Path, timeout_sec: in
         "--dangerously-skip-permissions",
         "--print",
         "--output-format", "stream-json",
+        "--verbose",  # Required for stream-json mode
         "--max-turns", "0",
         str(prompt_file)
     ]
