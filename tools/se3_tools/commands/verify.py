@@ -208,18 +208,89 @@ def print_json_report(results: Dict[str, Any]) -> None:
     print(json.dumps(results, indent=2, default=str))
 
 
-def main(change: str, format: str = "text", project_root: str = ".") -> int:
+def verify_all_specs(project_root: str = ".") -> Dict[str, Any]:
+    """Verify all specs in the project.
+
+    Args:
+        project_root: Root directory of the project
+
+    Returns:
+        Dict with verification results
+    """
+    root = Path(project_root).resolve()
+
+    # Find all specs in openspec/specs/
+    spec_files = []
+    specs_dir = root / "openspec" / "specs"
+    if specs_dir.exists():
+        for spec_dir in specs_dir.iterdir():
+            if spec_dir.is_dir():
+                spec_file = spec_dir / "spec.md"
+                if spec_file.exists():
+                    spec_files.append(str(spec_file))
+
+    if not spec_files:
+        return {
+            'success': False,
+            'error': "No specs found in openspec/specs/",
+            'scenarios': [],
+            'covered': [],
+            'uncovered': [],
+            'skipped': []
+        }
+
+    # Extract all scenarios
+    all_scenarios = []
+    for spec_file in spec_files:
+        scenarios = extract_scenarios_with_skips(spec_file)
+        all_scenarios.extend(scenarios)
+
+    # Search for verification markers
+    search_paths = [str(root / "tools"), str(root)]
+
+    covered = []
+    uncovered = []
+    skipped = []
+
+    for scenario in all_scenarios:
+        if scenario['skipped']:
+            skipped.append(scenario)
+            continue
+
+        markers = find_verification_markers(scenario['id'], search_paths)
+
+        if markers:
+            scenario['markers'] = markers
+            covered.append(scenario)
+        else:
+            uncovered.append(scenario)
+
+    return {
+        'success': len(uncovered) == 0,
+        'change': "all-specs",
+        'total': len(all_scenarios),
+        'covered': covered,
+        'uncovered': uncovered,
+        'skipped': skipped,
+        'coverage_pct': (len(covered) / (len(all_scenarios) - len(skipped)) * 100) if (len(all_scenarios) - len(skipped)) > 0 else 100
+    }
+
+
+def main(change: Optional[str], format: str = "text", project_root: str = ".") -> int:
     """Main entry point for verify command.
 
     Args:
-        change: Name of the change to verify
+        change: Name of the change to verify (None to verify all specs)
         format: Output format (text or json)
         project_root: Root directory of the project
 
     Returns:
         Exit code (0 = success, 1 = gaps found)
     """
-    results = verify_change(change, project_root)
+    if change:
+        results = verify_change(change, project_root)
+    else:
+        results = verify_all_specs(project_root)
 
     if format == "json":
         print_json_report(results)
@@ -231,10 +302,14 @@ def main(change: str, format: str = "text", project_root: str = ".") -> int:
 
 @app.callback()
 def verify(
-    change: str = typer.Argument(..., help="Name of the change to verify"),
+    change: str = typer.Argument(None, help="Name of the change to verify (default: verify all specs)"),
     format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
 ):
-    """Verify spec coverage for a change."""
+    """Verify spec coverage for a change or all specs.
+
+    If change is specified, verifies only that change's specs.
+    If no change is specified, verifies all spec scenarios in the project.
+    """
     exit_code = main(change, format, project_root)
     raise typer.Exit(code=exit_code)

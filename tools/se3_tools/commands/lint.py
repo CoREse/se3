@@ -148,7 +148,18 @@ def run_lint(path: str) -> int:
 
 
 @app.callback()
-def lint(path: str = "."):
-    """Lint OpenSpec files in the given path."""
+def lint(
+    path: str = typer.Argument(".", help="Path to lint"),
+    fix: bool = typer.Option(False, "--fix", help="Attempt to fix auto-correctable issues"),
+):
+    """Lint OpenSpec files in the given path.
+
+    Validates spec files for:
+    - Required sections (Purpose, Requirements)
+    - Correct scenario format (WHEN/THEN)
+    - SHALL requirements having scenarios
+    """
+    if fix:
+        print("Note: --fix is not yet implemented. Running lint without fixes.")
     exit_code = run_lint(path)
     raise typer.Exit(code=exit_code)
