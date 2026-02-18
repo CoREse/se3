@@ -136,6 +136,9 @@ se3 done --format json
 - `update_change_status`: Note remaining work in change directory
 - `create_human_call`: (Collab mode) Create human-call for orchestrator
 - `handoff`: Run `se3 handoff` to generate session summary
+- `archive_change`: Run `openspec archive <name>` to archive completed change
+- `verify_scenarios`: Check that all spec scenarios pass
+- `check_spec_drift`: Check if specs were inappropriately weakened during implementation
 
 #### Scenario: Normal session shutdown
 - **WHEN** `se3:done` runs with uncommitted changes
@@ -260,6 +263,34 @@ se3 update [--dry-run] [--force] [--se3-version X.Y.Z]
 - **THEN** it reports "Already on SE3 version X.Y.Z"
 - **AND** suggests using `--force` to update anyway
 
+### Requirement: se3 work guardrails Command
+
+The `se3 work guardrails` command SHALL check spec files against SE3 Spec Guardrails to verify requirements were not inappropriately weakened or deleted.
+
+**Interface:**
+```bash
+se3 work guardrails <spec-file> [--original <original-file>]
+```
+
+**Guardrail Checks:**
+1. **must_not_delete**: Detect deleted WHEN/THEN scenarios
+2. **must_not_weaken**: Detect weakened language (SHALL → SHOULD, MUST → SHOULD, all → some)
+
+**Violation Detection:**
+- Compare original and modified spec content
+- Check for deleted scenarios (missing WHEN clauses)
+- Check for weakened language patterns
+
+#### Scenario: Guardrails pass
+- **WHEN** `se3 work guardrails openspec/specs/auth/spec.md` is executed
+- **AND** no requirements were deleted or weakened
+- **THEN** it reports "✓ All guardrails passed"
+
+#### Scenario: Guardrails violation detected
+- **WHEN** a spec has deleted scenarios or weakened requirements
+- **THEN** it reports violations with type, message, and affected guardrail
+- **AND** exits with code 1
+
 ### Requirement: Session Guard
 
 All session-aware commands (`se3:work`, `se3:done`) SHALL check if session is properly started before proceeding.
@@ -275,7 +306,7 @@ All session-aware commands (`se3:work`, `se3:done`) SHALL check if session is pr
 #### Scenario: Work without session
 - **WHEN** `se3 work` runs without `.claude/.session.json`
 - **THEN** it returns `SESSION_NOT_STARTED` error
-- **AND` agent runs `se3 start` to initialize
+- **AND** agent runs `se3 start` to initialize
 
 #### Scenario: Done without active session
 - **WHEN** `se3 done` runs with non-active session
