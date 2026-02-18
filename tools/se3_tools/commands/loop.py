@@ -238,7 +238,8 @@ CLAUDE_EOF
     echo ""
 
     EXIT_CODE=0
-    timeout 1800 "$CLAUDE_CMD" --dangerously-skip-permissions --print --output-format stream-json --max-turns 0 "$PROMPT_FILE" 2>&1 | python3 "$RENDERER_FILE" || EXIT_CODE=$?
+    # Run in subshell with job control disabled to handle wrapper scripts like kclaude
+    ( set +m; timeout 1800 "$CLAUDE_CMD" --dangerously-skip-permissions --print --output-format stream-json --max-turns 0 "$PROMPT_FILE" 2>&1 ) | python3 "$RENDERER_FILE" || EXIT_CODE=$?
 
     echo ""
     echo "------------------------------------------------------------"
