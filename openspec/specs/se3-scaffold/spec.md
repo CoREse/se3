@@ -16,7 +16,7 @@ The **CLAUDE.md template MUST include**:
 
 The **SE3.md template MUST include**:
 - Complete standard process definitions (startup, execution, shutdown protocols)
-- Detailed special file specifications (status.md, progress.md, human-calls/, etc.)
+- Detailed special file specifications (progress.md, human-calls/, etc.)
 - Full conventional behavior definitions (self-iterate, change management, etc.)
 - Human-as-MCP invocation specifications
 - Agent Team collaboration specifications
@@ -36,7 +36,6 @@ Standard structure:
 ```
 project/
 ├── init.sh                # Environment setup (optional)
-├── status.md              # Runtime dashboard (current session state)
 ├── progress.md            # Cross-session progress tracking
 ├── se3.config.yaml        # Framework configuration (optional)
 ├── README.md              # Project documentation
@@ -49,6 +48,8 @@ project/
     ├── CLAUDE.md          # SE 3.0 minimal framework reference (project-level)
     └── SE3.md             # Complete SE 3.0 framework implementation
 ```
+
+Note: `status.md` is no longer used. Status is now computed in real-time via `se3 status` command (see status-diagnostics spec).
 
 OpenSpec specs serve as the single source of truth for project requirements. No separate demands/requirements file is needed.
 

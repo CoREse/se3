@@ -10,7 +10,8 @@ The system SHALL manage template files in `output/` for use by `se3 init`.
 Templates:
 - `output/SE3.md.template` → `.claude/SE3.md`
 - `output/CLAUDE.minimal.md.template` → `.claude/CLAUDE.md`
-- `output/status.md.template` → `status.md`
+
+Note: `status.md` is no longer generated. Status is computed in real-time via `se3 status` (see status-diagnostics spec).
 
 #### Scenario: List templates
 - **WHEN** `se3 sync --dry-run` is executed
