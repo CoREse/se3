@@ -232,12 +232,12 @@ CLAUDE_EOF
     # Execute Claude Code with --output-format stream-json and render output
     # Timeout after 30 minutes to prevent infinite hanging
     echo "------------------------------------------------------------"
-    echo "[SE3 Loop] Executing: $CLAUDE_CMD --output-format stream-json --max-turns 0"
+    echo "[SE3 Loop] Executing: $CLAUDE_CMD --print --output-format stream-json --max-turns 0"
     echo "[SE3 Loop] Renderer: $RENDERER_FILE"
     echo ""
 
     EXIT_CODE=0
-    timeout 1800 "$CLAUDE_CMD" --dangerously-skip-permissions --output-format stream-json --max-turns 0 "$PROMPT_FILE" 2>&1 | python3 "$RENDERER_FILE" || EXIT_CODE=$?
+    timeout 1800 "$CLAUDE_CMD" --dangerously-skip-permissions --print --output-format stream-json --max-turns 0 "$PROMPT_FILE" 2>&1 | python3 "$RENDERER_FILE" || EXIT_CODE=$?
 
     echo ""
     echo "------------------------------------------------------------"

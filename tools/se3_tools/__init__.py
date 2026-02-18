@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.10.2"  # Fix loop: use --output-format stream-json instead of invalid --stream-json
+SE3_FRAMEWORK_VERSION = "2.10.3"  # Add --print flag to loop for proper stream-json output

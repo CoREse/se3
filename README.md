@@ -193,6 +193,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.10.3 | 2026-02-18 | Fix `se3 loop`: add `--print` flag for proper `--output-format stream-json` output, matching collab launcher configuration. |
 | 2.10.2 | 2026-02-18 | Fix `se3 loop`: use correct `--output-format stream-json` instead of invalid `--stream-json` flag. |
 | 2.10.0 | 2026-02-18 | Add stream-json renderer to `se3 loop`. Replaces `--print` with `--stream-json | python3 renderer` for real-time visibility of Claude's thinking, tool calls, and progress. Zero external dependencies. |
 | 2.9.0 | 2026-02-18 | Add SE3 1.x features: Input Classification & Stage Routing (`se3 start -i`), Spec Guardrails (`se3 guardrails` command), full shutdown protocol with spec scenario verification and archive support. |
