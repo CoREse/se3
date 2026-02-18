@@ -69,6 +69,29 @@ The CLI automatically determines formality based on change contents:
 - **Medium**: Has proposal + specs (no design)
 - **Small**: No proposal/specs, ≤3 tasks
 
+**Spec Guardrails (SE3 1.x)**
+
+What Agents MUST NOT Do:
+- **MUST NOT delete** an existing spec requirement without explicit human approval (via human call)
+- **MUST NOT weaken** a requirement (e.g., changing "SHALL validate all inputs" to "SHOULD validate inputs")
+- **MUST NOT modify** the description or scenarios of a requirement they are implementing — the implementer does not get to change the spec they're building against
+
+What Agents CAN Do:
+- **ADD** new requirements
+- **MODIFY** requirements they are not currently implementing (with a change proposal)
+- **Mark requirements as deprecated** with a human-approved reason and migration path
+
+**Enforcement**: After archiving a change, review the git diff of `openspec/specs/` to confirm no requirements were inappropriately weakened or removed. If spec drift is detected, revert and investigate.
+
+**Session Guard (2.1+)**
+
+`se3 work` checks if session is properly started before proceeding:
+- If `.claude/.session.json` does not exist → returns error `SESSION_NOT_STARTED`
+- If session status is not "active" → returns error `SESSION_NOT_ACTIVE`
+- If session file is corrupted → returns error `SESSION_INVALID`
+
+In all cases, the agent should run `se3 start` first.
+
 **Guardrails**
 
 - NEVER modify spec files you are implementing against

@@ -48,6 +48,12 @@ Optimized for simple, quick tasks that can be completed in one session without c
 | Documentation update | `/se3:fc "update README" --quick` |
 | Complex feature (needs planning) | Use `/se3:start` → `/se3:work` separately |
 
+**Session Guard (2.1+)**
+
+`se3 full-cycle` checks if session is properly started before proceeding:
+- If `.claude/.session.json` does not exist → runs `se3 start` automatically
+- If session status is not "active" → prompts to run `se3 start`
+
 **Guardrails**
 
 - If start phase requires manual intervention (init.sh, openspec init), pause and ask user

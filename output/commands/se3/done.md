@@ -44,6 +44,31 @@ End the current SE3 work session with proper shutdown protocol. Ensures all chan
    - Session summary from `progress.md`
    - Any incomplete changes with notes for next session
 
+**Session Guard (2.1+)**
+
+`se3 done` checks if session is properly started before proceeding:
+- If `.claude/.session.json` does not exist → returns error `SESSION_NOT_STARTED`
+- If session status is not "active" → returns error `SESSION_NOT_ACTIVE`
+- If session file is corrupted → returns error `SESSION_INVALID`
+
+In all cases, the agent should run `se3 start` first.
+
+**Verification Protocol (SE3 1.x)**
+
+**The Rule**: Never mark a feature or change as complete without running tests that prove it works.
+
+**How to Verify**:
+1. **Spec scenarios = acceptance criteria**. Each WHEN/THEN scenario in a spec is a test case. Before marking a change complete, verify every scenario.
+2. **Prefer automated tests**. Write tests for spec scenarios when possible. Run them. A passing test suite is the only reliable proof of completion.
+3. **E2E testing for user-facing features**. Visual regression testing catches issues that unit tests miss.
+4. **Manual verification as fallback**. If no automated testing is feasible, manually exercise the feature and document the result.
+
+**When to Run Tests**:
+- **Startup**: Run existing tests to establish a baseline before making changes
+- **After implementation**: Run tests for the specific change
+- **Before commit**: Run the full test suite — do not commit if tests fail
+- **Before archiving a change**: Verify all spec scenarios pass
+
 **Shutdown Protocol**
 
 ```

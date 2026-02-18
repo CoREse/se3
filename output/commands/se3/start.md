@@ -49,6 +49,26 @@ Start a new SE3 work session. This skill runs the full startup protocol and guid
    - If there are active changes: Ask if they want to continue one
    - If no active changes: Ask what they want to work on
 
+**Input Classification & Stage Routing (SE3 1.x)**
+
+The `se3 start` command includes input classification to determine workflow routing:
+
+| Intent Type | Description | Stage Entry |
+|-------------|-------------|-------------|
+| `directive` | Explicit self-iterate, "implement X", "start feature Y" | Full SDD workflow |
+| `bug-report` | Error description, stack trace, broken behavior | Bug fix workflow |
+| `feature-request` | New capability, enhancement idea | Feature proposal workflow |
+| `question` | How does X work? Why Y? | Knowledge query |
+| `review` | "Check this", "What do you think", "Is this correct" | Review workflow |
+| `clarification` | Follow-up on previous topic | Resume/continue workflow |
+
+**Classification Indicators**:
+- Bug: "error", "bug", "broken", "fail", "crash", "exception", "stack trace", "not working"
+- Review: "review", "check this", "look at", "what do you think", "is this correct"
+- Feature: "add ", "implement", "create ", "build ", "support ", "feature", "new capability"
+- Question: "how ", "why ", "what is", "explain", "?"
+- Directive: "self-iterate", "continue", "proceed", "start ", "fix ", "update ", "refactor "
+
 **Guardrails**
 
 - If tests fail during `run_tests`, report the failure and pause — do not proceed until fixed
