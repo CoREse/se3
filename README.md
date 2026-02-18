@@ -193,6 +193,9 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.12.18 | 2026-02-19 | Fix test expectations in `test_fullcycle.py`. `sanitize_change_name` correctly handles empty strings (fallback to `loop-{timestamp}`) and slashes (converted to hyphens for filesystem safety). |
+| 2.12.17 | 2026-02-19 | Fix: Use `max_tasks_per_change` from config instead of hardcoded value. |
+| 2.12.16 | 2026-02-19 | Iteration 31: Comprehensive project review. Fixed test expectation mismatches in fullcycle tests. All 207 tests pass. |
 | 2.11.0 | 2026-02-19 | Add `se3 loop --no-summary` flag. Iteration summary is now enabled by default — Claude Code summarizes each iteration and passes it to the next. Use `--no-summary` to disable. |
 | 2.10.8 | 2026-02-18 | Fix `se3 loop`: add `--verbose` flag required for `--output-format stream-json` mode. |
 | 2.10.7 | 2026-02-18 | Refactor `se3 loop`: eliminate bash script generation, run claude directly in Python with real-time stream-json rendering. Simpler and more reliable. |
