@@ -45,6 +45,58 @@ class StepStatus(str, Enum):
     BLOCKED = "blocked"
 
 
+# Spec Guardrails (SE3 1.x feature)
+SPEC_GUARDRAILS = {
+    "must_not_delete": "MUST NOT delete an existing spec requirement without explicit human approval",
+    "must_not_weaken": "MUST NOT weaken a requirement (e.g., 'SHALL validate' → 'SHOULD validate')",
+    "must_not_modify_implementing": "MUST NOT modify requirements of the spec currently being implemented",
+    "can_add": "CAN ADD new requirements",
+    "can_modify_other": "CAN MODIFY requirements not currently implementing (with proposal)",
+    "can_deprecate": "CAN MARK requirements as deprecated (with human-approved reason and migration path)",
+}
+
+
+def check_spec_guardrails(spec_path: Path, original_content: str, new_content: str) -> List[Dict[str, Any]]:
+    """Check if spec changes violate guardrails.
+
+    Returns list of violations if any.
+    """
+    violations = []
+
+    # Check for deleted requirements (scenarios)
+    original_scenarios = set(re.findall(r"WHEN\s+(.+)", original_content))
+    new_scenarios = set(re.findall(r"WHEN\s+(.+)", new_content))
+
+    deleted = original_scenarios - new_scenarios
+    if deleted:
+        violations.append({
+            "type": "must_not_delete",
+            "message": f"Deleted scenarios detected: {deleted}",
+            "guardrail": SPEC_GUARDRAILS["must_not_delete"],
+        })
+
+    # Check for weakened requirements
+    weakened_patterns = [
+        (r"\bSHALL\b", r"\bSHOULD\b", "Requirement weakened: SHALL → SHOULD"),
+        (r"\bMUST\b", r"\bSHOULD\b", "Requirement weakened: MUST → SHOULD"),
+        (r"\ball\b", r"\bsome\b", "Requirement weakened: all → some"),
+        (r"\bevery\b", r"\bsome\b", "Requirement weakened: every → some"),
+    ]
+
+    for strong_pattern, weak_pattern, message in weakened_patterns:
+        strong_in_original = re.search(strong_pattern, original_content, re.IGNORECASE)
+        weak_in_new = re.search(weak_pattern, new_content, re.IGNORECASE)
+
+        if strong_in_original and weak_in_new:
+            violations.append({
+                "type": "must_not_weaken",
+                "message": message,
+                "guardrail": SPEC_GUARDRAILS["must_not_weaken"],
+            })
+
+    return violations
+
+
 def compute_git_status(project_root: Path) -> Dict[str, Any]:
     """Compute current git state."""
     info = {
@@ -265,6 +317,13 @@ def compute_step_actions(
             })
 
     elif current_step == "implement":
+        # Check spec guardrails before implementation (SE3 1.x feature)
+        actions.append({
+            "type": "check_guardrails",
+            "description": "Verify no spec requirements were weakened or deleted",
+            "reason": "Spec Guardrails: MUST NOT delete/weaken existing requirements",
+        })
+
         tasks = read_tasks(change_path)
         if tasks:
             next_task = get_next_pending_task(tasks)
@@ -718,3 +777,58 @@ def work(
 
     # Exit code: 0 = OK, 1 = no change or error
     raise typer.Exit(code=0 if result.get("change") else 1)
+
+
+@app.command()
+def guardrails(
+    spec_file: Path = typer.Argument(..., help="Path to spec file to check"),
+    original: Optional[Path] = typer.Option(None, "--original", "-o", help="Path to original spec file for comparison"),
+):
+    """Check spec file against SE3 Spec Guardrails.
+
+    Verifies that spec requirements were not inappropriately
+    weakened or deleted.
+
+    Examples:
+        se3 work guardrails openspec/specs/auth/spec.md
+        se3 work guardrails openspec/specs/auth/spec.md --original /tmp/original.md
+    """
+    if not spec_file.exists():
+        print(f"Error: Spec file not found: {spec_file}")
+        raise typer.Exit(code=1)
+
+    new_content = spec_file.read_text()
+
+    if original and original.exists():
+        original_content = original.read_text()
+    else:
+        # Try to get original from git
+        import subprocess
+        result = subprocess.run(
+            ["git", "show", f"HEAD:{spec_file}"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            original_content = result.stdout
+        else:
+            print(f"Warning: Could not find original version for comparison")
+            original_content = new_content
+
+    violations = check_spec_guardrails(spec_file, original_content, new_content)
+
+    print(f"\n{'=' * 60}")
+    print("SE 3.0 Spec Guardrails Check")
+    print(f"{'=' * 60}")
+    print(f"\nFile: {spec_file}")
+
+    if violations:
+        print(f"\n⚠️  {len(violations)} violation(s) found:")
+        for v in violations:
+            print(f"\n  [{v['type']}] {v['message']}")
+            print(f"  Rule: {v['guardrail']}")
+        print(f"\n{'=' * 60}")
+        raise typer.Exit(code=1)
+    else:
+        print(f"\n✓ All guardrails passed - no violations found")
+        print(f"\n{'=' * 60}")
+        raise typer.Exit(code=0)

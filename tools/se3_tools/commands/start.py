@@ -222,6 +222,116 @@ def is_first_time_project(project_root: Path) -> bool:
     return True
 
 
+def classify_input(user_message: str) -> str:
+    """Classify user input intent type.
+
+    Returns one of: directive, bug-report, feature-request, question,
+    review, clarification, meta, off-topic
+    """
+    message_lower = user_message.lower()
+
+    # Bug report indicators
+    bug_indicators = ["error", "bug", "broken", "fail", "crash", "exception",
+                      "stack trace", "not working", "doesn't work"]
+    if any(ind in message_lower for ind in bug_indicators):
+        return "bug-report"
+
+    # Review indicators
+    review_indicators = ["review", "check this", "look at", "what do you think",
+                         "is this correct", "evaluate"]
+    if any(ind in message_lower for ind in review_indicators):
+        return "review"
+
+    # Feature request indicators
+    feature_indicators = ["add ", "implement", "create ", "build ", "support ",
+                          "feature", "new capability", "enhancement"]
+    if any(ind in message_lower for ind in feature_indicators):
+        return "feature-request"
+
+    # Question indicators
+    question_indicators = ["how ", "why ", "what is", "explain", "?"]
+    if any(ind in message_lower for ind in question_indicators):
+        return "question"
+
+    # Directive indicators (explicit commands)
+    directive_indicators = ["self-iterate", "continue", "proceed", "start ",
+                            "fix ", "update ", "refactor "]
+    if any(ind in message_lower for ind in directive_indicators):
+        return "directive"
+
+    # Clarification / continuation
+    clarification_indicators = ["also", "additionally", "and", "then", "next"]
+    if any(ind in message_lower for ind in clarification_indicators):
+        return "clarification"
+
+    # Default to directive for most inputs
+    return "directive"
+
+
+def determine_stage(intent: str, current_state: Dict[str, Any]) -> Dict[str, Any]:
+    """Determine workflow stage based on input intent and current state.
+
+    Returns stage decision with recommended workflow and actions.
+    """
+    active_changes = current_state.get("active_changes", [])
+
+    if intent == "bug-report":
+        # Check if related to active change
+        if active_changes:
+            return {
+                "stage": "continue_change",
+                "workflow": "bugfix",
+                "note": "Adding bug fix to existing change context",
+            }
+        return {
+            "stage": "new_change",
+            "workflow": "bugfix",
+            "note": "Creating new bugfix change",
+        }
+
+    elif intent == "feature-request":
+        return {
+            "stage": "new_change",
+            "workflow": "feature",
+            "note": "Creating new feature change",
+        }
+
+    elif intent == "review":
+        return {
+            "stage": "review",
+            "workflow": "review",
+            "note": "Starting review workflow",
+        }
+
+    elif intent == "question":
+        return {
+            "stage": "answer",
+            "workflow": None,
+            "note": "Answer directly without creating change",
+        }
+
+    elif intent == "directive":
+        return {
+            "stage": "execute",
+            "workflow": "directive",
+            "note": "Execute directive workflow",
+        }
+
+    elif intent == "clarification":
+        return {
+            "stage": "continue",
+            "workflow": None,
+            "note": "Continue previous context",
+        }
+
+    # Default
+    return {
+        "stage": "execute",
+        "workflow": "directive",
+        "note": "Default to directive execution",
+    }
+
+
 def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Compute the actions array based on current state.
 
@@ -290,11 +400,15 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     return actions
 
 
-def run_session_start(project_root: str = ".") -> Dict[str, Any]:
+def run_session_start(project_root: str = ".", user_input: Optional[str] = None) -> Dict[str, Any]:
     """Run the full session start protocol and return JSON actions.
 
     This is the main workflow driver — it computes all state and determines
     what actions the agent should take.
+
+    Args:
+        project_root: Root directory of the project
+        user_input: The user's first message (for intent classification)
     """
     root = Path(project_root).resolve()
 
@@ -310,6 +424,16 @@ def run_session_start(project_root: str = ".") -> Dict[str, Any]:
     collab = compute_collab_status(root)
     progress_summary = read_progress_summary(root)
     test_command = detect_test_command(root)
+
+    # Input Classification & Stage Routing (SE3 1.x feature)
+    user_intent = classify_input(user_input) if user_input else "directive"
+
+    # Build intermediate state for stage decision
+    intermediate_state = {
+        "active_changes": active_changes,
+        "pending_human_calls": pending_calls,
+    }
+    stage_decision = determine_stage(user_intent, intermediate_state)
 
     # Determine if tests should be run
     test_baseline_needed = (
@@ -334,10 +458,17 @@ def run_session_start(project_root: str = ".") -> Dict[str, Any]:
         "collab": collab,
         "test_command": test_command,
         "test_baseline_needed": test_baseline_needed,
+        "user_intent": user_intent,
+        "stage_decision": stage_decision,
     }
 
     # Compute actions
     state["actions"] = compute_actions(state)
+
+    # Add intent-based routing actions (SE3 1.x feature)
+    if not is_first_time and user_input:
+        intent_actions = compute_intent_actions(state)
+        state["actions"].extend(intent_actions)
 
     # Create session file to mark session as started
     create_session_file(root)
@@ -345,9 +476,57 @@ def run_session_start(project_root: str = ".") -> Dict[str, Any]:
     return state
 
 
+def compute_intent_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Compute actions based on detected user intent.
+
+    This implements the Input Classification & Stage Routing from SE3 1.x.
+    """
+    actions = []
+    intent = state.get("user_intent", "directive")
+    stage = state.get("stage_decision", {})
+
+    if intent == "bug-report":
+        actions.append({
+            "type": "route_to_bugfix",
+            "workflow": "bugfix",
+            "reason": "Bug report detected - route to bug fix workflow",
+        })
+
+    elif intent == "feature-request":
+        actions.append({
+            "type": "route_to_feature",
+            "workflow": "feature",
+            "reason": "Feature request detected - route to feature workflow",
+        })
+
+    elif intent == "review":
+        actions.append({
+            "type": "route_to_review",
+            "workflow": "review",
+            "reason": "Review request detected - route to review workflow",
+        })
+
+    elif intent == "question":
+        actions.append({
+            "type": "explore_and_answer",
+            "reason": "Question detected - explore code and provide answer",
+        })
+
+    elif intent == "directive":
+        actions.append({
+            "type": "execute_directive",
+            "workflow": stage.get("workflow", "directive"),
+            "reason": "Directive detected - execute with SDD workflow",
+        })
+
+    return actions
+
+
 def create_session_file(project_root: Path) -> None:
     """Create .session.json to mark session as active."""
-    session_file = project_root / ".claude" / ".session.json"
+    claude_dir = project_root / ".claude"
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    session_file = claude_dir / ".session.json"
     session_data = {
         "status": "active",
         "started_at": datetime.now().isoformat(),
@@ -361,6 +540,15 @@ def print_text_report(state: Dict[str, Any]) -> None:
     print(f"\n{'=' * 60}")
     print("SE 3.0 Session Start")
     print(f"{'=' * 60}")
+
+    # Input Classification (SE3 1.x feature)
+    user_intent = state.get("user_intent")
+    if user_intent:
+        stage = state.get("stage_decision", {})
+        print(f"\nIntent: {user_intent}")
+        print(f"Stage: {stage.get('stage', 'N/A')}")
+        if stage.get('workflow'):
+            print(f"Workflow: {stage.get('workflow')}")
 
     # Git info
     git = state.get("git", {})
@@ -420,6 +608,7 @@ def print_json_report(state: Dict[str, Any]) -> None:
 def start(
     format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
+    input: Optional[str] = typer.Option(None, "--input", "-i", help="User input for intent classification"),
 ):
     """Start an SE3 session — compute state and return actions for the agent.
 
@@ -427,12 +616,15 @@ def start(
     7-step startup protocol into programmatic logic, returning a JSON actions
     array that tells the agent exactly what to do next.
 
+    Includes Input Classification & Stage Routing (SE3 1.x feature).
+
     Examples:
         se3 start
         se3 start --json
         se3 start -p /path/to/project --json
+        se3 start -i "Fix the login bug"
     """
-    state = run_session_start(project_root)
+    state = run_session_start(project_root, input)
 
     if format == "json":
         print_json_report(state)

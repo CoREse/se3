@@ -133,6 +133,41 @@ def is_in_collab_mode(project_root: Path) -> bool:
     return bool(os.environ.get("SE3_AGENT_ROLE"))
 
 
+def verify_spec_scenarios(change_path: Path) -> List[Dict[str, Any]]:
+    """Verify all spec scenarios pass for a change.
+
+    Returns list of scenarios with pass/fail status.
+    """
+    scenarios = []
+    specs_dir = change_path / "specs"
+
+    if not specs_dir.exists():
+        return scenarios
+
+    # Find all spec files
+    for spec_file in specs_dir.rglob("*.md"):
+        content = spec_file.read_text()
+
+        # Parse WHEN/THEN scenarios
+        lines = content.split("\n")
+        current_scenario = None
+
+        for line in lines:
+            line_stripped = line.strip()
+            if line_stripped.startswith("WHEN"):
+                current_scenario = {
+                    "when": line_stripped,
+                    "then": None,
+                    "file": spec_file.name,
+                }
+            elif line_stripped.startswith("THEN") and current_scenario:
+                current_scenario["then"] = line_stripped
+                scenarios.append(current_scenario)
+                current_scenario = None
+
+    return scenarios
+
+
 def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Compute the shutdown actions array based on current state."""
     actions = []
@@ -167,6 +202,16 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "reason": "Must pass tests before commit",
         })
 
+    # 1.5 Verify spec scenarios for incomplete changes (SE3 1.x feature)
+    for change in incomplete_changes:
+        if change.get("tasks", {}).get("remaining", 0) == 0:
+            # All tasks done - verify scenarios before archiving
+            actions.append({
+                "type": "verify_scenarios",
+                "change": change["name"],
+                "reason": f"Verify all spec scenarios pass before archiving '{change['name']}'",
+            })
+
     # 2. Commit changes
     if has_changes:
         files = uncommitted.get("files", [])
@@ -179,12 +224,28 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     # 3. Update active changes status
     for change in incomplete_changes:
-        actions.append({
-            "type": "update_change_status",
-            "change": change["name"],
-            "note": f"{change.get('tasks', {}).get('remaining', 0)} tasks remaining for next session",
-            "reason": f"Document remaining work for '{change['name']}'",
-        })
+        remaining = change.get('tasks', {}).get('remaining', 0)
+        if remaining == 0:
+            # All tasks complete - archive the change (SE3 1.x feature)
+            actions.append({
+                "type": "archive_change",
+                "change": change["name"],
+                "cmd": f"openspec archive {change['name']}",
+                "reason": f"Archive completed change '{change['name']}'",
+            })
+            # Check for spec drift after archiving (SE3 1.x feature)
+            actions.append({
+                "type": "check_spec_drift",
+                "change": change["name"],
+                "reason": f"Check if specs were inappropriately weakened in '{change['name']}'",
+            })
+        else:
+            actions.append({
+                "type": "update_change_status",
+                "change": change["name"],
+                "note": f"{remaining} tasks remaining for next session",
+                "reason": f"Document remaining work for '{change['name']}'",
+            })
 
     # 4. Handoff / Finalize session
     actions.append({

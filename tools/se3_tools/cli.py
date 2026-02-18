@@ -101,11 +101,15 @@ app.add_typer(human_input.app, name="human", help="Manage human input")
 def start_cmd(
     format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
+    input: Optional[str] = typer.Option(None, "--input", "-i", help="User input for intent classification"),
 ):
-    """Start an SE3 session — compute state and return actions for the agent."""
+    """Start an SE3 session — compute state and return actions for the agent.
+
+    Includes Input Classification & Stage Routing (SE3 1.x feature).
+    """
     from .commands.start import run_session_start, print_text_report, print_json_report
     import json
-    state = run_session_start(project_root)
+    state = run_session_start(project_root, input)
     if format == "json":
         print_json_report(state)
     else:
@@ -128,6 +132,60 @@ def work_cmd(
     else:
         print_text_report(result)
     raise typer.Exit(code=0 if result.get("change") else 1)
+
+
+@app.command(name="guardrails")
+def guardrails_cmd(
+    spec_file: Path = typer.Argument(..., help="Path to spec file to check"),
+    original: Optional[Path] = typer.Option(None, "--original", "-o", help="Path to original spec file for comparison"),
+):
+    """Check spec file against SE3 Spec Guardrails.
+
+    Verifies that spec requirements were not inappropriately
+    weakened or deleted.
+    """
+    from .commands.work import check_spec_guardrails
+    import subprocess
+    import re
+
+    if not spec_file.exists():
+        typer.echo(f"Error: Spec file not found: {spec_file}", err=True)
+        raise typer.Exit(code=1)
+
+    new_content = spec_file.read_text()
+
+    if original and original.exists():
+        original_content = original.read_text()
+    else:
+        # Try to get original from git
+        result = subprocess.run(
+            ["git", "show", f"HEAD:{spec_file}"],
+            capture_output=True, text=True, cwd=spec_file.parent
+        )
+        if result.returncode == 0:
+            original_content = result.stdout
+        else:
+            typer.echo(f"Warning: Could not find original version for comparison")
+            original_content = new_content
+
+    violations = check_spec_guardrails(spec_file, original_content, new_content)
+
+    typer.echo(f"\n{'=' * 60}")
+    typer.echo("SE 3.0 Spec Guardrails Check")
+    typer.echo(f"{'=' * 60}")
+    typer.echo(f"\nFile: {spec_file}")
+
+    if violations:
+        typer.echo(f"\n⚠️  {len(violations)} violation(s) found:")
+        for v in violations:
+            typer.echo(f"\n  [{v['type']}] {v['message']}")
+            typer.echo(f"  Rule: {v['guardrail']}")
+        typer.echo(f"\n{'=' * 60}")
+        raise typer.Exit(code=1)
+    else:
+        typer.echo(f"\n✓ All guardrails passed - no violations found")
+        typer.echo(f"\n{'=' * 60}")
+        raise typer.Exit(code=0)
 
 @app.command(name="done")
 def done_cmd(
