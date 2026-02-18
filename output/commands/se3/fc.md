@@ -15,9 +15,9 @@ Optimized for simple, quick tasks that can be completed in one session without c
 
 **Steps**
 
-1. **Run `se3 full-cycle --json`** to set up the complete workflow
+1. **Run `se3 full-cycle --format json`** to set up the complete workflow
    ```bash
-   se3 full-cycle "description of work" [--quick] --json
+   se3 full-cycle "description of work" [--quick] --format json
    ```
    Parse the JSON output to get:
    - `phases.start`: Session initialization results
