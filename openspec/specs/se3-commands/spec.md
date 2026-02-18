@@ -30,7 +30,7 @@ The `se3:start` command SHALL initialize a new SE3 work session with environment
 
 **Interface:**
 ```bash
-se3 start --format json
+se3 start [--format json]
 ```
 
 **JSON Response Fields:**
@@ -122,7 +122,7 @@ The `se3:done` command SHALL end the current session with proper shutdown protoc
 
 **Interface:**
 ```bash
-se3 done --format json
+se3 done [--format json]
 ```
 
 **JSON Response Fields:**
@@ -190,7 +190,7 @@ The `se3 commit` command SHALL be the single entry point for all git commits, en
 
 **Interface:**
 ```bash
-se3 commit [-m "message"] [-f "file1 file2"] [--skip-tests] [--dry-run]
+se3 commit [-m "message"] [-f "file1 file2"] [--skip-tests] [--dry-run] [--no-ai]
 ```
 
 **Enforced Standards:**
@@ -405,7 +405,7 @@ The `se3 handoff` command SHALL generate a session summary and transfer control 
 
 **Interface:**
 ```bash
-se3 handoff [message] [--project-root <path>] [--dry-run]
+se3 handoff [message] [--project-root <path>] [--dry-run] [--skip-commit]
 ```
 
 **Process:**
@@ -480,9 +480,10 @@ se3 lint [<path>] [--fix]
 - **WHEN** `se3 lint openspec/specs/auth/spec.md` is executed
 - **THEN** it validates only the specified file
 
-#### Scenario: Auto-fix issues
+#### Scenario: Auto-fix issues (TODO)
 - **WHEN** `se3 lint --fix` is executed
 - **THEN** it attempts to fix auto-correctable issues
+- **NOTE** This feature is not yet implemented
 
 ### Requirement: se3 verify Command
 
@@ -490,7 +491,7 @@ The `se3 verify` command SHALL verify that spec scenarios have corresponding imp
 
 **Interface:**
 ```bash
-se3 verify [--change <name>] [--format json]
+se3 verify [<change-name>] [--format json]
 ```
 
 **Detection Methods:**
@@ -504,7 +505,7 @@ se3 verify [--change <name>] [--format json]
 - Reports uncovered scenarios
 
 #### Scenario: Verify specific change
-- **WHEN** `se3 verify --change <name>` is executed
+- **WHEN** `se3 verify <change-name>` is executed
 - **THEN** it verifies scenarios for that change only
 
 #### Scenario: Verify all specs
@@ -517,11 +518,11 @@ The `se3 loop` command SHALL run the SE3 workflow in a loop for multiple iterati
 
 **Interface:**
 ```bash
-se3 loop "description" [--iterations <n>] [--quick] [--no-summary]
+se3 loop "prompt" [--iterations <n>] [--quick] [--no-summary]
 ```
 
 **Parameters:**
-- `description`: Description of work for each iteration
+- `prompt`: Description of work for each iteration
 - `--iterations`: Number of iterations (default: 10)
 - `--quick`: Use 'small' workflow (skip formal change creation)
 - `--no-summary`: Disable iteration summary between loops
