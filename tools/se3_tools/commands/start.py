@@ -76,7 +76,12 @@ def check_init_script(project_root: Path) -> Dict[str, Any]:
 
 
 def check_openspec(project_root: Path) -> Dict[str, Any]:
-    """Check if system openspec command is available and openspec/ directory exists."""
+    """Check if system openspec command is available and openspec is fully initialized.
+
+    OpenSpec initialization includes:
+    1. openspec/ directory with specs/ and changes/ subdirectories
+    2. .claude/commands/openspec/ directory (Claude skills/commands)
+    """
     # Check if system openspec CLI is available
     result = subprocess.run(
         ["which", "openspec"],
@@ -85,18 +90,26 @@ def check_openspec(project_root: Path) -> Dict[str, Any]:
     available = result.returncode == 0
 
     openspec_dir = project_root / "openspec"
+    claude_openspec_dir = project_root / ".claude" / "commands" / "opsx"
 
-    # OpenSpec is initialized if directory structure exists
-    # (system openspec handles .claude/commands/openspec/ during init)
-    initialized = (
+    # Core openspec directory structure exists
+    core_initialized = (
         openspec_dir.exists() and
         (openspec_dir / "specs").exists() and
         (openspec_dir / "changes").exists()
     )
 
+    # Claude integration exists (commands/skills installed)
+    claude_initialized = claude_openspec_dir.exists()
+
+    # Fully initialized requires both core structure AND Claude integration
+    initialized = core_initialized and claude_initialized
+
     return {
         "available": available,
         "initialized": initialized,
+        "core_initialized": core_initialized,
+        "claude_initialized": claude_initialized,
         "cmd": "openspec" if available else None,
     }
 
@@ -382,10 +395,17 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "reason": "openspec not installed"
         })
     elif not openspec.get("initialized"):
+        # Determine specific reason for better messaging
+        if not openspec.get("core_initialized"):
+            reason = "openspec/ directory missing, needs initialization"
+        elif not openspec.get("claude_initialized"):
+            reason = ".claude/commands/opsx/ missing, needs 'openspec init --tools claude'"
+        else:
+            reason = "openspec not fully initialized"
         actions.append({
             "type": "init_openspec",
-            "cmd": "openspec init",
-            "reason": "openspec/ directory missing, needs initialization"
+            "cmd": "openspec init --tools claude",
+            "reason": reason
         })
 
     # Baseline verification
@@ -570,7 +590,11 @@ def print_text_report(state: Dict[str, Any]) -> None:
     # OpenSpec
     openspec = state.get("openspec", {})
     print(f"\nOpenSpec: {'Available' if openspec.get('available') else 'Not installed'}")
-    print(f"OpenSpec Dir: {'Initialized' if openspec.get('initialized') else 'Missing'}")
+    if openspec.get("available"):
+        core_status = "✓" if openspec.get("core_initialized") else "✗"
+        claude_status = "✓" if openspec.get("claude_initialized") else "✗"
+        print(f"  Core structure (openspec/): {core_status}")
+        print(f"  Claude integration (.claude/commands/opsx/): {claude_status}")
 
     # Active changes
     changes = state.get("active_changes", [])

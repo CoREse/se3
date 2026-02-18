@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.12.1"  # Fix: use system openspec instead of embedded implementation
+SE3_FRAMEWORK_VERSION = "2.12.2"  # Fix: correct openspec detection to check .claude/commands/opsx/
