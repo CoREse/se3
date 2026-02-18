@@ -9,18 +9,27 @@ Usage:
 """
 
 import json
+import re
 import subprocess
+import shutil
 from pathlib import Path
 from datetime import datetime
 
+from ..config import load_claude_commands
+
 
 def sanitize_change_name(description: str) -> str:
-    """Convert a description into a valid change name."""
+    """Convert a description into a valid change name.
+
+    Change names must only contain lowercase ASCII letters, numbers, and hyphens.
+    Non-ASCII characters (like Chinese) are removed.
+    """
     name = description.lower().strip()
-    name = "".join(c for c in name if c.isalnum() or c in " -_/")
-    name = name.replace(" ", "-").replace("_", "-")
-    while "--" in name:
-        name = name.replace("--", "-")
+    # Only keep ASCII alphanumeric characters (a-z, 0-9), spaces, and separators
+    name = "".join(c for c in name if (ord(c) < 128 and c.isalnum()) or c in " -_/")
+    name = name.replace(" ", "-").replace("_", "-").replace("/", "-")
+    # Collapse multiple consecutive hyphens
+    name = re.sub(r'-+', '-', name)
     if len(name) > 40:
         name = name[:40].rsplit("-", 1)[0]
     return name.strip("-")
@@ -31,6 +40,8 @@ def generate_loop_script(
     project_root: str,
     iterations: int,
     quick: bool,
+    base_name: str,
+    claude_cmd: str,
 ) -> str:
     """Generate the bash loop script for execution."""
     from .work import WORKFLOWS
@@ -52,6 +63,7 @@ PROMPT="{prompt.replace('"', '\\"')}"
 ITERATIONS={iterations}
 PROJECT_ROOT="{project_root}"
 QUICK_FLAG="{quick_flag}"
+CLAUDE_CMD="{claude_cmd}"
 
 echo "============================================================"
 echo "SE3 Loop"
@@ -60,14 +72,15 @@ echo ""
 echo "Prompt: $PROMPT"
 echo "Iterations: $ITERATIONS"
 echo "Project: $PROJECT_ROOT"
+echo "Claude Command: $CLAUDE_CMD"
 echo ""
 echo "Press Ctrl+C to stop at any time."
 echo "============================================================"
 echo ""
 
 # Check for claude command
-if ! command -v claude &> /dev/null; then
-    echo "❌ Error: 'claude' command not found in PATH"
+if ! command -v "$CLAUDE_CMD" &> /dev/null; then
+    echo "❌ Error: '$CLAUDE_CMD' command not found in PATH"
     exit 1
 fi
 
@@ -83,8 +96,8 @@ while [ $ITERATION -lt $ITERATIONS ]; do
     echo "╚════════════════════════════════════════════════════════════╝"
     echo ""
 
-    # Generate change name
-    BASE_NAME=$(echo "$PROMPT" | tr '[:upper:]' '[:lower:]' | tr ' _/' '-' | sed 's/--*/-/g' | cut -c1-40 | sed 's/-*$//')
+    # Use pre-sanitized base name from Python (handles non-ASCII characters)
+    BASE_NAME="{base_name}"
     CHANGE_NAME="${{BASE_NAME}}-$(printf '%02d' $ITERATION)"
 
     # Ensure unique name
@@ -132,7 +145,7 @@ CLAUDE_EOF
 
     # Execute Claude Code
     echo "------------------------------------------------------------"
-    if claude "$PROMPT_FILE" 2>&1; then
+    if "$CLAUDE_CMD" --dangerously-skip-permissions "$PROMPT_FILE" 2>&1; then
         echo "------------------------------------------------------------"
         echo "[Claude] Session completed"
     else
@@ -178,8 +191,23 @@ def run_exclusive_loop(
     print("")
     print("Generating loop script...")
 
+    # Generate base_name in Python (shell tr can't handle non-ASCII)
+    base_name = sanitize_change_name(prompt)
+    if not base_name:
+        base_name = "loop-task"
+
+    # Load claude command from config (priority-based)
+    commands = load_claude_commands(root)
+    claude_cmd = commands[0]["cmd"] if commands else "claude"
+
+    # Verify the command exists
+    if not shutil.which(claude_cmd):
+        print(f"\n❌ Error: Configured claude command '{claude_cmd}' not found in PATH")
+        print("Please check your se3.config.yaml or install the required CLI.")
+        return
+
     # Generate the script
-    script_content = generate_loop_script(prompt, str(root), iterations, quick)
+    script_content = generate_loop_script(prompt, str(root), iterations, quick, base_name, claude_cmd)
 
     # Write to temporary file
     script_path = root / ".se3-loop-exec.sh"

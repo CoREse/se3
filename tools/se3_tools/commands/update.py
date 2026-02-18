@@ -40,6 +40,72 @@ def get_current_date() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+def sync_commands(templates_dir: Path, claude_dir: Path, dry_run: bool = False) -> None:
+    """
+    Sync command files from output/commands/se3/ to .claude/commands/se3/.
+
+    Args:
+        templates_dir: Path to output/ directory containing command templates
+        claude_dir: Path to .claude/ directory
+        dry_run: Show what would be updated without making changes
+    """
+    source_dir = templates_dir / "commands" / "se3"
+    target_dir = claude_dir / "commands" / "se3"
+
+    if not source_dir.exists():
+        typer.echo(
+            typer.style(
+                f"Warning: Command templates not found at {source_dir}",
+                fg=typer.colors.YELLOW,
+            )
+        )
+        return
+
+    # Ensure target directory exists
+    if not target_dir.exists() and not dry_run:
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+    source_files = list(source_dir.glob("*.md"))
+    if not source_files:
+        return
+
+    updated_count = 0
+    added_count = 0
+
+    for source_file in source_files:
+        target_file = target_dir / source_file.name
+
+        if not target_file.exists():
+            if dry_run:
+                typer.echo(f"  [dry-run] Would add: {target_file}")
+            else:
+                copy_file(source_file, target_file)
+            added_count += 1
+        else:
+            # Compare content
+            source_content = source_file.read_text(encoding="utf-8")
+            target_content = target_file.read_text(encoding="utf-8")
+
+            if source_content != target_content:
+                if dry_run:
+                    typer.echo(f"  [dry-run] Would update: {target_file}")
+                else:
+                    copy_file(source_file, target_file)
+                updated_count += 1
+
+    if dry_run:
+        if added_count > 0 or updated_count > 0:
+            typer.echo(f"\nCommands: would add {added_count}, update {updated_count}")
+    else:
+        if added_count > 0 or updated_count > 0:
+            typer.echo(
+                typer.style(
+                    f"Synced commands: {added_count} added, {updated_count} updated",
+                    fg=typer.colors.GREEN,
+                )
+            )
+
+
 def get_installed_se3_version() -> str:
     """Get currently installed SE3 version from .claude/SE3.md (direct file read for consistency)."""
     se3_path = Path(".claude/SE3.md")
@@ -149,6 +215,8 @@ def update_project(
         typer.echo("Would update:")
         typer.echo(f"  {se3_path}")
         typer.echo(f"  Version: {current_version} → {se3_version}")
+        # Also show what commands would be synced
+        sync_commands(templates_dir, claude_dir, dry_run)
         return
 
     # Perform update
@@ -162,6 +230,9 @@ def update_project(
     )
     if current_version != se3_version:
         typer.echo(f"  Previous version: {current_version}")
+
+    # Sync command files from output/commands/se3/ to .claude/commands/se3/
+    sync_commands(templates_dir, claude_dir, dry_run)
 
 
 
