@@ -5,9 +5,11 @@ Usage:
     se3 loop "prompt" --quick
 """
 
+import fcntl
 import json
 import os
 import re
+import select
 import subprocess
 import shutil
 import sys
@@ -126,14 +128,55 @@ def run_claude_with_renderer(claude_cmd: str, prompt_file: Path, timeout_sec: in
             stderr=subprocess.STDOUT,
             text=True,
             env=env,
-            bufsize=1,  # Line buffered
+            bufsize=1,
         )
 
-        # Read and render output line by line in real-time
-        for line in proc.stdout:
-            render_stream_json_line(line)
+        # Make stdout non-blocking to prevent deadlocks
+        fd = proc.stdout.fileno()
+        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
+        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
 
-        proc.wait(timeout=timeout_sec)
+        start_time = time.time()
+        buffer = ""
+
+        while True:
+            # Check if process has finished
+            ret = proc.poll()
+            if ret is not None:
+                # Process finished, read remaining output
+                try:
+                    remaining = proc.stdout.read()
+                    if remaining:
+                        buffer += remaining
+                        for line in buffer.split('\n'):
+                            if line:
+                                render_stream_json_line(line)
+                except:
+                    pass
+                return ret
+
+            # Check timeout
+            if time.time() - start_time > timeout_sec:
+                proc.kill()
+                print(f"\n{YELLOW}[SE3 Loop] Session timed out ({timeout_sec}s limit){RESET}")
+                return 124
+
+            # Try to read output (non-blocking)
+            try:
+                ready, _, _ = select.select([proc.stdout], [], [], 0.1)
+                if ready:
+                    chunk = proc.stdout.read(4096)
+                    if chunk:
+                        buffer += chunk
+                        # Process complete lines
+                        while '\n' in buffer:
+                            line, buffer = buffer.split('\n', 1)
+                            render_stream_json_line(line)
+            except (IOError, OSError):
+                pass
+
+            time.sleep(0.01)  # Small delay to prevent CPU spinning
+
         return proc.returncode
 
     except subprocess.TimeoutExpired:
