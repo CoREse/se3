@@ -465,7 +465,7 @@ def run_session_start(project_root: str = ".", user_input: Optional[str] = None)
 
     # Determine if tests should be run
     test_baseline_needed = (
-        git_info["uncommitted_count"] == 0 and  # Clean workspace
+        git_info["uncommitted_count"] > 0 and  # Has uncommitted changes
         test_command is not None
     )
 

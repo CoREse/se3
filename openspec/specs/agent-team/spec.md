@@ -36,8 +36,8 @@ The system SHALL support a Git Worktree Collaboration mode for long-running mult
 
 **Architecture:**
 - **Orchestrator** (bash): Manages task state, health checks, launches manager/worker processes
-- **Manager** (`claude -p`): Analyzes state, creates tasks, reviews work, makes merge decisions
-- **Worker** (`claude -p`): Implements tasks in isolated git worktrees
+- **Manager** (`kclaude -p`): Analyzes state, creates tasks, reviews work, makes merge decisions
+- **Worker** (`kclaude -p`): Implements tasks in isolated git worktrees
 
 **Directory Structure:**
 ```

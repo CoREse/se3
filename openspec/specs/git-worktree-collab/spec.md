@@ -15,12 +15,12 @@ Replace the experimental External Controller (v2) with a simplified architecture
 │  - File system is the ONLY communication channel    │
 │  - Zero AI token cost while idle                    │
 ├─────────────────────────────────────────────────────┤
-│  Layer 2: Manager (claude -p)                       │
+│  Layer 2: Manager (kclaude -p)                      │
 │  - Invoked on-demand when decisions needed          │
 │  - Stateless: reads .collab/, writes decisions      │
 │  - NO real-time communication with workers          │
 ├─────────────────────────────────────────────────────┤
-│  Layer 3: Workers (claude -p)                       │
+│  Layer 3: Workers (kclaude -p)                      │
 │  - Isolated in git worktrees                        │
 │  - Independent full context window                  │
 │  - Commit & exit — process exit = task complete     │
@@ -82,22 +82,22 @@ Worker exit triggers ───────► Manager reads result (at end)
 
 ### Requirement: Three-Layer Architecture (Simplified)
 
-The system SHALL use a three-layer architecture with bash orchestrator, manager (claude -p), and workers (claude -p).
+The system SHALL use a three-layer architecture with bash orchestrator, manager (kclaude -p), and workers (kclaude -p).
 
 **Orchestrator** (Layer 1):
 - Pure bash script — no daemon, no resident process
-- Spawns manager/worker via `claude -p`, waits for exit
+- Spawns manager/worker via `kclaude -p`, waits for exit
 - Reads task files, updates status, makes spawn decisions
 - All state in `.collab/` files — orchestrator is stateless
 
 **Manager** (Layer 2):
-- Invoked via `claude -p` for specific decisions only
+- Invoked via `kclaude -p` for specific decisions only
 - Reads `.collab/` state, returns JSON decision
 - Does NOT communicate with running workers
 - Exits after returning decision
 
 **Workers** (Layer 3):
-- Each runs as independent `claude -p` in git worktree
+- Each runs as independent `kclaude -p` in git worktree
 - Full context window, no shared state pressure
 - Commits to branch, exits when done (exit code = result)
 - If blocked: write to `human-calls/`, exit with code 2
@@ -214,13 +214,13 @@ load_state() {
 }
 
 spawn_manager(event_type, context) {
-  claude -p "$MANAGER_PROMPT" --output-format json
+  kclaude -p "$MANAGER_PROMPT" --output-format json
   # Parse JSON, return action
 }
 
 spawn_worker(task_id) {
   git worktree add ".worktrees/$task_id" -b "collab/$task_id"
-  claude -p "$WORKER_PROMPT" &
+  kclaude -p "$WORKER_PROMPT" &
   echo $! > .collab/tasks/$task_id.pid
 }
 
@@ -279,7 +279,7 @@ main_loop() {
 ### Requirement: Health Monitoring (Simplified)
 
 **Worker timeout:**
-- Bash `timeout` command wraps worker: `timeout ${TIMEOUT}m claude -p ...`
+- Bash `timeout` command wraps worker: `timeout ${TIMEOUT}m kclaude -p ...`
 - Exit code 124 = timeout
 
 **Stall detection:**
@@ -288,7 +288,7 @@ main_loop() {
 - Kill worker, set status to `timeout`
 
 **Manager timeout:**
-- `timeout ${MANAGER_TIMEOUT}m claude -p ...`
+- `timeout ${MANAGER_TIMEOUT}m kclaude -p ...`
 - On timeout: retry once with simplified prompt
 - On retry failure: escalate to human
 

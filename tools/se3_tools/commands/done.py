@@ -432,4 +432,4 @@ def done(
         print_text_report(state)
 
     # Exit code: 0 = clean, 1 = actions needed
-    raise typer.Exit(code=0 if not state.get("actions") else 0)
+    raise typer.Exit(code=0 if not state.get("actions") else 1)
