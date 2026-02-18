@@ -396,10 +396,45 @@
  13 files changed, 764 insertions(+), 89 deletions(-)
 ```
 
+## 2026-02-19 Session 9 (handoff)
 
-## Current Session
-<!-- current-session -->
+### Done
+- chore: bump SE3 framework to 2.11.0
+- feat: add missing SE3 1.x details
+- chore: sync SE3 framework to 2.12.0
+- fix: use system openspec instead of embedded implementation
+- Update .claude/.session.json, progress.md
+
+### Commits
 - `6f3eee2` chore: bump SE3 framework to 2.11.0 (5 files)
 - `80f7b89` feat: add missing SE3 1.x details (3 files)
 - `06d81ea` chore: sync SE3 framework to 2.12.0 (1 files)
 - `805135b` fix: use system openspec instead of embedded implementation (9 files)
+- `a2cfd6f` Update .claude/.session.json, progress.md (2 files)
+
+### Files Changed
+```
+.claude/.session.json                          |   4 +-
+ .claude/SE3.md                                 |   2 +-
+ .claude/commands/se3/done.md                   | 117 +++++++++++++
+ .claude/commands/se3/fc.md                     |   6 +
+ .claude/commands/se3/start.md                  |  76 ++++++++
+ .claude/commands/se3/work.md                   | 204 ++++++++++++++++++++++
+ openspec/changes/fix-openspec-init/proposal.md |  31 ++++
+ openspec/changes/fix-openspec-init/spec.md     |  37 ++++
+ openspec/changes/fix-openspec-init/status.md   |  21 +++
+ progress.md                                    |  39 ++++-
+ tests/test_openspec.py                         | 232 -------------------------
+ tools/se3_tools/__init__.py                    |   2 +-
+ tools/se3_tools/cli.py                         |   3 +-
+ tools/se3_tools/commands/init.py               |  21 ++-
+ tools/se3_tools/commands/openspec.py           | 225 ------------------------
+ tools/se3_tools/commands/start.py              |  12 +-
+ tools/se3_tools/config.py                      |  28 +++
+ 17 files changed, 591 insertions(+), 469 deletions(-)
+```
+
+
+## Current Session
+<!-- current-session -->
+- `e3eafae` fix(start): correct openspec detection to check .claude/commands/opsx/ (3 files)
