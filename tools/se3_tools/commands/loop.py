@@ -64,40 +64,66 @@ def render_stream_json_line(line: str) -> None:
 
     msg_type = msg.get("type", "")
 
+    # Handle assistant messages (contain tool_use or text)
+    if msg_type == "assistant":
+        message = msg.get("message", {})
+        content = message.get("content", [])
+        for item in content:
+            if isinstance(item, dict):
+                if item.get("type") == "tool_use":
+                    name = item.get("name", "unknown")
+                    input_data = item.get("input", {})
+                    print(f"{CYAN}🔧 {name}{RESET}", flush=True)
+                    for key, value in list(input_data.items())[:3]:
+                        preview = truncate_text(str(value), 80)
+                        print(f"{DIM}  {key}: {preview}{RESET}", flush=True)
+                elif item.get("type") == "text":
+                    text = item.get("text", "")
+                    if text:
+                        print(f"{RESET}{text}{RESET}", flush=True)
+        return
+
+    # Handle tool results (inside user messages)
+    if msg_type == "user":
+        message = msg.get("message", {})
+        content = message.get("content", [])
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "tool_result":
+                name = item.get("name", "unknown")
+                tool_result = item.get("result", {})
+                error = tool_result.get("error") if isinstance(tool_result, dict) else None
+                if error:
+                    print(f"{MAGENTA}❌ {name} failed: {truncate_text(str(error))}{RESET}", flush=True)
+                else:
+                    print(f"{GREEN}✓ {name} complete{RESET}", flush=True)
+        return
+
+    # Handle final result
+    if msg_type == "result":
+        result_text = msg.get("result", "")
+        if result_text:
+            print(f"{RESET}{result_text}{RESET}", flush=True)
+        return
+
+    # Handle legacy/thinking messages
     if msg_type == "thinking":
         thinking = msg.get("thinking", "")
         if thinking:
             print(f"{GRAY}{DIM}💭 {truncate_text(thinking)}{RESET}", flush=True)
+        return
 
-    elif msg_type == "tool_use":
-        name = msg.get("name", "unknown")
-        params = msg.get("parameters", {})
-        print(f"{CYAN}🔧 {name}{RESET}", flush=True)
-        for key, value in list(params.items())[:3]:
-            preview = truncate_text(str(value), 80)
-            print(f"{DIM}  {key}: {preview}{RESET}", flush=True)
+    # Handle system messages (just show init)
+    if msg_type == "system":
+        subtype = msg.get("subtype", "")
+        if subtype == "init":
+            print(f"{DIM}[System initialized]{RESET}", flush=True)
+        return
 
-    elif msg_type == "tool_result":
-        name = msg.get("name", "unknown")
-        error = msg.get("error")
-        if error:
-            print(f"{MAGENTA}❌ {name} failed: {truncate_text(str(error))}{RESET}", flush=True)
-        else:
-            print(f"{GREEN}✓ {name} complete{RESET}", flush=True)
-
-    elif msg_type == "output":
-        content = msg.get("content", "")
-        if content:
-            print(f"{RESET}{content}{RESET}", end="", flush=True)
-
-    elif msg_type == "message":
-        content = msg.get("content", "")
-        if content:
-            print(f"{RESET}{content}{RESET}", flush=True)
-
-    elif msg_type == "error":
+    # Handle error messages
+    if msg_type == "error":
         error_msg = msg.get("error", "Unknown error")
         print(f"{MAGENTA}❌ Error: {error_msg}{RESET}", flush=True)
+        return
 
 
 def run_claude_with_renderer(claude_cmd: str, prompt_file: Path, timeout_sec: int = 1800) -> int:
@@ -197,11 +223,76 @@ def run_claude_with_renderer(claude_cmd: str, prompt_file: Path, timeout_sec: in
     return exit_code[0] if exit_code[0] is not None else 0
 
 
+def run_claude_summary(claude_cmd: str, change_dir: Path, timeout_sec: int = 60) -> str:
+    """Generate a summary of the completed iteration using Claude Code.
+
+    Returns a brief summary string or empty string if failed.
+    """
+    # Read tasks.md and work.md if they exist
+    tasks_file = change_dir / "tasks.md"
+    work_file = change_dir / "work.md"
+
+    content_parts = []
+
+    if tasks_file.exists():
+        content_parts.append(f"Tasks:\n{tasks_file.read_text()}")
+
+    if work_file.exists():
+        work_text = work_file.read_text()
+        # Limit work content to avoid too large prompt
+        if len(work_text) > 2000:
+            work_text = work_text[:2000] + "\n... (truncated)"
+        content_parts.append(f"Work log:\n{work_text}")
+
+    if not content_parts:
+        return "No work records found."
+
+    full_content = "\n\n".join(content_parts)
+
+    # Create summary prompt
+    summary_prompt = f"""Please provide a brief summary (2-3 sentences) of what was accomplished in this iteration.
+
+{full_content}
+
+Summary:"""
+
+    env = {**dict(os.environ)}
+    env.pop("CLAUDECODE", None)
+
+    cmd = [
+        claude_cmd,
+        "--dangerously-skip-permissions",
+        "--print",
+        "-p", summary_prompt
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            env=env
+        )
+        if result.returncode == 0:
+            summary = result.stdout.strip()
+            # Clean up the summary - remove any quotes or extra whitespace
+            summary = summary.strip('"\'').strip()
+            return summary if summary else "Iteration completed."
+        else:
+            return f"Iteration completed (summary generation failed: {result.stderr[:100]})."
+    except subprocess.TimeoutExpired:
+        return "Iteration completed (summary generation timed out)."
+    except Exception as e:
+        return f"Iteration completed (summary generation error: {e})."
+
+
 def run_exclusive_loop(
     prompt: str,
     project_root: str = ".",
     iterations: int = 10,
     quick: bool = False,
+    no_summary: bool = False,
 ) -> None:
     """Run the loop - execute claude with real-time rendering for each iteration."""
     root = Path(project_root).resolve()
@@ -224,8 +315,11 @@ def run_exclusive_loop(
     print(f"Iterations: {iterations}")
     print(f"Project: {root}")
     print(f"Claude: {claude_cmd}")
+    print(f"Summary: {'disabled' if no_summary else 'enabled (use --no-summary to disable)'}")
     print(f"\nPress Ctrl+C to stop")
     print(f"{BOLD}{'=' * 60}{RESET}\n")
+
+    previous_summary = None
 
     for iteration in range(1, iterations + 1):
         print(f"\n{BOLD}{'─' * 60}{RESET}")
@@ -262,10 +356,21 @@ def run_exclusive_loop(
 - [ ] {prompt}
 """)
 
+        # Build prompt content with previous summary if available
+        previous_summary_section = ""
+        if previous_summary:
+            previous_summary_section = f"""
+## 上一次迭代总结
+
+{previous_summary}
+
+---
+"""
+
         # Create prompt file
         with tempfile.NamedTemporaryFile(mode='w', suffix='.md', prefix='se3-loop-prompt-', delete=False) as f:
             f.write(f"""/se3:work {change_name}
-
+{previous_summary_section}
 {prompt}
 
 (这是 SE3 Loop 的迭代 {iteration} / {iterations}。请按照 SE3 流程完成这个 change：
@@ -299,6 +404,13 @@ def run_exclusive_loop(
             break
         else:
             print(f"\n{YELLOW}[SE3 Loop] Iteration {iteration} exited with code {exit_code}{RESET}")
+
+        # Generate summary for next iteration (if not disabled and not the last iteration)
+        if not no_summary and iteration < iterations and exit_code == 0:
+            change_dir = root / "openspec" / "changes" / change_name
+            print(f"\n{CYAN}[SE3 Loop] Generating summary for next iteration...{RESET}")
+            previous_summary = run_claude_summary(claude_cmd, change_dir)
+            print(f"{GRAY}{DIM}Summary: {previous_summary[:100]}{'...' if len(previous_summary) > 100 else ''}{RESET}")
 
         if iteration < iterations:
             print(f"\n[SE3 Loop] Continuing in 2 seconds...")

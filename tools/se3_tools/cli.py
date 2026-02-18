@@ -257,6 +257,7 @@ def loop_cmd(
     iterations: int = typer.Option(10, "--iterations", "-n", help="Number of iterations (default: 10)"),
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
     quick: bool = typer.Option(False, "--quick", "-q", help="Quick mode - use 'small' workflow"),
+    no_summary: bool = typer.Option(False, "--no-summary", help="Disable iteration summary between loops"),
 ):
     """Run SE3 workflow in a loop, auto-executing all iterations.
 
@@ -268,10 +269,11 @@ def loop_cmd(
         se3 loop "refactor module" --iterations 5
         se3 loop "add test case" -n 20 --quick
         se3 loop "process item"                    # Default 10 iterations
+        se3 loop "process item" --no-summary       # Disable summary between iterations
     """
     from .commands.loop import run_exclusive_loop
 
-    run_exclusive_loop(prompt, project_root, iterations, quick)
+    run_exclusive_loop(prompt, project_root, iterations, quick, no_summary)
     raise typer.Exit(code=0)
 
 

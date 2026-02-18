@@ -193,6 +193,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.11.0 | 2026-02-19 | Add `se3 loop --no-summary` flag. Iteration summary is now enabled by default — Claude Code summarizes each iteration and passes it to the next. Use `--no-summary` to disable. |
 | 2.10.8 | 2026-02-18 | Fix `se3 loop`: add `--verbose` flag required for `--output-format stream-json` mode. |
 | 2.10.7 | 2026-02-18 | Refactor `se3 loop`: eliminate bash script generation, run claude directly in Python with real-time stream-json rendering. Simpler and more reliable. |
 | 2.10.5 | 2026-02-18 | Fix `se3 loop`: use subshell with `set +m` to properly disable job control for wrapper scripts (kclaude) that spawn claude.
