@@ -290,6 +290,18 @@ def classify_input(user_message: str) -> str:
     if any(ind in message_lower for ind in clarification_indicators):
         return "clarification"
 
+    # Meta indicators (about the project/process itself)
+    meta_indicators = ["what is se3", "how does se3 work", "explain se3", "about the process",
+                       "about the framework", "se3 workflow", "project structure"]
+    if any(ind in message_lower for ind in meta_indicators):
+        return "meta"
+
+    # Off-topic indicators (not related to project)
+    off_topic_indicators = ["what's the weather", "tell me a joke", "who are you",
+                            "hello", "hi there", "good morning", "good evening"]
+    if any(ind in message_lower for ind in off_topic_indicators):
+        return "off-topic"
+
     # Default to directive for most inputs
     return "directive"
 
@@ -348,6 +360,20 @@ def determine_stage(intent: str, current_state: Dict[str, Any]) -> Dict[str, Any
             "stage": "continue",
             "workflow": None,
             "note": "Continue previous context",
+        }
+
+    elif intent == "meta":
+        return {
+            "stage": "answer",
+            "workflow": None,
+            "note": "Answer meta question about SE3 process",
+        }
+
+    elif intent == "off-topic":
+        return {
+            "stage": "answer",
+            "workflow": None,
+            "note": "Answer without modifying project files",
         }
 
     # Default

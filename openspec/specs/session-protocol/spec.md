@@ -108,6 +108,14 @@ The system SHALL classify user input to determine the appropriate workflow stage
 - **WHEN** user input contains review indicators like "review", "check this"
 - **THEN** system classifies intent as "review" and routes to review workflow
 
+#### Scenario: Meta question classification
+- **WHEN** user input contains meta indicators like "what is se3", "how does se3 work", "about the process"
+- **THEN** system classifies intent as "meta" and answers without creating a change
+
+#### Scenario: Off-topic input classification
+- **WHEN** user input contains off-topic indicators like "what's the weather", "tell me a joke", "hello"
+- **THEN** system classifies intent as "off-topic" and answers without modifying project files
+
 ### Requirement: Session Execution Boundary
 Each session MUST focus on a limited scope of work and MUST NOT attempt to complete too many tasks in a single session.
 
