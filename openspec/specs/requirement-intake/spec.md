@@ -1,7 +1,7 @@
 # requirement-intake Specification
 
 ## Purpose
-TBD - created by archiving change requirement-capture. Update Purpose after archive.
+Define the requirement intake process for SE3, governing how new requirements enter the system from three sources: autonomous discovery, human-MCP calls, and human-initiated input. This spec ensures all requirements are captured through a unified change creation workflow with proper context preservation.
 ## Requirements
 ### Requirement: Three-Source Requirement Intake
 The system SHALL accept new requirements from three distinct sources and route them through a unified `openspec change` creation process.

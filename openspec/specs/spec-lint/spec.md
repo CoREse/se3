@@ -1,7 +1,7 @@
 # spec-lint Specification
 
 ## Purpose
-TBD - created by archiving change toolize-se3. Update Purpose after archive.
+Define the validation rules and linting protocol for SE3 specification files. This spec governs spec file discovery, required field validation, scenario format checking, and exit code behavior to ensure all specs meet quality standards.
 ## Requirements
 ### Requirement: Spec File Discovery
 The system SHALL discover all spec files in `openspec/specs/` and `openspec/changes/*/specs/`.
