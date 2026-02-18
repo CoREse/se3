@@ -23,20 +23,30 @@ app = typer.Typer()
 
 
 def sanitize_change_name(description: str) -> str:
-    """Convert a description into a valid change name."""
-    # Convert to lowercase, replace spaces with hyphens
+    """Convert a description into a valid change name.
+
+    Only lowercase letters, numbers, and hyphens are allowed.
+    Non-ASCII characters (e.g., Chinese) are filtered out.
+    Name must start with a letter.
+    """
+    import re
+    import time
+
     name = description.lower().strip()
-    # Remove special characters except hyphens and slashes
-    name = "".join(c for c in name if c.isalnum() or c in " -_/")
-    # Replace spaces and underscores with hyphens
-    name = name.replace(" ", "-").replace("_", "-")
-    # Remove multiple consecutive hyphens
-    while "--" in name:
-        name = name.replace("--", "-")
-    # Limit length
-    if len(name) > 50:
-        name = name[:50].rsplit("-", 1)[0]
-    return name.strip("-")
+    # Keep only ASCII alphanumeric and allowed separators
+    name = "".join(c for c in name if (ord(c) < 128 and c.isalnum()) or c in " -_/")
+    name = name.replace(" ", "-").replace("_", "-").replace("/", "-")
+    name = re.sub(r'-+', '-', name)
+    if len(name) > 40:
+        name = name[:40].rsplit("-", 1)[0]
+    name = name.strip("-")
+    # If name is empty (e.g., Chinese-only input), use timestamp-based fallback
+    if not name:
+        name = f"loop-{int(time.time()) % 10000}"
+    # Ensure name starts with a letter (openspec requirement)
+    if name and not name[0].isalpha():
+        name = "t" + name
+    return name
 
 
 def detect_test_command(project_root: Path) -> Optional[str]:

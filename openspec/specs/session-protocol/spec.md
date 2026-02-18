@@ -40,6 +40,49 @@ If step 3 finds no progress.md and no git history → **first-time bootstrap**:
 - **WHEN** agent needs details about a specific capability during execution
 - **THEN** agent reads the relevant spec file at that point, not during startup
 
+### Requirement: Input Classification and Stage Routing
+
+The system SHALL classify user input to determine the appropriate workflow stage.
+
+**Intent Types:**
+| Intent Type | Description | Stage Entry |
+|-------------|-------------|-------------|
+| `directive` | Explicit self-iterate, "implement X", "start feature Y" | Full SDD workflow |
+| `bug-report` | Error description, stack trace, broken behavior | Bug fix workflow |
+| `feature-request` | New capability, enhancement idea | Feature proposal workflow |
+| `question` | How does X work? Why Y? | Knowledge query |
+| `review` | "Check this", "What do you think", "Is this correct" | Review workflow |
+| `clarification` | Follow-up on previous topic | Resume/continue workflow |
+| `meta` | About the project/process itself | Meta workflow |
+| `off-topic` | Not related to project | Answer without modifying project files |
+
+**Classification Indicators:**
+- Bug: "error", "bug", "broken", "fail", "crash", "exception", "stack trace", "not working"
+- Review: "review", "check this", "look at", "what do you think", "is this correct"
+- Feature: "add ", "implement", "create ", "build ", "support ", "feature", "new capability"
+- Question: "how ", "why ", "what is", "explain", "?"
+- Directive: "self-iterate", "continue", "proceed", "start ", "fix ", "update ", "refactor "
+
+**Stage Decision Matrix:**
+- IF intent == bug-report: Route to bugfix workflow (create change if needed)
+- IF intent == feature-request: Route to feature workflow (or small workflow if simple)
+- IF intent == review: Route to review workflow
+- IF intent == question: Explore and answer (no change created)
+- IF intent == directive: Execute with SDD workflow
+- IF intent == clarification: Continue previous context
+
+#### Scenario: Bug report classification
+- **WHEN** user input contains bug indicators like "error", "broken", "not working"
+- **THEN** system classifies intent as "bug-report" and routes to bugfix workflow
+
+#### Scenario: Feature request classification
+- **WHEN** user input contains feature indicators like "add", "implement", "create"
+- **THEN** system classifies intent as "feature-request" and routes to feature workflow
+
+#### Scenario: Review request classification
+- **WHEN** user input contains review indicators like "review", "check this"
+- **THEN** system classifies intent as "review" and routes to review workflow
+
 ### Requirement: Session Execution Boundary
 Each session MUST focus on a limited scope of work and MUST NOT attempt to complete too many tasks in a single session.
 
