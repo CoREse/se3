@@ -1,7 +1,7 @@
 # change-verifier Specification
 
 ## Purpose
-TBD - created by archiving change toolize-se3. Update Purpose after archive.
+Define the verification protocol for SE3 changes, ensuring spec scenarios have corresponding implementation evidence. This spec governs scenario extraction, implementation detection through test markers and code comments, coverage reporting, and skip annotations to validate that changes are fully implemented.
 ## Requirements
 ### Requirement: Spec Scenario Extraction
 The system SHALL extract all WHEN/THEN scenarios from a change's specs.
