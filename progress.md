@@ -520,7 +520,25 @@ openspec/specs/agent-team/spec.md       | 65 +++++++++++++++++++++++++++++++++
  6 files changed, 203 insertions(+), 16 deletions(-)
 ```
 
+## 2026-02-19 Session 14 (handoff)
+
+### Done
+- fix: status.py bugs - rglob for nested changes, filter archive, handle null task
+- Update progress.md
+
+### Commits
+- `2ef09c1` fix: status.py bugs - rglob for nested changes, filter archive, handle null task (2 files)
+- `176edca` Update progress.md (1 files)
+
+### Files Changed
+```
+progress.md                        | 23 ++++++++++++++++++++++-
+ tools/se3_tools/__init__.py        |  2 +-
+ tools/se3_tools/commands/status.py | 14 +++++++++++---
+ 3 files changed, 34 insertions(+), 5 deletions(-)
+```
+
 
 ## Current Session
 <!-- current-session -->
-- `2ef09c1` fix: status.py bugs - rglob for nested changes, filter archive, handle null task (2 files)
+- `12520c7` fix: correct logic bugs and spec inconsistencies (5 files)
