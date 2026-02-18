@@ -14,9 +14,10 @@ The system SHALL provide a unified command interface for session management, wor
 
 | Category | Commands | Purpose |
 |----------|----------|---------|
-| Session | `se3:start`, `se3:done` | Session lifecycle |
-| Work | `se3:work`, `se3:fc` | Task execution |
-| Utility | `se3 commit`, `se3 update` | Framework operations |
+| Session | `se3:start`, `se3:done`, `se3 handoff` | Session lifecycle |
+| Work | `se3:work`, `se3:fc`, `se3 loop` | Task execution |
+| Utility | `se3 commit`, `se3 update`, `se3 status` | Framework operations |
+| Quality | `se3 lint`, `se3 verify`, `se3 guardrails` | Validation and verification |
 
 #### Scenario: Command discovery
 - **WHEN** an agent needs to understand available SE3 commands
@@ -157,6 +158,8 @@ The `se3:fc` (full-cycle) command SHALL run complete start-work-done workflow in
 **Interface:**
 ```bash
 se3 full-cycle "description of work" [--quick] --json
+# Alias:
+se3 fc "description of work" [--quick] --json
 ```
 
 **JSON Response Fields:**
@@ -395,3 +398,146 @@ Next: what the next session should do" -f "file1.py file2.py"
 - **WHEN** session is ending with `se3:done`
 - **THEN** all uncommitted changes are committed
 - **AND** `se3 handoff` generates session summary
+
+### Requirement: se3 handoff Command
+
+The `se3 handoff` command SHALL generate a session summary and transfer control to the human.
+
+**Interface:**
+```bash
+se3 handoff [message] [--project-root <path>] [--dry-run]
+```
+
+**Process:**
+1. Check for uncommitted changes
+2. Auto-commit if changes exist (unless `--skip-commit`)
+3. Generate session summary in `progress.md`
+4. Clear session file (mark as ended)
+
+**Session Summary Includes:**
+- Session date and duration
+- Changes committed
+- Files modified
+- Active changes status
+- Notes for next session
+
+#### Scenario: Normal handoff
+- **WHEN** `se3 handoff` is executed
+- **THEN** it generates a session summary in `progress.md`
+- **AND** transfers control to the human
+
+#### Scenario: Handoff with uncommitted changes
+- **WHEN** `se3 handoff` runs with uncommitted changes
+- **THEN** it auto-commits changes before generating summary
+- **AND** includes commit details in the summary
+
+### Requirement: se3 status Command
+
+The `se3 status` command SHALL display the current project status.
+
+**Interface:**
+```bash
+se3 status [--format json]
+```
+
+**Output Fields:**
+- `project_root`: Project root directory
+- `git`: Git status (branch, uncommitted changes, recent commits)
+- `openspec`: OpenSpec initialization status
+- `active_changes`: List of active changes
+- `pending_human_calls`: Pending human calls
+- `collab`: Collaboration session status (if active)
+
+#### Scenario: Check project status
+- **WHEN** `se3 status` is executed
+- **THEN** it displays current project state
+- **AND** includes git, openspec, and change information
+
+#### Scenario: JSON output
+- **WHEN** `se3 status --format json` is executed
+- **THEN** it returns structured JSON for programmatic use
+
+### Requirement: se3 lint Command
+
+The `se3 lint` command SHALL validate OpenSpec files for correctness.
+
+**Interface:**
+```bash
+se3 lint [<path>] [--fix]
+```
+
+**Validation Rules:**
+1. All spec files must have required sections (Purpose, Requirements)
+2. Scenario format must be correct (WHEN/THEN)
+3. No duplicate scenario names
+4. Requirement IDs must be unique
+
+#### Scenario: Lint all specs
+- **WHEN** `se3 lint` is executed without path
+- **THEN** it validates all specs in `openspec/specs/`
+
+#### Scenario: Lint specific file
+- **WHEN** `se3 lint openspec/specs/auth/spec.md` is executed
+- **THEN** it validates only the specified file
+
+#### Scenario: Auto-fix issues
+- **WHEN** `se3 lint --fix` is executed
+- **THEN** it attempts to fix auto-correctable issues
+
+### Requirement: se3 verify Command
+
+The `se3 verify` command SHALL verify that spec scenarios have corresponding implementation.
+
+**Interface:**
+```bash
+se3 verify [--change <name>] [--format json]
+```
+
+**Detection Methods:**
+1. Test file with `@pytest.mark.scenario("<id>")` decorator
+2. Code comment `# Verify: <scenario-id>`
+3. Spec archive with "implemented" marker
+
+**Coverage Report:**
+- Lists all scenarios from specs
+- Shows implementation status for each
+- Reports uncovered scenarios
+
+#### Scenario: Verify specific change
+- **WHEN** `se3 verify --change <name>` is executed
+- **THEN** it verifies scenarios for that change only
+
+#### Scenario: Verify all specs
+- **WHEN** `se3 verify` is executed without arguments
+- **THEN** it verifies all spec scenarios in the project
+
+### Requirement: se3 loop Command
+
+The `se3 loop` command SHALL run the SE3 workflow in a loop for multiple iterations.
+
+**Interface:**
+```bash
+se3 loop "description" [--iterations <n>] [--quick] [--no-summary]
+```
+
+**Parameters:**
+- `description`: Description of work for each iteration
+- `--iterations`: Number of iterations (default: 10)
+- `--quick`: Use 'small' workflow (skip formal change creation)
+- `--no-summary`: Disable iteration summary between loops
+
+**Process:**
+1. Generate a bash while-loop script
+2. Execute Claude Code for each iteration
+3. Track iteration count and progress
+4. Allow stopping with Ctrl+C
+
+#### Scenario: Run 10 iterations
+- **WHEN** `se3 loop "process item"` is executed
+- **THEN** it runs 10 iterations of the workflow
+- **AND** generates a summary between each iteration
+
+#### Scenario: Quick mode loop
+- **WHEN** `se3 loop "quick fix" --quick -n 5` is executed
+- **THEN** it runs 5 iterations using 'small' workflow
+- **AND** skips formal change creation for efficiency
