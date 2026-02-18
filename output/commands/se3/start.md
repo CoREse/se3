@@ -61,6 +61,8 @@ The `se3 start` command includes input classification to determine workflow rout
 | `question` | How does X work? Why Y? | Knowledge query |
 | `review` | "Check this", "What do you think", "Is this correct" | Review workflow |
 | `clarification` | Follow-up on previous topic | Resume/continue workflow |
+| `meta` | About the project/process itself | Meta workflow |
+| `off-topic` | Not related to project | Answer without modifying project files |
 
 **Classification Indicators**:
 - Bug: "error", "bug", "broken", "fail", "crash", "exception", "stack trace", "not working"
@@ -68,6 +70,59 @@ The `se3 start` command includes input classification to determine workflow rout
 - Feature: "add ", "implement", "create ", "build ", "support ", "feature", "new capability"
 - Question: "how ", "why ", "what is", "explain", "?"
 - Directive: "self-iterate", "continue", "proceed", "start ", "fix ", "update ", "refactor "
+
+**Stage Decision Matrix**:
+
+```
+Input + Current State → Stage Decision
+
+IF intent == bug-report:
+  IF openspec/changes/ has active change AND it relates to bug:
+    → Continue active change (add bug fix task)
+  ELSE:
+    → Create new change: "bugfix/{description}"
+    → Stage: Analyze → Fix → Verify
+
+IF intent == feature-request:
+  IF complexity == small AND no spec change needed:
+    → Direct implementation (Small workflow)
+  ELSE:
+    → Create new change: "feature/{description}"
+    → Stage: Proposal → Specs → Design → Tasks → Code → Verify
+
+IF intent == question:
+  IF answer requires code investigation:
+    → Quick exploration (no change created)
+  ELSE:
+    → Direct answer from existing knowledge
+
+IF intent == review:
+  → Review workflow: Check → Report → Optional fix
+
+IF intent == clarification:
+  → Continue previous context
+  OR if new context: treat as new input
+```
+
+**MUST NOT**: Handle input outside of SE3 workflow
+**MUST**: Create appropriate change record for any code modification
+
+**First-time Bootstrap (SE3 1.x)**
+
+If `progress.md` does not exist and no git history:
+1. Ask the human (sync human call): "What should this project do?"
+2. Create an openspec change from their response
+3. Create `progress.md`
+4. Create `human-calls/` directory
+
+**Core Principles (SE3 1.x)**
+
+1. **Human-as-MCP**: All human input obtained on-demand via human calls. No pre-written requirement files.
+2. **Progressive Loading**: Start with `progress.md` + `git log`. Load deeper only when the task needs it.
+3. **Specs as Truth**: OpenSpec specs are the source of truth for **requirements**. Agents MUST NOT weaken or delete existing requirements without explicit human approval.
+4. **Verify Before Done**: Never mark a feature complete without running tests. Spec scenarios are acceptance criteria, not documentation.
+5. **Tool-Assisted Enforcement**: Use CLI tools (`se3 lint`, `se3 verify`, `se3 status`) to validate specs, verify coverage, and diagnose issues. Tools make rules enforceable, not just documented.
+6. **Incremental Development**: Work in openspec changes. Each session stays within a bounded scope.
 
 **Guardrails**
 
@@ -77,3 +132,4 @@ The `se3 start` command includes input classification to determine workflow rout
 - Do NOT skip the startup protocol — it ensures the environment is ready
 - **Specs are authoritative**: OpenSpec specs are the single source of truth — agent MUST NOT modify requirements they are implementing against
 - **On-demand spec loading**: Load spec files when work scope is determined, not all upfront (progressive loading)
+- **NEVER modify spec files you are implementing against**
