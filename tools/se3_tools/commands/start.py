@@ -76,7 +76,8 @@ def check_init_script(project_root: Path) -> Dict[str, Any]:
 
 
 def check_openspec(project_root: Path) -> Dict[str, Any]:
-    """Check if openspec command is available and openspec/ directory exists."""
+    """Check if system openspec command is available and openspec/ directory exists."""
+    # Check if system openspec CLI is available
     result = subprocess.run(
         ["which", "openspec"],
         capture_output=True, text=True
@@ -84,7 +85,14 @@ def check_openspec(project_root: Path) -> Dict[str, Any]:
     available = result.returncode == 0
 
     openspec_dir = project_root / "openspec"
-    initialized = openspec_dir.exists()
+
+    # OpenSpec is initialized if directory structure exists
+    # (system openspec handles .claude/commands/openspec/ during init)
+    initialized = (
+        openspec_dir.exists() and
+        (openspec_dir / "specs").exists() and
+        (openspec_dir / "changes").exists()
+    )
 
     return {
         "available": available,

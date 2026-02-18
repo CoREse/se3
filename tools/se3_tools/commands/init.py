@@ -2,6 +2,7 @@
 
 import os
 import hashlib
+import subprocess
 from datetime import datetime
 from pathlib import Path
 import shutil
@@ -100,11 +101,27 @@ def initialize_project(
         typer.echo(f"Created {config_path}")
 
     # 4. Create other required directories
-    for dir_name in ["human-calls", "openspec/specs", "openspec/changes", "output"]:
+    for dir_name in ["human-calls", "output"]:
         dir_path = Path(dir_name)
         dir_path.mkdir(parents=True, exist_ok=True)
 
-    # 5. Install SE3 workflow skills to .claude/commands/se3/
+    # 5. Initialize OpenSpec using system openspec CLI
+    typer.echo("Initializing OpenSpec...")
+    result = subprocess.run(
+        ["openspec", "init"] + (["--force"] if force else []),
+        capture_output=True, text=True
+    )
+    if result.returncode == 0:
+        typer.echo(typer.style("OpenSpec initialized", fg=typer.colors.GREEN))
+    else:
+        typer.echo(
+            typer.style(
+                f"Warning: OpenSpec init may have failed: {result.stderr}",
+                fg=typer.colors.YELLOW,
+            )
+        )
+
+    # 6. Install SE3 workflow skills to .claude/commands/se3/
     skills_source = templates_dir / "commands" / "se3"
     skills_dest = claude_dir / "commands" / "se3"
     if skills_source.exists():
