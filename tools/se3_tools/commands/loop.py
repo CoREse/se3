@@ -19,6 +19,82 @@ from datetime import datetime
 from ..config import load_claude_commands
 
 
+# Python script for rendering --stream-json output (embedded in bash)
+STREAM_JSON_RENDERER = '''import sys
+import json
+
+# ANSI colors
+CYAN = "\\033[36m"
+GREEN = "\\033[32m"
+YELLOW = "\\033[33m"
+BLUE = "\\033[34m"
+MAGENTA = "\\033[35m"
+GRAY = "\\033[90m"
+RESET = "\\033[0m"
+BOLD = "\\033[1m"
+DIM = "\\033[2m"
+
+def truncate_text(text, max_len=200):
+    """Truncate long text for preview."""
+    if not text:
+        return ""
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text
+
+def render_stream():
+    """Render stream-json output from Claude Code."""
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        msg_type = msg.get("type", "")
+
+        if msg_type == "thinking":
+            thinking = msg.get("thinking", "")
+            if thinking:
+                print(f"{GRAY}{DIM}💭 {truncate_text(thinking)}{RESET}", flush=True)
+
+        elif msg_type == "tool_use":
+            name = msg.get("name", "unknown")
+            params = msg.get("parameters", {})
+            print(f"{CYAN}🔧 {name}{RESET}", flush=True)
+            for key, value in list(params.items())[:3]:
+                preview = truncate_text(str(value), 80)
+                print(f"{DIM}  {key}: {preview}{RESET}", flush=True)
+
+        elif msg_type == "tool_result":
+            name = msg.get("name", "unknown")
+            error = msg.get("error")
+            if error:
+                print(f"{MAGENTA}❌ {name} failed: {truncate_text(str(error))}{RESET}", flush=True)
+            else:
+                print(f"{GREEN}✓ {name} complete{RESET}", flush=True)
+
+        elif msg_type == "output":
+            content = msg.get("content", "")
+            if content:
+                print(f"{RESET}{content}{RESET}", end="", flush=True)
+
+        elif msg_type == "message":
+            content = msg.get("content", "")
+            if content:
+                print(f"{RESET}{content}{RESET}", flush=True)
+
+        elif msg_type == "error":
+            error_msg = msg.get("error", "Unknown error")
+            print(f"{MAGENTA}❌ Error: {error_msg}{RESET}", flush=True)
+
+if __name__ == "__main__":
+    render_stream()
+'''
+
+
 def sanitize_change_name(description: str) -> str:
     """Convert a description into a valid change name.
 
@@ -52,6 +128,9 @@ def generate_loop_script(
     first_step = steps[0] if steps else "analyze"
 
     quick_flag = "--quick" if quick else ""
+
+    # Embed the Python renderer script
+    renderer_script = STREAM_JSON_RENDERER
 
     script = f'''#!/bin/bash
 #
@@ -144,23 +223,30 @@ $PROMPT
 5. 运行 /se3:done 结束会话)
 CLAUDE_EOF
 
-    # Execute Claude Code (auto-exit after completion with --max-turns 0)
+    # Create the Python stream renderer
+    RENDERER_FILE=$(mktemp /tmp/se3-loop-renderer-XXXXXX.py)
+    cat > "$RENDERER_FILE" << 'RENDERER_EOF'
+''' + renderer_script + '''RENDERER_EOF
+
+    # Execute Claude Code with --stream-json and render output
     # Timeout after 30 minutes to prevent infinite hanging
     echo "------------------------------------------------------------"
-    if timeout 1800 "$CLAUDE_CMD" --dangerously-skip-permissions --print --output-format text --max-turns 0 "$PROMPT_FILE" 2>&1; then
-        echo "------------------------------------------------------------"
+
+    EXIT_CODE=0
+    timeout 1800 "$CLAUDE_CMD" --dangerously-skip-permissions --stream-json --max-turns 0 "$PROMPT_FILE" 2>&1 | python3 "$RENDERER_FILE" || EXIT_CODE=$?
+
+    echo ""
+    echo "------------------------------------------------------------"
+
+    if [ $EXIT_CODE -eq 0 ]; then
         echo "[Claude] Session completed"
+    elif [ $EXIT_CODE -eq 124 ]; then
+        echo "[Claude] Session timed out (30 min limit)"
     else
-        EXIT_CODE=$?
-        echo "------------------------------------------------------------"
-        if [ $EXIT_CODE -eq 124 ]; then
-            echo "[Claude] Session timed out (30 min limit)"
-        else
-            echo "[Claude] Session exited (code: $EXIT_CODE)"
-        fi
+        echo "[Claude] Session exited (code: $EXIT_CODE)"
     fi
 
-    rm -f "$PROMPT_FILE"
+    rm -f "$PROMPT_FILE" "$RENDERER_FILE"
 
     echo ""
     echo "[SE3 Loop] Iteration $ITERATION complete"
