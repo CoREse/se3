@@ -65,7 +65,7 @@ def test_initialization():
             return False
 
         print("✓ Initialization test passed")
-        return True
+        assert True
 
 def main():
     print("Testing SE3 Module System Initialization...")

@@ -28,7 +28,6 @@ def get_framework_version() -> str:
 
     return match.group(1)
 from .commands import lint, status, sync, verify, update, collab, commit, human_calls_cmd, human_input, work
-from .commands.update import get_installed_se3_version
 from .commands.init import initialize_project
 
 app = typer.Typer(
