@@ -63,6 +63,10 @@ def check_spec_guardrails(spec_path: Path, original_content: str, new_content: s
     """
     violations = []
 
+    # If content is identical, no violations
+    if original_content == new_content:
+        return violations
+
     # Check for deleted requirements (scenarios)
     original_scenarios = set(re.findall(r"WHEN\s+(.+)", original_content))
     new_scenarios = set(re.findall(r"WHEN\s+(.+)", new_content))
@@ -75,24 +79,31 @@ def check_spec_guardrails(spec_path: Path, original_content: str, new_content: s
             "guardrail": SPEC_GUARDRAILS["must_not_delete"],
         })
 
-    # Check for weakened requirements
+    # Check for weakened requirements by comparing specific patterns
+    # Only flag if the SAME line/section changed from strong to weak
     weakened_patterns = [
-        (r"\bSHALL\b", r"\bSHOULD\b", "Requirement weakened: SHALL → SHOULD"),
-        (r"\bMUST\b", r"\bSHOULD\b", "Requirement weakened: MUST → SHOULD"),
-        (r"\ball\b", r"\bsome\b", "Requirement weakened: all → some"),
-        (r"\bevery\b", r"\bsome\b", "Requirement weakened: every → some"),
+        (r"\bSHALL\b", r"\bSHOULD\b", "SHALL → SHOULD"),
+        (r"\bMUST\b", r"\bSHOULD\b", "MUST → SHOULD"),
+        (r"\ball\b", r"\bsome\b", "all → some"),
+        (r"\bevery\b", r"\bsome\b", "every → some"),
     ]
 
-    for strong_pattern, weak_pattern, message in weakened_patterns:
-        strong_in_original = re.search(strong_pattern, original_content, re.IGNORECASE)
-        weak_in_new = re.search(weak_pattern, new_content, re.IGNORECASE)
+    # Split content into lines for line-by-line comparison
+    original_lines = original_content.split("\n")
+    new_lines = new_content.split("\n")
 
-        if strong_in_original and weak_in_new:
-            violations.append({
-                "type": "must_not_weaken",
-                "message": message,
-                "guardrail": SPEC_GUARDRAILS["must_not_weaken"],
-            })
+    # Check each line that exists in both versions
+    for i, (orig_line, new_line) in enumerate(zip(original_lines, new_lines)):
+        for strong_pattern, weak_pattern, change_desc in weakened_patterns:
+            strong_in_orig = re.search(strong_pattern, orig_line, re.IGNORECASE)
+            weak_in_new = re.search(weak_pattern, new_line, re.IGNORECASE)
+            # Only flag if strong was in original AND weak is in new AND they're different
+            if strong_in_orig and weak_in_new and orig_line != new_line:
+                violations.append({
+                    "type": "must_not_weaken",
+                    "message": f"Requirement weakened: {change_desc}",
+                    "guardrail": SPEC_GUARDRAILS["must_not_weaken"],
+                })
 
     return violations
 

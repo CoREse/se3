@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.12.11"  # Fix: openspec init check path, remove duplicate docstring
+SE3_FRAMEWORK_VERSION = "2.12.12"  # Fix: guardrails weaken detection, update typer.Exit handling

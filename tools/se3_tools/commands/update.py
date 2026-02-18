@@ -254,6 +254,9 @@ def update(
         if se3_version is None:
             se3_version = get_framework_version()
         update_project(dry_run, force, se3_version)
+    except typer.Exit as e:
+        # Re-raise typer.Exit without wrapping it as an error
+        raise e
     except Exception as e:
         typer.echo(
             typer.style(

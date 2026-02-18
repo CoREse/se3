@@ -177,8 +177,9 @@ def guardrails_cmd(
         if result.returncode == 0:
             original_content = result.stdout
         else:
-            typer.echo(f"Warning: Could not find original version for comparison")
-            original_content = new_content
+            typer.echo(f"Warning: Could not find original version in git history")
+            typer.echo(f"         Run from a git repository or use --original to specify the original file")
+            original_content = new_content  # Compare with itself (no violations)
 
     violations = check_spec_guardrails(spec_file, original_content, new_content)
 
