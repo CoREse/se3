@@ -199,45 +199,21 @@ def loop_cmd(
     iterations: int = typer.Option(10, "--iterations", "-n", help="Number of iterations (default: 10)"),
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
     quick: bool = typer.Option(False, "--quick", "-q", help="Quick mode - use 'small' workflow"),
-    reset: bool = typer.Option(False, "--reset", "-r", help="Reset loop state and start over"),
-    exec_mode: bool = typer.Option(False, "--exec", "-e", help="Exclusive mode: auto-execute loop with bash while loop"),
-    format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
 ):
-    """Run SE3 workflow in a loop for multiple iterations.
+    """Run SE3 workflow in a loop, auto-executing all iterations.
 
-    Two modes:
-    1. Default: Creates change, reports to user, exits (manual iteration)
-    2. Exclusive (--exec): Generates bash script, auto-executes all iterations
+    Takes over the terminal, generates a bash while-loop script,
+    and executes Claude Code for each iteration automatically.
+    Press Ctrl+C to stop at any time.
 
     Examples:
-        se3 loop "refactor module" --iterations 5           # Manual mode
-        se3 loop "add test case" -n 20 --quick              # Manual mode, quick
-        se3 loop "process item" --exec --iterations 10      # Exclusive auto-execute
+        se3 loop "refactor module" --iterations 5
+        se3 loop "add test case" -n 20 --quick
+        se3 loop "process item"                    # Default 10 iterations
     """
-    from .commands.loop import run_loop_iteration, print_text_report, print_json_report, run_exclusive_loop
+    from .commands.loop import run_exclusive_loop
 
-    # Exclusive mode: auto-execute with bash loop
-    if exec_mode:
-        run_exclusive_loop(prompt, project_root, iterations, quick)
-        raise typer.Exit(code=0)
-
-    # Normal mode: prepare iteration and report
-    root = Path(project_root).resolve()
-
-    # Handle reset
-    if reset:
-        state_file = root / ".se3-loop-state.json"
-        if state_file.exists():
-            state_file.unlink()
-        print("Loop state reset. Starting fresh.")
-
-    result = run_loop_iteration(prompt, project_root, iterations, quick)
-
-    if format == "json":
-        print_json_report(result)
-    else:
-        print_text_report(result)
-
+    run_exclusive_loop(prompt, project_root, iterations, quick)
     raise typer.Exit(code=0)
 
 
