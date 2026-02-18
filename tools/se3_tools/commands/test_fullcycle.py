@@ -122,7 +122,8 @@ class TestRunFullCycle:
             "actions": [],
         }
 
-        result = run_full_cycle("test description", str(tmp_path), quick=True)
+        # Use quick=False (normal mode) to test change name generation with timestamp
+        result = run_full_cycle("test description", str(tmp_path), quick=False)
 
         assert result["success"] is True
         # Change name should have timestamp appended
