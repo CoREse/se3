@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.12.5"  # Fix: fullcycle.py sanitize_change_name now ensures names start with a letter
+SE3_FRAMEWORK_VERSION = "2.12.6"  # Fix: status.py - rglob for nested changes, filter archive, handle null task

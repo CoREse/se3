@@ -78,9 +78,15 @@ def compute_active_changes(project_root: Path) -> List[str]:
         return []
 
     active = []
-    for item in changes_dir.iterdir():
-        if item.is_dir() and item.name != "archive":
-            active.append(item.name)
+    # Recursively find all directories containing .se3-state.json
+    for state_file in changes_dir.rglob(".se3-state.json"):
+        # Get relative path from changes_dir, remove .se3-state.json filename
+        change_path = state_file.parent.relative_to(changes_dir)
+        change_name = str(change_path)
+        # Skip archived changes (paths starting with "archive/")
+        if change_name.startswith("archive/"):
+            continue
+        active.append(change_name)
     return sorted(active)
 
 
@@ -109,6 +115,8 @@ def compute_collab_status(project_root: Path) -> Optional[Dict[str, Any]]:
         for tf in sorted(tasks_dir.glob("task-*.json")):
             try:
                 task = json.loads(tf.read_text())
+                if task is None:
+                    continue
                 result["tasks"].append({
                     "id": task.get("id", tf.stem),
                     "status": task.get("status", "unknown"),
