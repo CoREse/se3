@@ -9,9 +9,9 @@ Start a new SE3 work session. This skill runs the full startup protocol and guid
 
 **Steps**
 
-1. **Run `se3 start --json`** to compute session state
+1. **Run `se3 start --format json`** to compute session state
    ```bash
-   se3 start --json
+   se3 start --format json
    ```
    Parse the JSON output to get:
    - `first_time`: Whether this is a new project

@@ -9,9 +9,9 @@ End the current SE3 work session with proper shutdown protocol. Ensures all chan
 
 **Steps**
 
-1. **Run `se3 done --json`** to compute shutdown actions
+1. **Run `se3 done --format json`** to compute shutdown actions
    ```bash
-   se3 done --json
+   se3 done --format json
    ```
    Parse the JSON output to get:
    - `uncommitted_changes`: Count and list of uncommitted files

@@ -11,9 +11,9 @@ description: Start or continue working on a change (feature, bugfix, review, dir
 **Steps**
 
 1. **Determine what to work on**:
-   - If a change name was provided: `se3 work <name> --json`
-   - If a description was provided: Infer workflow type, then `se3 work --new <type>/<kebab-name> --json`
-   - If nothing provided: `se3 work --json` to list active changes, then AskUserQuestion
+   - If a change name was provided: `se3 work <name> --format json`
+   - If a description was provided: Infer workflow type, then `se3 work --new <type>/<kebab-name> --format json`
+   - If nothing provided: `se3 work --format json` to list active changes, then AskUserQuestion
 
 2. **Parse JSON response** to get:
    - `change`: The change name
@@ -46,7 +46,7 @@ description: Start or continue working on a change (feature, bugfix, review, dir
    - `advance_step`: Trigger workflow step advancement
    - `complete`: All steps done
 
-4. **After completing actions**, re-run `se3 work <name> --json` for updated state
+4. **After completing actions**, re-run `se3 work <name> --format json` for updated state
    - Continue the loop until `complete` or blocked
    - If blocked: Report blocker and suggest next steps
 
