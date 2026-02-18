@@ -156,3 +156,30 @@ progress.md contains:
 - **WHEN** `se3 handoff` is executed
 - **THEN** the Current Session section is replaced with a formal dated session record including commits, files changed, and next steps
 
+### Requirement: Session Guard
+
+The system SHALL enforce session validity checks before allowing session-aware operations.
+
+Session-aware commands (`se3 work`, `se3 done`) SHALL check if session is properly started:
+- If `.claude/.session.json` does not exist → error `SESSION_NOT_STARTED`
+- If session status is not "active" → error `SESSION_NOT_ACTIVE`
+- If session file is corrupted → error `SESSION_INVALID`
+
+**Resolution:**
+- In all error cases, agent should run `se3 start` first
+
+#### Scenario: Work without session
+- **WHEN** `se3 work` runs without `.claude/.session.json`
+- **THEN** it returns `SESSION_NOT_STARTED` error
+- **AND** agent runs `se3 start` to initialize
+
+#### Scenario: Done with inactive session
+- **WHEN** `se3 done` runs with non-active session
+- **THEN** it returns `SESSION_NOT_ACTIVE` error
+- **AND** agent must start a session first
+
+#### Scenario: Corrupted session file
+- **WHEN** `.claude/.session.json` exists but is malformed
+- **THEN** it returns `SESSION_INVALID` error
+- **AND** agent must reinitialize the session
+
