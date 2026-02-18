@@ -37,6 +37,7 @@ def sanitize_change_name(description: str) -> str:
 
     Only lowercase letters, numbers, and hyphens are allowed.
     Non-ASCII characters (e.g., Chinese) are filtered out.
+    Name must start with a letter.
     """
     name = description.lower().strip()
     # Keep only ASCII alphanumeric and allowed separators
@@ -50,6 +51,9 @@ def sanitize_change_name(description: str) -> str:
     if not name:
         import time
         name = f"loop-{int(time.time()) % 10000}"
+    # Ensure name starts with a letter (openspec requirement)
+    if name and not name[0].isalpha():
+        name = "t" + name
     return name
 
 
