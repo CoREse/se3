@@ -19,6 +19,17 @@ from typing import Optional
 from ..config import load_claude_commands
 
 
+# ANSI colors for rendering
+CYAN = "\033[36m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+MAGENTA = "\033[35m"
+GRAY = "\033[90m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+DIM = "\033[2m"
+
+
 def sanitize_change_name(description: str) -> str:
     """Convert a description into a valid change name."""
     name = description.lower().strip()
@@ -30,22 +41,67 @@ def sanitize_change_name(description: str) -> str:
     return name.strip("-") or "loop-task"
 
 
-def run_claude_iteration(
-    claude_cmd: str,
-    prompt_file: Path,
-    timeout_sec: int = 1800,
-    capture_output: bool = False
-) -> int:
-    """Run claude for one iteration.
+def truncate_text(text: str, max_len: int = 200) -> str:
+    """Truncate long text for preview."""
+    if not text:
+        return ""
+    if len(text) > max_len:
+        return text[:max_len] + "..."
+    return text
 
-    Args:
-        claude_cmd: The claude command to use
-        prompt_file: Path to the prompt file
-        timeout_sec: Timeout in seconds
-        capture_output: If True, capture output and return it. If False, output goes directly to terminal.
 
-    Returns:
-        Exit code from claude
+def render_stream_json_line(line: str) -> None:
+    """Render a single stream-json line to terminal."""
+    line = line.strip()
+    if not line:
+        return
+    try:
+        msg = json.loads(line)
+    except json.JSONDecodeError:
+        return
+
+    msg_type = msg.get("type", "")
+
+    if msg_type == "thinking":
+        thinking = msg.get("thinking", "")
+        if thinking:
+            print(f"{GRAY}{DIM}💭 {truncate_text(thinking)}{RESET}", flush=True)
+
+    elif msg_type == "tool_use":
+        name = msg.get("name", "unknown")
+        params = msg.get("parameters", {})
+        print(f"{CYAN}🔧 {name}{RESET}", flush=True)
+        for key, value in list(params.items())[:3]:
+            preview = truncate_text(str(value), 80)
+            print(f"{DIM}  {key}: {preview}{RESET}", flush=True)
+
+    elif msg_type == "tool_result":
+        name = msg.get("name", "unknown")
+        error = msg.get("error")
+        if error:
+            print(f"{MAGENTA}❌ {name} failed: {truncate_text(str(error))}{RESET}", flush=True)
+        else:
+            print(f"{GREEN}✓ {name} complete{RESET}", flush=True)
+
+    elif msg_type == "output":
+        content = msg.get("content", "")
+        if content:
+            print(f"{RESET}{content}{RESET}", end="", flush=True)
+
+    elif msg_type == "message":
+        content = msg.get("content", "")
+        if content:
+            print(f"{RESET}{content}{RESET}", flush=True)
+
+    elif msg_type == "error":
+        error_msg = msg.get("error", "Unknown error")
+        print(f"{MAGENTA}❌ Error: {error_msg}{RESET}", flush=True)
+
+
+def run_claude_with_renderer(claude_cmd: str, prompt_file: Path, timeout_sec: int = 1800) -> int:
+    """Run claude with stream-json output and real-time rendering.
+
+    Returns exit code from claude.
     """
     env = {**dict(os.environ)}
     env.pop("CLAUDECODE", None)
@@ -54,37 +110,41 @@ def run_claude_iteration(
         claude_cmd,
         "--dangerously-skip-permissions",
         "--print",
+        "--output-format", "stream-json",
+        "--verbose",
         "--max-turns", "0",
         str(prompt_file)
     ]
 
+    print(f"[SE3 Loop] Executing: {claude_cmd} --print --output-format stream-json --verbose --max-turns 0 {prompt_file}")
+    print("")
+
     try:
-        if capture_output:
-            # For testing/debugging - capture output
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=timeout_sec
-            )
-            return result.returncode
-        else:
-            # Direct to terminal - most reliable
-            result = subprocess.run(
-                cmd,
-                env=env,
-                timeout=timeout_sec
-            )
-            return result.returncode
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=env,
+            bufsize=1,  # Line buffered
+        )
+
+        # Read and render output line by line in real-time
+        for line in proc.stdout:
+            render_stream_json_line(line)
+
+        proc.wait(timeout=timeout_sec)
+        return proc.returncode
+
     except subprocess.TimeoutExpired:
-        print(f"\n[SE3 Loop] Session timed out ({timeout_sec}s limit)", file=sys.stderr)
+        proc.kill()
+        print(f"\n{YELLOW}[SE3 Loop] Session timed out ({timeout_sec}s limit){RESET}")
         return 124
     except FileNotFoundError:
-        print(f"\n[SE3 Loop] Error: '{claude_cmd}' not found", file=sys.stderr)
+        print(f"\n{MAGENTA}[SE3 Loop] Error: '{claude_cmd}' not found{RESET}")
         return 127
     except Exception as e:
-        print(f"\n[SE3 Loop] Error: {e}", file=sys.stderr)
+        print(f"\n{MAGENTA}[SE3 Loop] Error: {e}{RESET}")
         return 1
 
 
@@ -94,7 +154,7 @@ def run_exclusive_loop(
     iterations: int = 10,
     quick: bool = False,
 ) -> None:
-    """Run the loop - execute claude directly for each iteration."""
+    """Run the loop - execute claude with real-time rendering for each iteration."""
     root = Path(project_root).resolve()
 
     # Load claude command
@@ -108,20 +168,20 @@ def run_exclusive_loop(
     base_name = sanitize_change_name(prompt)
     openspec_cmd = shutil.which("openspec") or "openspec"
 
-    print(f"\n{'=' * 60}")
-    print("SE3 Loop")
-    print(f"{'=' * 60}")
+    print(f"\n{BOLD}{'=' * 60}{RESET}")
+    print(f"{BOLD}SE3 Loop{RESET}")
+    print(f"{BOLD}{'=' * 60}{RESET}")
     print(f"\nPrompt: {prompt}")
     print(f"Iterations: {iterations}")
     print(f"Project: {root}")
     print(f"Claude: {claude_cmd}")
     print(f"\nPress Ctrl+C to stop")
-    print(f"{'=' * 60}\n")
+    print(f"{BOLD}{'=' * 60}{RESET}\n")
 
     for iteration in range(1, iterations + 1):
-        print(f"\n{'─' * 60}")
-        print(f"Iteration {iteration} / {iterations}")
-        print(f"{'─' * 60}\n")
+        print(f"\n{BOLD}{'─' * 60}{RESET}")
+        print(f"{BOLD}Iteration {iteration} / {iterations}{RESET}")
+        print(f"{BOLD}{'─' * 60}{RESET}\n")
 
         # Generate unique change name
         change_name = f"{base_name}-{iteration:02d}"
@@ -130,7 +190,7 @@ def run_exclusive_loop(
             change_name = f"{base_name}-{iteration:02d}-{counter}"
             counter += 1
 
-        print(f"[SE3 Loop] Creating change: {change_name}")
+        print(f"{CYAN}[SE3 Loop] Creating change: {change_name}{RESET}")
 
         # Create change
         result = subprocess.run(
@@ -140,7 +200,7 @@ def run_exclusive_loop(
             text=True
         )
         if result.returncode != 0:
-            print(f"[SE3 Loop] Failed to create change, retrying...")
+            print(f"{YELLOW}[SE3 Loop] Failed to create change, retrying...{RESET}")
             time.sleep(2)
             continue
 
@@ -168,27 +228,27 @@ def run_exclusive_loop(
 """)
             prompt_file = Path(f.name)
 
-        print(f"[SE3 Loop] Starting Claude Code...\n")
+        print(f"{CYAN}[SE3 Loop] Starting Claude Code...{RESET}\n")
         print(f"{'─' * 60}")
 
         try:
-            exit_code = run_claude_iteration(claude_cmd, prompt_file)
+            exit_code = run_claude_with_renderer(claude_cmd, prompt_file)
         finally:
             prompt_file.unlink(missing_ok=True)
 
-        print(f"{'─' * 60}")
+        print(f"\n{'─' * 60}")
 
         if exit_code == 0:
-            print(f"\n[SE3 Loop] Iteration {iteration} completed successfully")
+            print(f"\n{GREEN}[SE3 Loop] Iteration {iteration} completed successfully{RESET}")
         elif exit_code == 124:
-            print(f"\n[SE3 Loop] Iteration {iteration} timed out")
+            print(f"\n{YELLOW}[SE3 Loop] Iteration {iteration} timed out{RESET}")
         else:
-            print(f"\n[SE3 Loop] Iteration {iteration} exited with code {exit_code}")
+            print(f"\n{YELLOW}[SE3 Loop] Iteration {iteration} exited with code {exit_code}{RESET}")
 
         if iteration < iterations:
             print(f"\n[SE3 Loop] Continuing in 2 seconds...")
             time.sleep(2)
 
-    print(f"\n{'=' * 60}")
-    print("SE3 Loop Complete")
-    print(f"{'=' * 60}\n")
+    print(f"\n{BOLD}{'=' * 60}{RESET}")
+    print(f"{BOLD}SE3 Loop Complete{RESET}")
+    print(f"{BOLD}{'=' * 60}{RESET}\n")
