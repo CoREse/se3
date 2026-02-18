@@ -200,3 +200,4 @@
 ## Current Session
 <!-- current-session -->
 - `8e7af20` [collab:task-002] Add se3 full-cycle command (17 files)
+- `3cf95b8` [collab:task-001] Add openspec CLI commands (1 files)
