@@ -238,8 +238,11 @@ CLAUDE_EOF
     echo ""
 
     EXIT_CODE=0
-    # Run in subshell with job control disabled to handle wrapper scripts like kclaude
-    ( set +m; timeout 1800 "$CLAUDE_CMD" --dangerously-skip-permissions --print --output-format stream-json --max-turns 0 "$PROMPT_FILE" 2>&1 ) | python3 "$RENDERER_FILE" || EXIT_CODE=$?
+    # Run claude with output to temp file, then render
+    OUTPUT_FILE=$(mktemp /tmp/se3-loop-output-XXXXXX.jsonl)
+    timeout 1800 "$CLAUDE_CMD" --dangerously-skip-permissions --print --output-format stream-json --max-turns 0 "$PROMPT_FILE" > "$OUTPUT_FILE" 2>&1 || EXIT_CODE=$?
+    python3 "$RENDERER_FILE" < "$OUTPUT_FILE"
+    rm -f "$OUTPUT_FILE"
 
     echo ""
     echo "------------------------------------------------------------"
@@ -323,11 +326,13 @@ def run_exclusive_loop(
     print("")
 
     # Execute the script with modified environment (clear CLAUDECODE for nested sessions)
+    # Use 'bash' explicitly with +B flag to disable brace expansion and ensure non-interactive mode
     env = {**dict(os.environ)}
     env.pop("CLAUDECODE", None)  # Avoid nested session detection
 
     try:
-        subprocess.run([str(script_path)], check=False, env=env)
+        # Use bash in POSIX mode to minimize job control issues
+        subprocess.run(["bash", "-c", f'set +m; source "{script_path}"'], check=False, env=env)
     except KeyboardInterrupt:
         print("")
         print("\n[SE3 Loop] Interrupted by user")

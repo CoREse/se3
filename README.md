@@ -193,6 +193,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.10.6 | 2026-02-18 | Fix `se3 loop`: use temp file instead of pipe to avoid claude processes being stopped (T state). Output saved to file then rendered after completion.
 | 2.10.5 | 2026-02-18 | Fix `se3 loop`: use subshell with `set +m` to properly disable job control for wrapper scripts (kclaude) that spawn claude.
 | 2.10.4 | 2026-02-18 | Fix `se3 loop`: add `set +m` to disable job control, preventing claude processes from being stopped (T state) in pipeline. |
 | 2.10.3 | 2026-02-18 | Fix `se3 loop`: add `--print` flag for proper `--output-format stream-json` output, matching collab launcher configuration. |
