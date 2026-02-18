@@ -27,7 +27,7 @@ def get_framework_version() -> str:
         raise ValueError("Cannot find SE3_FRAMEWORK_VERSION definition in __init__.py")
 
     return match.group(1)
-from .commands import lint, status, sync, verify, update, collab, commit, human_calls_cmd, human_input
+from .commands import lint, status, sync, verify, update, collab, commit, human_calls_cmd, human_input, work
 from .commands.update import get_installed_se3_version
 from .commands.init import initialize_project
 
@@ -144,6 +144,8 @@ def work_cmd(
     raise typer.Exit(code=0 if result.get("change") else 1)
 
 
+# Register guardrails as a separate command (not under work due to Typer limitations)
+# Usage: se3 guardrails <spec-file>
 @app.command(name="guardrails")
 def guardrails_cmd(
     spec_file: Path = typer.Argument(..., help="Path to spec file to check"),

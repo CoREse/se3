@@ -283,6 +283,33 @@ def check_session_state(project_root: Path) -> Optional[Dict[str, Any]]:
             ],
         }
 
+    try:
+        session = json.loads(session_file.read_text())
+        if session.get("status") != "active":
+            return {
+                "error": "SESSION_NOT_ACTIVE",
+                "message": f"Session status is '{session.get('status')}'. Run 'se3 start' to resume.",
+                "actions": [
+                    {
+                        "type": "run_command",
+                        "command": "se3 start --json",
+                        "reason": "Session guard: Must activate session before ending",
+                    }
+                ],
+            }
+    except (json.JSONDecodeError, OSError):
+        return {
+            "error": "SESSION_INVALID",
+            "message": "Session file is corrupted. Run 'se3 start' to recreate.",
+            "actions": [
+                {
+                    "type": "run_command",
+                    "command": "se3 start --json",
+                    "reason": "Session guard: Must recreate valid session",
+                }
+            ],
+        }
+
     return None
 
 
