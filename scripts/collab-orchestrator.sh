@@ -992,6 +992,7 @@ escalate_to_human() {
 
   # Generate template based on language setting
   local header_type header_urgency header_context header_tasks header_response prompt_text
+  local header_interpretation interpretation_text suggested_response_text
   local language_note
   if [[ "$HUMAN_CALL_LANGUAGE" == zh* ]]; then
     header_type="类型"
@@ -999,6 +1000,7 @@ escalate_to_human() {
     header_context="上下文"
     header_tasks="当前任务状态"
     header_response="回复"
+    header_interpretation="解读与建议"
     prompt_text="<!-- 人类：请在下方输入您的回复 -->"
     language_note="\n\n**注意**：请用中文回复。"
   else
@@ -1007,8 +1009,42 @@ escalate_to_human() {
     header_context="Context"
     header_tasks="Current Task States"
     header_response="Response"
+    header_interpretation="Interpretation & Recommendations"
     prompt_text="<!-- Human: write your response below -->"
     language_note=""
+  fi
+
+  # Generate interpretation based on call type and title
+  if [[ "$HUMAN_CALL_LANGUAGE" == zh* ]]; then
+    case "$title" in
+      *"Manager Failure"*)
+        interpretation_text="**这是什么**：Manager Agent 在尝试所有可用的 Claude 命令后仍然失败。\n\n**建议如何处理**：\n1. 查看上面的 \"上下文\" 了解失败原因\n2. 查看 \"当前任务状态\" 了解有哪些任务\n3. 如果需要，可以手动创建任务文件到 .collab/tasks/\n\n**如何回复**：\n- 如果需要 manager 重试：输入 \"retry\"\n- 如果需要手动规划任务：输入 \"plan\" 并附上任务列表\n- 如果需要取消：输入 \"abort\""
+        ;;
+      *"Orchestrator Repeated Failure"*)
+        interpretation_text="**这是什么**：Orchestrator 已崩溃并重启多次，可能存在系统性问题。\n\n**建议如何处理**：\n1. 查看日志：cat .collab/logs/orchestrator.log\n2. 检查是否有资源问题（磁盘空间、内存等）\n3. 确认 se3 命令是否正常工作\n\n**如何回复**：\n- 输入 \"resume\" 继续尝试\n- 输入 \"abort\" 终止会话并清理\n- 或者提供更详细的指示"
+        ;;
+      *"Task Exceeded Max Attempts"*)
+        interpretation_text="**这是什么**：某个任务已失败多次，超过了最大重试次数。\n\n**建议如何处理**：\n1. 查看失败任务的日志：.collab/logs/worker-{task-id}-*.log\n2. 分析问题是否在于：\n   - 任务本身太复杂需要拆分\n   - 依赖的环境/资源不可用\n   - 需要人工干预的决策\n\n**如何回复**：\n- 输入 \"skip\" 跳过此任务\n- 输入 \"split\" 将任务拆分为更小的子任务\n- 提供具体的修复指导"
+        ;;
+      *)
+        interpretation_text="**这是什么**：系统需要您的输入或决策来继续。\n\n**建议如何处理**：\n1. 仔细阅读上面的 \"上下文\"\n2. 查看 \"当前任务状态\" 了解整体进展\n3. 根据情况做出决策\n\n**如何回复**：\n- 直接输入您的回复或决策\n- 可以使用简单的命令如 \"continue\", \"abort\", \"retry\""
+        ;;
+    esac
+  else
+    case "$title" in
+      *"Manager Failure"*)
+        interpretation_text="**What this is**: The Manager Agent failed after trying all available Claude commands.\n\n**How to handle**:\n1. Review the \"Context\" above for failure details\n2. Check \"Current Task States\" for existing tasks\n3. If needed, manually create task files in .collab/tasks/\n\n**How to respond**:\n- To retry: type \"retry\"\n- To manually plan tasks: type \"plan\" with your task list\n- To cancel: type \"abort\""
+        ;;
+      *"Orchestrator Repeated Failure"*)
+        interpretation_text="**What this is**: The orchestrator has crashed and restarted multiple times, indicating a systemic issue.\n\n**How to handle**:\n1. Check logs: cat .collab/logs/orchestrator.log\n2. Verify system resources (disk space, memory)\n3. Confirm se3 commands are working\n\n**How to respond**:\n- Type \"resume\" to try again\n- Type \"abort\" to terminate and cleanup\n- Or provide detailed instructions"
+        ;;
+      *"Task Exceeded Max Attempts"*)
+        interpretation_text="**What this is**: A task has failed multiple times and exceeded the maximum retry limit.\n\n**How to handle**:\n1. Review logs: .collab/logs/worker-{task-id}-*.log\n2. Analyze if the issue is:\n   - Task too complex and needs splitting\n   - Required environment/resources unavailable\n   - Needs human decision/intervention\n\n**How to respond**:\n- Type \"skip\" to skip this task\n- Type \"split\" to break into smaller subtasks\n- Provide specific guidance for fixing"
+        ;;
+      *)
+        interpretation_text="**What this is**: The system needs your input or decision to continue.\n\n**How to handle**:\n1. Read the \"Context\" carefully\n2. Check \"Current Task States\" for overall progress\n3. Make a decision based on the situation\n\n**How to respond**:\n- Simply type your response or decision\n- Can use simple commands like \"continue\", \"abort\", \"retry\""
+        ;;
+    esac
   fi
 
   # Generate ISO timestamp
@@ -1038,6 +1074,9 @@ ${context}${language_note}
 
 ### ${header_tasks}
 $(summarize_tasks)
+
+### ${header_interpretation}
+${interpretation_text}
 
 ### ${header_response}
 ${prompt_text}
