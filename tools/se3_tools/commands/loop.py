@@ -33,14 +33,24 @@ DIM = "\033[2m"
 
 
 def sanitize_change_name(description: str) -> str:
-    """Convert a description into a valid change name."""
+    """Convert a description into a valid change name.
+
+    Only lowercase letters, numbers, and hyphens are allowed.
+    Non-ASCII characters (e.g., Chinese) are filtered out.
+    """
     name = description.lower().strip()
+    # Keep only ASCII alphanumeric and allowed separators
     name = "".join(c for c in name if (ord(c) < 128 and c.isalnum()) or c in " -_/")
     name = name.replace(" ", "-").replace("_", "-").replace("/", "-")
     name = re.sub(r'-+', '-', name)
     if len(name) > 40:
         name = name[:40].rsplit("-", 1)[0]
-    return name.strip("-") or "loop-task"
+    name = name.strip("-")
+    # If name is empty (e.g., Chinese-only input), use timestamp-based fallback
+    if not name:
+        import time
+        name = f"loop-{int(time.time()) % 10000}"
+    return name
 
 
 def truncate_text(text: str, max_len: int = 200) -> str:
@@ -343,7 +353,12 @@ def run_exclusive_loop(
             text=True
         )
         if result.returncode != 0:
-            print(f"{YELLOW}[SE3 Loop] Failed to create change, retrying...{RESET}")
+            print(f"{YELLOW}[SE3 Loop] Failed to create change{RESET}")
+            if result.stderr:
+                print(f"{YELLOW}Error: {result.stderr.strip()}{RESET}")
+            if result.stdout:
+                print(f"{YELLOW}Output: {result.stdout.strip()}{RESET}")
+            print(f"{YELLOW}Retrying in 2 seconds...{RESET}")
             time.sleep(2)
             continue
 
