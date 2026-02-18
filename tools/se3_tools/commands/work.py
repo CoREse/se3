@@ -593,7 +593,11 @@ def run_work(
             # Recursively find all directories containing .se3-state.json
             for state_file in openspec_dir.rglob(".se3-state.json"):
                 change_path = state_file.parent.relative_to(openspec_dir)
-                active_changes.append(str(change_path))
+                change_name = str(change_path)
+                # Skip archived changes (paths starting with "archive/")
+                if change_name.startswith("archive/"):
+                    continue
+                active_changes.append(change_name)
 
         if active_changes:
             return {

@@ -75,6 +75,10 @@ def compute_active_changes(project_root: Path) -> List[Dict[str, Any]]:
         change_path = state_file.parent
         change_name = str(change_path.relative_to(changes_dir))
 
+        # Skip archived changes (paths starting with "archive/")
+        if change_name.startswith("archive/"):
+            continue
+
         # Read workflow state
         state = None
         try:

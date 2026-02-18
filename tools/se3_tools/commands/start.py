@@ -126,7 +126,11 @@ def compute_active_changes(project_root: Path) -> List[str]:
     for state_file in changes_dir.rglob(".se3-state.json"):
         # Get relative path from changes_dir, remove .se3-state.json filename
         change_path = state_file.parent.relative_to(changes_dir)
-        active.append(str(change_path))
+        change_name = str(change_path)
+        # Skip archived changes (paths starting with "archive/")
+        if change_name.startswith("archive/"):
+            continue
+        active.append(change_name)
 
     return sorted(active)
 
