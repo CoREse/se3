@@ -48,3 +48,21 @@ se3 commit -m "描述" -f "file1.py file2.py"
 - `openspec/` = 本项目定义的规范（只读，是项目的spec本身）
 - `output/` = 生成的新规范产出（可写）
 - `tools/` = 工具实现（可写）
+
+### 自举项目版本更新
+
+**场景**：升级 `se3_tools` 版本后（修改 `tools/se3_tools/__init__.py` 中的 `SE3_FRAMEWORK_VERSION`）
+
+**必须执行**：
+```bash
+# 1. 更新本项目的 SE3 框架文件
+se3 update update
+
+# 2. 提交更改（包括 .claude/ 目录的更新）
+se3 commit -m "chore: bump SE3 framework to X.Y.Z" -f ".claude/"
+```
+
+**原因**：
+- 本项目是自举项目，同时作为工具开发者（修改 `tools/`）和工具使用者（使用 `.claude/`）
+- `se3 update` 会将 `output/` 中的新规范同步到 `.claude/`
+- 如果不执行此步骤，`.claude/` 中的规范将与 `tools/` 的版本不一致
