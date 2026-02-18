@@ -116,6 +116,34 @@ def load_human_call_config(project_root: Optional[Path] = None) -> Dict[str, Any
     }
 
 
+def load_session_config(project_root: Optional[Path] = None) -> Dict[str, Any]:
+    """Load session configuration from config.
+
+    Resolution order:
+    1. Project se3.config.yaml session (if present, overrides global)
+    2. Global ~/.se3/config.yaml session
+    3. Default values
+
+    Returns dict with:
+        - max_tasks_per_change: Max tasks per group (default: 5)
+        - max_progress_entries: Max progress entries before archiving (default: 20)
+    """
+    global_cfg = load_global_config()
+    project_cfg = load_project_config(project_root) if project_root else {}
+
+    # Merge session configs: project overrides global
+    global_session = global_cfg.get("session", {})
+    project_session = project_cfg.get("session", {})
+
+    merged = dict(global_session)
+    merged.update(project_session)
+
+    return {
+        "max_tasks_per_change": merged.get("max_tasks_per_change", 5),
+        "max_progress_entries": merged.get("max_progress_entries", 20),
+    }
+
+
 def get_language_labels(language: str) -> Dict[str, str]:
     """Get human call template labels for a given language.
 

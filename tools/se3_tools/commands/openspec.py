@@ -3,9 +3,12 @@
 Provides commands for managing the openspec/ directory structure:
 - openspec init: Initialize the openspec/ directory structure
 - openspec list --specs: List all available specs
+- openspec archive: Archive a completed change
 """
 
 import json
+import shutil
+from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -223,3 +226,107 @@ def list_cmd(
         typer.echo(f"Total: {len(spec_list)} spec(s)")
 
     raise typer.Exit(code=0)
+
+
+def archive_change(change_name: str, project_root: Path) -> Dict[str, Any]:
+    """Archive a completed change by moving it to openspec/changes/archive/.
+
+    Args:
+        change_name: Name of the change to archive
+        project_root: Root directory of the project
+
+    Returns:
+        Dict with archive operation results
+    """
+    result = {
+        "change": change_name,
+        "success": False,
+        "source": None,
+        "destination": None,
+        "message": "",
+    }
+
+    changes_dir = project_root / "openspec" / "changes"
+    archive_dir = changes_dir / "archive"
+
+    # Handle nested change names (e.g., "feature/auth")
+    source_path = changes_dir / change_name
+    dest_path = archive_dir / change_name
+
+    if not source_path.exists():
+        result["message"] = f"Change '{change_name}' not found in openspec/changes/"
+        return result
+
+    # Create archive directory if needed
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create parent directories in archive if needed (for nested changes)
+    if "/" in change_name or "\\" in change_name:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Check if destination already exists
+    if dest_path.exists():
+        # Append timestamp to avoid collision
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        dest_path = archive_dir / f"{change_name}-{timestamp}"
+        result["message"] = f"Destination already existed, archived as {dest_path.name}"
+
+    try:
+        # Move the change directory
+        shutil.move(str(source_path), str(dest_path))
+        result["success"] = True
+        result["source"] = str(source_path.relative_to(project_root))
+        result["destination"] = str(dest_path.relative_to(project_root))
+        if not result["message"]:
+            result["message"] = f"Change '{change_name}' archived successfully"
+    except Exception as e:
+        result["message"] = f"Failed to archive change: {e}"
+
+    return result
+
+
+@app.command(name="archive")
+def archive_cmd(
+    change_name: str = typer.Argument(..., help="Name of the change to archive"),
+    project_root: str = typer.Option(
+        ".",
+        "--project-root",
+        "-p",
+        help="Root directory of the project",
+    ),
+    format: str = typer.Option(
+        "text",
+        "--format",
+        "-f",
+        help="Output format (text or json)",
+    ),
+):
+    """Archive a completed change to openspec/changes/archive/.
+
+    Moves the change directory from openspec/changes/ to openspec/changes/archive/.
+    This should be done after all tasks are complete and specs have been verified.
+
+    Examples:
+        openspec archive feature/auth
+        openspec archive bugfix/login-fix --format json
+    """
+    root = Path(project_root).resolve()
+    result = archive_change(change_name, root)
+
+    if format == "json":
+        typer.echo(json.dumps(result, indent=2, default=str))
+    else:
+        typer.echo(f"\n{'=' * 60}")
+        typer.echo("OpenSpec Archive")
+        typer.echo(f"{'=' * 60}\n")
+
+        if result["success"]:
+            typer.echo(typer.style(f"  ✓ {result['message']}", fg=typer.colors.GREEN))
+            typer.echo(f"\n  Source: {result['source']}")
+            typer.echo(f"  Destination: {result['destination']}")
+        else:
+            typer.echo(typer.style(f"  ✗ {result['message']}", fg=typer.colors.RED))
+
+        typer.echo(f"\n{'=' * 60}")
+
+    raise typer.Exit(code=0 if result["success"] else 1)
