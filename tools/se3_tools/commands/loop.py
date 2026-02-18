@@ -139,6 +139,7 @@ def generate_loop_script(
 
 set -e
 set -o pipefail
+set +m  # Disable job control to prevent processes from being stopped
 
 PROMPT="{prompt.replace('"', '\\"')}"
 ITERATIONS={iterations}

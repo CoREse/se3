@@ -193,6 +193,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.10.4 | 2026-02-18 | Fix `se3 loop`: add `set +m` to disable job control, preventing claude processes from being stopped (T state) in pipeline. |
 | 2.10.3 | 2026-02-18 | Fix `se3 loop`: add `--print` flag for proper `--output-format stream-json` output, matching collab launcher configuration. |
 | 2.10.2 | 2026-02-18 | Fix `se3 loop`: use correct `--output-format stream-json` instead of invalid `--stream-json` flag. |
 | 2.10.0 | 2026-02-18 | Add stream-json renderer to `se3 loop`. Replaces `--print` with `--stream-json | python3 renderer` for real-time visibility of Claude's thinking, tool calls, and progress. Zero external dependencies. |
