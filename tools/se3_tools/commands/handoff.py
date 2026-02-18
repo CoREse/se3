@@ -74,19 +74,14 @@ def get_changed_files_summary(project_root: Path) -> str:
 
 
 def is_in_collab_mode(project_root: Path) -> bool:
-    """Detect if we're running under se3 collab."""
-    if os.environ.get("SE3_AGENT_ROLE"):
-        return True
+    """Detect if we're running under se3 collab.
 
-    collab_config = project_root / ".collab" / "config.json"
-    if collab_config.exists():
-        try:
-            data = json.loads(collab_config.read_text())
-            return data.get("status") == "active"
-        except:
-            pass
-
-    return False
+    Only returns True if SE3_AGENT_ROLE is set in the environment, which
+    indicates this process was spawned by the collab orchestrator as a
+    work agent. The existence of .collab/config.json only means a collab
+    session exists, not that the current process is part of it.
+    """
+    return bool(os.environ.get("SE3_AGENT_ROLE"))
 
 
 def get_collab_info(project_root: Path) -> dict:
