@@ -5,16 +5,16 @@ Usage:
     se3 loop "prompt" --quick
 """
 
-import fcntl
 import json
 import os
 import re
-import select
 import subprocess
 import shutil
 import sys
 import tempfile
 import time
+import threading
+import queue
 from pathlib import Path
 from typing import Optional
 
@@ -121,39 +121,63 @@ def run_claude_with_renderer(claude_cmd: str, prompt_file: Path, timeout_sec: in
     print(f"[SE3 Loop] Executing: {claude_cmd} --print --output-format stream-json --verbose --max-turns 0 {prompt_file}")
     print("")
 
+    output_queue = queue.Queue()
+    exit_code = [None]  # Use list to allow modification in closure
+
+    def reader_thread():
+        """Read stdout in a separate thread to avoid blocking."""
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                env=env,
+                bufsize=1,
+            )
+
+            # Store process for main thread to wait
+            output_queue.put(proc)
+
+            # Read output line by line
+            for line in proc.stdout:
+                output_queue.put(line)
+
+            proc.wait()
+            exit_code[0] = proc.returncode
+            output_queue.put(None)  # Signal completion
+
+        except Exception as e:
+            output_queue.put(f"ERROR: {e}")
+            output_queue.put(None)
+
+    # Start reader thread
+    thread = threading.Thread(target=reader_thread, daemon=True)
+    thread.start()
+
+    # Wait for process object
     try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            env=env,
-            bufsize=1,
-        )
+        proc = output_queue.get(timeout=5)
+        if isinstance(proc, str) and proc.startswith("ERROR:"):
+            print(f"{MAGENTA}[SE3 Loop] {proc}{RESET}")
+            return 1
+    except queue.Empty:
+        print(f"{MAGENTA}[SE3 Loop] Failed to start claude process{RESET}")
+        return 1
 
-        # Make stdout non-blocking to prevent deadlocks
-        fd = proc.stdout.fileno()
-        fl = fcntl.fcntl(fd, fcntl.F_GETFL)
-        fcntl.fcntl(fd, fcntl.F_SETFL, fl | os.O_NONBLOCK)
+    # Process output with timeout
+    start_time = time.time()
+    while True:
+        try:
+            # Check for output with short timeout
+            item = output_queue.get(timeout=0.1)
 
-        start_time = time.time()
-        buffer = ""
-
-        while True:
-            # Check if process has finished
-            ret = proc.poll()
-            if ret is not None:
-                # Process finished, read remaining output
-                try:
-                    remaining = proc.stdout.read()
-                    if remaining:
-                        buffer += remaining
-                        for line in buffer.split('\n'):
-                            if line:
-                                render_stream_json_line(line)
-                except:
-                    pass
-                return ret
+            if item is None:
+                # Done
+                break
+            elif isinstance(item, str):
+                # Output line
+                render_stream_json_line(item)
 
             # Check timeout
             if time.time() - start_time > timeout_sec:
@@ -161,34 +185,16 @@ def run_claude_with_renderer(claude_cmd: str, prompt_file: Path, timeout_sec: in
                 print(f"\n{YELLOW}[SE3 Loop] Session timed out ({timeout_sec}s limit){RESET}")
                 return 124
 
-            # Try to read output (non-blocking)
-            try:
-                ready, _, _ = select.select([proc.stdout], [], [], 0.1)
-                if ready:
-                    chunk = proc.stdout.read(4096)
-                    if chunk:
-                        buffer += chunk
-                        # Process complete lines
-                        while '\n' in buffer:
-                            line, buffer = buffer.split('\n', 1)
-                            render_stream_json_line(line)
-            except (IOError, OSError):
-                pass
+        except queue.Empty:
+            # No output available, check if process is still running
+            if exit_code[0] is not None:
+                break
+            continue
 
-            time.sleep(0.01)  # Small delay to prevent CPU spinning
+    # Wait for thread to complete
+    thread.join(timeout=1)
 
-        return proc.returncode
-
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        print(f"\n{YELLOW}[SE3 Loop] Session timed out ({timeout_sec}s limit){RESET}")
-        return 124
-    except FileNotFoundError:
-        print(f"\n{MAGENTA}[SE3 Loop] Error: '{claude_cmd}' not found{RESET}")
-        return 127
-    except Exception as e:
-        print(f"\n{MAGENTA}[SE3 Loop] Error: {e}{RESET}")
-        return 1
+    return exit_code[0] if exit_code[0] is not None else 0
 
 
 def run_exclusive_loop(
@@ -276,6 +282,9 @@ def run_exclusive_loop(
 
         try:
             exit_code = run_claude_with_renderer(claude_cmd, prompt_file)
+        except KeyboardInterrupt:
+            print(f"\n{YELLOW}[SE3 Loop] Interrupted by user{RESET}")
+            exit_code = 130
         finally:
             prompt_file.unlink(missing_ok=True)
 
@@ -285,6 +294,9 @@ def run_exclusive_loop(
             print(f"\n{GREEN}[SE3 Loop] Iteration {iteration} completed successfully{RESET}")
         elif exit_code == 124:
             print(f"\n{YELLOW}[SE3 Loop] Iteration {iteration} timed out{RESET}")
+        elif exit_code == 130:
+            print(f"\n{YELLOW}[SE3 Loop] Iteration {iteration} interrupted{RESET}")
+            break
         else:
             print(f"\n{YELLOW}[SE3 Loop] Iteration {iteration} exited with code {exit_code}{RESET}")
 
