@@ -192,6 +192,47 @@ def fc_cmd(
     """Alias for 'full-cycle' - Run the complete start-work-done workflow in one command."""
     _full_cycle_cmd_impl(description, project_root, quick, format)
 
+
+@app.command(name="loop")
+def loop_cmd(
+    prompt: str = typer.Argument(..., help="Description of work for each iteration"),
+    iterations: int = typer.Option(10, "--iterations", "-n", help="Number of iterations (default: 10)"),
+    project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
+    quick: bool = typer.Option(False, "--quick", "-q", help="Quick mode - use 'small' workflow"),
+    reset: bool = typer.Option(False, "--reset", "-r", help="Reset loop state and start over"),
+    format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
+):
+    """Run SE3 workflow in a loop for multiple iterations.
+
+    Each iteration creates a new change, implements it, commits, and continues.
+    Run this command repeatedly until all iterations are complete.
+
+    Examples:
+        se3 loop "refactor module" --iterations 5
+        se3 loop "add test case" -n 20 --quick
+        se3 loop "process item" --reset  # Start over
+    """
+    from .commands.loop import run_loop_iteration, print_text_report, print_json_report
+
+    root = Path(project_root).resolve()
+
+    # Handle reset
+    if reset:
+        state_file = root / ".se3-loop-state.json"
+        if state_file.exists():
+            state_file.unlink()
+        print("Loop state reset. Starting fresh.")
+
+    result = run_loop_iteration(prompt, project_root, iterations, quick)
+
+    if format == "json":
+        print_json_report(result)
+    else:
+        print_text_report(result)
+
+    raise typer.Exit(code=0)
+
+
 # Register handoff as a direct command (not a sub-typer)
 @app.command(name="handoff")
 def handoff_cmd(
