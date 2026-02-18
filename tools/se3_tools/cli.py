@@ -126,6 +126,17 @@ def work_cmd(
     """Start or continue working on a change — the SDD workflow driver."""
     from .commands.work import run_work, print_text_report, print_json_report
     result = run_work(project_root, change_name, new, advance)
+
+    # Check for session guard error
+    if "error" in result:
+        typer.echo(f"Error: {result['error']}", err=True)
+        typer.echo(result.get("message", ""), err=True)
+        if result.get("actions"):
+            typer.echo("\nSuggested actions:", err=True)
+            for action in result["actions"]:
+                typer.echo(f"  - {action.get('type')}: {action.get('reason', '')}", err=True)
+        raise typer.Exit(code=1)
+
     if format == "json":
         print_json_report(result)
     else:
@@ -194,6 +205,17 @@ def done_cmd(
     """End an SE3 session — compute shutdown actions for the agent."""
     from .commands.done import run_session_done, print_text_report, print_json_report
     state = run_session_done(project_root)
+
+    # Check for session guard error
+    if "error" in state:
+        typer.echo(f"Error: {state['error']}", err=True)
+        typer.echo(state.get("message", ""), err=True)
+        if state.get("actions"):
+            typer.echo("\nSuggested actions:", err=True)
+            for action in state["actions"]:
+                typer.echo(f"  - {action.get('type')}: {action.get('reason', '')}", err=True)
+        raise typer.Exit(code=1)
+
     if format == "json":
         print_json_report(state)
     else:

@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.12.7"  # Fix: start.py test_baseline logic, done.py exit code, spec command refs
+SE3_FRAMEWORK_VERSION = "2.12.8"  # Fix: version sync, output/ command files, done.py error handling

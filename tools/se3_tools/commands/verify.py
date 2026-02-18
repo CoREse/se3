@@ -142,7 +142,7 @@ def print_text_report(results: Dict[str, Any]) -> None:
         results: Verification results dict
     """
     print(f"\n{'=' * 60}")
-    print(f"Change Verification Report: {results['change']}")
+    print(f"Change Verification Report: {results.get('change', 'unknown')}")
     print(f"{'=' * 60}")
 
     if 'error' in results and results['error']:
