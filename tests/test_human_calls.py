@@ -428,3 +428,173 @@ type: action
         call = self.store.parse_call_file(filepath)
 
         assert call.response == "这是人类的回复。"
+
+
+class TestArchiveFunctionality:
+    """Test archiving functionality."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.store = HumanCallStore(self.tmpdir)
+
+    def test_archive_completed_calls_dry_run(self):
+        """Should preview archiving without moving files in dry-run mode."""
+        # Create a completed call by creating and renaming
+        call = self.store.create_call("Completed Call", "Test context")
+        original_path = call.file_path
+        completed_path = original_path.with_suffix(".completed.md")
+        original_path.rename(completed_path)
+
+        # Re-initialize store to pick up the completed file
+        self.store = HumanCallStore(self.tmpdir)
+
+        # Archive with dry-run (use all_completed to bypass age check)
+        archived = self.store.archive_completed_calls(all_completed=True, dry_run=True)
+
+        # Should report the call but not move it
+        assert len(archived) == 1
+        assert archived[0]["title"] == "Completed Call"
+
+        # Archive directory should be empty (dry-run)
+        archive_dir = Path(self.tmpdir) / "archive"
+        assert not any(archive_dir.glob("*.md"))
+
+    def test_archive_completed_calls_actual_move(self):
+        """Should actually move files when not in dry-run mode."""
+        # Create a completed call
+        call = self.store.create_call("Completed Call", "Test context")
+        original_path = call.file_path
+
+        # Mark as completed by renaming file
+        completed_path = original_path.with_suffix(".completed.md")
+        original_path.rename(completed_path)
+
+        # Re-initialize store to pick up the completed file
+        self.store = HumanCallStore(self.tmpdir)
+
+        # Archive the call (use all_completed to bypass age check)
+        archived = self.store.archive_completed_calls(all_completed=True, dry_run=False)
+
+        # Should have moved the file
+        assert len(archived) == 1
+        assert not completed_path.exists()
+
+        # File should be in archive
+        archive_dir = Path(self.tmpdir) / "archive"
+        archived_files = list(archive_dir.glob("*.md"))
+        assert len(archived_files) == 1
+
+    def test_archive_respects_days_old(self):
+        """Should only archive calls older than specified days."""
+        # Create a completed call
+        call = self.store.create_call("Recent Call", "Test context")
+        original_path = call.file_path
+        completed_path = original_path.with_suffix(".completed.md")
+        original_path.rename(completed_path)
+
+        # Re-initialize store
+        self.store = HumanCallStore(self.tmpdir)
+
+        # Try to archive with 30 days (should not archive recent call)
+        archived = self.store.archive_completed_calls(days_old=30, dry_run=True)
+
+        # Should not find any calls to archive (recent call)
+        assert len(archived) == 0
+
+    def test_archive_all_completed_flag(self):
+        """Should archive all completed calls when all_completed=True."""
+        # Create a completed call
+        call = self.store.create_call("Completed Call", "Test context")
+        original_path = call.file_path
+        completed_path = original_path.with_suffix(".completed.md")
+        original_path.rename(completed_path)
+
+        # Re-initialize store
+        self.store = HumanCallStore(self.tmpdir)
+
+        # Archive all completed regardless of age
+        archived = self.store.archive_completed_calls(all_completed=True, dry_run=False)
+
+        assert len(archived) == 1
+        assert archived[0]["title"] == "Completed Call"
+
+    def test_get_archive_stats_empty(self):
+        """Should return empty stats when no archived calls."""
+        stats = self.store.get_archive_stats()
+
+        assert stats["total_archived"] == 0
+        assert stats["by_status"]["completed"] == 0
+        assert stats["by_status"]["expired"] == 0
+        assert stats["oldest_archive"] is None
+        assert stats["newest_archive"] is None
+
+    def test_get_archive_stats_with_calls(self):
+        """Should return correct stats for archived calls."""
+        # Create and archive a completed call
+        call = self.store.create_call("Archived Call", "Test context")
+        original_path = call.file_path
+        completed_path = original_path.with_suffix(".completed.md")
+        original_path.rename(completed_path)
+
+        # Re-initialize and archive
+        self.store = HumanCallStore(self.tmpdir)
+        self.store.archive_completed_calls(all_completed=True, dry_run=False)
+
+        # Get stats
+        stats = self.store.get_archive_stats()
+
+        assert stats["total_archived"] == 1
+        assert stats["by_status"]["completed"] == 1
+        assert stats["archive_dir"] == str(Path(self.tmpdir) / "archive")
+
+    def test_restore_from_archive(self):
+        """Should restore a call from archive."""
+        # Create and archive a call
+        call = self.store.create_call("Restorable Call", "Test context")
+        original_path = call.file_path
+        call_id = call.id
+        completed_path = original_path.with_suffix(".completed.md")
+        original_path.rename(completed_path)
+
+        # Re-initialize and archive
+        self.store = HumanCallStore(self.tmpdir)
+        self.store.archive_completed_calls(all_completed=True, dry_run=False)
+
+        # Verify it's archived
+        assert not completed_path.exists()
+
+        # Restore the call
+        restored = self.store.restore_from_archive(call_id)
+
+        assert restored is not None
+        assert restored.title == "Restorable Call"
+        assert restored.file_path.exists()
+
+    def test_restore_not_found(self):
+        """Should return None when call not found in archive."""
+        restored = self.store.restore_from_archive("nonexistent-id")
+        assert restored is None
+
+    def test_archive_preserves_metadata(self):
+        """Should preserve call metadata when archiving."""
+        # Create a call with metadata
+        call = self.store.create_call(
+            "Metadata Call",
+            "Test context",
+            call_type=CallType.DECISION,
+            priority=CallPriority.HIGH,
+            metadata={"key": "value", "number": 42}
+        )
+        original_path = call.file_path
+        completed_path = original_path.with_suffix(".completed.md")
+        original_path.rename(completed_path)
+
+        # Re-initialize and archive
+        self.store = HumanCallStore(self.tmpdir)
+        archived = self.store.archive_completed_calls(all_completed=True, dry_run=False)
+
+        assert len(archived) == 1
+
+        # Verify archived info has metadata
+        assert archived[0]["id"] is not None
+        assert archived[0]["title"] == "Metadata Call"

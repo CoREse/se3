@@ -376,6 +376,8 @@ language: {language}
                 status = CallStatus.RESPONDED
             elif filepath.suffix == ".processing" or filepath.name.endswith(".processing.md"):
                 status = CallStatus.PROCESSING
+            elif filepath.suffix == ".completed" or filepath.name.endswith(".completed.md"):
+                status = CallStatus.COMPLETED
 
             # Extract response if present
             response = self._extract_section(body, self.RESPONSE_HEADERS)
@@ -781,6 +783,207 @@ language: {language}
         """
         calls = [c.to_dict() for c in self.get_all_calls(include_completed)]
         output_path.write_text(json.dumps(calls, indent=2, default=str), encoding="utf-8")
+
+    def _get_archive_dir(self) -> Path:
+        """Get the archive directory path.
+
+        Returns:
+            Path to the archive directory
+        """
+        archive_dir = self.calls_dir / "archive"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        return archive_dir
+
+    def archive_completed_calls(
+        self,
+        days_old: int = 30,
+        dry_run: bool = False,
+        all_completed: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Archive completed/expired calls older than N days.
+
+        Args:
+            days_old: Minimum age in days for calls to be archived (default 30)
+            dry_run: If True, only preview what would be archived without moving files
+            all_completed: If True, archive all completed calls regardless of age
+
+        Returns:
+            List of archived call info dicts with keys: id, title, file_path, archive_path
+        """
+        archived = []
+        archive_dir = self._get_archive_dir()
+
+        # Calculate cutoff date for age-based archiving
+        if not all_completed:
+            cutoff = datetime.now(timezone.utc) - timedelta(days=days_old)
+        else:
+            cutoff = datetime.now(timezone.utc)  # All completed calls will pass
+
+        # Get all calls including completed
+        all_calls = self.get_all_calls(include_completed=True)
+
+        for call in all_calls:
+            # Archive completed, expired, or responded calls
+            if call.status not in (CallStatus.COMPLETED, CallStatus.EXPIRED, CallStatus.RESPONDED):
+                continue
+
+            # Check age unless all_completed is True
+            if not all_completed:
+                # Use response_timestamp if available, otherwise use created
+                check_time = call.response_timestamp or call.created
+                if check_time and check_time.tzinfo is None:
+                    check_time = check_time.replace(tzinfo=timezone.utc)
+                if check_time and check_time >= cutoff:
+                    continue
+
+            # Determine archive path
+            archive_path = archive_dir / call.file_path.name
+
+            # Handle name collisions
+            counter = 1
+            original_archive_path = archive_path
+            while archive_path.exists() and not dry_run:
+                stem = original_archive_path.stem
+                suffix = original_archive_path.suffix
+                archive_path = archive_dir / f"{stem}_{counter}{suffix}"
+                counter += 1
+
+            archived_info = {
+                "id": call.id,
+                "title": call.title,
+                "status": call.status.value,
+                "file_path": str(call.file_path),
+                "archive_path": str(archive_path),
+                "created": call.created.isoformat() if call.created else None,
+                "response_timestamp": call.response_timestamp.isoformat() if call.response_timestamp else None,
+            }
+
+            if not dry_run:
+                # Move the file to archive
+                if call.file_path.exists():
+                    call.file_path.rename(archive_path)
+
+                    # Update tracking - remove from active tracking
+                    path_str = str(call.file_path)
+                    if path_str in self._file_hashes:
+                        del self._file_hashes[path_str]
+                    if path_str in self._file_mtimes:
+                        del self._file_mtimes[path_str]
+                    if path_str in self._call_cache:
+                        del self._call_cache[path_str]
+
+                    # Add to archive tracking
+                    self._file_hashes[str(archive_path)] = self._compute_file_hash(archive_path)
+                    self._file_mtimes[str(archive_path)] = archive_path.stat().st_mtime
+
+            archived.append(archived_info)
+
+        return archived
+
+    def get_archive_stats(self) -> Dict[str, Any]:
+        """Get statistics about archived calls.
+
+        Returns:
+            Dict with archive statistics including:
+            - total_archived: Total number of archived calls
+            - by_status: Count by status (completed, expired)
+            - by_month: Count by month archived
+            - oldest_archive: Date of oldest archived call
+            - newest_archive: Date of newest archived call
+            - archive_dir: Path to archive directory
+        """
+        archive_dir = self._get_archive_dir()
+        archived_calls = []
+
+        # Parse all archived call files
+        for filepath in archive_dir.glob("*.md"):
+            if not filepath.is_file():
+                continue
+            call = self.parse_call_file(filepath)
+            if call:
+                archived_calls.append(call)
+
+        # Calculate statistics
+        stats = {
+            "total_archived": len(archived_calls),
+            "by_status": {"completed": 0, "expired": 0, "other": 0},
+            "by_month": {},
+            "oldest_archive": None,
+            "newest_archive": None,
+            "archive_dir": str(archive_dir),
+        }
+
+        if not archived_calls:
+            return stats
+
+        timestamps = []
+        for call in archived_calls:
+            # Count by status
+            if call.status == CallStatus.COMPLETED:
+                stats["by_status"]["completed"] += 1
+            elif call.status == CallStatus.EXPIRED:
+                stats["by_status"]["expired"] += 1
+            else:
+                stats["by_status"]["other"] += 1
+
+            # Get timestamp for date calculations
+            check_time = call.response_timestamp or call.created
+            if check_time:
+                if check_time.tzinfo is None:
+                    check_time = check_time.replace(tzinfo=timezone.utc)
+                timestamps.append(check_time)
+
+                # Count by month (use response_timestamp or created)
+                month_key = check_time.strftime("%Y-%m")
+                stats["by_month"][month_key] = stats["by_month"].get(month_key, 0) + 1
+
+        if timestamps:
+            stats["oldest_archive"] = min(timestamps).isoformat()
+            stats["newest_archive"] = max(timestamps).isoformat()
+
+        return stats
+
+    def restore_from_archive(self, call_id: str) -> Optional[HumanCall]:
+        """Restore a call from archive back to active calls.
+
+        Args:
+            call_id: The ID of the call to restore
+
+        Returns:
+            Restored HumanCall or None if not found
+        """
+        archive_dir = self._get_archive_dir()
+
+        # Find the archived file by call_id
+        for filepath in archive_dir.glob("*.md"):
+            if not filepath.is_file():
+                continue
+
+            # Check if this file matches the call_id
+            if filepath.stem.startswith(call_id) or call_id in filepath.stem:
+                # Move back to calls directory
+                restore_path = self.calls_dir / filepath.name
+
+                # Handle name collisions
+                counter = 1
+                original_restore_path = restore_path
+                while restore_path.exists():
+                    stem = original_restore_path.stem
+                    suffix = original_restore_path.suffix
+                    restore_path = self.calls_dir / f"{stem}_{counter}{suffix}"
+                    counter += 1
+
+                filepath.rename(restore_path)
+
+                # Parse and cache the restored call
+                call = self.parse_call_file(restore_path)
+                if call:
+                    self._file_hashes[str(restore_path)] = self._compute_file_hash(restore_path)
+                    self._file_mtimes[str(restore_path)] = restore_path.stat().st_mtime
+                    self._call_cache[str(restore_path)] = call
+                    return call
+
+        return None
 
 
 # Backwards compatibility: maintain the old discover_human_calls function

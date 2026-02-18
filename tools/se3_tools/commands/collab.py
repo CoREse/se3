@@ -71,6 +71,12 @@ def print_status(project_root: Path):
         raise typer.Exit(0)
 
     config = json.loads(config_file.read_text())
+
+    # Get human calls counts
+    from .human_calls_cmd import get_pending_calls_count, get_responded_calls_count
+    pending_calls = get_pending_calls_count(project_root)
+    responded_calls = get_responded_calls_count(project_root)
+
     typer.echo(f"\n{'=' * 60}")
     typer.echo("SE3 Collaboration Status")
     typer.echo(f"{'=' * 60}")
@@ -80,6 +86,14 @@ def print_status(project_root: Path):
     typer.echo(f"  Status:     {config.get('status', 'unknown')}")
     typer.echo(f"  Created:    {config.get('created_at', 'unknown')}")
     typer.echo(f"  Workers:    max {config.get('max_parallel_workers', 3)}")
+
+    # Show human calls summary
+    if pending_calls > 0 or responded_calls > 0:
+        typer.echo(f"\n  Human Calls:")
+        if pending_calls > 0:
+            typer.echo(f"    ○ Pending:   {pending_calls}")
+        if responded_calls > 0:
+            typer.echo(f"    ◉ Responded: {responded_calls} (waiting to be processed)")
 
     # List tasks
     tasks_dir = collab_dir / "tasks"
