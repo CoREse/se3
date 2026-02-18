@@ -208,9 +208,10 @@ def run_exclusive_loop(
 
         print(f"{CYAN}[SE3 Loop] Creating change: {change_name}{RESET}")
 
-        # Create the change using openspec
+        # Create the change using openspec (find in PATH)
+        openspec_cmd = shutil.which("openspec") or "openspec"
         result = subprocess.run(
-            ["openspec", "new", "change", change_name],
+            [openspec_cmd, "new", "change", change_name],
             cwd=root,
             capture_output=True,
             text=True
