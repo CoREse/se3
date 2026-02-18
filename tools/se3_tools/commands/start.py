@@ -90,7 +90,8 @@ def check_openspec(project_root: Path) -> Dict[str, Any]:
     available = result.returncode == 0
 
     openspec_dir = project_root / "openspec"
-    claude_openspec_dir = project_root / ".claude" / "commands" / "openspec"
+    # OpenSpec installs commands to .claude/commands/opsx/ (not openspec/)
+    claude_openspec_dir = project_root / ".claude" / "commands" / "opsx"
 
     # Core openspec directory structure exists
     core_initialized = (
@@ -399,7 +400,7 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not openspec.get("core_initialized"):
             reason = "openspec/ directory missing, needs initialization"
         elif not openspec.get("claude_initialized"):
-            reason = ".claude/commands/openspec/ missing, needs 'openspec init --tools claude'"
+            reason = ".claude/commands/opsx/ missing, needs 'openspec init --tools claude'"
         else:
             reason = "openspec not fully initialized"
         actions.append({

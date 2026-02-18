@@ -95,10 +95,18 @@ def initialize_project(
 
     # 3. Create se3.config.yaml if --with-config flag
     if with_config:
-        config_template_path = Path("/data/cre/workspace/se3.0/output/se3.config.yaml")
+        config_template_path = templates_dir / "se3.config.yaml"
         config_path = Path("se3.config.yaml")
-        copy_file(config_template_path, config_path)
-        typer.echo(f"Created {config_path}")
+        if config_template_path.exists():
+            copy_file(config_template_path, config_path)
+            typer.echo(f"Created {config_path}")
+        else:
+            typer.echo(
+                typer.style(
+                    f"Warning: Config template not found at {config_template_path}",
+                    fg=typer.colors.YELLOW,
+                )
+            )
 
     # 4. Create other required directories
     for dir_name in ["human-calls", "output"]:
