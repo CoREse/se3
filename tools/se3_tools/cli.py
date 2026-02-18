@@ -27,7 +27,7 @@ def get_framework_version() -> str:
         raise ValueError("Cannot find SE3_FRAMEWORK_VERSION definition in __init__.py")
 
     return match.group(1)
-from .commands import lint, status, sync, verify, update, collab, commit
+from .commands import lint, status, sync, verify, update, collab, commit, human_calls_cmd
 from .commands.update import get_installed_se3_version
 from .commands.init import initialize_project
 
@@ -91,6 +91,7 @@ app.add_typer(verify.app, name="verify", help="Verify spec coverage")
 app.add_typer(update.app, name="update", help="Update SE 3.0 framework to latest version")
 app.add_typer(collab.app, name="collab", help="Manage git-worktree multi-agent collaboration")
 app.add_typer(commit.app, name="commit", help="Commit changes with SE3 verification")
+app.add_typer(human_calls_cmd.app, name="human-calls", help="Manage human calls")
 
 # Register direct commands (simple single-command tools with positional args)
 # These are registered as direct commands to avoid sub-typer nesting issues
