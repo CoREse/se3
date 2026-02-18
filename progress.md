@@ -215,3 +215,5 @@
 - `0e77aa8` feat(loop): add exclusive execution mode (--exec) (4 files)
 - `7d1824b` refactor(loop): make exclusive execution the default mode (4 files)
 - `93a1967` feat(se3): add missing SE3 1.x features (6 files)
+- `d30abe9` fix(update): sync command files during se3 update (6 files)
+- `762f64d` docs: add self-bootstrapping version update workflow (1 files)

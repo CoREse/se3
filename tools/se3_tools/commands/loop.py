@@ -9,6 +9,7 @@ Usage:
 """
 
 import json
+import os
 import re
 import subprocess
 import shutil
@@ -143,14 +144,20 @@ $PROMPT
 5. 运行 /se3:done 结束会话)
 CLAUDE_EOF
 
-    # Execute Claude Code
+    # Execute Claude Code (auto-exit after completion with --max-turns 0)
+    # Timeout after 30 minutes to prevent infinite hanging
     echo "------------------------------------------------------------"
-    if "$CLAUDE_CMD" --dangerously-skip-permissions "$PROMPT_FILE" 2>&1; then
+    if timeout 1800 "$CLAUDE_CMD" --dangerously-skip-permissions --print --output-format text --max-turns 0 "$PROMPT_FILE" 2>&1; then
         echo "------------------------------------------------------------"
         echo "[Claude] Session completed"
     else
+        EXIT_CODE=$?
         echo "------------------------------------------------------------"
-        echo "[Claude] Session exited (may be normal)"
+        if [ $EXIT_CODE -eq 124 ]; then
+            echo "[Claude] Session timed out (30 min limit)"
+        else
+            echo "[Claude] Session exited (code: $EXIT_CODE)"
+        fi
     fi
 
     rm -f "$PROMPT_FILE"
@@ -223,9 +230,12 @@ def run_exclusive_loop(
     print(f"{'=' * 60}")
     print("")
 
-    # Execute the script
+    # Execute the script with modified environment (clear CLAUDECODE for nested sessions)
+    env = {**dict(os.environ)}
+    env.pop("CLAUDECODE", None)  # Avoid nested session detection
+
     try:
-        subprocess.run([str(script_path)], check=False)
+        subprocess.run([str(script_path)], check=False, env=env)
     except KeyboardInterrupt:
         print("")
         print("\n[SE3 Loop] Interrupted by user")
