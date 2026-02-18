@@ -1531,3 +1531,4 @@ openspec/specs/se3-workflows/spec.md   | 234 +++++++++++++++++++++++++++++++++
 ### Next Steps
 - Continue with next SE3 Loop iteration
 - `3aa9206` Iteration 95 complete: Comprehensive project review - verified all 1.x spec details match openspec, implementation aligns with specifications, all 207 tests pass, no bugs found. (1 files)
+- `ca46f65` docs: update progress.md with Iteration 95 summary (1 files)
