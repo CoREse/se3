@@ -11,8 +11,11 @@ No longer depends on status.md — all state is computed live.
 
 # Verify: status-diagnostics/Compute git status
 # Verify: status-diagnostics/Detect active changes
+# Verify: status-diagnostics/Show collab status
 # Verify: status-diagnostics/Unprocessed response
 # Verify: status-diagnostics/Long-pending call
+# Verify: status-diagnostics/Failed collab tasks
+# Verify: status-diagnostics/Blocked collab tasks
 # Verify: status-diagnostics/Healthy project
 # Verify: status-diagnostics/Issues found
 

@@ -12,6 +12,15 @@ Usage modes:
 4. --launch-worker: Launch worker for a task (internal use)
 """
 
+# Verify: agent-team/Start daemon collaboration
+# Verify: agent-team/Check collab status
+# Verify: git-worktree-collab/Three-Layer Architecture (Simplified)
+# Verify: git-worktree-collab/Task File Protocol (Unchanged)
+# Verify: git-worktree-collab/Manager-Worker Async Boundary
+# Verify: git-worktree-collab/Orchestrator Event Loop (Bash)
+# Verify: git-worktree-collab/Health Monitoring (Simplified)
+# Verify: git-worktree-collab/Human-as-MCP (Direct)
+
 import json
 import os
 import subprocess

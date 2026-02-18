@@ -1,5 +1,7 @@
 """Spec lint command for SE 3.0."""
 
+# Verify: se3-scaffold/Spec validation
+
 import re
 from pathlib import Path
 from typing import Dict, List, Any

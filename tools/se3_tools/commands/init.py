@@ -1,5 +1,9 @@
 """SE 3.0 init command - Initialize a new SE 3.0 project."""
 
+# Verify: se3-scaffold/SE3.md Generation via se3 init
+# Verify: se3-scaffold/New project adopts SE 3.0
+# Verify: se3-scaffold/Project initialization
+
 import os
 import hashlib
 import subprocess

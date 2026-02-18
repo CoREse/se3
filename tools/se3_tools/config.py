@@ -5,6 +5,11 @@ Supports two-level config:
 - Project: se3.config.yaml (project-specific, overrides global)
 """
 
+# Verify: se3-config/Using default configuration
+# Verify: se3-config/Custom configuration
+# Verify: se3-config/Global configuration
+# Verify: se3-config/Project overrides global
+
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 

@@ -6,6 +6,11 @@ logic with step tracking and adaptive formality.
 Workflow state is persisted in openspec/changes/<name>/.se3-state.json
 """
 
+# Verify: agent-team/Task distribution via native Task tool
+# Verify: agent-team/Conflict avoidance
+# Verify: agent-team/Role assignment via prompt
+# Verify: agent-team/Default to Task Tool mode
+
 import json
 import re
 import subprocess
@@ -15,6 +20,8 @@ from datetime import datetime
 from enum import Enum
 
 import typer
+
+from ..config import load_session_config
 
 app = typer.Typer()
 
@@ -239,6 +246,7 @@ def compute_step_actions(
     workflow: str,
     current_step: str,
     change_path: Path,
+    project_root: Path = None,
 ) -> List[Dict[str, Any]]:
     """Compute actions for the current workflow step."""
     actions = []
@@ -312,7 +320,7 @@ def compute_step_actions(
 
     elif current_step == "design":
         # Check if design is actually needed
-        has_complexity = _check_change_complexity(change_path)
+        has_complexity = _check_change_complexity(change_path, project_root)
         if has_complexity:
             actions.append({
                 "type": "write_design",
@@ -394,7 +402,7 @@ def compute_step_actions(
     return actions
 
 
-def _check_change_complexity(change_path: Path) -> bool:
+def _check_change_complexity(change_path: Path, project_root: Path = None) -> bool:
     """Check if change is complex enough to need design doc."""
     # Check for indicators of complexity
     # - Multiple spec files
@@ -419,7 +427,13 @@ def _check_change_complexity(change_path: Path) -> bool:
                 return True
 
     tasks = read_tasks(change_path)
-    if len(tasks) > 5:
+    # Use configured max_tasks_per_change (default 5)
+    if project_root:
+        session_config = load_session_config(project_root)
+        max_tasks = session_config.get("max_tasks_per_change", 5)
+    else:
+        max_tasks = 5
+    if len(tasks) > max_tasks:
         return True
 
     return False
@@ -582,7 +596,7 @@ def run_work(
             "workflow": state["workflow"],
             "current_step": state["current_step"],
             "actions": compute_step_actions(
-                actual_change_name, state["workflow"], state["current_step"], change_path
+                actual_change_name, state["workflow"], state["current_step"], change_path, root
             ),
         }
 
@@ -674,7 +688,7 @@ def run_work(
 
     # Compute actions
     if current_step:
-        actions = compute_step_actions(change_name, workflow, current_step, change_path)
+        actions = compute_step_actions(change_name, workflow, current_step, change_path, root)
     else:
         # All steps complete
         actions = [{"type": "complete", "reason": "All workflow steps complete"}]
