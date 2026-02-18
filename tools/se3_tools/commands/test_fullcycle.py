@@ -37,12 +37,13 @@ class TestSanitizeChangeName:
         assert len(result) <= 50
 
     def test_empty_description(self):
-        """Should handle empty description."""
-        assert sanitize_change_name("") == ""
+        """Should handle empty description with fallback name."""
+        result = sanitize_change_name("")
+        assert result.startswith("loop-")
 
     def test_description_with_slashes(self):
-        """Should preserve slashes for namespacing."""
-        assert sanitize_change_name("feature/add login") == "feature/add-login"
+        """Should convert slashes to hyphens for filesystem safety."""
+        assert sanitize_change_name("feature/add login") == "feature-add-login"
 
 
 class TestRunFullCycle:
