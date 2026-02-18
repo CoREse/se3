@@ -157,9 +157,9 @@ The `se3:fc` (full-cycle) command SHALL run complete start-work-done workflow in
 
 **Interface:**
 ```bash
-se3 full-cycle "description of work" [--quick] --json
+se3 full-cycle "description of work" [--quick] --format json
 # Alias:
-se3 fc "description of work" [--quick] --json
+se3 fc "description of work" [--quick] --format json
 ```
 
 **JSON Response Fields:**
@@ -176,12 +176,12 @@ se3 fc "description of work" [--quick] --json
 - `handoff`: Complete session via `se3 handoff`
 
 #### Scenario: Quick task execution
-- **WHEN** `se3:fc "fix typo" --quick` is executed
+- **WHEN** `se3 fc "fix typo" --quick` is executed
 - **THEN** it runs the full workflow without creating formal change
 - **AND** completes in a single session
 
 #### Scenario: Complex task detection
-- **WHEN** `se3:fc` is used for a complex task requiring design/specs
+- **WHEN** `se3 fc` is used for a complex task requiring design/specs
 - **THEN** it should recommend using separate `/se3:start` and `/se3:work` instead
 
 ### Requirement: se3 commit Command
