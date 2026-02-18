@@ -399,7 +399,7 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
         if not openspec.get("core_initialized"):
             reason = "openspec/ directory missing, needs initialization"
         elif not openspec.get("claude_initialized"):
-            reason = ".claude/commands/opsx/ missing, needs 'openspec init --tools claude'"
+            reason = ".claude/commands/openspec/ missing, needs 'openspec init --tools claude'"
         else:
             reason = "openspec not fully initialized"
         actions.append({
