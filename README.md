@@ -193,6 +193,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.8.0 | 2026-02-18 | Add `se3 loop --exec` exclusive execution mode. Auto-generates bash while-loop script, takes over terminal, runs Claude Code for each iteration automatically. Supports all loop flags including `--iterations`, `--quick`. |
 | 2.7.0 | 2026-02-18 | Add `se3 loop` command for running SE3 workflow repeatedly. Creates a new change for each iteration, tracks progress via `.se3-loop-state.json`, continues from interruption. Default 10 iterations, supports `--iterations`, `--quick`, and `--reset` flags. |
 | 2.6.1 | 2026-02-18 | Fix collab mode detection in `se3 done` and `se3 handoff`. Interactive sessions no longer incorrectly detect as collab agents when `.collab/config.json` exists. Only `SE3_AGENT_ROLE` env var indicates collab mode. |
 | 2.6.0 | 2026-02-18 | Add "Interpretation & Recommendations" section to human calls. Explains what the call is about, how to handle it, and how to respond. Supports Chinese and English. |

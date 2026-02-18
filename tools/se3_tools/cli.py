@@ -200,20 +200,28 @@ def loop_cmd(
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
     quick: bool = typer.Option(False, "--quick", "-q", help="Quick mode - use 'small' workflow"),
     reset: bool = typer.Option(False, "--reset", "-r", help="Reset loop state and start over"),
+    exec_mode: bool = typer.Option(False, "--exec", "-e", help="Exclusive mode: auto-execute loop with bash while loop"),
     format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
 ):
     """Run SE3 workflow in a loop for multiple iterations.
 
-    Each iteration creates a new change, implements it, commits, and continues.
-    Run this command repeatedly until all iterations are complete.
+    Two modes:
+    1. Default: Creates change, reports to user, exits (manual iteration)
+    2. Exclusive (--exec): Generates bash script, auto-executes all iterations
 
     Examples:
-        se3 loop "refactor module" --iterations 5
-        se3 loop "add test case" -n 20 --quick
-        se3 loop "process item" --reset  # Start over
+        se3 loop "refactor module" --iterations 5           # Manual mode
+        se3 loop "add test case" -n 20 --quick              # Manual mode, quick
+        se3 loop "process item" --exec --iterations 10      # Exclusive auto-execute
     """
-    from .commands.loop import run_loop_iteration, print_text_report, print_json_report
+    from .commands.loop import run_loop_iteration, print_text_report, print_json_report, run_exclusive_loop
 
+    # Exclusive mode: auto-execute with bash loop
+    if exec_mode:
+        run_exclusive_loop(prompt, project_root, iterations, quick)
+        raise typer.Exit(code=0)
+
+    # Normal mode: prepare iteration and report
     root = Path(project_root).resolve()
 
     # Handle reset
