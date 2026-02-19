@@ -481,6 +481,7 @@ def run_loop_collab(
             iterations=iterations,
             project_root=root,
             max_parallel=3,
+            mock=mock,
         )
         return await runner.run()
 

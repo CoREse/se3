@@ -46,11 +46,13 @@ class LoopCollabRunner:
         iterations: int,
         project_root: Path,
         max_parallel: int = 3,
+        mock: bool = False,
     ):
         self.base_prompt = base_prompt
         self.iterations = iterations
         self.project_root = project_root
         self.max_parallel = max_parallel
+        self.mock = mock
         self.previous_summaries: list[CollabSummary] = []
         self.renderer = CollabRenderer()
         self.console = self.renderer.console
@@ -159,34 +161,31 @@ class LoopCollabRunner:
                 self.project_root,
                 self.renderer,
                 max_parallel=self.max_parallel,
+                mock=self.mock,
             )
         except Exception as e:
             self.console.print(f"[red]Failed to create orchestrator: {e}[/red]")
             return None
 
         # Start live display
+        success = False
         try:
             with self.renderer.start_live():
                 success = await orchestrator.run(prompt)
         except asyncio.CancelledError:
             # Handle graceful shutdown on interrupt
             self.console.print("[yellow]Iteration cancelled by user[/yellow]")
-            # Ensure cleanup happens even on cancellation
-            if orchestrator:
-                try:
-                    await orchestrator.cleanup()
-                except Exception:
-                    pass  # Ignore cleanup errors during cancellation
             raise  # Re-raise to allow proper handling upstream
         except Exception as e:
             self.console.print(f"[red]Error during collab iteration: {e}[/red]")
-            # Ensure cleanup happens even on error
+            return None
+        finally:
+            # Always ensure cleanup happens, regardless of success or failure
             if orchestrator:
                 try:
                     await orchestrator.cleanup()
                 except Exception:
                     pass  # Ignore cleanup errors
-            return None
 
         if not success:
             return None
@@ -266,6 +265,21 @@ class LoopCollabRunner:
     def _extract_git_changes(self) -> list[str]:
         """Extract key changes from git."""
         changes = []
+
+        # First check if we're in a git repository
+        try:
+            git_check = subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+            )
+            if git_check.returncode != 0:
+                # Not a git repository
+                return []
+        except Exception:
+            # Git not available or other error
+            return []
 
         try:
             # Get list of changed files

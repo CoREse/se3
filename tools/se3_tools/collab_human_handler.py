@@ -87,16 +87,25 @@ class InteractiveHumanHandler:
         task_ids = {t.id for t in tasks}
 
         for call in calls:
-            # Check if call ID starts with a task ID
+            # Check if call ID starts with a task ID (most common pattern)
+            matched_task_id = None
             for task_id in task_ids:
-                if call.id.startswith(task_id) or task_id.replace("-", "_") in call.id.replace("-", "_"):
-                    # Find the task and mark it as blocked
-                    for task in tasks:
-                        if task.id == task_id and task.status == "running":
-                            task.status = "blocked"
-                            self.renderer.update_worker_status(task.id, status="blocked")
-                            break
+                # Normalize both IDs for comparison (replace underscores with hyphens)
+                normalized_call_id = call.id.replace("_", "-")
+                normalized_task_id = task_id.replace("_", "-")
+
+                # Check for exact match or prefix match
+                if normalized_call_id == normalized_task_id or normalized_call_id.startswith(f"{normalized_task_id}-"):
+                    matched_task_id = task_id
                     break
+
+            if matched_task_id:
+                # Find the task and mark it as blocked
+                for task in tasks:
+                    if task.id == matched_task_id and task.status == "running":
+                        task.status = "blocked"
+                        self.renderer.update_worker_status(task.id, status="blocked")
+                        break
 
     def _get_pending_calls(self) -> List[HumanCall]:
         """Get all pending human calls."""
@@ -166,14 +175,21 @@ class InteractiveHumanHandler:
 
     async def _interactive_mode(self, calls: List[HumanCall], tasks: List) -> bool:
         """Enter full-screen interactive mode for handling calls."""
-        # Clear screen
-        print("\033[2J\033[H", end='')
+        # Clear screen using cross-platform method
+        import shutil
+        terminal_width = shutil.get_terminal_size().columns
+        print("\n" * 2)  # Add some spacing instead of clearing
 
-        print("=" * 70)
+        print("=" * min(70, terminal_width))
         print("⚠️  ALL TASKS BLOCKED - Human Input Required")
-        print("=" * 70)
+        print("=" * min(70, terminal_width))
 
         print(f"\n{len(calls)} pending human call(s):")
+
+        # Handle case where there are no calls (shouldn't happen but be safe)
+        if not calls:
+            print("No pending calls to handle.")
+            return True
 
         for i, call in enumerate(calls, 1):
             waiting_time = self._format_waiting_time(call.created)
@@ -185,14 +201,14 @@ class InteractiveHumanHandler:
                 preview += "..."
             print(f"   Preview: {preview}")
 
-        print("\n" + "=" * 70)
+        print("\n" + "=" * min(70, terminal_width))
         print("Options for each call:")
         print("  [v] View full context")
         print("  [s] Suggest response (AI help)")
         print("  [r] Reply in $EDITOR")
         print("  [k] Skip this call")
         print("  [w] Wait for external response (exit interactive mode)")
-        print("=" * 70)
+        print("=" * min(70, terminal_width))
 
         # Process each call
         for call in calls:
@@ -240,11 +256,14 @@ class InteractiveHumanHandler:
 
     async def _view_full_context(self, call: HumanCall):
         """Display full context of a human call."""
-        print("\n" + "=" * 70)
+        import shutil
+        terminal_width = shutil.get_terminal_size().columns
+        width = min(70, terminal_width)
+        print("\n" + "=" * width)
         print(f"Full context for: {call.title}")
-        print("=" * 70)
+        print("=" * width)
         print(call.context)
-        print("=" * 70)
+        print("=" * width)
         await self._get_input("\nPress Enter to continue...")
 
     async def _handle_suggest(self, call: HumanCall):

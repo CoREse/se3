@@ -6,6 +6,7 @@ Provides real-time UI for manager decisions, worker status, and stream-json outp
 from __future__ import annotations
 
 import json
+import re
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,6 +18,10 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich.syntax import Syntax
+
+
+# Pre-compile ANSI pattern for efficiency
+_ANSI_PATTERN = re.compile(r'\x1B(?:[@-Z\-_]|\[[0-?]*[ -/]*[@-~])')
 
 
 @dataclass
@@ -320,11 +325,16 @@ class CollabRenderer:
         # Get last 30 lines from buffer
         lines = list(self.output_buffer)[-30:]
 
-        # Truncate long lines
+        # Truncate long lines (accounting for potential ANSI codes)
         truncated = []
         for line in lines:
-            if len(line) > 120:
-                line = line[:117] + "..."
+            # Strip ANSI escape sequences for length calculation
+            # but keep them in the output for styling
+            clean_line = self._strip_ansi(line)
+            if len(clean_line) > 120:
+                # Find safe truncation point (avoid cutting multi-byte chars)
+                trunc_point = self._safe_truncate_point(line, 117)
+                line = line[:trunc_point] + "..."
             truncated.append(line)
 
         content = "\n".join(truncated) if truncated else "(waiting for output...)"
@@ -336,6 +346,34 @@ class CollabRenderer:
                 title="[yellow]Output[/yellow]",
             )
         )
+
+    def _strip_ansi(self, text: str) -> str:
+        """Strip ANSI escape sequences from text."""
+        return _ANSI_PATTERN.sub('', text)
+
+    def _safe_truncate_point(self, text: str, max_len: int) -> int:
+        """Find a safe truncation point that doesn't split multi-byte characters."""
+        if len(text) <= max_len:
+            return len(text)
+
+        # In Python 3, strings are Unicode code points. We need to find a valid
+        # truncation point that doesn't split a grapheme cluster.
+        # For simplicity, we truncate at max_len and let Python handle encoding
+        # The key is to avoid splitting in the middle of a surrogate pair or
+        # combining character sequence.
+
+        # Try to find a good breaking point (space, punctuation, etc.)
+        for i in range(min(max_len, len(text)), max(0, max_len - 20), -1):
+            if i < len(text):
+                # Check if this is a safe character to break after
+                char = text[i - 1] if i > 0 else ''
+                # Safe breaking characters
+                if char in ' \t\n.,;:!?-_)]}>"\'':
+                    return i
+
+        # If no good breaking point found, just truncate at max_len
+        # Python strings handle Unicode correctly at the code point level
+        return min(max_len, len(text))
 
     def render_stream_json(self, line: str) -> dict[str, Any] | None:
         """Parse and render a stream-json line.
