@@ -683,6 +683,10 @@ class ForegroundOrchestrator:
         # Clean up prompt file
         self._cleanup_prompt_file(prompt_file)
 
+        # Merge successful task branch back to base branch (loop branch)
+        if task.status == "done" and task.exit_code == 0:
+            await self._merge_task_to_base_branch(task)
+
     async def _cleanup_worker_process(self, proc: asyncio.subprocess.Process, task: Task, timeout: float = 5.0):
         """Clean up a worker process gracefully, then forcefully if needed.
 
@@ -721,6 +725,51 @@ class ForegroundOrchestrator:
                 prompt_file.unlink()
         except Exception:
             pass  # Ignore cleanup errors
+
+    async def _merge_task_to_base_branch(self, task: Task):
+        """Merge a completed task branch back to the base branch (loop branch).
+
+        This ensures that changes made in the collab worktree are propagated
+        back to the loop branch so they can be merged to the original branch
+        when the loop completes.
+
+        Args:
+            task: The completed task to merge
+        """
+        try:
+            self.renderer.append_worker_output(
+                task.id, f"\n[Merging] {task.branch} -> {self.base_branch}\n"
+            )
+
+            # First, ensure we're in the project root (main worktree)
+            # The worktree commits are already in the git object database
+            # We just need to merge the branch from the main worktree
+
+            # Check out the base branch and merge the task branch
+            merge_proc = await asyncio.create_subprocess_exec(
+                "git", "merge", "--no-ff", task.branch, "-m", f"chore(collab): merge {task.branch}",
+                cwd=self.project_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await merge_proc.communicate()
+
+            if merge_proc.returncode == 0:
+                self.renderer.append_worker_output(
+                    task.id, f"[Merged] {task.branch} into {self.base_branch}\n"
+                )
+            else:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                self.renderer.append_worker_output(
+                    task.id, f"[Warning] Failed to merge {task.branch}: {error_msg}\n"
+                )
+                # Don't fail the task if merge fails - the changes are still in the branch
+
+        except Exception as e:
+            # Log but don't fail - the task itself succeeded
+            self.renderer.append_worker_output(
+                task.id, f"[Warning] Could not merge to base branch: {e}\n"
+            )
 
     async def _run_mock_worker(self, task: Task):
         """Run a mock worker for testing (simulates success)."""

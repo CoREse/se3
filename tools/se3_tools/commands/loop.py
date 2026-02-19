@@ -618,6 +618,61 @@ def get_loop_branch_base(project_root: Path, loop_branch: str) -> str | None:
     return None
 
 
+def infer_loop_branch_base(project_root: Path, loop_branch: str) -> str | None:
+    """Infer the base branch for a loop branch using git history.
+
+    Tries to find the most likely base branch by examining:
+    1. The branch that this branch was created from (using git merge-base)
+    2. Common branch names like master, main
+
+    Returns the inferred base branch name, or None if cannot determine.
+    """
+    # Try to find merge-base with common base branches
+    common_bases = ["master", "main", "develop", "dev"]
+
+    # Get the oldest commit on this branch
+    result = subprocess.run(
+        ["git", "rev-list", "--max-parents=0", loop_branch],
+        cwd=project_root,
+        capture_output=True,
+        text=True
+    )
+    if result.returncode != 0:
+        return None
+
+    branch_root = result.stdout.strip().split("\n")[0]
+    if not branch_root:
+        return None
+
+    # For each common base, check if loop_branch was branched from it
+    for base in common_bases:
+        # Check if base branch exists
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", base],
+            cwd=project_root,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            continue
+
+        # Check if loop_branch contains commits from this base
+        result = subprocess.run(
+            ["git", "merge-base", loop_branch, base],
+            cwd=project_root,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode == 0:
+            merge_base = result.stdout.strip()
+            # If merge-base is on the base branch and not the branch root,
+            # this is likely the correct base
+            if merge_base and merge_base != branch_root:
+                return base
+
+    return None
+
+
 def merge_loop_branch(project_root: Path, loop_branch: str, base_branch: str) -> bool:
     """Merge the loop branch back to base branch.
 
