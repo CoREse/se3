@@ -2572,8 +2572,31 @@ openspec/changes/test/.openspec.yaml |  3 --
  26 files changed, 192 insertions(+), 4 deletions(-)
 ```
 
+## 2026-02-20 Session 85 (handoff)
+
+### Done
+- fix(claude_runner): put temp .prompt files in se3/tmp/
+- fix(loop): increase inter-loop summary timeout from 60s to 300s
+- Update .claude/.session.json, .gitignore, progress.md
+
+### Commits
+- `38b5575` fix(claude_runner): put temp .prompt files in se3/tmp/ (1 files)
+- `50509ad` fix(loop): increase inter-loop summary timeout from 60s to 300s (2 files)
+- `d3ac908` Update .claude/.session.json, .gitignore, progress.md (3 files)
+
+### Files Changed
+```
+.claude/.session.json            |  4 ++--
+ .gitignore                       |  1 +
+ progress.md                      | 48 ++++++++++++++++++++++++++++++++++++++--
+ tools/se3_tools/__init__.py      |  2 +-
+ tools/se3_tools/claude_runner.py |  9 +++++---
+ tools/se3_tools/commands/loop.py |  2 +-
+ 6 files changed, 57 insertions(+), 9 deletions(-)
+```
+
 
 ## Current Session
 <!-- current-session -->
-- `0824207` fix(claude_runner): put temp .prompt files in se3/tmp/ (1 files)
-- `a4d0ffa` fix(loop): increase inter-loop summary timeout from 60s to 300s (2 files)
+- `38ededa` fix(version): correct framework version from 3.x back to 2.17.0 (2 files)
+- `30bc109` docs(readme): add complete version history for 2.15.x-2.16.x (1 files)
