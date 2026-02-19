@@ -366,12 +366,6 @@ class ForegroundOrchestrator:
                 proc.stdin.write(prompt.encode())
                 await proc.stdin.drain()
                 proc.stdin.close()
-                # Wait for stdin to close to ensure data is sent
-                try:
-                    await proc.stdin.wait_closed()
-                except (BrokenPipeError, ConnectionResetError, OSError):
-                    # Process may have already exited, which is fine
-                    pass
             else:
                 # stdin is None - process may have failed to start
                 self.renderer.update_manager("Warning: Manager process stdin is None, process may have failed to start")
@@ -633,6 +627,13 @@ class ForegroundOrchestrator:
 
         # Update task file with final status
         await self._save_task_file(task)
+
+        # Clean up prompt file
+        if prompt_file.exists():
+            try:
+                prompt_file.unlink()
+            except Exception:
+                pass  # Ignore cleanup errors
 
     async def _cleanup_worker_process(self, proc: asyncio.subprocess.Process, task: Task, timeout: float = 5.0):
         """Clean up a worker process gracefully, then forcefully if needed.
