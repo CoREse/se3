@@ -625,8 +625,9 @@ def infer_loop_branch_base(project_root: Path, loop_branch: str) -> str | None:
     1. The branch that this branch was created from (using git merge-base)
     2. Common branch names like master, main, develop, dev
 
-    The logic checks if the loop_branch shares history with a candidate base branch.
-    If merge-base finds a common ancestor, the candidate is considered the base.
+    The logic checks if the loop_branch was likely branched from a candidate base branch
+    by comparing the merge-base with the base branch's current HEAD. If they match,
+    it indicates loop_branch was likely created from that base branch.
 
     Returns the inferred base branch name, or None if cannot determine.
     """
@@ -637,28 +638,46 @@ def infer_loop_branch_base(project_root: Path, loop_branch: str) -> str | None:
     # For each common base, check if loop_branch was branched from it
     for base in common_bases:
         # Check if base branch exists
-        result = subprocess.run(
+        base_rev_result = subprocess.run(
             ["git", "rev-parse", "--verify", base],
             cwd=project_root,
             capture_output=True,
             text=True
         )
-        if result.returncode != 0:
+        if base_rev_result.returncode != 0:
             continue
 
+        base_head = base_rev_result.stdout.strip()
+
         # Find the merge-base between loop_branch and candidate base
-        result = subprocess.run(
+        merge_base_result = subprocess.run(
             ["git", "merge-base", loop_branch, base],
             cwd=project_root,
             capture_output=True,
             text=True
         )
-        if result.returncode == 0:
-            merge_base = result.stdout.strip()
-            # If we found a merge-base, this candidate is likely the base branch
-            # The merge_base is the common ancestor, which confirms they share history
-            if merge_base:
-                return base
+        if merge_base_result.returncode != 0:
+            continue
+
+        merge_base = merge_base_result.stdout.strip()
+
+        # Check if merge-base equals the base branch's HEAD
+        # This indicates loop_branch was likely created from this base branch
+        # We also check if loop_branch contains the base HEAD (fast-forward case)
+        if merge_base == base_head:
+            return base
+
+        # Alternative: check if base branch is an ancestor of loop_branch
+        # (loop_branch contains all commits from base)
+        ancestor_result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", base, loop_branch],
+            cwd=project_root,
+            capture_output=True,
+            text=True
+        )
+        if ancestor_result.returncode == 0:
+            # Base is an ancestor of loop_branch, likely the base branch
+            return base
 
     return None
 
@@ -668,6 +687,21 @@ def merge_loop_branch(project_root: Path, loop_branch: str, base_branch: str) ->
 
     Returns True if merge was successful, False otherwise.
     """
+    # Record the current branch to restore later
+    original_branch = get_current_branch(project_root)
+
+    # Check for dirty working tree (uncommitted changes)
+    status_result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=project_root,
+        capture_output=True,
+        text=True
+    )
+    if status_result.stdout.strip():
+        print(f"{YELLOW}[SE3 Loop] Warning: Working tree has uncommitted changes.{RESET}")
+        print(f"{GRAY}Please commit or stash your changes before merging.{RESET}")
+        return False
+
     # First, checkout the base branch
     result = subprocess.run(
         ["git", "checkout", base_branch],
@@ -694,6 +728,21 @@ def merge_loop_branch(project_root: Path, loop_branch: str, base_branch: str) ->
         return False
 
     print(f"{GREEN}[SE3 Loop] Successfully merged {loop_branch} into {base_branch}{RESET}")
+
+    # Restore original branch if different from base_branch
+    if original_branch != base_branch:
+        restore_result = subprocess.run(
+            ["git", "checkout", original_branch],
+            cwd=project_root,
+            capture_output=True,
+            text=True
+        )
+        if restore_result.returncode != 0:
+            print(f"{YELLOW}[SE3 Loop] Warning: Could not restore original branch '{original_branch}'{RESET}")
+            print(f"{GRAY}You are now on branch '{base_branch}'{RESET}")
+        else:
+            print(f"{CYAN}[SE3 Loop] Restored original branch: {original_branch}{RESET}")
+
     return True
 
 
