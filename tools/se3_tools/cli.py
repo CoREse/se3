@@ -347,6 +347,28 @@ def handoff_cmd(
     handoff(message=message, project_root=project_root, dry_run=dry_run, skip_commit=skip_commit)
 
 
+@app.command(name="migrate")
+def migrate_cmd(
+    project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
+    dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Show what would be migrated without making changes"),
+    force: bool = typer.Option(False, "--force", "-f", help="Proceed even if .se3/ already exists (merge mode)"),
+):
+    """Migrate legacy directory structure to new .se3/ format.
+
+    Moves directories from legacy locations to the new consolidated .se3/ structure:
+    - human-calls/ → .se3/calls/
+    - .collab/ → .se3/collab/
+    - tmp*.prompt files → cleaned up
+
+    Examples:
+        se3 migrate                    # Perform migration
+        se3 migrate --dry-run          # Preview changes
+        se3 migrate --force            # Merge with existing .se3/
+    """
+    from .commands.migrate import run_migration
+    run_migration(project_root, dry_run, force)
+
+
 @app.command(name="claude-cmd")
 def claude_cmd(
     all_cmds: bool = typer.Option(False, "--all", help="Output all commands as JSON sorted by priority"),

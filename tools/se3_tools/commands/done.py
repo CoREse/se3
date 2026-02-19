@@ -137,6 +137,42 @@ def is_in_collab_mode(project_root: Path) -> bool:
     return bool(os.environ.get("SE3_AGENT_ROLE"))
 
 
+def cleanup_tmp_files(project_root: Path, max_age_days: int = 7) -> int:
+    """Clean up temporary files in se3/tmp/ older than max_age_days.
+
+    Also cleans legacy tmp*.prompt files in root directory.
+
+    Returns number of files deleted.
+    """
+    from datetime import datetime, timedelta
+
+    deleted_count = 0
+    cutoff = datetime.now() - timedelta(days=max_age_days)
+
+    # New location: se3/tmp/ (VISIBLE, not hidden)
+    se3_tmp_dir = project_root / "se3" / "tmp"
+    if se3_tmp_dir.exists():
+        for tmp_file in se3_tmp_dir.glob("*"):
+            if tmp_file.is_file():
+                try:
+                    mtime = datetime.fromtimestamp(tmp_file.stat().st_mtime)
+                    if mtime < cutoff:
+                        tmp_file.unlink()
+                        deleted_count += 1
+                except (OSError, PermissionError):
+                    pass
+
+    # Legacy location: root tmp*.prompt files
+    for tmp_file in project_root.glob("tmp*.prompt"):
+        try:
+            tmp_file.unlink()
+            deleted_count += 1
+        except (OSError, PermissionError):
+            pass
+
+    return deleted_count
+
+
 def verify_spec_scenarios(change_path: Path) -> List[Dict[str, Any]]:
     """Verify all spec scenarios pass for a change.
 
@@ -251,7 +287,13 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "reason": f"Document remaining work for '{change['name']}'",
             })
 
-    # 4. Handoff / Finalize session
+    # 4. Cleanup temporary files
+    actions.append({
+        "type": "cleanup_tmp",
+        "reason": "Clean up temporary files older than 7 days",
+    })
+
+    # 5. Handoff / Finalize session
     actions.append({
         "type": "handoff",
         "cmd": "se3 handoff",

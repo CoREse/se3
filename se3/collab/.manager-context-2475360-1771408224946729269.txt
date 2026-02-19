@@ -1,0 +1,11 @@
+Merge conflict when merging collab/human-input-methods into master.
+Task: task-005
+
+Conflicting changes:
+Auto-merging tools/se3_tools/__init__.py
+CONFLICT (content): Merge conflict in tools/se3_tools/__init__.py
+Auto-merging tools/se3_tools/cli.py
+CONFLICT (content): Merge conflict in tools/se3_tools/cli.py
+Automatic merge failed; fix conflicts and then commit the result.
+tools/se3_tools/__init__.py
+tools/se3_tools/cli.py

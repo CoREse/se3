@@ -47,9 +47,9 @@ se3 start [--format json]
 - `run_script`: Execute the command (e.g., `bash init.sh`)
 - `init_openspec`: Run `openspec init --tools claude`
 - `run_tests`: Run tests to establish baseline
-- `process_human_call`: Read specified file in `human-calls/` and act on response
+- `process_human_call`: Read specified file in `se3/calls/active/` and act on response
 - `create_progress`: Create `progress.md` file
-- `create_human_calls_dir`: Create `human-calls/` directory
+- `create_se3_dirs`: Create `se3/` directory structure including `calls/active/`
 
 #### Scenario: First-time project startup
 - **WHEN** `se3:start` runs in a new project with no progress.md
@@ -430,6 +430,49 @@ se3 handoff [message] [--project-root <path>] [--dry-run] [--skip-commit]
 - **WHEN** `se3 handoff` runs with uncommitted changes
 - **THEN** it auto-commits changes before generating summary
 - **AND** includes commit details in the summary
+
+### Requirement: se3 migrate Command
+
+The `se3 migrate` command SHALL migrate legacy directory structures to the new `se3/` format.
+
+**Interface:**
+```bash
+se3 migrate [--dry-run] [--force]
+```
+
+**Migration Steps:**
+1. Detect legacy directories (`human-calls/`, `.collab/` in root, `.se3/` from earlier 2.x)
+2. Create new `se3/` structure:
+   - `se3/calls/active/` and `se3/calls/archive/`
+   - `se3/collab/`
+   - `se3/tmp/`
+   - `se3/state/`
+3. Move existing data preserving structure:
+   - `human-calls/*.md` → `se3/calls/active/` (non-archived)
+   - `human-calls/*.archived` → `se3/calls/archive/`
+   - `.collab/*` → `se3/collab/`
+   - `.se3/*` → `se3/` (if migrating from earlier 2.x with hidden directory)
+4. Clean up legacy tmp files: `tmp*.prompt` → delete (or move to `se3/tmp/` if needed)
+5. Update `.gitignore` to include `se3/tmp/`
+
+**Options:**
+- `--dry-run`: Show what would be migrated without making changes
+- `--force`: Proceed even if `se3/` already exists (merge mode)
+
+#### Scenario: Migration from legacy structure
+- **WHEN** `se3 migrate` runs in a project with `human-calls/` in root
+- **THEN** it creates `se3/` structure and moves all data
+- **AND** preserves file contents and timestamps
+
+#### Scenario: Migration from hidden .se3/
+- **WHEN** `se3 migrate` runs in a project with `.se3/` (hidden) from earlier 2.x
+- **THEN** it moves `.se3/` → `se3/` (removes the dot prefix)
+- **AND** preserves all existing data
+
+#### Scenario: Dry-run migration
+- **WHEN** `se3 migrate --dry-run` is executed
+- **THEN** it reports what would be migrated
+- **AND** makes no actual changes
 
 ### Requirement: se3 status Command
 

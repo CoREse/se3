@@ -39,15 +39,32 @@ project/
 ├── progress.md            # Cross-session progress tracking
 ├── se3.config.yaml        # Framework configuration (optional)
 ├── README.md              # Project documentation
-├── human-calls/           # Async human call queue
 ├── openspec/
 │   ├── specs/             # Source of truth for requirements
 │   └── changes/
 │       └── archive/
-└── .claude/
-    ├── CLAUDE.md          # SE 3.0 minimal framework reference (project-level)
-    └── SE3.md             # Complete SE 3.0 framework implementation
+├── .claude/               # Framework implementation (read-only for users)
+│   ├── CLAUDE.md          # SE 3.0 minimal framework reference (project-level)
+│   ├── SE3.md             # Complete SE 3.0 framework implementation
+│   └── commands/          # Claude command definitions
+└── se3/                   # SE 3.0 runtime metadata and state (VISIBLE for human-as-MCP)
+    ├── calls/             # Human call queue
+    │   ├── active/        # Pending human calls
+    │   └── archive/       # Completed/archived calls
+    ├── collab/            # Multi-agent collaboration state
+    ├── tmp/               # Temporary files (auto-cleaned)
+    └── state/             # Session state files
 ```
+
+**BREAKING CHANGE**: As of SE3 2.x, all SE3 runtime metadata is consolidated under `se3/` (visible directory, NOT hidden):
+- `human-calls/` → `se3/calls/`
+- `.collab/` → `se3/collab/`
+- `tmp*.prompt` files → `se3/tmp/`
+
+**Rationale**: The `se3/` directory is intentionally NOT hidden (no dot prefix) because:
+1. Human calls need to be discoverable by humans
+2. Aligns with "human-as-MCP" philosophy - humans are active participants
+3. `ls` should show pending calls waiting for human response
 
 Note: `status.md` is no longer used. Status is now computed in real-time via `se3 status` command (see status-diagnostics spec).
 
@@ -55,7 +72,12 @@ OpenSpec specs serve as the single source of truth for project requirements. No 
 
 #### Scenario: Project initialization
 - **WHEN** SE 3.0 is initialized in a directory
-- **THEN** the standard file structure is created with both CLAUDE.md and SE3.md
+- **THEN** the standard file structure is created with `.claude/`, `se3/`, and `openspec/` directories
+
+#### Scenario: Migration from legacy structure
+- **WHEN** a project has legacy directories (`human-calls/`, `.collab/` in root)
+- **THEN** `se3 migrate` moves them to `se3/` structure
+- **AND** preserves all existing data
 
 ### Requirement: Configuration System
 The system SHALL support configuring framework behavior via `se3.config.yaml`.
@@ -99,6 +121,31 @@ The system SHALL produce the following deliverables:
 #### Scenario: Backward compatibility
 - **WHEN** a project has an existing CLAUDE.md without SE3.md
 - **THEN** the framework continues to function with the existing CLAUDE.md file
+
+### Requirement: Temporary File Management
+
+The system SHALL manage temporary files to prevent root directory pollution.
+
+**Temporary file locations:**
+- All temporary files MUST be created in `se3/tmp/` instead of project root
+- Temporary files include: `tmp*.prompt`, session buffers, intermediate outputs
+
+**Cleanup policy:**
+- `se3:done` SHALL automatically clean `se3/tmp/` files older than 7 days
+- Files matching `tmp*.prompt` in root are considered legacy and SHOULD be migrated
+
+**Git ignore:**
+- The CLAUDE.md template MUST include `se3/tmp/` in `.gitignore` recommendations
+
+#### Scenario: Temporary file creation
+- **WHEN** a tool needs to create a temporary prompt file
+- **THEN** it creates it in `se3/tmp/` with a unique name
+- **AND** the file is automatically cleaned up after session ends or per retention policy
+
+#### Scenario: Legacy tmp file detection
+- **WHEN** `se3 status` runs and finds `tmp*.prompt` files in project root
+- **THEN** it warns about legacy temporary files
+- **AND** suggests running `se3 migrate` to clean up
 
 ### Requirement: CLI Tools
 The system SHALL provide CLI tools for validating and enforcing SE 3.0 conventions.

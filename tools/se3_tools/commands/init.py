@@ -112,10 +112,15 @@ def initialize_project(
                 )
             )
 
-    # 4. Create other required directories
-    for dir_name in ["human-calls", "output"]:
-        dir_path = Path(dir_name)
-        dir_path.mkdir(parents=True, exist_ok=True)
+    # 4. Create se3/ directory structure (SE3 2.x+, VISIBLE not hidden)
+    se3_dir = Path("se3")
+    for subdir in ["calls/active", "calls/archive", "collab", "tmp", "state"]:
+        (se3_dir / subdir).mkdir(parents=True, exist_ok=True)
+    typer.echo(f"Created {se3_dir}/ directory structure (visible, not hidden)")
+
+    # 5. Create output directory
+    output_dir = Path("output")
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     # 5. Initialize OpenSpec using system openspec CLI
     typer.echo("Initializing OpenSpec...")

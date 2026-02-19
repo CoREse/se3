@@ -136,10 +136,20 @@ def compute_active_changes(project_root: Path) -> List[str]:
 
 
 def check_pending_human_calls(project_root: Path) -> List[Dict[str, Any]]:
-    """Check for responded human calls that need processing."""
-    calls_dir = project_root / "human-calls"
+    """Check for responded human calls that need processing.
+
+    Checks new se3/calls/active/ location first, falls back to legacy human-calls/.
+    """
+    # New location (SE3 2.x+, VISIBLE directory)
+    calls_dir = project_root / "se3" / "calls" / "active"
     if not calls_dir.exists():
-        return []
+        # Legacy hidden .se3/ (earlier 2.x)
+        calls_dir = project_root / ".se3" / "calls" / "active"
+        if not calls_dir.exists():
+            # Legacy location (pre-2.x)
+            calls_dir = project_root / "human-calls"
+            if not calls_dir.exists():
+                return []
 
     store = HumanCallStore(calls_dir)
     responded = store.get_responded_calls()
@@ -159,17 +169,29 @@ def check_pending_human_calls(project_root: Path) -> List[Dict[str, Any]]:
 
 
 def compute_collab_status(project_root: Path) -> Optional[Dict[str, Any]]:
-    """Compute collaboration session status."""
-    collab_dir = project_root / ".collab"
+    """Compute collaboration session status.
+
+    Checks new se3/collab/ location first, falls back to legacy .collab/.
+    """
+    # New location (SE3 2.x+, VISIBLE directory)
+    collab_dir = project_root / "se3" / "collab"
     config_file = collab_dir / "config.json"
 
     if not config_file.exists():
-        return None
+        # Legacy hidden .se3/ (earlier 2.x)
+        collab_dir = project_root / ".se3" / "collab"
+        config_file = collab_dir / "config.json"
+        if not config_file.exists():
+            # Legacy location (pre-2.x)
+            collab_dir = project_root / ".collab"
+            config_file = collab_dir / "config.json"
+            if not config_file.exists():
+                return None
 
     try:
         config = json.loads(config_file.read_text())
     except (json.JSONDecodeError, OSError):
-        return {"status": "error", "message": "Cannot read .collab/config.json"}
+        return {"status": "error", "message": "Cannot read collab config"}
 
     return {
         "status": config.get("status", "unknown"),
@@ -403,8 +425,8 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
             "reason": "Initialize progress.md for cross-session history"
         })
         actions.append({
-            "type": "create_human_calls_dir",
-            "reason": "Initialize human-calls/ directory"
+            "type": "create_se3_dirs",
+            "reason": "Initialize .se3/ directory structure"
         })
         return actions
 
