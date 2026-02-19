@@ -141,7 +141,7 @@ def render_stream_json_line(line: str) -> None:
 
 
 def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int = 1800,
-                              loop_state: Optional["LoopState"] = None) -> int:
+                              loop_state: Optional["LoopState"] = None) -> tuple[int, bool]:
     """Run claude with stream-json output and real-time rendering.
 
     Args:
@@ -150,7 +150,8 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
         timeout_sec: Timeout in seconds
         loop_state: Optional LoopState for Ctrl-C handling
 
-    Returns exit code from claude.
+    Returns tuple of (exit_code, was_interrupted) where was_interrupted indicates
+    if the process was interrupted by Ctrl-C for supplemental prompt.
     """
     env = {**dict(os.environ)}
     env.pop("CLAUDECODE", None)
@@ -230,14 +231,15 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
         if isinstance(proc, str) and proc.startswith("ERROR:"):
             print(f"{MAGENTA}[SE3 Loop] {proc}{RESET}")
             signal.signal(signal.SIGINT, old_sigint_handler)
-            return 1
+            return 1, False
     except queue.Empty:
         print(f"{MAGENTA}[SE3 Loop] Failed to start claude process{RESET}")
         signal.signal(signal.SIGINT, old_sigint_handler)
-        return 1
+        return 1, False
 
     # Process output with timeout
     start_time = time.time()
+    was_interrupted = False
     while True:
         try:
             # Check for output with short timeout
@@ -255,23 +257,38 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
                 proc.kill()
                 print(f"\n{YELLOW}[SE3 Loop] Session timed out ({timeout_sec}s limit){RESET}")
                 signal.signal(signal.SIGINT, old_sigint_handler)
-                return 124
+                return 124, False
+
+            # Check if we should enter supplemental mode (first Ctrl-C pressed)
+            if loop_state and loop_state.in_supplemental_mode and not loop_state.should_exit:
+                # First Ctrl-C - interrupt Claude to enter supplemental mode
+                was_interrupted = True
+                proc.kill()
+                print(f"\n{YELLOW}[SE3 Loop] Interrupted for supplemental prompt{RESET}")
+                signal.signal(signal.SIGINT, old_sigint_handler)
+                return 130, True
 
             # Check if we should exit (second Ctrl-C pressed)
             if loop_state and loop_state.should_exit:
                 proc.kill()
                 signal.signal(signal.SIGINT, old_sigint_handler)
-                return 130
+                return 130, False
 
         except queue.Empty:
             # No output available, check if process is still running
             if exit_code[0] is not None:
                 break
+            # Check if we should enter supplemental mode while waiting
+            if loop_state and loop_state.in_supplemental_mode and not loop_state.should_exit:
+                was_interrupted = True
+                proc.kill()
+                signal.signal(signal.SIGINT, old_sigint_handler)
+                return 130, True
             # Check if we should exit while waiting
             if loop_state and loop_state.should_exit:
                 proc.kill()
                 signal.signal(signal.SIGINT, old_sigint_handler)
-                return 130
+                return 130, False
             continue
 
     # Wait for thread to complete
@@ -280,7 +297,7 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
     # Restore old signal handler
     signal.signal(signal.SIGINT, old_sigint_handler)
 
-    return exit_code[0] if exit_code[0] is not None else 0
+    return (exit_code[0] if exit_code[0] is not None else 0), was_interrupted
 
 
 def run_claude_summary(claude_cmd: str, change_dir: Path, timeout_sec: int = 60) -> str:
@@ -522,26 +539,49 @@ def run_exclusive_loop(
             previous_summary=previous_summary
         )
 
-        print(f"{CYAN}[SE3 Loop] Starting Claude Code...{RESET}\n")
-        print(f"{'─' * 60}")
+        # Inner loop to handle supplemental prompts within the same iteration
+        iteration_complete = False
+        while not iteration_complete:
+            print(f"{CYAN}[SE3 Loop] Starting Claude Code...{RESET}\n")
+            print(f"{'─' * 60}")
 
-        # Run claude with loop_state for Ctrl-C handling
-        exit_code = run_claude_with_renderer(claude_cmd, prompt_text, loop_state=loop_state)
+            # Run claude with loop_state for Ctrl-C handling
+            exit_code, was_interrupted = run_claude_with_renderer(claude_cmd, prompt_text, loop_state=loop_state)
 
-        print(f"\n{'─' * 60}")
+            print(f"\n{'─' * 60}")
 
-        # Handle supplemental mode after claude finishes
-        if loop_state.in_supplemental_mode and not loop_state.should_exit:
-            print(f"\n{YELLOW}[SE3 Loop] Supplemental mode - enter additional prompt (press Enter to skip):{RESET}")
-            try:
-                supplemental = input("> ")
-                if supplemental.strip():
-                    loop_state.supplemental_prompts.append(supplemental.strip())
-                    print(f"{GREEN}[SE3 Loop] Supplemental prompt added. It will be included in current and future iterations.{RESET}")
-                else:
+            # Handle supplemental mode after claude finishes
+            if was_interrupted and not loop_state.should_exit:
+                print(f"\n{YELLOW}[SE3 Loop] Supplemental mode - enter additional prompt (press Enter to skip):{RESET}")
+                print(f"{YELLOW}Press Ctrl-C again to exit the loop{RESET}")
+                try:
+                    # Reset supplemental mode flag before asking for input
+                    loop_state.in_supplemental_mode = False
+                    supplemental = input("> ")
+                    if supplemental.strip():
+                        loop_state.supplemental_prompts.append(supplemental.strip())
+                        print(f"{GREEN}[SE3 Loop] Supplemental prompt added. Restarting Claude with updated prompt...{RESET}")
+                        # Rebuild prompt with supplemental prompts and restart this iteration
+                        prompt_text = loop_state.get_full_prompt(
+                            base_prompt=prompt,
+                            iteration=iteration,
+                            iterations=iterations,
+                            change_name=change_name,
+                            quick=quick,
+                            previous_summary=previous_summary
+                        )
+                        continue  # Restart the inner loop with updated prompt
+                    else:
+                        print(f"{GRAY}[SE3 Loop] No supplemental prompt added. Continuing...{RESET}")
+                except EOFError:
                     print(f"{GRAY}[SE3 Loop] No supplemental prompt added.{RESET}")
-            except EOFError:
-                print(f"{GRAY}[SE3 Loop] No supplemental prompt added.{RESET}")
+                except KeyboardInterrupt:
+                    # User pressed Ctrl-C during input - exit the loop
+                    print(f"\n{YELLOW}[SE3 Loop] Second Ctrl-C pressed, exiting...{RESET}")
+                    loop_state.should_exit = True
+                    exit_code = 130
+
+            iteration_complete = True
 
         if exit_code == 0:
             print(f"\n{GREEN}[SE3 Loop] Iteration {iteration} completed successfully{RESET}")
