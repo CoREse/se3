@@ -782,6 +782,8 @@ class ForegroundOrchestrator:
                     self.renderer.append_worker_output(
                         task.id, f"[Merged] {task.branch} into {self.base_branch}\n"
                     )
+                    # Clean up worktree and branch after successful merge
+                    await self._cleanup_worktree_after_merge(task)
                 else:
                     error_msg = stderr.decode() if stderr else "Unknown error"
                     self.renderer.append_worker_output(
@@ -882,6 +884,62 @@ class ForegroundOrchestrator:
             stderr=asyncio.subprocess.PIPE,
         )
         await proc.communicate()  # Ignore error (branch may not exist)
+
+    async def _cleanup_worktree_after_merge(self, task: Task):
+        """Clean up worktree and branch after successful merge.
+
+        This removes the temporary worktree and branch that were created for
+        the collab task, keeping the repository clean after the changes have
+        been merged back to the base branch.
+
+        Args:
+            task: The completed task whose worktree should be cleaned up
+        """
+        try:
+            self.renderer.append_worker_output(
+                task.id, f"[Cleanup] Removing worktree and branch...\n"
+            )
+
+            # Remove worktree if it exists
+            if task.worktree.exists():
+                # Try to remove via git first
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "worktree", "remove", str(task.worktree), "--force",
+                    cwd=self.project_root,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.communicate()
+
+                # Fall back to direct removal if git removal failed
+                if task.worktree.exists():
+                    try:
+                        # Remove .git file first (it's a file in worktrees)
+                        git_file = task.worktree / ".git"
+                        if git_file.exists():
+                            git_file.unlink()
+                        shutil.rmtree(task.worktree, ignore_errors=True)
+                    except Exception:
+                        pass  # Ignore errors during cleanup
+
+            # Delete the branch
+            proc = await asyncio.create_subprocess_exec(
+                "git", "branch", "-D", task.branch,
+                cwd=self.project_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()  # Ignore error
+
+            self.renderer.append_worker_output(
+                task.id, f"[Cleanup] Worktree cleaned up\n"
+            )
+
+        except Exception as e:
+            # Log but don't fail - cleanup is best-effort
+            self.renderer.append_worker_output(
+                task.id, f"[Warning] Cleanup issue (non-critical): {e}\n"
+            )
 
     async def _ensure_worktree(self, task: Task):
         """Ensure the worktree exists for a task."""
