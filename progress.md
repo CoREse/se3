@@ -2532,3 +2532,4 @@ openspec/changes/test/.openspec.yaml |  3 --
 <!-- current-session -->
 - `daaeff3` chore(openspec): verify OpenSpec integrity system health (iteration 9/10) (1 files)
 - `7644a72` chore(openspec): complete OpenSpec integrity system (iteration 10/10) (25 files)
+- `f3f3579` chore(openspec): archive completed changes from iteration 10 (1 files)
