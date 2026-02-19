@@ -2600,3 +2600,6 @@ openspec/changes/test/.openspec.yaml |  3 --
 <!-- current-session -->
 - `38ededa` fix(version): correct framework version from 3.x back to 2.17.0 (2 files)
 - `30bc109` docs(readme): add complete version history for 2.15.x-2.16.x (1 files)
+- `d6aec3d` chore(progress): update progress.md with corrected commit hashes (2 files)
+- `87b4061` fix(handoff): auto-commit progress.md changes (2 files)
+- `0a71292` docs(readme): add version 2.17.1 to version history (1 files)
