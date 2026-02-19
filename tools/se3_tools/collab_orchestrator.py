@@ -281,7 +281,12 @@ class ForegroundOrchestrator:
             proc.stdin.write(prompt.encode())
             await proc.stdin.drain()
             proc.stdin.close()
-            # Don't wait for stdin to close - process may exit quickly
+            # Wait for stdin to close to ensure data is sent
+            try:
+                await proc.stdin.wait_closed()
+            except (BrokenPipeError, ConnectionResetError):
+                # Process may have already exited, which is fine
+                pass
         except (BrokenPipeError, ConnectionResetError) as e:
             # Handle case where process exits before we finish writing
             self.renderer.update_manager(f"Warning: Manager process closed stdin early: {e}")
@@ -441,14 +446,9 @@ class ForegroundOrchestrator:
             await self._save_task_file(task)
             return
 
-        # Check if process started successfully
-        if proc.returncode is not None and proc.returncode != 0:
-            # Process failed immediately
-            task.status = "failed"
-            task.exit_code = proc.returncode
-            self.renderer.append_worker_output(task.id, f"[Error] Worker process exited immediately with code {proc.returncode}")
-            await self._save_task_file(task)
-            return
+        # Note: proc.returncode is None here because process just started
+        # The actual exit code will be available after proc.wait()
+        # We check for process creation errors by catching exceptions above
 
         # Update status
         task.status = "running"

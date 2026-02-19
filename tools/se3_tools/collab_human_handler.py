@@ -280,15 +280,21 @@ Your response will be used directly, so write it as the actual response."""
 
         try:
             runner = ClaudeRunner(self.project_root)
-            result = runner.run(
-                ["--dangerously-skip-permissions", "--print", "-p", prompt],
-                timeout=60,
+            # Run synchronously in a thread pool to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                None,
+                lambda: runner.run(
+                    ["--dangerously-skip-permissions", "--print", "-p", prompt],
+                    timeout=60,
+                )
             )
 
             if result.returncode == 0:
                 return result.stdout
         except Exception as e:
-            pass
+            # Log error for debugging but don't expose to user
+            print(f"[collab-human-handler] Failed to generate suggestion: {e}", file=sys.stderr)
 
         return "Unable to generate suggestion. Please respond manually."
 

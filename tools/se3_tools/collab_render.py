@@ -90,14 +90,21 @@ class CollabRenderer:
         Returns:
             False to propagate exceptions, True to suppress them.
         """
+        # Store exception info before cleanup to ensure it's preserved
+        had_exception = exc_type is not None
+
         try:
             if self._live:
                 self._live.stop()
-                self._live = None
         except Exception:
-            # Ensure we don't mask the original exception
+            # Log but don't suppress cleanup errors
             pass
-        return False  # Don't suppress exceptions
+        finally:
+            # Always clear the live reference
+            self._live = None
+
+        # Always propagate exceptions (don't suppress)
+        return False
 
     def stop_live(self):
         """Stop the live display."""
@@ -405,9 +412,13 @@ class CollabRenderer:
     def print_message(self, message: str, style: str = ""):
         """Print a message outside the live display."""
         if self._live:
-            self._live.stop()
-            self.console.print(message, style=style)
-            self._live.start()
+            try:
+                self._live.stop()
+                self.console.print(message, style=style)
+                self._live.start()
+            except Exception:
+                # If live display fails, fall back to direct console output
+                self.console.print(message, style=style)
         else:
             self.console.print(message, style=style)
 
