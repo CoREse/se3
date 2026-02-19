@@ -2603,3 +2603,4 @@ openspec/changes/test/.openspec.yaml |  3 --
 - `d6aec3d` chore(progress): update progress.md with corrected commit hashes (2 files)
 - `87b4061` fix(handoff): auto-commit progress.md changes (2 files)
 - `0a71292` docs(readme): add version 2.17.1 to version history (1 files)
+- `251fb05` feat(loop): add branch isolation and merge support for SE3 Loop (6 files)
