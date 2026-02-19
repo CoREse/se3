@@ -300,7 +300,11 @@ class ForegroundOrchestrator:
                 # Check timeout
                 if asyncio.get_event_loop().time() - start_time > timeout:
                     proc.terminate()
-                    await proc.wait()
+                    try:
+                        await asyncio.wait_for(proc.wait(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        await proc.wait()
                     return ManagerDecision(
                         action="escalate",
                         reason=f"Manager planning timed out after {timeout}s",
@@ -332,6 +336,11 @@ class ForegroundOrchestrator:
 
         except asyncio.CancelledError:
             proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
             raise
 
         await proc.wait()
@@ -561,6 +570,9 @@ class ForegroundOrchestrator:
 
         del self.active_workers[task.id]
 
+        # Save final task state
+        await self._save_task_file(task)
+
     async def _cleanup_and_recreate_worktree(self, task: Task):
         """Clean up existing worktree/branch and recreate fresh."""
         # First, try to prune any stale worktrees
@@ -632,6 +644,9 @@ class ForegroundOrchestrator:
 
         # Create worktree with retry logic for locked worktrees
         max_retries = 2
+        proc = None
+        stdout = b""
+        stderr = b""
         for attempt in range(max_retries):
             proc = await asyncio.create_subprocess_exec(
                 "git", "worktree", "add", str(task.worktree), "-b", task.branch, self.base_branch,
@@ -665,7 +680,7 @@ class ForegroundOrchestrator:
             # For other errors, break and let the error handling below deal with it
             break
 
-        if proc.returncode != 0:
+        if proc is None or proc.returncode != 0:
             error_msg = stderr.decode() if stderr else "Unknown error"
             error_lower = error_msg.lower()
 

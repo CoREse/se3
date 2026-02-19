@@ -164,6 +164,10 @@ class LoopCollabRunner:
         try:
             with self.renderer.start_live():
                 success = await orchestrator.run(prompt)
+        except asyncio.CancelledError:
+            # Handle graceful shutdown on interrupt
+            self.console.print("[yellow]Iteration cancelled by user[/yellow]")
+            raise  # Re-raise to allow proper handling upstream
         except Exception as e:
             self.console.print(f"[red]Error during collab iteration: {e}[/red]")
             return None

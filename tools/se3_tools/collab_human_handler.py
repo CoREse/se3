@@ -9,6 +9,7 @@ import asyncio
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
@@ -169,31 +170,34 @@ class InteractiveHumanHandler:
 
         # Process each call
         for call in calls:
-            choice = await self._get_input(f"\nCall '{call.title}'? [v/s/r/k/w]: ")
-            if choice is None:
-                # Handle Ctrl+D or EOF - treat as 'wait'
-                print("\n(EOF received, waiting for external response)")
-                return False
-
-            choice = choice.strip().lower()
-
-            if choice == 'v':
-                await self._view_full_context(call)
-                # Ask again after viewing
-                choice = await self._get_input(f"Now choose [s/r/k/w]: ")
+            while True:  # Loop until valid action is taken
+                choice = await self._get_input(f"\nCall '{call.title}'? [v/s/r/k/w]: ")
                 if choice is None:
-                    print("\n(Interrupted, waiting for external response)")
+                    # Handle Ctrl+D or EOF - treat as 'wait'
+                    print("\n(EOF received, waiting for external response)")
                     return False
+
                 choice = choice.strip().lower()
 
-            if choice == 's':
-                await self._handle_suggest(call)
-            elif choice == 'r':
-                self._handle_reply(call)
-            elif choice == 'k':
-                self._skip_call(call)
-            elif choice == 'w':
-                return False  # Continue waiting
+                if choice == 'v':
+                    await self._view_full_context(call)
+                    # Loop back to ask again after viewing
+                    continue
+
+                if choice == 's':
+                    await self._handle_suggest(call)
+                    break  # Move to next call
+                elif choice == 'r':
+                    self._handle_reply(call)
+                    break  # Move to next call
+                elif choice == 'k':
+                    self._skip_call(call)
+                    break  # Move to next call
+                elif choice == 'w':
+                    return False  # Continue waiting
+                else:
+                    print(f"Invalid choice: '{choice}'. Please try again.")
+                    # Loop back to ask again
 
         return True
 
