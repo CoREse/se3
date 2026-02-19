@@ -2642,3 +2642,6 @@ openspec/changes/test/.openspec.yaml |  3 --
 - `5e060a6` fix(loop): collab branches now auto-merge to loop branch and improved base branch detection (5 files)
 - `f8fae4c` fix(loop): ensure collab task branches merge to loop branch with proper checkout (5 files)
 - `56f78d5` fix(collab): add merge lock to prevent race conditions when multiple tasks complete concurrently (2 files)
+- `9edbc63` chore(loop): verify branch isolation implementation (iteration 15) (2 files)
+- `7a2d240` fix(loop): improve merge_loop_branch robustness and base branch detection (3 files)
+- `bc9a81a` chore: mark iteration 16 task as complete (1 files)
