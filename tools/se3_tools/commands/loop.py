@@ -11,10 +11,10 @@ import re
 import subprocess
 import shutil
 import sys
-import tempfile
 import time
 import threading
 import queue
+import signal
 from pathlib import Path
 from typing import Optional
 
@@ -140,8 +140,13 @@ def render_stream_json_line(line: str) -> None:
         return
 
 
-def run_claude_with_renderer(claude_cmd: str, prompt_file: Path, timeout_sec: int = 1800) -> int:
+def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int = 1800) -> int:
     """Run claude with stream-json output and real-time rendering.
+
+    Args:
+        claude_cmd: The claude command to run
+        prompt_text: The prompt text to send via stdin
+        timeout_sec: Timeout in seconds
 
     Returns exit code from claude.
     """
@@ -155,10 +160,10 @@ def run_claude_with_renderer(claude_cmd: str, prompt_file: Path, timeout_sec: in
         "--output-format", "stream-json",
         "--verbose",
         "--max-turns", "0",
-        str(prompt_file)
     ]
 
-    print(f"[SE3 Loop] Executing: {claude_cmd} --print --output-format stream-json --verbose --max-turns 0 {prompt_file}")
+    print(f"[SE3 Loop] Executing: {claude_cmd} --print --output-format stream-json --verbose --max-turns 0")
+    print(f"[SE3 Loop] Prompt (first 200 chars): {prompt_text[:200]}...")
     print("")
 
     output_queue = queue.Queue()
@@ -169,6 +174,7 @@ def run_claude_with_renderer(claude_cmd: str, prompt_file: Path, timeout_sec: in
         try:
             proc = subprocess.Popen(
                 cmd,
+                stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -178,6 +184,13 @@ def run_claude_with_renderer(claude_cmd: str, prompt_file: Path, timeout_sec: in
 
             # Store process for main thread to wait
             output_queue.put(proc)
+
+            # Send prompt via stdin
+            try:
+                proc.stdin.write(prompt_text)
+                proc.stdin.close()
+            except Exception as e:
+                output_queue.put(f"ERROR writing to stdin: {e}")
 
             # Read output line by line
             for line in proc.stdout:
@@ -301,6 +314,83 @@ Summary:"""
         return f"Iteration completed (summary generation error: {e})."
 
 
+class LoopState:
+    """State for the SE3 Loop to handle Ctrl-C and supplemental prompts."""
+
+    def __init__(self):
+        self.supplemental_prompts: list[str] = []
+        self.in_supplemental_mode = False
+        self.should_exit = False
+
+    def handle_sigint(self, signum, frame):
+        """Handle Ctrl-C signal.
+
+        First press: enter supplemental mode
+        Second press (in supplemental mode): exit loop
+        """
+        if self.in_supplemental_mode:
+            # Second Ctrl-C in supplemental mode - exit
+            self.should_exit = True
+            print(f"\n{YELLOW}[SE3 Loop] Second Ctrl-C pressed, exiting...{RESET}")
+        else:
+            # First Ctrl-C - enter supplemental mode
+            self.in_supplemental_mode = True
+            print(f"\n{YELLOW}[SE3 Loop] Ctrl-C pressed - entering supplemental mode{RESET}")
+            print(f"{YELLOW}Press Ctrl-C again to exit, or enter your supplemental prompt below:{RESET}")
+
+    def get_full_prompt(self, base_prompt: str, iteration: int, iterations: int,
+                       change_name: Optional[str] = None, quick: bool = False,
+                       previous_summary: Optional[str] = None) -> str:
+        """Build the full prompt text with all supplemental prompts."""
+        # Build prompt content with previous summary if available
+        previous_summary_section = ""
+        if previous_summary:
+            previous_summary_section = f"""
+## Previous Iteration Summary
+
+{previous_summary}
+
+---
+"""
+
+        # Build supplemental section
+        supplemental_section = ""
+        if self.supplemental_prompts:
+            supplemental_section = """
+## Supplemental Instructions (from user during loop)
+
+"""
+            for i, sp in enumerate(self.supplemental_prompts, 1):
+                supplemental_section += f"{i}. {sp}\n"
+            supplemental_section += "\n---\n"
+
+        if quick:
+            # Quick mode: use se3:fc (full-cycle) instead of se3:work to skip formal change creation
+            prompt_text = f"""/se3:fc {base_prompt}
+{previous_summary_section}{supplemental_section}
+
+(This is SE3 Loop iteration {iteration} / {iterations}. Please complete this work using the full-cycle workflow:
+1. Read relevant specs
+2. Implement the requirements
+3. Run tests
+4. Commit changes
+5. Run /se3:done to end the session)
+"""
+        else:
+            prompt_text = f"""/se3:work {change_name}
+{previous_summary_section}{supplemental_section}
+{base_prompt}
+
+(This is SE3 Loop iteration {iteration} / {iterations}. Please complete this change following the SE3 process:
+1. Read relevant specs
+2. Implement the requirements
+3. Run tests
+4. Commit changes
+5. Run /se3:done to end the session)
+"""
+        return prompt_text
+
+
 def run_exclusive_loop(
     prompt: str,
     project_root: str = ".",
@@ -322,20 +412,28 @@ def run_exclusive_loop(
     base_name = sanitize_change_name(prompt)
     openspec_cmd = shutil.which("openspec") or "openspec"
 
+    # Initialize loop state for Ctrl-C handling
+    loop_state = LoopState()
+
     print(f"\n{BOLD}{'=' * 60}{RESET}")
     print(f"{BOLD}SE3 Loop{RESET}")
     print(f"{BOLD}{'=' * 60}{RESET}")
-    print(f"\nPrompt: {prompt}")
+    print(f"\nBase prompt: {prompt}")
     print(f"Iterations: {iterations}")
     print(f"Project: {root}")
     print(f"Claude: {claude_cmd}")
     print(f"Summary: {'disabled' if no_summary else 'enabled (use --no-summary to disable)'}")
-    print(f"\nPress Ctrl+C to stop")
+    print(f"\n{YELLOW}Press Ctrl+C once for supplemental prompt mode{RESET}")
+    print(f"{YELLOW}Press Ctrl+C twice to exit{RESET}")
     print(f"{BOLD}{'=' * 60}{RESET}\n")
 
     previous_summary = None
 
     for iteration in range(1, iterations + 1):
+        # Reset supplemental mode for this iteration
+        loop_state.in_supplemental_mode = False
+        loop_state.should_exit = False
+
         print(f"\n{BOLD}{'─' * 60}{RESET}")
         print(f"{BOLD}Iteration {iteration} / {iterations}{RESET}")
         print(f"{BOLD}{'─' * 60}{RESET}\n")
@@ -381,57 +479,49 @@ def run_exclusive_loop(
         else:
             print(f"{CYAN}[SE3 Loop] Quick mode: skipping formal change creation{RESET}")
 
-        # Build prompt content with previous summary if available
-        previous_summary_section = ""
-        if previous_summary:
-            previous_summary_section = f"""
-## Previous Iteration Summary
-
-{previous_summary}
-
----
-"""
-
-        # Create prompt file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.md', prefix='se3-loop-prompt-', delete=False) as f:
-            if quick:
-                # Quick mode: use se3:fc (full-cycle) instead of se3:work to skip formal change creation
-                f.write(f"""/se3:fc {prompt}
-{previous_summary_section}
-
-(This is SE3 Loop iteration {iteration} / {iterations}. Please complete this work using the full-cycle workflow:
-1. Read relevant specs
-2. Implement the requirements
-3. Run tests
-4. Commit changes
-5. Run /se3:done to end the session)
-""")
-            else:
-                f.write(f"""/se3:work {change_name}
-{previous_summary_section}
-{prompt}
-
-(This is SE3 Loop iteration {iteration} / {iterations}. Please complete this change following the SE3 process:
-1. Read relevant specs
-2. Implement the requirements
-3. Run tests
-4. Commit changes
-5. Run /se3:done to end the session)
-""")
-            prompt_file = Path(f.name)
+        # Build prompt text
+        prompt_text = loop_state.get_full_prompt(
+            base_prompt=prompt,
+            iteration=iteration,
+            iterations=iterations,
+            change_name=change_name,
+            quick=quick,
+            previous_summary=previous_summary
+        )
 
         print(f"{CYAN}[SE3 Loop] Starting Claude Code...{RESET}\n")
         print(f"{'─' * 60}")
 
+        # Set up signal handler for Ctrl-C
+        old_sigint_handler = signal.signal(signal.SIGINT, loop_state.handle_sigint)
+
         try:
-            exit_code = run_claude_with_renderer(claude_cmd, prompt_file)
+            exit_code = run_claude_with_renderer(claude_cmd, prompt_text)
         except KeyboardInterrupt:
-            print(f"\n{YELLOW}[SE3 Loop] Interrupted by user{RESET}")
-            exit_code = 130
+            # This will be triggered when Ctrl-C is pressed
+            if loop_state.should_exit:
+                exit_code = 130
+            else:
+                # First Ctrl-C, supplemental mode activated
+                exit_code = 0  # Treat as success so we can add supplemental prompt
         finally:
-            prompt_file.unlink(missing_ok=True)
+            # Restore old signal handler
+            signal.signal(signal.SIGINT, old_sigint_handler)
 
         print(f"\n{'─' * 60}")
+
+        # Handle supplemental mode after claude finishes
+        if loop_state.in_supplemental_mode and not loop_state.should_exit:
+            print(f"\n{YELLOW}[SE3 Loop] Supplemental mode - enter additional prompt (press Enter to skip):{RESET}")
+            try:
+                supplemental = input("> ")
+                if supplemental.strip():
+                    loop_state.supplemental_prompts.append(supplemental.strip())
+                    print(f"{GREEN}[SE3 Loop] Supplemental prompt added. It will be included in current and future iterations.{RESET}")
+                else:
+                    print(f"{GRAY}[SE3 Loop] No supplemental prompt added.{RESET}")
+            except EOFError:
+                print(f"{GRAY}[SE3 Loop] No supplemental prompt added.{RESET}")
 
         if exit_code == 0:
             print(f"\n{GREEN}[SE3 Loop] Iteration {iteration} completed successfully{RESET}")
@@ -454,7 +544,7 @@ def run_exclusive_loop(
                 # Quick mode: use a simpler summary approach
                 previous_summary = f"Iteration {iteration} completed successfully."
 
-        if iteration < iterations:
+        if iteration < iterations and exit_code != 130:
             print(f"\n[SE3 Loop] Continuing in 2 seconds...")
             time.sleep(2)
 

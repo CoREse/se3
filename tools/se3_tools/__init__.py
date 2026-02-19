@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.12.21"  # Fix: test_duplicate_change_name now correctly uses quick=False to test timestamp appending for duplicate change names.
+SE3_FRAMEWORK_VERSION = "2.13.0"  # Feat: se3 loop now uses stdin for prompts and supports Ctrl-C supplemental mode
