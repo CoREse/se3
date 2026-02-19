@@ -192,5 +192,43 @@ class TestLoopCollabIntegration:
         assert 'no_summary' in params
 
 
+class TestGetLoopBranchBase:
+    """Test get_loop_branch_base function."""
+
+    def test_get_loop_branch_base_imports(self):
+        """Test that get_loop_branch_base function can be imported."""
+        from se3_tools.commands.loop import get_loop_branch_base
+        assert callable(get_loop_branch_base)
+
+    def test_get_loop_branch_base_returns_none_when_not_set(self):
+        """Test that get_loop_branch_base returns None when base branch not recorded."""
+        from se3_tools.commands.loop import get_loop_branch_base
+        from pathlib import Path
+        from unittest.mock import patch, MagicMock
+
+        with patch('subprocess.run') as mock_run:
+            mock_result = MagicMock()
+            mock_result.returncode = 1  # Config not found
+            mock_run.return_value = mock_result
+
+            result = get_loop_branch_base(Path("/tmp"), "se3-loop/1234567890")
+            assert result is None
+
+    def test_get_loop_branch_base_returns_value_when_set(self):
+        """Test that get_loop_branch_base returns value when base branch is recorded."""
+        from se3_tools.commands.loop import get_loop_branch_base
+        from pathlib import Path
+        from unittest.mock import patch, MagicMock
+
+        with patch('subprocess.run') as mock_run:
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = "main\n"
+            mock_run.return_value = mock_result
+
+            result = get_loop_branch_base(Path("/tmp"), "se3-loop/1234567890")
+            assert result == "main"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

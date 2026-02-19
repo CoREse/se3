@@ -592,7 +592,30 @@ def create_loop_branch(project_root: Path, base_branch: str) -> str:
         else:
             raise RuntimeError(f"Failed to create loop branch: {result.stderr}")
 
+    # Record the base branch in git config for later merge
+    subprocess.run(
+        ["git", "config", f"branch.{branch_name}.se3-loop-base", base_branch],
+        cwd=project_root,
+        capture_output=True
+    )
+
     return branch_name
+
+
+def get_loop_branch_base(project_root: Path, loop_branch: str) -> str | None:
+    """Get the base branch for a loop branch from git config.
+
+    Returns the base branch name, or None if not recorded.
+    """
+    result = subprocess.run(
+        ["git", "config", f"branch.{loop_branch}.se3-loop-base"],
+        cwd=project_root,
+        capture_output=True,
+        text=True
+    )
+    if result.returncode == 0:
+        return result.stdout.strip() or None
+    return None
 
 
 def merge_loop_branch(project_root: Path, loop_branch: str, base_branch: str) -> bool:

@@ -334,12 +334,11 @@ def loop_cmd(
         se3 loop "test" --collab --mock -n 2       # Test collab mode with mock execution
         se3 loop --merge se3-loop/1234567890       # Merge loop branch back
     """
-    from .commands.loop import run_exclusive_loop, run_loop_collab, merge_loop_branch, get_current_branch
+    from .commands.loop import run_exclusive_loop, run_loop_collab, merge_loop_branch, get_current_branch, get_loop_branch_base
 
     # Handle merge mode
     if merge_branch:
         root = Path(project_root).resolve()
-        current_branch = get_current_branch(root)
 
         # Validate that the merge branch exists
         result = subprocess.run(
@@ -352,7 +351,17 @@ def loop_cmd(
             typer.echo(f"Error: Branch '{merge_branch}' not found", err=True)
             raise typer.Exit(code=1)
 
-        success = merge_loop_branch(root, merge_branch, current_branch)
+        # Get the base branch (original branch when loop was started)
+        # First try to get it from git config, otherwise use current branch
+        base_branch = get_loop_branch_base(root, merge_branch)
+        if not base_branch:
+            base_branch = get_current_branch(root)
+            typer.echo(f"Warning: Could not determine original base branch for {merge_branch}", err=True)
+            typer.echo(f"Using current branch '{base_branch}' as merge target.", err=True)
+            typer.echo(f"To specify a different target branch, switch to it first.", err=True)
+            typer.echo("")
+
+        success = merge_loop_branch(root, merge_branch, base_branch)
         raise typer.Exit(code=0 if success else 1)
 
     if collab:
