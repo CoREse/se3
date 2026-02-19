@@ -380,6 +380,9 @@ class CollabRenderer:
                     if text.strip():
                         self.output_buffer.append(f"[assistant] {text[:100]}")
                         self._update_output_panel()
+                elif item_type == "tool_use":
+                    # Handle tool_use inside assistant message
+                    self._render_tool_use(item)
 
     def _render_tool_use(self, msg: dict[str, Any]):
         """Render a tool_use message."""

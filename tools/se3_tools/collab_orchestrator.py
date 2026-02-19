@@ -519,6 +519,8 @@ class ForegroundOrchestrator:
             task.exit_code = -1
             task.completed_at = datetime.now()
             del self.active_workers[task.id]
+            # Save final state
+            await self._save_task_file(task)
             raise
 
         # Wait for completion
@@ -763,6 +765,10 @@ class ForegroundOrchestrator:
         task_file = self.collab_dir / "tasks" / f"{task.id}.json"
         # Ensure parent directory exists (in case it was deleted)
         task_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Calculate attempts from retry_count
+        attempts = task.retry_count + 1 if task.status != "pending" else 0
+
         task_data = {
             "id": task.id,
             "title": task.title,
@@ -771,10 +777,13 @@ class ForegroundOrchestrator:
             "worktree": str(task.worktree),
             "base_branch": self.base_branch,
             "status": task.status,
+            "exit_code": task.exit_code,
+            "started_at": task.started_at.isoformat() if task.started_at else None,
+            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
             "health": {
                 "timeout_minutes": 60,
-                "max_attempts": 3,
-                "attempts": 0,
+                "max_attempts": task.max_retries + 1,
+                "attempts": attempts,
                 "last_activity": datetime.now().isoformat(),
             },
         }
@@ -970,6 +979,9 @@ Rules:
                 # Also collect raw result messages
                 elif obj.get("type") == "result":
                     json_objects.append(obj.get("result", ""))
+                elif "action" in obj:
+                    # Plain JSON response (manager decision directly)
+                    json_objects.append(line)
             except json.JSONDecodeError:
                 # Not JSON, might be plain text output
                 json_objects.append(line)
