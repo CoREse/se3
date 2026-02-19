@@ -2711,8 +2711,26 @@ progress.md | 2 +-
  6 files changed, 16 insertions(+), 46 deletions(-)
 ```
 
+## 2026-02-20 Session 90 (handoff)
+
+### Done
+- fix(loop): initialize base_branch early in ForegroundOrchestrator
+- chore(session): update progress for iteration 20
+- Update openspec/changes/se3-loopbranchctrl-cclaudemergese3-20/tasks.md, progress.md
+
+### Commits
+- `3a902d9` fix(loop): initialize base_branch early in ForegroundOrchestrator (1 files)
+- `641b205` chore(session): update progress for iteration 20 (2 files)
+- `cc90a5e` Update openspec/changes/se3-loopbranchctrl-cclaudemergese3-20/tasks.md, progress.md (2 files)
+
+### Files Changed
+```
+progress.md                            | 3 ++-
+ tools/se3_tools/collab_orchestrator.py | 2 ++
+ 2 files changed, 4 insertions(+), 1 deletion(-)
+```
+
 
 ## Current Session
 <!-- current-session -->
-- `3a902d9` fix(loop): initialize base_branch early in ForegroundOrchestrator (1 files)
-- `641b205` chore(session): update progress for iteration 20 (2 files)
+
