@@ -2595,9 +2595,19 @@ openspec/changes/test/.openspec.yaml |  3 --
  6 files changed, 57 insertions(+), 9 deletions(-)
 ```
 
+## 2026-02-20 Session 86 (handoff)
 
-## Current Session
-<!-- current-session -->
+### Done
+- fix(version): correct framework version from 3.x back to 2.17.0
+- docs(readme): add complete version history for 2.15.x-2.16.x
+- chore(progress): update progress.md with corrected commit hashes
+- fix(handoff): auto-commit progress.md changes
+- docs(readme): add version 2.17.1 to version history
+- feat(loop): add branch isolation and merge support for SE3 Loop
+- chore: update progress and change status for loop branch feature
+- Update progress.md
+
+### Commits
 - `38ededa` fix(version): correct framework version from 3.x back to 2.17.0 (2 files)
 - `30bc109` docs(readme): add complete version history for 2.15.x-2.16.x (1 files)
 - `d6aec3d` chore(progress): update progress.md with corrected commit hashes (2 files)
@@ -2605,3 +2615,27 @@ openspec/changes/test/.openspec.yaml |  3 --
 - `0a71292` docs(readme): add version 2.17.1 to version history (1 files)
 - `251fb05` feat(loop): add branch isolation and merge support for SE3 Loop (6 files)
 - `a3ebc1f` chore: update progress and change status for loop branch feature (4 files)
+- `640a145` Update progress.md (1 files)
+
+### Files Changed
+```
+.claude/.session.json                              |   4 +-
+ .claude/SE3.md                                     |   4 +-
+ README.md                                          |  10 +-
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 ++
+ .../se3-loopbranchctrl-cclaudemergese3-01/tasks.md |   5 +
+ progress.md                                        |  32 ++++-
+ tools/se3_tools/__init__.py                        |   2 +-
+ tools/se3_tools/cli.py                             |  27 +++-
+ tools/se3_tools/collab_orchestrator.py             |   7 +
+ tools/se3_tools/commands/handoff.py                |  24 ++++
+ tools/se3_tools/commands/loop.py                   | 151 +++++++++++++++++++++
+ tools/se3_tools/loop_collab.py                     |   3 +
+ 13 files changed, 273 insertions(+), 9 deletions(-)
+```
+
+
+## Current Session
+<!-- current-session -->
+
