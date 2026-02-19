@@ -341,6 +341,8 @@ class CollabRenderer:
         """Parse and render a stream-json line.
 
         Returns the parsed message if it was valid JSON, None otherwise.
+        Also handles unknown message types by returning the parsed JSON for
+        potential downstream processing.
         """
         # Skip empty lines
         if not line or not line.strip():
@@ -363,6 +365,18 @@ class CollabRenderer:
                 self._render_error(msg)
             elif msg_type == "result":
                 self._render_result(msg)
+            elif msg_type == "system":
+                # Handle system messages (init, heartbeat, etc.)
+                self._render_system_message(msg)
+            elif msg_type == "thinking":
+                # Handle thinking messages
+                self._render_thinking_message(msg)
+            else:
+                # Unknown message type - add to output for visibility
+                # but still return the parsed message
+                subtype = msg.get("subtype", "unknown")
+                self.output_buffer.append(f"[stream-json:{msg_type}/{subtype}] {str(msg.get('content', msg))[:80]}")
+                self._update_output_panel()
 
             return msg
         except json.JSONDecodeError:
@@ -377,6 +391,32 @@ class CollabRenderer:
             self.output_buffer.append(f"[parse error] {str(e)[:80]}")
             self._update_output_panel()
             return None
+
+    def _render_system_message(self, msg: dict[str, Any]):
+        """Render a system message."""
+        subtype = msg.get("subtype", "")
+        if subtype == "init":
+            self.output_buffer.append("[system] Session initialized")
+            self._update_output_panel()
+        elif subtype == "heartbeat":
+            # Heartbeat messages are too noisy, skip them
+            pass
+        else:
+            content = msg.get("content", "")
+            if content:
+                self.output_buffer.append(f"[system:{subtype}] {str(content)[:80]}")
+                self._update_output_panel()
+
+    def _render_thinking_message(self, msg: dict[str, Any]):
+        """Render a thinking message."""
+        thinking = msg.get("thinking", "")
+        if thinking and len(thinking) > 10:  # Only show substantial thinking
+            # Truncate very long thinking messages
+            preview = str(thinking)[:100]
+            if len(thinking) > 100:
+                preview += "..."
+            self.output_buffer.append(f"[thinking] {preview}")
+            self._update_output_panel()
 
     def _render_assistant_message(self, msg: dict[str, Any]):
         """Render an assistant message from stream-json."""
@@ -399,6 +439,14 @@ class CollabRenderer:
         """Render a tool_use message."""
         name = msg.get("name", "unknown")
         input_data = msg.get("input", {})
+
+        # Skip rendering certain noisy tools
+        noisy_tools = {"Read", "Grep", "Glob"}
+        if name in noisy_tools:
+            # Still show the tool name but with less detail
+            self.output_buffer.append(f"[tool] 📖 {name} (details hidden)")
+            self._update_output_panel()
+            return
 
         self.output_buffer.append(f"[tool] 🔧 {name}")
 

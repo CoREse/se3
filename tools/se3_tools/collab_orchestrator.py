@@ -101,63 +101,140 @@ class ForegroundOrchestrator:
         self._load_base_branch()
         self._save_session_config(objective)
 
-        # Phase 1: Manager planning
-        self.renderer.update_manager("Initializing Manager for task planning...")
-        decision = await self._run_manager_plan(objective)
+        try:
+            # Phase 1: Manager planning
+            self.renderer.update_manager("Initializing Manager for task planning...")
+            decision = await self._run_manager_plan(objective)
 
-        if decision.action == "escalate":
-            self.renderer.print_message(
-                f"Manager escalated: {decision.reason}", "yellow"
+            if decision.action == "escalate":
+                self.renderer.print_message(
+                    f"Manager escalated: {decision.reason}", "yellow"
+                )
+                return False
+
+            if decision.action != "plan":
+                self.renderer.print_message(
+                    f"Unexpected manager action: {decision.action}", "red"
+                )
+                return False
+
+            # Create tasks from manager decision
+            self.renderer.update_manager(f"Creating {len(decision.tasks)} tasks...")
+            for task_data in decision.tasks:
+                task = self._create_task(task_data)
+                self.tasks[task.id] = task
+                self.renderer.add_worker(task.id, task.title)
+
+            # Check if any tasks were created
+            if not self.tasks:
+                self.renderer.print_message(
+                    "Manager returned no tasks. Nothing to do.", "yellow"
+                )
+                return False
+
+            # Phase 2: Execute all workers concurrently
+            self.renderer.update_manager(f"Launching {len(self.tasks)} workers...")
+            await self._run_all_workers()
+
+            # Phase 2.5: Check for human calls if all tasks are blocked
+            can_continue = await self.human_handler.check_and_handle(list(self.tasks.values()))
+            if not can_continue:
+                self.renderer.print_message(
+                    "Collaboration paused - waiting for human response", "yellow"
+                )
+                return False
+
+            # Phase 3: Manager review
+            self.renderer.update_manager("Running final review...")
+            review = await self._run_manager_review()
+
+            # Summary
+            completed = sum(1 for t in self.tasks.values() if t.status == "done")
+            failed = sum(1 for t in self.tasks.values() if t.status == "failed")
+
+            self.renderer.print_final_summary(
+                success=review.action == "complete",
+                completed=completed,
+                failed=failed,
             )
-            return False
 
-        if decision.action != "plan":
-            self.renderer.print_message(
-                f"Unexpected manager action: {decision.action}", "red"
-            )
-            return False
+            return review.action == "complete"
 
-        # Create tasks from manager decision
-        self.renderer.update_manager(f"Creating {len(decision.tasks)} tasks...")
-        for task_data in decision.tasks:
-            task = self._create_task(task_data)
-            self.tasks[task.id] = task
-            self.renderer.add_worker(task.id, task.title)
+        except asyncio.CancelledError:
+            # Handle graceful shutdown on cancellation
+            self.renderer.print_message("\nShutting down collaboration...", "yellow")
+            await self.cleanup()
+            raise
+        except Exception as e:
+            self.renderer.print_message(f"\nError during collaboration: {e}", "red")
+            await self.cleanup()
+            raise
 
-        # Check if any tasks were created
-        if not self.tasks:
-            self.renderer.print_message(
-                "Manager returned no tasks. Nothing to do.", "yellow"
-            )
-            return False
+    async def cleanup(self):
+        """Clean up all active resources.
 
-        # Phase 2: Execute all workers concurrently
-        self.renderer.update_manager(f"Launching {len(self.tasks)} workers...")
-        await self._run_all_workers()
+        Terminates any running worker processes and saves task states.
+        Called on shutdown or error.
+        """
+        if not self.active_workers:
+            return
 
-        # Phase 2.5: Check for human calls if all tasks are blocked
-        can_continue = await self.human_handler.check_and_handle(list(self.tasks.values()))
-        if not can_continue:
-            self.renderer.print_message(
-                "Collaboration paused - waiting for human response", "yellow"
-            )
-            return False
-
-        # Phase 3: Manager review
-        self.renderer.update_manager("Running final review...")
-        review = await self._run_manager_review()
-
-        # Summary
-        completed = sum(1 for t in self.tasks.values() if t.status == "done")
-        failed = sum(1 for t in self.tasks.values() if t.status == "failed")
-
-        self.renderer.print_final_summary(
-            success=review.action == "complete",
-            completed=completed,
-            failed=failed,
+        self.renderer.print_message(
+            f"Cleaning up {len(self.active_workers)} active worker(s)...", "yellow"
         )
 
-        return review.action == "complete"
+        # Create cleanup tasks for all active workers
+        cleanup_tasks = []
+        for session in list(self.active_workers.values()):
+            cleanup_tasks.append(self._cleanup_worker(session))
+
+        # Wait for all cleanups with a timeout
+        if cleanup_tasks:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*cleanup_tasks, return_exceptions=True),
+                    timeout=10.0
+                )
+            except asyncio.TimeoutError:
+                self.renderer.print_message(
+                    "Warning: Some workers did not terminate in time", "red"
+                )
+
+        self.active_workers.clear()
+
+    async def _cleanup_worker(self, session: WorkerSession):
+        """Clean up a single worker session.
+
+        Terminates the process and updates task status.
+        """
+        task = session.task
+        proc = session.process
+
+        # Update task status
+        if task.status == "running":
+            task.status = "failed"
+            task.exit_code = -1
+            task.completed_at = datetime.now()
+
+        # Terminate process if still running
+        if proc.returncode is None:
+            try:
+                proc.terminate()
+                await asyncio.wait_for(proc.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except Exception:
+                    pass  # Ignore errors during force kill
+            except Exception:
+                pass  # Ignore other termination errors
+
+        # Save final task state
+        try:
+            await self._save_task_file(task)
+        except Exception:
+            pass  # Ignore save errors during cleanup
 
     def _ensure_directories(self):
         """Ensure required directories exist."""
@@ -450,6 +527,7 @@ class ForegroundOrchestrator:
             return
 
         # Launch worker
+        proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 cmd_name,
@@ -468,10 +546,6 @@ class ForegroundOrchestrator:
             self.renderer.append_worker_output(task.id, f"[Error] Failed to launch worker process: {e}")
             await self._save_task_file(task)
             return
-
-        # Note: proc.returncode is None here because process just started
-        # The actual exit code will be available after proc.wait()
-        # We check for process creation errors by catching exceptions above
 
         # Update status
         task.status = "running"
@@ -505,15 +579,7 @@ class ForegroundOrchestrator:
 
         except asyncio.CancelledError:
             self.renderer.append_worker_output(task.id, "[Cancelled by user]")
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-                try:
-                    await proc.wait()
-                except Exception:
-                    pass  # Process may already be dead
+            await self._cleanup_worker_process(proc, task, timeout=5.0)
             # Update task status before re-raising
             task.status = "failed"
             task.exit_code = -1
@@ -529,12 +595,7 @@ class ForegroundOrchestrator:
             task.exit_code = proc.returncode
             task.status = "done" if proc.returncode == 0 else "failed"
         except asyncio.TimeoutError:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+            await self._cleanup_worker_process(proc, task, timeout=5.0)
             task.exit_code = -1
             task.status = "failed"
             self.renderer.append_worker_output(task.id, "[Error] Worker timed out after 1 hour")
@@ -556,6 +617,34 @@ class ForegroundOrchestrator:
 
         # Update task file with final status
         await self._save_task_file(task)
+
+    async def _cleanup_worker_process(self, proc: asyncio.subprocess.Process, task: Task, timeout: float = 5.0):
+        """Clean up a worker process gracefully, then forcefully if needed.
+
+        Args:
+            proc: The subprocess process to clean up
+            task: The task being run (for logging purposes)
+            timeout: Timeout in seconds to wait for graceful termination
+        """
+        if proc.returncode is not None:
+            # Process already exited
+            return
+
+        # Try graceful termination first
+        try:
+            proc.terminate()
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            # Force kill if graceful termination failed
+            try:
+                proc.kill()
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except Exception:
+                # Ignore errors during force kill - process may already be dead
+                pass
+        except Exception:
+            # Ignore other errors during termination
+            pass
 
     async def _run_mock_worker(self, task: Task):
         """Run a mock worker for testing (simulates success)."""
@@ -903,16 +992,32 @@ When complete, exit with code 0.
                 f"{status_icon} {task.id}: [{task.status}] {task.title}"
             )
 
+        # Calculate success/failure stats
+        completed_count = sum(1 for t in self.tasks.values() if t.status == "done")
+        failed_count = sum(1 for t in self.tasks.values() if t.status == "failed")
+        total_count = len(self.tasks)
+
         objective = f"""Review completed collaboration session.
 
 All tasks have completed execution.
 
-Task Summary:
+Task Summary ({completed_count}/{total_count} completed, {failed_count} failed):
 {chr(10).join(tasks_summary)}
 
 Please review the results and decide next action.
-Respond with JSON action: "complete" if all tasks succeeded, "retry" if some failed,
-or "escalate" if human intervention is needed."""
+
+IMPORTANT: Respond with a JSON object in this exact format:
+{{
+  "action": "complete",
+  "reason": "explanation of your decision",
+  "summary": "human-readable summary"
+}}
+
+Valid actions are:
+- "complete": All tasks succeeded or acceptable level of success achieved
+- "retry": Some tasks failed and should be retried with adjusted approach
+- "escalate": Human intervention is needed to resolve issues
+- "split": Failed tasks should be broken down into smaller sub-tasks"""
 
         # Use same planning method with review context
         return await self._run_manager_plan(objective)
@@ -968,6 +1073,7 @@ Rules:
         """Parse the Manager's JSON decision from output.
 
         Handles both plain JSON output and stream-json format with multiple messages.
+        Uses a robust JSON extraction method that handles nested braces correctly.
         """
         # First, try to parse as stream-json (multiple JSON lines)
         json_objects = []
@@ -999,37 +1105,90 @@ Rules:
         # Combine all collected text and search for JSON
         combined_output = '\n'.join(json_objects) if json_objects else output
 
-        # Try to extract JSON from markdown code blocks
+        # Try to extract JSON from markdown code blocks first
         code_block_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', combined_output, re.DOTALL)
         if code_block_match:
             json_str = code_block_match.group(1).strip()
-        else:
-            # Try to find JSON object in the output
-            # Use a more robust pattern that finds the outermost JSON object
-            json_match = re.search(r'\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\}', combined_output, re.DOTALL)
-            if not json_match:
+            try:
+                data = json.loads(json_str)
+                return self._create_manager_decision(data)
+            except json.JSONDecodeError:
+                # Continue to try other methods
+                pass
+
+        # Use robust brace matching to find JSON objects
+        json_str = self._extract_json_with_brace_matching(combined_output)
+        if json_str:
+            try:
+                data = json.loads(json_str)
+                return self._create_manager_decision(data)
+            except json.JSONDecodeError as e:
                 return ManagerDecision(
                     action="escalate",
-                    reason="Could not parse manager response as JSON",
+                    reason=f"JSON parse error: {e}",
                 )
-            json_str = json_match.group()
 
-        try:
-            data = json.loads(json_str)
-            return ManagerDecision(
-                action=data.get("action", "escalate"),
-                tasks=data.get("tasks", []),
-                target_task=data.get("target_task", ""),
-                merge_branch=data.get("merge_branch", ""),
-                retry_prompt=data.get("retry_prompt", ""),
-                reason=data.get("reason", ""),
-                summary=data.get("summary", ""),
-            )
-        except json.JSONDecodeError as e:
-            return ManagerDecision(
-                action="escalate",
-                reason=f"JSON parse error: {e}",
-            )
+        return ManagerDecision(
+            action="escalate",
+            reason="Could not parse manager response as JSON",
+        )
+
+    def _extract_json_with_brace_matching(self, text: str) -> str | None:
+        """Extract a JSON object from text using proper brace matching.
+
+        This handles nested braces correctly by counting open/close braces,
+        ignoring braces inside strings.
+        """
+        in_string = False
+        escape_next = False
+        brace_depth = 0
+        start_idx = -1
+
+        for i, char in enumerate(text):
+            if escape_next:
+                escape_next = False
+                continue
+
+            if char == '\\' and in_string:
+                escape_next = True
+                continue
+
+            if char == '"' and not in_string:
+                in_string = True
+                continue
+            elif char == '"' and in_string:
+                in_string = False
+                continue
+
+            # Only count braces when not inside a string
+            if not in_string:
+                if char == '{':
+                    if brace_depth == 0:
+                        start_idx = i
+                    brace_depth += 1
+                elif char == '}':
+                    brace_depth -= 1
+                    if brace_depth == 0 and start_idx >= 0:
+                        # Found a complete JSON object
+                        return text[start_idx:i+1]
+                    elif brace_depth < 0:
+                        # Mismatched braces, reset
+                        brace_depth = 0
+                        start_idx = -1
+
+        return None
+
+    def _create_manager_decision(self, data: dict) -> ManagerDecision:
+        """Create a ManagerDecision from parsed JSON data."""
+        return ManagerDecision(
+            action=data.get("action", "escalate"),
+            tasks=data.get("tasks", []),
+            target_task=data.get("target_task", ""),
+            merge_branch=data.get("merge_branch", ""),
+            retry_prompt=data.get("retry_prompt", ""),
+            reason=data.get("reason", ""),
+            summary=data.get("summary", ""),
+        )
 
     def _get_clean_env(self) -> dict[str, str]:
         """Get clean environment for subprocesses."""

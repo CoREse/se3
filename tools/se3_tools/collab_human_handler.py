@@ -309,7 +309,16 @@ Please provide a helpful, actionable response. Be concise but thorough.
 Your response will be used directly, so write it as the actual response."""
 
         try:
+            # Validate project_root is set before creating runner
+            if not self.project_root:
+                raise ValueError("Project root not set")
+
             runner = ClaudeRunner(self.project_root)
+
+            # Check if runner has any commands configured
+            if not hasattr(runner, 'commands') or not runner.commands:
+                return "ClaudeRunner has no commands configured. Please respond manually or check your configuration."
+
             # Run synchronously in a thread pool to avoid blocking the event loop
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
@@ -320,8 +329,12 @@ Your response will be used directly, so write it as the actual response."""
                 )
             )
 
-            if result.returncode == 0:
-                return result.stdout
+            if result.returncode == 0 and result.stdout:
+                return result.stdout.strip()
+            elif result.returncode != 0:
+                return f"Claude returned error (code {result.returncode}). Please respond manually."
+        except ValueError as e:
+            print(f"[collab-human-handler] Configuration error: {e}", file=sys.stderr)
         except Exception as e:
             # Log error for debugging but don't expose to user
             print(f"[collab-human-handler] Failed to generate suggestion: {e}", file=sys.stderr)

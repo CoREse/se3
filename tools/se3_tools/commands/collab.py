@@ -311,7 +311,7 @@ def launch_manager(project_root: Path, event_type: str, context: str) -> subproc
     prompt_file = collab_dir / "logs" / f"manager-{event_type}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.prompt"
     prompt_file.write_text(prompt)
 
-    args = ["--dangerously-skip-permissions", "--print", "--output-format", "text", "--max-turns", "0", f"@{prompt_file}"]
+    args = ["--dangerously-skip-permissions", "--print", "--output-format", "text", "--max-turns", "50", f"@{prompt_file}"]
     env = {**dict(os.environ), "SE3_AGENT_ROLE": "manager", "SE3_PROJECT_ROOT": str(project_root)}
     env.pop("CLAUDECODE", None)  # Avoid nested session detection
 
@@ -404,7 +404,7 @@ def launch_worker(project_root: Path, task_id: str) -> WorkerResult:
     prompt_file = collab_dir / "logs" / f"worker-{task_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.prompt"
     prompt_file.write_text(prompt)
 
-    args = ["--dangerously-skip-permissions", "--print", "--max-turns", "0", f"@{prompt_file}"]
+    args = ["--dangerously-skip-permissions", "--print", "--max-turns", "100", f"@{prompt_file}"]
     env = {
         **dict(os.environ),
         "SE3_TASK_ID": task_id,

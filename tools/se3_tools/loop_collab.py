@@ -152,6 +152,7 @@ class LoopCollabRunner:
         # Reset renderer state for this iteration
         self.renderer.reset()
 
+        orchestrator = None
         try:
             # Create orchestrator with our renderer
             orchestrator = ForegroundOrchestrator(
@@ -170,9 +171,21 @@ class LoopCollabRunner:
         except asyncio.CancelledError:
             # Handle graceful shutdown on interrupt
             self.console.print("[yellow]Iteration cancelled by user[/yellow]")
+            # Ensure cleanup happens even on cancellation
+            if orchestrator:
+                try:
+                    await orchestrator.cleanup()
+                except Exception:
+                    pass  # Ignore cleanup errors during cancellation
             raise  # Re-raise to allow proper handling upstream
         except Exception as e:
             self.console.print(f"[red]Error during collab iteration: {e}[/red]")
+            # Ensure cleanup happens even on error
+            if orchestrator:
+                try:
+                    await orchestrator.cleanup()
+                except Exception:
+                    pass  # Ignore cleanup errors
             return None
 
         if not success:

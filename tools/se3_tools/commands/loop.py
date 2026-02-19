@@ -162,10 +162,10 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
         "--print",
         "--output-format", "stream-json",
         "--verbose",
-        "--max-turns", "0",
+        "--max-turns", "50",
     ]
 
-    print(f"[SE3 Loop] Executing: {claude_cmd} --print --output-format stream-json --verbose --max-turns 0")
+    print(f"[SE3 Loop] Executing: {claude_cmd} --print --output-format stream-json --verbose --max-turns 50")
     print(f"[SE3 Loop] Prompt (first 200 chars): {prompt_text[:200]}...")
     print("")
 
@@ -456,6 +456,8 @@ def run_loop_collab(
 
     Each iteration runs as a collab session with foreground orchestrator,
     allowing parallel work across multiple workers with real-time visibility.
+
+    Uses LoopCollabRunner for proper state management and interactive menus.
     """
     import asyncio
 
@@ -470,87 +472,30 @@ def run_loop_collab(
     print(f"\n{YELLOW}Each iteration runs as a collab session with parallel workers{RESET}")
     print(f"{BOLD}{'=' * 60}{RESET}\n")
 
-    previous_summary = None
+    # Use LoopCollabRunner for proper state management
+    from ..loop_collab import LoopCollabRunner
 
-    for iteration in range(1, iterations + 1):
-        print(f"\n{BOLD}{'─' * 60}{RESET}")
-        print(f"{BOLD}Collab Iteration {iteration} / {iterations}{RESET}")
-        print(f"{BOLD}{'─' * 60}{RESET}\n")
+    async def _run_loop():
+        runner = LoopCollabRunner(
+            base_prompt=prompt,
+            iterations=iterations,
+            project_root=root,
+            max_parallel=3,
+        )
+        return await runner.run()
 
-        # Build the iteration prompt
-        iteration_prompt = prompt
-        if previous_summary:
-            iteration_prompt = f"""{prompt}
-
-## Previous Iteration Summary
-
-{previous_summary}
-
-## Instructions
-Continue the work from the previous iteration, incorporating the insights above.
-"""
-
-        # Run collab session with foreground orchestrator
-        print(f"{CYAN}[SE3 Loop] Starting collab session for iteration {iteration}...{RESET}")
-
-        async def _run_iteration():
-            from ..collab_render import CollabRenderer
-            from ..collab_orchestrator import ForegroundOrchestrator
-
-            renderer = CollabRenderer()
-            orchestrator = ForegroundOrchestrator(root, renderer, max_parallel=3, mock=mock)
-
-            with renderer.start_live():
-                try:
-                    success = await orchestrator.run(iteration_prompt)
-                    return 0 if success else 1
-                except KeyboardInterrupt:
-                    renderer.print_message("\nInterrupted by user.", "yellow")
-                    return 130
-                except Exception as e:
-                    renderer.print_message(f"\nError: {e}", "red")
-                    import traceback
-
-                    traceback.print_exc()
-                    return 1
-
-        try:
-            exit_code = asyncio.run(_run_iteration())
-            if exit_code == 0:
-                print(f"{GREEN}[SE3 Loop] Collab iteration {iteration} completed successfully{RESET}")
-            elif exit_code == 130:
-                print(f"{YELLOW}[SE3 Loop] Collab iteration {iteration} interrupted{RESET}")
-                break
-            else:
-                print(f"{YELLOW}[SE3 Loop] Collab iteration {iteration} exited with code {exit_code}{RESET}")
-        except Exception as e:
-            print(f"{MAGENTA}[SE3 Loop] Error in iteration {iteration}: {e}{RESET}")
-            import traceback
-            traceback.print_exc()
-            exit_code = 1
-
-        # Generate summary for next iteration
-        if not no_summary and iteration < iterations and exit_code == 0:
-            print(f"\n{CYAN}[SE3 Loop] Generating summary for next iteration...{RESET}")
-            # Simple summary based on git changes
-            try:
-                result = subprocess.run(
-                    ["git", "log", "--oneline", "-5"],
-                    cwd=root,
-                    capture_output=True,
-                    text=True
-                )
-                if result.returncode == 0:
-                    previous_summary = f"Recent commits:\n{result.stdout}"
-                    print(f"{GRAY}{DIM}Summary: {previous_summary[:100]}{'...' if len(previous_summary) > 100 else ''}{RESET}")
-                else:
-                    previous_summary = f"Iteration {iteration} completed."
-            except Exception as e:
-                previous_summary = f"Iteration {iteration} completed (summary error: {e})."
-
-        if iteration < iterations and exit_code != 130:
-            print(f"\n[SE3 Loop] Continuing to next iteration in 2 seconds...")
-            time.sleep(2)
+    try:
+        success = asyncio.run(_run_loop())
+        if success:
+            print(f"\n{GREEN}[SE3 Loop] All iterations completed successfully{RESET}")
+        else:
+            print(f"\n{YELLOW}[SE3 Loop] Loop ended with some issues{RESET}")
+    except KeyboardInterrupt:
+        print(f"\n{YELLOW}[SE3 Loop] Interrupted by user{RESET}")
+    except Exception as e:
+        print(f"\n{MAGENTA}[SE3 Loop] Error: {e}{RESET}")
+        import traceback
+        traceback.print_exc()
 
     print(f"\n{BOLD}{'=' * 60}{RESET}")
     print(f"{BOLD}SE3 Loop + Collab Complete{RESET}")
