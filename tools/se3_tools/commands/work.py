@@ -44,6 +44,69 @@ WORKFLOWS = {
 }
 
 
+# Change naming conventions - action words that make change names descriptive
+VALID_CHANGE_PREFIXES = [
+    "fix", "add", "update", "remove", "refactor", "implement",
+    "create", "delete", "improve", "optimize", "migrate",
+    "upgrade", "support", "enable", "disable", "configure",
+    "bugfix", "feature", "review", "directive"
+]
+
+
+def validate_change_name(change_name: str) -> Dict[str, Any]:
+    """Validate change name and provide guidance.
+
+    Returns dict with:
+        - valid: bool - whether name is acceptable
+        - warnings: List[str] - list of warnings
+        - suggestion: str - suggested improvement
+    """
+    result = {"valid": True, "warnings": [], "suggestion": ""}
+
+    # Check for auto-generated patterns (gibberish)
+    auto_patterns = [
+        (r"[a-z]+\d+[a-z]*\d+", "Appears auto-generated (random characters and numbers)"),
+        (r"^t\d+-\d+x", "Auto-generated pattern (t1-1x...)"),
+        (r"[a-z]{10,}\d+", "Likely auto-generated (long random prefix)"),
+    ]
+
+    for pattern, message in auto_patterns:
+        if re.search(pattern, change_name, re.IGNORECASE):
+            result["warnings"].append(message)
+            result["valid"] = False
+            break
+
+    # Check length
+    if len(change_name) < 5:
+        result["warnings"].append("Name is too short (minimum 5 characters)")
+        result["valid"] = False
+
+    # Check for meaningful words
+    parts = change_name.replace("-", "_").replace("/", "_").split("_")
+    meaningful_parts = [p for p in parts if len(p) > 2 and not p.isdigit()]
+
+    if len(meaningful_parts) < 2:
+        result["warnings"].append("Name should have at least 2 descriptive words")
+        result["valid"] = False
+
+    # Check for action prefix
+    has_action_prefix = any(change_name.lower().startswith(prefix) for prefix in VALID_CHANGE_PREFIXES)
+    if not has_action_prefix:
+        # Check if it uses workflow/type prefix
+        if "/" in change_name:
+            prefix = change_name.split("/")[0].lower()
+            if prefix not in WORKFLOWS:
+                result["warnings"].append(f"Unknown prefix '{prefix}' - use: bugfix/, feature/, review/, directive/, or action words like fix-, add-, update-")
+        else:
+            result["warnings"].append("Name should start with an action word (fix-, add-, update-, etc.) or type prefix (bugfix/, feature/, etc.)")
+
+    # Generate suggestion if needed
+    if not result["valid"] or result["warnings"]:
+        result["suggestion"] = "Use format: <action>-<descriptive-name> (e.g., 'fix-login-validation', 'add-user-profile', 'feature/oauth-integration')"
+
+    return result
+
+
 class StepStatus(str, Enum):
     PENDING = "pending"
     IN_PROGRESS = "in_progress"
@@ -578,6 +641,9 @@ def run_work(
             else:
                 actual_workflow = "feature"
 
+        # Validate change name
+        name_validation = validate_change_name(actual_change_name)
+
         # Create new change
         change_path = openspec_dir / actual_change_name
         change_path.mkdir(parents=True, exist_ok=True)
@@ -591,7 +657,7 @@ def run_work(
             state["current_step"] = WORKFLOWS[actual_workflow][0]
             write_change_state(change_path, state)
 
-        return {
+        result = {
             "change": actual_change_name,
             "workflow": state["workflow"],
             "current_step": state["current_step"],
@@ -599,6 +665,13 @@ def run_work(
                 actual_change_name, state["workflow"], state["current_step"], change_path, root
             ),
         }
+
+        # Include naming validation warnings if any
+        if name_validation["warnings"]:
+            result["naming_warnings"] = name_validation["warnings"]
+            result["naming_suggestion"] = name_validation["suggestion"]
+
+        return result
 
     # List active changes if no change specified
     if not change_name:
@@ -733,6 +806,14 @@ def print_text_report(result: Dict[str, Any]) -> None:
     print(f"\n{'=' * 60}")
     print(f"SE 3.0 Work: {result['change']}")
     print(f"{'=' * 60}")
+
+    # Naming warnings
+    if result.get("naming_warnings"):
+        print(f"\n⚠️  Naming Warnings:")
+        for warning in result["naming_warnings"]:
+            print(f"   - {warning}")
+        if result.get("naming_suggestion"):
+            print(f"\n   Suggestion: {result['naming_suggestion']}")
 
     print(f"\nWorkflow: {result['workflow']} ({result.get('formality', 'unknown')})")
     print(f"Current Step: {result.get('current_step', 'COMPLETE')}")
