@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.18.5"  # Fix: loop branch reuse, separate create/checkout, better error handling
+SE3_FRAMEWORK_VERSION = "2.18.6"  # Fix: collab base_branch propagation in all modes (foreground, manual, daemon)

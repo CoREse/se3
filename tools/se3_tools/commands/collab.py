@@ -499,8 +499,16 @@ def launch_worker(project_root: Path, task_id: str) -> WorkerResult:
                 pass  # Ignore cleanup errors
 
 
-def start_daemon(project_root: Path, objective: str, resume: bool = False):
-    """Start orchestrator daemon mode."""
+def start_daemon(project_root: Path, objective: str, resume: bool = False, base_branch: str | None = None):
+    """Start orchestrator daemon mode.
+
+    Args:
+        project_root: The project root directory
+        objective: The collaboration objective
+        resume: Whether to resume a previous session
+        base_branch: The base branch to create collab branches from. If None,
+                     uses the current branch.
+    """
     ensure_collab_structure(project_root)
     collab_dir = get_collab_dir(project_root)
 
@@ -513,14 +521,15 @@ def start_daemon(project_root: Path, objective: str, resume: bool = False):
             for f in tasks_dir.glob(".exitcode-*"):
                 f.unlink()
 
-        # Create session config
-        result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=project_root,
-            capture_output=True,
-            text=True
-        )
-        base_branch = result.stdout.strip() or "master"
+        # Get base branch if not provided
+        if base_branch is None:
+            result = subprocess.run(
+                ["git", "branch", "--show-current"],
+                cwd=project_root,
+                capture_output=True,
+                text=True
+            )
+            base_branch = result.stdout.strip() or "master"
 
         config = {
             "session_id": f"collab-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
@@ -534,6 +543,7 @@ def start_daemon(project_root: Path, objective: str, resume: bool = False):
 
         typer.echo(f"Created collaboration session: {config['session_id']}")
         typer.echo(f"Objective: {objective}")
+        typer.echo(f"Base branch: {base_branch}")
 
     # Start the orchestrator daemon
     script = project_root / "scripts" / "collab-orchestrator.sh"
@@ -565,11 +575,20 @@ def start_daemon(project_root: Path, objective: str, resume: bool = False):
     typer.echo(f"Use 'se3 collab --abort' to stop")
 
 
-def run_foreground_mode(project_root: Path, objective: str, resume: bool = False, mock: bool = False):
+def run_foreground_mode(project_root: Path, objective: str, resume: bool = False, mock: bool = False, base_branch: str | None = None):
     """Foreground mode: run orchestrator with interactive terminal UI.
 
     This mode runs the Python asyncio orchestrator with rich terminal UI,
     providing real-time visibility into manager decisions and worker execution.
+
+    Args:
+        project_root: The project root directory
+        objective: The collaboration objective
+        resume: Whether to resume a previous session
+        mock: Whether to use mock mode for testing
+        base_branch: The base branch to create collab branches from. If None,
+                     uses the current branch. When called from se3 loop,
+                     this should be the loop branch.
     """
     from ..collab_render import CollabRenderer
     from ..collab_orchestrator import ForegroundOrchestrator
@@ -580,7 +599,7 @@ def run_foreground_mode(project_root: Path, objective: str, resume: bool = False
 
     async def _run():
         renderer = CollabRenderer()
-        orchestrator = ForegroundOrchestrator(project_root, renderer, max_parallel=3, mock=mock)
+        orchestrator = ForegroundOrchestrator(project_root, renderer, max_parallel=3, mock=mock, base_branch=base_branch)
 
         with renderer.start_live():
             try:
@@ -601,19 +620,27 @@ def run_foreground_mode(project_root: Path, objective: str, resume: bool = False
         raise typer.Exit(1)
 
 
-def run_manual_mode(project_root: Path, objective: str):
-    """Manual mode: generate initial plan, print commands for user to execute."""
+def run_manual_mode(project_root: Path, objective: str, base_branch: str | None = None):
+    """Manual mode: generate initial plan, print commands for user to execute.
+
+    Args:
+        project_root: The project root directory
+        objective: The collaboration objective
+        base_branch: The base branch to create collab branches from. If None,
+                     uses the current branch.
+    """
     ensure_collab_structure(project_root)
     collab_dir = get_collab_dir(project_root)
 
-    # Get base branch
-    result = subprocess.run(
-        ["git", "branch", "--show-current"],
-        cwd=project_root,
-        capture_output=True,
-        text=True
-    )
-    base_branch = result.stdout.strip() or "master"
+    # Get base branch if not provided
+    if base_branch is None:
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=project_root,
+            capture_output=True,
+            text=True
+        )
+        base_branch = result.stdout.strip() or "master"
 
     # Create session config
     config = {
@@ -657,6 +684,7 @@ def collab(
     task_id: str = typer.Option(None, "--task", help="Task ID for worker"),
     mock: bool = typer.Option(False, "--mock", help="Use mock for testing"),
     project_root: str = typer.Option(None, "--project-root", "-p", help="Project root directory"),
+    base_branch: str = typer.Option(None, "--base-branch", "-b", help="Base branch for collab (default: current branch)"),
 ):
     """Manage git-worktree based multi-agent collaboration.
 
@@ -706,21 +734,21 @@ def collab(
         if not resume and not objective:
             typer.echo("Error: provide an objective or use --resume")
             raise typer.Exit(1)
-        start_daemon(root, objective or "", resume)
+        start_daemon(root, objective or "", resume, base_branch)
         raise typer.Exit(0)
 
     if manual:
         if not objective:
             typer.echo("Error: provide an objective")
             raise typer.Exit(1)
-        run_manual_mode(root, objective)
+        run_manual_mode(root, objective, base_branch)
         raise typer.Exit(0)
 
     if foreground:
         if not resume and not objective:
             typer.echo("Error: provide an objective or use --resume")
             raise typer.Exit(1)
-        run_foreground_mode(root, objective or "", resume, mock)
+        run_foreground_mode(root, objective or "", resume, mock, base_branch)
         raise typer.Exit(0)
 
     # Default: run orchestrator directly (legacy mode, for testing)
