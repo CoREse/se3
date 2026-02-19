@@ -193,6 +193,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.18.3 | 2026-02-20 | Fix: Ensure collab task branches correctly merge to loop branch by checking out base branch before merge. Simplified base branch inference logic. |
 | 2.18.0 | 2026-02-20 | Feature: SE3 Loop branch isolation and merge support. Each loop session creates a dedicated branch (se3-loop/{timestamp}) for isolation. Collab tasks branch from the loop branch. Added `se3 loop --merge <branch>` command to merge loop branch back. |
 | 2.17.1 | 2026-02-20 | Fix: `se3 handoff` now auto-commits `progress.md` changes. Previously progress.md was updated but left uncommitted. |
 | 2.17.0 | 2026-02-20 | **Version correction**: `.se3/` → `se3/` was incorrectly marked as breaking; this was a temp fix, not API change. Added: `se3 health` command, `--strict`/`--archive` flags, auto health checks in `se3:done`/`se3:work`. Fix: loop summary timeout 60s→300s. |

@@ -623,26 +623,16 @@ def infer_loop_branch_base(project_root: Path, loop_branch: str) -> str | None:
 
     Tries to find the most likely base branch by examining:
     1. The branch that this branch was created from (using git merge-base)
-    2. Common branch names like master, main
+    2. Common branch names like master, main, develop, dev
+
+    The logic checks if the loop_branch shares history with a candidate base branch.
+    If merge-base finds a common ancestor, the candidate is considered the base.
 
     Returns the inferred base branch name, or None if cannot determine.
     """
     # Try to find merge-base with common base branches
+    # Order matters: prefer master/main over develop/dev
     common_bases = ["master", "main", "develop", "dev"]
-
-    # Get the oldest commit on this branch
-    result = subprocess.run(
-        ["git", "rev-list", "--max-parents=0", loop_branch],
-        cwd=project_root,
-        capture_output=True,
-        text=True
-    )
-    if result.returncode != 0:
-        return None
-
-    branch_root = result.stdout.strip().split("\n")[0]
-    if not branch_root:
-        return None
 
     # For each common base, check if loop_branch was branched from it
     for base in common_bases:
@@ -656,7 +646,7 @@ def infer_loop_branch_base(project_root: Path, loop_branch: str) -> str | None:
         if result.returncode != 0:
             continue
 
-        # Check if loop_branch contains commits from this base
+        # Find the merge-base between loop_branch and candidate base
         result = subprocess.run(
             ["git", "merge-base", loop_branch, base],
             cwd=project_root,
@@ -665,9 +655,9 @@ def infer_loop_branch_base(project_root: Path, loop_branch: str) -> str | None:
         )
         if result.returncode == 0:
             merge_base = result.stdout.strip()
-            # If merge-base is on the base branch and not the branch root,
-            # this is likely the correct base
-            if merge_base and merge_base != branch_root:
+            # If we found a merge-base, this candidate is likely the base branch
+            # The merge_base is the common ancestor, which confirms they share history
+            if merge_base:
                 return base
 
     return None

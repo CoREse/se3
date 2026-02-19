@@ -733,6 +733,9 @@ class ForegroundOrchestrator:
         back to the loop branch so they can be merged to the original branch
         when the loop completes.
 
+        The branch hierarchy is: original <- se3-loop/{timestamp} <- collab/{task_id}
+        This merge handles: collab/{task_id} -> se3-loop/{timestamp}
+
         Args:
             task: The completed task to merge
         """
@@ -741,11 +744,23 @@ class ForegroundOrchestrator:
                 task.id, f"\n[Merging] {task.branch} -> {self.base_branch}\n"
             )
 
-            # First, ensure we're in the project root (main worktree)
-            # The worktree commits are already in the git object database
-            # We just need to merge the branch from the main worktree
+            # First, checkout the base branch (this is the loop branch when running under se3 loop)
+            checkout_proc = await asyncio.create_subprocess_exec(
+                "git", "checkout", self.base_branch,
+                cwd=self.project_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await checkout_proc.communicate()
 
-            # Check out the base branch and merge the task branch
+            if checkout_proc.returncode != 0:
+                error_msg = stderr.decode() if stderr else "Unknown error"
+                self.renderer.append_worker_output(
+                    task.id, f"[Warning] Failed to checkout {self.base_branch}: {error_msg}\n"
+                )
+                return
+
+            # Now merge the task branch into the base branch
             merge_proc = await asyncio.create_subprocess_exec(
                 "git", "merge", "--no-ff", task.branch, "-m", f"chore(collab): merge {task.branch}",
                 cwd=self.project_root,

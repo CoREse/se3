@@ -2638,4 +2638,5 @@ openspec/changes/test/.openspec.yaml |  3 --
 
 ## Current Session
 <!-- current-session -->
-
+- `7a9a7c4` fix(loop): correct merge target branch for se3 loop --merge (4 files)
+- `5e060a6` fix(loop): collab branches now auto-merge to loop branch and improved base branch detection (5 files)
