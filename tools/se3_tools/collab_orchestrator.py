@@ -276,12 +276,12 @@ class ForegroundOrchestrator:
             env=self._get_clean_env(),
         )
 
-        # Send prompt
+        # Send prompt via stdin
         try:
             proc.stdin.write(prompt.encode())
             await proc.stdin.drain()
             proc.stdin.close()
-            await proc.stdin.wait_closed()
+            # Don't wait for stdin to close - process may exit quickly
         except (BrokenPipeError, ConnectionResetError) as e:
             # Handle case where process exits before we finish writing
             self.renderer.update_manager(f"Warning: Manager process closed stdin early: {e}")
@@ -581,19 +581,7 @@ class ForegroundOrchestrator:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout, stderr = await proc.communicate()
-
-            # If git removal failed, try to unregister the worktree from git's registry
-            # without deleting files (in case of permission issues or locked files)
-            if task.worktree.exists() and proc.returncode != 0:
-                # Try to unregister from git's worktree list without deleting files
-                unregister_proc = await asyncio.create_subprocess_exec(
-                    "git", "worktree", "remove", "--force", str(task.worktree),
-                    cwd=self.project_root,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                await unregister_proc.communicate()
+            await proc.communicate()
 
             # Fall back to direct removal if git removal failed
             if task.worktree.exists():
@@ -630,20 +618,52 @@ class ForegroundOrchestrator:
             # Remove .git file first to avoid permission issues
             git_file = task.worktree / ".git"
             if git_file.exists():
-                git_file.unlink(missing_ok=True)
-            shutil.rmtree(task.worktree, ignore_errors=True)
+                try:
+                    git_file.unlink(missing_ok=True)
+                except Exception:
+                    pass  # Continue even if unlink fails
+            try:
+                shutil.rmtree(task.worktree, ignore_errors=True)
+            except Exception:
+                pass  # Continue even if rmtree fails
 
         # Ensure parent directory exists
         task.worktree.parent.mkdir(parents=True, exist_ok=True)
 
-        # Create worktree
-        proc = await asyncio.create_subprocess_exec(
-            "git", "worktree", "add", str(task.worktree), "-b", task.branch, self.base_branch,
-            cwd=self.project_root,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await proc.communicate()
+        # Create worktree with retry logic for locked worktrees
+        max_retries = 2
+        for attempt in range(max_retries):
+            proc = await asyncio.create_subprocess_exec(
+                "git", "worktree", "add", str(task.worktree), "-b", task.branch, self.base_branch,
+                cwd=self.project_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await proc.communicate()
+
+            if proc.returncode == 0:
+                return  # Success
+
+            error_msg = stderr.decode() if stderr else "Unknown error"
+            error_lower = error_msg.lower()
+
+            # If worktree is locked, prune and retry
+            if "locked" in error_lower and attempt < max_retries - 1:
+                self.renderer.append_worker_output(
+                    task.id, f"[Warning] Worktree locked, pruning and retrying..."
+                )
+                prune_proc = await asyncio.create_subprocess_exec(
+                    "git", "worktree", "prune",
+                    cwd=self.project_root,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await prune_proc.communicate()
+                await asyncio.sleep(0.5)  # Brief delay before retry
+                continue
+
+            # For other errors, break and let the error handling below deal with it
+            break
 
         if proc.returncode != 0:
             error_msg = stderr.decode() if stderr else "Unknown error"
@@ -704,13 +724,6 @@ class ForegroundOrchestrator:
                     if git_file.exists():
                         git_file.unlink(missing_ok=True)
                     shutil.rmtree(task.worktree, ignore_errors=True)
-                    # Also try to remove from git worktree registry
-                    await asyncio.create_subprocess_exec(
-                        "git", "worktree", "remove", str(task.worktree), "--force",
-                        cwd=self.project_root,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
                 except Exception:
                     pass
 
