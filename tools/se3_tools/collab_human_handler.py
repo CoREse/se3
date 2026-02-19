@@ -13,11 +13,14 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     from .collab_orchestrator import Task
     from .collab_render import CollabRenderer
+
+# Import at module level to avoid runtime import issues
+from .claude_runner import ClaudeRunner
 
 
 @dataclass
@@ -39,12 +42,12 @@ class InteractiveHumanHandler:
     mode for the user to respond to human calls.
     """
 
-    def __init__(self, project_root: Path, renderer: "CollabRenderer" | None = None):
+    def __init__(self, project_root: Path, renderer: "CollabRenderer"):
         self.project_root = project_root
         self.human_calls_dir = project_root / "human-calls"
         self.renderer = renderer
 
-    async def check_and_handle(self, tasks: list[Task]) -> bool:
+    async def check_and_handle(self, tasks: List["Task"]) -> bool:
         """Check for pending human calls and handle them if all tasks are blocked.
 
         Args:
@@ -68,7 +71,7 @@ class InteractiveHumanHandler:
         # All tasks blocked - enter interactive mode
         return await self._interactive_mode(pending, tasks)
 
-    def _get_pending_calls(self) -> list[HumanCall]:
+    def _get_pending_calls(self) -> List[HumanCall]:
         """Get all pending human calls."""
         calls = []
 
@@ -134,7 +137,7 @@ class InteractiveHumanHandler:
             file_path=file_path,
         )
 
-    async def _interactive_mode(self, calls: list[HumanCall], tasks: list[Task]) -> bool:
+    async def _interactive_mode(self, calls: List[HumanCall], tasks: List["Task"]) -> bool:
         """Enter full-screen interactive mode for handling calls."""
         # Clear screen
         print("\033[2J\033[H", end='')
@@ -237,8 +240,6 @@ Skipped by user in interactive mode.
 
     async def _generate_suggestion(self, call: HumanCall) -> str:
         """Generate AI suggestion for a human call response."""
-        from .claude_runner import ClaudeRunner
-
         prompt = f"""You are helping respond to a human call in a software development context.
 
 Call Type: {call.call_type}

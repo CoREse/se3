@@ -66,7 +66,10 @@ class CollabRenderer:
         return layout
 
     def start_live(self) -> Live:
-        """Start the live display."""
+        """Start the live display.
+
+        Returns a Live context manager that can be used with 'with' statement.
+        """
         self._live = Live(
             self.layout,
             console=self.console,
@@ -74,6 +77,19 @@ class CollabRenderer:
             screen=False,
         )
         return self._live
+
+    def __enter__(self) -> "CollabRenderer":
+        """Enter context manager - starts live display."""
+        self.start_live()
+        if self._live:
+            self._live.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit context manager - stops live display."""
+        if self._live:
+            return self._live.__exit__(exc_type, exc_val, exc_tb)
+        return False
 
     def stop_live(self):
         """Stop the live display."""

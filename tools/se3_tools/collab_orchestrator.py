@@ -197,7 +197,6 @@ class ForegroundOrchestrator:
             task_id = f"task-{len(self.tasks)+1:03d}"
 
         # Sanitize ID for filesystem safety
-        import re
         task_id = re.sub(r'[^a-zA-Z0-9_-]', '-', task_id)
 
         # Get title with fallback
@@ -417,8 +416,6 @@ class ForegroundOrchestrator:
 
     async def _run_mock_worker(self, task: Task):
         """Run a mock worker for testing (simulates success)."""
-        import asyncio
-
         # Update status
         task.status = "running"
         task.started_at = datetime.now()
@@ -456,6 +453,31 @@ class ForegroundOrchestrator:
 
         del self.active_workers[task.id]
 
+    async def _cleanup_and_recreate_worktree(self, task: Task):
+        """Clean up existing worktree/branch and recreate fresh."""
+        # Remove worktree if it exists
+        if task.worktree.exists():
+            # Try to remove via git first
+            proc = await asyncio.create_subprocess_exec(
+                "git", "worktree", "remove", str(task.worktree), "--force",
+                cwd=self.project_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+            # Fall back to direct removal if git removal failed
+            if task.worktree.exists():
+                shutil.rmtree(task.worktree, ignore_errors=True)
+
+        # Try to delete branch if it exists
+        proc = await asyncio.create_subprocess_exec(
+            "git", "branch", "-D", task.branch,
+            cwd=self.project_root,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()  # Ignore error (branch may not exist)
+
     async def _ensure_worktree(self, task: Task):
         """Ensure the worktree exists for a task."""
         if task.worktree.exists():
@@ -464,7 +486,6 @@ class ForegroundOrchestrator:
             if git_dir.exists():
                 return
             # Invalid worktree, remove and recreate
-            import shutil
             shutil.rmtree(task.worktree, ignore_errors=True)
 
         # Ensure parent directory exists
@@ -481,25 +502,27 @@ class ForegroundOrchestrator:
 
         if proc.returncode != 0:
             error_msg = stderr.decode() if stderr else "Unknown error"
-            # Check if branch already exists
-            if "already exists" in error_msg.lower():
-                # Try to add worktree with existing branch
+            error_lower = error_msg.lower()
+
+            # Handle branch already exists - clean up and retry
+            if "already exists" in error_lower:
+                await self._cleanup_and_recreate_worktree(task)
+                # Retry creating worktree
                 proc = await asyncio.create_subprocess_exec(
-                    "git", "worktree", "add", str(task.worktree), task.branch,
+                    "git", "worktree", "add", str(task.worktree), "-b", task.branch, self.base_branch,
                     cwd=self.project_root,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
                 stdout, stderr = await proc.communicate()
-
                 if proc.returncode == 0:
                     return
-
                 error_msg = stderr.decode() if stderr else error_msg
+                error_lower = error_msg.lower()
 
-            # Check if worktree is already registered
-            if "is already registered" in error_msg.lower():
-                # Try to prune and retry
+            # Handle worktree already registered - prune and retry
+            if "is already registered" in error_lower or "already registered" in error_lower:
+                # Prune stale worktrees
                 prune_proc = await asyncio.create_subprocess_exec(
                     "git", "worktree", "prune",
                     cwd=self.project_root,
@@ -508,18 +531,20 @@ class ForegroundOrchestrator:
                 )
                 await prune_proc.communicate()
 
-                # Retry creating worktree with existing branch
+                # Try to remove the existing worktree directory if it exists
+                if task.worktree.exists():
+                    shutil.rmtree(task.worktree, ignore_errors=True)
+
+                # Retry creating worktree
                 proc = await asyncio.create_subprocess_exec(
-                    "git", "worktree", "add", str(task.worktree), task.branch,
+                    "git", "worktree", "add", str(task.worktree), "-b", task.branch, self.base_branch,
                     cwd=self.project_root,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
                 stdout, stderr = await proc.communicate()
-
                 if proc.returncode == 0:
                     return
-
                 error_msg = stderr.decode() if stderr else error_msg
 
             raise RuntimeError(f"Failed to create worktree for {task.id}: {error_msg}")
