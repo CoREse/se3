@@ -77,7 +77,7 @@ class LoopCollabRunner:
 
             if not summary:
                 self.console.print("[red]Iteration failed[/red]")
-                if not await self._confirm("Continue to next iteration?"):
+                if not self._confirm("Continue to next iteration?"):
                     break
                 continue
 
@@ -88,7 +88,7 @@ class LoopCollabRunner:
 
             # Show iteration menu (if not last iteration)
             if i < self.iterations:
-                action = await self._iteration_menu()
+                action = self._iteration_menu()
                 if action == "exit":
                     self.console.print("[yellow]Exiting loop early[/yellow]")
                     break
@@ -96,7 +96,7 @@ class LoopCollabRunner:
                     self.console.print("[yellow]Skipping to next iteration[/yellow]")
                     continue
                 elif action == "modify":
-                    self.base_prompt = await self._modify_prompt()
+                    self.base_prompt = self._modify_prompt()
 
         self._print_completion()
         return True
@@ -278,7 +278,7 @@ class LoopCollabRunner:
 
         self.console.print(panel)
 
-    async def _iteration_menu(self) -> str:
+    def _iteration_menu(self) -> str:
         """Show menu between iterations."""
         self.console.print("\n[bold]Options:[/bold]")
         self.console.print("  [c] Continue to next iteration")
@@ -295,12 +295,12 @@ class LoopCollabRunner:
             "e": "exit",
         }.get(choice, "continue")
 
-    async def _confirm(self, message: str) -> bool:
+    def _confirm(self, message: str) -> bool:
         """Ask for confirmation."""
         response = input(f"{message} [y/N]: ").strip().lower()
         return response == "y"
 
-    async def _modify_prompt(self) -> str:
+    def _modify_prompt(self) -> str:
         """Modify the base prompt."""
         self.console.print(f"\n[bold]Current prompt:[/bold]\n{self.base_prompt[:200]}...")
         self.console.print("\nEnter additional instructions (or 'edit' to rewrite):")

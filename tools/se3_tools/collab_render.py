@@ -232,6 +232,8 @@ class CollabRenderer:
 
     def _render_progress_bar(self, progress: int, width: int = 8) -> str:
         """Render a simple progress bar."""
+        # Clamp progress to valid range
+        progress = max(0, min(100, progress))
         filled = int(progress / 100 * width)
         bar = "█" * filled + "░" * (width - filled)
         return f"{bar} {progress}%"
@@ -263,22 +265,35 @@ class CollabRenderer:
 
         Returns the parsed message if it was valid JSON, None otherwise.
         """
+        # Skip empty lines
+        if not line or not line.strip():
+            return None
+
         try:
             msg = json.loads(line)
             msg_type = msg.get("type", "")
 
             if msg_type == "assistant":
                 self._render_assistant_message(msg)
+            elif msg_type == "user":
+                # Handle tool results inside user messages
+                self._render_user_message(msg)
             elif msg_type == "tool_use":
                 self._render_tool_use(msg)
             elif msg_type == "tool_result":
                 self._render_tool_result(msg)
             elif msg_type == "error":
                 self._render_error(msg)
+            elif msg_type == "result":
+                self._render_result(msg)
 
             return msg
         except json.JSONDecodeError:
-            # Not JSON, treat as plain text
+            # Not JSON, treat as plain text - add to output buffer
+            stripped = line.rstrip()
+            if stripped:
+                self.output_buffer.append(stripped)
+                self._update_output_panel()
             return None
 
     def _render_assistant_message(self, msg: dict[str, Any]):
@@ -301,10 +316,19 @@ class CollabRenderer:
         self.output_buffer.append(f"[tool] 🔧 {name}")
         self._update_output_panel()
 
+    def _render_user_message(self, msg: dict[str, Any]):
+        """Render a user message (contains tool results)."""
+        message = msg.get("message", {})
+        content = message.get("content", [])
+
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "tool_result":
+                self._render_tool_result(item)
+
     def _render_tool_result(self, msg: dict[str, Any]):
         """Render a tool_result message."""
         result = msg.get("result", {})
-        error = result.get("error")
+        error = result.get("error") if isinstance(result, dict) else None
 
         if error:
             self.output_buffer.append(f"[result] ❌ Error: {str(error)[:80]}")
@@ -316,6 +340,13 @@ class CollabRenderer:
                 self.output_buffer.append("[result] ✓ Done")
 
         self._update_output_panel()
+
+    def _render_result(self, msg: dict[str, Any]):
+        """Render a final result message."""
+        result = msg.get("result", "")
+        if result:
+            self.output_buffer.append(f"[final] {str(result)[:100]}")
+            self._update_output_panel()
 
     def _render_error(self, msg: dict[str, Any]):
         """Render an error message."""

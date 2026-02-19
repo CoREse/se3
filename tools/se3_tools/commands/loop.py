@@ -493,6 +493,8 @@ Continue the work from the previous iteration, incorporating the insights above.
         print(f"{CYAN}[SE3 Loop] Starting collab session for iteration {iteration}...{RESET}")
 
         async def _run_iteration():
+            from ..collab_render import CollabRenderer
+            from ..collab_orchestrator import ForegroundOrchestrator
             renderer = CollabRenderer()
             orchestrator = ForegroundOrchestrator(root, renderer, max_parallel=3, mock=mock)
 

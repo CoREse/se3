@@ -9,6 +9,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from .collab_render import CollabRenderer
+from .collab_human_handler import InteractiveHumanHandler
 
 
 @dataclass
@@ -80,6 +82,7 @@ class ForegroundOrchestrator:
         self.mock = mock
         self.session_id = f"collab-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         self.base_branch = "master"
+        self.human_handler = InteractiveHumanHandler(project_root, renderer)
 
     async def run(self, objective: str) -> bool:
         """Run the complete collaboration session.
@@ -121,6 +124,14 @@ class ForegroundOrchestrator:
         # Phase 2: Execute all workers concurrently
         self.renderer.update_manager(f"Launching {len(self.tasks)} workers...")
         await self._run_all_workers()
+
+        # Phase 2.5: Check for human calls if all tasks are blocked
+        can_continue = await self.human_handler.check_and_handle(list(self.tasks.values()))
+        if not can_continue:
+            self.renderer.print_message(
+                "Collaboration paused - waiting for human response", "yellow"
+            )
+            return False
 
         # Phase 3: Manager review
         self.renderer.update_manager("Running final review...")
@@ -180,8 +191,13 @@ class ForegroundOrchestrator:
             worktree=self.worktrees_dir / task_id,
         )
 
-    async def _run_manager_plan(self, objective: str) -> ManagerDecision:
-        """Run Manager to create initial plan."""
+    async def _run_manager_plan(self, objective: str, timeout: int = 300) -> ManagerDecision:
+        """Run Manager to create initial plan.
+
+        Args:
+            objective: The objective to plan for
+            timeout: Maximum time to wait for planning (seconds)
+        """
         if self.mock:
             # Return a mock plan for testing
             return ManagerDecision(
@@ -216,18 +232,45 @@ class ForegroundOrchestrator:
         await proc.stdin.drain()
         proc.stdin.close()
 
-        # Read output
+        # Read output with timeout
         output_lines = []
-        while True:
-            line = await proc.stdout.readline()
-            if not line:
-                break
+        start_time = asyncio.get_event_loop().time()
 
-            line_str = line.decode()
-            output_lines.append(line_str)
+        try:
+            while True:
+                # Check timeout
+                if asyncio.get_event_loop().time() - start_time > timeout:
+                    proc.terminate()
+                    await proc.wait()
+                    return ManagerDecision(
+                        action="escalate",
+                        reason=f"Manager planning timed out after {timeout}s",
+                    )
 
-            # Update manager panel with recent output
-            self.renderer.update_manager("".join(output_lines[-20:]))
+                # Use wait_for to implement read timeout
+                try:
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(),
+                        timeout=1.0
+                    )
+                except asyncio.TimeoutError:
+                    # Check if process is still running
+                    if proc.returncode is not None:
+                        break
+                    continue
+
+                if not line:
+                    break
+
+                line_str = line.decode()
+                output_lines.append(line_str)
+
+                # Update manager panel with recent output
+                self.renderer.update_manager("".join(output_lines[-20:]))
+
+        except asyncio.CancelledError:
+            proc.terminate()
+            raise
 
         await proc.wait()
 
@@ -258,7 +301,7 @@ class ForegroundOrchestrator:
         await self._ensure_worktree(task)
 
         # Create task file
-        task_file = self._save_task_file(task)
+        task_file = await self._save_task_file(task)
 
         if self.mock:
             # Mock mode: simulate worker execution
@@ -312,13 +355,25 @@ class ForegroundOrchestrator:
                 self._update_progress_from_output(task, line_str)
 
         except asyncio.CancelledError:
+            self.renderer.append_worker_output(task.id, "[Cancelled by user]")
             proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
             raise
 
         # Wait for completion
-        await proc.wait()
-        task.exit_code = proc.returncode
-        task.status = "done" if proc.returncode == 0 else "failed"
+        try:
+            await proc.wait()
+            task.exit_code = proc.returncode
+            task.status = "done" if proc.returncode == 0 else "failed"
+        except Exception as e:
+            task.exit_code = -1
+            task.status = "failed"
+            self.renderer.append_worker_output(task.id, f"Error: {e}")
+
         task.completed_at = datetime.now()
 
         # Update UI
@@ -329,6 +384,9 @@ class ForegroundOrchestrator:
         )
 
         del self.active_workers[task.id]
+
+        # Update task file with final status
+        await self._save_task_file(task)
 
     async def _run_mock_worker(self, task: Task):
         """Run a mock worker for testing (simulates success)."""
@@ -374,7 +432,13 @@ class ForegroundOrchestrator:
     async def _ensure_worktree(self, task: Task):
         """Ensure the worktree exists for a task."""
         if task.worktree.exists():
-            return
+            # Verify it's a valid git worktree
+            git_dir = task.worktree / ".git"
+            if git_dir.exists():
+                return
+            # Invalid worktree, remove and recreate
+            import shutil
+            shutil.rmtree(task.worktree, ignore_errors=True)
 
         # Create worktree
         proc = await asyncio.create_subprocess_exec(
@@ -383,9 +447,10 @@ class ForegroundOrchestrator:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        await proc.wait()
+        stdout, stderr = await proc.communicate()
 
         if proc.returncode != 0:
+            error_msg = stderr.decode() if stderr else "Unknown error"
             # Branch might already exist, try without -b
             proc = await asyncio.create_subprocess_exec(
                 "git", "worktree", "add", str(task.worktree), task.branch,
@@ -393,9 +458,13 @@ class ForegroundOrchestrator:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await proc.wait()
+            stdout, stderr = await proc.communicate()
 
-    def _save_task_file(self, task: Task) -> Path:
+            if proc.returncode != 0:
+                error_msg = stderr.decode() if stderr else error_msg
+                raise RuntimeError(f"Failed to create worktree for {task.id}: {error_msg}")
+
+    async def _save_task_file(self, task: Task) -> Path:
         """Save task definition to file."""
         task_file = self.collab_dir / "tasks" / f"{task.id}.json"
         task_data = {
@@ -487,15 +556,19 @@ When complete, exit with code 0.
                 f"{status_icon} {task.id}: [{task.status}] {task.title}"
             )
 
-        context = f"""All tasks have completed execution.
+        objective = f"""Review completed collaboration session.
+
+All tasks have completed execution.
 
 Task Summary:
 {chr(10).join(tasks_summary)}
 
-Please review the results and decide next action."""
+Please review the results and decide next action.
+Respond with JSON action: "complete" if all tasks succeeded, "retry" if some failed,
+or "escalate" if human intervention is needed."""
 
         # Use same planning method with review context
-        return await self._run_manager_plan(context)
+        return await self._run_manager_plan(objective)
 
     def _build_manager_prompt(self, objective: str) -> str:
         """Build the prompt for the Manager agent."""
