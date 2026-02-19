@@ -350,7 +350,18 @@ class CollabRenderer:
     def _render_tool_use(self, msg: dict[str, Any]):
         """Render a tool_use message."""
         name = msg.get("name", "unknown")
+        input_data = msg.get("input", {})
+
         self.output_buffer.append(f"[tool] 🔧 {name}")
+
+        # Show key parameters (limited to first 3, truncated)
+        if isinstance(input_data, dict):
+            for key, value in list(input_data.items())[:3]:
+                preview = str(value)[:80]
+                if len(str(value)) > 80:
+                    preview += "..."
+                self.output_buffer.append(f"[tool]   {key}: {preview}")
+
         self._update_output_panel()
 
     def _render_user_message(self, msg: dict[str, Any]):

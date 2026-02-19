@@ -297,18 +297,20 @@ class LoopCollabRunner:
 
     def _display_summary(self, summary: CollabSummary):
         """Display iteration summary."""
-        content = Text()
+        # Build content as string with rich markup
+        content_lines = []
 
-        content.append(f"[bold]Insights:[/bold]\n{summary.insights}\n\n")
-
-        content.append(f"[green]Completed:[/green] {len(summary.completed_tasks)} tasks\n")
+        content_lines.append(f"[bold]Insights:[/bold]\n{summary.insights}\n")
+        content_lines.append(f"[green]Completed:[/green] {len(summary.completed_tasks)} tasks")
         if summary.failed_tasks:
-            content.append(f"[red]Failed:[/red] {len(summary.failed_tasks)} tasks\n")
+            content_lines.append(f"[red]Failed:[/red] {len(summary.failed_tasks)} tasks")
 
         if summary.key_changes:
-            content.append(f"\n[bold]Key Changes:[/bold]\n")
+            content_lines.append(f"\n[bold]Key Changes:[/bold]")
             for change in summary.key_changes[:5]:
-                content.append(f"  {change}\n")
+                content_lines.append(f"  {change}")
+
+        content = "\n".join(content_lines)
 
         panel = Panel(
             content,

@@ -178,7 +178,7 @@ class InteractiveHumanHandler:
             choice = choice.strip().lower()
 
             if choice == 'v':
-                self._view_full_context(call)
+                await self._view_full_context(call)
                 # Ask again after viewing
                 choice = await self._get_input(f"Now choose [s/r/k/w]: ")
                 if choice is None:
