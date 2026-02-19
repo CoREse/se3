@@ -598,6 +598,11 @@ class ForegroundOrchestrator:
             # Fall back to direct removal if git removal failed
             if task.worktree.exists():
                 try:
+                    # Remove .git file first (it's a file, not a directory in worktrees)
+                    # This avoids permission issues on some systems
+                    git_file = task.worktree / ".git"
+                    if git_file.exists():
+                        git_file.unlink()
                     shutil.rmtree(task.worktree, ignore_errors=False)
                 except Exception as e:
                     # If we can't remove it, log but continue - git might still work
@@ -622,6 +627,10 @@ class ForegroundOrchestrator:
             if git_dir.exists():
                 return
             # Invalid worktree, remove and recreate
+            # Remove .git file first to avoid permission issues
+            git_file = task.worktree / ".git"
+            if git_file.exists():
+                git_file.unlink(missing_ok=True)
             shutil.rmtree(task.worktree, ignore_errors=True)
 
         # Ensure parent directory exists
@@ -669,6 +678,10 @@ class ForegroundOrchestrator:
 
                 # Try to remove the existing worktree directory if it exists
                 if task.worktree.exists():
+                    # Remove .git file first to avoid permission issues
+                    git_file = task.worktree / ".git"
+                    if git_file.exists():
+                        git_file.unlink(missing_ok=True)
                     shutil.rmtree(task.worktree, ignore_errors=True)
 
                 # Retry creating worktree
@@ -686,6 +699,10 @@ class ForegroundOrchestrator:
             # Clean up on failure to avoid leaving partial state
             if task.worktree.exists():
                 try:
+                    # Remove .git file first to avoid permission issues
+                    git_file = task.worktree / ".git"
+                    if git_file.exists():
+                        git_file.unlink(missing_ok=True)
                     shutil.rmtree(task.worktree, ignore_errors=True)
                     # Also try to remove from git worktree registry
                     await asyncio.create_subprocess_exec(

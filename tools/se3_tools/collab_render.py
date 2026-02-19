@@ -391,20 +391,6 @@ class CollabRenderer:
         self.output_buffer.append(f"[error] ❌ {str(error)[:100]}")
         self._update_output_panel()
 
-    def print_final_summary(self, success: bool, completed: int, failed: int):
-        """Print a final summary after the live display ends."""
-        self.stop_live()
-
-        print("\n" + "=" * 60)
-        if success:
-            print("✅ Collaboration completed successfully")
-        else:
-            print("❌ Collaboration completed with issues")
-
-        print(f"  Completed tasks: {completed}")
-        print(f"  Failed tasks: {failed}")
-        print("=" * 60 + "\n")
-
     def print_message(self, message: str, style: str = ""):
         """Print a message outside the live display."""
         if self._live:
