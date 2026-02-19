@@ -2791,4 +2791,5 @@ openspec/changes/se3-loopbranchctrl-cclaudemergese3-23/tasks.md | 5 +++++
 
 ## Current Session
 <!-- current-session -->
-
+- `fcbe775` chore(loop): verify branch isolation and collab integration complete (1 files)
+- `4aed902` chore(loop): verify branch isolation and collab integration (iteration 26) (1 files)
