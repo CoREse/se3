@@ -1712,3 +1712,4 @@ README.md                             |   1 +
 ## Current Session
 <!-- current-session -->
 - `6b45d35` test(loop): add comprehensive tests for stdin prompt and Ctrl-C handling (1 files)
+- `1d29de3` docs: update progress.md with session 73 summary (1 files)
