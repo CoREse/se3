@@ -2730,8 +2730,28 @@ progress.md                            | 3 ++-
  2 files changed, 4 insertions(+), 1 deletion(-)
 ```
 
+## 2026-02-20 Session 91 (handoff)
+
+### Done
+- fix(loop): improve branch handling for se3 loop and se3 collab
+- chore: update openspec state and task progress for se3-loopbranchctrl-cclaudemergese3-21
+- Update 4 files (4 files changed, 2 insertions(+), 76 deletions(-))
+
+### Commits
+- `4fd2281` fix(loop): improve branch handling for se3 loop and se3 collab (3 files)
+- `976044d` chore: update openspec state and task progress for se3-loopbranchctrl-cclaudemergese3-21 (3 files)
+- `75b494b` Update 4 files (4 files changed, 2 insertions(+), 76 deletions(-)) (4 files)
+
+### Files Changed
+```
+progress.md                           |  3 +-
+ tools/se3_tools/__init__.py           |  2 +-
+ tools/se3_tools/commands/loop.py      | 98 +++++++++++++++++++++++++++--------
+ tools/se3_tools/commands/test_loop.py | 25 +++++++++
+ 4 files changed, 105 insertions(+), 23 deletions(-)
+```
+
 
 ## Current Session
 <!-- current-session -->
-- `4fd2281` fix(loop): improve branch handling for se3 loop and se3 collab (3 files)
-- `976044d` chore: update openspec state and task progress for se3-loopbranchctrl-cclaudemergese3-21 (3 files)
+
