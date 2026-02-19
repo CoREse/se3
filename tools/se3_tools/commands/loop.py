@@ -140,13 +140,15 @@ def render_stream_json_line(line: str) -> None:
         return
 
 
-def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int = 1800) -> int:
+def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int = 1800,
+                              loop_state: Optional["LoopState"] = None) -> int:
     """Run claude with stream-json output and real-time rendering.
 
     Args:
         claude_cmd: The claude command to run
         prompt_text: The prompt text to send via stdin
         timeout_sec: Timeout in seconds
+        loop_state: Optional LoopState for Ctrl-C handling
 
     Returns exit code from claude.
     """
@@ -168,6 +170,7 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
 
     output_queue = queue.Queue()
     exit_code = [None]  # Use list to allow modification in closure
+    proc_container = [None]  # Store process for signal handler access
 
     def reader_thread():
         """Read stdout in a separate thread to avoid blocking."""
@@ -181,6 +184,7 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
                 env=env,
                 bufsize=1,
             )
+            proc_container[0] = proc
 
             # Store process for main thread to wait
             output_queue.put(proc)
@@ -204,6 +208,15 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
             output_queue.put(f"ERROR: {e}")
             output_queue.put(None)
 
+    # Define signal handler that only sets flag, doesn't kill process
+    def sigint_handler(signum, frame):
+        if loop_state:
+            loop_state.handle_sigint(signum, frame)
+            # Note: We don't raise KeyboardInterrupt here - let Claude continue running
+
+    # Install signal handler
+    old_sigint_handler = signal.signal(signal.SIGINT, sigint_handler)
+
     # Start reader thread
     thread = threading.Thread(target=reader_thread, daemon=True)
     thread.start()
@@ -213,9 +226,11 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
         proc = output_queue.get(timeout=5)
         if isinstance(proc, str) and proc.startswith("ERROR:"):
             print(f"{MAGENTA}[SE3 Loop] {proc}{RESET}")
+            signal.signal(signal.SIGINT, old_sigint_handler)
             return 1
     except queue.Empty:
         print(f"{MAGENTA}[SE3 Loop] Failed to start claude process{RESET}")
+        signal.signal(signal.SIGINT, old_sigint_handler)
         return 1
 
     # Process output with timeout
@@ -236,16 +251,31 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
             if time.time() - start_time > timeout_sec:
                 proc.kill()
                 print(f"\n{YELLOW}[SE3 Loop] Session timed out ({timeout_sec}s limit){RESET}")
+                signal.signal(signal.SIGINT, old_sigint_handler)
                 return 124
+
+            # Check if we should exit (second Ctrl-C pressed)
+            if loop_state and loop_state.should_exit:
+                proc.kill()
+                signal.signal(signal.SIGINT, old_sigint_handler)
+                return 130
 
         except queue.Empty:
             # No output available, check if process is still running
             if exit_code[0] is not None:
                 break
+            # Check if we should exit while waiting
+            if loop_state and loop_state.should_exit:
+                proc.kill()
+                signal.signal(signal.SIGINT, old_sigint_handler)
+                return 130
             continue
 
     # Wait for thread to complete
     thread.join(timeout=1)
+
+    # Restore old signal handler
+    signal.signal(signal.SIGINT, old_sigint_handler)
 
     return exit_code[0] if exit_code[0] is not None else 0
 
@@ -492,21 +522,8 @@ def run_exclusive_loop(
         print(f"{CYAN}[SE3 Loop] Starting Claude Code...{RESET}\n")
         print(f"{'─' * 60}")
 
-        # Set up signal handler for Ctrl-C
-        old_sigint_handler = signal.signal(signal.SIGINT, loop_state.handle_sigint)
-
-        try:
-            exit_code = run_claude_with_renderer(claude_cmd, prompt_text)
-        except KeyboardInterrupt:
-            # This will be triggered when Ctrl-C is pressed
-            if loop_state.should_exit:
-                exit_code = 130
-            else:
-                # First Ctrl-C, supplemental mode activated
-                exit_code = 0  # Treat as success so we can add supplemental prompt
-        finally:
-            # Restore old signal handler
-            signal.signal(signal.SIGINT, old_sigint_handler)
+        # Run claude with loop_state for Ctrl-C handling
+        exit_code = run_claude_with_renderer(claude_cmd, prompt_text, loop_state=loop_state)
 
         print(f"\n{'─' * 60}")
 
