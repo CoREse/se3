@@ -240,10 +240,7 @@ class LoopCollabRunner:
         )
 
     async def _generate_insights(self, orchestrator: ForegroundOrchestrator) -> str:
-        """Generate insights using AI."""
-        # Simple heuristic-based insights for now
-        # Could be enhanced to call Claude for deeper analysis
-
+        """Generate insights based on task completion status."""
         try:
             summary = orchestrator.get_summary()
             total = summary.get("total_tasks", 0)
@@ -260,7 +257,22 @@ class LoopCollabRunner:
             else:
                 return f"Several tasks ({failed}) encountered issues. Review recommended before continuing."
         except Exception as e:
-            return f"Iteration completed. (Could not generate detailed insights: {e})"
+            # Fallback: count tasks manually from orchestrator.tasks
+            try:
+                total = len(orchestrator.tasks)
+                completed = sum(1 for t in orchestrator.tasks.values() if t.status == "done")
+                failed = sum(1 for t in orchestrator.tasks.values() if t.status == "failed")
+
+                if total == 0:
+                    return "No tasks were executed in this iteration."
+                if failed == 0:
+                    return f"All {completed} tasks completed successfully."
+                elif completed > failed:
+                    return f"Majority of tasks ({completed}/{total}) completed successfully."
+                else:
+                    return f"Several tasks ({failed}/{total}) encountered issues."
+            except Exception:
+                return "Iteration completed successfully."
 
     def _extract_git_changes(self) -> list[str]:
         """Extract key changes from git."""

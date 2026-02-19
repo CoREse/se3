@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -96,12 +97,16 @@ class ForegroundOrchestrator:
         Returns:
             True if successful, False otherwise
         """
-        # Setup
-        self._ensure_directories()
-        self._load_base_branch()
-        self._save_session_config(objective)
+        # Setup signal handlers for graceful shutdown
+        self._shutdown_requested = False
+        original_sigint = signal.signal(signal.SIGINT, self._signal_handler)
+        original_sigterm = signal.signal(signal.SIGTERM, self._signal_handler)
 
         try:
+            self._ensure_directories()
+            self._load_base_branch()
+            self._save_session_config(objective)
+
             # Phase 1: Manager planning
             self.renderer.update_manager("Initializing Manager for task planning...")
             decision = await self._run_manager_plan(objective)
@@ -169,6 +174,10 @@ class ForegroundOrchestrator:
             self.renderer.print_message(f"\nError during collaboration: {e}", "red")
             await self.cleanup()
             raise
+        finally:
+            # Restore original signal handlers
+            signal.signal(signal.SIGINT, original_sigint)
+            signal.signal(signal.SIGTERM, original_sigterm)
 
     async def cleanup(self):
         """Clean up all active resources.
@@ -369,6 +378,16 @@ class ForegroundOrchestrator:
             else:
                 # stdin is None - process may have failed to start
                 self.renderer.update_manager("Warning: Manager process stdin is None, process may have failed to start")
+                # Clean up and return escalation
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+                return ManagerDecision(
+                    action="escalate",
+                    reason="Manager process failed to start (stdin is None)",
+                )
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
             # Handle case where process exits before we finish writing
             self.renderer.update_manager(f"Warning: Manager process closed stdin early: {e}")
@@ -562,6 +581,11 @@ class ForegroundOrchestrator:
         # Read output in real-time
         try:
             while True:
+                # Check for shutdown request
+                if self._shutdown_requested:
+                    self.renderer.append_worker_output(task.id, "[Shutdown requested]")
+                    break
+
                 line = await proc.stdout.readline()
                 if not line:
                     break
@@ -1206,6 +1230,22 @@ Rules:
             reason=data.get("reason", ""),
             summary=data.get("summary", ""),
         )
+
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully.
+
+        Sets a flag that the main loop can check to initiate graceful shutdown.
+        """
+        signal_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+        self.renderer.print_message(f"\nReceived {signal_name}, initiating graceful shutdown...", "yellow")
+        self._shutdown_requested = True
+        # Cancel any running tasks
+        for session in list(self.active_workers.values()):
+            try:
+                if session.process.returncode is None:
+                    session.process.terminate()
+            except Exception:
+                pass
 
     def _get_clean_env(self) -> dict[str, str]:
         """Get clean environment for subprocesses."""

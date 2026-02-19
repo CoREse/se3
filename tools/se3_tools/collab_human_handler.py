@@ -329,8 +329,9 @@ Your response will be used directly, so write it as the actual response."""
 
         try:
             # Validate project_root is set before creating runner
-            if not self.project_root:
-                raise ValueError("Project root not set")
+            # Note: self.project_root is a Path, so we check if it's valid
+            if self.project_root is None or str(self.project_root) == "." or not self.project_root.exists():
+                raise ValueError(f"Invalid project root: {self.project_root}")
 
             runner = ClaudeRunner(self.project_root)
 
@@ -354,11 +355,11 @@ Your response will be used directly, so write it as the actual response."""
                 return f"Claude returned error (code {result.returncode}). Please respond manually."
         except ValueError as e:
             print(f"[collab-human-handler] Configuration error: {e}", file=sys.stderr)
+            return f"Configuration error: {e}. Please respond manually."
         except Exception as e:
             # Log error for debugging but don't expose to user
             print(f"[collab-human-handler] Failed to generate suggestion: {e}", file=sys.stderr)
-
-        return "Unable to generate suggestion. Please respond manually."
+            return f"Unable to generate suggestion ({type(e).__name__}). Please respond manually."
 
     def _open_editor(self, initial_text: str) -> str:
         """Open system editor for text input."""
