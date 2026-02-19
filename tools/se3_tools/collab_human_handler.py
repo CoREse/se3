@@ -168,25 +168,22 @@ class InteractiveHumanHandler:
 
         # Process each call
         for call in calls:
-            try:
-                choice = input(f"\nCall '{call.title}'? [v/s/r/k/w]: ").strip().lower()
-            except EOFError:
+            choice = await self._get_input(f"\nCall '{call.title}'? [v/s/r/k/w]: ")
+            if choice is None:
                 # Handle Ctrl+D or EOF - treat as 'wait'
                 print("\n(EOF received, waiting for external response)")
                 return False
-            except KeyboardInterrupt:
-                # Handle Ctrl+C - treat as 'wait'
-                print("\n(Interrupted, waiting for external response)")
-                return False
+
+            choice = choice.strip().lower()
 
             if choice == 'v':
                 self._view_full_context(call)
                 # Ask again after viewing
-                try:
-                    choice = input(f"Now choose [s/r/k/w]: ").strip().lower()
-                except (EOFError, KeyboardInterrupt):
+                choice = await self._get_input(f"Now choose [s/r/k/w]: ")
+                if choice is None:
                     print("\n(Interrupted, waiting for external response)")
                     return False
+                choice = choice.strip().lower()
 
             if choice == 's':
                 await self._handle_suggest(call)
@@ -199,14 +196,25 @@ class InteractiveHumanHandler:
 
         return True
 
-    def _view_full_context(self, call: HumanCall):
+    async def _get_input(self, prompt: str) -> str | None:
+        """Get input from user asynchronously without blocking the event loop.
+
+        Returns None if input was interrupted (EOFError/KeyboardInterrupt).
+        """
+        loop = asyncio.get_event_loop()
+        try:
+            return await loop.run_in_executor(None, lambda: input(prompt))
+        except (EOFError, KeyboardInterrupt):
+            return None
+
+    async def _view_full_context(self, call: HumanCall):
         """Display full context of a human call."""
         print("\n" + "=" * 70)
         print(f"Full context for: {call.title}")
         print("=" * 70)
         print(call.context)
         print("=" * 70)
-        input("\nPress Enter to continue...")
+        await self._get_input("\nPress Enter to continue...")
 
     async def _handle_suggest(self, call: HumanCall):
         """Generate AI suggestion for a human call."""
@@ -218,11 +226,12 @@ class InteractiveHumanHandler:
         print(suggestion)
         print('-' * 50)
 
-        try:
-            use = input("\nUse this? [y/n/edit]: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        use = await self._get_input("\nUse this? [y/n/edit]: ")
+        if use is None:
             print("\n(Cancelled)")
             return
+
+        use = use.strip().lower()
 
         if use == 'y':
             self._write_response(call, suggestion)

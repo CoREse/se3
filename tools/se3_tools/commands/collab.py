@@ -346,6 +346,8 @@ class WorkerResult:
 
     def communicate(self, input: bytes | None = None, timeout: float | None = None) -> tuple[bytes, bytes]:
         """Return stdout/stderr (already captured)."""
+        # Note: input parameter is accepted for Popen compatibility but ignored
+        # since the process has already completed
         return (self._stdout, self._stderr)
 
     def poll(self) -> int | None:

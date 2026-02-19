@@ -184,13 +184,26 @@ class CollabRenderer:
         progress: int | None = None,
         eta: str | None = None,
     ):
-        """Update a worker's status."""
+        """Update a worker's status.
+
+        Args:
+            worker_id: The worker's ID
+            status: Status value - must be one of: pending, running, done, failed, blocked, escalated
+            progress: Progress percentage (0-100)
+            eta: Estimated time to completion or retry info
+        """
         if worker_id not in self.workers:
             self.add_worker(worker_id)
 
         worker = self.workers[worker_id]
         if status is not None:
-            worker.status = status
+            # Validate status to ensure it's a known state
+            valid_statuses = {"pending", "running", "done", "failed", "blocked", "escalated"}
+            if status not in valid_statuses:
+                # If unknown status, append to output but don't change status
+                self.append_worker_output(worker_id, f"[Status: {status}]")
+            else:
+                worker.status = status
         if progress is not None:
             worker.progress = progress
         if eta is not None:

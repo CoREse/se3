@@ -365,9 +365,12 @@ class ForegroundOrchestrator:
                 task.retry_count += 1
                 task.status = "pending"  # Reset to pending for retry
                 task.progress = 0
+                # Use 'running' status with retry info in title via update_worker_status
+                # The status field should remain a valid enum value
                 self.renderer.update_worker_status(
                     task.id,
-                    status=f"retrying ({task.retry_count}/{task.max_retries})"
+                    status="running",
+                    eta=f"retry {task.retry_count}/{task.max_retries}"
                 )
                 self.renderer.append_worker_output(
                     task.id,
@@ -420,17 +423,33 @@ class ForegroundOrchestrator:
             return
 
         # Launch worker
-        proc = await asyncio.create_subprocess_exec(
-            cmd_name,
-            "--dangerously-skip-permissions",
-            "--print",
-            "--output-format", "stream-json",
-            f"@{prompt_file}",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=task.worktree,
-            env=self._get_clean_env(),
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                cmd_name,
+                "--dangerously-skip-permissions",
+                "--print",
+                "--output-format", "stream-json",
+                f"@{prompt_file}",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+                cwd=task.worktree,
+                env=self._get_clean_env(),
+            )
+        except Exception as e:
+            task.status = "failed"
+            task.exit_code = -1
+            self.renderer.append_worker_output(task.id, f"[Error] Failed to launch worker process: {e}")
+            await self._save_task_file(task)
+            return
+
+        # Check if process started successfully
+        if proc.returncode is not None and proc.returncode != 0:
+            # Process failed immediately
+            task.status = "failed"
+            task.exit_code = proc.returncode
+            self.renderer.append_worker_output(task.id, f"[Error] Worker process exited immediately with code {proc.returncode}")
+            await self._save_task_file(task)
+            return
 
         # Update status
         task.status = "running"
@@ -545,6 +564,15 @@ class ForegroundOrchestrator:
 
     async def _cleanup_and_recreate_worktree(self, task: Task):
         """Clean up existing worktree/branch and recreate fresh."""
+        # First, try to prune any stale worktrees
+        prune_proc = await asyncio.create_subprocess_exec(
+            "git", "worktree", "prune",
+            cwd=self.project_root,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await prune_proc.communicate()
+
         # Remove worktree if it exists
         if task.worktree.exists():
             # Try to remove via git first
@@ -554,12 +582,30 @@ class ForegroundOrchestrator:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await proc.communicate()
+            stdout, stderr = await proc.communicate()
+
+            # If git removal failed, try to unregister first then force remove
+            if task.worktree.exists() and proc.returncode != 0:
+                # Try to remove from git's worktree registry without deleting files
+                unregister_proc = await asyncio.create_subprocess_exec(
+                    "git", "worktree", "remove", str(task.worktree), "--force",
+                    cwd=self.project_root,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await unregister_proc.communicate()
+
             # Fall back to direct removal if git removal failed
             if task.worktree.exists():
-                shutil.rmtree(task.worktree, ignore_errors=True)
+                try:
+                    shutil.rmtree(task.worktree, ignore_errors=False)
+                except Exception as e:
+                    # If we can't remove it, log but continue - git might still work
+                    self.renderer.append_worker_output(
+                        task.id, f"[Warning] Could not remove worktree directory: {e}"
+                    )
 
-        # Try to delete branch if it exists
+        # Try to delete branch if it exists (ignore errors)
         proc = await asyncio.create_subprocess_exec(
             "git", "branch", "-D", task.branch,
             cwd=self.project_root,
@@ -716,24 +762,52 @@ When complete, exit with code 0.
         return prompt_file
 
     def _update_progress_from_output(self, task: Task, line: str):
-        """Update task progress based on output patterns."""
+        """Update task progress based on output patterns.
+
+        Recognizes various progress indicators from common tools and frameworks.
+        """
         # Look for progress indicators in output
         patterns = [
+            # Standard progress patterns
             (r"progress[:\s]+(\d+)%", 1),
             (r"(\d+)%\s+complete", 1),
+            (r"(\d+)%\s+done", 1),
             (r"completed[:\s]+(\d+)/(\d+)", lambda m: int(m.group(1)) / int(m.group(2)) * 100),
+            # pytest patterns
+            (r"(\d+) passed.*in\s+[\d.]+s", lambda m: 100),  # All tests passed
+            (r"passed.*?(\d+)%", 1),
+            # Build/compilation patterns
+            (r"\[(\d+)/(\d+)\]", lambda m: int(m.group(1)) / int(m.group(2)) * 100),
+            (r"Compiling.*?(\d+)%", 1),
+            (r"Building.*?(\d+)%", 1),
+            # Git patterns
+            (r"Receiving objects:\s+(\d+)%", 1),
+            (r"Resolving deltas:\s+(\d+)%", 1),
+            # Package manager patterns
+            (r"Installing.*?(\d+)%", 1),
+            (r"Downloading.*?(\d+)%", 1),
+            # Task completion patterns
+            (r"Task (\d+)/(\d+) complete", lambda m: int(m.group(1)) / int(m.group(2)) * 100),
+            (r"Step (\d+)/(\d+)", lambda m: int(m.group(1)) / int(m.group(2)) * 100),
+            # Claude Code specific patterns
+            (r"✓\s+\w+.*\((\d+)%\)", 1),
+            (r"Running tests.*?\[(\d+)%\]", 1),
         ]
 
         for pattern, group in patterns:
             match = re.search(pattern, line, re.IGNORECASE)
             if match:
-                if callable(group):
-                    progress = int(group(match))
-                else:
-                    progress = int(match.group(group))
-                task.progress = min(100, max(0, progress))
-                self.renderer.update_worker_status(task.id, progress=task.progress)
-                break
+                try:
+                    if callable(group):
+                        progress = int(group(match))
+                    else:
+                        progress = int(match.group(group))
+                    task.progress = min(100, max(0, progress))
+                    self.renderer.update_worker_status(task.id, progress=task.progress)
+                    break
+                except (ValueError, ZeroDivisionError):
+                    # Skip if conversion fails
+                    continue
 
     async def _run_manager_review(self) -> ManagerDecision:
         """Run Manager to review completed tasks."""

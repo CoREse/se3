@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.16.1"  # Bug fixes: collab launch_worker return type, error handling improvements
+SE3_FRAMEWORK_VERSION = "2.16.2"  # Bug fixes: status handling, async input, worktree cleanup, progress patterns
