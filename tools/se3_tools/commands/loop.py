@@ -175,6 +175,8 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
     def reader_thread():
         """Read stdout in a separate thread to avoid blocking."""
         try:
+            # Start Claude in a new process group so Ctrl-C doesn't interrupt it
+            # This allows us to handle Ctrl-C in the parent while Claude continues running
             proc = subprocess.Popen(
                 cmd,
                 stdin=subprocess.PIPE,
@@ -183,6 +185,7 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
                 text=True,
                 env=env,
                 bufsize=1,
+                start_new_session=True,  # New process group - isolates from Ctrl-C
             )
             proc_container[0] = proc
 
