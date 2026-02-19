@@ -313,7 +313,7 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
     return (exit_code[0] if exit_code[0] is not None else 0), was_interrupted
 
 
-def run_claude_summary(claude_cmd: str, change_dir: Path, timeout_sec: int = 60) -> str:
+def run_claude_summary(claude_cmd: str, change_dir: Path, timeout_sec: int = 300) -> str:
     """Generate a summary of the completed iteration using Claude Code.
 
     Returns a brief summary string or empty string if failed.
