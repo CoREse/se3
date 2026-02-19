@@ -2527,9 +2527,53 @@ openspec/changes/test/.openspec.yaml |  3 --
  6 files changed, 191 insertions(+), 23 deletions(-)
 ```
 
+## 2026-02-20 Session 84 (handoff)
 
-## Current Session
-<!-- current-session -->
+### Done
+- chore(openspec): verify OpenSpec integrity system health (iteration 9/10)
+- chore(openspec): complete OpenSpec integrity system (iteration 10/10)
+- chore(openspec): archive completed changes from iteration 10
+- Update .claude/.session.json, openspec/changes/prompts-ensure-openspec-09/tasks.md, progress.md
+
+### Commits
 - `daaeff3` chore(openspec): verify OpenSpec integrity system health (iteration 9/10) (1 files)
 - `7644a72` chore(openspec): complete OpenSpec integrity system (iteration 10/10) (25 files)
 - `f3f3579` chore(openspec): archive completed changes from iteration 10 (1 files)
+- `54116e3` Update .claude/.session.json, openspec/changes/prompts-ensure-openspec-09/tasks.md, progress.md (3 files)
+
+### Files Changed
+```
+.claude/.session.json                              |  4 +--
+ .../.openspec.yaml                                 |  2 ++
+ .../.se3-state.json                                | 11 ++++++++
+ .../tasks.md                                       |  5 ++++
+ .../.openspec.yaml                                 |  2 ++
+ .../.se3-state.json                                | 16 ++++++++++++
+ .../2026-02-19-prompts-ensure-openspec-04/tasks.md |  5 ++++
+ .../.openspec.yaml                                 |  2 ++
+ .../.se3-state.json                                | 11 ++++++++
+ .../2026-02-19-prompts-ensure-openspec-05/tasks.md |  5 ++++
+ .../.openspec.yaml                                 |  2 ++
+ .../.se3-state.json                                | 11 ++++++++
+ .../2026-02-19-prompts-ensure-openspec-06/tasks.md |  5 ++++
+ .../.openspec.yaml                                 |  2 ++
+ .../.se3-state.json                                | 11 ++++++++
+ .../2026-02-19-prompts-ensure-openspec-09/tasks.md | 16 ++++++++++++
+ .../.openspec.yaml                                 |  2 ++
+ .../.se3-state.json                                | 11 ++++++++
+ .../2026-02-19-prompts-ensure-openspec-10/tasks.md |  5 ++++
+ .../.openspec.yaml                                 |  2 ++
+ .../.se3-state.json                                | 11 ++++++++
+ .../2026-02-20-prompts-ensure-openspec-07/tasks.md |  5 ++++
+ .../.openspec.yaml                                 |  2 ++
+ .../.se3-state.json                                | 11 ++++++++
+ .../2026-02-20-prompts-ensure-openspec-08/tasks.md |  8 ++++++
+ progress.md                                        | 29 ++++++++++++++++++++--
+ 26 files changed, 192 insertions(+), 4 deletions(-)
+```
+
+
+## Current Session
+<!-- current-session -->
+- `0824207` fix(claude_runner): put temp .prompt files in se3/tmp/ (1 files)
+- `a4d0ffa` fix(loop): increase inter-loop summary timeout from 60s to 300s (2 files)

@@ -13,3 +13,4 @@ issues.md
 
 # SE3 temporary files
 se3/tmp/
+tmp*.prompt
