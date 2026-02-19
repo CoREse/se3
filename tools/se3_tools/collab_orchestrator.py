@@ -365,11 +365,10 @@ class ForegroundOrchestrator:
                 task.retry_count += 1
                 task.status = "pending"  # Reset to pending for retry
                 task.progress = 0
-                # Use 'running' status with retry info in title via update_worker_status
-                # The status field should remain a valid enum value
+                # Update renderer to show retry status
                 self.renderer.update_worker_status(
                     task.id,
-                    status="running",
+                    status="pending",
                     eta=f"retry {task.retry_count}/{task.max_retries}"
                 )
                 self.renderer.append_worker_output(
@@ -584,11 +583,12 @@ class ForegroundOrchestrator:
             )
             stdout, stderr = await proc.communicate()
 
-            # If git removal failed, try to unregister first then force remove
+            # If git removal failed, try to unregister the worktree from git's registry
+            # without deleting files (in case of permission issues or locked files)
             if task.worktree.exists() and proc.returncode != 0:
-                # Try to remove from git's worktree registry without deleting files
+                # Try to unregister from git's worktree list without deleting files
                 unregister_proc = await asyncio.create_subprocess_exec(
-                    "git", "worktree", "remove", str(task.worktree), "--force",
+                    "git", "worktree", "remove", "--force", str(task.worktree),
                     cwd=self.project_root,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -776,6 +776,7 @@ When complete, exit with code 0.
             # pytest patterns
             (r"(\d+) passed.*in\s+[\d.]+s", lambda m: 100),  # All tests passed
             (r"passed.*?(\d+)%", 1),
+            (r"(\d+) failed", lambda m: 50),  # Partial progress on failures
             # Build/compilation patterns
             (r"\[(\d+)/(\d+)\]", lambda m: int(m.group(1)) / int(m.group(2)) * 100),
             (r"Compiling.*?(\d+)%", 1),
@@ -792,6 +793,9 @@ When complete, exit with code 0.
             # Claude Code specific patterns
             (r"✓\s+\w+.*\((\d+)%\)", 1),
             (r"Running tests.*?\[(\d+)%\]", 1),
+            # SE3 workflow patterns
+            (r"Iteration (\d+)/(\d+)", lambda m: int(m.group(1)) / int(m.group(2)) * 100),
+            (r"se3:work.*iteration (\d+)/(\d+)", lambda m: int(m.group(1)) / int(m.group(2)) * 100),
         ]
 
         for pattern, group in patterns:

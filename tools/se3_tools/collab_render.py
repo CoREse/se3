@@ -414,6 +414,20 @@ class CollabRenderer:
         else:
             self.console.print(message, style=style)
 
+    def print_final_summary(self, success: bool, completed: int, failed: int):
+        """Print a final summary after the live display ends."""
+        self.stop_live()
+
+        print("\n" + "=" * 60)
+        if success:
+            print("✅ Collaboration completed successfully")
+        else:
+            print("❌ Collaboration completed with issues")
+
+        print(f"  Completed tasks: {completed}")
+        print(f"  Failed tasks: {failed}")
+        print("=" * 60 + "\n")
+
 
 class SimpleRenderer:
     """Simple non-live renderer for basic output."""

@@ -96,7 +96,7 @@ class LoopCollabRunner:
                     self.console.print("[yellow]Skipping to next iteration[/yellow]")
                     continue
                 elif action == "modify":
-                    self.base_prompt = await self._modify_prompt_async()
+                    self.base_prompt = await self._modify_prompt()
 
         self._print_completion()
         return True
@@ -344,19 +344,7 @@ class LoopCollabRunner:
         response = await loop.run_in_executor(None, lambda: input(f"{message} [y/N]: ").strip().lower())
         return response == "y"
 
-    def _modify_prompt(self) -> str:
-        """Modify the base prompt."""
-        self.console.print(f"\n[bold]Current prompt:[/bold]\n{self.base_prompt[:200]}...")
-        self.console.print("\nEnter additional instructions (or 'edit' to rewrite):")
-
-        additional = input("> ").strip()
-
-        if additional.lower() == "edit":
-            return self._open_editor(self.base_prompt)
-
-        return f"{self.base_prompt}\n\n## Additional Instructions\n{additional}"
-
-    async def _modify_prompt_async(self) -> str:
+    async def _modify_prompt(self) -> str:
         """Modify the base prompt (async version that doesn't block the event loop)."""
         self.console.print(f"\n[bold]Current prompt:[/bold]\n{self.base_prompt[:200]}...")
         self.console.print("\nEnter additional instructions (or 'edit' to rewrite):")

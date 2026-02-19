@@ -455,8 +455,6 @@ def run_loop_collab(
     allowing parallel work across multiple workers with real-time visibility.
     """
     import asyncio
-    from ..collab_render import CollabRenderer
-    from ..collab_orchestrator import ForegroundOrchestrator
 
     root = Path(project_root).resolve()
 
@@ -495,6 +493,7 @@ Continue the work from the previous iteration, incorporating the insights above.
         async def _run_iteration():
             from ..collab_render import CollabRenderer
             from ..collab_orchestrator import ForegroundOrchestrator
+
             renderer = CollabRenderer()
             orchestrator = ForegroundOrchestrator(root, renderer, max_parallel=3, mock=mock)
 
@@ -508,6 +507,7 @@ Continue the work from the previous iteration, incorporating the insights above.
                 except Exception as e:
                     renderer.print_message(f"\nError: {e}", "red")
                     import traceback
+
                     traceback.print_exc()
                     return 1
 

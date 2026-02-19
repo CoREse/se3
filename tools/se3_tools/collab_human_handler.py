@@ -17,6 +17,7 @@ from typing import List, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .collab_render import CollabRenderer
+    from .collab_orchestrator import Task
 
 # Import at module level to avoid runtime import issues
 from .claude_runner import ClaudeRunner
