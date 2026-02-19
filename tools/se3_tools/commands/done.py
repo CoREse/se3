@@ -238,6 +238,32 @@ def compute_actions(state: Dict[str, Any], auto_archive: bool = False) -> List[D
 
     # Standard shutdown protocol
 
+    # 0. Run health check first - OpenSpec integrity is foundational
+    # This ensures the system is healthy before we proceed with shutdown
+    from se3_tools.commands.health import run_health_check
+    health_results = run_health_check(".", stale_days=30, include_archived=False, skip_test_changes=True)
+    state["health_results"] = health_results
+
+    # If there are health errors, add them as blocking actions
+    if health_results.get("summary", {}).get("errors", 0) > 0:
+        actions.append({
+            "type": "health_check_errors",
+            "severity": "error",
+            "count": health_results["summary"]["errors"],
+            "reason": f"OpenSpec integrity errors detected: {health_results['summary']['errors']} errors must be fixed",
+            "cmd": "se3 health",
+        })
+
+    # If there are health warnings, surface them (non-blocking but visible)
+    if health_results.get("summary", {}).get("warnings", 0) > 0:
+        actions.append({
+            "type": "health_check_warnings",
+            "severity": "warning",
+            "count": health_results["summary"]["warnings"],
+            "reason": f"OpenSpec integrity warnings: {health_results['summary']['warnings']} warnings detected",
+            "cmd": "se3 health",
+        })
+
     # 1. Run tests (if test command exists and there are changes to verify)
     # Note: We defer actual test running to the agent, but flag if needed
     if test_command and has_changes:
@@ -302,16 +328,7 @@ def compute_actions(state: Dict[str, Any], auto_archive: bool = False) -> List[D
                 "reason": f"Document remaining work for '{change['name']}'",
             })
 
-    # 4. Check OpenSpec health (suggested weekly or when suspicious)
-    # Only suggest if there are multiple active changes or potential issues
-    if len(active_changes) > 2 or any(c.get('complete') for c in active_changes):
-        actions.append({
-            "type": "check_health",
-            "cmd": "se3 health",
-            "reason": "Check OpenSpec system health for zombie changes, old formats, and unarchived completed changes",
-        })
-
-    # 5. Cleanup temporary files
+    # 4. Cleanup temporary files
     actions.append({
         "type": "cleanup_tmp",
         "reason": "Clean up temporary files older than 7 days",
@@ -459,6 +476,37 @@ def print_text_report(state: Dict[str, Any]) -> None:
 
     # Git info
     print(f"\nBranch: {state.get('branch', 'N/A')}")
+
+    # OpenSpec Health Check (now automatic)
+    health = state.get("health_results", {})
+    if health:
+        summary = health.get("summary", {})
+        stats = health.get("stats", {})
+        is_healthy = health.get("healthy", False)
+
+        print(f"\nOpenSpec Health:")
+        if is_healthy and summary.get("warnings", 0) == 0:
+            print(f"  Status: HEALTHY ✓")
+        elif summary.get("errors", 0) > 0:
+            print(f"  Status: ERRORS DETECTED ✗")
+        else:
+            print(f"  Status: OK (with info)")
+
+        print(f"  Changes: {stats.get('active_changes', 0)} active, {stats.get('archived_changes', 0)} archived")
+        print(f"  Issues: {summary.get('errors', 0)} errors, {summary.get('warnings', 0)} warnings, {summary.get('info', 0)} info")
+
+        # Show top health issues if any
+        issues = health.get("issues", [])
+        if issues:
+            print(f"  Notable issues:")
+            for issue in issues[:3]:  # Show first 3
+                severity = issue.get("severity", "info")
+                category = issue.get("category", "unknown")
+                message = issue.get("message", "")
+                icon = "✗" if severity == "error" else "!" if severity == "warning" else "i"
+                print(f"    [{icon}] [{category}] {message}")
+            if len(issues) > 3:
+                print(f"    ... and {len(issues) - 3} more (run 'se3 health' for details)")
 
     # Uncommitted changes
     uncommitted = state.get("uncommitted_changes", {})

@@ -711,10 +711,15 @@ def run_work(
                     continue
                 active_changes.append(change_name)
 
+        # Check health for warnings to display
+        from se3_tools.commands.health import run_health_check
+        health_results = run_health_check(str(root), stale_days=30, include_archived=False, skip_test_changes=True)
+
         if active_changes:
-            return {
+            result = {
                 "change": None,
                 "active_changes": active_changes,
+                "health": health_results,
                 "actions": [
                     {
                         "type": "select_change",
@@ -723,10 +728,20 @@ def run_work(
                     }
                 ],
             }
+            # Add health action if there are issues
+            summary = health_results.get("summary", {})
+            if summary.get("errors", 0) > 0 or summary.get("warnings", 0) > 0:
+                result["actions"].insert(0, {
+                    "type": "check_health",
+                    "cmd": "se3 health",
+                    "reason": f"OpenSpec integrity: {summary.get('errors', 0)} errors, {summary.get('warnings', 0)} warnings detected",
+                })
+            return result
         else:
-            return {
+            result = {
                 "change": None,
                 "active_changes": [],
+                "health": health_results,
                 "actions": [
                     {
                         "type": "ask_user",
@@ -735,6 +750,15 @@ def run_work(
                     }
                 ],
             }
+            # Add health action if there are issues
+            summary = health_results.get("summary", {})
+            if summary.get("errors", 0) > 0 or summary.get("warnings", 0) > 0:
+                result["actions"].insert(0, {
+                    "type": "check_health",
+                    "cmd": "se3 health",
+                    "reason": f"OpenSpec integrity: {summary.get('errors', 0)} errors, {summary.get('warnings', 0)} warnings detected",
+                })
+            return result
 
     # Work on existing change
     change_path = openspec_dir / change_name
@@ -815,6 +839,22 @@ def print_text_report(result: Dict[str, Any]) -> None:
         print(f"\n{'=' * 60}")
         print("SE 3.0 Work")
         print(f"{'=' * 60}")
+
+        # Show health warnings if present
+        health = result.get("health", {})
+        if health:
+            summary = health.get("summary", {})
+            error_count = summary.get("errors", 0)
+            warning_count = summary.get("warnings", 0)
+            info_count = summary.get("info", 0)
+
+            if error_count > 0 or warning_count > 0:
+                print(f"\n⚠️  OpenSpec Health Warnings:")
+                if error_count > 0:
+                    print(f"   ✗ {error_count} errors detected")
+                if warning_count > 0:
+                    print(f"   ! {warning_count} warnings detected")
+                print(f"   Run 'se3 health' for details")
 
         changes = result.get("active_changes", [])
         if changes:
