@@ -183,3 +183,61 @@ Flow:
 - **WHEN** agent is instructed to self-iterate
 - **THEN** agent executes the flow without stopping until step 5, using human calls only when blocked
 
+### Requirement: Change Lifecycle Management
+
+The system SHALL define a complete change lifecycle with explicit states and transitions.
+
+**Change States:**
+```
+active → [completed] → archived
+  ↓
+[abandoned] → archived
+```
+
+**Change Directory Structure:**
+```
+openspec/changes/
+├── active-change/          # Active change with .openspec.yaml
+│   ├── .openspec.yaml      # Change metadata (required for new format)
+│   ├── .se3-state.json     # Workflow state (auto-generated)
+│   ├── proposal.md         # Change proposal
+│   ├── tasks.md            # Implementation tasks
+│   └── specs/              # Optional: specs created/modified by change
+│       └── capability-name/
+│           └── spec.md
+└── archive/                # Archived changes
+    └── YYYY-MM-DD-change-name/
+```
+
+**Change Naming Convention:**
+- Changes SHOULD use descriptive, kebab-case names
+- Good: `add-user-authentication`, `fix-memory-leak`, `refactor-database-layer`
+- Bad: `se31xse3mdse3se3startcommandse3se3md-01-12` (auto-generated)
+
+**Lifecycle Rules:**
+1. Changes MUST be created via `se3 work --new` or equivalent
+2. Changes MUST have `.openspec.yaml` to be considered valid (new format)
+3. Changes with ALL tasks complete for >7 days SHOULD be archived
+4. Changes with no activity for >30 days SHOULD be reviewed
+5. Changes with auto-generated names SHOULD be renamed or archived
+
+#### Scenario: Create new change
+- **WHEN** `se3 work --new feature/my-feature` is executed
+- **THEN** it creates the change with `.openspec.yaml` metadata file
+- **AND** the change follows the new format
+
+#### Scenario: Detect old format change
+- **WHEN** a change directory exists without `.openspec.yaml`
+- **THEN** `se3 health` reports it as using the old format
+- **AND** suggests migration
+
+#### Scenario: Archive completed change
+- **WHEN** all tasks in a change are marked complete
+- **AND** `se3:done` or `se3 health` suggests archival
+- **THEN** the change is moved to `openspec/changes/archive/YYYY-MM-DD-change-name/`
+
+#### Scenario: Naming convention enforcement
+- **WHEN** a change has an auto-generated name (contains patterns like `se3md`, `t1-1x`, random suffixes)
+- **THEN** `se3 health` warns about the non-descriptive name
+- **AND** suggests renaming or archiving
+
