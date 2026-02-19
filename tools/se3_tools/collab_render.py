@@ -84,11 +84,20 @@ class CollabRenderer:
         live.__enter__()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        """Exit context manager - stops live display."""
-        if self._live:
-            return self._live.__exit__(exc_type, exc_val, exc_tb)
-        return False
+    def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
+        """Exit context manager - stops live display.
+
+        Returns:
+            False to propagate exceptions, True to suppress them.
+        """
+        try:
+            if self._live:
+                self._live.stop()
+                self._live = None
+        except Exception:
+            # Ensure we don't mask the original exception
+            pass
+        return False  # Don't suppress exceptions
 
     def stop_live(self):
         """Stop the live display."""

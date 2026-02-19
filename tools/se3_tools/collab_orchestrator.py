@@ -36,6 +36,8 @@ class Task:
     completed_at: datetime | None = None
     exit_code: int | None = None
     output_log: list[str] = field(default_factory=list)
+    retry_count: int = 0
+    max_retries: int = 2
 
 
 @dataclass
@@ -266,7 +268,7 @@ class ForegroundOrchestrator:
             cmd_name,
             "--dangerously-skip-permissions",
             "--print",
-            "--output-format", "text",
+            "--output-format", "stream-json",
             "--max-turns", "30",
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -275,10 +277,14 @@ class ForegroundOrchestrator:
         )
 
         # Send prompt
-        proc.stdin.write(prompt.encode())
-        await proc.stdin.drain()
-        proc.stdin.close()
-        await proc.stdin.wait_closed()
+        try:
+            proc.stdin.write(prompt.encode())
+            await proc.stdin.drain()
+            proc.stdin.close()
+            await proc.stdin.wait_closed()
+        except (BrokenPipeError, ConnectionResetError) as e:
+            # Handle case where process exits before we finish writing
+            self.renderer.update_manager(f"Warning: Manager process closed stdin early: {e}")
 
         # Read output with timeout
         output_lines = []
@@ -316,6 +322,9 @@ class ForegroundOrchestrator:
                 # Update manager panel with recent output
                 self.renderer.update_manager("".join(output_lines[-20:]))
 
+                # Also render stream-json output for tool calls
+                self.renderer.render_stream_json(line_str)
+
         except asyncio.CancelledError:
             proc.terminate()
             raise
@@ -327,12 +336,12 @@ class ForegroundOrchestrator:
         return self._parse_manager_decision(full_output)
 
     async def _run_all_workers(self):
-        """Run all workers with concurrency limit."""
+        """Run all workers with concurrency limit and retry support."""
         semaphore = asyncio.Semaphore(self.max_parallel)
 
         async def run_with_limit(task: Task):
             async with semaphore:
-                await self._run_worker(task)
+                await self._run_worker_with_retry(task)
 
         # Create tasks for all pending workers
         pending = [t for t in self.tasks.values() if t.status == "pending"]
@@ -342,6 +351,37 @@ class ForegroundOrchestrator:
         # Start all workers
         coroutines = [run_with_limit(task) for task in pending]
         await asyncio.gather(*coroutines, return_exceptions=True)
+
+    async def _run_worker_with_retry(self, task: Task):
+        """Run a worker with automatic retry on failure."""
+        while task.retry_count <= task.max_retries:
+            await self._run_worker(task)
+
+            if task.status == "done":
+                return  # Success, no retry needed
+
+            # Task failed - check if we should retry
+            if task.retry_count < task.max_retries:
+                task.retry_count += 1
+                task.status = "pending"  # Reset to pending for retry
+                task.progress = 0
+                self.renderer.update_worker_status(
+                    task.id,
+                    status=f"retrying ({task.retry_count}/{task.max_retries})"
+                )
+                self.renderer.append_worker_output(
+                    task.id,
+                    f"\n[Retry {task.retry_count}/{task.max_retries}] Retrying task...\n"
+                )
+                # Small delay before retry
+                await asyncio.sleep(1)
+            else:
+                # Max retries reached
+                self.renderer.append_worker_output(
+                    task.id,
+                    f"\n[Failed] Max retries ({task.max_retries}) reached.\n"
+                )
+                break
 
     async def _run_worker(self, task: Task):
         """Run a single worker task."""
@@ -597,6 +637,20 @@ class ForegroundOrchestrator:
                     return
                 error_msg = stderr.decode() if stderr else error_msg
 
+            # Clean up on failure to avoid leaving partial state
+            if task.worktree.exists():
+                try:
+                    shutil.rmtree(task.worktree, ignore_errors=True)
+                    # Also try to remove from git worktree registry
+                    await asyncio.create_subprocess_exec(
+                        "git", "worktree", "remove", str(task.worktree), "--force",
+                        cwd=self.project_root,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                except Exception:
+                    pass
+
             raise RuntimeError(f"Failed to create worktree for {task.id}: {error_msg}")
 
     async def _save_task_file(self, task: Task) -> Path:
@@ -753,14 +807,45 @@ Rules:
 """
 
     def _parse_manager_decision(self, output: str) -> ManagerDecision:
-        """Parse the Manager's JSON decision from output."""
-        # First, try to extract JSON from markdown code blocks
-        code_block_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', output, re.DOTALL)
+        """Parse the Manager's JSON decision from output.
+
+        Handles both plain JSON output and stream-json format with multiple messages.
+        """
+        # First, try to parse as stream-json (multiple JSON lines)
+        json_objects = []
+        for line in output.split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                # Look for assistant messages with content
+                if obj.get("type") == "assistant":
+                    message = obj.get("message", {})
+                    content = message.get("content", [])
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            text = item.get("text", "")
+                            # Try to find JSON in the text
+                            json_objects.append(text)
+                # Also collect raw result messages
+                elif obj.get("type") == "result":
+                    json_objects.append(obj.get("result", ""))
+            except json.JSONDecodeError:
+                # Not JSON, might be plain text output
+                json_objects.append(line)
+
+        # Combine all collected text and search for JSON
+        combined_output = '\n'.join(json_objects) if json_objects else output
+
+        # Try to extract JSON from markdown code blocks
+        code_block_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', combined_output, re.DOTALL)
         if code_block_match:
             json_str = code_block_match.group(1).strip()
         else:
-            # Try to find JSON object in the output (non-greedy to get first valid object)
-            json_match = re.search(r'\{[\s\S]*?\}', output)
+            # Try to find JSON object in the output
+            # Use a more robust pattern that finds the outermost JSON object
+            json_match = re.search(r'\{(?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*\}', combined_output, re.DOTALL)
             if not json_match:
                 return ManagerDecision(
                     action="escalate",

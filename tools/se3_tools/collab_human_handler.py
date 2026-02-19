@@ -13,10 +13,9 @@ import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, List
+from typing import List, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .collab_orchestrator import Task
     from .collab_render import CollabRenderer
 
 # Import at module level to avoid runtime import issues
@@ -47,7 +46,7 @@ class InteractiveHumanHandler:
         self.human_calls_dir = project_root / "human-calls"
         self.renderer = renderer
 
-    async def check_and_handle(self, tasks: List["Task"]) -> bool:
+    async def check_and_handle(self, tasks: List) -> bool:
         """Check for pending human calls and handle them if all tasks are blocked.
 
         Args:
@@ -137,7 +136,7 @@ class InteractiveHumanHandler:
             file_path=file_path,
         )
 
-    async def _interactive_mode(self, calls: List[HumanCall], tasks: List["Task"]) -> bool:
+    async def _interactive_mode(self, calls: List[HumanCall], tasks: List) -> bool:
         """Enter full-screen interactive mode for handling calls."""
         # Clear screen
         print("\033[2J\033[H", end='')
@@ -169,12 +168,25 @@ class InteractiveHumanHandler:
 
         # Process each call
         for call in calls:
-            choice = input(f"\nCall '{call.title}'? [v/s/r/k/w]: ").strip().lower()
+            try:
+                choice = input(f"\nCall '{call.title}'? [v/s/r/k/w]: ").strip().lower()
+            except EOFError:
+                # Handle Ctrl+D or EOF - treat as 'wait'
+                print("\n(EOF received, waiting for external response)")
+                return False
+            except KeyboardInterrupt:
+                # Handle Ctrl+C - treat as 'wait'
+                print("\n(Interrupted, waiting for external response)")
+                return False
 
             if choice == 'v':
                 self._view_full_context(call)
                 # Ask again after viewing
-                choice = input(f"Now choose [s/r/k/w]: ").strip().lower()
+                try:
+                    choice = input(f"Now choose [s/r/k/w]: ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print("\n(Interrupted, waiting for external response)")
+                    return False
 
             if choice == 's':
                 await self._handle_suggest(call)
@@ -206,7 +218,11 @@ class InteractiveHumanHandler:
         print(suggestion)
         print('-' * 50)
 
-        use = input("\nUse this? [y/n/edit]: ").strip().lower()
+        try:
+            use = input("\nUse this? [y/n/edit]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n(Cancelled)")
+            return
 
         if use == 'y':
             self._write_response(call, suggestion)
