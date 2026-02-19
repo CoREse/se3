@@ -89,6 +89,8 @@ class ForegroundOrchestrator:
         self._base_branch_override = base_branch
         self.base_branch = "master"
         self.human_handler = InteractiveHumanHandler(project_root, renderer)
+        # Lock for serializing merge operations to prevent race conditions
+        self._merge_lock = asyncio.Lock()
 
     async def run(self, objective: str) -> bool:
         """Run the complete collaboration session.
@@ -736,55 +738,60 @@ class ForegroundOrchestrator:
         The branch hierarchy is: original <- se3-loop/{timestamp} <- collab/{task_id}
         This merge handles: collab/{task_id} -> se3-loop/{timestamp}
 
+        Uses a lock to prevent race conditions when multiple tasks complete
+        concurrently and try to merge simultaneously.
+
         Args:
             task: The completed task to merge
         """
-        try:
-            self.renderer.append_worker_output(
-                task.id, f"\n[Merging] {task.branch} -> {self.base_branch}\n"
-            )
-
-            # First, checkout the base branch (this is the loop branch when running under se3 loop)
-            checkout_proc = await asyncio.create_subprocess_exec(
-                "git", "checkout", self.base_branch,
-                cwd=self.project_root,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await checkout_proc.communicate()
-
-            if checkout_proc.returncode != 0:
-                error_msg = stderr.decode() if stderr else "Unknown error"
+        # Use lock to serialize merge operations and prevent race conditions
+        async with self._merge_lock:
+            try:
                 self.renderer.append_worker_output(
-                    task.id, f"[Warning] Failed to checkout {self.base_branch}: {error_msg}\n"
+                    task.id, f"\n[Merging] {task.branch} -> {self.base_branch}\n"
                 )
-                return
 
-            # Now merge the task branch into the base branch
-            merge_proc = await asyncio.create_subprocess_exec(
-                "git", "merge", "--no-ff", task.branch, "-m", f"chore(collab): merge {task.branch}",
-                cwd=self.project_root,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await merge_proc.communicate()
+                # First, checkout the base branch (this is the loop branch when running under se3 loop)
+                checkout_proc = await asyncio.create_subprocess_exec(
+                    "git", "checkout", self.base_branch,
+                    cwd=self.project_root,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await checkout_proc.communicate()
 
-            if merge_proc.returncode == 0:
+                if checkout_proc.returncode != 0:
+                    error_msg = stderr.decode() if stderr else "Unknown error"
+                    self.renderer.append_worker_output(
+                        task.id, f"[Warning] Failed to checkout {self.base_branch}: {error_msg}\n"
+                    )
+                    return
+
+                # Now merge the task branch into the base branch
+                merge_proc = await asyncio.create_subprocess_exec(
+                    "git", "merge", "--no-ff", task.branch, "-m", f"chore(collab): merge {task.branch}",
+                    cwd=self.project_root,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await merge_proc.communicate()
+
+                if merge_proc.returncode == 0:
+                    self.renderer.append_worker_output(
+                        task.id, f"[Merged] {task.branch} into {self.base_branch}\n"
+                    )
+                else:
+                    error_msg = stderr.decode() if stderr else "Unknown error"
+                    self.renderer.append_worker_output(
+                        task.id, f"[Warning] Failed to merge {task.branch}: {error_msg}\n"
+                    )
+                    # Don't fail the task if merge fails - the changes are still in the branch
+
+            except Exception as e:
+                # Log but don't fail - the task itself succeeded
                 self.renderer.append_worker_output(
-                    task.id, f"[Merged] {task.branch} into {self.base_branch}\n"
+                    task.id, f"[Warning] Could not merge to base branch: {e}\n"
                 )
-            else:
-                error_msg = stderr.decode() if stderr else "Unknown error"
-                self.renderer.append_worker_output(
-                    task.id, f"[Warning] Failed to merge {task.branch}: {error_msg}\n"
-                )
-                # Don't fail the task if merge fails - the changes are still in the branch
-
-        except Exception as e:
-            # Log but don't fail - the task itself succeeded
-            self.renderer.append_worker_output(
-                task.id, f"[Warning] Could not merge to base branch: {e}\n"
-            )
 
     async def _run_mock_worker(self, task: Task):
         """Run a mock worker for testing (simulates success)."""
