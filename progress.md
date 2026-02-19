@@ -2754,4 +2754,4 @@ progress.md                           |  3 +-
 
 ## Current Session
 <!-- current-session -->
-
+- `b1aa333` fix(collab): clean up worktrees after successful merge (1 files)
