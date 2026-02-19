@@ -88,6 +88,8 @@ class ForegroundOrchestrator:
         self.session_id = f"collab-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
         self._base_branch_override = base_branch
         self.base_branch = "master"
+        # Initialize base_branch early so it's correct even before run() is called
+        self._load_base_branch()
         self.human_handler = InteractiveHumanHandler(project_root, renderer)
         # Lock for serializing merge operations to prevent race conditions
         self._merge_lock = asyncio.Lock()
