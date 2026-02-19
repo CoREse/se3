@@ -384,6 +384,9 @@ class LoopState:
         self.supplemental_prompts: list[str] = []
         self.in_supplemental_mode = False
         self.should_exit = False
+        self.loop_branch: str = ""
+        self.original_branch: str = ""
+        self.should_merge: bool = False
 
     def handle_sigint(self, signum, frame):
         """Handle Ctrl-C signal.
@@ -473,25 +476,42 @@ def run_loop_collab(
 
     root = Path(project_root).resolve()
 
+    # Get the current branch before creating loop branch
+    original_branch = get_current_branch(root)
+
+    # Create a dedicated branch for this loop session
+    try:
+        loop_branch = create_loop_branch(root, original_branch)
+        print(f"{CYAN}[SE3 Loop] Created branch: {loop_branch}{RESET}")
+    except RuntimeError as e:
+        print(f"{MAGENTA}[SE3 Loop] Error: {e}{RESET}")
+        return
+
     print(f"\n{BOLD}{'=' * 60}{RESET}")
     print(f"{BOLD}SE3 Loop + Collab{RESET}")
     print(f"{BOLD}{'=' * 60}{RESET}")
     print(f"\nBase prompt: {prompt}")
     print(f"Iterations: {iterations}")
     print(f"Project: {root}")
+    print(f"Loop branch: {loop_branch}")
+    print(f"Original branch: {original_branch}")
     print(f"\n{YELLOW}Each iteration runs as a collab session with parallel workers{RESET}")
     print(f"{BOLD}{'=' * 60}{RESET}\n")
 
     # Use LoopCollabRunner for proper state management
     from ..loop_collab import LoopCollabRunner
 
+    interrupted = False
+
     async def _run_loop():
+        nonlocal interrupted
         runner = LoopCollabRunner(
             base_prompt=prompt,
             iterations=iterations,
             project_root=root,
             max_parallel=3,
             mock=mock,
+            base_branch=loop_branch,  # Use loop branch as base for collab
         )
         return await runner.run()
 
@@ -503,6 +523,7 @@ def run_loop_collab(
             print(f"\n{YELLOW}[SE3 Loop] Loop ended with some issues{RESET}")
     except KeyboardInterrupt:
         print(f"\n{YELLOW}[SE3 Loop] Interrupted by user{RESET}")
+        interrupted = True
     except Exception as e:
         print(f"\n{MAGENTA}[SE3 Loop] Error: {e}{RESET}")
         import traceback
@@ -511,6 +532,101 @@ def run_loop_collab(
     print(f"\n{BOLD}{'=' * 60}{RESET}")
     print(f"{BOLD}SE3 Loop + Collab Complete{RESET}")
     print(f"{BOLD}{'=' * 60}{RESET}\n")
+
+    # Handle merge logic
+    if not interrupted and loop_branch:
+        print(f"{CYAN}[SE3 Loop] Loop branch: {loop_branch}{RESET}")
+        print(f"{CYAN}[SE3 Loop] Original branch: {original_branch}{RESET}")
+        print(f"\n{YELLOW}To merge the loop branch back to {original_branch}:{RESET}")
+        print(f"  se3 loop --merge {loop_branch}")
+        print(f"\n{GRAY}Or manually merge with:{RESET}")
+        print(f"  git checkout {original_branch}")
+        print(f"  git merge --no-ff {loop_branch}")
+    elif interrupted and loop_branch:
+        print(f"\n{YELLOW}[SE3 Loop] Loop was interrupted.{RESET}")
+        print(f"{CYAN}[SE3 Loop] Work is preserved on branch: {loop_branch}{RESET}")
+        print(f"\n{YELLOW}To resume or merge later:{RESET}")
+        print(f"  se3 loop --merge {loop_branch}  # Merge when ready")
+        print(f"  git checkout {loop_branch}      # Continue working on loop branch")
+
+
+def get_current_branch(project_root: Path) -> str:
+    """Get the current git branch."""
+    result = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=project_root,
+        capture_output=True,
+        text=True
+    )
+    return result.stdout.strip() or "master"
+
+
+def create_loop_branch(project_root: Path, base_branch: str) -> str:
+    """Create a new branch for the SE3 Loop.
+
+    Returns the name of the created branch.
+    """
+    timestamp = int(time.time())
+    branch_name = f"se3-loop/{timestamp}"
+
+    # Create the branch from base_branch
+    result = subprocess.run(
+        ["git", "checkout", "-b", branch_name, base_branch],
+        cwd=project_root,
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+        # Branch may already exist, try with counter
+        for i in range(1, 100):
+            branch_name = f"se3-loop/{timestamp}-{i}"
+            result = subprocess.run(
+                ["git", "checkout", "-b", branch_name, base_branch],
+                cwd=project_root,
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                break
+        else:
+            raise RuntimeError(f"Failed to create loop branch: {result.stderr}")
+
+    return branch_name
+
+
+def merge_loop_branch(project_root: Path, loop_branch: str, base_branch: str) -> bool:
+    """Merge the loop branch back to base branch.
+
+    Returns True if merge was successful, False otherwise.
+    """
+    # First, checkout the base branch
+    result = subprocess.run(
+        ["git", "checkout", base_branch],
+        cwd=project_root,
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+        print(f"{MAGENTA}[SE3 Loop] Error: Failed to checkout {base_branch}: {result.stderr}{RESET}")
+        return False
+
+    # Merge the loop branch
+    result = subprocess.run(
+        ["git", "merge", "--no-ff", loop_branch, "-m", f"chore(loop): merge {loop_branch}"],
+        cwd=project_root,
+        capture_output=True,
+        text=True
+    )
+
+    if result.returncode != 0:
+        print(f"{YELLOW}[SE3 Loop] Merge conflict detected. Please resolve manually.{RESET}")
+        print(f"{GRAY}Branch {loop_branch} has conflicts with {base_branch}{RESET}")
+        return False
+
+    print(f"{GREEN}[SE3 Loop] Successfully merged {loop_branch} into {base_branch}{RESET}")
+    return True
 
 
 def run_exclusive_loop(
@@ -534,8 +650,22 @@ def run_exclusive_loop(
     base_name = sanitize_change_name(prompt)
     openspec_cmd = shutil.which("openspec") or "openspec"
 
+    # Get the current branch before creating loop branch
+    original_branch = get_current_branch(root)
+
+    # Create a dedicated branch for this loop session
+    try:
+        loop_branch = create_loop_branch(root, original_branch)
+        print(f"{CYAN}[SE3 Loop] Created branch: {loop_branch}{RESET}")
+    except RuntimeError as e:
+        print(f"{MAGENTA}[SE3 Loop] Error: {e}{RESET}")
+        return
+
     # Initialize loop state for Ctrl-C handling
     loop_state = LoopState()
+    loop_state.loop_branch = loop_branch
+    loop_state.original_branch = original_branch
+    loop_state.should_merge = False  # Will be set to True if loop completes normally
 
     print(f"\n{BOLD}{'=' * 60}{RESET}")
     print(f"{BOLD}SE3 Loop{RESET}")
@@ -680,6 +810,27 @@ def run_exclusive_loop(
             print(f"\n[SE3 Loop] Continuing in 2 seconds...")
             time.sleep(2)
 
+    # Check if loop completed all iterations successfully
+    all_completed = exit_code == 0 or (exit_code != 130 and iteration == iterations)
+
     print(f"\n{BOLD}{'=' * 60}{RESET}")
     print(f"{BOLD}SE3 Loop Complete{RESET}")
     print(f"{BOLD}{'=' * 60}{RESET}\n")
+
+    # Handle merge logic
+    if all_completed and loop_branch:
+        # Loop completed successfully, offer to merge
+        print(f"{CYAN}[SE3 Loop] Loop branch: {loop_branch}{RESET}")
+        print(f"{CYAN}[SE3 Loop] Original branch: {original_branch}{RESET}")
+        print(f"\n{YELLOW}To merge the loop branch back to {original_branch}:{RESET}")
+        print(f"  se3 loop --merge {loop_branch}")
+        print(f"\n{GRAY}Or manually merge with:{RESET}")
+        print(f"  git checkout {original_branch}")
+        print(f"  git merge --no-ff {loop_branch}")
+    elif loop_branch and exit_code == 130:
+        # Loop was interrupted
+        print(f"\n{YELLOW}[SE3 Loop] Loop was interrupted.{RESET}")
+        print(f"{CYAN}[SE3 Loop] Work is preserved on branch: {loop_branch}{RESET}")
+        print(f"\n{YELLOW}To resume or merge later:{RESET}")
+        print(f"  se3 loop --merge {loop_branch}  # Merge when ready")
+        print(f"  git checkout {loop_branch}      # Continue working on loop branch")

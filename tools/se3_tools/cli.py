@@ -1,6 +1,7 @@
 """SE 3.0 CLI - Main entry point for se3 commands."""
 
 import json
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -313,12 +314,16 @@ def loop_cmd(
     no_summary: bool = typer.Option(False, "--no-summary", help="Disable iteration summary between loops"),
     collab: bool = typer.Option(False, "--collab", "-c", help="Use collab mode for each iteration (parallel workers)"),
     mock: bool = typer.Option(False, "--mock", "-m", help="Mock mode for testing (simulates execution)"),
+    merge_branch: Optional[str] = typer.Option(None, "--merge", help="Merge a loop branch back to original branch"),
 ):
     """Run SE3 workflow in a loop, auto-executing all iterations.
 
     Takes over the terminal, generates a bash while-loop script,
     and executes Claude Code for each iteration automatically.
     Press Ctrl+C to stop at any time.
+
+    Each loop session creates its own branch (se3-loop/{timestamp}) for isolation.
+    When finished, use --merge to integrate changes back to the original branch.
 
     Examples:
         se3 loop "refactor module" --iterations 5
@@ -327,8 +332,28 @@ def loop_cmd(
         se3 loop "process item" --no-summary       # Disable summary between iterations
         se3 loop "optimize code" --collab -n 3     # Use collab mode with parallel workers
         se3 loop "test" --collab --mock -n 2       # Test collab mode with mock execution
+        se3 loop --merge se3-loop/1234567890       # Merge loop branch back
     """
-    from .commands.loop import run_exclusive_loop, run_loop_collab
+    from .commands.loop import run_exclusive_loop, run_loop_collab, merge_loop_branch, get_current_branch
+
+    # Handle merge mode
+    if merge_branch:
+        root = Path(project_root).resolve()
+        current_branch = get_current_branch(root)
+
+        # Validate that the merge branch exists
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", merge_branch],
+            cwd=root,
+            capture_output=True,
+            text=True
+        )
+        if result.returncode != 0:
+            typer.echo(f"Error: Branch '{merge_branch}' not found", err=True)
+            raise typer.Exit(code=1)
+
+        success = merge_loop_branch(root, merge_branch, current_branch)
+        raise typer.Exit(code=0 if success else 1)
 
     if collab:
         run_loop_collab(prompt, project_root, iterations, quick, no_summary, mock)

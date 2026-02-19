@@ -75,6 +75,7 @@ class ForegroundOrchestrator:
         renderer: CollabRenderer,
         max_parallel: int = 3,
         mock: bool = False,
+        base_branch: str | None = None,
     ):
         self.project_root = project_root
         self.renderer = renderer
@@ -85,6 +86,7 @@ class ForegroundOrchestrator:
         self.max_parallel = max_parallel
         self.mock = mock
         self.session_id = f"collab-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+        self._base_branch_override = base_branch
         self.base_branch = "master"
         self.human_handler = InteractiveHumanHandler(project_root, renderer)
 
@@ -254,6 +256,11 @@ class ForegroundOrchestrator:
 
     def _load_base_branch(self):
         """Load the current git branch as base."""
+        # Use override if provided (e.g., from loop branch)
+        if self._base_branch_override:
+            self.base_branch = self._base_branch_override
+            return
+
         result = subprocess.run(
             ["git", "branch", "--show-current"],
             cwd=self.project_root,

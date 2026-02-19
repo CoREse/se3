@@ -47,12 +47,14 @@ class LoopCollabRunner:
         project_root: Path,
         max_parallel: int = 3,
         mock: bool = False,
+        base_branch: str | None = None,
     ):
         self.base_prompt = base_prompt
         self.iterations = iterations
         self.project_root = project_root
         self.max_parallel = max_parallel
         self.mock = mock
+        self.base_branch = base_branch  # Use specified base branch (e.g., loop branch)
         self.previous_summaries: list[CollabSummary] = []
         self.renderer = CollabRenderer()
         self.console = self.renderer.console
@@ -166,6 +168,7 @@ class LoopCollabRunner:
                 self.renderer,
                 max_parallel=self.max_parallel,
                 mock=self.mock,
+                base_branch=self.base_branch,
             )
         except Exception as e:
             self.console.print(f"[red]Failed to create orchestrator: {e}[/red]")

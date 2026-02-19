@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.17.1"  # Fix: se3 handoff now auto-commits progress.md changes
+SE3_FRAMEWORK_VERSION = "2.18.0"  # Feat: SE3 Loop now creates isolated branch with merge support
