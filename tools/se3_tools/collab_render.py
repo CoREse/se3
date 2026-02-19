@@ -80,9 +80,8 @@ class CollabRenderer:
 
     def __enter__(self) -> "CollabRenderer":
         """Enter context manager - starts live display."""
-        self.start_live()
-        if self._live:
-            self._live.__enter__()
+        live = self.start_live()
+        live.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

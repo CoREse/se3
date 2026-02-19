@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from .claude_runner import ClaudeRunner
 from .collab_render import CollabRenderer
 from .collab_human_handler import InteractiveHumanHandler
 
@@ -241,8 +242,28 @@ class ForegroundOrchestrator:
 
         prompt = self._build_manager_prompt(objective)
 
+        # Use ClaudeRunner for command fallback support
+        runner = ClaudeRunner(self.project_root)
+
+        # Get the first available command
+        if not runner.commands:
+            return ManagerDecision(
+                action="escalate",
+                reason="No Claude commands configured",
+            )
+
+        cmd_entry = runner.commands[0]
+        cmd_name = cmd_entry["cmd"]
+
+        # Check if command exists
+        if not shutil.which(cmd_name):
+            return ManagerDecision(
+                action="escalate",
+                reason=f"Claude command '{cmd_name}' not found in PATH",
+            )
+
         proc = await asyncio.create_subprocess_exec(
-            "claude",
+            cmd_name,
             "--dangerously-skip-permissions",
             "--print",
             "--output-format", "text",
@@ -257,6 +278,7 @@ class ForegroundOrchestrator:
         proc.stdin.write(prompt.encode())
         await proc.stdin.drain()
         proc.stdin.close()
+        await proc.stdin.wait_closed()
 
         # Read output with timeout
         output_lines = []
@@ -337,9 +359,29 @@ class ForegroundOrchestrator:
         # Create worker prompt file
         prompt_file = self._create_worker_prompt_file(task)
 
+        # Use ClaudeRunner for command fallback support
+        runner = ClaudeRunner(self.project_root)
+
+        # Get the first available command
+        if not runner.commands:
+            task.status = "failed"
+            task.exit_code = -1
+            self.renderer.append_worker_output(task.id, "[Error] No Claude commands configured")
+            return
+
+        cmd_entry = runner.commands[0]
+        cmd_name = cmd_entry["cmd"]
+
+        # Check if command exists
+        if not shutil.which(cmd_name):
+            task.status = "failed"
+            task.exit_code = -1
+            self.renderer.append_worker_output(task.id, f"[Error] Claude command '{cmd_name}' not found")
+            return
+
         # Launch worker
         proc = await asyncio.create_subprocess_exec(
-            "claude",
+            cmd_name,
             "--dangerously-skip-permissions",
             "--print",
             "--output-format", "stream-json",
@@ -387,7 +429,15 @@ class ForegroundOrchestrator:
                 await asyncio.wait_for(proc.wait(), timeout=5.0)
             except asyncio.TimeoutError:
                 proc.kill()
-                await proc.wait()
+                try:
+                    await proc.wait()
+                except Exception:
+                    pass  # Process may already be dead
+            # Update task status before re-raising
+            task.status = "failed"
+            task.exit_code = -1
+            task.completed_at = datetime.now()
+            del self.active_workers[task.id]
             raise
 
         # Wait for completion
@@ -704,16 +754,22 @@ Rules:
 
     def _parse_manager_decision(self, output: str) -> ManagerDecision:
         """Parse the Manager's JSON decision from output."""
-        # Try to find JSON in the output
-        json_match = re.search(r'\{[\s\S]*\}', output)
-        if not json_match:
-            return ManagerDecision(
-                action="escalate",
-                reason="Could not parse manager response as JSON",
-            )
+        # First, try to extract JSON from markdown code blocks
+        code_block_match = re.search(r'```(?:json)?\s*\n(.*?)\n```', output, re.DOTALL)
+        if code_block_match:
+            json_str = code_block_match.group(1).strip()
+        else:
+            # Try to find JSON object in the output (non-greedy to get first valid object)
+            json_match = re.search(r'\{[\s\S]*?\}', output)
+            if not json_match:
+                return ManagerDecision(
+                    action="escalate",
+                    reason="Could not parse manager response as JSON",
+                )
+            json_str = json_match.group()
 
         try:
-            data = json.loads(json_match.group())
+            data = json.loads(json_str)
             return ManagerDecision(
                 action=data.get("action", "escalate"),
                 tasks=data.get("tasks", []),
