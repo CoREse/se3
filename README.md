@@ -193,6 +193,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.17.1 | 2026-02-20 | Fix: `se3 handoff` now auto-commits `progress.md` changes. Previously progress.md was updated but left uncommitted. |
 | 2.17.0 | 2026-02-20 | **Version correction**: `.se3/` → `se3/` was incorrectly marked as breaking; this was a temp fix, not API change. Added: `se3 health` command, `--strict`/`--archive` flags, auto health checks in `se3:done`/`se3:work`. Fix: loop summary timeout 60s→300s. |
 | 2.16.4 | 2026-02-20 | Fix: Increase loop inter-iteration summary timeout from 60s to 300s. |
 | 2.16.3 | 2026-02-20 | Feature: Auto-run OpenSpec health checks in `se3:done` and `se3:work` commands. |
