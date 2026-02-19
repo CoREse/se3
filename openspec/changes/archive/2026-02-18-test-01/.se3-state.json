@@ -1,0 +1,21 @@
+{
+  "workflow": "small",
+  "current_step": null,
+  "steps": {
+    "implement": "done",
+    "verify": "done"
+  },
+  "step_history": [
+    {
+      "step": "implement",
+      "completed_at": "2026-02-19T01:33:52.377794"
+    },
+    {
+      "step": "verify",
+      "completed_at": "2026-02-19T01:33:59.095527"
+    }
+  ],
+  "created_at": "2026-02-19T01:33:30.570682",
+  "updated_at": "2026-02-19T01:33:59.095548",
+  "complete": true
+}

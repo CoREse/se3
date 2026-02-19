@@ -1,0 +1,11 @@
+{
+  "workflow": "small",
+  "current_step": "implement",
+  "steps": {
+    "implement": "pending",
+    "verify": "pending"
+  },
+  "step_history": [],
+  "created_at": "2026-02-19T10:10:26.799175",
+  "updated_at": "2026-02-19T10:10:26.799199"
+}
