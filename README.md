@@ -194,6 +194,12 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 | Version | Date | Changes |
 |---------|------|---------|
 | 2.17.0 | 2026-02-20 | **Version correction**: `.se3/` → `se3/` was incorrectly marked as breaking; this was a temp fix, not API change. Added: `se3 health` command, `--strict`/`--archive` flags, auto health checks in `se3:done`/`se3:work`. Fix: loop summary timeout 60s→300s. |
+| 2.16.4 | 2026-02-20 | Fix: Increase loop inter-iteration summary timeout from 60s to 300s. |
+| 2.16.3 | 2026-02-20 | Feature: Auto-run OpenSpec health checks in `se3:done` and `se3:work` commands. |
+| 2.16.2 | 2026-02-20 | Feature: Add `--strict` and `--fail-on-warning` flags to `se3 health` command for stricter integrity checks. |
+| 2.16.1 | 2026-02-20 | Feature: OpenSpec integrity improvements - name validation, format checks, stale change detection. |
+| 2.16.0 | 2026-02-20 | Feature: Add `se3 health` command for OpenSpec integrity monitoring with directory structure, zombie changes, and naming convention checks. |
+| 2.15.0 | 2026-02-20 | Change: SE3 runtime directory moved from hidden `.se3/` to visible `se3/` for human-as-MCP discoverability. Add `se3 migrate` command for migration. |
 | 2.14.1 | 2026-02-19 | Test: add comprehensive tests for `se3 loop` stdin prompt delivery and Ctrl-C supplemental mode. |
 | 2.14.0 | 2026-02-19 | Feat: `se3 loop` Ctrl-C supplemental mode now interrupts Claude and restarts with updated prompt. Press Ctrl-C once to enter supplemental mode, type your additional prompt, and Claude restarts immediately with the new context. Empty input continues without changes. |
 | 2.13.2 | 2026-02-19 | Fix: `se3 loop` uses `start_new_session` to isolate Claude from Ctrl-C signals. |
