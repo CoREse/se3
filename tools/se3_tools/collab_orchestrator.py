@@ -514,6 +514,7 @@ class ForegroundOrchestrator:
             task.status = "failed"
             task.exit_code = -1
             self.renderer.append_worker_output(task.id, "[Error] No Claude commands configured")
+            await self._save_task_file(task)
             return
 
         cmd_entry = runner.commands[0]
@@ -524,6 +525,7 @@ class ForegroundOrchestrator:
             task.status = "failed"
             task.exit_code = -1
             self.renderer.append_worker_output(task.id, f"[Error] Claude command '{cmd_name}' not found")
+            await self._save_task_file(task)
             return
 
         # Launch worker
@@ -588,6 +590,16 @@ class ForegroundOrchestrator:
             # Save final state
             await self._save_task_file(task)
             raise
+        except Exception as e:
+            # Handle unexpected errors during output reading
+            self.renderer.append_worker_output(task.id, f"[Error] Failed to read worker output: {e}")
+            await self._cleanup_worker_process(proc, task, timeout=5.0)
+            task.status = "failed"
+            task.exit_code = -1
+            task.completed_at = datetime.now()
+            del self.active_workers[task.id]
+            await self._save_task_file(task)
+            return
 
         # Wait for completion with timeout to prevent indefinite hanging
         try:
