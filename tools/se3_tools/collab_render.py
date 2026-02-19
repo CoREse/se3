@@ -76,7 +76,8 @@ class CollabRenderer:
                 self._live.stop()
             except Exception:
                 pass  # Ignore errors from stopping old display
-            self._live = None
+            finally:
+                self._live = None
 
         self._live = Live(
             self.layout,
@@ -360,6 +361,11 @@ class CollabRenderer:
                 self.output_buffer.append(stripped)
                 self._update_output_panel()
             return None
+        except Exception as e:
+            # Handle any other unexpected errors gracefully
+            self.output_buffer.append(f"[parse error] {str(e)[:80]}")
+            self._update_output_panel()
+            return None
 
     def _render_assistant_message(self, msg: dict[str, Any]):
         """Render an assistant message from stream-json."""
@@ -439,6 +445,8 @@ class CollabRenderer:
                 self._live.start()
             except Exception:
                 # If live display fails, fall back to direct console output
+                # and mark live as stopped to prevent further errors
+                self._live = None
                 self.console.print(message, style=style)
         else:
             self.console.print(message, style=style)

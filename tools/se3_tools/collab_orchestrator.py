@@ -291,10 +291,10 @@ class ForegroundOrchestrator:
             # Wait for stdin to close to ensure data is sent
             try:
                 await proc.stdin.wait_closed()
-            except (BrokenPipeError, ConnectionResetError):
+            except (BrokenPipeError, ConnectionResetError, OSError):
                 # Process may have already exited, which is fine
                 pass
-        except (BrokenPipeError, ConnectionResetError) as e:
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
             # Handle case where process exits before we finish writing
             self.renderer.update_manager(f"Warning: Manager process closed stdin early: {e}")
 

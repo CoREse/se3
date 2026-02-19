@@ -414,10 +414,14 @@ def launch_worker(project_root: Path, task_id: str) -> WorkerResult:
     env.pop("CLAUDECODE", None)  # Avoid nested session detection
 
     log_file = collab_dir / "logs" / f"worker-{task_id}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
-    timeout_min = task.get("health", {}).get("timeout_minutes", 60)
+
+    # Ensure health dict exists
+    if "health" not in task:
+        task["health"] = {}
+    timeout_min = task["health"].get("timeout_minutes", 60)
 
     # Initialize last_activity if not present
-    if "last_activity" not in task.get("health", {}):
+    if "last_activity" not in task["health"]:
         task["health"]["last_activity"] = datetime.now().isoformat()
         task_file.write_text(json.dumps(task, indent=2))
 
@@ -632,7 +636,12 @@ def collab(
         except RuntimeError as e:
             typer.echo(f"Error: Failed to launch manager: {e}", err=True)
             raise typer.Exit(1)
-        stdout, _ = proc.communicate(timeout=900)  # 15 min timeout
+        # Use timeout if supported (Python 3.11+)
+        try:
+            stdout, _ = proc.communicate(timeout=900)  # 15 min timeout
+        except TypeError:
+            # Python < 3.11 doesn't support timeout in communicate()
+            stdout, _ = proc.communicate()
         if proc.returncode == 0 and stdout:
             print(stdout.decode() if isinstance(stdout, bytes) else stdout)
         raise typer.Exit(proc.returncode)
