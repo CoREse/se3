@@ -2445,8 +2445,35 @@ progress.md                             |  43 ++-
  426 files changed, 3250 insertions(+), 94 deletions(-)
 ```
 
+## 2026-02-20 Session 81 (handoff)
+
+### Done
+- feat(se3): implement OpenSpec integrity improvements
+- chore(openspec): archive prompts-ensure-openspec-02 change
+- Session complete: Implemented OpenSpec integrity improvements
+
+### Commits
+- `77bfeab` feat(se3): implement OpenSpec integrity improvements (6 files)
+- `dd89c62` chore(openspec): archive prompts-ensure-openspec-02 change (3 files)
+- `5daff81` Session complete: Implemented OpenSpec integrity improvements (2 files)
+
+### Files Changed
+```
+.../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../2026-02-20-prompts-ensure-openspec-02/tasks.md |   5 +
+ .../archive/2026-02-20-python-01/.openspec.yaml    |   2 +
+ .../archive/2026-02-20-python-01/.se3-state.json   |  21 +
+ .../changes/archive/2026-02-20-python-01/tasks.md  |   5 +
+ openspec/changes/test/.openspec.yaml               |   3 +
+ openspec/specs/se3-commands/spec.md                |  42 --
+ progress.md                                        | 448 ++++++++++++++++++++-
+ tools/se3_tools/__init__.py                        |   2 +-
+ tools/se3_tools/commands/work.py                   |  83 +++-
+ 11 files changed, 578 insertions(+), 46 deletions(-)
+```
+
 
 ## Current Session
 <!-- current-session -->
-- `77bfeab` feat(se3): implement OpenSpec integrity improvements (6 files)
-- `dd89c62` chore(openspec): archive prompts-ensure-openspec-02 change (3 files)
+- `14895c5` feat(openspec): verify OpenSpec integrity system (iteration 3/10) (3 files)
