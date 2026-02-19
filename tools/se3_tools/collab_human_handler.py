@@ -63,6 +63,9 @@ class InteractiveHumanHandler:
         if not pending:
             return True
 
+        # Update task statuses based on human calls
+        self._update_task_statuses_from_calls(tasks, pending)
+
         # Check if all tasks are blocked
         blocked_tasks = [t for t in tasks if t.status in ("blocked", "failed")]
         if len(blocked_tasks) < len(tasks):
@@ -71,6 +74,29 @@ class InteractiveHumanHandler:
 
         # All tasks blocked - enter interactive mode
         return await self._interactive_mode(pending, tasks)
+
+    def _update_task_statuses_from_calls(self, tasks: List, calls: List[HumanCall]):
+        """Update task statuses to 'blocked' if they have pending human calls.
+
+        Args:
+            tasks: List of all tasks in the collaboration
+            calls: List of pending human calls
+        """
+        # Build a set of task IDs that have pending calls
+        # Human call IDs may be prefixed with task ID (e.g., "task-001-question")
+        task_ids = {t.id for t in tasks}
+
+        for call in calls:
+            # Check if call ID starts with a task ID
+            for task_id in task_ids:
+                if call.id.startswith(task_id) or task_id.replace("-", "_") in call.id.replace("-", "_"):
+                    # Find the task and mark it as blocked
+                    for task in tasks:
+                        if task.id == task_id and task.status == "running":
+                            task.status = "blocked"
+                            self.renderer.update_worker_status(task.id, status="blocked")
+                            break
+                    break
 
     def _get_pending_calls(self) -> List[HumanCall]:
         """Get all pending human calls."""

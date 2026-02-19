@@ -85,6 +85,17 @@ class CollabRenderer:
             refresh_per_second=4,
             screen=False,
         )
+
+        # Wrap the Live context manager to clear self._live on exit
+        original_exit = self._live.__exit__
+
+        def wrapped_exit(exc_type, exc_val, exc_tb):
+            try:
+                return original_exit(exc_type, exc_val, exc_tb)
+            finally:
+                self._live = None
+
+        self._live.__exit__ = wrapped_exit
         return self._live
 
     def __enter__(self) -> "CollabRenderer":

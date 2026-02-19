@@ -523,11 +523,21 @@ class ForegroundOrchestrator:
             await self._save_task_file(task)
             raise
 
-        # Wait for completion
+        # Wait for completion with timeout to prevent indefinite hanging
         try:
-            await proc.wait()
+            await asyncio.wait_for(proc.wait(), timeout=3600)  # 1 hour timeout
             task.exit_code = proc.returncode
             task.status = "done" if proc.returncode == 0 else "failed"
+        except asyncio.TimeoutError:
+            proc.terminate()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+            task.exit_code = -1
+            task.status = "failed"
+            self.renderer.append_worker_output(task.id, "[Error] Worker timed out after 1 hour")
         except Exception as e:
             task.exit_code = -1
             task.status = "failed"
@@ -806,7 +816,7 @@ Rules:
 2. Make commits as you progress
 3. Run tests to verify your work
 4. Exit with code 0 on success, non-zero on failure
-5. If you need help, create a human call file"""
+5. If you need help, create a human call file in human-calls/ with your task ID as prefix (e.g., human-calls/{task_id}-question.md)"""
 
         prompt = f"""{rules}
 

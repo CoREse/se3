@@ -438,18 +438,26 @@ def launch_worker(project_root: Path, task_id: str) -> WorkerResult:
 
     runner = ClaudeRunner(project_root)
 
-    # Use run_with_monitor for activity-based monitoring and command fallback
-    result = runner.run_with_monitor(
-        args=args,
-        log_file=log_file,
-        wall_timeout=timeout_min * 60,
-        inactivity_timeout=300,  # 5 minutes without output = stuck
-        cwd=Path(worktree),
-        env=env,
-        on_activity=on_activity,
-    )
+    try:
+        # Use run_with_monitor for activity-based monitoring and command fallback
+        result = runner.run_with_monitor(
+            args=args,
+            log_file=log_file,
+            wall_timeout=timeout_min * 60,
+            inactivity_timeout=300,  # 5 minutes without output = stuck
+            cwd=Path(worktree),
+            env=env,
+            on_activity=on_activity,
+        )
 
-    return WorkerResult(result.returncode, result.stdout.encode() if result.stdout else b"")
+        return WorkerResult(result.returncode, result.stdout.encode() if result.stdout else b"")
+    finally:
+        # Clean up prompt file after worker finishes
+        if prompt_file.exists():
+            try:
+                prompt_file.unlink()
+            except Exception:
+                pass  # Ignore cleanup errors
 
 
 def start_daemon(project_root: Path, objective: str, resume: bool = False):
