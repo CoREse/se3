@@ -149,6 +149,9 @@ class LoopCollabRunner:
 
     async def _run_collab_iteration(self, iteration: int, prompt: str) -> CollabSummary | None:
         """Run a single collab iteration."""
+        # Reset renderer state for this iteration
+        self.renderer.reset()
+
         try:
             # Create orchestrator with our renderer
             orchestrator = ForegroundOrchestrator(

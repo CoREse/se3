@@ -70,6 +70,14 @@ class CollabRenderer:
 
         Returns a Live context manager that can be used with 'with' statement.
         """
+        # Stop any existing live display first to prevent resource leaks
+        if self._live is not None:
+            try:
+                self._live.stop()
+            except Exception:
+                pass  # Ignore errors from stopping old display
+            self._live = None
+
         self._live = Live(
             self.layout,
             console=self.console,
@@ -80,8 +88,9 @@ class CollabRenderer:
 
     def __enter__(self) -> "CollabRenderer":
         """Enter context manager - starts live display."""
-        live = self.start_live()
-        live.__enter__()
+        self.start_live()
+        if self._live:
+            self._live.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> bool:
@@ -111,6 +120,18 @@ class CollabRenderer:
         if self._live:
             self._live.stop()
             self._live = None
+
+    def reset(self):
+        """Reset the renderer state for a new session.
+
+        Clears workers, output buffers, and manager history.
+        Should be called between iterations in loop mode.
+        """
+        self.workers.clear()
+        self.manager_lines.clear()
+        self.output_buffer.clear()
+        # Recreate layout to ensure clean state
+        self.layout = self._create_layout()
 
     def update_manager(self, text: str | list[str]):
         """Update the Manager decision panel.

@@ -197,6 +197,9 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
             try:
                 proc.stdin.write(prompt_text)
                 proc.stdin.close()
+            except BrokenPipeError:
+                # Process exited before we could write - this is okay, we'll capture the exit code
+                pass
             except Exception as e:
                 output_queue.put(f"ERROR writing to stdin: {e}")
 
@@ -291,8 +294,8 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
                 return 130, False
             continue
 
-    # Wait for thread to complete
-    thread.join(timeout=1)
+    # Wait for thread to complete (give it more time to clean up)
+    thread.join(timeout=5)
 
     # Restore old signal handler
     signal.signal(signal.SIGINT, old_sigint_handler)

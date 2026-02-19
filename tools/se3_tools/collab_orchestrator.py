@@ -124,6 +124,13 @@ class ForegroundOrchestrator:
             self.tasks[task.id] = task
             self.renderer.add_worker(task.id, task.title)
 
+        # Check if any tasks were created
+        if not self.tasks:
+            self.renderer.print_message(
+                "Manager returned no tasks. Nothing to do.", "yellow"
+            )
+            return False
+
         # Phase 2: Execute all workers concurrently
         self.renderer.update_manager(f"Launching {len(self.tasks)} workers...")
         await self._run_all_workers()
@@ -402,7 +409,14 @@ class ForegroundOrchestrator:
     async def _run_worker(self, task: Task):
         """Run a single worker task."""
         # Create worktree
-        await self._ensure_worktree(task)
+        try:
+            await self._ensure_worktree(task)
+        except Exception as e:
+            task.status = "failed"
+            task.exit_code = -1
+            self.renderer.append_worker_output(task.id, f"[Error] Failed to create worktree: {e}")
+            await self._save_task_file(task)
+            return
 
         # Create task file
         task_file = await self._save_task_file(task)
@@ -747,6 +761,8 @@ class ForegroundOrchestrator:
     async def _save_task_file(self, task: Task) -> Path:
         """Save task definition to file."""
         task_file = self.collab_dir / "tasks" / f"{task.id}.json"
+        # Ensure parent directory exists (in case it was deleted)
+        task_file.parent.mkdir(parents=True, exist_ok=True)
         task_data = {
             "id": task.id,
             "title": task.title,
