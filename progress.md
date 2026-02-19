@@ -2635,9 +2635,19 @@ openspec/changes/test/.openspec.yaml |  3 --
  13 files changed, 273 insertions(+), 9 deletions(-)
 ```
 
+## 2026-02-20 Session 87 (handoff)
 
-## Current Session
-<!-- current-session -->
+### Done
+- fix(loop): correct merge target branch for se3 loop --merge
+- fix(loop): collab branches now auto-merge to loop branch and improved base branch detection
+- fix(loop): ensure collab task branches merge to loop branch with proper checkout
+- fix(collab): add merge lock to prevent race conditions when multiple tasks complete concurrently
+- chore(loop): verify branch isolation implementation (iteration 15)
+- fix(loop): improve merge_loop_branch robustness and base branch detection
+- chore: mark iteration 16 task as complete
+- Update openspec/changes/se3-loopbranchctrl-cclaudemergese3-16/tasks.md, progress.md
+
+### Commits
 - `7a9a7c4` fix(loop): correct merge target branch for se3 loop --merge (4 files)
 - `5e060a6` fix(loop): collab branches now auto-merge to loop branch and improved base branch detection (5 files)
 - `f8fae4c` fix(loop): ensure collab task branches merge to loop branch with proper checkout (5 files)
@@ -2645,3 +2655,24 @@ openspec/changes/test/.openspec.yaml |  3 --
 - `9edbc63` chore(loop): verify branch isolation implementation (iteration 15) (2 files)
 - `7a2d240` fix(loop): improve merge_loop_branch robustness and base branch detection (3 files)
 - `bc9a81a` chore: mark iteration 16 task as complete (1 files)
+- `e0ef61b` Update openspec/changes/se3-loopbranchctrl-cclaudemergese3-16/tasks.md, progress.md (2 files)
+
+### Files Changed
+```
+README.md                                          |   2 +
+ .../se3-loopbranchctrl-cclaudemergese3-12/tasks.md |  39 +++++++
+ .../se3-loopbranchctrl-cclaudemergese3-14/tasks.md |   5 +
+ .../se3-loopbranchctrl-cclaudemergese3-15/tasks.md |   5 +
+ progress.md                                        |   8 +-
+ tools/se3_tools/__init__.py                        |   2 +-
+ tools/se3_tools/cli.py                             |  21 +++-
+ tools/se3_tools/collab_orchestrator.py             |  71 +++++++++++++
+ tools/se3_tools/commands/loop.py                   | 117 +++++++++++++++++++++
+ tools/se3_tools/commands/test_loop.py              |  38 +++++++
+ 10 files changed, 303 insertions(+), 5 deletions(-)
+```
+
+
+## Current Session
+<!-- current-session -->
+
