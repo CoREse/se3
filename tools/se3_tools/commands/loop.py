@@ -476,16 +476,33 @@ def run_loop_collab(
 
     root = Path(project_root).resolve()
 
-    # Get the current branch before creating loop branch
-    original_branch = get_current_branch(root)
+    # Get the current branch
+    current_branch = get_current_branch(root)
 
-    # Create a dedicated branch for this loop session
-    try:
-        loop_branch = create_loop_branch(root, original_branch)
-        print(f"{CYAN}[SE3 Loop] Created branch: {loop_branch}{RESET}")
-    except RuntimeError as e:
-        print(f"{MAGENTA}[SE3 Loop] Error: {e}{RESET}")
-        return
+    # Check if we're already on a loop branch
+    if is_loop_branch(current_branch):
+        # Already on a loop branch, reuse it
+        loop_branch = current_branch
+        original_branch = get_loop_branch_base(root, loop_branch)
+        if not original_branch:
+            # Try to infer from git history
+            original_branch = infer_loop_branch_base(root, loop_branch)
+        if not original_branch:
+            # Fallback to master/main
+            original_branch = "master"
+        print(f"{CYAN}[SE3 Loop] Continuing on existing branch: {loop_branch}{RESET}")
+        print(f"{CYAN}[SE3 Loop] Original branch: {original_branch}{RESET}")
+    else:
+        # Get the original branch before creating loop branch
+        original_branch = current_branch
+
+        # Create a dedicated branch for this loop session
+        try:
+            loop_branch = create_loop_branch(root, original_branch)
+            print(f"{CYAN}[SE3 Loop] Created branch: {loop_branch}{RESET}")
+        except RuntimeError as e:
+            print(f"{MAGENTA}[SE3 Loop] Error: {e}{RESET}")
+            return
 
     print(f"\n{BOLD}{'=' * 60}{RESET}")
     print(f"{BOLD}SE3 Loop + Collab{RESET}")
@@ -561,6 +578,11 @@ def get_current_branch(project_root: Path) -> str:
     return result.stdout.strip() or "master"
 
 
+def is_loop_branch(branch_name: str) -> bool:
+    """Check if a branch name is a loop branch."""
+    return branch_name.startswith("se3-loop/")
+
+
 def create_loop_branch(project_root: Path, base_branch: str) -> str:
     """Create a new branch for the SE3 Loop.
 
@@ -569,9 +591,9 @@ def create_loop_branch(project_root: Path, base_branch: str) -> str:
     timestamp = int(time.time())
     branch_name = f"se3-loop/{timestamp}"
 
-    # Create the branch from base_branch
+    # Create the branch from base_branch (but don't switch yet)
     result = subprocess.run(
-        ["git", "checkout", "-b", branch_name, base_branch],
+        ["git", "branch", branch_name, base_branch],
         cwd=project_root,
         capture_output=True,
         text=True
@@ -582,7 +604,7 @@ def create_loop_branch(project_root: Path, base_branch: str) -> str:
         for i in range(1, 100):
             branch_name = f"se3-loop/{timestamp}-{i}"
             result = subprocess.run(
-                ["git", "checkout", "-b", branch_name, base_branch],
+                ["git", "branch", branch_name, base_branch],
                 cwd=project_root,
                 capture_output=True,
                 text=True
@@ -591,6 +613,23 @@ def create_loop_branch(project_root: Path, base_branch: str) -> str:
                 break
         else:
             raise RuntimeError(f"Failed to create loop branch: {result.stderr}")
+
+    # Now checkout the new branch
+    checkout_result = subprocess.run(
+        ["git", "checkout", branch_name],
+        cwd=project_root,
+        capture_output=True,
+        text=True
+    )
+
+    if checkout_result.returncode != 0:
+        # Try to clean up the created branch
+        subprocess.run(
+            ["git", "branch", "-D", branch_name],
+            cwd=project_root,
+            capture_output=True
+        )
+        raise RuntimeError(f"Failed to checkout loop branch: {checkout_result.stderr}")
 
     # Record the base branch in git config for later merge
     subprocess.run(
@@ -767,16 +806,33 @@ def run_exclusive_loop(
     base_name = sanitize_change_name(prompt)
     openspec_cmd = shutil.which("openspec") or "openspec"
 
-    # Get the current branch before creating loop branch
-    original_branch = get_current_branch(root)
+    # Get the current branch
+    current_branch = get_current_branch(root)
 
-    # Create a dedicated branch for this loop session
-    try:
-        loop_branch = create_loop_branch(root, original_branch)
-        print(f"{CYAN}[SE3 Loop] Created branch: {loop_branch}{RESET}")
-    except RuntimeError as e:
-        print(f"{MAGENTA}[SE3 Loop] Error: {e}{RESET}")
-        return
+    # Check if we're already on a loop branch
+    if is_loop_branch(current_branch):
+        # Already on a loop branch, reuse it
+        loop_branch = current_branch
+        original_branch = get_loop_branch_base(root, loop_branch)
+        if not original_branch:
+            # Try to infer from git history
+            original_branch = infer_loop_branch_base(root, loop_branch)
+        if not original_branch:
+            # Fallback to master/main
+            original_branch = "master"
+        print(f"{CYAN}[SE3 Loop] Continuing on existing branch: {loop_branch}{RESET}")
+        print(f"{CYAN}[SE3 Loop] Original branch: {original_branch}{RESET}")
+    else:
+        # Get the original branch before creating loop branch
+        original_branch = current_branch
+
+        # Create a dedicated branch for this loop session
+        try:
+            loop_branch = create_loop_branch(root, original_branch)
+            print(f"{CYAN}[SE3 Loop] Created branch: {loop_branch}{RESET}")
+        except RuntimeError as e:
+            print(f"{MAGENTA}[SE3 Loop] Error: {e}{RESET}")
+            return
 
     # Initialize loop state for Ctrl-C handling
     loop_state = LoopState()

@@ -192,6 +192,31 @@ class TestLoopCollabIntegration:
         assert 'no_summary' in params
 
 
+class TestIsLoopBranch:
+    """Test is_loop_branch function."""
+
+    def test_is_loop_branch_imports(self):
+        """Test that is_loop_branch function can be imported."""
+        from se3_tools.commands.loop import is_loop_branch
+        assert callable(is_loop_branch)
+
+    def test_is_loop_branch_returns_true_for_loop_branch(self):
+        """Test that is_loop_branch returns True for loop branch names."""
+        from se3_tools.commands.loop import is_loop_branch
+
+        assert is_loop_branch("se3-loop/1234567890") is True
+        assert is_loop_branch("se3-loop/1234567890-1") is True
+
+    def test_is_loop_branch_returns_false_for_non_loop_branch(self):
+        """Test that is_loop_branch returns False for non-loop branch names."""
+        from se3_tools.commands.loop import is_loop_branch
+
+        assert is_loop_branch("master") is False
+        assert is_loop_branch("main") is False
+        assert is_loop_branch("feature/test") is False
+        assert is_loop_branch("collab/task-001") is False
+
+
 class TestGetLoopBranchBase:
     """Test get_loop_branch_base function."""
 
