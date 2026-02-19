@@ -2473,10 +2473,38 @@ progress.md                             |  43 ++-
  11 files changed, 578 insertions(+), 46 deletions(-)
 ```
 
+## 2026-02-20 Session 82 (handoff)
 
-## Current Session
-<!-- current-session -->
+### Done
+- feat(openspec): verify OpenSpec integrity system (iteration 3/10)
+- chore(openspec): archive completed change prompts-ensure-openspec-03
+- feat(se3): add --strict and --archive flags for OpenSpec integrity (iteration 5/10)
+- chore(openspec): complete iteration 5/10 of OpenSpec integrity improvements
+- Update openspec/changes/prompts-ensure-openspec-05/tasks.md, progress.md
+
+### Commits
 - `14895c5` feat(openspec): verify OpenSpec integrity system (iteration 3/10) (3 files)
 - `002c4fe` chore(openspec): archive completed change prompts-ensure-openspec-03 (7 files)
 - `778baea` feat(se3): add --strict and --archive flags for OpenSpec integrity (iteration 5/10) (4 files)
 - `4e0da2c` chore(openspec): complete iteration 5/10 of OpenSpec integrity improvements (1 files)
+- `71db359` Update openspec/changes/prompts-ensure-openspec-05/tasks.md, progress.md (2 files)
+
+### Files Changed
+```
+.../.openspec.yaml                                 |  2 +
+ .../.se3-state.json                                | 21 ++++++++++
+ .../2026-02-19-prompts-ensure-openspec-03/tasks.md |  5 +++
+ progress.md                                        | 34 +++++++++++++++-
+ tools/se3_tools/__init__.py                        |  2 +-
+ tools/se3_tools/cli.py                             |  6 ++-
+ tools/se3_tools/commands/done.py                   | 45 ++++++++++++++++------
+ tools/se3_tools/commands/work.py                   | 27 ++++++++++++-
+ 8 files changed, 125 insertions(+), 17 deletions(-)
+```
+
+
+## Current Session
+<!-- current-session -->
+- `88c7335` feat(se3): enhance health command with --strict and --fail-on-warning flags (iteration 6/10) (3 files)
+- `93b4964` chore(openspec): verify OpenSpec integrity system health (iteration 7/10) (1 files)
+- `4ee3969` feat(se3): integrate OpenSpec health checks into se3:done and se3:work commands (4 files)
