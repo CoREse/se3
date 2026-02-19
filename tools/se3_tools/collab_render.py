@@ -77,12 +77,12 @@ class CollabRenderer:
         """
         # Stop any existing live display first to prevent resource leaks
         if self._live is not None:
+            old_live = self._live
+            self._live = None  # Clear reference first to prevent double-stop issues
             try:
-                self._live.stop()
+                old_live.stop()
             except Exception:
                 pass  # Ignore errors from stopping old display
-            finally:
-                self._live = None
 
         self._live = Live(
             self.layout,

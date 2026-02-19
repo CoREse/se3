@@ -221,8 +221,10 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
             loop_state.handle_sigint(signum, frame)
             # Note: We don't raise KeyboardInterrupt here - let Claude continue running
 
-    # Install signal handler
-    old_sigint_handler = signal.signal(signal.SIGINT, sigint_handler)
+    # Install signal handler (only if loop_state is provided)
+    old_sigint_handler = None
+    if loop_state:
+        old_sigint_handler = signal.signal(signal.SIGINT, sigint_handler)
 
     # Start reader thread
     thread = threading.Thread(target=reader_thread, daemon=True)
@@ -233,11 +235,13 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
         proc = output_queue.get(timeout=5)
         if isinstance(proc, str) and proc.startswith("ERROR:"):
             print(f"{MAGENTA}[SE3 Loop] {proc}{RESET}")
-            signal.signal(signal.SIGINT, old_sigint_handler)
+            if old_sigint_handler:
+                signal.signal(signal.SIGINT, old_sigint_handler)
             return 1, False
     except queue.Empty:
         print(f"{MAGENTA}[SE3 Loop] Failed to start claude process{RESET}")
-        signal.signal(signal.SIGINT, old_sigint_handler)
+        if old_sigint_handler:
+            signal.signal(signal.SIGINT, old_sigint_handler)
         return 1, False
 
     # Process output with timeout
@@ -259,7 +263,8 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
             if time.time() - start_time > timeout_sec:
                 proc.kill()
                 print(f"\n{YELLOW}[SE3 Loop] Session timed out ({timeout_sec}s limit){RESET}")
-                signal.signal(signal.SIGINT, old_sigint_handler)
+                if old_sigint_handler:
+                    signal.signal(signal.SIGINT, old_sigint_handler)
                 return 124, False
 
             # Check if we should enter supplemental mode (first Ctrl-C pressed)
@@ -268,13 +273,15 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
                 was_interrupted = True
                 proc.kill()
                 print(f"\n{YELLOW}[SE3 Loop] Interrupted for supplemental prompt{RESET}")
-                signal.signal(signal.SIGINT, old_sigint_handler)
+                if old_sigint_handler:
+                    signal.signal(signal.SIGINT, old_sigint_handler)
                 return 130, True
 
             # Check if we should exit (second Ctrl-C pressed)
             if loop_state and loop_state.should_exit:
                 proc.kill()
-                signal.signal(signal.SIGINT, old_sigint_handler)
+                if old_sigint_handler:
+                    signal.signal(signal.SIGINT, old_sigint_handler)
                 return 130, False
 
         except queue.Empty:
@@ -285,12 +292,14 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
             if loop_state and loop_state.in_supplemental_mode and not loop_state.should_exit:
                 was_interrupted = True
                 proc.kill()
-                signal.signal(signal.SIGINT, old_sigint_handler)
+                if old_sigint_handler:
+                    signal.signal(signal.SIGINT, old_sigint_handler)
                 return 130, True
             # Check if we should exit while waiting
             if loop_state and loop_state.should_exit:
                 proc.kill()
-                signal.signal(signal.SIGINT, old_sigint_handler)
+                if old_sigint_handler:
+                    signal.signal(signal.SIGINT, old_sigint_handler)
                 return 130, False
             continue
 
@@ -298,7 +307,8 @@ def run_claude_with_renderer(claude_cmd: str, prompt_text: str, timeout_sec: int
     thread.join(timeout=5)
 
     # Restore old signal handler
-    signal.signal(signal.SIGINT, old_sigint_handler)
+    if old_sigint_handler:
+        signal.signal(signal.SIGINT, old_sigint_handler)
 
     return (exit_code[0] if exit_code[0] is not None else 0), was_interrupted
 

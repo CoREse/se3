@@ -95,7 +95,11 @@ class LoopCollabRunner:
                     self.console.print("[yellow]Exiting loop early[/yellow]")
                     break
                 elif action == "skip":
-                    self.console.print("[yellow]Skipping to next iteration[/yellow]")
+                    self.console.print("[yellow]Skipping next iteration[/yellow]")
+                    # Increment i an extra time to skip the next iteration
+                    i += 1
+                    if i >= self.iterations:
+                        break
                     continue
                 elif action == "modify":
                     self.base_prompt = await self._modify_prompt()
@@ -181,11 +185,11 @@ class LoopCollabRunner:
             return None
         finally:
             # Always ensure cleanup happens, regardless of success or failure
-            if orchestrator:
-                try:
-                    await orchestrator.cleanup()
-                except Exception:
-                    pass  # Ignore cleanup errors
+            # Note: orchestrator is always created at this point (we check above)
+            try:
+                await orchestrator.cleanup()
+            except Exception:
+                pass  # Ignore cleanup errors
 
         if not success:
             return None

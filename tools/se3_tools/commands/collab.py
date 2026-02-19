@@ -162,20 +162,54 @@ def abort_session(project_root: Path):
     pid_file = collab_dir / "orchestrator.pid"
     if pid_file.exists():
         pid = pid_file.read_text().strip()
-        subprocess.run(["kill", "-TERM", pid], capture_output=True)
-        typer.echo(f"Killed orchestrator (PID {pid})")
+        try:
+            # Send TERM signal first
+            subprocess.run(["kill", "-TERM", pid], capture_output=True)
+            # Wait for process to terminate (up to 2 seconds)
+            for _ in range(20):
+                result = subprocess.run(["kill", "-0", pid], capture_output=True)
+                if result.returncode != 0:
+                    break  # Process no longer exists
+                import time
+                time.sleep(0.1)
+            else:
+                # Process still running, force kill
+                subprocess.run(["kill", "-KILL", pid], capture_output=True)
+                typer.echo(f"Force killed orchestrator (PID {pid})")
+            typer.echo(f"Killed orchestrator (PID {pid})")
+        except Exception as e:
+            typer.echo(f"Warning: Error killing orchestrator: {e}")
 
     # Kill workers
     tasks_dir = collab_dir / "tasks"
     if tasks_dir.exists():
         for tf in tasks_dir.glob("task-*.json"):
-            task = json.loads(tf.read_text())
-            wpid = task.get("worker_pid")
-            if wpid and str(wpid) != "null" and str(wpid) != "0":
-                subprocess.run(
-                    ["kill", "-TERM", str(wpid)], capture_output=True
-                )
-                typer.echo(f"Killed worker {task['id']} (PID {wpid})")
+            try:
+                task = json.loads(tf.read_text())
+                wpid = task.get("worker_pid")
+                if wpid and str(wpid) != "null" and str(wpid) != "0":
+                    try:
+                        # Send TERM signal first
+                        subprocess.run(
+                            ["kill", "-TERM", str(wpid)], capture_output=True
+                        )
+                        # Wait for process to terminate (up to 1 second)
+                        for _ in range(10):
+                            result = subprocess.run(["kill", "-0", str(wpid)], capture_output=True)
+                            if result.returncode != 0:
+                                break  # Process no longer exists
+                            import time
+                            time.sleep(0.1)
+                        else:
+                            # Process still running, force kill
+                            subprocess.run(["kill", "-KILL", str(wpid)], capture_output=True)
+                            typer.echo(f"Force killed worker {task['id']} (PID {wpid})")
+                            continue
+                        typer.echo(f"Killed worker {task['id']} (PID {wpid})")
+                    except Exception as e:
+                        typer.echo(f"Warning: Error killing worker {task['id']}: {e}")
+            except (json.JSONDecodeError, IOError) as e:
+                typer.echo(f"Warning: Could not read task file {tf}: {e}")
 
     # Cleanup worktrees
     worktree_dir = project_root / ".worktrees"
@@ -378,6 +412,11 @@ def launch_worker(project_root: Path, task_id: str) -> WorkerResult:
         return WorkerResult(1)
     except Exception as e:
         typer.echo(f"Error reading task file: {e}", err=True)
+        return WorkerResult(1)
+
+    # Validate task is a dictionary
+    if not isinstance(task, dict):
+        typer.echo(f"Error: Task file does not contain a valid task object", err=True)
         return WorkerResult(1)
 
     worktree = task.get("worktree", f".worktrees/{task_id}")

@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.16.8"  # Bug fixes: error handling, resource management, terminal width detection
+SE3_FRAMEWORK_VERSION = "2.16.9"  # Bug fixes: prompt_file cleanup, blocked task handling, safe dict removal
