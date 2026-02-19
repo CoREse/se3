@@ -140,6 +140,7 @@ se3 done [--format json]
 - `archive_change`: Run `openspec archive <name>` to archive completed change
 - `verify_scenarios`: Check that all spec scenarios pass
 - `check_spec_drift`: Check if specs were inappropriately weakened during implementation
+- `check_health`: Run `se3 health` to check OpenSpec system integrity
 
 #### Scenario: Normal session shutdown
 - **WHEN** `se3:done` runs with uncommitted changes
@@ -500,6 +501,50 @@ se3 status [--format json]
 - **WHEN** `se3 status --format json` is executed
 - **THEN** it returns structured JSON for programmatic use
 
+### Requirement: se3 health Command
+
+The `se3 health` command SHALL check OpenSpec system integrity and report health issues.
+
+**Interface:**
+```bash
+se3 health [--format json] [--stale-days <n>] [--include-archived]
+```
+
+**Health Checks:**
+- **Zombie changes**: Changes with no activity or progress for extended periods
+- **Old format changes**: Changes missing `.openspec.yaml` (legacy format)
+- **Unarchived completed**: Changes that are complete but not archived
+- **Stale changes**: No activity for specified days (default: 30)
+- **Naming conventions**: Auto-generated or unclear change names
+- **Directory structure**: Drift from expected structure
+- **Spec-change association**: Specs without associated changes
+
+**Output Fields:**
+- `healthy`: Boolean - true if no errors or warnings
+- `stats`: Summary statistics about changes
+- `issues`: List of issues found with severity, category, and suggestions
+
+#### Scenario: Check OpenSpec health
+- **WHEN** `se3 health` is executed
+- **THEN** it analyzes all changes and directory structure
+- **AND** reports any zombie, stale, old-format, or unarchived changes
+- **AND** suggests fixes for each issue found
+
+#### Scenario: Detect zombie changes
+- **WHEN** a change has no activity for 30+ days and no completed tasks
+- **THEN** `se3 health` reports it as a zombie change
+- **AND** suggests archiving or resuming work
+
+#### Scenario: Detect old format changes
+- **WHEN** a change exists without `.openspec.yaml` file
+- **THEN** `se3 health` flags it as old format
+- **AND** suggests migration or archival
+
+#### Scenario: Suggest archiving completed changes
+- **WHEN** `se3 health` detects changes with all tasks done
+- **THEN** it suggests running `openspec archive <name>`
+- **AND** includes the archive command in suggestions
+
 ### Requirement: se3 lint Command
 
 The `se3 lint` command SHALL validate OpenSpec files for correctness.
@@ -585,3 +630,45 @@ se3 loop "prompt" [--iterations <n>] [--quick] [--no-summary]
 - **WHEN** `se3 loop "quick fix" --quick -n 5` is executed
 - **THEN** it runs 5 iterations using 'small' workflow
 - **AND** skips formal change creation for efficiency
+
+### Requirement: se3 health Command
+
+The `se3 health` command SHALL diagnose the OpenSpec system and report integrity issues.
+
+**Interface:**
+```bash
+se3 health [--format json] [--fix]
+```
+
+**Health Checks:**
+1. **Zombie changes**: Detect old/experimental changes with auto-generated names
+2. **Old format changes**: Find changes without `.openspec.yaml` (legacy format)
+3. **Stale changes**: Detect changes with no activity for >30 days
+4. **Orphan changes**: Changes not associated with any specs
+5. **Completed unarchived**: Changes that should be archived but aren't
+6. **Naming convention**: Flag changes with non-descriptive names
+
+**Output Fields:**
+- `healthy`: Overall health status (true if no issues found)
+- `issues`: List of issues with severity (error/warning/info)
+- `summary`: Count by category
+
+#### Scenario: Healthy OpenSpec system
+- **WHEN** `se3 health` runs on a well-maintained project
+- **THEN** it reports `healthy: true` with no issues
+
+#### Scenario: Detect zombie changes
+- **WHEN** `se3 health` runs and finds auto-generated change names like `se31xse3mdse3se3startcommandse3se3md-01-12`
+- **THEN** it reports a warning suggesting archival or cleanup
+
+#### Scenario: Detect old format changes
+- **WHEN** `se3 health` finds a change directory without `.openspec.yaml`
+- **THEN** it reports an error indicating the change uses an old format
+
+#### Scenario: Detect stale changes
+- **WHEN** `se3 health` finds changes with no activity >30 days
+- **THEN** it reports a warning suggesting review or archival
+
+#### Scenario: Detect completed unarchived changes
+- **WHEN** `se3 health` finds changes where all tasks are marked complete but not archived
+- **THEN** it suggests running `openspec archive <name>`

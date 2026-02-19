@@ -54,7 +54,7 @@ def get_installed_se3_version(project_root: Path = None) -> str:
         return "0.0.0"
 
 
-from .commands import lint, status, sync, verify, update, collab, commit, human_calls_cmd, human_input, work
+from .commands import lint, status, sync, verify, update, collab, commit, human_calls_cmd, human_input, work, health
 from .commands.init import initialize_project
 
 app = typer.Typer(
@@ -112,6 +112,7 @@ def init_cmd(
 # Register sub-typer commands (complex multi-command tools)
 app.add_typer(lint.app, name="lint", help="Lint OpenSpec files")
 app.add_typer(status.app, name="status", help="Check project status")
+app.add_typer(health.app, name="health", help="Check OpenSpec system health and integrity")
 app.add_typer(sync.app, name="sync", help="Sync output files")
 app.add_typer(verify.app, name="verify", help="Verify spec coverage")
 app.add_typer(update.app, name="update", help="Update SE 3.0 framework to latest version")

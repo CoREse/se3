@@ -287,13 +287,22 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
                 "reason": f"Document remaining work for '{change['name']}'",
             })
 
-    # 4. Cleanup temporary files
+    # 4. Check OpenSpec health (suggested weekly or when suspicious)
+    # Only suggest if there are multiple active changes or potential issues
+    if len(active_changes) > 2 or any(c.get('complete') for c in active_changes):
+        actions.append({
+            "type": "check_health",
+            "cmd": "se3 health",
+            "reason": "Check OpenSpec system health for zombie changes, old formats, and unarchived completed changes",
+        })
+
+    # 5. Cleanup temporary files
     actions.append({
         "type": "cleanup_tmp",
         "reason": "Clean up temporary files older than 7 days",
     })
 
-    # 5. Handoff / Finalize session
+    # 6. Handoff / Finalize session
     actions.append({
         "type": "handoff",
         "cmd": "se3 handoff",
