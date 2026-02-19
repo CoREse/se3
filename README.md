@@ -193,6 +193,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.14.1 | 2026-02-19 | Test: add comprehensive tests for `se3 loop` stdin prompt delivery and Ctrl-C supplemental mode. |
 | 2.14.0 | 2026-02-19 | Feat: `se3 loop` Ctrl-C supplemental mode now interrupts Claude and restarts with updated prompt. Press Ctrl-C once to enter supplemental mode, type your additional prompt, and Claude restarts immediately with the new context. Empty input continues without changes. |
 | 2.13.2 | 2026-02-19 | Fix: `se3 loop` uses `start_new_session` to isolate Claude from Ctrl-C signals. |
 | 2.12.19 | 2026-02-19 | Fix: Add missing `meta` and `off-topic` intent classification to `se3 start`. These intent types were defined in openspec but not implemented in the classifier. |
