@@ -325,21 +325,58 @@ def launch_manager(project_root: Path, event_type: str, context: str) -> subproc
         bufsize=1,
         universal_newlines=True,
     )
+    if proc is None:
+        raise RuntimeError("Failed to launch manager process")
     return proc
 
 
-def launch_worker(project_root: Path, task_id: str) -> subprocess.Popen:
+class WorkerResult:
+    """Result wrapper for worker process compatibility.
+
+    Provides Popen-like interface with returncode, wait(), communicate(), and poll().
+    """
+    def __init__(self, returncode: int, stdout: bytes = b"", stderr: bytes = b""):
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    def wait(self, timeout: float | None = None) -> int:
+        """Wait for process to complete (already complete, returns immediately)."""
+        return self.returncode
+
+    def communicate(self, input: bytes | None = None, timeout: float | None = None) -> tuple[bytes, bytes]:
+        """Return stdout/stderr (already captured)."""
+        return (self._stdout, self._stderr)
+
+    def poll(self) -> int | None:
+        """Check if process has completed (always completed)."""
+        return self.returncode
+
+
+def launch_worker(project_root: Path, task_id: str) -> WorkerResult:
     """Launch worker as independent Claude process in worktree.
 
     Uses ClaudeRunner for priority-based command selection with activity monitoring.
 
-    Returns a Popen-like object with wait() and returncode for compatibility.
+    Returns a WorkerResult with Popen-like interface for compatibility.
     """
-    from ..claude_runner import ClaudeRunner, MonitoredResult
+    from ..claude_runner import ClaudeRunner
 
     collab_dir = get_collab_dir(project_root)
     task_file = collab_dir / "tasks" / f"{task_id}.json"
-    task = json.loads(task_file.read_text())
+
+    if not task_file.exists():
+        typer.echo(f"Error: Task file not found: {task_file}", err=True)
+        return WorkerResult(1)
+
+    try:
+        task = json.loads(task_file.read_text())
+    except json.JSONDecodeError as e:
+        typer.echo(f"Error: Invalid JSON in task file: {e}", err=True)
+        return WorkerResult(1)
+    except Exception as e:
+        typer.echo(f"Error reading task file: {e}", err=True)
+        return WorkerResult(1)
 
     worktree = task.get("worktree", f".worktrees/{task_id}")
     if not worktree.startswith("/"):
@@ -349,11 +386,14 @@ def launch_worker(project_root: Path, task_id: str) -> subprocess.Popen:
     if not Path(worktree).exists():
         branch = task.get("branch", f"collab/{task_id}")
         base_branch = task.get("base_branch", "master")
-        subprocess.run(
+        result = subprocess.run(
             ["git", "worktree", "add", worktree, "-b", branch, base_branch],
             cwd=project_root,
             capture_output=True
         )
+        if result.returncode != 0:
+            typer.echo(f"Error: Failed to create worktree: {result.stderr.decode()}", err=True)
+            return WorkerResult(result.returncode)
 
     prompt = generate_worker_prompt(project_root, task_id)
 
@@ -403,21 +443,7 @@ def launch_worker(project_root: Path, task_id: str) -> subprocess.Popen:
         on_activity=on_activity,
     )
 
-    # Create a simple wrapper object for compatibility
-    class WorkerResult:
-        def __init__(self, returncode: int):
-            self.returncode = returncode
-
-        def wait(self) -> int:
-            return self.returncode
-
-        def communicate(self, timeout=None) -> tuple:
-            return (b"", b"")
-
-        def poll(self) -> int:
-            return self.returncode
-
-    return WorkerResult(result.returncode)
+    return WorkerResult(result.returncode, result.stdout.encode() if result.stdout else b"")
 
 
 def start_daemon(project_root: Path, objective: str, resume: bool = False):
@@ -599,7 +625,11 @@ def collab(
     if launch_manager_flag:
         # Internal: launch manager process
         context = objective if objective else ""
-        proc = launch_manager(root, event_type, context)
+        try:
+            proc = launch_manager(root, event_type, context)
+        except RuntimeError as e:
+            typer.echo(f"Error: Failed to launch manager: {e}", err=True)
+            raise typer.Exit(1)
         stdout, _ = proc.communicate(timeout=900)  # 15 min timeout
         if proc.returncode == 0 and stdout:
             print(stdout.decode() if isinstance(stdout, bytes) else stdout)
@@ -611,6 +641,7 @@ def collab(
             typer.echo("Error: --task required for --launch-worker")
             raise typer.Exit(1)
         result = launch_worker(root, task_id)
+        # WorkerResult has returncode attribute set directly
         raise typer.Exit(result.returncode)
 
     if daemon:

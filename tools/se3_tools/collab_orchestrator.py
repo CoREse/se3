@@ -181,12 +181,39 @@ class ForegroundOrchestrator:
         config_file.write_text(json.dumps(config, indent=2))
 
     def _create_task(self, task_data: dict[str, Any]) -> Task:
-        """Create a Task from manager decision data."""
+        """Create a Task from manager decision data.
+
+        Validates required fields and provides sensible defaults.
+        """
+        # Validate task_data is a dict
+        if not isinstance(task_data, dict):
+            raise ValueError(f"Task data must be a dictionary, got {type(task_data).__name__}")
+
+        # Get or generate task ID
         task_id = task_data.get("id", f"task-{len(self.tasks)+1:03d}")
+
+        # Validate ID format (basic check)
+        if not task_id or not isinstance(task_id, str):
+            task_id = f"task-{len(self.tasks)+1:03d}"
+
+        # Sanitize ID for filesystem safety
+        import re
+        task_id = re.sub(r'[^a-zA-Z0-9_-]', '-', task_id)
+
+        # Get title with fallback
+        title = task_data.get("title", "")
+        if not title or not isinstance(title, str):
+            title = f"Task {task_id}"
+
+        # Get prompt with fallback
+        prompt = task_data.get("prompt", "")
+        if not isinstance(prompt, str):
+            prompt = str(prompt) if prompt else ""
+
         return Task(
             id=task_id,
-            title=task_data.get("title", "Untitled task"),
-            prompt=task_data.get("prompt", ""),
+            title=title,
+            prompt=prompt,
             branch=f"collab/{task_id}",
             worktree=self.worktrees_dir / task_id,
         )
@@ -440,6 +467,9 @@ class ForegroundOrchestrator:
             import shutil
             shutil.rmtree(task.worktree, ignore_errors=True)
 
+        # Ensure parent directory exists
+        task.worktree.parent.mkdir(parents=True, exist_ok=True)
+
         # Create worktree
         proc = await asyncio.create_subprocess_exec(
             "git", "worktree", "add", str(task.worktree), "-b", task.branch, self.base_branch,
@@ -451,18 +481,48 @@ class ForegroundOrchestrator:
 
         if proc.returncode != 0:
             error_msg = stderr.decode() if stderr else "Unknown error"
-            # Branch might already exist, try without -b
-            proc = await asyncio.create_subprocess_exec(
-                "git", "worktree", "add", str(task.worktree), task.branch,
-                cwd=self.project_root,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, stderr = await proc.communicate()
+            # Check if branch already exists
+            if "already exists" in error_msg.lower():
+                # Try to add worktree with existing branch
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "worktree", "add", str(task.worktree), task.branch,
+                    cwd=self.project_root,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
 
-            if proc.returncode != 0:
+                if proc.returncode == 0:
+                    return
+
                 error_msg = stderr.decode() if stderr else error_msg
-                raise RuntimeError(f"Failed to create worktree for {task.id}: {error_msg}")
+
+            # Check if worktree is already registered
+            if "is already registered" in error_msg.lower():
+                # Try to prune and retry
+                prune_proc = await asyncio.create_subprocess_exec(
+                    "git", "worktree", "prune",
+                    cwd=self.project_root,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await prune_proc.communicate()
+
+                # Retry creating worktree with existing branch
+                proc = await asyncio.create_subprocess_exec(
+                    "git", "worktree", "add", str(task.worktree), task.branch,
+                    cwd=self.project_root,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, stderr = await proc.communicate()
+
+                if proc.returncode == 0:
+                    return
+
+                error_msg = stderr.decode() if stderr else error_msg
+
+            raise RuntimeError(f"Failed to create worktree for {task.id}: {error_msg}")
 
     async def _save_task_file(self, task: Task) -> Path:
         """Save task definition to file."""

@@ -149,22 +149,42 @@ class LoopCollabRunner:
 
     async def _run_collab_iteration(self, iteration: int, prompt: str) -> CollabSummary | None:
         """Run a single collab iteration."""
-        # Create orchestrator with our renderer
-        orchestrator = ForegroundOrchestrator(
-            self.project_root,
-            self.renderer,
-            max_parallel=self.max_parallel,
-        )
+        try:
+            # Create orchestrator with our renderer
+            orchestrator = ForegroundOrchestrator(
+                self.project_root,
+                self.renderer,
+                max_parallel=self.max_parallel,
+            )
+        except Exception as e:
+            self.console.print(f"[red]Failed to create orchestrator: {e}[/red]")
+            return None
 
         # Start live display
-        with self.renderer.start_live():
-            success = await orchestrator.run(prompt)
+        try:
+            with self.renderer.start_live():
+                success = await orchestrator.run(prompt)
+        except Exception as e:
+            self.console.print(f"[red]Error during collab iteration: {e}[/red]")
+            return None
 
         if not success:
             return None
 
         # Generate summary from results
-        return await self._generate_summary(iteration, orchestrator)
+        try:
+            return await self._generate_summary(iteration, orchestrator)
+        except Exception as e:
+            self.console.print(f"[yellow]Warning: Failed to generate summary: {e}[/yellow]")
+            # Return a basic summary even if generation fails
+            return CollabSummary(
+                iteration=iteration,
+                completed_tasks=[],
+                failed_tasks=[],
+                key_changes=[],
+                insights="Iteration completed but summary generation failed.",
+                next_steps=["Review changes manually"],
+            )
 
     async def _generate_summary(
         self,
@@ -205,17 +225,23 @@ class LoopCollabRunner:
         # Simple heuristic-based insights for now
         # Could be enhanced to call Claude for deeper analysis
 
-        summary = orchestrator.get_summary()
-        total = summary["total_tasks"]
-        completed = summary["completed"]
-        failed = summary["failed"]
+        try:
+            summary = orchestrator.get_summary()
+            total = summary.get("total_tasks", 0)
+            completed = summary.get("completed", 0)
+            failed = summary.get("failed", 0)
 
-        if failed == 0:
-            return f"All {completed} tasks completed successfully. Ready for next iteration."
-        elif completed > failed:
-            return f"Majority of tasks ({completed}/{total}) completed successfully. {failed} tasks need attention."
-        else:
-            return f"Several tasks ({failed}) encountered issues. Review recommended before continuing."
+            if total == 0:
+                return "No tasks were executed in this iteration."
+
+            if failed == 0:
+                return f"All {completed} tasks completed successfully. Ready for next iteration."
+            elif completed > failed:
+                return f"Majority of tasks ({completed}/{total}) completed successfully. {failed} tasks need attention."
+            else:
+                return f"Several tasks ({failed}) encountered issues. Review recommended before continuing."
+        except Exception as e:
+            return f"Iteration completed. (Could not generate detailed insights: {e})"
 
     def _extract_git_changes(self) -> list[str]:
         """Extract key changes from git."""
@@ -230,14 +256,28 @@ class LoopCollabRunner:
                 text=True,
             )
 
-            if result.returncode == 0:
+            if result.returncode == 0 and result.stdout.strip():
                 for line in result.stdout.strip().split("\n"):
                     if line.strip():
                         changes.append(line.strip())
 
-            # Limit to first 10 changes
-            return changes[:10]
-        except Exception:
+            # Also get recent commits
+            result = subprocess.run(
+                ["git", "log", "--oneline", "-5"],
+                cwd=self.project_root,
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                changes.append("--- Recent commits ---")
+                for line in result.stdout.strip().split("\n")[:5]:
+                    if line.strip():
+                        changes.append(line.strip())
+
+            # Limit to first 15 changes
+            return changes[:15]
+        except Exception as e:
+            self.console.print(f"[dim]Note: Could not extract git changes: {e}[/dim]")
             return []
 
     def _generate_next_steps(self, completed: list[str], failed: list[str]) -> list[str]:
