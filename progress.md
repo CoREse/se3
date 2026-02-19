@@ -1670,3 +1670,4 @@ progress.md | 20 +++++++++++++++++++-
 <!-- current-session -->
 - `0afae11` feat(loop): stdin prompt and Ctrl-C supplemental mode (iteration 6) (1 files)
 - `f6fb3fd` feat(loop): improve Ctrl-C supplemental mode to restart Claude with updated prompt (3 files)
+- `252bf74` docs: update progress.md with session 71 summary (1 files)
