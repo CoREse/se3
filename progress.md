@@ -1873,7 +1873,136 @@ progress.md                             |  43 ++-
  8 files changed, 974 insertions(+), 335 deletions(-)
 ```
 
+## 2026-02-20 Session 79 (handoff)
+
+### Done
+- feat(se3)!: change .se3/ to se3/ (visible directory)
+- Completed: Migrated SE3 directory structure from .se3/ to se3/ (visible). Implemented se3 migrate command. All tests pass.
+
+### Commits
+- `29f8188` feat(se3)!: change .se3/ to se3/ (visible directory) (109 files)
+- `c1a3ddb` Completed: Migrated SE3 directory structure from .se3/ to se3/ (visible). Implemented se3 migrate command. All tests pass. (3 files)
+
+### Files Changed
+```
+.claude/.session.json                              |    4 +-
+ .gitignore                                         |    3 +
+ README.md                                          |    1 +
+ .../.openspec.yaml                                 |    2 +
+ .../.se3-state.json                                |   11 +
+ .../tasks.md                                       |   37 +
+ .../.openspec.yaml                                 |    2 +
+ .../2026-02-20-se3-directory-visible/tasks.md      |   29 +
+ openspec/specs/se3-commands/spec.md                |   47 +-
+ openspec/specs/se3-scaffold/spec.md                |   57 +-
+ progress.md                                        |   40 +-
+ .../active/20260218-203527-manager-failure.md      |   42 +
+ ...0260218-203847-orchestrator-repeated-failure.md |   25 +
+ .../active/20260218-214718-manager-failure.md      |   81 +
+ .../active/20260218-214851-manager-failure.md      |   81 +
+ se3/calls/active/20260218-215151-agent-handoff.md  |   36 +
+ se3/calls/active/20260218-222347-agent-handoff.md  |   36 +
+ se3/calls/active/handoff-20260218-222344.md        |   33 +
+ .../archive/20260217-004802-manager-failure.md     |   42 +
+ ...0260217-004933-orchestrator-repeated-failure.md |   24 +
+ ...0260217-010436-orchestrator-repeated-failure.md |   24 +
+ .../archive/20260217-114512-manager-failure.md     |   42 +
+ .../archive/20260217-120717-manager-failure.md     |   41 +
+ .../archive/20260217-121543-manager-failure.md     |   41 +
+ ...0260217-121907-orchestrator-repeated-failure.md |   24 +
+ .../archive/20260217-123639-manager-failure.md     |   41 +
+ ...0260217-123944-orchestrator-repeated-failure.md |   24 +
+ .../archive/20260217-224425-manager-failure.md     |   42 +
+ .../archive/20260217-224647-manager-failure.md     |   30 +
+ .../archive/20260217-224834-manager-failure.md     |   30 +
+ ...0260217-224901-orchestrator-repeated-failure.md |   24 +
+ ...0260218-015230-orchestrator-repeated-failure.md |   24 +
+ .../archive/20260218-015424-manager-failure.md     |   72 +
+ .../archive/20260218-015456-manager-failure.md     |   73 +
+ .../archive/20260218-015458-manager-failure.md     |   84 +
+ .../archive/20260218-015500-manager-failure.md     |   84 +
+ .../archive/20260218-165607-manager-failure.md     |   41 +
+ ...0260218-165923-orchestrator-repeated-failure.md |   24 +
+ ...0260218-170219-orchestrator-repeated-failure.md |   24 +
+ ...strator-repeated-failure.responded.responded.md |   29 +
+ .../archive/20260218-173448-manager-failure.md     |   84 +
+ .../archive/20260218-174217-manager-failure.md     |   35 +
+ ...0260218-175105-orchestrator-repeated-failure.md |   29 +
+ .../archive/20260218-175511-manager-failure.md     |   34 +
+ .../archive/20260218-175537-manager-failure.md     |   84 +
+ .../archive/20260218-175557-manager-failure.md     |   34 +
+ .../archive/20260218-175646-manager-failure.md     |   39 +
+ ...0260218-175712-orchestrator-repeated-failure.md |   29 +
+ .../archive/20260218-175856-manager-failure.md     |   39 +
+ .../archive/20260218-180043-manager-failure.md     |   39 +
+ .../archive/20260218-180130-manager-failure.md     |   39 +
+ .../archive/20260218-180251-manager-failure.md     |   39 +
+ ...0260218-180254-orchestrator-repeated-failure.md |   28 +
+ se3/collab/.manager-cmdinfo.json                   |    1 +
+ ...manager-context-2475360-1771408224946729269.txt |   11 +
+ ....manager-stderr-2475360-1771408224946729269.log |   10 +
+ .../.manager-tasks-2475360-1771408224946729269.txt |    5 +
+ se3/collab/config.json                             |    8 +
+ se3/collab/logs/manager-20260218-172008.log        |  105 +
+ se3/collab/logs/manager-20260218-172255.log        |    5 +
+ se3/collab/logs/manager-20260218-172439.log        |   20 +
+ se3/collab/logs/manager-20260218-173037.log        |   16 +
+ se3/collab/logs/manager-20260218-173423.log        |   28 +
+ se3/collab/logs/manager-20260218-174027.log        |   18 +
+ se3/collab/logs/manager-20260218-174055.log        |  111 +
+ se3/collab/logs/manager-20260218-174236.log        |   66 +
+ se3/collab/logs/manager-20260218-174345.log        |   34 +
+ se3/collab/logs/manager-20260218-174451.log        |   35 +
+ se3/collab/logs/manager-20260218-174521.log        |   15 +
+ se3/collab/logs/manager-20260218-175002.log        |   25 +
+ se3/collab/logs/manager-20260218-175018.log        |   25 +
+ se3/collab/logs/manager-20260218-175024.log        |   82 +
+ se3/collab/logs/manager-20260218-175029.log        |   60 +
+ se3/collab/logs/manager-20260218-175444.log        |   33 +
+ se3/collab/logs/manager-20260218-175513.log        |   18 +
+ se3/collab/logs/manager-20260218-175543.log        |   16 +
+ se3/collab/logs/manager-20260218-175613.log        |   24 +
+ se3/collab/logs/manager-20260218-175825.log        |   25 +
+ se3/collab/logs/manager-20260218-175925.log        |   43 +
+ se3/collab/logs/manager-20260218-180055.log        |   24 +
+ se3/collab/logs/manager-20260218-180155.log        |   65 +
+ se3/collab/logs/manager-20260218-203217.log        |   62 +
+ se3/collab/logs/manager-20260218-214648.log        |   26 +
+ se3/collab/logs/manager-20260218-214835.log        |    5 +
+ se3/collab/logs/manager-raw-result-latest.log      |    1 +
+ se3/collab/logs/manager-stderr-latest.log          |    8 +
+ se3/collab/logs/orchestrator.log                   | 3237 ++++++++++++++++++++
+ .../logs/worker-task-001-20260218-172156.log       |   78 +
+ .../logs/worker-task-001-20260218-175213.log       |   73 +
+ .../logs/worker-task-001-20260218-214506.log       |   67 +
+ .../logs/worker-task-002-20260218-172156.log       |   24 +
+ .../logs/worker-task-002-20260218-214506.log       |  102 +
+ .../logs/worker-task-003-20260218-172836.log       |  397 +++
+ .../logs/worker-task-004-20260218-172837.log       |   63 +
+ .../logs/worker-task-005-20260218-172837.log       |  144 +
+ .../logs/worker-task-005-20260218-174606.log       |  190 ++
+ se3/collab/orchestrator.pid                        |    1 +
+ se3/collab/tasks/.cmdinfo-task-001                 |    1 +
+ se3/collab/tasks/.cmdinfo-task-002                 |    1 +
+ se3/collab/tasks/.cmdinfo-task-003                 |    1 +
+ se3/collab/tasks/.cmdinfo-task-004                 |    1 +
+ se3/collab/tasks/.cmdinfo-task-005                 |    1 +
+ se3/collab/tasks/.exitcode-task-001                |    1 +
+ se3/collab/tasks/.exitcode-task-002                |    1 +
+ se3/collab/tasks/task-001.json                     |    1 +
+ se3/collab/tasks/task-002.json                     |    1 +
+ tools/se3_tools/__init__.py                        |    2 +-
+ tools/se3_tools/cli.py                             |   22 +
+ tools/se3_tools/commands/done.py                   |   44 +-
+ tools/se3_tools/commands/init.py                   |   13 +-
+ tools/se3_tools/commands/migrate.py                |  196 ++
+ tools/se3_tools/commands/start.py                  |   40 +-
+ 112 files changed, 7709 insertions(+), 26 deletions(-)
+```
+
 
 ## Current Session
 <!-- current-session -->
-- `29f8188` feat(se3)!: change .se3/ to se3/ (visible directory) (109 files)
+- `dcf670b` feat(se3): add se3 health command for OpenSpec integrity monitoring (6 files)
+- `db9caa0` chore(openspec): archive prompts-ensure-openspec-01 change (416 files)
+- `07577dc` docs(specs): add Change Lifecycle Management spec to se3-scaffold (1 files)
