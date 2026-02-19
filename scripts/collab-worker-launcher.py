@@ -118,6 +118,9 @@ def main():
     cmd_info_file = project_root / ".collab" / "tasks" / f".cmdinfo-{args.task_id}"
     exitcode_file.parent.mkdir(parents=True, exist_ok=True)
 
+    # Import datetime at function start for use in callbacks
+    from datetime import datetime
+
     # Activity callback: update task's last_activity timestamp whenever output is received
     def on_activity():
         task_file = project_root / ".collab" / "tasks" / f"{args.task_id}.json"
@@ -125,7 +128,7 @@ def main():
             try:
                 with open(task_file, "r", encoding="utf-8") as f:
                     task = json.load(f)
-                task["health"]["last_activity"] = json.dumps(datetime.now().isoformat())[1:-1]  # Remove quotes
+                task["health"]["last_activity"] = datetime.now().isoformat()
                 with open(task_file, "w", encoding="utf-8") as f:
                     json.dump(task, f, indent=2, ensure_ascii=False)
             except Exception as e:
@@ -133,8 +136,6 @@ def main():
 
     result = None
     try:
-        # Import datetime for timestamp
-        from datetime import datetime
 
         result = runner.run_with_monitor(
             args=claude_args,

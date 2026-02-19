@@ -484,7 +484,7 @@ def start_daemon(project_root: Path, objective: str, resume: bool = False):
     typer.echo(f"Use 'se3 collab --abort' to stop")
 
 
-def run_foreground_mode(project_root: Path, objective: str, resume: bool = False):
+def run_foreground_mode(project_root: Path, objective: str, resume: bool = False, mock: bool = False):
     """Foreground mode: run orchestrator with interactive terminal UI.
 
     This mode runs the orchestrator in the foreground with real-time status display,
@@ -665,7 +665,7 @@ def collab(
         if not resume and not objective:
             typer.echo("Error: provide an objective or use --resume")
             raise typer.Exit(1)
-        run_foreground_mode(root, objective or "", resume)
+        run_foreground_mode(root, objective or "", resume, mock)
         raise typer.Exit(0)
 
     # Default: run orchestrator directly (legacy mode, for testing)
