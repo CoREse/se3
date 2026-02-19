@@ -330,7 +330,7 @@ Your response will be used directly, so write it as the actual response."""
         try:
             # Validate project_root is set before creating runner
             # Note: self.project_root is a Path, so we check if it's valid
-            if self.project_root is None or str(self.project_root) == "." or not self.project_root.exists():
+            if self.project_root is None or not isinstance(self.project_root, Path) or not self.project_root.exists():
                 raise ValueError(f"Invalid project root: {self.project_root}")
 
             runner = ClaudeRunner(self.project_root)

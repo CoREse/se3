@@ -475,6 +475,14 @@ class ForegroundOrchestrator:
             if task.status == "done":
                 return  # Success, no retry needed
 
+            # Don't retry blocked tasks - they need human intervention
+            if task.status == "blocked":
+                self.renderer.append_worker_output(
+                    task.id,
+                    f"\n[Blocked] Task is blocked waiting for human input.\n"
+                )
+                return
+
             # Task failed - check if we should retry
             if task.retry_count < task.max_retries:
                 task.retry_count += 1
@@ -532,6 +540,7 @@ class ForegroundOrchestrator:
             task.exit_code = -1
             self.renderer.append_worker_output(task.id, "[Error] No Claude commands configured")
             await self._save_task_file(task)
+            self._cleanup_prompt_file(prompt_file)
             return
 
         cmd_entry = runner.commands[0]
@@ -543,6 +552,7 @@ class ForegroundOrchestrator:
             task.exit_code = -1
             self.renderer.append_worker_output(task.id, f"[Error] Claude command '{cmd_name}' not found")
             await self._save_task_file(task)
+            self._cleanup_prompt_file(prompt_file)
             return
 
         # Launch worker
@@ -564,6 +574,7 @@ class ForegroundOrchestrator:
             task.exit_code = -1
             self.renderer.append_worker_output(task.id, f"[Error] Failed to launch worker process: {e}")
             await self._save_task_file(task)
+            self._cleanup_prompt_file(prompt_file)
             return
 
         # Update status
@@ -608,9 +619,13 @@ class ForegroundOrchestrator:
             task.status = "failed"
             task.exit_code = -1
             task.completed_at = datetime.now()
-            del self.active_workers[task.id]
+            # Safely remove from active_workers (may already be removed)
+            if task.id in self.active_workers:
+                del self.active_workers[task.id]
             # Save final state
             await self._save_task_file(task)
+            # Clean up prompt file before re-raising
+            self._cleanup_prompt_file(prompt_file)
             raise
         except Exception as e:
             # Handle unexpected errors during output reading
@@ -619,8 +634,12 @@ class ForegroundOrchestrator:
             task.status = "failed"
             task.exit_code = -1
             task.completed_at = datetime.now()
-            del self.active_workers[task.id]
+            # Safely remove from active_workers (may already be removed during cleanup)
+            if task.id in self.active_workers:
+                del self.active_workers[task.id]
             await self._save_task_file(task)
+            # Clean up prompt file before returning
+            self._cleanup_prompt_file(prompt_file)
             return
 
         # Wait for completion with timeout to prevent indefinite hanging
@@ -647,17 +666,15 @@ class ForegroundOrchestrator:
             progress=100 if task.status == "done" else task.progress,
         )
 
-        del self.active_workers[task.id]
+        # Safely remove from active_workers (may already be removed during cleanup)
+        if task.id in self.active_workers:
+            del self.active_workers[task.id]
 
         # Update task file with final status
         await self._save_task_file(task)
 
         # Clean up prompt file
-        if prompt_file.exists():
-            try:
-                prompt_file.unlink()
-            except Exception:
-                pass  # Ignore cleanup errors
+        self._cleanup_prompt_file(prompt_file)
 
     async def _cleanup_worker_process(self, proc: asyncio.subprocess.Process, task: Task, timeout: float = 5.0):
         """Clean up a worker process gracefully, then forcefully if needed.
@@ -686,6 +703,17 @@ class ForegroundOrchestrator:
         except Exception:
             # Ignore other errors during termination
             pass
+
+    def _cleanup_prompt_file(self, prompt_file: Path):
+        """Clean up the worker prompt file.
+
+        Silently ignores errors if file doesn't exist or can't be removed.
+        """
+        try:
+            if prompt_file.exists():
+                prompt_file.unlink()
+        except Exception:
+            pass  # Ignore cleanup errors
 
     async def _run_mock_worker(self, task: Task):
         """Run a mock worker for testing (simulates success)."""
