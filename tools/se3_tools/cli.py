@@ -149,10 +149,11 @@ def work_cmd(
     new: Optional[str] = typer.Option(None, "--new", help="Create new change with workflow type (bugfix/feature/review/directive)"),
     advance: bool = typer.Option(False, "--advance", "-a", help="Mark current step complete and advance to next"),
     format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
+    strict: bool = typer.Option(False, "--strict", "-s", help="Enforce naming conventions strictly (reject invalid names)"),
 ):
     """Start or continue working on a change — the SDD workflow driver."""
     from .commands.work import run_work, print_text_report, print_json_report
-    result = run_work(project_root, change_name, new, advance)
+    result = run_work(project_root, change_name, new, advance, strict)
 
     # Check for session guard error
     if "error" in result:
@@ -231,10 +232,11 @@ def guardrails_cmd(
 def done_cmd(
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
     format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
+    archive: bool = typer.Option(False, "--archive", "-a", help="Automatically archive all completed changes"),
 ):
     """End an SE3 session — compute shutdown actions for the agent."""
     from .commands.done import run_session_done, print_text_report, print_json_report
-    state = run_session_done(project_root)
+    state = run_session_done(project_root, auto_archive=archive)
 
     # Check for session guard error
     if "error" in state:

@@ -208,8 +208,13 @@ def verify_spec_scenarios(change_path: Path) -> List[Dict[str, Any]]:
     return scenarios
 
 
-def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Compute the shutdown actions array based on current state."""
+def compute_actions(state: Dict[str, Any], auto_archive: bool = False) -> List[Dict[str, Any]]:
+    """Compute the shutdown actions array based on current state.
+
+    Args:
+        state: Current session state
+        auto_archive: If True, automatically archive all completed changes
+    """
     actions = []
 
     # Check for uncommitted changes
@@ -267,12 +272,22 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
         remaining = change.get('tasks', {}).get('remaining', 0)
         if remaining == 0:
             # All tasks complete - archive the change (SE3 1.x feature)
-            actions.append({
-                "type": "archive_change",
-                "change": change["name"],
-                "cmd": f"openspec archive {change['name']}",
-                "reason": f"Archive completed change '{change['name']}'",
-            })
+            if auto_archive:
+                # Auto-archive mode: archive immediately without prompting
+                actions.append({
+                    "type": "archive_change_immediate",
+                    "change": change["name"],
+                    "cmd": f"openspec archive {change['name']}",
+                    "reason": f"Auto-archiving completed change '{change['name']}' (--archive flag set)",
+                })
+            else:
+                # Normal mode: suggest archiving as an action
+                actions.append({
+                    "type": "archive_change",
+                    "change": change["name"],
+                    "cmd": f"openspec archive {change['name']}",
+                    "reason": f"Archive completed change '{change['name']}'",
+                })
             # Check for spec drift after archiving (SE3 1.x feature)
             actions.append({
                 "type": "check_spec_drift",
@@ -382,11 +397,15 @@ def clear_session_file(project_root: Path) -> None:
             session_file.unlink(missing_ok=True)
 
 
-def run_session_done(project_root: str = ".") -> Dict[str, Any]:
+def run_session_done(project_root: str = ".", auto_archive: bool = False) -> Dict[str, Any]:
     """Run the session shutdown protocol and return JSON actions.
 
     This is the workflow driver — it computes the state and determines
     what actions the agent should take to properly end the session.
+
+    Args:
+        project_root: Root directory of the project
+        auto_archive: If True, automatically archive all completed changes
     """
     root = Path(project_root).resolve()
 
@@ -423,10 +442,11 @@ def run_session_done(project_root: str = ".") -> Dict[str, Any]:
         "test_command": test_command,
         "collab_mode": collab_mode,
         "recent_commits": recent_commits,
+        "auto_archive": auto_archive,
     }
 
     # Compute actions
-    state["actions"] = compute_actions(state)
+    state["actions"] = compute_actions(state, auto_archive=auto_archive)
 
     return state
 
@@ -491,6 +511,7 @@ def print_json_report(state: Dict[str, Any]) -> None:
 def done(
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
     format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
+    archive: bool = typer.Option(False, "--archive", "-a", help="Automatically archive all completed changes"),
 ):
     """End an SE3 session — compute shutdown actions for the agent.
 
@@ -499,14 +520,16 @@ def done(
     - Run tests (if needed)
     - Commit changes (if uncommitted)
     - Update change status
+    - Archive completed changes (with --archive flag)
     - Handoff to human
 
     Examples:
         se3 done
         se3 done --json
         se3 done -p /path/to/project --json
+        se3 done --archive       # Auto-archive completed changes
     """
-    state = run_session_done(project_root)
+    state = run_session_done(project_root, auto_archive=archive)
 
     if format == "json":
         print_json_report(state)

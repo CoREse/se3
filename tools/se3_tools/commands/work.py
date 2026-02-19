@@ -611,8 +611,17 @@ def run_work(
     change_name: Optional[str] = None,
     new_workflow: Optional[str] = None,
     advance: bool = False,
+    strict: bool = False,
 ) -> Dict[str, Any]:
-    """Run the work command and return JSON with actions."""
+    """Run the work command and return JSON with actions.
+
+    Args:
+        project_root: Root directory of the project
+        change_name: Name of the change to work on
+        new_workflow: Workflow type for new changes
+        advance: Whether to advance to the next step
+        strict: If True, enforce naming conventions strictly (reject invalid names)
+    """
     root = Path(project_root).resolve()
 
     # Session Guard: Check session state before proceeding
@@ -643,6 +652,22 @@ def run_work(
 
         # Validate change name
         name_validation = validate_change_name(actual_change_name)
+
+        # In strict mode, reject invalid names
+        if strict and not name_validation["valid"]:
+            return {
+                "error": "INVALID_CHANGE_NAME",
+                "change_name": actual_change_name,
+                "message": f"Change name '{actual_change_name}' does not follow naming conventions",
+                "warnings": name_validation["warnings"],
+                "suggestion": name_validation["suggestion"],
+                "actions": [
+                    {
+                        "type": "retry_with_valid_name",
+                        "reason": "Use a descriptive name following the format: <action>-<descriptive-name>",
+                    }
+                ],
+            }
 
         # Create new change
         change_path = openspec_dir / actual_change_name
