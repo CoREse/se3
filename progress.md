@@ -2640,3 +2640,5 @@ openspec/changes/test/.openspec.yaml |  3 --
 <!-- current-session -->
 - `7a9a7c4` fix(loop): correct merge target branch for se3 loop --merge (4 files)
 - `5e060a6` fix(loop): collab branches now auto-merge to loop branch and improved base branch detection (5 files)
+- `f8fae4c` fix(loop): ensure collab task branches merge to loop branch with proper checkout (5 files)
+- `56f78d5` fix(collab): add merge lock to prevent race conditions when multiple tasks complete concurrently (2 files)
