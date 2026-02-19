@@ -27,8 +27,10 @@ def load_global_config() -> Dict[str, Any]:
     return {}
 
 
-def load_project_config(project_root: Path) -> Dict[str, Any]:
+def load_project_config(project_root: Path | str) -> Dict[str, Any]:
     """Load project config from se3.config.yaml."""
+    if isinstance(project_root, str):
+        project_root = Path(project_root)
     config_file = project_root / "se3.config.yaml"
     if config_file.exists():
         try:

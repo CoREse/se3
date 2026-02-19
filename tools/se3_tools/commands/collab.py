@@ -7,9 +7,10 @@ Independent Entry Mode Architecture:
 
 Usage modes:
 1. --daemon: Start orchestrator daemon (runs in background)
-2. --manual: Generate task files, print commands for manual execution
-3. --launch-manager: Launch manager for a task (internal use)
-4. --launch-worker: Launch worker for a task (internal use)
+2. --foreground: Run with Python asyncio orchestrator and rich terminal UI
+3. --manual: Generate task files, print commands for manual execution
+4. --launch-manager: Launch manager for a task (internal use)
+5. --launch-worker: Launch worker for a task (internal use)
 """
 
 # Verify: agent-team/Start daemon collaboration
@@ -21,6 +22,7 @@ Usage modes:
 # Verify: git-worktree-collab/Health Monitoring (Simplified)
 # Verify: git-worktree-collab/Human-as-MCP (Direct)
 
+import asyncio
 import json
 import os
 import subprocess
@@ -487,73 +489,37 @@ def start_daemon(project_root: Path, objective: str, resume: bool = False):
 def run_foreground_mode(project_root: Path, objective: str, resume: bool = False, mock: bool = False):
     """Foreground mode: run orchestrator with interactive terminal UI.
 
-    This mode runs the orchestrator in the foreground with real-time status display,
-    providing better visibility into the collaboration process without daemonizing.
+    This mode runs the Python asyncio orchestrator with rich terminal UI,
+    providing real-time visibility into manager decisions and worker execution.
     """
-    ensure_collab_structure(project_root)
-    collab_dir = get_collab_dir(project_root)
+    from ..collab_render import CollabRenderer
+    from ..collab_orchestrator import ForegroundOrchestrator
 
-    if not resume:
-        # Clean up old tasks from previous sessions
-        tasks_dir = collab_dir / "tasks"
-        if tasks_dir.exists():
-            for f in tasks_dir.glob("task-*.json"):
-                f.unlink()
-            for f in tasks_dir.glob(".exitcode-*"):
-                f.unlink()
-
-        # Create session config
-        result = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=project_root,
-            capture_output=True,
-            text=True
-        )
-        base_branch = result.stdout.strip() or "master"
-
-        config = {
-            "session_id": f"collab-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
-            "objective": objective,
-            "base_branch": base_branch,
-            "created_at": datetime.now().isoformat(),
-            "max_parallel_workers": 3,
-            "status": "active",
-            "mode": "foreground"
-        }
-        (collab_dir / "config.json").write_text(json.dumps(config, indent=2))
-
-        typer.echo(f"Created foreground collaboration session: {config['session_id']}")
-        typer.echo(f"Objective: {objective}")
-        typer.echo("")
-        typer.echo("Running in foreground mode (Ctrl+C to interrupt)")
-        typer.echo("")
-
-    # Run the orchestrator script directly (not as daemon)
-    script = project_root / "scripts" / "collab-orchestrator.sh"
-    if not script.exists():
-        typer.echo(f"Error: orchestrator script not found at {script}")
+    if not objective and not resume:
+        typer.echo("Error: provide an objective or use --resume")
         raise typer.Exit(1)
 
-    cmd = ["bash", str(script)]
-    if resume:
-        cmd.append("--resume")
-    if mock:
-        cmd.append("--mock")
-    if objective and not resume:
-        cmd.append(objective)
+    async def _run():
+        renderer = CollabRenderer()
+        orchestrator = ForegroundOrchestrator(project_root, renderer, max_parallel=3, mock=mock)
 
-    # Add --no-watchdog for foreground mode (we want direct control)
-    cmd.append("--no-watchdog")
-
-    env = {**dict(os.environ), "PROJECT_ROOT": str(project_root)}
+        with renderer.start_live():
+            try:
+                success = await orchestrator.run(objective)
+                return 0 if success else 1
+            except KeyboardInterrupt:
+                renderer.print_message("\nInterrupted by user.", "yellow")
+                return 130
+            except Exception as e:
+                renderer.print_message(f"\nError: {e}", "red")
+                return 1
 
     try:
-        # Run orchestrator directly, streaming output
-        result = subprocess.run(cmd, env=env, cwd=project_root)
-        raise typer.Exit(result.returncode)
-    except KeyboardInterrupt:
-        typer.echo("\nInterrupted. Use 'se3 collab --abort' to cleanup.")
-        raise typer.Exit(130)
+        exit_code = asyncio.run(_run())
+        raise typer.Exit(exit_code)
+    except Exception as e:
+        typer.echo(f"Error in foreground mode: {e}")
+        raise typer.Exit(1)
 
 
 def run_manual_mode(project_root: Path, objective: str):

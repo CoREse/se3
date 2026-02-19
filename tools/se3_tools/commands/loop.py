@@ -447,12 +447,17 @@ def run_loop_collab(
     iterations: int = 10,
     quick: bool = False,
     no_summary: bool = False,
+    mock: bool = False,
 ) -> None:
     """Run the loop with collab integration for each iteration.
 
-    Each iteration runs as a collab session, allowing parallel work
-    across multiple workers with manager coordination.
+    Each iteration runs as a collab session with foreground orchestrator,
+    allowing parallel work across multiple workers with real-time visibility.
     """
+    import asyncio
+    from ..collab_render import CollabRenderer
+    from ..collab_orchestrator import ForegroundOrchestrator
+
     root = Path(project_root).resolve()
 
     print(f"\n{BOLD}{'=' * 60}{RESET}")
@@ -463,10 +468,6 @@ def run_loop_collab(
     print(f"Project: {root}")
     print(f"\n{YELLOW}Each iteration runs as a collab session with parallel workers{RESET}")
     print(f"{BOLD}{'=' * 60}{RESET}\n")
-
-    # Ensure collab structure exists
-    collab_dir = root / ".collab"
-    collab_dir.mkdir(parents=True, exist_ok=True)
 
     previous_summary = None
 
@@ -488,56 +489,43 @@ def run_loop_collab(
 Continue the work from the previous iteration, incorporating the insights above.
 """
 
-        # Run collab session for this iteration
-        from .collab import start_daemon, print_status, abort_session
-
-        # Check if there's an active collab session
-        config_file = collab_dir / "config.json"
-        if config_file.exists():
-            config = json.loads(config_file.read_text())
-            if config.get("status") == "active":
-                print(f"{YELLOW}[SE3 Loop] Found active collab session, aborting first...{RESET}")
-                abort_session(root)
-
-        # Start collab daemon for this iteration
+        # Run collab session with foreground orchestrator
         print(f"{CYAN}[SE3 Loop] Starting collab session for iteration {iteration}...{RESET}")
-        start_daemon(root, iteration_prompt, resume=False)
 
-        # Wait for collab to complete (poll status)
-        import time
-        max_wait = 3600  # 1 hour max per iteration
-        wait_interval = 10  # Check every 10 seconds
-        waited = 0
+        async def _run_iteration():
+            renderer = CollabRenderer()
+            orchestrator = ForegroundOrchestrator(root, renderer, max_parallel=3, mock=mock)
 
-        while waited < max_wait:
-            time.sleep(wait_interval)
-            waited += wait_interval
+            with renderer.start_live():
+                try:
+                    success = await orchestrator.run(iteration_prompt)
+                    return 0 if success else 1
+                except KeyboardInterrupt:
+                    renderer.print_message("\nInterrupted by user.", "yellow")
+                    return 130
+                except Exception as e:
+                    renderer.print_message(f"\nError: {e}", "red")
+                    import traceback
+                    traceback.print_exc()
+                    return 1
 
-            # Check if collab is still active
-            if config_file.exists():
-                config = json.loads(config_file.read_text())
-                status = config.get("status", "unknown")
-
-                if status in ("completed", "aborted"):
-                    print(f"{GREEN}[SE3 Loop] Collab iteration {iteration} finished with status: {status}{RESET}")
-                    break
-                elif status == "active":
-                    # Still running, show status periodically
-                    if waited % 60 == 0:  # Every minute
-                        print(f"{GRAY}[SE3 Loop] Iteration {iteration} still running... ({waited}s elapsed){RESET}")
-                    continue
-                else:
-                    print(f"{YELLOW}[SE3 Loop] Unknown status: {status}{RESET}")
-                    break
-            else:
-                print(f"{YELLOW}[SE3 Loop] Config file missing, assuming session ended{RESET}")
+        try:
+            exit_code = asyncio.run(_run_iteration())
+            if exit_code == 0:
+                print(f"{GREEN}[SE3 Loop] Collab iteration {iteration} completed successfully{RESET}")
+            elif exit_code == 130:
+                print(f"{YELLOW}[SE3 Loop] Collab iteration {iteration} interrupted{RESET}")
                 break
-        else:
-            print(f"{YELLOW}[SE3 Loop] Iteration {iteration} timed out after {max_wait}s{RESET}")
-            abort_session(root)
+            else:
+                print(f"{YELLOW}[SE3 Loop] Collab iteration {iteration} exited with code {exit_code}{RESET}")
+        except Exception as e:
+            print(f"{MAGENTA}[SE3 Loop] Error in iteration {iteration}: {e}{RESET}")
+            import traceback
+            traceback.print_exc()
+            exit_code = 1
 
         # Generate summary for next iteration
-        if not no_summary and iteration < iterations:
+        if not no_summary and iteration < iterations and exit_code == 0:
             print(f"\n{CYAN}[SE3 Loop] Generating summary for next iteration...{RESET}")
             # Simple summary based on git changes
             try:
@@ -555,7 +543,7 @@ Continue the work from the previous iteration, incorporating the insights above.
             except Exception as e:
                 previous_summary = f"Iteration {iteration} completed (summary error: {e})."
 
-        if iteration < iterations:
+        if iteration < iterations and exit_code != 130:
             print(f"\n[SE3 Loop] Continuing to next iteration in 2 seconds...")
             time.sleep(2)
 
