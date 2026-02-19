@@ -490,7 +490,8 @@ def check_spec_change_association(project_root: Path, changes: List[ChangeInfo])
 def run_health_check(
     project_root: str = ".",
     stale_days: int = 30,
-    include_archived: bool = False
+    include_archived: bool = False,
+    skip_test_changes: bool = True
 ) -> Dict[str, Any]:
     """Run all health checks and return results.
 
@@ -508,8 +509,15 @@ def run_health_check(
     changes = discover_all_changes(root)
 
     # Filter out archived changes unless requested
-    active_changes = [c for c in changes if not c.is_archived]
-    changes_to_check = changes if include_archived else active_changes
+    all_active_changes = [c for c in changes if not c.is_archived]
+    changes_to_check = changes if include_archived else all_active_changes
+
+    # Filter out test changes if requested
+    if skip_test_changes:
+        changes_to_check = [c for c in changes_to_check if not is_test_change(c.name)]
+        active_changes = [c for c in all_active_changes if not is_test_change(c.name)]
+    else:
+        active_changes = all_active_changes
 
     # Run all checks
     all_issues = []
@@ -638,12 +646,40 @@ def print_json_report(results: Dict[str, Any]) -> None:
     print(json.dumps(results, indent=2, default=str))
 
 
+def is_test_change(change_name: str) -> bool:
+    """Check if a change name indicates a test/experimental change.
+
+    Test changes are identified by:
+    - Starting with 'test' or 'tmp'
+    - Containing only generic words like 'test', 'tmp', 'temp', 'fix'
+    - Being very short (< 8 characters)
+    """
+    name_lower = change_name.lower()
+
+    # Explicit test prefixes
+    if name_lower.startswith(("test", "tmp", "temp-")):
+        return True
+
+    # Generic-only names (no meaningful descriptor)
+    generic_words = {"test", "tmp", "temp", "fix", "update", "change", "work"}
+    parts = name_lower.replace("-", "_").split("_")
+    meaningful_parts = [p for p in parts if len(p) > 2 and p not in generic_words]
+
+    if not meaningful_parts and len(change_name) < 15:
+        return True
+
+    return False
+
+
 @app.callback()
 def health(
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
     format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
     stale_days: int = typer.Option(30, "--stale-days", "-s", help="Days before a change is considered stale"),
     include_archived: bool = typer.Option(False, "--include-archived", "-a", help="Include archived changes in checks"),
+    strict: bool = typer.Option(False, "--strict", help="Treat naming/info issues as warnings (for CI)"),
+    fail_on_warning: bool = typer.Option(False, "--fail-on-warning", "-w", help="Exit with error if any warnings found"),
+    skip_test_changes: bool = typer.Option(True, "--skip-test-changes/--include-test-changes", help="Skip test/experimental changes in checks"),
 ):
     """Check OpenSpec system health and integrity.
 
@@ -660,8 +696,23 @@ def health(
         se3 health --format json
         se3 health --stale-days 14
         se3 health --include-archived
+        se3 health --strict              # CI mode: fail on naming issues
+        se3 health --fail-on-warning     # Exit error if any warnings
     """
-    results = run_health_check(project_root, stale_days, include_archived)
+    results = run_health_check(project_root, stale_days, include_archived, skip_test_changes)
+
+    # Apply strict mode: upgrade naming issues from info to warning
+    if strict:
+        for issue in results.get("issues", []):
+            if issue.get("category") == "naming" and issue.get("severity") == "info":
+                issue["severity"] = "warning"
+
+        # Recalculate health status
+        warnings = [i for i in results.get("issues", []) if i.get("severity") == "warning"]
+        errors = [i for i in results.get("issues", []) if i.get("severity") == "error"]
+        results["healthy"] = len(errors) == 0 and len(warnings) == 0
+        results["summary"]["warnings"] = len(warnings)
+        results["summary"]["info"] = len([i for i in results.get("issues", []) if i.get("severity") == "info"])
 
     if format == "json":
         print_json_report(results)
@@ -669,7 +720,11 @@ def health(
         print_text_report(results)
 
     # Exit code: 0 = healthy, 1 = has warnings/issues
-    raise typer.Exit(code=0 if results["healthy"] else 1)
+    is_healthy = results["healthy"]
+    if fail_on_warning and results["summary"].get("warnings", 0) > 0:
+        is_healthy = False
+
+    raise typer.Exit(code=0 if is_healthy else 1)
 
 
 def main():
