@@ -2000,9 +2000,453 @@ progress.md                             |  43 ++-
  112 files changed, 7709 insertions(+), 26 deletions(-)
 ```
 
+## 2026-02-20 Session 80 (handoff)
 
-## Current Session
-<!-- current-session -->
+### Done
+- feat(se3): add se3 health command for OpenSpec integrity monitoring
+- chore(openspec): archive prompts-ensure-openspec-01 change
+- docs(specs): add Change Lifecycle Management spec to se3-scaffold
+- Update 26 files (26 files changed, 130 insertions(+), 354 deletions(-))
+
+### Commits
 - `dcf670b` feat(se3): add se3 health command for OpenSpec integrity monitoring (6 files)
 - `db9caa0` chore(openspec): archive prompts-ensure-openspec-01 change (416 files)
 - `07577dc` docs(specs): add Change Lifecycle Management spec to se3-scaffold (1 files)
+- `9e3c9c4` Update 26 files (26 files changed, 130 insertions(+), 354 deletions(-)) (26 files)
+
+### Files Changed
+```
+.../.openspec.yaml                                 |   0
+ .../2026-02-18-loop-summary-feature/tasks.md       |  36 ++
+ .../2026-02-18-loop-task-01-1}/.openspec.yaml      |   0
+ .../2026-02-18-loop-task-01-1/.se3-state.json      |  11 +
+ .../archive/2026-02-18-loop-task-01-1/tasks.md     |   5 +
+ .../.openspec.yaml                                 |   0
+ .../proposal.md                                    |  52 ++
+ .../tasks.md                                       |  35 ++
+ .../.openspec.yaml                                 |   0
+ .../.se3-state.json                                |  16 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  21 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  16 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  21 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  16 +
+ .../tasks.md                                       |   5 +
+ .../archive/2026-02-18-test-01/.openspec.yaml      |   2 +
+ .../archive/2026-02-18-test-01/.se3-state.json     |  21 +
+ .../changes/archive/2026-02-18-test-01/tasks.md    |   5 +
+ .../2026-02-18-test-prompt-01/.openspec.yaml       |   2 +
+ .../2026-02-18-test-prompt-01/.se3-state.json      |  21 +
+ .../archive/2026-02-18-test-prompt-01/tasks.md     |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  16 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  21 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  21 +
+ .../tasks.md                                       |  36 ++
+ .../.openspec.yaml                                 |   2 +
+ .../se3-loop1-promptstdinclaude2-ctrl-01/tasks.md  |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../se3-loop1-promptstdinclaude2-ctrl-02/tasks.md  |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../se3-loop1-promptstdinclaude2-ctrl-04/tasks.md  |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../se3-loop1-promptstdinclaude2-ctrl-06/tasks.md  |   0
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../se3-loop1-promptstdinclaude2-ctrl-07/tasks.md  |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../se3-loop1-promptstdinclaude2-ctrl-10/tasks.md  |   5 +
+ .../se31xse3md-01-1/.openspec.yaml                 |   2 +
+ .../se31xse3md-01-1/.se3-state.json                |  11 +
+ .../se31xse3md-01-1/tasks.md                       |   5 +
+ .../se31xse3md-01/.openspec.yaml                   |   2 +
+ .../2026-02-20-bulk-archive/se31xse3md-01/tasks.md |   5 +
+ .../se31xse3md-02/.openspec.yaml                   |   2 +
+ .../2026-02-20-bulk-archive/se31xse3md-02/tasks.md |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  21 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   0
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |   0
+ .../tasks.md                                       |   0
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  21 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |   0
+ .../tasks.md                                       |   0
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  21 +
+ .../tasks.md                                       |   0
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   0
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   0
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  21 +
+ .../tasks.md                                       |   0
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |   0
+ .../tasks.md                                       |   0
+ .../work.md                                        |   0
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |   0
+ .../tasks.md                                       |   0
+ .../work.md                                        |   0
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   0
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../tasks.md                                       |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  11 +
+ .../2026-02-20-prompts-ensure-openspec-01/tasks.md |   5 +
+ .../.openspec.yaml                                 |   2 +
+ .../.se3-state.json                                |  21 +
+ .../tasks.md                                       |   5 +
+ openspec/changes/fix-openspec-init/proposal.md     |  31 -
+ openspec/changes/fix-openspec-init/spec.md         |  37 --
+ openspec/changes/fix-openspec-init/status.md       |  21 -
+ openspec/specs/se3-commands/spec.md                |  87 +++
+ openspec/specs/se3-scaffold/spec.md                |  58 ++
+ progress.md                                        | 131 +++-
+ tools/se3_tools/__init__.py                        |   2 +-
+ tools/se3_tools/cli.py                             |   3 +-
+ tools/se3_tools/commands/done.py                   |  13 +-
+ tools/se3_tools/commands/health.py                 | 681 +++++++++++++++++++++
+ 426 files changed, 3250 insertions(+), 94 deletions(-)
+```
+
+
+## Current Session
+<!-- current-session -->
+- `77bfeab` feat(se3): implement OpenSpec integrity improvements (6 files)
+- `dd89c62` chore(openspec): archive prompts-ensure-openspec-02 change (3 files)
