@@ -441,6 +441,129 @@ class LoopState:
         return prompt_text
 
 
+def run_loop_collab(
+    prompt: str,
+    project_root: str = ".",
+    iterations: int = 10,
+    quick: bool = False,
+    no_summary: bool = False,
+) -> None:
+    """Run the loop with collab integration for each iteration.
+
+    Each iteration runs as a collab session, allowing parallel work
+    across multiple workers with manager coordination.
+    """
+    root = Path(project_root).resolve()
+
+    print(f"\n{BOLD}{'=' * 60}{RESET}")
+    print(f"{BOLD}SE3 Loop + Collab{RESET}")
+    print(f"{BOLD}{'=' * 60}{RESET}")
+    print(f"\nBase prompt: {prompt}")
+    print(f"Iterations: {iterations}")
+    print(f"Project: {root}")
+    print(f"\n{YELLOW}Each iteration runs as a collab session with parallel workers{RESET}")
+    print(f"{BOLD}{'=' * 60}{RESET}\n")
+
+    # Ensure collab structure exists
+    collab_dir = root / ".collab"
+    collab_dir.mkdir(parents=True, exist_ok=True)
+
+    previous_summary = None
+
+    for iteration in range(1, iterations + 1):
+        print(f"\n{BOLD}{'─' * 60}{RESET}")
+        print(f"{BOLD}Collab Iteration {iteration} / {iterations}{RESET}")
+        print(f"{BOLD}{'─' * 60}{RESET}\n")
+
+        # Build the iteration prompt
+        iteration_prompt = prompt
+        if previous_summary:
+            iteration_prompt = f"""{prompt}
+
+## Previous Iteration Summary
+
+{previous_summary}
+
+## Instructions
+Continue the work from the previous iteration, incorporating the insights above.
+"""
+
+        # Run collab session for this iteration
+        from .collab import start_daemon, print_status, abort_session
+
+        # Check if there's an active collab session
+        config_file = collab_dir / "config.json"
+        if config_file.exists():
+            config = json.loads(config_file.read_text())
+            if config.get("status") == "active":
+                print(f"{YELLOW}[SE3 Loop] Found active collab session, aborting first...{RESET}")
+                abort_session(root)
+
+        # Start collab daemon for this iteration
+        print(f"{CYAN}[SE3 Loop] Starting collab session for iteration {iteration}...{RESET}")
+        start_daemon(root, iteration_prompt, resume=False)
+
+        # Wait for collab to complete (poll status)
+        import time
+        max_wait = 3600  # 1 hour max per iteration
+        wait_interval = 10  # Check every 10 seconds
+        waited = 0
+
+        while waited < max_wait:
+            time.sleep(wait_interval)
+            waited += wait_interval
+
+            # Check if collab is still active
+            if config_file.exists():
+                config = json.loads(config_file.read_text())
+                status = config.get("status", "unknown")
+
+                if status in ("completed", "aborted"):
+                    print(f"{GREEN}[SE3 Loop] Collab iteration {iteration} finished with status: {status}{RESET}")
+                    break
+                elif status == "active":
+                    # Still running, show status periodically
+                    if waited % 60 == 0:  # Every minute
+                        print(f"{GRAY}[SE3 Loop] Iteration {iteration} still running... ({waited}s elapsed){RESET}")
+                    continue
+                else:
+                    print(f"{YELLOW}[SE3 Loop] Unknown status: {status}{RESET}")
+                    break
+            else:
+                print(f"{YELLOW}[SE3 Loop] Config file missing, assuming session ended{RESET}")
+                break
+        else:
+            print(f"{YELLOW}[SE3 Loop] Iteration {iteration} timed out after {max_wait}s{RESET}")
+            abort_session(root)
+
+        # Generate summary for next iteration
+        if not no_summary and iteration < iterations:
+            print(f"\n{CYAN}[SE3 Loop] Generating summary for next iteration...{RESET}")
+            # Simple summary based on git changes
+            try:
+                result = subprocess.run(
+                    ["git", "log", "--oneline", "-5"],
+                    cwd=root,
+                    capture_output=True,
+                    text=True
+                )
+                if result.returncode == 0:
+                    previous_summary = f"Recent commits:\n{result.stdout}"
+                    print(f"{GRAY}{DIM}Summary: {previous_summary[:100]}{'...' if len(previous_summary) > 100 else ''}{RESET}")
+                else:
+                    previous_summary = f"Iteration {iteration} completed."
+            except Exception as e:
+                previous_summary = f"Iteration {iteration} completed (summary error: {e})."
+
+        if iteration < iterations:
+            print(f"\n[SE3 Loop] Continuing to next iteration in 2 seconds...")
+            time.sleep(2)
+
+    print(f"\n{BOLD}{'=' * 60}{RESET}")
+    print(f"{BOLD}SE3 Loop + Collab Complete{RESET}")
+    print(f"{BOLD}{'=' * 60}{RESET}\n")
+
+
 def run_exclusive_loop(
     prompt: str,
     project_root: str = ".",

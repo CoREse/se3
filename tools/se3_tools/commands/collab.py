@@ -484,6 +484,78 @@ def start_daemon(project_root: Path, objective: str, resume: bool = False):
     typer.echo(f"Use 'se3 collab --abort' to stop")
 
 
+def run_foreground_mode(project_root: Path, objective: str, resume: bool = False):
+    """Foreground mode: run orchestrator with interactive terminal UI.
+
+    This mode runs the orchestrator in the foreground with real-time status display,
+    providing better visibility into the collaboration process without daemonizing.
+    """
+    ensure_collab_structure(project_root)
+    collab_dir = get_collab_dir(project_root)
+
+    if not resume:
+        # Clean up old tasks from previous sessions
+        tasks_dir = collab_dir / "tasks"
+        if tasks_dir.exists():
+            for f in tasks_dir.glob("task-*.json"):
+                f.unlink()
+            for f in tasks_dir.glob(".exitcode-*"):
+                f.unlink()
+
+        # Create session config
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=project_root,
+            capture_output=True,
+            text=True
+        )
+        base_branch = result.stdout.strip() or "master"
+
+        config = {
+            "session_id": f"collab-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+            "objective": objective,
+            "base_branch": base_branch,
+            "created_at": datetime.now().isoformat(),
+            "max_parallel_workers": 3,
+            "status": "active",
+            "mode": "foreground"
+        }
+        (collab_dir / "config.json").write_text(json.dumps(config, indent=2))
+
+        typer.echo(f"Created foreground collaboration session: {config['session_id']}")
+        typer.echo(f"Objective: {objective}")
+        typer.echo("")
+        typer.echo("Running in foreground mode (Ctrl+C to interrupt)")
+        typer.echo("")
+
+    # Run the orchestrator script directly (not as daemon)
+    script = project_root / "scripts" / "collab-orchestrator.sh"
+    if not script.exists():
+        typer.echo(f"Error: orchestrator script not found at {script}")
+        raise typer.Exit(1)
+
+    cmd = ["bash", str(script)]
+    if resume:
+        cmd.append("--resume")
+    if mock:
+        cmd.append("--mock")
+    if objective and not resume:
+        cmd.append(objective)
+
+    # Add --no-watchdog for foreground mode (we want direct control)
+    cmd.append("--no-watchdog")
+
+    env = {**dict(os.environ), "PROJECT_ROOT": str(project_root)}
+
+    try:
+        # Run orchestrator directly, streaming output
+        result = subprocess.run(cmd, env=env, cwd=project_root)
+        raise typer.Exit(result.returncode)
+    except KeyboardInterrupt:
+        typer.echo("\nInterrupted. Use 'se3 collab --abort' to cleanup.")
+        raise typer.Exit(130)
+
+
 def run_manual_mode(project_root: Path, objective: str):
     """Manual mode: generate initial plan, print commands for user to execute."""
     ensure_collab_structure(project_root)
@@ -533,6 +605,7 @@ def collab(
     abort: bool = typer.Option(False, "--abort", help="Abort and cleanup"),
     daemon: bool = typer.Option(False, "--daemon", help="Start orchestrator daemon (auto mode)"),
     manual: bool = typer.Option(False, "--manual", help="Manual mode: generate plan, print commands"),
+    foreground: bool = typer.Option(False, "--foreground", "-f", help="Foreground mode: run with interactive terminal UI"),
     launch_manager_flag: bool = typer.Option(False, "--launch-manager", help="Launch manager for event type (internal)"),
     launch_worker_flag: bool = typer.Option(False, "--launch-worker", help="Launch worker for task (internal)"),
     event_type: str = typer.Option("plan", "--event", help="Event type for manager"),
@@ -544,6 +617,7 @@ def collab(
 
     Independent Entry Mode:
     - Use --daemon for automatic execution (orchestrator manages everything)
+    - Use --foreground for interactive terminal UI (runs in foreground)
     - Use --manual to generate plan and execute manually
     """
     root = Path(project_root) if project_root else find_project_root()
@@ -585,6 +659,13 @@ def collab(
             typer.echo("Error: provide an objective")
             raise typer.Exit(1)
         run_manual_mode(root, objective)
+        raise typer.Exit(0)
+
+    if foreground:
+        if not resume and not objective:
+            typer.echo("Error: provide an objective or use --resume")
+            raise typer.Exit(1)
+        run_foreground_mode(root, objective or "", resume)
         raise typer.Exit(0)
 
     # Default: run orchestrator directly (legacy mode, for testing)

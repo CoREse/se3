@@ -169,5 +169,28 @@ class TestStdinPromptDelivery:
         mock_proc.stdin.close.assert_called_once()
 
 
+class TestLoopCollabIntegration:
+    """Test loop collab integration."""
+
+    def test_run_loop_collab_imports(self):
+        """Test that run_loop_collab function can be imported."""
+        from se3_tools.commands.loop import run_loop_collab
+        assert callable(run_loop_collab)
+
+    def test_run_loop_collab_function_signature(self):
+        """Test that run_loop_collab has correct function signature."""
+        from se3_tools.commands.loop import run_loop_collab
+        import inspect
+
+        sig = inspect.signature(run_loop_collab)
+        params = list(sig.parameters.keys())
+
+        assert 'prompt' in params
+        assert 'project_root' in params
+        assert 'iterations' in params
+        assert 'quick' in params
+        assert 'no_summary' in params
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -308,6 +308,7 @@ def loop_cmd(
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
     quick: bool = typer.Option(False, "--quick", "-q", help="Quick mode - use 'small' workflow"),
     no_summary: bool = typer.Option(False, "--no-summary", help="Disable iteration summary between loops"),
+    collab: bool = typer.Option(False, "--collab", "-c", help="Use collab mode for each iteration (parallel workers)"),
 ):
     """Run SE3 workflow in a loop, auto-executing all iterations.
 
@@ -320,10 +321,14 @@ def loop_cmd(
         se3 loop "add test case" -n 20 --quick
         se3 loop "process item"                    # Default 10 iterations
         se3 loop "process item" --no-summary       # Disable summary between iterations
+        se3 loop "optimize code" --collab -n 3     # Use collab mode with parallel workers
     """
-    from .commands.loop import run_exclusive_loop
+    from .commands.loop import run_exclusive_loop, run_loop_collab
 
-    run_exclusive_loop(prompt, project_root, iterations, quick, no_summary)
+    if collab:
+        run_loop_collab(prompt, project_root, iterations, quick, no_summary)
+    else:
+        run_exclusive_loop(prompt, project_root, iterations, quick, no_summary)
     raise typer.Exit(code=0)
 
 
