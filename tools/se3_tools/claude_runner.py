@@ -75,6 +75,12 @@ class ClaudeRunner:
         """
         resolved = []
         i = 0
+
+        # Use se3/tmp/ for temp files (visible, auto-cleaned by se3 done)
+        project_root = cwd or Path.cwd()
+        temp_dir = project_root / "se3" / "tmp"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+
         while i < len(args):
             arg = args[i]
 
@@ -89,7 +95,6 @@ class ClaudeRunner:
                     # Write content to temp file and use @ syntax
                     # This avoids command line length limitations
                     import tempfile
-                    temp_dir = cwd or Path.cwd()
                     with tempfile.NamedTemporaryFile(mode='w', suffix='.prompt',
                                                    dir=temp_dir, delete=False,
                                                    encoding='utf-8') as f:
@@ -112,7 +117,6 @@ class ClaudeRunner:
                     if file_path.exists():
                         # Write content to temp file and use @ syntax
                         import tempfile
-                        temp_dir = cwd or Path.cwd()
                         with tempfile.NamedTemporaryFile(mode='w', suffix='.prompt',
                                                        dir=temp_dir, delete=False,
                                                        encoding='utf-8') as f:
@@ -126,7 +130,6 @@ class ClaudeRunner:
                 else:
                     # Regular prompt text - write to temp file to avoid CLI issues
                     import tempfile
-                    temp_dir = cwd or Path.cwd()
                     with tempfile.NamedTemporaryFile(mode='w', suffix='.prompt',
                                                    dir=temp_dir, delete=False,
                                                    encoding='utf-8') as f:
