@@ -2733,4 +2733,5 @@ progress.md                            | 3 ++-
 
 ## Current Session
 <!-- current-session -->
-
+- `4fd2281` fix(loop): improve branch handling for se3 loop and se3 collab (3 files)
+- `976044d` chore: update openspec state and task progress for se3-loopbranchctrl-cclaudemergese3-21 (3 files)
