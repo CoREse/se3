@@ -193,6 +193,8 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.18.6 | 2026-02-20 | Fix: Collab base_branch propagation in all modes (foreground, manual, daemon). Ensures task branches correctly inherit base branch from loop branch. |
+| 2.18.5 | 2026-02-20 | Fix: Collab base_branch correctly set when creating task branches from loop branch. |
 | 2.18.4 | 2026-02-20 | Fix: `merge_loop_branch` now handles dirty working tree (warns user to commit/stash), restores original branch after merge, and improved `infer_loop_branch_base` with precise ancestor detection. |
 | 2.18.3 | 2026-02-20 | Fix: Ensure collab task branches correctly merge to loop branch by checking out base branch before merge. Simplified base branch inference logic. |
 | 2.18.0 | 2026-02-20 | Feature: SE3 Loop branch isolation and merge support. Each loop session creates a dedicated branch (se3-loop/{timestamp}) for isolation. Collab tasks branch from the loop branch. Added `se3 loop --merge <branch>` command to merge loop branch back. |
