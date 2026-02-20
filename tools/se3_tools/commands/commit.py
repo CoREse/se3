@@ -394,7 +394,18 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
 
     # Check README.md - BLOCKING check when framework files change
     readme_path = project_root / "README.md"
-    if readme_path.exists() and current_version:
+
+    # If we can't extract version but framework files changed, something is wrong
+    if not current_version:
+        issues.append(
+            f"BLOCKING: Could not extract SE3_FRAMEWORK_VERSION from {init_file}.\n"
+            f"  Changed files: {', '.join(changed_framework_files)}\n"
+            f"  Required action: Ensure {init_file} contains valid version string:\n"
+            f'    SE3_FRAMEWORK_VERSION = "X.Y.Z"'
+        )
+        return False, issues  # BLOCK COMMIT
+
+    if readme_path.exists():
         readme_content = readme_path.read_text()
 
         # Check 1: README.md must reference VERSIONS.md (not have inline version history)
@@ -421,7 +432,7 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
             )
             return False, issues  # BLOCK COMMIT
 
-    elif current_version:
+    else:
         # README.md doesn't exist - this is a problem for framework development
         issues.append(
             f"BLOCKING: README.md not found but framework files changed.\n"

@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**2.22.0** — Feature: README.md update check is now mandatory (blocking) when framework files change
+**2.22.1** — Fix: Handle None current_version in commit check to prevent TypeError when version extraction fails
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.22.1 | 2026-02-20 | Fix: Handle None current_version in commit check to prevent TypeError when version extraction fails. Adds explicit check for missing version extraction. |
 | 2.22.0 | 2026-02-20 | Feature: README.md update check is now mandatory (blocking) when framework files change. Checks for inline version history and version reference. |
 | 2.21.0 | 2026-02-20 | Feature: VERSIONS.md for version history, enforced by se3 commit
 
