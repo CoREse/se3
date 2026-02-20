@@ -398,12 +398,19 @@ def check_documentation_consistency(
             else:
                 issues.append(msg)
     else:
-        if is_se3_framework and check_framework_files:
-            issues.append(
-                "BLOCKING: VERSIONS.md not found.\n"
-                "  Required action: Create VERSIONS.md with version history."
-            )
-            return False, issues
+        if is_se3_framework:
+            if check_framework_files:
+                issues.append(
+                    "BLOCKING: VERSIONS.md not found.\n"
+                    "  Required action: Create VERSIONS.md with version history."
+                )
+                return False, issues
+            else:
+                # Non-blocking: still report for awareness
+                issues.append(
+                    "VERSIONS.md not found. "
+                    "Recommended action: Create VERSIONS.md with version history."
+                )
 
     # Check version consistency (only for SE3 framework projects)
     if is_se3_framework:
