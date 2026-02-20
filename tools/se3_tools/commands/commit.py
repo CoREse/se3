@@ -349,7 +349,14 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
             ["git", "diff", "--cached", str(init_file)],
             cwd=project_root
         )
-        version_updated = "SE3_FRAMEWORK_VERSION" in result.stdout
+        # Check for actual version change, not just context lines
+        # Look for +/- prefix which indicates actual changes in diff output
+        diff_lines = result.stdout.split("\n")
+        version_updated = any(
+            (line.startswith("+") or line.startswith("-")) and
+            "SE3_FRAMEWORK_VERSION" in line
+            for line in diff_lines
+        )
     else:
         version_updated = False
 
