@@ -154,6 +154,33 @@ def run_se3_commit(project_root: Path, message: Optional[str] = None) -> Tuple[b
     return result.returncode == 0, (result.stdout + "\n" + result.stderr).strip()
 
 
+def check_documentation_for_handoff(project_root: Path) -> Tuple[bool, List[str]]:
+    """Check documentation consistency for handoff.
+
+    This check runs even when --skip-commit is used, ensuring
+    documentation consistency cannot be bypassed.
+
+    Returns: (is_consistent, list of issues)
+    """
+    from ..utils import check_documentation_consistency
+
+    # Always use strict checks for handoff (same as commit)
+    is_consistent, issues = check_documentation_consistency(
+        project_root,
+        check_framework_files=True
+    )
+
+    # Filter out "BLOCKING:" prefix for handoff output
+    cleaned_issues = []
+    for issue in issues:
+        if issue.startswith("BLOCKING: "):
+            cleaned_issues.append(issue[10:])
+        else:
+            cleaned_issues.append(issue)
+
+    return is_consistent, cleaned_issues
+
+
 def generate_handoff_report(project_root: Path, commit_output: str) -> str:
     """Generate a handoff report with session summary from progress.md."""
     # Get last commit info
@@ -290,6 +317,20 @@ The agent has completed its assigned task and is handing off to human for:
         if skip_commit:
             typer.echo("  WARNING: --skip-commit flag used, bypassing commit.")
             typer.echo("  This violates SE3 protocol but proceeding as requested.")
+
+            # Even with --skip-commit, we still check documentation consistency
+            # This ensures the bypass cannot be used to skip documentation requirements
+            typer.echo("\n  Checking documentation consistency (cannot be skipped)...")
+            docs_ok, doc_issues = check_documentation_for_handoff(root)
+            if not docs_ok:
+                typer.echo("  Documentation issues detected:")
+                for issue in doc_issues:
+                    typer.echo(f"    - {issue}")
+                typer.echo("\n  Handoff BLOCKED: Documentation consistency required.")
+                typer.echo("  Fix the issues above or commit changes properly without --skip-commit.")
+                raise typer.Exit(1)
+            typer.echo("  Documentation check passed.")
+
         elif dry_run:
             typer.echo("  [DRY RUN] Would execute: se3 commit")
             if message:

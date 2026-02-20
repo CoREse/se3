@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**2.22.4** — Fix: Correct version.py get_readme_versions function and add documentation consistency check to se3 done command.
+**2.22.5** — Fix: Unify documentation check logic across all commands and prevent --skip-commit bypass of documentation requirements.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.22.5 | 2026-02-20 | Fix: Unify documentation check logic across all commands and prevent --skip-commit bypass of documentation requirements. |
 | 2.22.4 | 2026-02-20 | Fix: Correct version.py get_readme_versions function and add documentation consistency check to se3 done command. |
 | 2.22.3 | 2026-02-20 | Fix: Strengthen README version consistency checks. VERSIONS.md reference now required when VERSIONS.md exists; README version check is now unconditional. |
 | 2.22.2 | 2026-02-20 | Fix: Correct version_updated detection in se3 commit. Now checks for +/- prefix in diff lines to distinguish actual version changes from context lines. |

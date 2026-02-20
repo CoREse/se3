@@ -177,41 +177,25 @@ def check_documentation_consistency(project_root: Path) -> Tuple[bool, List[str]
     """Check documentation consistency: README.md and VERSIONS.md.
 
     This is the NON-BLOCKING version for done command.
+    Delegates to the shared implementation in utils.py.
     For BLOCKING checks during commit, see commit.py.
 
     Returns: (is_consistent, list of issues)
     """
-    issues = []
+    from ..utils import check_documentation_consistency as _check_docs
 
-    readme_path = project_root / "README.md"
-    versions_path = project_root / "VERSIONS.md"
+    # Use shared implementation without strict framework checks
+    is_consistent, issues = _check_docs(project_root, check_framework_files=False)
 
-    # Check README.md exists
-    if not readme_path.exists():
-        issues.append("README.md not found")
-        return False, issues
+    # Filter out BLOCKING: prefix for done command (it's non-blocking)
+    cleaned_issues = []
+    for issue in issues:
+        if issue.startswith("BLOCKING: "):
+            cleaned_issues.append(issue[10:])  # Remove "BLOCKING: " prefix
+        else:
+            cleaned_issues.append(issue)
 
-    readme_content = readme_path.read_text()
-
-    # Check VERSIONS.md reference in README
-    if versions_path.exists() and "VERSIONS.md" not in readme_content:
-        issues.append("README.md does not reference VERSIONS.md")
-
-    # Try to get framework version
-    try:
-        init_file = project_root / "tools" / "se3_tools" / "__init__.py"
-        if init_file.exists():
-            import re
-            init_content = init_file.read_text()
-            version_match = re.search(r'SE3_FRAMEWORK_VERSION = "(\d+\.\d+\.\d+)"', init_content)
-            if version_match:
-                current_version = version_match.group(1)
-                if current_version not in readme_content:
-                    issues.append(f"README.md missing reference to version {current_version}")
-    except Exception:
-        pass  # Skip version check if we can't read the version
-
-    return len(issues) == 0, issues
+    return is_consistent, cleaned_issues
 
 
 def verify_spec_scenarios(change_path: Path) -> List[Dict[str, Any]]:
@@ -308,9 +292,15 @@ def compute_actions(state: Dict[str, Any], auto_archive: bool = False) -> List[D
     # 0.5 Check documentation consistency (README.md, VERSIONS.md)
     docs_ok, doc_issues = check_documentation_consistency(Path(state.get("project_root", ".")))
     if not docs_ok:
+        # Determine severity: if framework files changed or critical docs missing, it's an error
+        has_critical_doc_issue = any(
+            "not found" in issue.lower() or "missing" in issue.lower()
+            for issue in doc_issues
+        )
+        severity = "error" if has_critical_doc_issue else "warning"
         actions.append({
             "type": "check_documentation",
-            "severity": "warning",
+            "severity": severity,
             "issues": doc_issues,
             "reason": f"Documentation consistency issues: {len(doc_issues)} issue(s) found",
             "cmd": "se3 commit",

@@ -309,42 +309,35 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
     Returns: (can_commit, list of issues)
     If framework files changed, version MUST be bumped AND documented.
     """
+    from ..utils import check_documentation_consistency as _check_docs
+    from ..utils import has_framework_file_changes
+
     issues = []
 
     # Check if framework files are being modified
+    has_framework_change, changed_framework_files = has_framework_file_changes(project_root)
+
+    # Check if documentation files are being modified (even without framework changes)
     result = run_command(["git", "diff", "--cached", "--name-only"], cwd=project_root)
     staged_files = result.stdout.strip().split("\n") if result.returncode == 0 else []
+    doc_files_changed = [f for f in staged_files if f in ("README.md", "VERSIONS.md")]
 
-    # Extended list of framework files that require version bump
-    framework_patterns = [
-        "output/SE3.md.template",
-        "tools/se3_tools/__init__.py",
-        "tools/se3_tools/commands/",
-        "tools/se3_tools/utils.py",
-        "tools/se3_tools/progress.py",
-        "tools/se3_tools/human_calls.py",
-        "tools/se3_tools/config.py",
-        "scripts/collab-",
-        "scripts/rules-",
-        "scripts/mcp-",
-    ]
-
-    has_framework_change = False
-    changed_framework_files = []
-
-    for f in staged_files:
-        for pattern in framework_patterns:
-            if f.startswith(pattern):
-                has_framework_change = True
-                changed_framework_files.append(f)
-                break
-
-    if not has_framework_change:
-        return True, []  # No framework changes, no version check needed
-
-    # Check if version was updated
+    # Check if this is an SE3 framework project (has tools/se3_tools/__init__.py)
     init_file = project_root / "tools" / "se3_tools" / "__init__.py"
-    if init_file.exists():
+    is_se3_framework = init_file.exists()
+
+    # No framework or doc changes - skip all checks
+    if not has_framework_change and not doc_files_changed:
+        return True, []
+
+    # Non-SE3 projects with doc-only changes - skip strict checks
+    if not is_se3_framework:
+        return True, []
+
+    # From here on: this IS an SE3 framework project
+
+    # Check if version was updated (only relevant if framework files changed)
+    if has_framework_change:
         result = run_command(
             ["git", "diff", "--cached", str(init_file)],
             cwd=project_root
@@ -357,99 +350,29 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
             "SE3_FRAMEWORK_VERSION" in line
             for line in diff_lines
         )
-    else:
-        version_updated = False
 
-    if not version_updated:
-        issues.append(
-            f"BLOCKING: Framework files changed but version not bumped.\n"
-            f"  Changed files: {', '.join(changed_framework_files)}\n"
-            f"  Required action: Update SE3_FRAMEWORK_VERSION in tools/se3_tools/__init__.py\n"
-            f"  Version rules:\n"
-            f"    - PATCH (X.Y.Z+1): Bug fixes, docs corrections\n"
-            f"    - MINOR (X.Y+1.0): New features, new commands\n"
-            f"    - MAJOR (X+1.0.0): Breaking changes\n"
-            f"  Also update VERSIONS.md with the new version entry."
-        )
-        return False, issues  # BLOCK COMMIT
-
-    # Extract current version from __init__.py
-    import re
-    init_content = init_file.read_text()
-    version_match = re.search(r'SE3_FRAMEWORK_VERSION = "(\d+\.\d+\.\d+)"', init_content)
-    current_version = version_match.group(1) if version_match else None
-
-    # Check VERSIONS.md - BLOCKING check
-    versions_path = project_root / "VERSIONS.md"
-    if versions_path.exists() and current_version:
-        versions_content = versions_path.read_text()
-        if current_version not in versions_content:
+        if not version_updated:
             issues.append(
-                f"BLOCKING: Version {current_version} not found in VERSIONS.md.\n"
+                f"BLOCKING: Framework files changed but version not bumped.\n"
                 f"  Changed files: {', '.join(changed_framework_files)}\n"
-                f"  Required action: Add version entry to VERSIONS.md\n"
-                f"  Entry format: | {current_version} | YYYY-MM-DD | Description of changes |"
-            )
-            return False, issues  # BLOCK COMMIT
-    elif current_version:
-        # VERSIONS.md doesn't exist - this is a problem for framework development
-        issues.append(
-            f"BLOCKING: VERSIONS.md not found but framework files changed.\n"
-            f"  Required action: Create VERSIONS.md with version history."
-        )
-        return False, issues  # BLOCK COMMIT
-
-    # Check README.md - BLOCKING check when framework files change
-    readme_path = project_root / "README.md"
-
-    # If we can't extract version but framework files changed, something is wrong
-    if not current_version:
-        issues.append(
-            f"BLOCKING: Could not extract SE3_FRAMEWORK_VERSION from {init_file}.\n"
-            f"  Changed files: {', '.join(changed_framework_files)}\n"
-            f"  Required action: Ensure {init_file} contains valid version string:\n"
-            f'    SE3_FRAMEWORK_VERSION = "X.Y.Z"'
-        )
-        return False, issues  # BLOCK COMMIT
-
-    if readme_path.exists():
-        readme_content = readme_path.read_text()
-
-        # Check 1: README.md must reference VERSIONS.md (if VERSIONS.md exists)
-        # This prevents inline version history or linking to wrong file
-        if versions_path.exists() and "VERSIONS.md" not in readme_content:
-            if "Version History" in readme_content or "version" in readme_content.lower():
-                issues.append(
-                    f"BLOCKING: README.md does not reference VERSIONS.md.\n"
-                    f"  Changed files: {', '.join(changed_framework_files)}\n"
-                    f"  Required action: Update README.md to reference VERSIONS.md\n"
-                    f"  1. If there's inline version history: move it to VERSIONS.md\n"
-                    f"  2. Replace version history section in README.md with:\n"
-                    f"     ## Version History\n"
-                    f"     See [VERSIONS.md](VERSIONS.md) for the complete version history.\n"
-                    f"  3. If version is mentioned elsewhere, ensure VERSIONS.md is linked\n"
-                    f"  4. Stage README.md changes and retry commit."
-                )
-                return False, issues  # BLOCK COMMIT
-
-        # Check 2: README.md must reference the current version (ALWAYS, not just when bumped)
-        # This ensures README and VERSIONS.md stay in sync
-        if current_version not in readme_content:
-            issues.append(
-                f"BLOCKING: Version {current_version} not found in README.md.\n"
-                f"  Changed files: {', '.join(changed_framework_files)}\n"
-                f"  Required action: Update README.md to reference version {current_version}\n"
-                f"  README.md should include the current version (e.g., 'Current Version: {current_version}')"
+                f"  Required action: Update SE3_FRAMEWORK_VERSION in tools/se3_tools/__init__.py\n"
+                f"  Version rules:\n"
+                f"    - PATCH (X.Y.Z+1): Bug fixes, docs corrections\n"
+                f"    - MINOR (X.Y+1.0): New features, new commands\n"
+                f"    - MAJOR (X+1.0.0): Breaking changes\n"
+                f"  Also update VERSIONS.md with the new version entry."
             )
             return False, issues  # BLOCK COMMIT
 
-    else:
-        # README.md doesn't exist - this is a problem for framework development
-        issues.append(
-            f"BLOCKING: README.md not found but framework files changed.\n"
-            f"  Required action: Create README.md with framework documentation."
-        )
-        return False, issues  # BLOCK COMMIT
+    # Use shared documentation consistency check (strict mode for framework changes)
+    docs_ok, doc_issues = _check_docs(
+        project_root,
+        check_framework_files=has_framework_change or bool(doc_files_changed)
+    )
+
+    if not docs_ok:
+        # The shared function already prefixes issues with "BLOCKING:"
+        return False, doc_issues
 
     return True, issues  # Allow commit
 

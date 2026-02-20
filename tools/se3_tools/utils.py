@@ -326,6 +326,168 @@ def find_verification_markers(scenario_id: str, search_paths: List[str]) -> List
     return markers
 
 
+def get_framework_version(project_root: Path) -> Optional[str]:
+    """Extract SE3 framework version from tools/se3_tools/__init__.py.
+
+    Args:
+        project_root: Root of the project
+
+    Returns:
+        Version string (e.g., "2.22.4") or None if not found
+    """
+    init_file = project_root / "tools" / "se3_tools" / "__init__.py"
+    if not init_file.exists():
+        return None
+
+    try:
+        content = init_file.read_text()
+        match = re.search(r'SE3_FRAMEWORK_VERSION = "(\d+\.\d+\.\d+)"', content)
+        return match.group(1) if match else None
+    except (OSError, IOError):
+        return None
+
+
+def check_documentation_consistency(
+    project_root: Path,
+    check_framework_files: bool = False
+) -> tuple[bool, List[str]]:
+    """Check documentation consistency: README.md and VERSIONS.md.
+
+    This is the SHARED version used by commit, done, and handoff commands.
+
+    Args:
+        project_root: Root of the project
+        check_framework_files: If True, perform strict checks for framework changes
+
+    Returns:
+        Tuple of (is_consistent, list_of_issues)
+        Issues prefixed with "BLOCKING:" indicate the check should block the operation
+    """
+    issues = []
+    readme_path = project_root / "README.md"
+    versions_path = project_root / "VERSIONS.md"
+    init_file = project_root / "tools" / "se3_tools" / "__init__.py"
+
+    # Check if this is an SE3 framework project
+    is_se3_framework = init_file.exists()
+
+    # Check README.md exists
+    if not readme_path.exists():
+        if is_se3_framework and check_framework_files:
+            issues.append(
+                "BLOCKING: README.md not found.\n"
+                "  Required action: Create README.md with framework documentation."
+            )
+            return False, issues
+        else:
+            issues.append("README.md not found")
+            return False, issues
+
+    readme_content = readme_path.read_text()
+
+    # Check VERSIONS.md exists and is referenced
+    if versions_path.exists():
+        if "VERSIONS.md" not in readme_content:
+            msg = "README.md does not reference VERSIONS.md"
+            if is_se3_framework:
+                if check_framework_files or "Version History" in readme_content:
+                    issues.append(f"BLOCKING: {msg}.\n"
+                        f"  Required action: Update README.md to reference VERSIONS.md\n"
+                        f"  Add: 'See [VERSIONS.md](VERSIONS.md) for the complete version history.'")
+                    return False, issues
+            else:
+                issues.append(msg)
+    else:
+        if is_se3_framework and check_framework_files:
+            issues.append(
+                "BLOCKING: VERSIONS.md not found.\n"
+                "  Required action: Create VERSIONS.md with version history."
+            )
+            return False, issues
+
+    # Check version consistency (only for SE3 framework projects)
+    if is_se3_framework:
+        current_version = get_framework_version(project_root)
+        if not current_version:
+            if check_framework_files:
+                issues.append(
+                    "BLOCKING: Could not extract SE3_FRAMEWORK_VERSION from tools/se3_tools/__init__.py.\n"
+                    "  Required action: Ensure the file contains valid version string:\n"
+                    '    SE3_FRAMEWORK_VERSION = "X.Y.Z"'
+                )
+                return False, issues
+        else:
+            # Check README.md contains current version
+            if current_version not in readme_content:
+                msg = f"Version {current_version} not found in README.md"
+                if check_framework_files:
+                    issues.append(
+                        f"BLOCKING: {msg}.\n"
+                        f"  Required action: Update README.md to reference version {current_version}\n"
+                        f"  README.md should include the current version (e.g., 'Current Version: {current_version}')"
+                    )
+                    return False, issues
+                else:
+                    issues.append(msg)
+
+            # Check VERSIONS.md contains current version (if it exists)
+            if versions_path.exists():
+                versions_content = versions_path.read_text()
+                if current_version not in versions_content:
+                    msg = f"Version {current_version} not found in VERSIONS.md"
+                    if check_framework_files:
+                        issues.append(
+                            f"BLOCKING: {msg}.\n"
+                            f"  Required action: Add version entry to VERSIONS.md\n"
+                            f"  Entry format: | {current_version} | YYYY-MM-DD | Description of changes |"
+                        )
+                        return False, issues
+                    else:
+                        issues.append(msg)
+
+    return len(issues) == 0, issues
+
+
+def has_framework_file_changes(project_root: Path) -> tuple[bool, List[str]]:
+    """Check if any framework files have been staged for commit.
+
+    Args:
+        project_root: Root of the project
+
+    Returns:
+        Tuple of (has_changes, list_of_changed_files)
+    """
+    import subprocess
+
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=project_root, capture_output=True, text=True
+    )
+    staged_files = result.stdout.strip().split("\n") if result.returncode == 0 else []
+
+    framework_patterns = [
+        "output/SE3.md.template",
+        "tools/se3_tools/__init__.py",
+        "tools/se3_tools/commands/",
+        "tools/se3_tools/utils.py",
+        "tools/se3_tools/progress.py",
+        "tools/se3_tools/human_calls.py",
+        "tools/se3_tools/config.py",
+        "scripts/collab-",
+        "scripts/rules-",
+        "scripts/mcp-",
+    ]
+
+    changed_framework_files = []
+    for f in staged_files:
+        for pattern in framework_patterns:
+            if f.startswith(pattern):
+                changed_framework_files.append(f)
+                break
+
+    return len(changed_framework_files) > 0, changed_framework_files
+
+
 def parse_status_md(filepath: str = "./status.md") -> Dict[str, Any]:
     """Parse the status.md file.
 

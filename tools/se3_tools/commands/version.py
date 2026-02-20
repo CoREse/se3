@@ -61,14 +61,38 @@ def get_readme_versions(project_root: Path) -> List[str]:
 
     DEPRECATED: Version history is now in VERSIONS.md.
     This function now returns versions mentioned in README (for reference validation only).
+
+    Only matches versions with explicit version context (e.g., "Version: X.Y.Z", "vX.Y.Z",
+    "Current Version: X.Y.Z") to avoid matching dependency versions or dates.
     """
     readme_file = project_root / "README.md"
     if not readme_file.exists():
         return []
 
     content = readme_file.read_text()
-    # Find any version mentions in README (for reference validation)
-    versions = re.findall(r'(\d+\.\d+\.\d+)', content)
+    versions = []
+
+    # Pattern 1: Explicit version labels (case-insensitive)
+    # Matches: "Version: 1.2.3", "Current Version: 1.2.3", "version 1.2.3"
+    pattern1 = re.compile(
+        r'(?:current\s+)?version[:\s]+v?(\d+\.\d+\.\d+)',
+        re.IGNORECASE
+    )
+    versions.extend(match.group(1) for match in pattern1.finditer(content))
+
+    # Pattern 2: Bold/heading version references
+    # Matches: "**Version 1.2.3**", "## Version 1.2.3"
+    pattern2 = re.compile(
+        r'[\*#\[]+\s*(?:current\s+)?version[:\s]+v?(\d+\.\d+\.\d+)',
+        re.IGNORECASE
+    )
+    versions.extend(match.group(1) for match in pattern2.finditer(content))
+
+    # Pattern 3: "vX.Y.Z" format (standalone, not part of a larger word)
+    # Matches: "v1.2.3" but not "python3.9.0" or "2026-02-20"
+    pattern3 = re.compile(r'\bv(\d+\.\d+\.\d+)\b')
+    versions.extend(match.group(1) for match in pattern3.finditer(content))
+
     return versions
 
 
