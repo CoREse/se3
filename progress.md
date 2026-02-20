@@ -2995,3 +2995,4 @@ openspec/changes/se3-loopbranchse3-loop-09/.openspec.yaml  |  2 ++
 <!-- current-session -->
 - `9d74306` test(loop): verify branch management and collab mode functionality (4 files)
 - `292bbd5` test(loop): verify branch management and collab mode functionality (4 files)
+- `26b9a3d` chore: archive completed changes (18 files)
