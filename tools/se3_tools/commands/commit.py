@@ -307,7 +307,7 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
     STRICT version check for SE3 framework development.
 
     Returns: (can_commit, list of issues)
-    If framework files changed, version MUST be bumped.
+    If framework files changed, version MUST be bumped AND documented.
     """
     issues = []
 
@@ -320,6 +320,10 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
         "output/SE3.md.template",
         "tools/se3_tools/__init__.py",
         "tools/se3_tools/commands/",
+        "tools/se3_tools/utils.py",
+        "tools/se3_tools/progress.py",
+        "tools/se3_tools/human_calls.py",
+        "tools/se3_tools/config.py",
         "scripts/collab-",
         "scripts/rules-",
         "scripts/mcp-",
@@ -358,27 +362,47 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
             f"    - PATCH (X.Y.Z+1): Bug fixes, docs corrections\n"
             f"    - MINOR (X.Y+1.0): New features, new commands\n"
             f"    - MAJOR (X+1.0.0): Breaking changes\n"
-            f"  Also update README.md Version History."
+            f"  Also update VERSIONS.md with the new version entry."
         )
         return False, issues  # BLOCK COMMIT
 
-    # Check README.md Version History
+    # Extract current version from __init__.py
+    import re
+    init_content = init_file.read_text()
+    version_match = re.search(r'SE3_FRAMEWORK_VERSION = "(\d+\.\d+\.\d+)"', init_content)
+    current_version = version_match.group(1) if version_match else None
+
+    # Check VERSIONS.md - BLOCKING check
+    versions_path = project_root / "VERSIONS.md"
+    if versions_path.exists() and current_version:
+        versions_content = versions_path.read_text()
+        if current_version not in versions_content:
+            issues.append(
+                f"BLOCKING: Version {current_version} not found in VERSIONS.md.\n"
+                f"  Changed files: {', '.join(changed_framework_files)}\n"
+                f"  Required action: Add version entry to VERSIONS.md\n"
+                f"  Entry format: | {current_version} | YYYY-MM-DD | Description of changes |"
+            )
+            return False, issues  # BLOCK COMMIT
+    elif current_version:
+        # VERSIONS.md doesn't exist - this is a problem for framework development
+        issues.append(
+            f"BLOCKING: VERSIONS.md not found but framework files changed.\n"
+            f"  Required action: Create VERSIONS.md with version history."
+        )
+        return False, issues  # BLOCK COMMIT
+
+    # Check README.md references VERSIONS.md - WARNING only
     readme_path = project_root / "README.md"
     if readme_path.exists():
         readme_content = readme_path.read_text()
-        # Extract current version from __init__.py
-        init_content = init_file.read_text()
-        import re
-        version_match = re.search(r'SE3_FRAMEWORK_VERSION = "(\d+\.\d+\.\d+)"', init_content)
-        current_version = version_match.group(1) if version_match else None
-
-        if current_version and current_version not in readme_content:
+        if "VERSIONS.md" not in readme_content and "Version History" in readme_content:
             issues.append(
-                f"WARNING: Version {current_version} not found in README.md Version History.\n"
-                f"  Add entry to the version table in README.md."
+                f"WARNING: README.md has inline version history.\n"
+                f"  Consider moving version history to VERSIONS.md and referencing it."
             )
 
-    return True, issues  # Allow commit with warnings
+    return True, issues  # Allow commit (may have warnings)
 
 
 def validate_message(message: str) -> List[str]:
