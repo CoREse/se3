@@ -173,6 +173,47 @@ def cleanup_tmp_files(project_root: Path, max_age_days: int = 7) -> int:
     return deleted_count
 
 
+def check_documentation_consistency(project_root: Path) -> Tuple[bool, List[str]]:
+    """Check documentation consistency: README.md and VERSIONS.md.
+
+    This is the NON-BLOCKING version for done command.
+    For BLOCKING checks during commit, see commit.py.
+
+    Returns: (is_consistent, list of issues)
+    """
+    issues = []
+
+    readme_path = project_root / "README.md"
+    versions_path = project_root / "VERSIONS.md"
+
+    # Check README.md exists
+    if not readme_path.exists():
+        issues.append("README.md not found")
+        return False, issues
+
+    readme_content = readme_path.read_text()
+
+    # Check VERSIONS.md reference in README
+    if versions_path.exists() and "VERSIONS.md" not in readme_content:
+        issues.append("README.md does not reference VERSIONS.md")
+
+    # Try to get framework version
+    try:
+        init_file = project_root / "tools" / "se3_tools" / "__init__.py"
+        if init_file.exists():
+            import re
+            init_content = init_file.read_text()
+            version_match = re.search(r'SE3_FRAMEWORK_VERSION = "(\d+\.\d+\.\d+)"', init_content)
+            if version_match:
+                current_version = version_match.group(1)
+                if current_version not in readme_content:
+                    issues.append(f"README.md missing reference to version {current_version}")
+    except Exception:
+        pass  # Skip version check if we can't read the version
+
+    return len(issues) == 0, issues
+
+
 def verify_spec_scenarios(change_path: Path) -> List[Dict[str, Any]]:
     """Verify all spec scenarios pass for a change.
 
@@ -262,6 +303,17 @@ def compute_actions(state: Dict[str, Any], auto_archive: bool = False) -> List[D
             "count": health_results["summary"]["warnings"],
             "reason": f"OpenSpec integrity warnings: {health_results['summary']['warnings']} warnings detected",
             "cmd": "se3 health",
+        })
+
+    # 0.5 Check documentation consistency (README.md, VERSIONS.md)
+    docs_ok, doc_issues = check_documentation_consistency(Path(state.get("project_root", ".")))
+    if not docs_ok:
+        actions.append({
+            "type": "check_documentation",
+            "severity": "warning",
+            "issues": doc_issues,
+            "reason": f"Documentation consistency issues: {len(doc_issues)} issue(s) found",
+            "cmd": "se3 commit",
         })
 
     # 1. Run tests (if test command exists and there are changes to verify)

@@ -41,21 +41,43 @@ def get_template_version(project_root: Path) -> Optional[str]:
     return match.group(1) if match else None
 
 
+def get_versions_from_versions_md(project_root: Path) -> List[str]:
+    """Get all versions from VERSIONS.md version history.
+
+    Version history is maintained in VERSIONS.md (not README.md).
+    """
+    versions_file = project_root / "VERSIONS.md"
+    if not versions_file.exists():
+        return []
+
+    content = versions_file.read_text()
+    # Match version table entries: | 1.0.0 | 2026-02-16 | ... |
+    versions = re.findall(r'\|\s*(\d+\.\d+\.\d+)\s*\|', content)
+    return versions
+
+
 def get_readme_versions(project_root: Path) -> List[str]:
-    """Get all versions from README.md Version History."""
+    """Get version mentions from README.md.
+
+    DEPRECATED: Version history is now in VERSIONS.md.
+    This function now returns versions mentioned in README (for reference validation only).
+    """
     readme_file = project_root / "README.md"
     if not readme_file.exists():
         return []
 
     content = readme_file.read_text()
-    # Match version table entries: | 1.0.0 | 2026-02-16 | ... |
-    versions = re.findall(r'\|\s*(\d+\.\d+\.\d+)\s*\|', content)
+    # Find any version mentions in README (for reference validation)
+    versions = re.findall(r'(\d+\.\d+\.\d+)', content)
     return versions
 
 
 def check_version_consistency(project_root: Path) -> Tuple[bool, List[str]]:
     """
     Check if all version references are consistent.
+
+    This is the NON-BLOCKING version used for status checks.
+    For BLOCKING checks during commit, see commit.py's check_version_consistency.
 
     Returns: (is_consistent, list of issues)
     """
@@ -64,6 +86,7 @@ def check_version_consistency(project_root: Path) -> Tuple[bool, List[str]]:
     # Get versions from all sources
     framework_version = get_framework_version()
     template_version = get_template_version(project_root)
+    versions_md_versions = get_versions_from_versions_md(project_root)
     readme_versions = get_readme_versions(project_root)
 
     # Check template matches framework
@@ -73,10 +96,16 @@ def check_version_consistency(project_root: Path) -> Tuple[bool, List[str]]:
             f"!= SE3_FRAMEWORK_VERSION ({framework_version})"
         )
 
-    # Check README has the current version
+    # Check VERSIONS.md has the current version
+    if versions_md_versions and framework_version not in versions_md_versions:
+        issues.append(
+            f"VERSIONS.md missing entry for {framework_version}"
+        )
+
+    # Check README references the current version (for consistency)
     if readme_versions and framework_version not in readme_versions:
         issues.append(
-            f"README.md Version History missing entry for {framework_version}"
+            f"README.md missing reference to current version {framework_version}"
         )
 
     # Check if framework files changed without version bump
