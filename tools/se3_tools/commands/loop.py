@@ -464,6 +464,7 @@ def run_loop_collab(
     quick: bool = False,
     no_summary: bool = False,
     mock: bool = False,
+    auto: bool = False,
 ) -> None:
     """Run the loop with collab integration for each iteration.
 
