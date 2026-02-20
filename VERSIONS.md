@@ -2,7 +2,14 @@
 
 ## Current Version
 
-**2.21.0** — Feature: VERSIONS.md for version history, enforced by se3 commit
+**2.22.0** — Feature: README.md update check is now mandatory (blocking) when framework files change
+
+## Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 2.22.0 | 2026-02-20 | Feature: README.md update check is now mandatory (blocking) when framework files change. Checks for inline version history and version reference. |
+| 2.21.0 | 2026-02-20 | Feature: VERSIONS.md for version history, enforced by se3 commit
 
 ## Version History
 

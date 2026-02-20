@@ -191,9 +191,10 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 See [VERSIONS.md](VERSIONS.md) for the complete version history.
 
-**Current Version: 2.21.0**
+**Current Version: 2.22.0**
 
 When modifying framework files:
 1. Bump `SE3_FRAMEWORK_VERSION` in `tools/se3_tools/__init__.py`
 2. Add entry to `VERSIONS.md`
-3. Both are enforced by `se3 commit` (blocking check)
+3. Update `README.md` version reference
+4. All are enforced by `se3 commit` (blocking check)

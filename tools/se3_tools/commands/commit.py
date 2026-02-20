@@ -392,17 +392,44 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
         )
         return False, issues  # BLOCK COMMIT
 
-    # Check README.md references VERSIONS.md - WARNING only
+    # Check README.md - BLOCKING check when framework files change
     readme_path = project_root / "README.md"
-    if readme_path.exists():
+    if readme_path.exists() and current_version:
         readme_content = readme_path.read_text()
+
+        # Check 1: README.md must reference VERSIONS.md (not have inline version history)
         if "VERSIONS.md" not in readme_content and "Version History" in readme_content:
             issues.append(
-                f"WARNING: README.md has inline version history.\n"
-                f"  Consider moving version history to VERSIONS.md and referencing it."
+                f"BLOCKING: README.md has inline version history instead of referencing VERSIONS.md.\n"
+                f"  Changed files: {', '.join(changed_framework_files)}\n"
+                f"  Required action: Remove inline version history from README.md\n"
+                f"  1. Move all version history entries to VERSIONS.md\n"
+                f"  2. Replace version history section in README.md with:\n"
+                f"     ## Version History\n"
+                f"     See [VERSIONS.md](VERSIONS.md) for the complete version history.\n"
+                f"  3. Stage README.md changes and retry commit."
             )
+            return False, issues  # BLOCK COMMIT
 
-    return True, issues  # Allow commit (may have warnings)
+        # Check 2: If version was bumped, README.md must reference the new version
+        if version_updated and current_version not in readme_content:
+            issues.append(
+                f"BLOCKING: Version {current_version} not found in README.md.\n"
+                f"  Changed files: {', '.join(changed_framework_files)}\n"
+                f"  Required action: Update README.md to reference version {current_version}\n"
+                f"  README.md should include the current version in the version section."
+            )
+            return False, issues  # BLOCK COMMIT
+
+    elif current_version:
+        # README.md doesn't exist - this is a problem for framework development
+        issues.append(
+            f"BLOCKING: README.md not found but framework files changed.\n"
+            f"  Required action: Create README.md with framework documentation."
+        )
+        return False, issues  # BLOCK COMMIT
+
+    return True, issues  # Allow commit
 
 
 def validate_message(message: str) -> List[str]:
