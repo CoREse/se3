@@ -530,6 +530,7 @@ def run_loop_collab(
             max_parallel=3,
             mock=mock,
             base_branch=loop_branch,  # Use loop branch as base for collab
+            auto=auto,  # Pass auto mode flag
         )
         return await runner.run()
 

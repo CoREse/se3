@@ -48,6 +48,7 @@ class LoopCollabRunner:
         max_parallel: int = 3,
         mock: bool = False,
         base_branch: str | None = None,
+        auto: bool = False,
     ):
         self.base_prompt = base_prompt
         self.iterations = iterations
@@ -55,6 +56,7 @@ class LoopCollabRunner:
         self.max_parallel = max_parallel
         self.mock = mock
         self.base_branch = base_branch  # Use specified base branch (e.g., loop branch)
+        self.auto = auto  # Auto mode - skip interactive prompts
         self.previous_summaries: list[CollabSummary] = []
         self.renderer = CollabRenderer()
         self.console = self.renderer.console
@@ -81,6 +83,9 @@ class LoopCollabRunner:
 
             if not summary:
                 self.console.print("[red]Iteration failed[/red]")
+                if self.auto:
+                    self.console.print("[yellow]Auto mode: continuing despite failure[/yellow]")
+                    continue
                 if not await self._confirm("Continue to next iteration?"):
                     break
                 continue
@@ -90,8 +95,8 @@ class LoopCollabRunner:
             # Display summary
             self._display_summary(summary)
 
-            # Show iteration menu (if not last iteration)
-            if i < self.iterations:
+            # Show iteration menu (if not last iteration and not in auto mode)
+            if i < self.iterations and not self.auto:
                 action = await self._iteration_menu()
                 if action == "exit":
                     self.console.print("[yellow]Exiting loop early[/yellow]")
@@ -105,6 +110,8 @@ class LoopCollabRunner:
                     continue
                 elif action == "modify":
                     self.base_prompt = await self._modify_prompt()
+            elif i < self.iterations and self.auto:
+                self.console.print("[dim]Auto mode: continuing to next iteration[/dim]")
 
         self._print_completion()
         return True
