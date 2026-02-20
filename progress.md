@@ -2885,3 +2885,4 @@ openspec/changes/se3-loopbranchctrl-cclaudemergese3-28/tasks.md | 5 +++++
 - `dc4d41b` feat(start): implement new branch creation on session start (1 files)
 - `4bb29b0` feat(start): add branch creation implementation and tests (1 files)
 - `88164ce` feat(loop): add --auto mode and --verbose flag to collab (6 files)
+- `0b1d36a` test(loop): verify branch creation mode and collab mode work correctly (26 files)
