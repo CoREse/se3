@@ -415,27 +415,31 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
     if readme_path.exists():
         readme_content = readme_path.read_text()
 
-        # Check 1: README.md must reference VERSIONS.md (not have inline version history)
-        if "VERSIONS.md" not in readme_content and "Version History" in readme_content:
-            issues.append(
-                f"BLOCKING: README.md has inline version history instead of referencing VERSIONS.md.\n"
-                f"  Changed files: {', '.join(changed_framework_files)}\n"
-                f"  Required action: Remove inline version history from README.md\n"
-                f"  1. Move all version history entries to VERSIONS.md\n"
-                f"  2. Replace version history section in README.md with:\n"
-                f"     ## Version History\n"
-                f"     See [VERSIONS.md](VERSIONS.md) for the complete version history.\n"
-                f"  3. Stage README.md changes and retry commit."
-            )
-            return False, issues  # BLOCK COMMIT
+        # Check 1: README.md must reference VERSIONS.md (if VERSIONS.md exists)
+        # This prevents inline version history or linking to wrong file
+        if versions_path.exists() and "VERSIONS.md" not in readme_content:
+            if "Version History" in readme_content or "version" in readme_content.lower():
+                issues.append(
+                    f"BLOCKING: README.md does not reference VERSIONS.md.\n"
+                    f"  Changed files: {', '.join(changed_framework_files)}\n"
+                    f"  Required action: Update README.md to reference VERSIONS.md\n"
+                    f"  1. If there's inline version history: move it to VERSIONS.md\n"
+                    f"  2. Replace version history section in README.md with:\n"
+                    f"     ## Version History\n"
+                    f"     See [VERSIONS.md](VERSIONS.md) for the complete version history.\n"
+                    f"  3. If version is mentioned elsewhere, ensure VERSIONS.md is linked\n"
+                    f"  4. Stage README.md changes and retry commit."
+                )
+                return False, issues  # BLOCK COMMIT
 
-        # Check 2: If version was bumped, README.md must reference the new version
-        if version_updated and current_version not in readme_content:
+        # Check 2: README.md must reference the current version (ALWAYS, not just when bumped)
+        # This ensures README and VERSIONS.md stay in sync
+        if current_version not in readme_content:
             issues.append(
                 f"BLOCKING: Version {current_version} not found in README.md.\n"
                 f"  Changed files: {', '.join(changed_framework_files)}\n"
                 f"  Required action: Update README.md to reference version {current_version}\n"
-                f"  README.md should include the current version in the version section."
+                f"  README.md should include the current version (e.g., 'Current Version: {current_version}')"
             )
             return False, issues  # BLOCK COMMIT
 

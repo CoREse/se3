@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**2.22.2** — Fix: Correct version_updated detection in se3 commit. Now checks for +/- prefix in diff lines to distinguish actual version changes from context lines.
+**2.22.3** — Fix: Strengthen README version consistency checks. VERSIONS.md reference now required when VERSIONS.md exists; README version check is now unconditional (always enforces sync with framework version).
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.22.3 | 2026-02-20 | Fix: Strengthen README version consistency checks. VERSIONS.md reference now required when VERSIONS.md exists; README version check is now unconditional. |
 | 2.22.2 | 2026-02-20 | Fix: Correct version_updated detection in se3 commit. Now checks for +/- prefix in diff lines to distinguish actual version changes from context lines. |
 | 2.22.1 | 2026-02-20 | Fix: Handle None current_version in commit check to prevent TypeError when version extraction fails. Adds explicit check for missing version extraction. |
 | 2.22.0 | 2026-02-20 | Feature: README.md update check is now mandatory (blocking) when framework files change. Checks for inline version history and version reference. |
