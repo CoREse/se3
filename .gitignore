@@ -14,3 +14,6 @@ issues.md
 # SE3 temporary files
 se3/tmp/
 tmp*.prompt
+
+# SE3 session file
+.claude/.session.json
