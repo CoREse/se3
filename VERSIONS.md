@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**2.22.6** — Fix: Non-blocking documentation checks now catch missing VERSIONS.md.
+**2.22.7** — Fix: Version substring matching bug in documentation consistency check.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 2.22.7 | 2026-02-20 | Fix: Version substring matching bug in documentation consistency check. Uses regex with negative lookbehind/ahead to ensure distinct version matching. |
 | 2.22.6 | 2026-02-20 | Fix: Non-blocking documentation checks now catch missing VERSIONS.md. |
 | 2.22.5 | 2026-02-20 | Fix: Unify documentation check logic across all commands and prevent --skip-commit bypass of documentation requirements. |
 | 2.22.4 | 2026-02-20 | Fix: Correct version.py get_readme_versions function and add documentation consistency check to se3 done command. |

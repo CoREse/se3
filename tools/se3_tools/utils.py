@@ -424,8 +424,12 @@ def check_documentation_consistency(
                 )
                 return False, issues
         else:
-            # Check README.md contains current version
-            if current_version not in readme_content:
+            # Check README.md contains current version (as distinct version to avoid substring matches)
+            # Use negative lookbehind/ahead to ensure "2.22" doesn't match "2.22.6"
+            # Match must be preceded/followed by non-version char (not digit or dot) or string boundary
+            import re
+            version_pattern = rf'(?<![\d.]){re.escape(current_version)}(?![\d.])'
+            if not re.search(version_pattern, readme_content):
                 msg = f"Version {current_version} not found in README.md"
                 if check_framework_files:
                     issues.append(
@@ -440,7 +444,8 @@ def check_documentation_consistency(
             # Check VERSIONS.md contains current version (if it exists)
             if versions_path.exists():
                 versions_content = versions_path.read_text()
-                if current_version not in versions_content:
+                # Use same pattern: version must be distinct (not part of larger version)
+                if not re.search(version_pattern, versions_content):
                     msg = f"Version {current_version} not found in VERSIONS.md"
                     if check_framework_files:
                         issues.append(
