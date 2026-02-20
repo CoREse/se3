@@ -10,6 +10,7 @@ __pycache__/
 *.egg-info/
 human-calls/
 issues.md
+prompts/
 
 # SE3 temporary files
 se3/tmp/
