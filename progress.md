@@ -2845,4 +2845,7 @@ openspec/changes/se3-loopbranchctrl-cclaudemergese3-28/tasks.md | 5 +++++
 
 ## Current Session
 <!-- current-session -->
-
+- `495ce84` fix(collab): ensure base_branch is correctly passed in all modes (2 files)
+- `4b6d678` chore(se3-loopbranchctrl-cclaudemergese3-30): mark task as complete (1 files)
+- `76d4be0` docs(readme): add versions 2.18.5 and 2.18.6 to version history (1 files)
+- `f2342b8` fix(loop): fix se3 loop --collab mode and branch handling (3 files)
