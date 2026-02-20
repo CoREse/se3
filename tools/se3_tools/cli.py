@@ -307,7 +307,7 @@ def fc_cmd(
 
 @app.command(name="loop")
 def loop_cmd(
-    prompt: str = typer.Argument(..., help="Description of work for each iteration"),
+    prompt: Optional[str] = typer.Argument(None, help="Description of work for each iteration"),
     iterations: int = typer.Option(10, "--iterations", "-n", help="Number of iterations (default: 10)"),
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
     quick: bool = typer.Option(False, "--quick", "-q", help="Quick mode - use 'small' workflow"),
@@ -336,7 +336,7 @@ def loop_cmd(
     """
     from .commands.loop import run_exclusive_loop, run_loop_collab, merge_loop_branch, get_current_branch, get_loop_branch_base, infer_loop_branch_base
 
-    # Handle merge mode
+    # Handle merge mode (prompt not required)
     if merge_branch:
         root = Path(project_root).resolve()
 
@@ -369,6 +369,11 @@ def loop_cmd(
 
         success = merge_loop_branch(root, merge_branch, base_branch)
         raise typer.Exit(code=0 if success else 1)
+
+    # Validate prompt is provided for normal loop execution
+    if not prompt:
+        typer.echo("Error: PROMPT is required when not using --merge", err=True)
+        raise typer.Exit(code=1)
 
     if collab:
         run_loop_collab(prompt, project_root, iterations, quick, no_summary, mock)

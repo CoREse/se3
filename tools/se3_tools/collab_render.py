@@ -165,8 +165,8 @@ class CollabRenderer:
             for line in text.split("\n"):
                 self.manager_lines.append(line)
 
-        # Truncate to fit panel
-        display_text = "\n".join(self.manager_lines[-20:])
+        # Truncate to fit panel (convert deque to list for slicing compatibility)
+        display_text = "\n".join(list(self.manager_lines)[-20:])
 
         self.layout["manager"].update(
             Panel(

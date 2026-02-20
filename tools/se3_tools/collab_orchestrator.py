@@ -333,6 +333,14 @@ class ForegroundOrchestrator:
         """
         if self.mock:
             # Return a mock plan for testing
+            # For review objectives (containing "Review completed"), return "complete"
+            if "review" in objective.lower() and "completed" in objective.lower():
+                return ManagerDecision(
+                    action="complete",
+                    tasks=[],
+                    reason="Mock mode - all tasks completed successfully",
+                    summary="Mock review: collaboration completed",
+                )
             return ManagerDecision(
                 action="plan",
                 tasks=[
