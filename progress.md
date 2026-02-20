@@ -3109,3 +3109,4 @@ README.md                                          |  5 +--
 <!-- current-session -->
 - `883c19c` Fix: Handle None current_version in commit check to prevent TypeError (4 files)
 - `2532be5` Fix VERSIONS.md duplicate sections and entries (2 files)
+- `79929fc` Fix version_updated detection in se3 commit (5 files)
