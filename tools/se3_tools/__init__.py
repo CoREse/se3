@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "2.22.7"  # Fix: Version substring matching in docs check
+SE3_FRAMEWORK_VERSION = "2.23.0"  # feat: auto-merge loop branch with Claude after iterations complete

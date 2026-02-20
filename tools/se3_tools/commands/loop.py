@@ -32,6 +32,48 @@ BOLD = "\033[1m"
 DIM = "\033[2m"
 
 
+def auto_merge_with_claude(loop_branch: str, original_branch: str, project_root: Path) -> bool:
+    """Spawn a Claude process to merge the loop branch back to the original branch.
+
+    Args:
+        loop_branch: The loop branch to merge from
+        original_branch: The target branch to merge into
+        project_root: Path to the project root
+
+    Returns:
+        True if merge succeeded, False otherwise
+    """
+    commands = load_claude_commands(project_root)
+    claude_cmd = commands[0]["cmd"] if commands else "claude"
+
+    if not shutil.which(claude_cmd):
+        print(f"\n{YELLOW}[SE3 Loop] '{claude_cmd}' not found, cannot auto-merge{RESET}")
+        return False
+
+    merge_prompt = (
+        f"You need to merge the loop branch back to the original branch.\n\n"
+        f"Steps:\n"
+        f"1. Run: git checkout {original_branch}\n"
+        f"2. Run: git merge --no-ff {loop_branch}\n"
+        f"3. If there are merge conflicts, resolve them intelligently by examining both sides "
+        f"and picking the correct resolution. After resolving, run: git add . && git commit --no-edit\n"
+        f"4. After successful merge, delete the loop branch: git branch -d {loop_branch}\n\n"
+        f"Important: Do NOT push anything. Just merge locally and delete the loop branch.\n"
+        f"If the merge fails for a reason other than conflicts, report the error and stop."
+    )
+
+    print(f"\n{CYAN}[SE3 Loop] Auto-merging {loop_branch} into {original_branch}...{RESET}")
+
+    exit_code, _ = run_claude_with_renderer(claude_cmd, merge_prompt)
+
+    if exit_code == 0:
+        print(f"\n{GREEN}[SE3 Loop] Auto-merge completed successfully{RESET}")
+        return True
+    else:
+        print(f"\n{YELLOW}[SE3 Loop] Auto-merge failed (exit code {exit_code}){RESET}")
+        return False
+
+
 def sanitize_change_name(description: str) -> str:
     """Convert a description into a valid change name.
 
@@ -556,11 +598,12 @@ def run_loop_collab(
     if not interrupted and loop_branch:
         print(f"{CYAN}[SE3 Loop] Loop branch: {loop_branch}{RESET}")
         print(f"{CYAN}[SE3 Loop] Original branch: {original_branch}{RESET}")
-        print(f"\n{YELLOW}To merge the loop branch back to {original_branch}:{RESET}")
-        print(f"  se3 loop --merge {loop_branch}")
-        print(f"\n{GRAY}Or manually merge with:{RESET}")
-        print(f"  git checkout {original_branch}")
-        print(f"  git merge --no-ff {loop_branch}")
+        if not auto_merge_with_claude(loop_branch, original_branch, root):
+            print(f"\n{YELLOW}Auto-merge failed. You can merge manually:{RESET}")
+            print(f"  se3 loop --merge {loop_branch}")
+            print(f"\n{GRAY}Or:{RESET}")
+            print(f"  git checkout {original_branch}")
+            print(f"  git merge --no-ff {loop_branch}")
     elif interrupted and loop_branch:
         print(f"\n{YELLOW}[SE3 Loop] Loop was interrupted.{RESET}")
         print(f"{CYAN}[SE3 Loop] Work is preserved on branch: {loop_branch}{RESET}")
@@ -994,14 +1037,15 @@ def run_exclusive_loop(
 
     # Handle merge logic
     if all_completed and loop_branch:
-        # Loop completed successfully, offer to merge
+        # Loop completed successfully, auto-merge
         print(f"{CYAN}[SE3 Loop] Loop branch: {loop_branch}{RESET}")
         print(f"{CYAN}[SE3 Loop] Original branch: {original_branch}{RESET}")
-        print(f"\n{YELLOW}To merge the loop branch back to {original_branch}:{RESET}")
-        print(f"  se3 loop --merge {loop_branch}")
-        print(f"\n{GRAY}Or manually merge with:{RESET}")
-        print(f"  git checkout {original_branch}")
-        print(f"  git merge --no-ff {loop_branch}")
+        if not auto_merge_with_claude(loop_branch, original_branch, root):
+            print(f"\n{YELLOW}Auto-merge failed. You can merge manually:{RESET}")
+            print(f"  se3 loop --merge {loop_branch}")
+            print(f"\n{GRAY}Or:{RESET}")
+            print(f"  git checkout {original_branch}")
+            print(f"  git merge --no-ff {loop_branch}")
     elif loop_branch and exit_code == 130:
         # Loop was interrupted
         print(f"\n{YELLOW}[SE3 Loop] Loop was interrupted.{RESET}")

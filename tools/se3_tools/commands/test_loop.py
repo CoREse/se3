@@ -405,5 +405,61 @@ class TestGetLoopBranchBase:
             assert result == "main"
 
 
+class TestAutoMergeWithClaude:
+    """Test auto_merge_with_claude function."""
+
+    def test_auto_merge_can_be_imported(self):
+        """Test that auto_merge_with_claude can be imported."""
+        from se3_tools.commands.loop import auto_merge_with_claude
+        assert callable(auto_merge_with_claude)
+
+    @patch('se3_tools.commands.loop.run_claude_with_renderer')
+    @patch('se3_tools.commands.loop.load_claude_commands')
+    @patch('shutil.which', return_value='/usr/bin/claude')
+    def test_auto_merge_success(self, mock_which, mock_load_cmds, mock_run_claude):
+        """Test auto_merge_with_claude returns True on success."""
+        from se3_tools.commands.loop import auto_merge_with_claude
+        from pathlib import Path
+
+        mock_load_cmds.return_value = [{"cmd": "claude"}]
+        mock_run_claude.return_value = (0, False)
+
+        result = auto_merge_with_claude("se3-loop/123", "master", Path("/tmp"))
+        assert result is True
+        mock_run_claude.assert_called_once()
+
+        # Verify the prompt mentions both branches
+        call_args = mock_run_claude.call_args
+        prompt = call_args[0][1]
+        assert "se3-loop/123" in prompt
+        assert "master" in prompt
+
+    @patch('se3_tools.commands.loop.run_claude_with_renderer')
+    @patch('se3_tools.commands.loop.load_claude_commands')
+    @patch('shutil.which', return_value='/usr/bin/claude')
+    def test_auto_merge_failure(self, mock_which, mock_load_cmds, mock_run_claude):
+        """Test auto_merge_with_claude returns False on failure."""
+        from se3_tools.commands.loop import auto_merge_with_claude
+        from pathlib import Path
+
+        mock_load_cmds.return_value = [{"cmd": "claude"}]
+        mock_run_claude.return_value = (1, False)
+
+        result = auto_merge_with_claude("se3-loop/123", "master", Path("/tmp"))
+        assert result is False
+
+    @patch('se3_tools.commands.loop.load_claude_commands')
+    @patch('shutil.which', return_value=None)
+    def test_auto_merge_no_claude(self, mock_which, mock_load_cmds):
+        """Test auto_merge_with_claude returns False when claude not found."""
+        from se3_tools.commands.loop import auto_merge_with_claude
+        from pathlib import Path
+
+        mock_load_cmds.return_value = [{"cmd": "claude"}]
+
+        result = auto_merge_with_claude("se3-loop/123", "master", Path("/tmp"))
+        assert result is False
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
