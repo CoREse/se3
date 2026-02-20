@@ -10,18 +10,7 @@
 |---------|------|---------|
 | 2.22.1 | 2026-02-20 | Fix: Handle None current_version in commit check to prevent TypeError when version extraction fails. Adds explicit check for missing version extraction. |
 | 2.22.0 | 2026-02-20 | Feature: README.md update check is now mandatory (blocking) when framework files change. Checks for inline version history and version reference. |
-| 2.21.0 | 2026-02-20 | Feature: VERSIONS.md for version history, enforced by se3 commit
-
-## Version History
-
-| Version | Date | Changes |
-|---------|------|---------|
 | 2.21.0 | 2026-02-20 | Feature: Move version history to VERSIONS.md, enforce VERSIONS.md update in `se3 commit` (blocking check). Simplified README.md. |
-
-## Version History
-
-| Version | Date | Changes |
-|---------|------|---------|
 | 2.18.6 | 2026-02-20 | Fix: Collab base_branch propagation in all modes (foreground, manual, daemon). Ensures task branches correctly inherit base branch from loop branch. |
 | 2.18.5 | 2026-02-20 | Fix: Collab base_branch correctly set when creating task branches from loop branch. |
 | 2.18.4 | 2026-02-20 | Fix: `merge_loop_branch` now handles dirty working tree (warns user to commit/stash), restores original branch after merge, and improved `infer_loop_branch_base` with precise ancestor detection. |
