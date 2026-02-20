@@ -192,6 +192,156 @@ class TestLoopCollabIntegration:
         assert 'no_summary' in params
 
 
+class TestCreateLoopBranch:
+    """Test create_loop_branch function."""
+
+    def test_create_loop_branch_imports(self):
+        """Test that create_loop_branch function can be imported."""
+        from se3_tools.commands.loop import create_loop_branch
+        assert callable(create_loop_branch)
+
+    def test_create_loop_branch_creates_branch_with_timestamp(self):
+        """Test that create_loop_branch creates a branch with timestamp."""
+        from se3_tools.commands.loop import create_loop_branch, is_loop_branch
+        from pathlib import Path
+        from unittest.mock import patch, MagicMock
+
+        with patch('subprocess.run') as mock_run:
+            # Mock successful branch creation
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+
+            # Return same mock for all calls
+            mock_run.return_value = mock_result
+
+            result = create_loop_branch(Path("/tmp"), "master")
+
+            # Should create a se3-loop/ timestamp branch
+            assert is_loop_branch(result)
+            assert result.startswith("se3-loop/")
+
+    def test_create_loop_branch_sets_config(self):
+        """Test that create_loop_branch records base branch in git config."""
+        from se3_tools.commands.loop import create_loop_branch
+        from pathlib import Path
+        from unittest.mock import patch, MagicMock, call
+
+        with patch('subprocess.run') as mock_run:
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = ""
+            mock_result.stderr = ""
+            mock_run.return_value = mock_result
+
+            create_loop_branch(Path("/tmp"), "feature-branch")
+
+            # Check that git config was called to record base branch
+            calls = mock_run.call_args_list
+            config_calls = [c for c in calls if 'config' in str(c)]
+            assert len(config_calls) > 0
+            assert 'feature-branch' in str(config_calls[-1])
+
+    def test_create_loop_branch_handles_existing_branch(self):
+        """Test that create_loop_branch handles branch name collision."""
+        from se3_tools.commands.loop import create_loop_branch
+        from pathlib import Path
+        from unittest.mock import patch, MagicMock
+
+        with patch('subprocess.run') as mock_run:
+            # First call fails (branch exists), second succeeds
+            mock_fail = MagicMock()
+            mock_fail.returncode = 1
+            mock_fail.stderr = "branch already exists"
+
+            mock_success = MagicMock()
+            mock_success.returncode = 0
+            mock_success.stdout = ""
+            mock_success.stderr = ""
+
+            mock_run.side_effect = [mock_fail, mock_success, mock_success, mock_success]
+
+            result = create_loop_branch(Path("/tmp"), "master")
+
+            assert result.startswith("se3-loop/")
+            # Should have tried multiple times with different names
+            assert mock_run.call_count >= 2
+
+
+class TestInferLoopBranchBase:
+    """Test infer_loop_loop_branch_base function."""
+
+    def test_infer_loop_branch_base_imports(self):
+        """Test that infer_loop_branch_base function can be imported."""
+        from se3_tools.commands.loop import infer_loop_branch_base
+        assert callable(infer_loop_branch_base)
+
+    def test_infer_loop_branch_base_returns_master_when_ancestor(self):
+        """Test that infer_loop_branch_base returns master when it's an ancestor."""
+        from se3_tools.commands.loop import infer_loop_branch_base
+        from pathlib import Path
+        from unittest.mock import patch, MagicMock
+
+        with patch('subprocess.run') as mock_run:
+            # Mock master exists
+            mock_master_rev = MagicMock()
+            mock_master_rev.returncode = 0
+            mock_master_rev.stdout = "abc123\n"
+
+            # Mock merge-base returns same as master HEAD
+            mock_merge_base = MagicMock()
+            mock_merge_base.returncode = 0
+            mock_merge_base.stdout = "abc123\n"
+
+            mock_run.side_effect = [mock_master_rev, mock_merge_base]
+
+            result = infer_loop_branch_base(Path("/tmp"), "se3-loop/1234567890")
+            assert result == "master"
+
+    def test_infer_loop_branch_base_returns_main_when_master_not_found(self):
+        """Test that infer_loop_branch_base returns main when master not found but main is."""
+        from se3_tools.commands.loop import infer_loop_branch_base
+        from pathlib import Path
+        from unittest.mock import patch, MagicMock
+
+        with patch('subprocess.run') as mock_run:
+            # Mock master doesn't exist
+            mock_master_rev = MagicMock()
+            mock_master_rev.returncode = 1
+
+            # Mock main exists
+            mock_main_rev = MagicMock()
+            mock_main_rev.returncode = 0
+            mock_main_rev.stdout = "def456\n"
+
+            # Mock merge-base returns same as main HEAD
+            mock_merge_base = MagicMock()
+            mock_merge_base.returncode = 0
+            mock_merge_base.stdout = "def456\n"
+
+            mock_run.side_effect = [mock_master_rev, mock_main_rev, mock_merge_base]
+
+            result = infer_loop_branch_base(Path("/tmp"), "se3-loop/1234567890")
+            assert result == "main"
+
+    def test_infer_loop_branch_base_returns_none_when_no_match(self):
+        """Test that infer_loop_branch_base returns None when no base branch matches."""
+        from se3_tools.commands.loop import infer_loop_branch_base
+        from pathlib import Path
+        from unittest.mock import patch, MagicMock
+
+        with patch('subprocess.run') as mock_run:
+            # All common branches don't exist
+            mock_fail = MagicMock()
+            mock_fail.returncode = 1
+
+            mock_run.return_value = mock_fail
+
+            result = infer_loop_branch_base(Path("/tmp"), "se3-loop/1234567890")
+            assert result is None
+
+
 class TestIsLoopBranch:
     """Test is_loop_branch function."""
 

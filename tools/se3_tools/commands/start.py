@@ -26,8 +26,38 @@ import typer
 app = typer.Typer(invoke_without_command=True)
 
 
-def compute_git_status(project_root: Path) -> Dict[str, Any]:
-    """Compute current git state."""
+def create_session_branch(project_root: Path) -> str:
+    """Create a new session branch with se3-session/<timestamp> pattern.
+
+    Returns the name of the created branch.
+    """
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    branch_name = f"se3-session/{timestamp}"
+
+    # Create and checkout the new branch
+    result = subprocess.run(
+        ["git", "checkout", "-b", branch_name],
+        cwd=project_root, capture_output=True, text=True
+    )
+
+    if result.returncode != 0:
+        # If branch creation fails, return current branch
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=project_root, capture_output=True, text=True
+        )
+        return result.stdout.strip() or "unknown"
+
+    return branch_name
+
+
+def compute_git_status(project_root: Path, create_branch: bool = True) -> Dict[str, Any]:
+    """Compute current git state.
+
+    Args:
+        project_root: Root directory of the project
+        create_branch: If True, create a new se3-session branch
+    """
     info = {
         "branch": "unknown",
         "uncommitted_count": 0,
@@ -42,6 +72,15 @@ def compute_git_status(project_root: Path) -> Dict[str, Any]:
     )
     if result.returncode == 0:
         info["branch"] = result.stdout.strip() or "(detached HEAD)"
+
+    # Create new session branch if requested and we're not already on a se3-session branch
+    if create_branch and not info["branch"].startswith("se3-session/"):
+        new_branch = create_session_branch(project_root)
+        info["branch"] = new_branch
+        info["branch_created"] = True
+    elif info["branch"].startswith("se3-session/"):
+        info["branch_created"] = False
+        info["branch_reused"] = True
 
     # Uncommitted changes
     result = subprocess.run(
@@ -497,7 +536,7 @@ def run_session_start(project_root: str = ".", user_input: Optional[str] = None)
     is_first_time = is_first_time_project(root)
 
     # Compute all state
-    git_info = compute_git_status(root)
+    git_info = compute_git_status(root, create_branch=True)
     env_setup = check_init_script(root)
     openspec = check_openspec(root)
     active_changes = compute_active_changes(root)
@@ -532,6 +571,8 @@ def run_session_start(project_root: str = ".", user_input: Optional[str] = None)
             "branch": git_info["branch"],
             "uncommitted_count": git_info["uncommitted_count"],
             "last_commits": git_info["last_commits"],
+            "branch_created": git_info.get("branch_created", False),
+            "branch_reused": git_info.get("branch_reused", False),
         },
         "progress_summary": progress_summary,
         "active_changes": active_changes,
