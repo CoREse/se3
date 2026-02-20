@@ -250,7 +250,12 @@ class TestCreateLoopBranch:
         from unittest.mock import patch, MagicMock
 
         with patch('subprocess.run') as mock_run:
-            # First call fails (branch exists), second succeeds
+            # git status --porcelain (no uncommitted changes)
+            mock_status = MagicMock()
+            mock_status.returncode = 0
+            mock_status.stdout = ""
+
+            # First git branch call fails (branch exists)
             mock_fail = MagicMock()
             mock_fail.returncode = 1
             mock_fail.stderr = "branch already exists"
@@ -260,13 +265,14 @@ class TestCreateLoopBranch:
             mock_success.stdout = ""
             mock_success.stderr = ""
 
-            mock_run.side_effect = [mock_fail, mock_success, mock_success, mock_success]
+            # status, branch(fail), branch(success), checkout, config
+            mock_run.side_effect = [mock_status, mock_fail, mock_success, mock_success, mock_success]
 
             result = create_loop_branch(Path("/tmp"), "master")
 
             assert result.startswith("se3-loop/")
             # Should have tried multiple times with different names
-            assert mock_run.call_count >= 2
+            assert mock_run.call_count >= 3
 
 
 class TestInferLoopBranchBase:

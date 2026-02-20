@@ -849,6 +849,88 @@ class ForegroundOrchestrator:
         # Save final task state
         await self._save_task_file(task)
 
+    async def _is_valid_worktree(self, worktree_path: Path) -> bool:
+        """Check if a path is a valid git worktree.
+
+        Validates by checking git worktree list and verifying the .git file exists.
+        """
+        # Check if .git file exists (in worktrees, .git is a file, not a directory)
+        git_file = worktree_path / ".git"
+        if not git_file.exists():
+            return False
+
+        # Verify it's actually registered as a worktree
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "worktree", "list", "--porcelain",
+                cwd=self.project_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+
+            if proc.returncode == 0:
+                worktree_str = str(worktree_path.resolve())
+                for line in stdout.decode().split("\n"):
+                    if line.startswith("worktree "):
+                        listed_path = line[9:].strip()
+                        if listed_path == worktree_str:
+                            return True
+        except Exception:
+            pass
+
+        return False
+
+    async def _cleanup_worktree_directory(self, worktree_path: Path):
+        """Clean up a worktree directory and all its contents."""
+        # First try to remove via git if it's a registered worktree
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "worktree", "remove", str(worktree_path), "--force",
+                cwd=self.project_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+        except Exception:
+            pass
+
+        # If directory still exists, force remove it
+        if worktree_path.exists():
+            try:
+                # Remove .git file first (avoids permission issues)
+                git_file = worktree_path / ".git"
+                if git_file.exists():
+                    git_file.unlink(missing_ok=True)
+                shutil.rmtree(worktree_path, ignore_errors=True)
+            except Exception:
+                pass
+
+        # Prune any stale worktree registrations
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "worktree", "prune",
+                cwd=self.project_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()
+        except Exception:
+            pass
+
+    async def _cleanup_existing_branch(self, branch_name: str):
+        """Remove a branch if it exists."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "branch", "-D", branch_name,
+                cwd=self.project_root,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.communicate()  # Ignore errors (branch may not exist)
+        except Exception:
+            pass
+
     async def _cleanup_and_recreate_worktree(self, task: Task):
         """Clean up existing worktree/branch and recreate fresh."""
         # First, try to prune any stale worktrees
@@ -954,22 +1036,19 @@ class ForegroundOrchestrator:
     async def _ensure_worktree(self, task: Task):
         """Ensure the worktree exists for a task."""
         if task.worktree.exists():
-            # Verify it's a valid git worktree
-            git_dir = task.worktree / ".git"
-            if git_dir.exists():
+            # Verify it's a valid git worktree by checking if it's registered
+            is_valid_worktree = await self._is_valid_worktree(task.worktree)
+            if is_valid_worktree:
                 return
-            # Invalid worktree, remove and recreate
-            # Remove .git file first to avoid permission issues
-            git_file = task.worktree / ".git"
-            if git_file.exists():
-                try:
-                    git_file.unlink(missing_ok=True)
-                except Exception:
-                    pass  # Continue even if unlink fails
-            try:
-                shutil.rmtree(task.worktree, ignore_errors=True)
-            except Exception:
-                pass  # Continue even if rmtree fails
+
+            # Invalid or stale worktree, clean up thoroughly
+            self.renderer.append_worker_output(
+                task.id, f"[Cleanup] Removing stale worktree directory..."
+            )
+            await self._cleanup_worktree_directory(task.worktree)
+
+        # Also check if branch already exists and remove it
+        await self._cleanup_existing_branch(task.branch)
 
         # Ensure parent directory exists
         task.worktree.parent.mkdir(parents=True, exist_ok=True)

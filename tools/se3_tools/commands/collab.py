@@ -615,6 +615,8 @@ def run_foreground_mode(project_root: Path, objective: str, resume: bool = False
     try:
         exit_code = asyncio.run(_run())
         raise typer.Exit(exit_code)
+    except typer.Exit:
+        raise  # Re-raise typer.Exit without handling
     except Exception as e:
         typer.echo(f"Error in foreground mode: {e}")
         raise typer.Exit(1)

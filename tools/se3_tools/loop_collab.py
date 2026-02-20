@@ -382,6 +382,11 @@ class LoopCollabRunner:
 
     async def _iteration_menu(self) -> str:
         """Show menu between iterations."""
+        # In auto mode, always continue without prompting
+        if self.auto:
+            self.console.print("\n[dim]Auto mode: continuing to next iteration[/dim]")
+            return "continue"
+
         self.console.print("\n[bold]Options:[/bold]")
         self.console.print("  [c] Continue to next iteration")
         self.console.print("  [m] Modify prompt for next iteration")
@@ -390,7 +395,10 @@ class LoopCollabRunner:
 
         # Run input() in a thread pool to avoid blocking the event loop
         loop = asyncio.get_event_loop()
-        choice = await loop.run_in_executor(None, lambda: input("\nChoice [c/m/s/e]: ").strip().lower())
+        try:
+            choice = await loop.run_in_executor(None, lambda: input("\nChoice [c/m/s/e]: ").strip().lower())
+        except EOFError:
+            return "continue"
 
         return {
             "c": "continue",

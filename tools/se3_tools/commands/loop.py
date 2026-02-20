@@ -636,6 +636,21 @@ def create_loop_branch(project_root: Path, base_branch: str) -> str:
     timestamp = int(time.time())
     branch_name = f"se3-loop/{timestamp}"
 
+    # Check for uncommitted changes and stash them if present
+    status_result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=project_root,
+        capture_output=True,
+        text=True
+    )
+    had_changes = bool(status_result.stdout.strip())
+    if had_changes:
+        subprocess.run(
+            ["git", "stash", "push", "-m", "se3-loop auto-stash"],
+            cwd=project_root,
+            capture_output=True
+        )
+
     # Create the branch from base_branch (but don't switch yet)
     result = subprocess.run(
         ["git", "branch", branch_name, base_branch],
@@ -657,6 +672,13 @@ def create_loop_branch(project_root: Path, base_branch: str) -> str:
             if result.returncode == 0:
                 break
         else:
+            # Restore stashed changes if we failed to create branch
+            if had_changes:
+                subprocess.run(
+                    ["git", "stash", "pop"],
+                    cwd=project_root,
+                    capture_output=True
+                )
             raise RuntimeError(f"Failed to create loop branch: {result.stderr}")
 
     # Now checkout the new branch
@@ -674,7 +696,22 @@ def create_loop_branch(project_root: Path, base_branch: str) -> str:
             cwd=project_root,
             capture_output=True
         )
+        # Restore stashed changes if we failed to checkout
+        if had_changes:
+            subprocess.run(
+                ["git", "stash", "pop"],
+                cwd=project_root,
+                capture_output=True
+            )
         raise RuntimeError(f"Failed to checkout loop branch: {checkout_result.stderr}")
+
+    # Restore stashed changes on the new branch
+    if had_changes:
+        subprocess.run(
+            ["git", "stash", "pop"],
+            cwd=project_root,
+            capture_output=True
+        )
 
     # Record the base branch in git config for later merge
     subprocess.run(
