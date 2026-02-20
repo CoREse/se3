@@ -2915,3 +2915,4 @@ openspec/changes/se3-loopbranchctrl-cclaudemergese3-28/tasks.md | 5 +++++
 - `0b1d36a` test(loop): verify branch creation mode and collab mode work correctly (26 files)
 - `7448ffa` wip(loop): prepare for branch creation test (3 files)
 - `bf637e1` test(loop): verify branch creation and collab mode functionality (1 files)
+- `d447aa5` docs: update progress for loop branch and collab verification (4 files)
