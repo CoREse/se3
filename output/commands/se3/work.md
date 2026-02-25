@@ -1,7 +1,12 @@
 ---
 name: "SE3: Work"
 description: Start or continue working on a change (feature, bugfix, review, directive)
+deprecated: true
+replacement: se3 run
 ---
+
+> ⚠️ **DEPRECATED**: This command is deprecated in SE3 3.0. Use `se3 run` instead.
+> This command will be removed in a future version.
 
 **Usage**:
 - `/se3:work` — List active changes or create new one

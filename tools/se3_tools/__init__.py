@@ -6,4 +6,4 @@ __version__ = "0.1.0"
 # SE3 Framework version - Single source of truth
 # This is the version stamped into .claude/SE3.md during init/update
 # Follows Semantic Versioning: MAJOR.MINOR.PATCH
-SE3_FRAMEWORK_VERSION = "3.0.0"  # feat: flow engine, state machine, se3 run, step handlers
+SE3_FRAMEWORK_VERSION = "3.1.0"  # feat: deprecation warnings for 2.x commands, dashboard, flow engine status

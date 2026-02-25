@@ -184,6 +184,51 @@ def check_human_calls(project_root: Path, timeout_days: int = 7) -> List[Dict[st
     return issues
 
 
+def compute_flow_engine_status(project_root: Path) -> Optional[Dict[str, Any]]:
+    """Compute flow engine status from .se3/state/ directory.
+
+    Returns dict with flow engine state or None if not initialized.
+    """
+    se3_dir = project_root / ".se3"
+    state_dir = se3_dir / "state"
+
+    if not state_dir.exists():
+        return None
+
+    flows = []
+    try:
+        for flow_file in state_dir.glob("flow_*.json"):
+            try:
+                with open(flow_file) as f:
+                    data = json.load(f)
+                    flows.append({
+                        "id": data.get("flow_id", "unknown"),
+                        "status": data.get("status", "unknown"),
+                        "description": data.get("task_description", "No description")[:60],
+                        "current_step": data.get("current_step_id", "none"),
+                        "step_status": data.get("current_step_status", "unknown"),
+                        "updated_at": data.get("updated_at", "unknown"),
+                    })
+            except (json.JSONDecodeError, IOError):
+                continue
+    except OSError:
+        return None
+
+    # Categorize flows
+    active_flows = [f for f in flows if f["status"] == "in_progress"]
+    completed_flows = [f for f in flows if f["status"] == "completed"]
+    failed_flows = [f for f in flows if f["status"] == "failed"]
+
+    return {
+        "initialized": True,
+        "total_flows": len(flows),
+        "active_flows": active_flows,
+        "completed_flows": completed_flows,
+        "failed_flows": failed_flows,
+        "all_flows": flows,
+    }
+
+
 def run_diagnostics(project_root: str = ".") -> Dict[str, Any]:
     """Run all diagnostics by computing live state.
 
@@ -196,6 +241,7 @@ def run_diagnostics(project_root: str = ".") -> Dict[str, Any]:
     git_info = compute_git_status(root)
     active_changes = compute_active_changes(root)
     collab = compute_collab_status(root)
+    flow_engine = compute_flow_engine_status(root)
 
     # Build computed status
     status = {
@@ -203,6 +249,7 @@ def run_diagnostics(project_root: str = ".") -> Dict[str, Any]:
         "uncommitted_changes": git_info["uncommitted_count"],
         "active_changes": active_changes,
         "collab": collab,
+        "flow_engine": flow_engine,
         "last_commits": git_info["last_commits"],
     }
 
@@ -236,6 +283,30 @@ def run_diagnostics(project_root: str = ".") -> Dict[str, Any]:
 
     # Diagnostics: human calls
     issues.extend(check_human_calls(root))
+
+    # Diagnostics: flow engine
+    if flow_engine:
+        if flow_engine["active_flows"]:
+            issues.append({
+                'severity': 'info',
+                'check': 'flow_engine',
+                'message': f"{len(flow_engine['active_flows'])} flow(s) in progress",
+                'suggestion': "Use 'se3 run --resume' to continue"
+            })
+        if flow_engine["failed_flows"]:
+            issues.append({
+                'severity': 'warning',
+                'check': 'flow_engine',
+                'message': f"{len(flow_engine['failed_flows'])} failed flow(s)",
+                'suggestion': "Check .se3/state/ for details or restart with 'se3 run'"
+            })
+    else:
+        issues.append({
+            'severity': 'info',
+            'check': 'flow_engine',
+            'message': "Flow engine not initialized",
+            'suggestion': "Use 'se3 run' to start using the 3.0 flow engine"
+        })
 
     # Count by severity
     errors = [i for i in issues if i['severity'] == 'error']
@@ -278,6 +349,23 @@ def print_text_report(results: Dict[str, Any]) -> None:
             print(f"  - {c}")
     else:
         print(f"\nActive Changes: (none)")
+
+    # Flow engine status
+    flow_engine = status.get('flow_engine')
+    if flow_engine:
+        print(f"\nFlow Engine: initialized ({flow_engine['total_flows']} flow(s))")
+        if flow_engine['active_flows']:
+            print(f"  Active Flows:")
+            for f in flow_engine['active_flows']:
+                print(f"    - {f['id']}: {f['current_step']} ({f['step_status']})")
+                print(f"      {f['description']}...")
+        if flow_engine['failed_flows']:
+            print(f"  Failed Flows:")
+            for f in flow_engine['failed_flows']:
+                print(f"    - {f['id']}: {f['status']}")
+    else:
+        print(f"\nFlow Engine: not initialized")
+        print(f"  Use 'se3 run' to start using the 3.0 flow engine")
 
     # Collab status
     collab = status.get('collab')
@@ -333,11 +421,88 @@ def main(format: str = "text", project_root: str = ".") -> int:
     return 0 if results['healthy'] else 1
 
 
+def show_execution_logs(project_root: Path, lines: int = 50) -> None:
+    """Show recent execution logs from flow engine.
+
+    Args:
+        project_root: Project root directory
+        lines: Number of log lines to show
+    """
+    log_file = project_root / ".se3" / "logs" / "structured.log"
+
+    if not log_file.exists():
+        print("\nNo execution logs found.")
+        print("Logs will appear after running 'se3 run'.")
+        return
+
+    try:
+        # Read log file (JSON lines format)
+        with open(log_file) as f:
+            all_lines = f.readlines()
+
+        if not all_lines:
+            print("\nLog file is empty.")
+            return
+
+        print(f"\n{'=' * 60}")
+        print("Recent Execution Logs")
+        print(f"{'=' * 60}")
+
+        # Show last N lines
+        for line in all_lines[-lines:]:
+            try:
+                event = json.loads(line)
+                timestamp = event.get("timestamp", "unknown")
+                event_type = event.get("event_type", "unknown")
+                step = event.get("step", "-")
+                flow_id = event.get("flow_id", "-")[:8]
+
+                # Format based on event type
+                if event_type == "step_start":
+                    icon = "▶"
+                elif event_type == "step_complete":
+                    icon = "✓"
+                elif event_type == "step_error":
+                    icon = "✗"
+                elif event_type == "llm_call":
+                    icon = "🤖"
+                else:
+                    icon = "•"
+
+                print(f"\n{icon} [{timestamp}] {event_type}")
+                print(f"   Flow: {flow_id}...  Step: {step}")
+
+                # Show additional details
+                if "duration_ms" in event:
+                    print(f"   Duration: {event['duration_ms']}ms")
+                if "error" in event:
+                    print(f"   Error: {event['error']}")
+
+            except json.JSONDecodeError:
+                continue
+
+        print(f"\n{'=' * 60}")
+        print(f"Showing last {min(lines, len(all_lines))} of {len(all_lines)} log entries")
+        print(f"{'=' * 60}\n")
+
+    except IOError as e:
+        print(f"\nError reading logs: {e}")
+
+
 @app.callback()
 def status(
     format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
+    show_logs: bool = typer.Option(False, "--log", "-l", help="Show execution logs"),
+    log_lines: int = typer.Option(50, "--lines", "-n", help="Number of log lines to show"),
 ):
-    """Check project status and run diagnostics (computed live, no status.md needed)."""
+    """Check project status and run diagnostics (computed live, no status.md needed).
+
+    Use --log to view recent execution logs from the flow engine.
+    """
+    if show_logs:
+        show_execution_logs(Path(project_root).resolve(), log_lines)
+        raise typer.Exit(code=0)
+
     exit_code = main(format, project_root)
     raise typer.Exit(code=exit_code)

@@ -2,6 +2,7 @@
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -55,7 +56,7 @@ def get_installed_se3_version(project_root: Path = None) -> str:
         return "0.0.0"
 
 
-from .commands import lint, status, sync, verify, update, collab, commit, human_calls_cmd, human_input, work, health
+from .commands import lint, status, sync, verify, update, collab, commit, human_calls_cmd, human_input, work, health, run, dashboard
 from .commands.init import initialize_project
 
 app = typer.Typer(
@@ -121,6 +122,8 @@ app.add_typer(collab.app, name="collab", help="Manage git-worktree multi-agent c
 app.add_typer(commit.app, name="commit", help="Commit changes with SE3 verification")
 app.add_typer(human_calls_cmd.app, name="human-calls", help="Manage human calls")
 app.add_typer(human_input.app, name="human", help="Manage human input")
+app.add_typer(run.app, name="run", help="Run the SE3 3.0 flow engine (new unified entry point)")
+app.add_typer(dashboard.app, name="dashboard", help="Display project status dashboard")
 
 # Register direct commands (simple single-command tools with positional args)
 # These are registered as direct commands to avoid sub-typer nesting issues
@@ -132,8 +135,11 @@ def start_cmd(
 ):
     """Start an SE3 session — compute state and return actions for the agent.
 
+    [DEPRECATED] Use 'se3 run' instead. This command will be removed in SE3 3.0.
+
     Includes Input Classification & Stage Routing (SE3 1.x feature).
     """
+    _show_deprecation_warning("start", "se3 run")
     from .commands.start import run_session_start, print_text_report, print_json_report
     import json
     state = run_session_start(project_root, input)
@@ -152,7 +158,11 @@ def work_cmd(
     format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
     strict: bool = typer.Option(False, "--strict", "-s", help="Enforce naming conventions strictly (reject invalid names)"),
 ):
-    """Start or continue working on a change — the SDD workflow driver."""
+    """Start or continue working on a change — the SDD workflow driver.
+
+    [DEPRECATED] Use 'se3 run' instead. This command will be removed in SE3 3.0.
+    """
+    _show_deprecation_warning("work", "se3 run")
     from .commands.work import run_work, print_text_report, print_json_report
     result = run_work(project_root, change_name, new, advance, strict)
 
@@ -182,9 +192,13 @@ def guardrails_cmd(
 ):
     """Check spec file against SE3 Spec Guardrails.
 
+    [DEPRECATED] This functionality is now integrated into the flow engine.
+    Use 'se3 run' which includes automatic spec verification.
+
     Verifies that spec requirements were not inappropriately
     weakened or deleted.
     """
+    _show_deprecation_warning("guardrails", "se3 run (includes automatic verify-spec)")
     from .commands.work import check_spec_guardrails
     import subprocess
     import re
@@ -235,7 +249,11 @@ def done_cmd(
     format: str = typer.Option("text", "--format", "-f", help="Output format (text or json)"),
     archive: bool = typer.Option(False, "--archive", "-a", help="Automatically archive all completed changes"),
 ):
-    """End an SE3 session — compute shutdown actions for the agent."""
+    """End an SE3 session — compute shutdown actions for the agent.
+
+    [DEPRECATED] Use 'se3 run' instead. This command will be removed in SE3 3.0.
+    """
+    _show_deprecation_warning("done", "se3 run")
     from .commands.done import run_session_done, print_text_report, print_json_report
     state = run_session_done(project_root, auto_archive=archive)
 
@@ -255,6 +273,22 @@ def done_cmd(
         print_text_report(state)
     raise typer.Exit(code=0)
 
+def _show_deprecation_warning(old_cmd: str, new_cmd: str):
+    """Show deprecation warning for legacy 2.x commands."""
+    import warnings
+    warnings.warn(
+        f"'{old_cmd}' is deprecated and will be removed in SE3 3.0. Use '{new_cmd}' instead.",
+        DeprecationWarning,
+        stacklevel=3
+    )
+    # Also print to stderr for immediate visibility
+    print(
+        f"⚠️  WARNING: '{old_cmd}' is deprecated and will be removed in SE3 3.0.",
+        file=sys.stderr
+    )
+    print(f"   Use '{new_cmd}' instead.\n", file=sys.stderr)
+
+
 def _full_cycle_cmd_impl(
     description: str,
     project_root: str,
@@ -262,6 +296,7 @@ def _full_cycle_cmd_impl(
     format: str,
 ):
     """Implementation of full-cycle command."""
+    _show_deprecation_warning("full-cycle", "se3 run")
     from .commands.fullcycle import run_full_cycle, print_text_report as fullcycle_print_text, print_json_report as fullcycle_print_json
     result = run_full_cycle(description, project_root, quick)
     if format == "json":
@@ -319,6 +354,8 @@ def loop_cmd(
 ):
     """Run SE3 workflow in a loop, auto-executing all iterations.
 
+    [DEPRECATED] Use 'se3 run --loop' instead. This command will be removed in SE3 3.0.
+
     Takes over the terminal, generates a bash while-loop script,
     and executes Claude Code for each iteration automatically.
     Press Ctrl+C to stop at any time.
@@ -336,6 +373,7 @@ def loop_cmd(
         se3 loop "work" --collab --auto -n 3       # Auto mode (non-interactive)
         se3 loop --merge se3-loop/1234567890       # Merge loop branch back
     """
+    _show_deprecation_warning("loop", "se3 run --loop")
     from .commands.loop import run_exclusive_loop, run_loop_collab, merge_loop_branch, get_current_branch, get_loop_branch_base, infer_loop_branch_base
 
     # Handle merge mode (prompt not required)
@@ -392,7 +430,11 @@ def handoff_cmd(
     dry_run: bool = typer.Option(False, "--dry-run", help="Preview what would happen without executing"),
     skip_commit: bool = typer.Option(False, "--skip-commit", help="Skip automatic commit (use with caution)"),
 ):
-    """Handoff control to human — enforcing SE3 commit-before-handoff rule."""
+    """Handoff control to human — enforcing SE3 commit-before-handoff rule.
+
+    [DEPRECATED] Use 'se3 run' which includes automatic commit and summarize steps.
+    """
+    _show_deprecation_warning("handoff", "se3 run (includes commit and summarize steps)")
     from .commands.handoff import handoff
     handoff(message=message, project_root=project_root, dry_run=dry_run, skip_commit=skip_commit)
 

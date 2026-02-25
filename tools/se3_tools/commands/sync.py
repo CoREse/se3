@@ -3,6 +3,7 @@
 Synchronizes output/ directory with source files.
 """
 
+import sys
 from pathlib import Path
 from typing import List, Tuple, Optional
 import typer
@@ -60,6 +61,22 @@ def analyze_sync(project_root: Path) -> SyncResult:
     return result
 
 
+def _show_deprecation_warning():
+    """Show deprecation warning for sync command."""
+    import warnings
+    warnings.warn(
+        "'sync' is deprecated and will be removed in SE3 3.0. "
+        "Use 'se3 run' which includes automatic spec update.",
+        DeprecationWarning,
+        stacklevel=3
+    )
+    print(
+        "⚠️  WARNING: 'sync' is deprecated and will be removed in SE3 3.0.",
+        file=sys.stderr
+    )
+    print("   Use 'se3 run' which includes automatic spec update.\n", file=sys.stderr)
+
+
 @app.callback()
 def sync(
     dry_run: bool = typer.Option(
@@ -78,7 +95,12 @@ def sync(
         help="Project root directory (default: current directory)",
     ),
 ):
-    """Synchronize output/ directory with source files."""
+    """Synchronize output/ directory with source files.
+
+    [DEPRECATED] Use 'se3 run' which includes automatic spec update.
+    This command will be removed in SE3 3.0.
+    """
+    _show_deprecation_warning()
 
     if project_root is None:
         project_root = Path.cwd()

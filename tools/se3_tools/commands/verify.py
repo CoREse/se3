@@ -300,6 +300,22 @@ def main(change: Optional[str], format: str = "text", project_root: str = ".") -
     return 0 if results.get('success', False) else 1
 
 
+def _show_deprecation_warning():
+    """Show deprecation warning for verify command."""
+    import warnings
+    warnings.warn(
+        "'verify' is deprecated and will be removed in SE3 3.0. "
+        "Use 'se3 run' which includes automatic verify-spec step.",
+        DeprecationWarning,
+        stacklevel=3
+    )
+    print(
+        "⚠️  WARNING: 'verify' is deprecated and will be removed in SE3 3.0.",
+        file=sys.stderr
+    )
+    print("   Use 'se3 run' which includes automatic verify-spec step.\n", file=sys.stderr)
+
+
 @app.callback()
 def verify(
     change: str = typer.Argument(None, help="Name of the change to verify (default: verify all specs)"),
@@ -308,8 +324,12 @@ def verify(
 ):
     """Verify spec coverage for a change or all specs.
 
+    [DEPRECATED] Use 'se3 run' which includes automatic verify-spec step.
+    This command will be removed in SE3 3.0.
+
     If change is specified, verifies only that change's specs.
     If no change is specified, verifies all spec scenarios in the project.
     """
+    _show_deprecation_warning()
     exit_code = main(change, format, project_root)
     raise typer.Exit(code=exit_code)

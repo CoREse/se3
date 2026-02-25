@@ -1,7 +1,12 @@
 ---
 name: "SE3: Done"
 description: End session — tests, commit, handoff
+deprecated: true
+replacement: se3 run
 ---
+
+> ⚠️ **DEPRECATED**: This command is deprecated in SE3 3.0. Use `se3 run` instead.
+> This command will be removed in a future version.
 
 **Usage**: `/se3:done`
 

@@ -1,7 +1,12 @@
 ---
 name: "SE3: Full Cycle"
 description: Run complete start-work-done workflow in one command for simple/quick tasks
+deprecated: true
+replacement: se3 run
 ---
+
+> ⚠️ **DEPRECATED**: This command is deprecated in SE3 3.0. Use `se3 run` instead.
+> This command will be removed in a future version.
 
 **Usage**: `/se3:fc <description>` or `/se3:fc <description> --quick`
 
