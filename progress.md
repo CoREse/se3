@@ -3231,3 +3231,4 @@ README.md                                                     |  2 +-
 - `356a97b` chore: bump SE3 framework to 2.23.1 and clean up all stale branches (2 files)
 - `8483b92` feat: implement SE3 3.0 flow engine (Phase 1) with all fixes (43 files)
 - `cc9c2ae` feat: SE3 3.1.0 — deprecation warnings, dashboard, flow engine diagnostics, cleanup (60 files)
+- `be1977b` fix: se3 run 4 bugs — typer arg parsing, infinite retry, glob mismatch, CLAUDECODE leak (12 files)

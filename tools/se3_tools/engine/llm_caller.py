@@ -70,10 +70,6 @@ class LLMCaller:
                 if f.exists():
                     args.extend(["--file", str(f)])
 
-        # Strip CLAUDECODE to avoid nested session detection when called from within Claude Code
-        env = dict(os.environ)
-        env.pop("CLAUDECODE", None)
-
         start_time = time.time()
         last_error = ""
 
