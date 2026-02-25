@@ -70,6 +70,8 @@ class LLMCaller:
                 if f.exists():
                     args.extend(["--file", str(f)])
 
+        env = dict(os.environ)
+
         start_time = time.time()
         last_error = ""
 
