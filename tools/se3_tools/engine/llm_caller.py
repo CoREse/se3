@@ -4,6 +4,7 @@ Handles subprocess calls to Claude CLI with retry and fallback logic.
 """
 
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -69,6 +70,10 @@ class LLMCaller:
                 if f.exists():
                     args.extend(["--file", str(f)])
 
+        # Strip CLAUDECODE to avoid nested session detection when called from within Claude Code
+        env = dict(os.environ)
+        env.pop("CLAUDECODE", None)
+
         start_time = time.time()
         last_error = ""
 
@@ -81,6 +86,7 @@ class LLMCaller:
                     wall_timeout=timeout,
                     inactivity_timeout=300,
                     cwd=self.project_root,
+                    env=env,
                     on_output=on_output,
                 )
 

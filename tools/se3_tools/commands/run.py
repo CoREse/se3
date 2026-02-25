@@ -41,7 +41,7 @@ except ImportError:
     from engine.steps import STEP_HANDLERS
 
 
-app = typer.Typer(invoke_without_command=True)
+app = typer.Typer()
 logger = logging.getLogger(__name__)
 
 SE3_DIR = ".se3"
@@ -99,9 +99,9 @@ def prompt_user_choice(message: str, options: List[str]) -> int:
         except ValueError:
             print("Please enter a valid number")
         except EOFError:
-            # Handle non-interactive mode - default to first option
-            print("Non-interactive mode detected, selecting option 1")
-            return 0
+            # Handle non-interactive mode - default to last option (typically Abort)
+            print(f"Non-interactive mode detected, selecting option {len(options)} ({options[-1]})")
+            return len(options) - 1
 
 
 def handle_resume_interactive(project_root: Path) -> Optional[str]:
@@ -226,6 +226,23 @@ def run_flow(
             if result == StepStatus.FAILED:
                 error_msg = current_step.error_message or "Unknown error"
                 print(f"Step failed: {error_msg}", file=sys.stderr)
+
+                max_retries = 3
+                if current_step.retry_count >= max_retries:
+                    print(f"Max retries ({max_retries}) reached for step {current_step.step_type.value}", file=sys.stderr)
+                    # Only offer skip or abort
+                    options = ["Skip to next step", "Abort flow"]
+                    choice = prompt_user_choice("What would you like to do?", options)
+                    if choice == 0:
+                        current_step.status = StepStatus.COMPLETED
+                        state_machine.transition_to_next(flow)
+                        persistence.save_flow(flow)
+                        continue
+                    else:
+                        flow.status = FlowStatus.FAILED
+                        persistence.save_flow(flow)
+                        return 1
+
                 # Ask user whether to retry, skip, or abort
                 options = ["Retry this step", "Skip to next step", "Abort flow"]
                 choice = prompt_user_choice("What would you like to do?", options)
@@ -407,77 +424,8 @@ def find_next_task(project_root: Path) -> Optional[str]:
     return None
 
 
-@app.callback()
-def main(
-    ctx: typer.Context,
-    task: Optional[str] = typer.Argument(None, help="Task description"),
-    resume: bool = typer.Option(False, "--resume", "-r", help="Resume interrupted flow"),
-    loop: bool = typer.Option(False, "--loop", "-l", help="Loop mode (continuous task execution)"),
-    type: str = typer.Option("feature", "--type", "-t", help="Task type (feature, bugfix, refactor, etc.)"),
-    change: Optional[str] = typer.Option(None, "--change", "-c", help="Change name for this task"),
-    flow_id: Optional[str] = typer.Option(None, "--flow-id", help="Specific flow ID to resume"),
-):
-    """SE3 Run — Unified entry point for the flow engine.
-
-    Examples:
-        se3 run "Implement user authentication"
-        se3 run "Fix login bug" --type=bugfix
-        se3 run --resume
-        se3 run --loop
-    """
-    if ctx.invoked_subcommand is not None:
-        return
-    project_root = get_project_root()
-
-    # Ensure .se3 directory exists
-    se3_dir = project_root / SE3_DIR
-    se3_dir.mkdir(exist_ok=True)
-    (se3_dir / "state").mkdir(exist_ok=True)
-
-    if loop:
-        # Loop mode
-        exit_code = run_loop_mode(
-            project_root=project_root,
-            initial_task=task,
-            task_type=type,
-        )
-        raise typer.Exit(exit_code)
-
-    if resume or flow_id:
-        # Resume mode
-        target_flow_id = flow_id
-
-        if not target_flow_id:
-            target_flow_id = handle_resume_interactive(project_root)
-
-        if target_flow_id:
-            exit_code = run_flow(
-                project_root=project_root,
-                flow_id=target_flow_id,
-            )
-            raise typer.Exit(exit_code)
-        else:
-            # User chose to start new flow
-            if not task:
-                print("Error: Task description required for new flow", file=sys.stderr)
-                raise typer.Exit(1)
-
-    # New flow mode
-    if not task:
-        print("Error: Task description required (or use --resume)", file=sys.stderr)
-        print("\nExamples:", file=sys.stderr)
-        print('  se3 run "Implement feature X"', file=sys.stderr)
-        print("  se3 run --resume", file=sys.stderr)
-        raise typer.Exit(1)
-
-    exit_code = run_flow(
-        project_root=project_root,
-        task_description=task,
-        task_type=type,
-        change_name=change,
-        is_loop_mode=False,
-    )
-    raise typer.Exit(exit_code)
+## CLI entry point is in cli.py (@app.command("run"))
+## This module provides the logic functions: run_flow, run_loop_mode, etc.
 
 
 if __name__ == "__main__":

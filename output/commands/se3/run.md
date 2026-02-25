@@ -65,7 +65,7 @@ Steps are selected dynamically based on task analysis.
 
 ## State Persistence
 
-Flow state is saved to `.se3/state/flow_*.json` after each step. This enables:
+Flow state is saved to `.se3/state/engine.json` after each step. This enables:
 
 - Recovery from crashes or interruptions
 - Resume with `se3 run --resume`

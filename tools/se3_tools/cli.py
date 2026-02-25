@@ -122,7 +122,7 @@ app.add_typer(collab.app, name="collab", help="Manage git-worktree multi-agent c
 app.add_typer(commit.app, name="commit", help="Commit changes with SE3 verification")
 app.add_typer(human_calls_cmd.app, name="human-calls", help="Manage human calls")
 app.add_typer(human_input.app, name="human", help="Manage human input")
-app.add_typer(run.app, name="run", help="Run the SE3 3.0 flow engine (new unified entry point)")
+# run is registered as a direct command below (not sub-typer) to avoid positional arg + options parsing issues
 app.add_typer(dashboard.app, name="dashboard", help="Display project status dashboard")
 
 # Register direct commands (simple single-command tools with positional args)
@@ -420,6 +420,75 @@ def loop_cmd(
     else:
         run_exclusive_loop(prompt, project_root, iterations, quick, no_summary)
     raise typer.Exit(code=0)
+
+
+@app.command(name="run")
+def run_cmd(
+    task: Optional[str] = typer.Argument(None, help="Task description"),
+    resume: bool = typer.Option(False, "--resume", "-r", help="Resume interrupted flow"),
+    loop: bool = typer.Option(False, "--loop", "-l", help="Loop mode (continuous task execution)"),
+    type: str = typer.Option("feature", "--type", "-t", help="Task type (feature, bugfix, refactor, etc.)"),
+    change: Optional[str] = typer.Option(None, "--change", "-c", help="Change name for this task"),
+    flow_id: Optional[str] = typer.Option(None, "--flow-id", help="Specific flow ID to resume"),
+):
+    """SE3 Run — Unified entry point for the flow engine.
+
+    Examples:
+        se3 run "Implement user authentication"
+        se3 run "Fix login bug" --type=bugfix
+        se3 run --resume
+        se3 run --loop
+    """
+    from .commands.run import run_flow, run_loop_mode, get_project_root, handle_resume_interactive, SE3_DIR
+
+    project_root = get_project_root()
+
+    # Ensure .se3 directory exists
+    se3_dir = project_root / SE3_DIR
+    se3_dir.mkdir(exist_ok=True)
+    (se3_dir / "state").mkdir(exist_ok=True)
+
+    if loop:
+        exit_code = run_loop_mode(
+            project_root=project_root,
+            initial_task=task,
+            task_type=type,
+        )
+        raise typer.Exit(exit_code)
+
+    if resume or flow_id:
+        target_flow_id = flow_id
+
+        if not target_flow_id:
+            target_flow_id = handle_resume_interactive(project_root)
+
+        if target_flow_id:
+            exit_code = run_flow(
+                project_root=project_root,
+                flow_id=target_flow_id,
+            )
+            raise typer.Exit(exit_code)
+        else:
+            if not task:
+                print("Error: Task description required for new flow", file=sys.stderr)
+                raise typer.Exit(1)
+
+    # New flow mode
+    if not task:
+        print("Error: Task description required (or use --resume)", file=sys.stderr)
+        print("\nExamples:", file=sys.stderr)
+        print('  se3 run "Implement feature X"', file=sys.stderr)
+        print("  se3 run --resume", file=sys.stderr)
+        raise typer.Exit(1)
+
+    exit_code = run_flow(
+        project_root=project_root,
+        task_description=task,
+        task_type=type,
+        change_name=change,
+        is_loop_mode=False,
+    )
+    raise typer.Exit(exit_code)
 
 
 # Register handoff as a direct command (not a sub-typer)

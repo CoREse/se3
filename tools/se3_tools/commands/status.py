@@ -196,23 +196,22 @@ def compute_flow_engine_status(project_root: Path) -> Optional[Dict[str, Any]]:
         return None
 
     flows = []
-    try:
-        for flow_file in state_dir.glob("flow_*.json"):
-            try:
-                with open(flow_file) as f:
-                    data = json.load(f)
-                    flows.append({
-                        "id": data.get("flow_id", "unknown"),
-                        "status": data.get("status", "unknown"),
-                        "description": data.get("task_description", "No description")[:60],
-                        "current_step": data.get("current_step_id", "none"),
-                        "step_status": data.get("current_step_status", "unknown"),
-                        "updated_at": data.get("updated_at", "unknown"),
-                    })
-            except (json.JSONDecodeError, IOError):
-                continue
-    except OSError:
-        return None
+    engine_file = state_dir / "engine.json"
+    if engine_file.exists():
+        try:
+            with open(engine_file) as f:
+                data = json.load(f)
+                state_data = data.get("state", {})
+                flows.append({
+                    "id": data.get("flow_id", "unknown"),
+                    "status": data.get("status", "unknown"),
+                    "description": data.get("task_description", "No description")[:60],
+                    "current_step": state_data.get("current_step_id", "none"),
+                    "step_status": data.get("current_step_status", "unknown"),
+                    "updated_at": data.get("updated_at", "unknown"),
+                })
+        except (json.JSONDecodeError, IOError, OSError):
+            pass
 
     # Categorize flows
     active_flows = [f for f in flows if f["status"] == "in_progress"]

@@ -103,21 +103,23 @@ def compute_flow_engine_status(project_root: Path) -> Optional[Dict[str, Any]]:
         return None
 
     flows = []
-    for flow_file in state_dir.glob("flow_*.json"):
+    engine_file = state_dir / "engine.json"
+    if engine_file.exists():
         try:
-            with open(flow_file) as f:
+            with open(engine_file) as f:
                 data = json.load(f)
+                state_data = data.get("state", {})
                 flows.append({
                     "id": data.get("flow_id", "unknown"),
                     "status": data.get("status", "unknown"),
                     "description": data.get("task_description", "No description"),
-                    "current_step": data.get("current_step_id", "none"),
+                    "current_step": state_data.get("current_step_id", "none"),
                     "step_status": data.get("current_step_status", "unknown"),
                     "created_at": data.get("created_at", "unknown"),
                     "updated_at": data.get("updated_at", "unknown"),
                 })
         except (json.JSONDecodeError, IOError):
-            continue
+            pass
 
     active = [f for f in flows if f["status"] == "in_progress"]
     completed = [f for f in flows if f["status"] == "completed"]

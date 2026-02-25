@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.1.0** — feat: Deprecation warnings for 2.x commands, dashboard command, flow engine status in diagnostics.
+**3.1.1** — fix: se3 run bugs — typer arg parsing, infinite retry, glob mismatch, CLAUDECODE leak.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.1.1 | 2026-02-25 | fix: 4 se3 run bugs. (1) Convert run from add_typer to @app.command for correct --type after positional arg. (2) Add max_retries check + EOFError defaults to Abort. (3) dashboard/status read engine.json instead of globbing flow_*.json. (4) LLMCaller strips CLAUDECODE env var. Doc: fix state file path in run.md. |
 | 3.1.0 | 2026-02-25 | feat: Mark all 2.x commands as deprecated with migration guidance to `se3 run`. Add `se3 dashboard` and `se3 status --log` commands. Flow engine status detection in diagnostics. New output specs (run, sync, verify, guardrails, handoff). Clean up stale openspec changes. |
 | 3.0.0 | 2026-02-24 | feat: SE3 3.0 flow engine. State machine driven workflow replaces prompt-driven agent. 11 step handlers (analyze→summarize), LLMCaller with retry, JSON state persistence, structured logging, spec index, ContextBuilder. Unified `se3 run` entry point (new/resume/loop). 41 tests. Architecture: .claude/ SE3 spec installation no longer needed. |
 | 2.23.1 | 2026-02-20 | fix: Cherry-pick improvements from loop branches. Stash uncommitted changes during branch creation, fix typer.Exit handling, proper worktree validation via git worktree list, auto mode in loop collab. |

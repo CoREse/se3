@@ -3230,3 +3230,4 @@ README.md                                                     |  2 +-
 - `134fe9b` fix: cherry-pick useful changes from loop branches before cleanup - Stash/restore uncommitted changes in create_loop_branch - Fix typer.Exit swallowed by generic except in collab.py - Add proper worktree validation via git worktree list in orchestrator - Add auto mode and EOFError handling in loop_collab iteration menu Status: preparing to delete all non-master branches (8 files)
 - `356a97b` chore: bump SE3 framework to 2.23.1 and clean up all stale branches (2 files)
 - `8483b92` feat: implement SE3 3.0 flow engine (Phase 1) with all fixes (43 files)
+- `cc9c2ae` feat: SE3 3.1.0 — deprecation warnings, dashboard, flow engine diagnostics, cleanup (60 files)
