@@ -70,13 +70,21 @@ class TestLoadGlobalConfig:
 
 
 class TestLoadProjectConfig:
-    """Test project config loading from se3.config.yaml."""
+    """Test project config loading from se3.yaml (with se3.config.yaml fallback)."""
 
     def test_no_config_file(self, tmp_path):
         result = load_project_config(tmp_path)
         assert result == {}
 
-    def test_valid_config(self, tmp_path):
+    def test_valid_config_se3_yaml(self, tmp_path):
+        """Should load from se3.yaml (new name)."""
+        config = tmp_path / "se3.yaml"
+        config.write_text("claude_commands:\n  - cmd: kclaude\n    priority: 5\n")
+        result = load_project_config(tmp_path)
+        assert result["claude_commands"][0]["cmd"] == "kclaude"
+
+    def test_valid_config_legacy_fallback(self, tmp_path):
+        """Should fall back to se3.config.yaml if se3.yaml doesn't exist."""
         config = tmp_path / "se3.config.yaml"
         config.write_text("claude_commands:\n  - cmd: kclaude\n    priority: 5\n")
         result = load_project_config(tmp_path)

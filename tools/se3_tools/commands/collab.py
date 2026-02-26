@@ -53,8 +53,10 @@ def get_collab_dir(project_root: Path) -> Path:
 
 
 def load_config(project_root: Path) -> dict:
-    """Load se3.config.yaml if exists."""
-    config_file = project_root / "se3.config.yaml"
+    """Load se3.yaml if exists (fallback: se3.config.yaml)."""
+    config_file = project_root / "se3.yaml"
+    if not config_file.exists():
+        config_file = project_root / "se3.config.yaml"  # legacy fallback
     if config_file.exists():
         try:
             import yaml

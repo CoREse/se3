@@ -328,7 +328,7 @@ class TestRecovery:
 
             # PersistenceManager only tracks one flow per state file
             # For multi-flow, we'd scan the state directory
-            state_dir = Path(tmpdir) / ".se3" / "state"
+            state_dir = Path(tmpdir) / "se3" / "state"
             all_flows = list(state_dir.glob("*.json"))
             assert len(all_flows) >= 1  # At least one flow saved
 

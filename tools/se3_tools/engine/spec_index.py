@@ -59,16 +59,19 @@ class SpecIndex:
         self.specs: Dict[str, SpecInfo] = {}
         self.capability_map: Dict[str, List[str]] = {}
         self.keyword_map: Dict[str, List[str]] = {}
-        self._index_file = project_root / ".se3" / "spec_index.json"
+        self._index_file = project_root / "se3" / "cache" / "spec_index.json"
 
     @staticmethod
     def _resolve_specs_dir(project_root: Path) -> Path:
-        """Resolve specs directory: specs/ preferred, openspec/specs/ fallback."""
-        primary = project_root / "specs"
-        fallback = project_root / "openspec" / "specs"
+        """Resolve specs directory: se3/specs/ preferred, specs/ fallback, openspec/specs/ legacy."""
+        primary = project_root / "se3" / "specs"
+        fallback = project_root / "specs"
+        legacy = project_root / "openspec" / "specs"
         if primary.exists():
             return primary
-        return fallback
+        if fallback.exists():
+            return fallback
+        return legacy
 
     def build_index(self) -> "SpecIndex":
         """Scan specs directory and build the index."""

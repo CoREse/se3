@@ -102,13 +102,15 @@ def detect_test_command(project_root: Path) -> Optional[List[str]]:
     """Auto-detect the project's test command.
 
     Checks (in order):
-    1. se3.config.yaml commit.test_command
+    1. se3.yaml commit.test_command
     2. pytest (if tests/ exists or pytest.ini/pyproject.toml has pytest config)
     3. npm test (if package.json has test script)
     4. None (no tests detected)
     """
-    # Check se3.config.yaml
-    config_file = project_root / "se3.config.yaml"
+    # Check se3.yaml (fallback: se3.config.yaml)
+    config_file = project_root / "se3.yaml"
+    if not config_file.exists():
+        config_file = project_root / "se3.config.yaml"  # legacy fallback
     if config_file.exists():
         try:
             import yaml

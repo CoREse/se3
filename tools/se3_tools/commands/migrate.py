@@ -21,15 +21,26 @@ def run_migration(project_root: str, dry_run: bool, force: bool) -> None:
     # Check for legacy directories
     legacy_human_calls = root / "human-calls"
     legacy_collab = root / ".collab"
-    legacy_hidden_se3 = root / ".se3"  # Earlier 2.x with hidden directory
+    legacy_hidden_se3 = root / ".se3"  # Earlier 2.x/3.0 with hidden directory
+    legacy_visible_se3 = root / "se3"  # Current se3/ directory (for merging)
+    legacy_specs = root / "specs"  # Specs at project root
+    legacy_config = root / "se3.config.yaml"  # Old config name
     legacy_tmp_files = list(root.glob("tmp*.prompt"))
 
     # Target directory (VISIBLE, not hidden)
     se3_dir = root / "se3"
 
     # Check if already migrated
-    if se3_dir.exists() and not force and not legacy_hidden_se3.exists():
-        typer.echo("✓ Project already has se3/ directory (use --force to merge)")
+    has_legacy = (
+        legacy_human_calls.exists() or
+        legacy_collab.exists() or
+        legacy_hidden_se3.exists() or
+        legacy_specs.exists() or
+        legacy_config.exists() or
+        legacy_tmp_files
+    )
+    if se3_dir.exists() and not force and not has_legacy:
+        typer.echo("✓ Project already migrated (use --force to merge)")
         raise typer.Exit(code=0)
 
     # Determine what needs migration
@@ -60,12 +71,26 @@ def run_migration(project_root: str, dry_run: bool, force: bool) -> None:
                 rel_path = item.relative_to(legacy_collab)
                 migrations.append((item, se3_dir / "collab" / rel_path, "collab file"))
 
-    # Hidden .se3/ to visible se3/ migration (earlier 2.x)
+    # Hidden .se3/ to visible se3/ migration (earlier 2.x/3.0)
     if legacy_hidden_se3.exists() and legacy_hidden_se3.is_dir():
         for item in legacy_hidden_se3.rglob("*"):
             if item.is_file():
                 rel_path = item.relative_to(legacy_hidden_se3)
+                # Remap spec_index.json to cache/spec_index.json
+                if rel_path.name == "spec_index.json" and len(rel_path.parts) == 1:
+                    rel_path = Path("cache") / rel_path.name
                 migrations.append((item, se3_dir / rel_path, "from hidden .se3"))
+
+    # specs/ → se3/specs/ migration
+    if legacy_specs.exists() and legacy_specs.is_dir() and not (se3_dir / "specs").exists():
+        for item in legacy_specs.rglob("*"):
+            if item.is_file():
+                rel_path = item.relative_to(legacy_specs)
+                migrations.append((item, se3_dir / "specs" / rel_path, "specs → se3/specs"))
+
+    # se3.config.yaml → se3.yaml migration
+    if legacy_config.exists():
+        migrations.append((legacy_config, root / "se3.yaml", "config rename"))
 
     # Tmp files cleanup
     tmp_deletions: List[Path] = []
@@ -105,6 +130,8 @@ def run_migration(project_root: str, dry_run: bool, force: bool) -> None:
         se3_dir / "collab",
         se3_dir / "tmp",
         se3_dir / "state",
+        se3_dir / "cache",
+        se3_dir / "specs" / "_changelog",
     ]
 
     if dry_run:
@@ -166,6 +193,9 @@ def run_migration(project_root: str, dry_run: bool, force: bool) -> None:
     if legacy_hidden_se3.exists() and not any(legacy_hidden_se3.iterdir()):
         legacy_hidden_se3.rmdir()
         removed_dirs += 1
+    if legacy_specs.exists() and not any(legacy_specs.iterdir()):
+        legacy_specs.rmdir()
+        removed_dirs += 1
 
     if removed_dirs:
         typer.echo(f"  ✓ Removed {removed_dirs} empty legacy directories")
@@ -175,11 +205,11 @@ def run_migration(project_root: str, dry_run: bool, force: bool) -> None:
     if gitignore.exists():
         content = gitignore.read_text()
         needs_update = False
-        if ".se3/tmp/" in content:
-            content = content.replace(".se3/tmp/", "se3/tmp/")
+        if ".se3/" in content:
+            content = content.replace(".se3/", "se3/")
             needs_update = True
-        elif "se3/tmp/" not in content:
-            content += "\n# SE3 temporary files\nse3/tmp/\n"
+        if "se3/tmp/" not in content and "se3/" not in content:
+            content += "\n# SE3 runtime (gitignored)\nse3/state/\nse3/cache/\nse3/logs/\nse3/tmp/\nse3/collab/\nse3/calls/\n"
             needs_update = True
         if needs_update:
             with open(gitignore, "w") as f:
@@ -188,9 +218,12 @@ def run_migration(project_root: str, dry_run: bool, force: bool) -> None:
 
     typer.echo(f"\n{'=' * 60}")
     typer.echo("Migration complete!")
-    typer.echo(f"\nNew structure (VISIBLE, not hidden):")
-    typer.echo(f"  se3/calls/active/  - Pending human calls")
-    typer.echo(f"  se3/calls/archive/ - Archived calls")
-    typer.echo(f"  se3/collab/        - Multi-agent collaboration state")
-    typer.echo(f"  se3/tmp/           - Temporary files (auto-cleaned)")
-    typer.echo(f"  se3/state/         - Session state files")
+    typer.echo(f"\nNew unified se3/ structure:")
+    typer.echo(f"  se3/specs/         - Project specifications")
+    typer.echo(f"  se3/state/         - Flow engine state")
+    typer.echo(f"  se3/cache/         - Cached indexes")
+    typer.echo(f"  se3/logs/          - Execution logs")
+    typer.echo(f"  se3/calls/         - Human call management")
+    typer.echo(f"  se3/collab/        - Multi-agent collaboration")
+    typer.echo(f"  se3/tmp/           - Temporary files")
+    typer.echo(f"  se3.yaml           - Project configuration")

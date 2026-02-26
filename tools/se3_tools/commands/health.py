@@ -402,8 +402,8 @@ def check_directory_structure(project_root: Path) -> List[HealthIssue]:
     issues = []
 
     expected_dirs = [
-        ("specs", True),  # (path, required)
-        ("specs/_changelog", False),
+        ("se3/specs", True),  # (path, required)
+        ("se3/specs/_changelog", False),
     ]
 
     for dir_path, required in expected_dirs:

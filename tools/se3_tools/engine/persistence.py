@@ -32,7 +32,7 @@ class PersistenceManager:
             project_root: Root directory of the project
         """
         self.project_root = Path(project_root)
-        self.state_dir = self.project_root / ".se3" / "state"
+        self.state_dir = self.project_root / "se3" / "state"
         self.state_file = self.state_dir / self.STATE_FILENAME
         self.context_file = self.state_dir / self.CONTEXT_FILENAME
 

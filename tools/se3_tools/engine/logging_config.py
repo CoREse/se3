@@ -149,12 +149,12 @@ class StructuredLogger:
 
         Args:
             project_root: Project root directory
-            log_dir: Directory for log files (default: .se3/logs)
+            log_dir: Directory for log files (default: se3/logs)
             console_output: Whether to output to console
             min_level: Minimum log level to record
         """
         self.project_root = Path(project_root)
-        self.log_dir = log_dir or (self.project_root / ".se3" / "logs")
+        self.log_dir = log_dir or (self.project_root / "se3" / "logs")
         self.console_output = console_output
         self.min_level = min_level
 

@@ -73,7 +73,7 @@ se3 update
 project/
 ├── init.sh                 # Environment setup (optional)
 ├── progress.md             # Cross-session history (auto-maintained by SE3 tools)
-├── se3.config.yaml         # Configuration (optional)
+├── se3.yaml                # Configuration (optional)
 ├── README.md
 ├── human-calls/            # Async human call queue
 ├── tests/                  # Test files
@@ -178,20 +178,18 @@ This separation allows:
 
 Native Task tool. Parent spawns sub-agents per openspec change. Specs on the file system serve as contracts — sub-agents read them to know what to implement. Results return directly.
 
-## Output Files
+## Documentation
 
 | File | Purpose |
 |------|---------|
-| `output/SE3.md.template` | SE3 framework template → `.claude/SE3.md` (via `se3 init`) |
-| `output/CLAUDE.minimal.md.template` | Minimal CLAUDE.md template (25 lines) |
-| `output/TOOLS.md` | CLI tools documentation |
 | `docs/best-practices.md` | Best practices guide |
+| `VERSIONS.md` | Framework version history |
 
 ## Version History
 
 See [VERSIONS.md](VERSIONS.md) for the complete version history.
 
-**Current Version: 3.2.0**
+**Current Version: 3.3.0**
 
 When modifying framework files:
 1. Bump `SE3_FRAMEWORK_VERSION` in `tools/se3_tools/__init__.py`

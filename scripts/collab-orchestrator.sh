@@ -22,7 +22,7 @@ if [ -z "$JQ_CMD" ]; then
   JQ_CMD="python3 $SCRIPT_DIR/jq-complete.py"
 fi
 
-# --- Configuration (defaults, overridden by se3.config.yaml) ---
+# --- Configuration (defaults, overridden by se3.yaml) ---
 MAX_PARALLEL_WORKERS=3
 WORKER_TIMEOUT_MINUTES=60
 MANAGER_TIMEOUT_MINUTES=15
@@ -89,9 +89,10 @@ log_ok()    { echo -e "${GREEN}[orch]${NC} $*" >&2; }
 log_warn()  { echo -e "${YELLOW}[orch]${NC} $*" >&2; }
 log_error() { echo -e "${RED}[orch]${NC} $*" >&2; }
 
-# --- Load config from se3.config.yaml if available ---
+# --- Load config from se3.yaml if available (fallback: se3.config.yaml) ---
 load_config() {
-  local config="$PROJECT_ROOT/se3.config.yaml"
+  local config="$PROJECT_ROOT/se3.yaml"
+  [ ! -f "$config" ] && config="$PROJECT_ROOT/se3.config.yaml"  # legacy fallback
   if [ -f "$config" ] && command -v python3 &>/dev/null; then
     eval "$(python3 -c "
 import yaml, sys
@@ -243,7 +244,8 @@ Rules:
   [ -f "$rules_file" ] && launcher_args+=(--rules-file "$rules_file")
   [ -n "$MANAGER_MODEL" ] && launcher_args+=(--model "$MANAGER_MODEL")
   [ -n "$MCP_CONFIG" ] && launcher_args+=(--mcp-config "$MCP_CONFIG")
-  [ -f "$PROJECT_ROOT/se3.config.yaml" ] && launcher_args+=(--config-file "$PROJECT_ROOT/se3.config.yaml")
+  local _cfg="$PROJECT_ROOT/se3.yaml"; [ ! -f "$_cfg" ] && _cfg="$PROJECT_ROOT/se3.config.yaml"
+  [ -f "$_cfg" ] && launcher_args+=(--config-file "$_cfg")
 
   # Run manager with launcher (handles command switching internally)
   log_info "Invoking manager: event=$event_type"
@@ -378,7 +380,8 @@ $task_prompt"
   )
   [ -n "$WORKER_MODEL" ] && launcher_args+=(--model "$WORKER_MODEL")
   [ -n "$MCP_CONFIG" ] && launcher_args+=(--mcp-config "$MCP_CONFIG")
-  [ -f "$PROJECT_ROOT/se3.config.yaml" ] && launcher_args+=(--config-file "$PROJECT_ROOT/se3.config.yaml")
+  local _cfg="$PROJECT_ROOT/se3.yaml"; [ ! -f "$_cfg" ] && _cfg="$PROJECT_ROOT/se3.config.yaml"
+  [ -f "$_cfg" ] && launcher_args+=(--config-file "$_cfg")
 
   # Spawn worker using Python launcher with activity monitoring
   # Launcher handles its own logging internally

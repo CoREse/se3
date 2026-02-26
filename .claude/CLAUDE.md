@@ -13,15 +13,12 @@
 
 - 已发布的规范位于 `.claude/` 目录中
 - 开发依赖的规范文件应保持不变
-- 新规范输出到独立的目录或文件
 
 ## SE3 命令入口
 
 | Command | 用途 |
 |---------|------|
-| `/se3:start` | 开始会话 |
-| `/se3:work <描述>` | 开始/继续工作 |
-| `/se3:done` | 结束会话 |
+| `/se3:run` | 启动 SE3 流程引擎 |
 
 ## Git Commit
 
@@ -31,38 +28,15 @@
 se3 commit -m "描述" -f "file1.py file2.py"
 ```
 
-## 常见陷阱（Lessons Learned）
+## 目录结构
 
-### 规范输出位置混淆
-
-**错误**：
-- ❌ `.claude/commands/se3/fc.md` — 这是已发布的规范目录，不能修改
-- ❌ `openspec/specs/se3-commands/spec.md` — 这是项目自身的规范定义，不是产出
-
-**正确**：
-- ✅ `output/commands/se3/fc.md` — 新规范产出目录
-- ✅ `tools/` — 工具实现代码
-
-**记忆方法**：
+- `se3/` — SE3 运行时目录（gitignored）
+  - `specs/` — 项目规范
+  - `state/` — 流程引擎状态
+  - `cache/` — 缓存索引
+  - `logs/` — 执行日志
+  - `calls/` — 人工调用队列
+  - `collab/` — 多智能体协作状态
+- `se3.yaml` — 项目配置（可选）
 - `.claude/` = 开发依赖的框架规范（只读）
-- `openspec/` = 本项目定义的规范（只读，是项目的spec本身）
-- `output/` = 生成的新规范产出（可写）
 - `tools/` = 工具实现（可写）
-
-### 自举项目版本更新
-
-**场景**：升级 `se3_tools` 版本后（修改 `tools/se3_tools/__init__.py` 中的 `SE3_FRAMEWORK_VERSION`）
-
-**必须执行**：
-```bash
-# 1. 更新本项目的 SE3 框架文件
-se3 update update
-
-# 2. 提交更改（包括 .claude/ 目录的更新）
-se3 commit -m "chore: bump SE3 framework to X.Y.Z" -f ".claude/"
-```
-
-**原因**：
-- 本项目是自举项目，同时作为工具开发者（修改 `tools/`）和工具使用者（使用 `.claude/`）
-- `se3 update` 会将 `output/` 中的新规范同步到 `.claude/`
-- 如果不执行此步骤，`.claude/` 中的规范将与 `tools/` 的版本不一致

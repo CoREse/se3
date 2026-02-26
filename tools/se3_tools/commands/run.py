@@ -44,7 +44,7 @@ except ImportError:
 app = typer.Typer()
 logger = logging.getLogger(__name__)
 
-SE3_DIR = ".se3"
+SE3_DIR = "se3"
 STATE_FILE = "state/engine.json"
 
 

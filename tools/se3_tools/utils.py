@@ -11,12 +11,15 @@ from .human_calls import discover_human_calls, HumanCallStore
 
 
 def _resolve_specs_dir(base_path: Path) -> Path:
-    """Resolve specs directory: specs/ preferred, openspec/specs/ fallback."""
-    primary = base_path / "specs"
-    fallback = base_path / "openspec" / "specs"
+    """Resolve specs directory: se3/specs/ preferred, specs/ fallback, openspec/specs/ legacy."""
+    primary = base_path / "se3" / "specs"
+    fallback = base_path / "specs"
+    legacy = base_path / "openspec" / "specs"
     if primary.exists():
         return primary
-    return fallback
+    if fallback.exists():
+        return fallback
+    return legacy
 
 
 def discover_specs(path: str) -> List[str]:
@@ -220,7 +223,7 @@ def get_source_mappings(project_root: Path) -> dict:
     """Get mapping of source files to output files.
 
     With the SE3 module system, output/ only contains templates for `se3 init`.
-    Runtime files (CLAUDE.md, status.md, se3.config.yaml) are no longer synced.
+    Runtime files (CLAUDE.md, status.md, se3.yaml) are no longer synced.
 
     Args:
         project_root: Root of the SE 3.0 project
@@ -232,17 +235,21 @@ def get_source_mappings(project_root: Path) -> dict:
     return {}
 
 
-def discover_changes(path: str = "specs/_changelog") -> List[str]:
+def discover_changes(path: str = "se3/specs/_changelog") -> List[str]:
     """Discover all changelog entries.
 
     Args:
-        path: Base path to search for changelog entries (falls back to openspec/changes)
+        path: Base path to search for changelog entries (falls back to specs/, openspec/changes)
 
     Returns:
         List of changelog entry names
     """
     changes = []
     changes_path = Path(path)
+
+    # Fallback to specs/_changelog (legacy)
+    if not changes_path.exists():
+        changes_path = Path("specs/_changelog")
 
     # Fallback to legacy openspec/changes
     if not changes_path.exists():
@@ -478,7 +485,6 @@ def has_framework_file_changes(project_root: Path) -> tuple[bool, List[str]]:
     staged_files = result.stdout.strip().split("\n") if result.returncode == 0 else []
 
     framework_patterns = [
-        "output/SE3.md.template",
         "tools/se3_tools/__init__.py",
         "tools/se3_tools/commands/",
         "tools/se3_tools/utils.py",

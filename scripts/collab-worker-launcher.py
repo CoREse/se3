@@ -50,7 +50,7 @@ def main():
     parser.add_argument("--model", help="Model to use")
     parser.add_argument("--mcp-config", help="MCP config file")
     parser.add_argument("--project-root", help="Project root directory")
-    parser.add_argument("--config-file", help="Path to se3.config.yaml")
+    parser.add_argument("--config-file", help="Path to se3.yaml")
 
     args = parser.parse_args()
 

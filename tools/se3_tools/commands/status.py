@@ -185,11 +185,11 @@ def check_human_calls(project_root: Path, timeout_days: int = 7) -> List[Dict[st
 
 
 def compute_flow_engine_status(project_root: Path) -> Optional[Dict[str, Any]]:
-    """Compute flow engine status from .se3/state/ directory.
+    """Compute flow engine status from se3/state/ directory.
 
     Returns dict with flow engine state or None if not initialized.
     """
-    se3_dir = project_root / ".se3"
+    se3_dir = project_root / "se3"
     state_dir = se3_dir / "state"
 
     if not state_dir.exists():
@@ -297,7 +297,7 @@ def run_diagnostics(project_root: str = ".") -> Dict[str, Any]:
                 'severity': 'warning',
                 'check': 'flow_engine',
                 'message': f"{len(flow_engine['failed_flows'])} failed flow(s)",
-                'suggestion': "Check .se3/state/ for details or restart with 'se3 run'"
+                'suggestion': "Check se3/state/ for details or restart with 'se3 run'"
             })
     else:
         issues.append({
@@ -427,7 +427,7 @@ def show_execution_logs(project_root: Path, lines: int = 50) -> None:
         project_root: Project root directory
         lines: Number of log lines to show
     """
-    log_file = project_root / ".se3" / "logs" / "structured.log"
+    log_file = project_root / "se3" / "logs" / "structured.log"
 
     if not log_file.exists():
         print("\nNo execution logs found.")

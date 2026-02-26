@@ -12,9 +12,16 @@ human-calls/
 issues.md
 prompts/
 
-# SE3 temporary files
+# SE3 runtime (gitignored)
+se3/state/
+se3/cache/
+se3/logs/
 se3/tmp/
+se3/collab/
+se3/calls/
 tmp*.prompt
+
+# SE3 tracked content: se3/specs/ and se3.yaml are NOT ignored
 
 # SE3 session file
 .claude/.session.json

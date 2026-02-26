@@ -1,1 +1,18 @@
-{"id": "task-002", "branch": "collab/verify-human-calls-archive", "worktree": ".worktrees/verify-human-calls-archive", "status": "failed", "title": "Verify human calls archiving system", "prompt": "Verify that the human calls archiving system is fully functional. Check the se3 human-calls archive and se3 human-calls list commands. Verify that completed calls are properly archived.", "spec_refs": [], "dependencies": [], "health": {"timeout_minutes": 30, "attempts": 1, "max_attempts": 2, "last_activity": "2026-02-18T21:47:10.704738"}, "created_at": "2026-02-18T20:35:27", "started_at": "now", "worker_pid": 2527908, "worker_exit_code": 1, "completed_at": "now"}
+{
+  "id": "task-002",
+  "title": "Test spec file reading",
+  "prompt": "This is a test task to verify spec reading in the collaboration framework. Your task:\n\n1. Read the file `openspec/README.md` if it exists, or any `.md` file in the openspec directory\n2. Create a summary file at `.worktrees/test-spec-reading/spec-summary.txt` containing:\n   - The name of the spec file you read\n   - First 100 characters of its content\n   - Confirmation that spec reading works\n\nThis verifies that workers can access and read specification files.",
+  "branch": "collab/task-002",
+  "worktree": "/data/cre/workspace/se3.0/.worktrees/task-002",
+  "base_branch": "se3-loop/1771558202",
+  "status": "failed",
+  "exit_code": -1,
+  "started_at": "2026-02-20T12:37:25.590240",
+  "completed_at": "2026-02-20T13:37:25.691450",
+  "health": {
+    "timeout_minutes": 60,
+    "max_attempts": 3,
+    "attempts": 3,
+    "last_activity": "2026-02-20T13:37:25.691787"
+  }
+}

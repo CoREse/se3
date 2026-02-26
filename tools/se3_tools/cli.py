@@ -8,7 +8,7 @@ from typing import Optional
 
 import typer
 
-from . import __version__, SE3_FRAMEWORK_VERSION
+from . import __version__
 
 def get_framework_version() -> str:
     """Get current framework version from single source of truth (direct file read for git worktree compatibility)."""
@@ -31,33 +31,7 @@ def get_framework_version() -> str:
     return match.group(1)
 
 
-def get_installed_se3_version(project_root: Path = None) -> str:
-    """Get the SE3 version installed in the project.
-
-    Reads the version from .claude/SE3.md metadata.
-    Returns "0.0.0" if not installed or version cannot be determined.
-    """
-    if project_root is None:
-        project_root = Path.cwd()
-
-    se3_md = project_root / ".claude" / "SE3.md"
-    if not se3_md.exists():
-        return "0.0.0"
-
-    try:
-        content = se3_md.read_text(encoding="utf-8")
-        # Look for version in metadata comment: <!-- SE3 Version: X.Y.Z -->
-        import re
-        match = re.search(r'<!--\s*SE3 Version:\s*([\d]+\.[\d]+\.[\d]+)\s*-->', content)
-        if match:
-            return match.group(1)
-        return "0.0.0"
-    except Exception:
-        return "0.0.0"
-
-
-from .commands import lint, status, sync, verify, update, collab, commit, human_calls_cmd, human_input, work, health, run, dashboard
-from .commands.init import initialize_project
+from .commands import lint, status, verify, collab, commit, human_calls_cmd, human_input, work, health, run, dashboard
 
 app = typer.Typer(
     name="se3",
@@ -70,12 +44,6 @@ def _version_callback(value: bool):
     if value:
         typer.echo(f"se3 CLI version: {__version__}")
         typer.echo(f"SE3 Framework version: {get_framework_version()}")
-        try:
-            installed = get_installed_se3_version()
-            if installed != "0.0.0":
-                typer.echo(f"Project SE3 version: {installed}")
-        except Exception:
-            pass
         raise typer.Exit()
 
 @app.callback()
@@ -91,33 +59,11 @@ def main(
         raise typer.Exit()
 
 
-# Register direct commands
-@app.command(name="init")
-def init_cmd(
-    force: bool = typer.Option(False, "--force", "-f", help="Reinitialize even if already initialized"),
-    offline: bool = typer.Option(False, "--offline", "-o", help="Use local templates without network"),
-    with_config: bool = typer.Option(False, "--with-config", "-c", help="Create se3.config.yaml"),
-    se3_version: str = typer.Option(SE3_FRAMEWORK_VERSION, "--se3-version", "-v", help="Specify SE3 version to use"),
-):
-    """Initialize a new SE 3.0 project."""
-    try:
-        initialize_project(force, offline, with_config, se3_version)
-    except Exception as e:
-        typer.echo(
-            typer.style(
-                f"Error during initialization: {str(e)}",
-                fg=typer.colors.RED,
-            )
-        )
-        raise typer.Exit(1)
-
 # Register sub-typer commands (complex multi-command tools)
 app.add_typer(lint.app, name="lint", help="Lint OpenSpec files")
 app.add_typer(status.app, name="status", help="Check project status")
 app.add_typer(health.app, name="health", help="Check OpenSpec system health and integrity")
-app.add_typer(sync.app, name="sync", help="Sync output files")
 app.add_typer(verify.app, name="verify", help="Verify spec coverage")
-app.add_typer(update.app, name="update", help="Update SE 3.0 framework to latest version")
 app.add_typer(collab.app, name="collab", help="Manage git-worktree multi-agent collaboration")
 app.add_typer(commit.app, name="commit", help="Commit changes with SE3 verification")
 app.add_typer(human_calls_cmd.app, name="human-calls", help="Manage human calls")
@@ -443,10 +389,11 @@ def run_cmd(
 
     project_root = get_project_root()
 
-    # Ensure .se3 directory exists
+    # Ensure se3 directory exists
     se3_dir = project_root / SE3_DIR
     se3_dir.mkdir(exist_ok=True)
     (se3_dir / "state").mkdir(exist_ok=True)
+    (se3_dir / "cache").mkdir(exist_ok=True)
 
     if loop:
         exit_code = run_loop_mode(
@@ -512,19 +459,19 @@ def handoff_cmd(
 def migrate_cmd(
     project_root: str = typer.Option(".", "--project-root", "-p", help="Root directory of the project"),
     dry_run: bool = typer.Option(False, "--dry-run", "-n", help="Show what would be migrated without making changes"),
-    force: bool = typer.Option(False, "--force", "-f", help="Proceed even if .se3/ already exists (merge mode)"),
+    force: bool = typer.Option(False, "--force", "-f", help="Proceed even if se3/ already exists (merge mode)"),
 ):
-    """Migrate legacy directory structure to new .se3/ format.
+    """Migrate legacy directory structure to new se3/ format.
 
-    Moves directories from legacy locations to the new consolidated .se3/ structure:
-    - human-calls/ → .se3/calls/
-    - .collab/ → .se3/collab/
-    - tmp*.prompt files → cleaned up
+    Moves directories from legacy locations to the new consolidated se3/ structure:
+    - .se3/ → se3/ (state, logs, cache)
+    - specs/ → se3/specs/
+    - se3.config.yaml → se3.yaml
 
     Examples:
         se3 migrate                    # Perform migration
         se3 migrate --dry-run          # Preview changes
-        se3 migrate --force            # Merge with existing .se3/
+        se3 migrate --force            # Merge with existing se3/
     """
     from .commands.migrate import run_migration
     run_migration(project_root, dry_run, force)

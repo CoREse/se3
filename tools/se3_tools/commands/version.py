@@ -30,17 +30,6 @@ def get_framework_version() -> str:
     return match.group(1)
 
 
-def get_template_version(project_root: Path) -> Optional[str]:
-    """Get version from SE3.md.template."""
-    template_file = project_root / "output" / "SE3.md.template"
-    if not template_file.exists():
-        return None
-
-    content = template_file.read_text()
-    match = re.search(r'<!-- SE3 Version: (\d+\.\d+\.\d+) -->', content)
-    return match.group(1) if match else None
-
-
 def get_versions_from_versions_md(project_root: Path) -> List[str]:
     """Get all versions from VERSIONS.md version history.
 
@@ -109,16 +98,8 @@ def check_version_consistency(project_root: Path) -> Tuple[bool, List[str]]:
 
     # Get versions from all sources
     framework_version = get_framework_version()
-    template_version = get_template_version(project_root)
     versions_md_versions = get_versions_from_versions_md(project_root)
     readme_versions = get_readme_versions(project_root)
-
-    # Check template matches framework
-    if template_version and template_version != framework_version:
-        issues.append(
-            f"Version mismatch: output/SE3.md.template ({template_version}) "
-            f"!= SE3_FRAMEWORK_VERSION ({framework_version})"
-        )
 
     # Check VERSIONS.md has the current version
     if versions_md_versions and framework_version not in versions_md_versions:
@@ -151,7 +132,6 @@ def get_changed_framework_files(project_root: Path, since_ref: str = "HEAD~1") -
         since_ref: Git ref to compare against (default: HEAD~1 for last commit)
     """
     framework_patterns = [
-        "output/SE3.md.template",
         "tools/se3_tools/__init__.py",
         "tools/se3_tools/commands/",
         "scripts/collab-",
@@ -214,7 +194,6 @@ def validate_version_bump(project_root: Path) -> Tuple[bool, List[str]]:
 
     # Check for framework changes
     framework_files = [
-        "output/SE3.md.template",
         "tools/se3_tools/__init__.py",
         "tools/se3_tools/commands/",
         "scripts/collab-",

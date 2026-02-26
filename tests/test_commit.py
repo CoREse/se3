@@ -71,9 +71,9 @@ class TestDetectTestCommand:
         assert cmd is None
 
     def test_config_override(self):
-        """Should use se3.config.yaml test_command if present."""
+        """Should use se3.yaml test_command if present."""
         config = {"commit": {"test_command": "make test"}}
-        (Path(self.tmpdir) / "se3.config.yaml").write_text(
+        (Path(self.tmpdir) / "se3.yaml").write_text(
             "commit:\n  test_command: make test\n"
         )
         cmd = detect_test_command(Path(self.tmpdir))

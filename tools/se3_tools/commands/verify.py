@@ -219,9 +219,11 @@ def verify_all_specs(project_root: str = ".") -> Dict[str, Any]:
     """
     root = Path(project_root).resolve()
 
-    # Find all specs in specs/ (or openspec/specs/ fallback)
+    # Find all specs in se3/specs/ (or specs/, openspec/specs/ fallback)
     spec_files = []
-    specs_dir = root / "specs"
+    specs_dir = root / "se3" / "specs"
+    if not specs_dir.exists():
+        specs_dir = root / "specs"
     if not specs_dir.exists():
         specs_dir = root / "openspec" / "specs"
     if specs_dir.exists():
@@ -234,7 +236,7 @@ def verify_all_specs(project_root: str = ".") -> Dict[str, Any]:
     if not spec_files:
         return {
             'success': False,
-            'error': "No specs found in specs/ or openspec/specs/",
+            'error': "No specs found in se3/specs/, specs/, or openspec/specs/",
             'scenarios': [],
             'covered': [],
             'uncovered': [],

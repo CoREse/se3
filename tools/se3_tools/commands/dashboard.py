@@ -96,8 +96,8 @@ def compute_git_status(project_root: Path) -> Dict[str, Any]:
 
 
 def compute_flow_engine_status(project_root: Path) -> Optional[Dict[str, Any]]:
-    """Compute flow engine status from .se3/state/ directory."""
-    state_dir = project_root / ".se3" / "state"
+    """Compute flow engine status from se3/state/ directory."""
+    state_dir = project_root / "se3" / "state"
 
     if not state_dir.exists():
         return None

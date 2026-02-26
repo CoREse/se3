@@ -117,10 +117,11 @@ def check_init_script(project_root: Path) -> Dict[str, Any]:
 def check_specs(project_root: Path) -> Dict[str, Any]:
     """Check if SE3 specs directory exists and is initialized.
 
-    Checks for specs/ (preferred) or openspec/specs/ (fallback).
+    Checks for se3/specs/ (preferred), specs/ (fallback), or openspec/specs/ (legacy).
     """
-    specs_dir = project_root / "specs"
-    fallback_dir = project_root / "openspec" / "specs"
+    specs_dir = project_root / "se3" / "specs"
+    fallback_dir = project_root / "specs"
+    legacy_dir = project_root / "openspec" / "specs"
 
     if specs_dir.exists():
         spec_count = len(list(specs_dir.glob("*/spec.md")))
@@ -135,6 +136,14 @@ def check_specs(project_root: Path) -> Dict[str, Any]:
         return {
             "initialized": True,
             "path": str(fallback_dir),
+            "spec_count": spec_count,
+            "using_fallback": True,
+        }
+    elif legacy_dir.exists():
+        spec_count = len(list(legacy_dir.glob("*/spec.md")))
+        return {
+            "initialized": True,
+            "path": str(legacy_dir),
             "spec_count": spec_count,
             "using_fallback": True,
         }
@@ -461,7 +470,7 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
         })
         actions.append({
             "type": "create_se3_dirs",
-            "reason": "Initialize .se3/ directory structure"
+            "reason": "Initialize se3/ directory structure"
         })
         return actions
 
@@ -479,8 +488,8 @@ def compute_actions(state: Dict[str, Any]) -> List[Dict[str, Any]]:
     if not specs_info.get("initialized"):
         actions.append({
             "type": "init_specs",
-            "cmd": "mkdir -p specs",
-            "reason": "specs/ directory missing, needs initialization"
+            "cmd": "mkdir -p se3/specs",
+            "reason": "se3/specs/ directory missing, needs initialization"
         })
 
     # Baseline verification

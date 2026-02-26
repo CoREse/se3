@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.2.0** — refactor: migrate spec system from openspec/ to specs/, remove openspec CLI dependency.
+**3.3.0** — refactor: pure CLI architecture - consolidate directories, remove output/, delete init/update/sync commands.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.3.0 | 2026-02-26 | refactor: SE3 3.3 pure CLI architecture. Delete output/ directory (no more template distribution). Remove init/update/sync commands (no more .claude/ writes). Consolidate .se3/ + specs/ + se3/ into unified se3/ directory. Rename se3.config.yaml to se3.yaml with legacy fallback. |
 | 3.2.0 | 2026-02-26 | refactor: Migrate SE3 spec system from openspec/ to native specs/ directory. Engine reads specs/ first with openspec/specs/ fallback. Remove openspec CLI dependency from start/init. Fix pre-existing test_claude_runner failures. |
 | 3.1.1 | 2026-02-25 | fix: 4 se3 run bugs. (1) Convert run from add_typer to @app.command for correct --type after positional arg. (2) Add max_retries check + EOFError defaults to Abort. (3) dashboard/status read engine.json instead of globbing flow_*.json. (4) LLMCaller strips CLAUDECODE env var. Doc: fix state file path in run.md. |
 | 3.1.0 | 2026-02-25 | feat: Mark all 2.x commands as deprecated with migration guidance to `se3 run`. Add `se3 dashboard` and `se3 status --log` commands. Flow engine status detection in diagnostics. New output specs (run, sync, verify, guardrails, handoff). Clean up stale openspec changes. |

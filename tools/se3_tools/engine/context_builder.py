@@ -33,12 +33,15 @@ class ContextBuilder:
 
     @staticmethod
     def _resolve_specs_dir(project_root: Path) -> Path:
-        """Resolve specs directory: specs/ preferred, openspec/specs/ fallback."""
-        primary = project_root / "specs"
-        fallback = project_root / "openspec" / "specs"
+        """Resolve specs directory: se3/specs/ preferred, specs/ fallback, openspec/specs/ legacy."""
+        primary = project_root / "se3" / "specs"
+        fallback = project_root / "specs"
+        legacy = project_root / "openspec" / "specs"
         if primary.exists():
             return primary
-        return fallback
+        if fallback.exists():
+            return fallback
+        return legacy
 
     def build_step_context(
         self,

@@ -179,7 +179,7 @@ When available, use browser automation (Puppeteer MCP, etc.) to test user-facing
 2. **Subsequent runs**: Screenshot → compare with baseline → fail if diff > threshold
 3. **Update baseline**: When UI intentionally changes, delete/recreate baseline after human approval
 
-**Config** (in `se3.config.yaml`):
+**Config** (in `se3.yaml`):
 - `e2e.baseline_dir`: Where to store baseline screenshots
 - `e2e.diff_threshold`: Pixel difference tolerance (0.0 - 1.0)
 - `e2e.default_viewport`: Browser viewport for consistent screenshots

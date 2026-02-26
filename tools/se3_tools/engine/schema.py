@@ -133,7 +133,7 @@ class FlowInstanceSchema(TypedDict, total=False):
             "updated_at": "2026-02-24T10:30:00",
             "completed_at": null,
             "change_name": "feature-x-implementation",
-            "change_path": "specs/_changelog/feature-x",
+            "change_path": "se3/specs/_changelog/feature-x",
             "is_loop_mode": false,
             "loop_branch": null
         }

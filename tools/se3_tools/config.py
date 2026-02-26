@@ -2,7 +2,7 @@
 
 Supports two-level config:
 - Global: ~/.se3/config.yaml (shared across all projects)
-- Project: se3.config.yaml (project-specific, overrides global)
+- Project: se3.yaml (project-specific, overrides global)
 """
 
 # Verify: se3-config/Using default configuration
@@ -28,10 +28,12 @@ def load_global_config() -> Dict[str, Any]:
 
 
 def load_project_config(project_root: Path | str) -> Dict[str, Any]:
-    """Load project config from se3.config.yaml."""
+    """Load project config from se3.yaml (fallback: se3.config.yaml)."""
     if isinstance(project_root, str):
         project_root = Path(project_root)
-    config_file = project_root / "se3.config.yaml"
+    config_file = project_root / "se3.yaml"
+    if not config_file.exists():
+        config_file = project_root / "se3.config.yaml"  # legacy fallback
     if config_file.exists():
         try:
             import yaml
@@ -58,7 +60,7 @@ def load_claude_commands(project_root: Optional[Path] = None) -> List[Dict[str, 
     """Load and sort claude commands from config.
 
     Resolution order:
-    1. Project se3.config.yaml claude_commands (if present, replaces global)
+    1. Project se3.yaml claude_commands (if present, replaces global)
     2. Global ~/.se3/config.yaml claude_commands
     3. Default: [{cmd: "claude", priority: 0}]
 
@@ -97,7 +99,7 @@ def load_human_call_config(project_root: Optional[Path] = None) -> Dict[str, Any
     """Load human call configuration from config.
 
     Resolution order:
-    1. Project se3.config.yaml human_call (if present, overrides global)
+    1. Project se3.yaml human_call (if present, overrides global)
     2. Global ~/.se3/config.yaml human_call
     3. Default values
 
@@ -127,7 +129,7 @@ def load_session_config(project_root: Optional[Path] = None) -> Dict[str, Any]:
     """Load session configuration from config.
 
     Resolution order:
-    1. Project se3.config.yaml session (if present, overrides global)
+    1. Project se3.yaml session (if present, overrides global)
     2. Global ~/.se3/config.yaml session
     3. Default values
 
