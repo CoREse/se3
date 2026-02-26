@@ -30,6 +30,7 @@ try:
     from ..engine.state_machine import StateMachine
     from ..engine.context_builder import ContextBuilder
     from ..engine.steps import STEP_HANDLERS
+    from ..engine.llm_caller import set_extra_prompt
 except ImportError:
     # Direct import for development
     import sys
@@ -39,6 +40,7 @@ except ImportError:
     from engine.state_machine import StateMachine
     from engine.context_builder import ContextBuilder
     from engine.steps import STEP_HANDLERS
+    from engine.llm_caller import set_extra_prompt
 
 
 app = typer.Typer()
@@ -212,53 +214,53 @@ def run_flow(
         print(f"Type: {task_type}")
 
     # Execute flow
-    try:
-        while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED):
-            current_step = flow.state.get_current_step()
-            if not current_step:
-                print("No current step, marking flow as complete")
-                flow.status = FlowStatus.COMPLETED
-                break
+    while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED):
+        current_step = flow.state.get_current_step()
+        if not current_step:
+            print("No current step, marking flow as complete")
+            flow.status = FlowStatus.COMPLETED
+            break
 
-            print(f"\n{'='*60}")
-            print(f"Step: {current_step.step_type.value}")
-            print(f"Status: {current_step.status.value}")
-            print(f"{'='*60}")
+        print(f"\n{'='*60}")
+        print(f"Step: {current_step.step_type.value}")
+        print(f"Status: {current_step.status.value}")
+        print(f"{'='*60}")
 
+        try:
             result = state_machine.run_step(flow, current_step)
+        except KeyboardInterrupt:
+            # First Ctrl+C: interrupt current step, offer prompt injection
+            print("\n\n⏸  Interrupted. Enter additional instruction for this step")
+            print("   (empty to retry as-is, Ctrl+C again to exit):")
+            try:
+                user_input = input("   > ").strip()
+                if user_input:
+                    set_extra_prompt(user_input)
+                    print(f"   ✓ Extra prompt set, retrying step...")
+                else:
+                    print("   → Retrying step as-is...")
+                # Reset step to PENDING so it re-runs
+                current_step.status = StepStatus.PENDING
+                persistence.save_flow(flow)
+                continue
+            except (KeyboardInterrupt, EOFError):
+                # Second Ctrl+C (or EOF): save and exit
+                persistence.save_flow(flow)
+                print("\n\nInterrupted by user. Flow state saved.")
+                print(f"Resume with: se3 run --resume")
+                return 130
 
-            if result == StepStatus.FAILED:
-                error_msg = current_step.error_message or "Unknown error"
-                print(f"Step failed: {error_msg}", file=sys.stderr)
+        if result == StepStatus.FAILED:
+            error_msg = current_step.error_message or "Unknown error"
+            print(f"Step failed: {error_msg}", file=sys.stderr)
 
-                max_retries = 3
-                if current_step.retry_count >= max_retries:
-                    print(f"Max retries ({max_retries}) reached for step {current_step.step_type.value}", file=sys.stderr)
-                    # Only offer skip or abort
-                    options = ["Skip to next step", "Abort flow"]
-                    choice = prompt_user_choice("What would you like to do?", options)
-                    if choice == 0:
-                        current_step.status = StepStatus.COMPLETED
-                        state_machine.transition_to_next(flow)
-                        persistence.save_flow(flow)
-                        continue
-                    else:
-                        flow.status = FlowStatus.FAILED
-                        persistence.save_flow(flow)
-                        return 1
-
-                # Ask user whether to retry, skip, or abort
-                options = ["Retry this step", "Skip to next step", "Abort flow"]
+            max_retries = 3
+            if current_step.retry_count >= max_retries:
+                print(f"Max retries ({max_retries}) reached for step {current_step.step_type.value}", file=sys.stderr)
+                # Only offer skip or abort
+                options = ["Skip to next step", "Abort flow"]
                 choice = prompt_user_choice("What would you like to do?", options)
-
                 if choice == 0:
-                    # Reset step status and retry
-                    current_step.status = StepStatus.PENDING
-                    current_step.retry_count += 1
-                    persistence.save_flow(flow)
-                    continue
-                elif choice == 1:
-                    # Force step to completed so transition works
                     current_step.status = StepStatus.COMPLETED
                     state_machine.transition_to_next(flow)
                     persistence.save_flow(flow)
@@ -268,31 +270,47 @@ def run_flow(
                     persistence.save_flow(flow)
                     return 1
 
-            print(f"Step completed: {current_step.step_type.value}")
+            # Ask user whether to retry, skip, or abort
+            options = ["Retry this step", "Skip to next step", "Abort flow"]
+            choice = prompt_user_choice("What would you like to do?", options)
 
-            # Transition to next step
-            state_machine.transition_to_next(flow)
-            persistence.save_flow(flow)
+            if choice == 0:
+                # Reset step status and retry
+                current_step.status = StepStatus.PENDING
+                current_step.retry_count += 1
+                persistence.save_flow(flow)
+                continue
+            elif choice == 1:
+                # Force step to completed so transition works
+                current_step.status = StepStatus.COMPLETED
+                state_machine.transition_to_next(flow)
+                persistence.save_flow(flow)
+                continue
+            else:
+                flow.status = FlowStatus.FAILED
+                persistence.save_flow(flow)
+                return 1
 
-        # Flow complete
-        if flow.status == FlowStatus.COMPLETED:
-            print(f"\n{'='*60}")
-            print("Flow completed successfully!")
-            print(f"{'='*60}")
-            return 0
-        elif flow.status == FlowStatus.FAILED:
-            current_step = flow.state.get_current_step()
-            error_msg = current_step.error_message if current_step else "Unknown error"
-            print(f"\nFlow failed: {error_msg}", file=sys.stderr)
-            return 1
-        else:
-            print(f"\nFlow ended with status: {flow.status.value}")
-            return 0
+        print(f"Step completed: {current_step.step_type.value}")
 
-    except KeyboardInterrupt:
-        print("\n\nInterrupted by user. Flow state saved.")
-        print(f"Resume with: se3 run --resume")
-        return 130  # Standard exit code for Ctrl+C
+        # Transition to next step
+        state_machine.transition_to_next(flow)
+        persistence.save_flow(flow)
+
+    # Flow complete
+    if flow.status == FlowStatus.COMPLETED:
+        print(f"\n{'='*60}")
+        print("Flow completed successfully!")
+        print(f"{'='*60}")
+        return 0
+    elif flow.status == FlowStatus.FAILED:
+        current_step = flow.state.get_current_step()
+        error_msg = current_step.error_message if current_step else "Unknown error"
+        print(f"\nFlow failed: {error_msg}", file=sys.stderr)
+        return 1
+    else:
+        print(f"\nFlow ended with status: {flow.status.value}")
+        return 0
 
 
 def run_loop_mode(

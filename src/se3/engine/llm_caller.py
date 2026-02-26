@@ -3,6 +3,7 @@
 Handles subprocess calls to Claude CLI with retry and fallback logic.
 """
 
+import json
 import logging
 import os
 import time
@@ -12,6 +13,20 @@ from typing import Any, Callable, Dict, List, Optional
 from ..claude_runner import ClaudeRunner
 
 logger = logging.getLogger(__name__)
+
+# Module-level extra prompt state for Ctrl+C injection
+_extra_prompt: Optional[str] = None
+
+
+def set_extra_prompt(prompt: Optional[str]) -> None:
+    """Set an extra prompt to inject into the next LLM call."""
+    global _extra_prompt
+    _extra_prompt = prompt
+
+
+def get_extra_prompt() -> Optional[str]:
+    """Get the current extra prompt (None if not set)."""
+    return _extra_prompt
 
 
 class LLMCallError(Exception):
@@ -63,6 +78,13 @@ class LLMCaller:
         Raises:
             LLMCallError: If all retries exhausted
         """
+        # Inject extra prompt if set (from Ctrl+C user injection)
+        global _extra_prompt
+        if _extra_prompt:
+            prompt = f"{prompt}\n\n[Additional user instruction]: {_extra_prompt}"
+            logger.info(f"Injected extra prompt: {_extra_prompt[:80]}")
+            _extra_prompt = None  # Consume after use
+
         args = ["-p", prompt]
 
         if context_files:
@@ -111,8 +133,9 @@ class LLMCaller:
                     )
 
                 if result.success:
-                    duration_ms = int((time.time() - start_time) * 1000)
-                    logger.debug(f"LLM call succeeded in {duration_ms}ms")
+                    duration_s = time.time() - start_time
+                    logger.debug(f"LLM call succeeded in {int(duration_s * 1000)}ms")
+                    _print_response_summary(result.output, duration_s)
                     return result.output
 
                 last_error = f"Command '{result.cmd_used}' failed with exit code {result.returncode}"
@@ -126,3 +149,30 @@ class LLMCaller:
                 time.sleep(self.retry_delay)
 
         raise LLMCallError(f"LLM call failed after {self.max_retries} attempts: {last_error}")
+
+
+def _print_response_summary(output: str, duration_s: float) -> None:
+    """Print a summary of the LLM response to terminal."""
+    size_kb = len(output.encode("utf-8")) / 1024
+    duration_str = f"{duration_s:.1f}s"
+
+    # Try to detect and parse JSON in the output
+    text = output.strip()
+    # Handle markdown code blocks wrapping JSON
+    if text.startswith("```"):
+        first_newline = text.find("\n")
+        last_fence = text.rfind("```")
+        if first_newline != -1 and last_fence > first_newline:
+            text = text[first_newline + 1:last_fence].strip()
+
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, dict):
+            keys = ", ".join(parsed.keys())
+            print(f"  [llm-response] \u2713 JSON received: {{{keys}}} ({size_kb:.1f}KB, {duration_str})")
+        else:
+            print(f"  [llm-response] \u2713 JSON received ({size_kb:.1f}KB, {duration_str})")
+    except (json.JSONDecodeError, ValueError):
+        # Not JSON — show text length summary
+        lines = output.count("\n") + 1
+        print(f"  [llm-response] \u2713 Text received: {lines} lines ({size_kb:.1f}KB, {duration_str})")
