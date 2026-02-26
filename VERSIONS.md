@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.3.1** — fix: improve project root detection and JSON parsing in all step handlers.
+**3.3.2** — feat: add terminal output for summarize step.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.3.2 | 2026-02-26 | feat: summarize step now prints formatted summary to terminal including work summary, key changes, files modified, testing status, remaining work, and suggested next steps. Summary is still saved to se3/state/summary-{flow_id}.json for persistence. |
 | 3.3.1 | 2026-02-26 | fix: get_project_root() now also checks for se3.yaml/se3.config.yaml to find project root when .git is not available (fixes SSH execution). Improve JSON parsing in all step handlers (analyze, design, implement, plan_tasks, propose, summarize, update_spec, verify_spec) to extract JSON from LLM responses that include extra text before or after the JSON object. |
 | 3.3.0 | 2026-02-26 | refactor: SE3 3.3 pure CLI architecture. Delete output/ directory (no more template distribution). Remove init/update/sync commands (no more .claude/ writes). Consolidate .se3/ + specs/ + se3/ into unified se3/ directory. Rename se3.config.yaml to se3.yaml with legacy fallback. |
 | 3.2.0 | 2026-02-26 | refactor: Migrate SE3 spec system from openspec/ to native specs/ directory. Engine reads specs/ first with openspec/specs/ fallback. Remove openspec CLI dependency from start/init. Fix pre-existing test_claude_runner failures. |
