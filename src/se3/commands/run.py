@@ -18,6 +18,7 @@ import json
 import logging
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -226,6 +227,7 @@ def run_flow(
         print(f"Status: {current_step.status.value}")
         print(f"{'='*60}")
 
+        step_start_time = datetime.now()
         try:
             result = state_machine.run_step(flow, current_step)
         except KeyboardInterrupt:
@@ -291,7 +293,8 @@ def run_flow(
                 persistence.save_flow(flow)
                 return 1
 
-        print(f"Step completed: {current_step.step_type.value}")
+        step_duration = (datetime.now() - step_start_time).total_seconds()
+        print(f"Step completed: {current_step.step_type.value} ({step_duration:.1f}s)")
 
         # Transition to next step
         state_machine.transition_to_next(flow)

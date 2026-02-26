@@ -334,21 +334,21 @@ def find_verification_markers(scenario_id: str, search_paths: List[str]) -> List
 
 
 def get_framework_version(project_root: Path) -> Optional[str]:
-    """Extract SE3 framework version from tools/se3_tools/__init__.py.
+    """Extract SE3 framework version from pyproject.toml.
 
     Args:
         project_root: Root of the project
 
     Returns:
-        Version string (e.g., "2.22.4") or None if not found
+        Version string (e.g., "3.3.6") or None if not found
     """
-    init_file = project_root / "tools" / "se3_tools" / "__init__.py"
-    if not init_file.exists():
+    pyproject_file = project_root / "pyproject.toml"
+    if not pyproject_file.exists():
         return None
 
     try:
-        content = init_file.read_text()
-        match = re.search(r'SE3_FRAMEWORK_VERSION = "(\d+\.\d+\.\d+)"', content)
+        content = pyproject_file.read_text()
+        match = re.search(r'version\s*=\s*"(\d+\.\d+\.\d+)"', content)
         return match.group(1) if match else None
     except (OSError, IOError):
         return None
@@ -373,10 +373,10 @@ def check_documentation_consistency(
     issues = []
     readme_path = project_root / "README.md"
     versions_path = project_root / "VERSIONS.md"
-    init_file = project_root / "tools" / "se3_tools" / "__init__.py"
+    pyproject_file = project_root / "pyproject.toml"
 
     # Check if this is an SE3 framework project
-    is_se3_framework = init_file.exists()
+    is_se3_framework = pyproject_file.exists()
 
     # Check README.md exists
     if not readme_path.exists():
@@ -425,9 +425,9 @@ def check_documentation_consistency(
         if not current_version:
             if check_framework_files:
                 issues.append(
-                    "BLOCKING: Could not extract SE3_FRAMEWORK_VERSION from tools/se3_tools/__init__.py.\n"
+                    "BLOCKING: Could not extract version from pyproject.toml.\n"
                     "  Required action: Ensure the file contains valid version string:\n"
-                    '    SE3_FRAMEWORK_VERSION = "X.Y.Z"'
+                    '    version = "X.Y.Z"'
                 )
                 return False, issues
         else:

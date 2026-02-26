@@ -324,9 +324,9 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
     staged_files = result.stdout.strip().split("\n") if result.returncode == 0 else []
     doc_files_changed = [f for f in staged_files if f in ("README.md", "VERSIONS.md")]
 
-    # Check if this is an SE3 framework project (has tools/se3_tools/__init__.py)
-    init_file = project_root / "tools" / "se3_tools" / "__init__.py"
-    is_se3_framework = init_file.exists()
+    # Check if this is an SE3 framework project (has pyproject.toml)
+    pyproject_file = project_root / "pyproject.toml"
+    is_se3_framework = pyproject_file.exists()
 
     # No framework or doc changes - skip all checks
     if not has_framework_change and not doc_files_changed:
@@ -341,7 +341,7 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
     # Check if version was updated (only relevant if framework files changed)
     if has_framework_change:
         result = run_command(
-            ["git", "diff", "--cached", str(init_file)],
+            ["git", "diff", "--cached", str(pyproject_file)],
             cwd=project_root
         )
         # Check for actual version change, not just context lines
@@ -349,7 +349,7 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
         diff_lines = result.stdout.split("\n")
         version_updated = any(
             (line.startswith("+") or line.startswith("-")) and
-            "SE3_FRAMEWORK_VERSION" in line
+            'version' in line.lower()
             for line in diff_lines
         )
 
@@ -357,7 +357,7 @@ def check_version_consistency(project_root: Path) -> tuple[bool, List[str]]:
             issues.append(
                 f"BLOCKING: Framework files changed but version not bumped.\n"
                 f"  Changed files: {', '.join(changed_framework_files)}\n"
-                f"  Required action: Update SE3_FRAMEWORK_VERSION in tools/se3_tools/__init__.py\n"
+                f"  Required action: Update version in pyproject.toml\n"
                 f"  Version rules:\n"
                 f"    - PATCH (X.Y.Z+1): Bug fixes, docs corrections\n"
                 f"    - MINOR (X.Y+1.0): New features, new commands\n"

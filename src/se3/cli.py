@@ -10,25 +10,10 @@ import typer
 
 from . import __version__
 
+
 def get_framework_version() -> str:
-    """Get current framework version from single source of truth (direct file read for git worktree compatibility)."""
-    import os
-    from pathlib import Path
-    import re
-
-    # Get the path to __init__.py in the current working tree
-    init_file = Path(__file__).parent / "__init__.py"
-    if not init_file.exists():
-        raise FileNotFoundError(f"Cannot find se3_tools __init__.py at {init_file}")
-
-    with open(init_file, "r", encoding="utf-8") as f:
-        content = f.read()
-
-    match = re.search(r'SE3_FRAMEWORK_VERSION\s*=\s*"([\d]+\.[\d]+\.[\d]+)"', content)
-    if not match:
-        raise ValueError("Cannot find SE3_FRAMEWORK_VERSION definition in __init__.py")
-
-    return match.group(1)
+    """Get framework version from single source of truth (pyproject.toml via __init__.py)."""
+    return __version__
 
 
 from .commands import lint, status, verify, collab, commit, human_calls_cmd, human_input, work, health, run, dashboard
