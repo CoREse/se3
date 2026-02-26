@@ -2,13 +2,13 @@
 
 ## Current Version
 
-**3.3.1** — fix: improve project root detection and JSON parsing in analyze step.
+**3.3.1** — fix: improve project root detection and JSON parsing in all step handlers.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 3.3.1 | 2026-02-26 | fix: get_project_root() now also checks for se3.yaml/se3.config.yaml to find project root when .git is not available (fixes SSH execution). Improve _parse_analyze_response() to extract JSON from LLM responses that include extra text after the JSON object. |
+| 3.3.1 | 2026-02-26 | fix: get_project_root() now also checks for se3.yaml/se3.config.yaml to find project root when .git is not available (fixes SSH execution). Improve JSON parsing in all step handlers (analyze, design, implement, plan_tasks, propose, summarize, update_spec, verify_spec) to extract JSON from LLM responses that include extra text before or after the JSON object. |
 | 3.3.0 | 2026-02-26 | refactor: SE3 3.3 pure CLI architecture. Delete output/ directory (no more template distribution). Remove init/update/sync commands (no more .claude/ writes). Consolidate .se3/ + specs/ + se3/ into unified se3/ directory. Rename se3.config.yaml to se3.yaml with legacy fallback. |
 | 3.2.0 | 2026-02-26 | refactor: Migrate SE3 spec system from openspec/ to native specs/ directory. Engine reads specs/ first with openspec/specs/ fallback. Remove openspec CLI dependency from start/init. Fix pre-existing test_claude_runner failures. |
 | 3.1.1 | 2026-02-25 | fix: 4 se3 run bugs. (1) Convert run from add_typer to @app.command for correct --type after positional arg. (2) Add max_retries check + EOFError defaults to Abort. (3) dashboard/status read engine.json instead of globbing flow_*.json. (4) LLMCaller strips CLAUDECODE env var. Doc: fix state file path in run.md. |
