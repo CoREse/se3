@@ -85,7 +85,8 @@ class LLMCaller:
             logger.info(f"Injected extra prompt: {_extra_prompt[:80]}")
             _extra_prompt = None  # Consume after use
 
-        args = ["-p", prompt]
+        # Use stream-json format for streaming JSON output with verbose mode
+        args = ["--output-format", "stream-json", "--verbose", "-p", prompt]
 
         if context_files:
             for f in context_files:

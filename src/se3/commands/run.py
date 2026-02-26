@@ -259,18 +259,10 @@ def run_flow(
             max_retries = 3
             if current_step.retry_count >= max_retries:
                 print(f"Max retries ({max_retries}) reached for step {current_step.step_type.value}", file=sys.stderr)
-                # Only offer skip or abort
-                options = ["Skip to next step", "Abort flow"]
-                choice = prompt_user_choice("What would you like to do?", options)
-                if choice == 0:
-                    current_step.status = StepStatus.COMPLETED
-                    state_machine.transition_to_next(flow)
-                    persistence.save_flow(flow)
-                    continue
-                else:
-                    flow.status = FlowStatus.FAILED
-                    persistence.save_flow(flow)
-                    return 1
+                # Auto-fail: exit without asking user
+                flow.status = FlowStatus.FAILED
+                persistence.save_flow(flow)
+                return 1
 
             # Ask user whether to retry, skip, or abort
             options = ["Retry this step", "Skip to next step", "Abort flow"]
