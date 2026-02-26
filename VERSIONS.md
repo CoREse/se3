@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.4.0** — feat: simplified version management and step timing.
+**3.4.1** — feat: stream-json output format and auto-fail on max retries.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.4.1 | 2026-02-26 | feat: add `--output-format stream-json` and `--verbose` to Claude CLI calls for streaming JSON output. Change retry behavior: exit immediately on max retries reached instead of prompting user. |
 | 3.4.0 | 2026-02-26 | feat: simplify version management — single source of truth from pyproject.toml, dynamic version loading in `__init__.py`, remove duplicate SE3_FRAMEWORK_VERSION definition. feat: add step execution timing display in `se3 run` (shows duration in seconds after each step completes). Update version checks in commit, version, and utils modules to use pyproject.toml. |
 | 3.3.6 | 2026-02-26 | feat: centralized robust JSON parsing utility in `src/se3/engine/utils/json_parser.py`. Refactor all 8 step handlers (analyze, propose, design, plan_tasks, implement, verify_spec, summarize, update_spec) to use the centralized JSON parser, improving resilience against malformed LLM outputs. |
 | 3.3.5 | 2026-02-26 | fix: add missing `from pathlib import Path` in propose.py and plan_tasks.py, fixing NameError on `Path.cwd()` during step execution. |
