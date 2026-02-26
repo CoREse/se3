@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.4.5** — fix: handle single-line stream-json format.
+**3.4.6** — fix: extract only assistant message text from stream-json.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.4.6 | 2026-02-26 | fix: extract only assistant message text from stream-json. Remove `result` type extraction to avoid appending non-JSON text to valid JSON responses. Fix JSON parsing when result summary was being appended to assistant's JSON output. |
 | 3.4.5 | 2026-02-26 | fix: handle single-line stream-json format. Remove `len(lines) < 2` check in `_extract_from_stream_json()` to properly parse single-line stream-json events. All JSON parser test cases now pass. |
 | 3.4.4 | 2026-02-26 | feat: properly implement stream-json parsing. Add `_extract_from_stream_json()` to extract text content from stream-json format. Rewrite `parse_json_response()` to handle stream-json, NDJSON, and single JSON formats correctly. |
 | 3.4.3 | 2026-02-26 | fix: remove `--output-format stream-json` due to parsing compatibility issues. Revert to standard text format which works correctly with existing JSON parsing. Add debug logging for response diagnosis. |
