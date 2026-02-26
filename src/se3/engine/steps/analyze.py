@@ -92,11 +92,6 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         caller = LLMCaller(project_root)
         response = caller.call(prompt=prompt)
 
-        # Debug: log first 500 chars of response
-        logger.debug(f"Raw response (first 500 chars): {response[:500]!r}")
-        print(f"[DEBUG] Response type: {type(response)}, length: {len(response)}")
-        print(f"[DEBUG] Response preview: {response[:200]!r}")
-
         # Parse JSON response
         result = parse_json_response(response, required_keys=["task_type"])
 
