@@ -272,6 +272,13 @@ def _update_flow_steps(
         # Insert analyze at the beginning for tracking
         selected.insert(0, StepType.ANALYZE)
 
+    # Enforce step dependency constraints
+    # DESIGN requires PROPOSE to have run before it (for proposal input)
+    if StepType.DESIGN in selected and StepType.PROPOSE not in selected:
+        design_idx = selected.index(StepType.DESIGN)
+        selected.insert(design_idx, StepType.PROPOSE)
+        logger.info("Auto-inserted PROPOSE before DESIGN (required dependency)")
+
     # Update flow state
     if selected:
         flow.state.selected_steps = selected
