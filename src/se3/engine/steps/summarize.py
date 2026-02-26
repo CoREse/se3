@@ -121,6 +121,9 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Also save to a standard location
         _save_summary(flow, summary)
 
+        # Print summary to terminal for user visibility
+        _print_summary(summary)
+
         logger.info("Summary generated successfully")
 
         return StepStatus.COMPLETED
@@ -254,6 +257,47 @@ def _create_basic_summary(
         "handoff_context": f"Flow {flow.flow_id} completed on {datetime.now().isoformat()}",
         "next_steps": [],
     }
+
+
+def _print_summary(summary: dict[str, Any]) -> None:
+    """Print summary to terminal for user visibility.
+
+    Args:
+        summary: Summary dictionary
+    """
+    print("\n" + "=" * 60)
+    print("📋 WORK SUMMARY")
+    print("=" * 60)
+
+    if "summary" in summary:
+        print(f"\n{summary['summary']}")
+
+    if "key_changes" in summary and summary["key_changes"]:
+        print("\n📝 Key Changes:")
+        for change in summary["key_changes"]:
+            print(f"  • {change}")
+
+    if "files_modified" in summary and summary["files_modified"]:
+        print("\n📁 Files Modified:")
+        for file in summary["files_modified"][:10]:  # Limit to 10 files
+            print(f"  • {file}")
+        if len(summary["files_modified"]) > 10:
+            print(f"  ... and {len(summary['files_modified']) - 10} more")
+
+    if "testing_status" in summary:
+        print(f"\n✅ Testing Status: {summary['testing_status']}")
+
+    if "remaining_work" in summary and summary["remaining_work"]:
+        print("\n⏭️  Remaining Work:")
+        for task in summary["remaining_work"]:
+            print(f"  • {task}")
+
+    if "next_steps" in summary and summary["next_steps"]:
+        print("\n➡️  Suggested Next Steps:")
+        for step in summary["next_steps"]:
+            print(f"  • {step}")
+
+    print("\n" + "=" * 60)
 
 
 def _save_summary(flow: FlowInstance, summary: dict[str, Any]) -> None:
