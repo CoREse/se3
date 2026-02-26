@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.3.4** — fix: auto-insert PROPOSE before DESIGN when LLM omits it from step sequence.
+**3.3.5** — fix: missing Path import in propose.py and plan_tasks.py.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.3.5 | 2026-02-26 | fix: add missing `from pathlib import Path` in propose.py and plan_tasks.py, fixing NameError on `Path.cwd()` during step execution. |
 | 3.3.4 | 2026-02-26 | fix: enforce step dependency constraints — auto-insert PROPOSE before DESIGN when LLM's analyze step omits it, preventing "No proposal available" error. Fix missing Path import in design.py. |
 | 3.3.3 | 2026-02-26 | feat: LLM response summary display (JSON keys, size, duration) after every LLM call in llm_caller. Two-layer Ctrl+C: first interrupts step and prompts for extra instruction to inject into retry, second saves state and exits. |
 | 3.3.2 | 2026-02-26 | feat: summarize step now prints formatted summary to terminal including work summary, key changes, files modified, testing status, remaining work, and suggested next steps. Summary is still saved to se3/state/summary-{flow_id}.json for persistence. |
