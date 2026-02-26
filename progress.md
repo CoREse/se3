@@ -3249,3 +3249,4 @@ README.md                                                     |  2 +-
 - `141fa27` chore: bump version to 3.3.4 (4 files)
 - `3dec0fd` fix: add missing Path import in propose.py and plan_tasks.py — NameError on Path.cwd() (2 files)
 - `8ca7dc3` chore: bump version to 3.3.5 (4 files)
+- `f1e7ca6` Extract centralized JSON parser and refactor all 8 step handlers to use it (12 files)
