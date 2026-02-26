@@ -1,0 +1,243 @@
+# se3-scaffold Specification
+
+## Purpose
+Define the SE 3.0 project scaffold system, including the CLAUDE.md + SE3.md template system, standard project structure, configuration system, and self-iterate workflow. This spec governs how SE 3.0 generates its output artifacts and how new projects adopt the framework.
+## Requirements
+### Requirement: CLAUDE.md + SE3.md Template System
+The system SHALL produce a two-part template system:
+1. **CLAUDE.md** - Minimal project-level configuration file with core framework references
+2. **SE3.md** - Complete framework implementation with all process definitions
+
+The **CLAUDE.md template MUST include**:
+- Core principles references
+- Session protocol references
+- Minimal project structure specification
+- Reference to SE3.md for complete framework documentation
+
+The **SE3.md template MUST include**:
+- Complete standard process definitions (startup, execution, shutdown protocols)
+- Detailed special file specifications (progress.md, human-calls/, etc.)
+- Full conventional behavior definitions (self-iterate, change management, etc.)
+- Human-as-MCP invocation specifications
+- Agent Team collaboration specifications
+- Verification protocol
+- Spec guardrails
+- SDD process
+- Configuration system details
+
+#### Scenario: New project adopts SE 3.0
+- **WHEN** a user initializes SE 3.0 framework in a new project
+- **THEN** the system generates both CLAUDE.md (minimal) and SE3.md (complete) in the .claude/ directory
+
+### Requirement: SE 3.0 Project Structure
+The system SHALL define the standard SE 3.0 project file structure.
+
+Standard structure:
+```
+project/
+├── init.sh                # Environment setup (optional)
+├── progress.md            # Cross-session progress tracking
+├── se3.config.yaml        # Framework configuration (optional)
+├── README.md              # Project documentation
+├── openspec/
+│   ├── specs/             # Source of truth for requirements
+│   └── changes/
+│       └── archive/
+├── .claude/               # Framework implementation (read-only for users)
+│   ├── CLAUDE.md          # SE 3.0 minimal framework reference (project-level)
+│   ├── SE3.md             # Complete SE 3.0 framework implementation
+│   └── commands/          # Claude command definitions
+└── se3/                   # SE 3.0 runtime metadata and state (VISIBLE for human-as-MCP)
+    ├── calls/             # Human call queue
+    │   ├── active/        # Pending human calls
+    │   └── archive/       # Completed/archived calls
+    ├── collab/            # Multi-agent collaboration state
+    ├── tmp/               # Temporary files (auto-cleaned)
+    └── state/             # Session state files
+```
+
+**BREAKING CHANGE**: As of SE3 2.x, all SE3 runtime metadata is consolidated under `se3/` (visible directory, NOT hidden):
+- `human-calls/` → `se3/calls/`
+- `.collab/` → `se3/collab/`
+- `tmp*.prompt` files → `se3/tmp/`
+
+**Rationale**: The `se3/` directory is intentionally NOT hidden (no dot prefix) because:
+1. Human calls need to be discoverable by humans
+2. Aligns with "human-as-MCP" philosophy - humans are active participants
+3. `ls` should show pending calls waiting for human response
+
+Note: `status.md` is no longer used. Status is now computed in real-time via `se3 status` command (see status-diagnostics spec).
+
+OpenSpec specs serve as the single source of truth for project requirements. No separate demands/requirements file is needed.
+
+#### Scenario: Project initialization
+- **WHEN** SE 3.0 is initialized in a directory
+- **THEN** the standard file structure is created with `.claude/`, `se3/`, and `openspec/` directories
+
+#### Scenario: Migration from legacy structure
+- **WHEN** a project has legacy directories (`human-calls/`, `.collab/` in root)
+- **THEN** `se3 migrate` moves them to `se3/` structure
+- **AND** preserves all existing data
+
+### Requirement: Configuration System
+The system SHALL support configuring framework behavior via `se3.config.yaml`.
+
+Configuration options include:
+- `max_tasks_per_change`: Maximum tasks per change (default: 5)
+- `human_call.timeout_days`: Default timeout days for human calls (default: 7)
+- `agent_team.roles`: List of enabled agent roles
+- `session.max_progress_entries`: Maximum session records to keep in progress (default: 20)
+
+#### Scenario: Using default configuration
+- **WHEN** no se3.config.yaml file exists in the project
+- **THEN** the framework runs with built-in default values
+
+### Requirement: SE3.md Generation via se3 init
+The system SHALL generate SE3.md file via the `se3 init` command.
+
+The `se3 init` command MUST:
+1. Create the .claude/ directory if it doesn't exist
+2. Generate SE3.md with the complete framework implementation
+3. Generate CLAUDE.md with minimal framework references
+4. Ensure both files are properly formatted
+5. Preserve existing files if they already exist
+
+#### Scenario: SE3.md generation on initialization
+- **WHEN** a user runs `se3 init` in a project directory
+- **THEN** the system creates .claude/SE3.md with the complete framework and .claude/CLAUDE.md with minimal content
+
+### Requirement: Output Artifacts
+The system SHALL produce the following deliverables:
+1. Project-level CLAUDE.md template (minimal, English)
+2. Project-level SE3.md template (complete, English)
+3. Configuration file template
+4. Documentation and best practices guide
+5. CLI tools documentation (TOOLS.md)
+
+#### Scenario: Complete delivery
+- **WHEN** SE 3.0 framework design is complete
+- **THEN** all deliverables are available for direct use in new projects
+
+#### Scenario: Backward compatibility
+- **WHEN** a project has an existing CLAUDE.md without SE3.md
+- **THEN** the framework continues to function with the existing CLAUDE.md file
+
+### Requirement: Temporary File Management
+
+The system SHALL manage temporary files to prevent root directory pollution.
+
+**Temporary file locations:**
+- All temporary files MUST be created in `se3/tmp/` instead of project root
+- Temporary files include: `tmp*.prompt`, session buffers, intermediate outputs
+
+**Cleanup policy:**
+- `se3:done` SHALL automatically clean `se3/tmp/` files older than 7 days
+- Files matching `tmp*.prompt` in root are considered legacy and SHOULD be migrated
+
+**Git ignore:**
+- The CLAUDE.md template MUST include `se3/tmp/` in `.gitignore` recommendations
+
+#### Scenario: Temporary file creation
+- **WHEN** a tool needs to create a temporary prompt file
+- **THEN** it creates it in `se3/tmp/` with a unique name
+- **AND** the file is automatically cleaned up after session ends or per retention policy
+
+#### Scenario: Legacy tmp file detection
+- **WHEN** `se3 status` runs and finds `tmp*.prompt` files in project root
+- **THEN** it warns about legacy temporary files
+- **AND** suggests running `se3 migrate` to clean up
+
+### Requirement: CLI Tools
+The system SHALL provide CLI tools for validating and enforcing SE 3.0 conventions.
+
+Tools include:
+- `se3 init` — Initialize a new SE 3.0 project
+- `se3 lint` — Validate spec file format and content
+- `se3 sync` — Synchronize output/ directory with source files
+- `se3 verify` — Verify change implementation covers all spec scenarios
+- `se3 status` — Diagnose session state and identify issues
+- `se3 update` — Update SE3.md to the latest framework version
+- `se3 commit` — Commit changes with test verification and sensitive file checks
+- `se3 collab` — Manage git-worktree multi-agent collaboration
+- `se3 claude-cmd` — Show configured Claude commands by priority
+
+#### Scenario: Spec validation
+- **WHEN** a developer runs `se3 lint`
+- **THEN** the tool validates all specs and reports any format violations
+
+#### Scenario: Change verification
+- **WHEN** an agent completes implementing a change
+- **THEN** `se3 verify --change <name>` confirms all scenarios are covered before archiving
+
+### Requirement: Self-Iterate Flow
+The system SHALL define a self-iterate behavior that drives the project from human intent to working implementation.
+
+Flow:
+1. Obtain direction via human call → create openspec change (proposal captures the intent)
+2. Implement the change (specs → design → tasks → code)
+3. Verify implementation against specs
+4. Check if specs fully cover the project goals — if gaps exist, go to 1
+5. Update project documentation
+
+#### Scenario: Self-iterate execution
+- **WHEN** agent is instructed to self-iterate
+- **THEN** agent executes the flow without stopping until step 5, using human calls only when blocked
+
+### Requirement: Change Lifecycle Management
+
+The system SHALL define a complete change lifecycle with explicit states and transitions.
+
+**Change States:**
+```
+active → [completed] → archived
+  ↓
+[abandoned] → archived
+```
+
+**Change Directory Structure:**
+```
+openspec/changes/
+├── active-change/          # Active change with .openspec.yaml
+│   ├── .openspec.yaml      # Change metadata (required for new format)
+│   ├── .se3-state.json     # Workflow state (auto-generated)
+│   ├── proposal.md         # Change proposal
+│   ├── tasks.md            # Implementation tasks
+│   └── specs/              # Optional: specs created/modified by change
+│       └── capability-name/
+│           └── spec.md
+└── archive/                # Archived changes
+    └── YYYY-MM-DD-change-name/
+```
+
+**Change Naming Convention:**
+- Changes SHOULD use descriptive, kebab-case names
+- Good: `add-user-authentication`, `fix-memory-leak`, `refactor-database-layer`
+- Bad: `se31xse3mdse3se3startcommandse3se3md-01-12` (auto-generated)
+
+**Lifecycle Rules:**
+1. Changes MUST be created via `se3 work --new` or equivalent
+2. Changes MUST have `.openspec.yaml` to be considered valid (new format)
+3. Changes with ALL tasks complete for >7 days SHOULD be archived
+4. Changes with no activity for >30 days SHOULD be reviewed
+5. Changes with auto-generated names SHOULD be renamed or archived
+
+#### Scenario: Create new change
+- **WHEN** `se3 work --new feature/my-feature` is executed
+- **THEN** it creates the change with `.openspec.yaml` metadata file
+- **AND** the change follows the new format
+
+#### Scenario: Detect old format change
+- **WHEN** a change directory exists without `.openspec.yaml`
+- **THEN** `se3 health` reports it as using the old format
+- **AND** suggests migration
+
+#### Scenario: Archive completed change
+- **WHEN** all tasks in a change are marked complete
+- **AND** `se3:done` or `se3 health` suggests archival
+- **THEN** the change is moved to `openspec/changes/archive/YYYY-MM-DD-change-name/`
+
+#### Scenario: Naming convention enforcement
+- **WHEN** a change has an auto-generated name (contains patterns like `se3md`, `t1-1x`, random suffixes)
+- **THEN** `se3 health` warns about the non-descriptive name
+- **AND** suggests renaming or archiving
+

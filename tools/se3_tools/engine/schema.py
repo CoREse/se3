@@ -133,7 +133,7 @@ class FlowInstanceSchema(TypedDict, total=False):
             "updated_at": "2026-02-24T10:30:00",
             "completed_at": null,
             "change_name": "feature-x-implementation",
-            "change_path": "openspec/changes/feature-x",
+            "change_path": "specs/_changelog/feature-x",
             "is_loop_mode": false,
             "loop_branch": null
         }
@@ -238,7 +238,7 @@ class ContextSchema(TypedDict, total=False):
             },
             "project_context": {
                 "root": "/home/user/project",
-                "change_path": "openspec/changes/feature-x"
+                "change_path": "specs/_changelog/feature-x"
             },
             "timestamp": "2026-02-24T10:30:00"
         }
@@ -358,7 +358,7 @@ def build_context_from_flow(flow_dict: Dict[str, Any]) -> Dict[str, Any]:
         "steps": context_steps,
         "key_outputs": key_outputs,
         "project_context": {
-            "root": str(flow_dict.get("change_path", "")).split("/openspec")[0] if flow_dict.get("change_path") else "",
+            "root": str(flow_dict.get("change_path", "")).split("/specs")[0] if flow_dict.get("change_path") else "",
             "change_path": flow_dict.get("change_path"),
             "change_name": flow_dict.get("change_name")
         },

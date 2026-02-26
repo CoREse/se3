@@ -1,6 +1,7 @@
-"""Spec Indexer - Build capability to spec mapping from OpenSpec files.
+"""Spec Indexer - Build capability to spec mapping from spec files.
 
-Scans openspec/specs/ and builds an index for programmatic access.
+Scans specs/ (with openspec/specs/ fallback) and builds an index for
+programmatic access.
 Supports:
 - Capability -> spec mapping
 - Keyword -> spec mapping
@@ -54,11 +55,20 @@ class SpecIndex:
 
     def __init__(self, project_root: Path):
         self.project_root = project_root
-        self.specs_dir = project_root / "openspec" / "specs"
+        self.specs_dir = self._resolve_specs_dir(project_root)
         self.specs: Dict[str, SpecInfo] = {}
         self.capability_map: Dict[str, List[str]] = {}
         self.keyword_map: Dict[str, List[str]] = {}
         self._index_file = project_root / ".se3" / "spec_index.json"
+
+    @staticmethod
+    def _resolve_specs_dir(project_root: Path) -> Path:
+        """Resolve specs directory: specs/ preferred, openspec/specs/ fallback."""
+        primary = project_root / "specs"
+        fallback = project_root / "openspec" / "specs"
+        if primary.exists():
+            return primary
+        return fallback
 
     def build_index(self) -> "SpecIndex":
         """Scan specs directory and build the index."""

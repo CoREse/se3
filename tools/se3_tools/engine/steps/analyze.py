@@ -137,9 +137,9 @@ def _gather_project_context(flow: FlowInstance) -> str:
     """
     context_parts = []
 
-    # Check for existing OpenSpec change
+    # Check for existing change
     if flow.change_name:
-        context_parts.append(f"OpenSpec change: {flow.change_name}")
+        context_parts.append(f"Active change: {flow.change_name}")
 
     # Check for project structure
     project_root = Path(flow.change_path).parent if flow.change_path else Path.cwd()
@@ -158,12 +158,14 @@ def _gather_project_context(flow: FlowInstance) -> str:
     if (project_root / "pytest.ini").exists() or (project_root / "setup.py").exists():
         context_parts.append("Testing: pytest")
 
-    # Check for OpenSpec specs
-    spec_dir = project_root / "openspec" / "specs"
+    # Check for specs
+    spec_dir = project_root / "specs"
+    if not spec_dir.exists():
+        spec_dir = project_root / "openspec" / "specs"
     if spec_dir.exists():
         spec_count = len(list(spec_dir.glob("**/*.md")))
         if spec_count > 0:
-            context_parts.append(f"OpenSpec specs: {spec_count} found")
+            context_parts.append(f"Specs: {spec_count} found")
 
     return "\n".join(context_parts) if context_parts else "No additional context available"
 

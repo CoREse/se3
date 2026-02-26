@@ -1,6 +1,6 @@
-"""SE3 Health command - OpenSpec system integrity diagnostics.
+"""SE3 Health command - spec system integrity diagnostics.
 
-Provides comprehensive health checks for the OpenSpec system:
+Provides comprehensive health checks for the SE3 spec system:
 - Zombie changes detection
 - Old format change detection
 - Completed but unarchived changes
@@ -163,7 +163,7 @@ def get_change_activity_time(change_path: Path) -> Tuple[Optional[datetime], Opt
 
 
 def discover_all_changes(project_root: Path) -> List[ChangeInfo]:
-    """Discover all changes in the openspec/changes directory."""
+    """Discover all changes in the openspec/changes directory (legacy)."""
     changes = []
     changes_dir = project_root / "openspec" / "changes"
 
@@ -402,9 +402,8 @@ def check_directory_structure(project_root: Path) -> List[HealthIssue]:
     issues = []
 
     expected_dirs = [
-        ("openspec/specs", True),  # (path, required)
-        ("openspec/changes", True),
-        ("openspec/changes/archive", False),
+        ("specs", True),  # (path, required)
+        ("specs/_changelog", False),
     ]
 
     for dir_path, required in expected_dirs:
@@ -452,7 +451,9 @@ def check_spec_change_association(project_root: Path, changes: List[ChangeInfo])
     issues = []
 
     # Find specs that don't reference any change
-    specs_dir = project_root / "openspec" / "specs"
+    specs_dir = project_root / "specs"
+    if not specs_dir.exists():
+        specs_dir = project_root / "openspec" / "specs"
     if specs_dir.exists():
         for spec_dir in specs_dir.iterdir():
             if not spec_dir.is_dir():
@@ -573,7 +574,7 @@ def run_health_check(
 def print_text_report(results: Dict[str, Any]) -> None:
     """Print a human-readable health report."""
     print(f"\n{'=' * 70}")
-    print("SE 3.0 OpenSpec Health Check")
+    print("SE 3.0 Spec System Health Check")
     print(f"{'=' * 70}")
 
     print(f"\nProject: {results['project_root']}")
@@ -626,7 +627,7 @@ def print_text_report(results: Dict[str, Any]) -> None:
                     print(f"        -> {issue.get('suggestion')}")
     else:
         print(f"\n{'-' * 70}")
-        print("  All checks passed - OpenSpec system is healthy!")
+        print("  All checks passed - spec system is healthy!")
 
     # Summary
     summary = results.get("summary", {})
@@ -681,9 +682,9 @@ def health(
     fail_on_warning: bool = typer.Option(False, "--fail-on-warning", "-w", help="Exit with error if any warnings found"),
     skip_test_changes: bool = typer.Option(True, "--skip-test-changes/--include-test-changes", help="Skip test/experimental changes in checks"),
 ):
-    """Check OpenSpec system health and integrity.
+    """Check SE3 spec system health and integrity.
 
-    Detects common issues in the OpenSpec system:
+    Detects common issues in the spec system:
     - Zombie changes (inactive, no progress)
     - Old format changes (missing .openspec.yaml)
     - Completed but unarchived changes

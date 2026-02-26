@@ -94,9 +94,23 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     task_list = step.inputs.get("task_list", [])
     proposal = step.inputs.get("proposal", {})
 
+    # For small tasks or when design is skipped, create minimal design from proposal/task
     if not design_doc:
-        step.error_message = "No design document available from previous step"
-        return StepStatus.FAILED
+        design_doc = {
+            "overview": task_description,
+            "components": [],
+            "architecture_decisions": [],
+        }
+        # Try to extract files from proposal if available
+        if proposal:
+            files_to_modify = proposal.get("files_to_modify", [])
+            files_to_create = proposal.get("files_to_create", [])
+            if files_to_modify or files_to_create:
+                design_doc["components"] = [{
+                    "name": "Implementation",
+                    "responsibilities": f"Modify: {files_to_modify}, Create: {files_to_create}",
+                    "interfaces": [],
+                }]
 
     # Get current task to focus on
     current_task = _get_current_task(task_list)

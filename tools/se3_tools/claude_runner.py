@@ -128,15 +128,10 @@ class ClaudeRunner:
                         resolved.append(arg)
                         resolved.append(prompt_arg)
                 else:
-                    # Regular prompt text - write to temp file to avoid CLI issues
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.prompt',
-                                                   dir=temp_dir, delete=False,
-                                                   encoding='utf-8') as f:
-                        f.write(prompt_arg)
-                        temp_file = Path(f.name)
+                    # Regular prompt text - pass directly to avoid temp file issues
+                    # in non-interactive environments (SSH, nohup, etc.)
                     resolved.append(arg)
-                    resolved.append(f"@{temp_file}")
+                    resolved.append(prompt_arg)
             else:
                 resolved.append(arg)
 
@@ -195,6 +190,13 @@ class ClaudeRunner:
 
                 full_cmd = [cmd_name] + resolved_args
 
+                # Ensure CLAUDECODE is removed to avoid nested session detection
+                # This is important when run() is called without explicit env
+                run_env = env
+                if run_env is None:
+                    run_env = dict(os.environ)
+                run_env.pop("CLAUDECODE", None)
+
                 try:
                     result = subprocess.run(
                         full_cmd,
@@ -202,7 +204,7 @@ class ClaudeRunner:
                         text=True,
                         timeout=timeout,
                         cwd=cwd,
-                        env=env,
+                        env=run_env,
                     )
                     last_result = result
 
@@ -428,6 +430,13 @@ class ClaudeRunner:
         start_time = time.time()
         all_outputs = []
 
+        # Ensure CLAUDECODE is removed to avoid nested session detection
+        # This is important when run_with_monitor() is called without explicit env
+        run_env = env
+        if run_env is None:
+            run_env = dict(os.environ)
+        run_env.pop("CLAUDECODE", None)
+
         temp_files = []
         try:
             for cmd_index, cmd_entry in enumerate(self.commands):
@@ -455,7 +464,7 @@ class ClaudeRunner:
                         wall_timeout=wall_timeout,
                         inactivity_timeout=inactivity_timeout,
                         cwd=cwd,
-                        env=env,
+                        env=run_env,
                         on_output=on_output,
                         on_activity=on_activity,
                         start_time=start_time,

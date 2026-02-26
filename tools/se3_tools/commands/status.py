@@ -2,7 +2,7 @@
 
 Computes project status in real-time from:
 - git status / git log (uncommitted changes, recent activity)
-- openspec/changes/ (active changes)
+- openspec/changes/ (legacy active changes)
 - .collab/ (collaboration session state)
 - human-calls/ (pending/responded requests)
 
@@ -75,7 +75,7 @@ def compute_git_status(project_root: Path) -> Dict[str, Any]:
 
 
 def compute_active_changes(project_root: Path) -> List[str]:
-    """Find active (non-archived) openspec changes."""
+    """Find active (non-archived) changes (legacy openspec/changes/)."""
     changes_dir = project_root / "openspec" / "changes"
     if not changes_dir.exists():
         return []

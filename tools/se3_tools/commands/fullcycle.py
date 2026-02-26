@@ -155,7 +155,7 @@ def run_full_cycle(
         change_name = sanitize_change_name(description)
 
         # Create the change
-        openspec_dir = root / "openspec" / "changes"
+        openspec_dir = root / "openspec" / "changes"  # legacy change dir
         change_path = openspec_dir / change_name
 
         # If change already exists, append timestamp

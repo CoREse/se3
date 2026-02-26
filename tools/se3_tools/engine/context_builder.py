@@ -16,7 +16,7 @@ class ContextBuilder:
     """Builds context for flow engine steps.
 
     Automatically collects:
-    - Relevant OpenSpec specifications
+    - Relevant specifications
     - Outputs from previous steps
     - Current project state (git, files)
     - Code context based on task
@@ -29,7 +29,16 @@ class ContextBuilder:
             project_root: Project root directory
         """
         self.project_root = Path(project_root)
-        self.specs_dir = self.project_root / "openspec" / "specs"
+        self.specs_dir = self._resolve_specs_dir(self.project_root)
+
+    @staticmethod
+    def _resolve_specs_dir(project_root: Path) -> Path:
+        """Resolve specs directory: specs/ preferred, openspec/specs/ fallback."""
+        primary = project_root / "specs"
+        fallback = project_root / "openspec" / "specs"
+        if primary.exists():
+            return primary
+        return fallback
 
     def build_step_context(
         self,
@@ -276,7 +285,7 @@ Your task is to analyze the input and determine:
 
 Step pool available:
 - analyze: Analyze input and determine task type
-- read_spec: Read relevant OpenSpec specs
+- read_spec: Read relevant specs
 - propose: Generate change proposal
 - design: Design solution and architecture
 - plan_tasks: Break down into concrete tasks

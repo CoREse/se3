@@ -225,7 +225,7 @@ class TestContextBuilder:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create a mock spec file
-            specs_dir = Path(tmpdir) / "openspec" / "specs" / "test-spec"
+            specs_dir = Path(tmpdir) / "specs" / "test-spec"
             specs_dir.mkdir(parents=True)
             spec_file = specs_dir / "spec.md"
             spec_file.write_text("# Test Spec\n\n## Purpose\nTest purpose")
@@ -245,7 +245,7 @@ class TestContextBuilder:
 
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create a spec
-            specs_dir = Path(tmpdir) / "openspec" / "specs" / "flow-engine"
+            specs_dir = Path(tmpdir) / "specs" / "flow-engine"
             specs_dir.mkdir(parents=True)
             (specs_dir / "spec.md").write_text("# Flow Engine Spec\nDetails here")
 

@@ -122,21 +122,13 @@ def initialize_project(
     output_dir = Path("output")
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 5. Initialize OpenSpec using system openspec CLI
-    typer.echo("Initializing OpenSpec...")
-    result = subprocess.run(
-        ["openspec", "init"] + (["--force"] if force else []),
-        capture_output=True, text=True
-    )
-    if result.returncode == 0:
-        typer.echo(typer.style("OpenSpec initialized", fg=typer.colors.GREEN))
-    else:
-        typer.echo(
-            typer.style(
-                f"Warning: OpenSpec init may have failed: {result.stderr}",
-                fg=typer.colors.YELLOW,
-            )
-        )
+    # 5. Initialize specs directory
+    typer.echo("Initializing specs directory...")
+    specs_dir = Path("specs")
+    specs_changelog = specs_dir / "_changelog"
+    specs_dir.mkdir(parents=True, exist_ok=True)
+    specs_changelog.mkdir(parents=True, exist_ok=True)
+    typer.echo(typer.style("Specs directory initialized", fg=typer.colors.GREEN))
 
     # 6. Install SE3 workflow skills to .claude/commands/se3/
     skills_source = templates_dir / "commands" / "se3"

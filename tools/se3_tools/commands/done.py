@@ -64,7 +64,7 @@ def has_uncommitted_changes(project_root: Path) -> Tuple[bool, Dict[str, Any]]:
 
 
 def compute_active_changes(project_root: Path) -> List[Dict[str, Any]]:
-    """Find active (non-archived) openspec changes with their status."""
+    """Find active (non-archived) changes with their status (legacy openspec/changes/)."""
     changes_dir = project_root / "openspec" / "changes"
     if not changes_dir.exists():
         return []

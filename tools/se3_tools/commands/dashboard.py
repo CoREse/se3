@@ -135,7 +135,7 @@ def compute_flow_engine_status(project_root: Path) -> Optional[Dict[str, Any]]:
 
 
 def compute_changes_status(project_root: Path) -> Dict[str, Any]:
-    """Compute OpenSpec changes status."""
+    """Compute changes status (legacy openspec/changes/)."""
     changes_dir = project_root / "openspec" / "changes"
 
     if not changes_dir.exists():

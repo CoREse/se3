@@ -3,7 +3,7 @@
 Encodes all SDD workflows (bugfix, feature, review, directive) into programmatic
 logic with step tracking and adaptive formality.
 
-Workflow state is persisted in openspec/changes/<name>/.se3-state.json
+Workflow state is persisted in openspec/changes/<name>/.se3-state.json (legacy)
 """
 
 # Verify: agent-team/Task distribution via native Task tool
@@ -372,7 +372,7 @@ def compute_step_actions(
     elif current_step == "spec":
         actions.append({
             "type": "write_spec",
-            "description": "Write/update specs in openspec/specs/ with WHEN/THEN scenarios",
+            "description": "Write/update specs in specs/ with WHEN/THEN scenarios",
             "reason": "Feature workflow step 3: Specification",
         })
         actions.append({
@@ -629,7 +629,7 @@ def run_work(
     if session_error:
         return session_error
 
-    openspec_dir = root / "openspec" / "changes"
+    openspec_dir = root / "openspec" / "changes"  # legacy change directory
 
     # Handle --new flag (create new change)
     # Usage: se3 work <change-name> --new <workflow-type>
@@ -734,7 +734,7 @@ def run_work(
                 result["actions"].insert(0, {
                     "type": "check_health",
                     "cmd": "se3 health",
-                    "reason": f"OpenSpec integrity: {summary.get('errors', 0)} errors, {summary.get('warnings', 0)} warnings detected",
+                    "reason": f"Spec system integrity: {summary.get('errors', 0)} errors, {summary.get('warnings', 0)} warnings detected",
                 })
             return result
         else:
@@ -756,7 +756,7 @@ def run_work(
                 result["actions"].insert(0, {
                     "type": "check_health",
                     "cmd": "se3 health",
-                    "reason": f"OpenSpec integrity: {summary.get('errors', 0)} errors, {summary.get('warnings', 0)} warnings detected",
+                    "reason": f"Spec system integrity: {summary.get('errors', 0)} errors, {summary.get('warnings', 0)} warnings detected",
                 })
             return result
 

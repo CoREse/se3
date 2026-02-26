@@ -10,12 +10,21 @@ import shutil
 from .human_calls import discover_human_calls, HumanCallStore
 
 
+def _resolve_specs_dir(base_path: Path) -> Path:
+    """Resolve specs directory: specs/ preferred, openspec/specs/ fallback."""
+    primary = base_path / "specs"
+    fallback = base_path / "openspec" / "specs"
+    if primary.exists():
+        return primary
+    return fallback
+
+
 def discover_specs(path: str) -> List[str]:
     """
-    Discover all spec files in openspec/specs/ and openspec/changes/*/specs/.
+    Discover all spec files in specs/ (or openspec/specs/ fallback).
 
     Args:
-        path: Base path to search from (should contain openspec/ directory)
+        path: Base path to search from
 
     Returns:
         List of absolute paths to spec.md files
@@ -23,27 +32,14 @@ def discover_specs(path: str) -> List[str]:
     base_path = Path(path).resolve()
     spec_files = []
 
-    # Standard location: openspec/specs/*/
-    standard_specs = base_path / "openspec" / "specs"
+    # Standard location: specs/*/ (with openspec/specs/ fallback)
+    standard_specs = _resolve_specs_dir(base_path)
     if standard_specs.exists():
         for spec_dir in standard_specs.iterdir():
-            if spec_dir.is_dir():
+            if spec_dir.is_dir() and not spec_dir.name.startswith("_"):
                 spec_file = spec_dir / "spec.md"
                 if spec_file.exists():
                     spec_files.append(str(spec_file))
-
-    # Change specs: openspec/changes/*/specs/*/
-    changes_dir = base_path / "openspec" / "changes"
-    if changes_dir.exists():
-        for change_dir in changes_dir.iterdir():
-            if change_dir.is_dir():
-                change_specs = change_dir / "specs"
-                if change_specs.exists():
-                    for spec_dir in change_specs.iterdir():
-                        if spec_dir.is_dir():
-                            spec_file = spec_dir / "spec.md"
-                            if spec_file.exists():
-                                spec_files.append(str(spec_file))
 
     return sorted(spec_files)
 
@@ -236,30 +232,34 @@ def get_source_mappings(project_root: Path) -> dict:
     return {}
 
 
-def discover_changes(path: str = "openspec/changes") -> List[str]:
-    """Discover all change directories.
+def discover_changes(path: str = "specs/_changelog") -> List[str]:
+    """Discover all changelog entries.
 
     Args:
-        path: Base path to search for changes
+        path: Base path to search for changelog entries (falls back to openspec/changes)
 
     Returns:
-        List of change directory names
+        List of changelog entry names
     """
     changes = []
     changes_path = Path(path)
+
+    # Fallback to legacy openspec/changes
+    if not changes_path.exists():
+        changes_path = Path("openspec/changes")
 
     if not changes_path.exists():
         return changes
 
     for item in changes_path.iterdir():
-        if item.is_dir():
-            changes.append(item.name)
+        if item.is_dir() or (item.is_file() and item.suffix == ".md"):
+            changes.append(item.stem if item.is_file() else item.name)
 
     return sorted(changes)
 
 
 def discover_specs_in_change(change_name: str, base_path: str = "openspec/changes") -> List[str]:
-    """Discover all spec files within a change.
+    """Discover all spec files within a change (legacy support).
 
     Args:
         change_name: Name of the change

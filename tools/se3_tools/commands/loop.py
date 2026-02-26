@@ -886,7 +886,7 @@ def run_exclusive_loop(
         return
 
     base_name = sanitize_change_name(prompt)
-    openspec_cmd = shutil.which("openspec") or "openspec"
+    openspec_cmd = shutil.which("openspec") or "openspec"  # legacy, used only in non-quick mode
 
     # Get the current branch
     current_branch = get_current_branch(root)
@@ -952,7 +952,7 @@ def run_exclusive_loop(
             # Generate unique change name
             change_name = f"{base_name}-{iteration:02d}"
             counter = 1
-            while (root / "openspec" / "changes" / change_name).exists():
+            while (root / "openspec" / "changes" / change_name).exists():  # legacy change dir
                 change_name = f"{base_name}-{iteration:02d}-{counter}"
                 counter += 1
 
@@ -976,7 +976,7 @@ def run_exclusive_loop(
                 continue
 
             # Create tasks.md
-            tasks_file = root / "openspec" / "changes" / change_name / "tasks.md"
+            tasks_file = root / "openspec" / "changes" / change_name / "tasks.md"  # legacy change dir
             tasks_file.write_text(f"""# {prompt} (Iteration {iteration}/{iterations})
 
 ## Tasks
@@ -1053,7 +1053,7 @@ def run_exclusive_loop(
         # Generate summary for next iteration (if not disabled and not the last iteration)
         if not no_summary and iteration < iterations and exit_code == 0:
             if not quick and change_name:
-                change_dir = root / "openspec" / "changes" / change_name
+                change_dir = root / "openspec" / "changes" / change_name  # legacy change dir
                 print(f"\n{CYAN}[SE3 Loop] Generating summary for next iteration...{RESET}")
                 previous_summary = run_claude_summary(claude_cmd, change_dir)
                 print(f"{GRAY}{DIM}Summary: {previous_summary[:100]}{'...' if len(previous_summary) > 100 else ''}{RESET}")

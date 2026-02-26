@@ -71,6 +71,9 @@ class LLMCaller:
                     args.extend(["--file", str(f)])
 
         env = dict(os.environ)
+        # Remove CLAUDECODE to avoid nested session detection
+        # This allows se3 run to invoke Claude CLI from within a Claude session
+        env.pop("CLAUDECODE", None)
 
         start_time = time.time()
         last_error = ""
@@ -79,14 +82,33 @@ class LLMCaller:
             try:
                 logger.debug(f"LLM call attempt {attempt + 1}/{self.max_retries}")
 
-                result = self._runner.run_with_monitor(
-                    args=args,
-                    wall_timeout=timeout,
-                    inactivity_timeout=300,
-                    cwd=self.project_root,
-                    env=env,
-                    on_output=on_output,
-                )
+                # Use run() instead of run_with_monitor() for better compatibility
+                # with non-interactive shells (e.g., SSH + nohup environments)
+                if on_output:
+                    result = self._runner.run_with_monitor(
+                        args=args,
+                        wall_timeout=timeout,
+                        inactivity_timeout=300,
+                        cwd=self.project_root,
+                        env=env,
+                        on_output=on_output,
+                    )
+                else:
+                    result = self._runner.run(
+                        args=args,
+                        timeout=timeout,
+                        cwd=self.project_root,
+                        env=env,
+                    )
+                    # Convert CompletedProcess to MonitoredResult-like object
+                    from ..claude_runner import MonitoredResult
+                    result = MonitoredResult(
+                        returncode=result.returncode,
+                        output=result.stdout or "",
+                        cmd_used="claude",
+                        cmd_index=0,
+                        was_retry=False,
+                    )
 
                 if result.success:
                     duration_ms = int((time.time() - start_time) * 1000)

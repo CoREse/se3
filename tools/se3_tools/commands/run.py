@@ -367,7 +367,9 @@ def find_next_task(project_root: Path) -> Optional[str]:
         Task description or None if no tasks found
     """
     # Check for backlog files
-    backlog_dir = project_root / "openspec" / "backlog"
+    backlog_dir = project_root / "specs" / "_backlog"
+    if not backlog_dir.exists():
+        backlog_dir = project_root / "openspec" / "backlog"
     if backlog_dir.exists():
         for backlog_file in sorted(backlog_dir.glob("*.md")):
             try:
