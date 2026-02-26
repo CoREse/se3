@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.4.3** — fix: remove stream-json format causing parsing issues.
+**3.4.4** — feat: properly implement stream-json parsing.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.4.4 | 2026-02-26 | feat: properly implement stream-json parsing. Add `_extract_from_stream_json()` to extract text content from stream-json format. Rewrite `parse_json_response()` to handle stream-json, NDJSON, and single JSON formats correctly. |
 | 3.4.3 | 2026-02-26 | fix: remove `--output-format stream-json` due to parsing compatibility issues. Revert to standard text format which works correctly with existing JSON parsing. Add debug logging for response diagnosis. |
 | 3.4.2 | 2026-02-26 | fix: handle NDJSON (newline-delimited JSON) format from `--output-format stream-json`. Add `_parse_ndjson()` function to extract valid JSON from stream output. Fix JSON parsing error that caused "Failed to parse LLM response". |
 | 3.4.1 | 2026-02-26 | feat: add `--output-format stream-json` and `--verbose` to Claude CLI calls for streaming JSON output. Change retry behavior: exit immediately on max retries reached instead of prompting user. |
