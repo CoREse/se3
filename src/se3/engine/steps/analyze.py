@@ -15,6 +15,7 @@ from typing import Any
 
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus, StepType, get_default_step_sequence
+from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         response = caller.call(prompt=prompt)
 
         # Parse JSON response
-        result = _parse_analyze_response(response)
+        result = parse_json_response(response, required_keys=["task_type"])
 
         if not result:
             step.error_message = "Failed to parse LLM response"
@@ -168,62 +169,6 @@ def _gather_project_context(flow: FlowInstance) -> str:
             context_parts.append(f"Specs: {spec_count} found")
 
     return "\n".join(context_parts) if context_parts else "No additional context available"
-
-
-def _parse_analyze_response(response: str) -> dict[str, Any] | None:
-    """Parse the LLM response into a structured result.
-
-    Args:
-        response: Raw LLM response string
-
-    Returns:
-        Parsed dictionary or None if parsing fails
-    """
-    try:
-        # Try to extract JSON from the response
-        response = response.strip()
-
-        # Remove markdown code block if present
-        if response.startswith("```json"):
-            response = response[7:]
-        elif response.startswith("```"):
-            response = response[3:]
-
-        if response.endswith("```"):
-            response = response[:-3]
-
-        response = response.strip()
-
-        # Try to find JSON object boundaries
-        # Handle case where LLM adds extra text after JSON
-        json_start = response.find('{')
-        json_end = response.rfind('}')
-
-        if json_start == -1 or json_end == -1 or json_end <= json_start:
-            logger.warning("No JSON object found in response")
-            return None
-
-        # Extract just the JSON part
-        json_str = response[json_start:json_end + 1]
-
-        # Parse JSON
-        result = json.loads(json_str)
-
-        # Validate required fields
-        if "task_type" not in result:
-            logger.warning("Missing 'task_type' in analyze response")
-            return None
-
-        return result
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse JSON response: {e}")
-        # Log the problematic response for debugging
-        logger.debug(f"Response content: {response[:500]}...")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error parsing response: {e}")
-        return None
 
 
 def _update_flow_steps(

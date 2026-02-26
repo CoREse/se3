@@ -13,6 +13,7 @@ from typing import Any
 
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
+from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         response = caller.call(prompt=prompt)
 
         # Parse JSON response
-        implementation = _parse_implement_response(response)
+        implementation = parse_json_response(response, required_keys=["files_changed"])
 
         if not implementation:
             step.error_message = "Failed to parse implementation from LLM response"
@@ -236,52 +237,6 @@ def _gather_project_context(flow: FlowInstance) -> str:
         context_parts.append("Uses pytest for testing")
 
     return "; ".join(context_parts) if context_parts else "Standard project"
-
-
-def _parse_implement_response(response: str) -> dict[str, Any] | None:
-    """Parse the LLM response into structured implementation."""
-    try:
-        response = response.strip()
-
-        # Remove markdown code block if present
-        if response.startswith("```json"):
-            response = response[7:]
-        elif response.startswith("```"):
-            response = response[3:]
-
-        if response.endswith("```"):
-            response = response[:-3]
-
-        response = response.strip()
-
-        # Try to find JSON object boundaries
-        # Handle case where LLM adds extra text after JSON
-        json_start = response.find('{')
-        json_end = response.rfind('}')
-
-        if json_start == -1 or json_end == -1 or json_end <= json_start:
-            logger.warning("No JSON object found in response")
-            return None
-
-        # Extract just the JSON part
-        json_str = response[json_start:json_end + 1]
-
-        result = json.loads(json_str)
-
-        if "files_changed" not in result:
-            logger.warning("Missing 'files_changed' in implementation response")
-            return None
-
-        return result
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse JSON response: {e}")
-        # Log the problematic response for debugging
-        logger.debug(f"Response content: {response[:500]}...")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error parsing response: {e}")
-        return None
 
 
 def _apply_changes(flow: FlowInstance, files_changed: list[dict[str, Any]]) -> None:

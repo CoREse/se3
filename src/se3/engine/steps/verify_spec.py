@@ -13,6 +13,7 @@ from typing import Any
 
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
+from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +100,7 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         response = caller.call(prompt=prompt)
 
         # Parse JSON response
-        verification = _parse_verify_response(response)
+        verification = parse_json_response(response, required_keys=["verified"])
 
         if not verification:
             step.error_message = "Failed to parse verification from LLM response"
@@ -178,49 +179,3 @@ def _format_test_results(test_results: dict[str, Any]) -> str:
         lines.append(f"\nTest output:\n{stdout_preview}")
 
     return "\n".join(lines)
-
-
-def _parse_verify_response(response: str) -> dict[str, Any] | None:
-    """Parse the LLM response into structured verification result."""
-    try:
-        response = response.strip()
-
-        # Remove markdown code block if present
-        if response.startswith("```json"):
-            response = response[7:]
-        elif response.startswith("```"):
-            response = response[3:]
-
-        if response.endswith("```"):
-            response = response[:-3]
-
-        response = response.strip()
-
-        # Try to find JSON object boundaries
-        # Handle case where LLM adds extra text after JSON
-        json_start = response.find('{')
-        json_end = response.rfind('}')
-
-        if json_start == -1 or json_end == -1 or json_end <= json_start:
-            logger.warning("No JSON object found in response")
-            return None
-
-        # Extract just the JSON part
-        json_str = response[json_start:json_end + 1]
-
-        result = json.loads(json_str)
-
-        if "verified" not in result:
-            logger.warning("Missing 'verified' in verify response")
-            return None
-
-        return result
-
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse JSON response: {e}")
-        # Log the problematic response for debugging
-        logger.debug(f"Response content: {response[:500]}...")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error parsing response: {e}")
-        return None
