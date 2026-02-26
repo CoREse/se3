@@ -39,9 +39,8 @@ def parse_json_response(response: str, required_keys: Optional[list[str]] = None
         parsed = _try_parse_json(stream_result, required_keys)
         if parsed:
             return parsed
-        # If extracted content isn't valid JSON, try the original response
 
-    # Try NDJSON parsing (for stream-json format)
+    # Try NDJSON parsing (for stream-json format with JSON objects)
     ndjson_result = _parse_ndjson(response, required_keys)
     if ndjson_result:
         return ndjson_result
@@ -59,7 +58,7 @@ def _extract_from_stream_json(response: str) -> Optional[str]:
     """Extract text content from Claude stream-json format.
 
     Stream-json outputs lines like:
-    {"type": "content_block_delta", "delta": {"type": "text_delta", "text": "..."}}
+    {"type": "assistant", "message": {"content": [{"type": "text", "text": "..."}]}}
 
     Args:
         response: Raw stream-json response
@@ -69,6 +68,7 @@ def _extract_from_stream_json(response: str) -> Optional[str]:
     """
     lines = response.strip().split('\n')
     text_parts = []
+
     for line in lines:
         line = line.strip()
         if not line:
@@ -78,13 +78,15 @@ def _extract_from_stream_json(response: str) -> Optional[str]:
             if not isinstance(data, dict):
                 continue
 
-            # Extract text from content_block_delta
-            if data.get('type') == 'content_block_delta':
-                delta = data.get('delta', {})
-                if delta.get('type') == 'text_delta':
-                    text = delta.get('text', '')
-                    if text:
-                        text_parts.append(text)
+            # Extract from assistant message content
+            if data.get('type') == 'assistant':
+                message = data.get('message', {})
+                content = message.get('content', [])
+                for item in content:
+                    if isinstance(item, dict) and item.get('type') == 'text':
+                        text = item.get('text', '')
+                        if text:
+                            text_parts.append(text)
 
         except json.JSONDecodeError:
             continue
