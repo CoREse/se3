@@ -2,170 +2,200 @@
 
 ## Purpose
 
-Define the standard workflows for SE3 development: bug fix, feature, review, directive, and small workflows. These workflows govern how different types of work are processed from intake to completion.
+Define the standard workflows for SE3 development using the Flow Engine's 11-step state machine. These workflows govern how different types of work are processed from intake to completion through the unified `se3 run` entry point.
 
 ## Requirements
 
 ### Requirement: Workflow Types
 
-The system SHALL support five workflow types:
+The system SHALL support five workflow types, mapped to different step sequences from the 11-step pool:
 
 | Type | Steps | When Used |
 |------|-------|-----------|
-| `bugfix` | analyze → fix → verify | Bug reports |
-| `feature` | clarify → propose → spec → design → implement → verify | Feature requests |
-| `review` | inspect → report → fix | Code review requests |
-| `directive` | plan → implement → verify → check_coverage | "Implement X" commands |
-| `small` | implement → verify | Simple changes, no openspec needed |
+| `feature` | analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → commit → summarize | New functionality or significant enhancement |
+| `bugfix` | analyze → read_spec → propose → plan_tasks → implement → test → verify_spec → update_spec → commit → summarize | Bug reports (skip design for faster iteration) |
+| `review` | analyze → read_spec → verify_spec → summarize | Code review, audit, or analysis |
+| `small` | analyze → implement → test → commit → summarize | Minor fixes, typos, simple changes |
+| `directive` | analyze → read_spec → plan_tasks → implement → test → verify_spec → commit → summarize | Following specific instructions |
 
-#### Scenario: Bug fix workflow selection
-- **WHEN** input is classified as "bug-report"
-- **THEN** the system uses the bugfix workflow
+**Step Pool (11 steps):**
+1. **analyze** - Analyze task type and scope
+2. **read_spec** - Read relevant specifications
+3. **propose** - Generate change proposal
+4. **design** - Design solution and architecture
+5. **plan_tasks** - Break down into concrete tasks
+6. **implement** - Write code implementation
+7. **test** - Run tests to verify
+8. **verify_spec** - Check implementation vs spec
+9. **update_spec** - Update spec records
+10. **commit** - Commit changes
+11. **summarize** - Generate summary and handoff
 
 #### Scenario: Feature workflow selection
 - **WHEN** input is classified as "feature-request"
-- **THEN** the system uses the feature workflow
+- **THEN** the system uses the feature workflow with full 11 steps
+
+#### Scenario: Bug fix workflow selection
+- **WHEN** input is classified as "bug-report"
+- **THEN** the system uses the bugfix workflow (skips design step)
 
 #### Scenario: Small workflow selection
 - **WHEN** the change is simple (no spec changes needed, ≤3 tasks)
 - **THEN** the system uses the small workflow for efficiency
 
+### Requirement: Feature Workflow
+
+The feature workflow SHALL follow these steps:
+
+**1. ANALYZE**
+   - Classify task type (feature/bugfix/review/small/directive)
+   - Determine scope and complexity
+   - Select appropriate step sequence
+
+**2. READ_SPEC**
+   - Automatically discover relevant specs based on scope
+   - Load spec content into context
+
+**3. PROPOSE**
+   - Generate change proposal
+   - Identify files to modify/create
+   - Define acceptance criteria
+
+**4. DESIGN**
+   - Create design document for complex changes
+   - Define architecture decisions
+   - Design component interfaces
+
+**5. PLAN_TASKS**
+   - Break implementation into concrete tasks (max 5 per group)
+   - Estimate complexity for each task
+   - Define verification criteria
+
+**6. IMPLEMENT**
+   - Write code following the design
+   - Include tests where applicable
+   - Follow project conventions
+
+**7. TEST**
+   - Run test suite automatically
+   - Report test results
+   - Continue even if tests fail (verify_spec handles decision)
+
+**8. VERIFY_SPEC**
+   - Check implementation against specifications
+   - Verify all scenarios are covered
+   - Identify any discrepancies
+
+**9. UPDATE_SPEC**
+   - Update specs to reflect changes made
+   - Add new capabilities documentation
+   - Mark scenarios as implemented
+
+**10. COMMIT**
+   - Stage and commit all changes
+   - Generate meaningful commit message
+   - Auto-append to progress.md
+
+**11. SUMMARIZE**
+   - Generate session summary
+   - Document changes made
+   - Provide handoff context for future sessions
+
+#### Scenario: Large feature
+- **WHEN** a feature is complex with multiple components
+- **THEN** go through all 11 steps including full design
+- **AND** create formal specs and design documents
+
+#### Scenario: Medium feature
+- **WHEN** a feature is moderately complex
+- **THEN** create proposal and specs but may skip design if simple
+
 ### Requirement: Bug Fix Workflow
 
-The bugfix workflow SHALL follow these steps:
+The bugfix workflow SHALL follow these steps (skipping design):
 
 **1. ANALYZE**
    - Reproduce the bug
    - Identify root cause
    - Determine affected components
 
-**2. FIX**
-   - IF complexity > small:
-     - Create openspec/change/bugfix-{id}/
-     - Write fix-spec.md: expected behavior, test cases
-     - Implement fix
-     - Run tests to verify
-   - ELSE:
-     - Fix directly
-     - Run tests
+**2. READ_SPEC**
+   - Read relevant specs for context
 
-**3. VERIFY**
-   - Confirm bug is resolved
+**3. PROPOSE**
+   - Generate fix proposal
+   - Identify files to modify
+
+**4. PLAN_TASKS** (if needed)
+   - Break complex fixes into tasks
+   - Skip for simple one-line fixes
+
+**5. IMPLEMENT**
+   - Fix the bug
+   - Add regression tests
+
+**6. TEST**
+   - Run tests to verify fix
    - Run regression tests
-   - Update relevant specs if behavior changed
-   - Archive change (if created)
+
+**7. VERIFY_SPEC**
+   - Verify fix meets requirements
+
+**8. UPDATE_SPEC**
+   - Update specs if behavior changed
+
+**9. COMMIT**
+   - Commit the fix
+
+**10. SUMMARIZE**
+   - Document the bug and fix
 
 #### Scenario: Complex bug fix
 - **WHEN** a bug requires significant changes
-- **THEN** create a formal openspec change with fix-spec.md
-- **AND** follow the full bugfix workflow
+- **THEN** follow full bugfix workflow with plan_tasks
 
 #### Scenario: Simple bug fix
 - **WHEN** a bug is small and easily fixed
-- **THEN** fix directly without creating a formal change
-- **AND** run tests to verify
-
-### Requirement: Feature Request Workflow
-
-The feature workflow SHALL follow these steps:
-
-**1. CLARIFY**
-   - Understand the request
-   - Ask clarifying questions
-   - Determine scope and priority
-
-**2. PROPOSE**
-   - Create openspec/change/feature-{id}/
-   - Write proposal.md: what, why, acceptance criteria
-   - Get human approval (if significant)
-
-**3. SPEC**
-   - Write/update specs in openspec/specs/
-   - Define scenarios (WHEN/THEN)
-   - Run `se3 lint` to validate
-
-**4. DESIGN** (if needed)
-   - Write design.md for complex changes
-   - Design architecture
-
-**5. IMPLEMENT**
-   - Break into tasks (max 5 per group)
-   - Implement incrementally
-   - Run tests continuously
-
-**6. VERIFY**
-   - Run all tests
-   - Verify each spec scenario
-   - Archive change
-
-#### Scenario: Large feature
-- **WHEN** a feature is complex with multiple components
-- **THEN** go through all steps including design
-- **AND** create formal specs and design documents
-
-#### Scenario: Medium feature
-- **WHEN** a feature is moderately complex
-- **THEN** create proposal and specs but skip design
+- **THEN** analyze → implement → test → commit → summarize
 
 ### Requirement: Review Workflow
 
-The review workflow SHALL follow these steps:
+The review workflow SHALL follow minimal steps:
 
-**1. INSPECT**
-   - Read the code/file in question
-   - Check against specs
-   - Identify issues
+**1. ANALYZE**
+   - Understand review scope
+   - Identify what to review
 
-**2. REPORT**
-   - Provide findings to human
-   - Categorize: critical / warning / suggestion
+**2. READ_SPEC**
+   - Read relevant specifications
 
-**3. FIX** (optional, if requested)
-   - IF fix approved: route to Bug Fix or Feature workflow
-   - ELSE: end here
+**3. VERIFY_SPEC**
+   - Review code against specs
+   - Categorize findings: critical / warning / suggestion
+
+**4. SUMMARIZE**
+   - Provide review report
 
 #### Scenario: Code review
 - **WHEN** user asks for a review
 - **THEN** inspect the code and report findings
 - **AND** categorize issues by severity
 
-### Requirement: Directive Workflow
-
-The directive workflow SHALL follow these steps:
-
-**1. PLAN**
-   - Create openspec change from user direction
-   - Determine scope and approach
-
-**2. IMPLEMENT**
-   - Execute the directive
-   - Run tests continuously
-
-**3. VERIFY**
-   - Run all tests
-   - Verify implementation
-
-**4. CHECK_COVERAGE**
-   - Check if specs fully cover project goals
-   - If gaps exist, create new changes
-
-#### Scenario: Self-iterate directive
-- **WHEN** user says "self-iterate" or "continue"
-- **THEN** use directive workflow
-- **AND** check coverage at the end
-
 ### Requirement: Small Workflow
 
-The small workflow SHALL be used for simple changes that don't need formal specs.
+The small workflow SHALL be used for simple changes:
 
 **Steps:**
-1. IMPLEMENT - Direct code changes
-2. VERIFY - Run tests
+1. ANALYZE - Confirm it's a small change
+2. IMPLEMENT - Direct code changes
+3. TEST - Run tests
+4. COMMIT - Commit changes
+5. SUMMARIZE - Document the change
 
 #### Scenario: Documentation update
 - **WHEN** updating README or comments
 - **THEN** use small workflow
-- **AND** skip formal change creation
+- **AND** skip formal proposal/design
 
 #### Scenario: Quick fix
 - **WHEN** a one-line fix is needed
@@ -175,60 +205,86 @@ The small workflow SHALL be used for simple changes that don't need formal specs
 
 The system SHALL automatically determine formality based on change contents:
 
-- **Large**: Has proposal + specs + design
-- **Medium**: Has proposal + specs (no design)
-- **Small**: No proposal/specs, ≤3 tasks
+- **Large**: Has proposal + design + multiple tasks
+- **Medium**: Has proposal + tasks (no design)
+- **Small**: No proposal/design, ≤3 tasks
+
+The analyze step SHALL determine the appropriate level and select steps accordingly.
 
 #### Scenario: Large change detection
-- **WHEN** a change has proposal, specs, and design
-- **THEN** formality is "large"
+- **WHEN** analysis indicates complex changes needed
+- **THEN** formality is "large" with full workflow
 
 #### Scenario: Small change detection
-- **WHEN** a change has no proposal/specs and ≤3 tasks
-- **THEN** formality is "small"
+- **WHEN** analysis indicates trivial changes
+- **THEN** formality is "small" with minimal workflow
 
 ### Requirement: Spec Guardrails
 
-The system SHALL enforce guardrails that protect spec integrity during implementation. Agents MUST NOT perform the following actions without explicit human approval:
+The system SHALL enforce guardrails that protect spec integrity during implementation.
 
-1. **MUST NOT delete** an existing spec requirement without explicit human approval (via human call)
+**Guardrail Rules:**
+1. **MUST NOT delete** an existing spec requirement without explicit human approval
 2. **MUST NOT weaken** a requirement (e.g., changing "SHALL validate all inputs" to "SHOULD validate inputs")
-3. **MUST NOT modify** the description or scenarios of a requirement they are implementing — the implementer does not get to change the spec they're building against
+3. **MUST NOT modify** the scenarios of a requirement being implemented
 
 **Permitted Actions:**
 - **CAN ADD** new requirements
-- **CAN MODIFY** requirements they are not currently implementing (with a change proposal)
-- **CAN MARK requirements as deprecated** with a human-approved reason and migration path
+- **CAN MODIFY** requirements not being implemented (with change proposal)
+- **CAN MARK** requirements as deprecated with human approval
 
-**Enforcement points:**
-1. Before archiving a change, review the git diff of `openspec/specs/`
-2. If spec drift is detected, revert and investigate
-3. Use `se3 guardrails` command to check spec files for violations
-
-**Violation detection methods:**
-1. Compare original and modified spec content
-2. Check for deleted scenarios (missing WHEN clauses)
-3. Check for weakened language (SHALL → SHOULD, MUST → SHOULD)
-4. Check for weakened quantifiers (all → some, every → some)
+**Enforcement:**
+- verify_spec step checks for spec drift
+- update_spec step validates changes are appropriate
 
 #### Scenario: Attempt to delete requirement
 - **WHEN** an agent removes a SHALL requirement from a spec during implementation
 - **THEN** the system blocks the change and reports a guardrail violation
 
 #### Scenario: Attempt to weaken requirement
-- **WHEN** an agent changes "SHALL" to "SHOULD" or "MUST" to "SHOULD"
+- **WHEN** an agent changes "SHALL" to "SHOULD"
 - **THEN** the system blocks the change and reports a guardrail violation
 
-#### Scenario: Attempt to modify implementing spec
-- **WHEN** an agent modifies scenarios in a spec they are currently implementing
-- **THEN** the system blocks the change and reports a guardrail violation
+### Requirement: Workflow Entry Point
 
-#### Scenario: Add new requirement
-- **WHEN** an agent discovers a missing requirement during implementation
-- **THEN** they CAN add the new requirement to the spec
-- **AND** they SHOULD create a separate change to track the new requirement
+All workflows SHALL be accessed through the unified `se3 run` command.
 
-#### Scenario: Automated guardrail check
-- **WHEN** `se3 guardrails <spec-file>` is run
-- **THEN** it compares the spec against the git HEAD version
-- **AND** reports any violations of the guardrails
+**Entry Patterns:**
+```bash
+# Feature workflow
+se3 run "Implement user authentication"
+
+# Bugfix workflow  
+se3 run "Fix memory leak in cache" --type=bugfix
+
+# Review workflow
+se3 run "Review the auth module" --type=review
+
+# Small workflow
+se3 run "Fix typo in README" --type=small
+```
+
+The analyze step SHALL auto-detect task type if not specified, but explicit type SHALL override.
+
+### Requirement: Step Retry and Recovery
+
+The system SHALL handle step failures with retry and recovery options.
+
+**Retry Policy:**
+- Automatic retry up to 3 times
+- After max retries, ask user: retry / skip / abort
+- User can skip failed step and continue
+
+**Recovery:**
+- State is persisted after each step
+- Interrupted flows can be resumed with `se3 run --resume`
+- Ctrl+C allows prompt injection before retry
+
+#### Scenario: Step failure
+- **WHEN** a step fails after 3 retries
+- **THEN** user is prompted to retry, skip, or abort
+
+#### Scenario: Flow interruption
+- **WHEN** flow is interrupted mid-step
+- **THEN** state is saved automatically
+- **AND** `se3 run --resume` continues from interruption point

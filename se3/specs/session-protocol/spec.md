@@ -1,7 +1,8 @@
 # session-protocol Specification
 
 ## Purpose
-Define the session lifecycle protocol for SE 3.0 agents. This spec governs progressive startup (se3 status → progress.md → scope determination), execution boundaries, shutdown procedures, and tool-enforced progress tracking across sessions.
+
+Define the session lifecycle protocol for SE3 3.0 agents. This spec governs progressive startup via `se3 run`, execution boundaries, shutdown procedures, and state persistence across sessions through the Flow Engine.
 
 ## Requirements
 
@@ -11,73 +12,74 @@ The system SHALL adhere to the following core principles that govern all SE3 ope
 
 **1. Human-as-MCP**: All human input is obtained on-demand via human calls. No pre-written requirement files.
 
-**2. Progressive Loading**: Start with `progress.md` + `git log`. Load deeper only when the task needs it.
+**2. Progressive Loading**: Start with minimal context. Load deeper only when the task needs it.
 
-**3. Specs as Truth**: OpenSpec specs are the single source of truth for requirements. Agents MUST NOT weaken or delete existing requirements without explicit human approval.
+**3. Specs as Truth**: SE3 specs (`se3/specs/`) are the single source of truth for requirements. Agents MUST NOT weaken or delete existing requirements without explicit human approval.
 
 **4. Verify Before Done**: Never mark a feature complete without running tests. Spec scenarios are acceptance criteria, not documentation.
 
-**5. Tool-Assisted Enforcement**: Use CLI tools (`se3 lint`, `se3 verify`, `se3 status`) to validate specs, verify coverage, and diagnose issues. Tools make rules enforceable, not just documented.
+**5. Tool-Assisted Enforcement**: Use CLI tools (`se3 lint`, `se3 verify`, `se3 status`) to validate specs, verify coverage, and diagnose issues.
 
-**6. Incremental Development**: Work in openspec changes. Each session stays within a bounded scope.
+**6. State Machine Driven**: Flow is controlled programmatically, not by LLM decisions.
+
+**7. Interruptible & Resumable**: Any flow can be interrupted and resumed from the exact step.
 
 #### Scenario: Agent follows core principles
-- **WHEN** an agent is working on a change
-- **THEN** the agent follows all six core principles throughout the session
+- **WHEN** an agent is working on a flow
+- **THEN** the agent follows all seven core principles throughout the session
 
 #### Scenario: Spec violation detected
 - **WHEN** an agent attempts to modify a spec they are implementing against
 - **THEN** the system blocks the change and reports a guardrail violation
+
 ### Requirement: Session Startup Protocol
-The system SHALL define a progressive session startup protocol. The agent MUST locate current state with minimal context, then load more on demand.
 
-Startup steps:
-1. Verify `openspec` CLI is available; if not, ask the human to install it. If available but `openspec/` directory does not exist, run `openspec init`.
-2. Run `se3 status` for computed project state (git, collab, human-calls)
-3. Read `head -50 progress.md` + `git log --oneline -5`
-4. Scan `human-calls/` for responded but unprocessed requests
-5. Check `openspec/changes/` for active changes and `openspec/specs/` for current capabilities
-6. Determine session scope based on progress "next steps" + active changes
-7. Load additional files only when the task requires them
+The system SHALL define a unified session startup protocol via `se3 run`.
 
-If step 3 finds no progress.md and no git history → **first-time bootstrap**:
-- Ask the human (sync human call): "What should this project do?"
-- Create an openspec change from the response (proposal captures the intent)
-- Create `progress.md`
+**Startup Flow:**
+1. User executes `se3 run [task_description]`
+2. Flow Engine checks for existing active flow
+3. If active flow exists:
+   - Prompt user to resume or start new
+   - If resume: load persisted state and continue
+   - If new: create new flow instance
+4. If no active flow:
+   - Create new flow instance with task description
+   - Start from analyze step
 
-#### Scenario: OpenSpec not installed
-- **WHEN** agent starts a session and `openspec` command is not found
-- **THEN** agent asks the human to install it via sync human call and does not proceed with spec-related work until resolved
+**First-Time Bootstrap:**
+- If no `progress.md` and no git history:
+  - Ask human: "What should this project do?"
+  - Create initial flow from response
+  - Create `progress.md`
 
-#### Scenario: OpenSpec not initialized
-- **WHEN** agent starts a session and `openspec` is available but `openspec/` directory does not exist
-- **THEN** agent runs `openspec init` before proceeding
+#### Scenario: New flow startup
+- **WHEN** agent runs `se3 run "Implement feature X"`
+- **THEN** a new flow is created starting from analyze step
+
+#### Scenario: Resume interrupted flow
+- **WHEN** agent runs `se3 run` with interrupted flow existing
+- **THEN** agent is prompted to resume or start new
+- **AND** resume continues from exact interruption point
 
 #### Scenario: Mature project startup
-- **WHEN** agent starts a session with existing progress.md and git history
-- **THEN** agent runs `se3 status`, reads progress.md and git log, then determines scope without reading all spec files upfront
+- **WHEN** agent starts a flow in project with existing progress.md
+- **THEN** flow engine loads context automatically
+- **AND** executes without requiring manual state loading
 
-#### Scenario: First-time bootstrap
-- **WHEN** agent starts a session with no progress.md and no git history
-- **THEN** agent asks the human what to build via human call, creates an openspec change from the response
+### Requirement: Input Classification and Step Routing
 
-#### Scenario: On-demand deep loading
-- **WHEN** agent needs details about a specific capability during execution
-- **THEN** agent reads the relevant spec file at that point, not during startup
-
-### Requirement: Input Classification and Stage Routing
-
-The system SHALL classify user input to determine the appropriate workflow stage.
+The system SHALL classify user input in the analyze step to determine the appropriate workflow.
 
 **Intent Types:**
-| Intent Type | Description | Stage Entry |
-|-------------|-------------|-------------|
-| `directive` | Explicit self-iterate, "implement X", "start feature Y" | Full SDD workflow |
-| `bug-report` | Error description, stack trace, broken behavior | Bug fix workflow |
-| `feature-request` | New capability, enhancement idea | Feature proposal workflow |
-| `question` | How does X work? Why Y? | Knowledge query |
-| `review` | "Check this", "What do you think", "Is this correct" | Review workflow |
-| `clarification` | Follow-up on previous topic | Resume/continue workflow |
+| Intent Type | Description | Steps Used |
+|-------------|-------------|------------|
+| `directive` | Explicit self-iterate, "implement X" | analyze → read_spec → plan_tasks → implement → test → verify_spec → commit → summarize |
+| `bug-report` | Error description, stack trace, broken behavior | analyze → read_spec → propose → plan_tasks → implement → test → verify_spec → update_spec → commit → summarize |
+| `feature-request` | New capability, enhancement idea | Full 11-step workflow |
+| `question` | How does X work? Why Y? | Knowledge query (no flow) |
+| `review` | "Check this", "What do you think", "Is this correct" | analyze → read_spec → verify_spec → summarize |
+| `clarification` | Follow-up on previous topic | Continue from last flow |
 | `meta` | About the project/process itself | Meta workflow |
 | `off-topic` | Not related to project | Answer without modifying project files |
 
@@ -88,131 +90,144 @@ The system SHALL classify user input to determine the appropriate workflow stage
 - Question: "how ", "why ", "what is", "explain", "?"
 - Directive: "self-iterate", "continue", "proceed", "start ", "fix ", "update ", "refactor "
 
-**Stage Decision Matrix:**
-- IF intent == bug-report: Route to bugfix workflow (create change if needed)
-- IF intent == feature-request: Route to feature workflow (or small workflow if simple)
-- IF intent == review: Route to review workflow
-- IF intent == question: Explore and answer (no change created)
-- IF intent == directive: Execute with SDD workflow
-- IF intent == clarification: Continue previous context
-
 #### Scenario: Bug report classification
-- **WHEN** user input contains bug indicators like "error", "broken", "not working"
-- **THEN** system classifies intent as "bug-report" and routes to bugfix workflow
+- **WHEN** user input contains bug indicators
+- **THEN** system classifies intent as "bug-report"
+- **AND** routes to bugfix workflow (skips design step)
 
 #### Scenario: Feature request classification
-- **WHEN** user input contains feature indicators like "add", "implement", "create"
-- **THEN** system classifies intent as "feature-request" and routes to feature workflow
+- **WHEN** user input contains feature indicators
+- **THEN** system classifies intent as "feature-request"
+- **AND** routes to feature workflow (full 11 steps)
 
 #### Scenario: Review request classification
-- **WHEN** user input contains review indicators like "review", "check this"
-- **THEN** system classifies intent as "review" and routes to review workflow
-
-#### Scenario: Meta question classification
-- **WHEN** user input contains meta indicators like "what is se3", "how does se3 work", "about the process"
-- **THEN** system classifies intent as "meta" and answers without creating a change
-
-#### Scenario: Off-topic input classification
-- **WHEN** user input contains off-topic indicators like "what's the weather", "tell me a joke", "hello"
-- **THEN** system classifies intent as "off-topic" and answers without modifying project files
+- **WHEN** user input contains review indicators
+- **THEN** system classifies intent as "review"
+- **AND** routes to review workflow (minimal steps)
 
 ### Requirement: Session Execution Boundary
-Each session MUST focus on a limited scope of work and MUST NOT attempt to complete too many tasks in a single session.
 
-#### Scenario: Session scope limitation
-- **WHEN** the agent has determined the work scope through the startup protocol
-- **THEN** the agent only executes tasks within that scope and does not actively expand the scope
+Each flow MUST focus on a limited scope of work and MUST NOT attempt to complete too many tasks in a single flow.
+
+**Scope Guidelines:**
+- A flow should complete in a reasonable number of steps
+- Complex work should be broken into multiple flows
+- Loop mode (`se3 run --loop`) handles multiple related tasks
+
+#### Scenario: Flow scope limitation
+- **WHEN** the flow has determined work scope through analyze step
+- **THEN** the flow only executes tasks within that scope
 
 ### Requirement: Session Shutdown Protocol
-Session ending MUST leave code in a mergeable state. Progress tracking is handled automatically by tools.
 
-Shutdown steps:
-1. Ensure all modified code runs correctly
-2. Run `se3 handoff` — automatically commits and generates session summary in progress.md
-3. Update openspec change status if applicable
+Session ending MUST leave code in a mergeable state.
+
+**Shutdown Flow:**
+1. Complete summarize step
+2. Generate handoff summary
+3. Update progress.md via `se3 handoff`
+4. Mark flow as COMPLETED
+
+**Manual Shutdown (Ctrl+C):**
+1. First Ctrl+C: interrupt current step, allow prompt injection
+2. Second Ctrl+C: save state and exit
+3. Flow can be resumed later with `se3 run --resume`
+
+#### Scenario: Normal flow completion
+- **WHEN** flow reaches summarize step
+- **THEN** generate handoff summary
+- **AND** mark flow as COMPLETED
+
+#### Scenario: Interrupt and resume
+- **WHEN** user interrupts with Ctrl+C twice
+- **THEN** state is saved
+- **AND** flow can be resumed later
 
 ### Requirement: Session Commit Cadence
 
-The system SHALL define when commits occur during a session.
+Commits SHOULD occur during a flow when distinct units of work are complete.
 
-Commits SHOULD occur mid-session when a distinct, working unit of change is complete — not accumulated into a single commit with unrelated changes.
-
-**When to commit mid-session:**
+**When to Commit:**
 - After completing a coherent unit of work that passes tests
-- Before starting a substantially different task that would muddy the commit message
-- Before context clearing (/new) if there are completed changes to preserve
-
-**Commit sequence:**
-1. Run tests — do NOT commit with failing tests
-2. Stage files
-3. Write message with context for next session
-4. Commit (via `se3 commit` — automatically appends progress entry)
+- Before starting a substantially different task
+- The commit step handles this automatically
 
 **Commit Rules:**
-- Commit when a meaningful unit of work is complete — not tied to /new or any mechanical trigger
-- Do not batch unrelated changes into one commit
-- Commit messages MUST include summary of changes and context for the next session
+- Flow executes commit step automatically
+- Commit messages include context
+- progress.md is updated automatically
 
-#### Scenario: Mid-session commit
-- **WHEN** a distinct unit of work is complete and tested
-- **THEN** agent commits before starting the next unit
+#### Scenario: Mid-flow commit
+- **WHEN** flow reaches commit step
+- **THEN** changes are committed automatically
+- **AND** progress.md is updated
 
-### Requirement: Session Context Clearing
+### Requirement: Progress Tracking
 
-The system SHALL define when context is cleared during a session.
+The system SHALL use `progress.md` as the cumulative cross-session progress record.
 
-Context SHOULD be cleared when it approaches saturation or when switching to a substantially different task.
+**Progress Entries:**
+- Commit step appends commit entries
+- Summarize step appends session summary
+- Loop mode appends iteration summaries
 
-Context SHOULD NOT be cleared mechanically after every task group — agents SHOULD continue if there is context budget and the next task benefits from current context.
-
-#### Scenario: Normal shutdown
-- **WHEN** agent completes the current scope
-- **THEN** agent runs `se3 handoff`, code is mergeable, progress is updated automatically
-
-#### Scenario: Context approaching saturation
-- **WHEN** context window is nearly full
-- **THEN** agent prioritizes shutdown protocol (at minimum: `se3 commit` current work)
-
-### Requirement: Progress Tracking File
-The system SHALL use progress.md as the cumulative cross-session progress record. Progress entries are appended automatically by `se3 commit` and `se3 handoff` — agents do NOT manually maintain progress.md.
-
-progress.md contains:
-- Auto-appended commit entries in "Current Session" section (by `se3 commit`)
-- Formal session records generated by `se3 handoff`
-- Collab session reports generated by orchestrator do_complete()
+**Flow State:**
+- Persisted in `se3/state/engine.json`
+- Updated after each step completion
+- Enables precise resume
 
 #### Scenario: Auto-append commit entry
-- **WHEN** `se3 commit` succeeds
-- **THEN** a one-line commit record is automatically appended to progress.md Current Session section
+- **WHEN** commit step succeeds
+- **THEN** a record is automatically appended to progress.md
 
-#### Scenario: Finalize session
-- **WHEN** `se3 handoff` is executed
-- **THEN** the Current Session section is replaced with a formal dated session record including commits, files changed, and next steps
+#### Scenario: Finalize flow
+- **WHEN** summarize step completes
+- **THEN** a formal session record is generated
+- **AND** flow is marked COMPLETED
 
-### Requirement: Session Guard
+### Requirement: State Persistence
 
-The system SHALL enforce session validity checks before allowing session-aware operations.
+The system SHALL persist flow state after each step.
 
-Session-aware commands (`se3 work`, `se3 done`) SHALL check if session is properly started:
-- If `.claude/.session.json` does not exist → error `SESSION_NOT_STARTED`
-- If session status is not "active" → error `SESSION_NOT_ACTIVE`
-- If session file is corrupted → error `SESSION_INVALID`
+**Persistence Details:**
+- File location: `se3/state/engine.json`
+- Atomic writes (temp file + rename)
+- Includes: flow metadata, current step, step history, all outputs
 
-**Resolution:**
-- In all error cases, agent should run `se3 start` first
+**Recovery:**
+- `se3 run --resume` loads persisted state
+- Prompts user if multiple active flows
+- Continues from exact interruption point
 
-#### Scenario: Work without session
-- **WHEN** `se3 work` runs without `.claude/.session.json`
-- **THEN** it returns `SESSION_NOT_STARTED` error
-- **AND** agent runs `se3 start` to initialize
+#### Scenario: State persistence
+- **WHEN** each step completes
+- **THEN** state is automatically saved
 
-#### Scenario: Done with inactive session
-- **WHEN** `se3 done` runs with non-active session
-- **THEN** it returns `SESSION_NOT_ACTIVE` error
-- **AND** agent must start a session first
+#### Scenario: State recovery
+- **WHEN** `se3 run --resume` is executed
+- **THEN** flow continues from last saved state
 
-#### Scenario: Corrupted session file
-- **WHEN** `.claude/.session.json` exists but is malformed
-- **THEN** it returns `SESSION_INVALID` error
-- **AND** agent must reinitialize the session
+### Requirement: Loop Mode
 
+The system SHALL support continuous task execution via `se3 run --loop`.
+
+**Loop Mode Behavior:**
+1. Execute current task flow to completion
+2. Look for next task from:
+   - `specs/_backlog/*.md`
+   - `roadmap.md` unchecked items
+   - TODO comments in code
+3. If task found: create new flow and execute
+4. If no tasks: exit loop
+
+**Loop Options:**
+- `--max-iterations N`: Limit iterations
+- `--task-type TYPE`: Filter task types
+
+#### Scenario: Loop execution
+- **WHEN** `se3 run --loop` is executed
+- **THEN** tasks are discovered and executed continuously
+
+#### Scenario: Loop with task filter
+- **WHEN** `se3 run --loop --task-type=bugfix` is executed
+- **THEN** only bugfix tasks are executed
