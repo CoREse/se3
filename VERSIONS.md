@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.4.7** — fix: add --verbose flag required for stream-json format.
+**3.4.8** — fix: simplify stream-json parsing logic.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.4.8 | 2026-02-26 | fix: simplify stream-json parsing logic. Parse NDJSON line by line, collect text from assistant messages only. Remove redundant extraction functions. All steps now work correctly with stream-json format. |
 | 3.4.7 | 2026-02-26 | fix: add `--verbose` flag required for `--output-format stream-json`. Claude CLI requires verbose mode when using stream-json format. Fix exit code 1 error. |
 | 3.4.6 | 2026-02-26 | fix: extract only assistant message text from stream-json. Remove `result` type extraction to avoid appending non-JSON text to valid JSON responses. Fix JSON parsing when result summary was being appended to assistant's JSON output. |
 | 3.4.5 | 2026-02-26 | fix: handle single-line stream-json format. Remove `len(lines) < 2` check in `_extract_from_stream_json()` to properly parse single-line stream-json events. All JSON parser test cases now pass. |
