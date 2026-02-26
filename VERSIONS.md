@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.4.1** — feat: stream-json output format and auto-fail on max retries.
+**3.4.2** — fix: handle NDJSON format from stream-json output.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.4.2 | 2026-02-26 | fix: handle NDJSON (newline-delimited JSON) format from `--output-format stream-json`. Add `_parse_ndjson()` function to extract valid JSON from stream output. Fix JSON parsing error that caused "Failed to parse LLM response". |
 | 3.4.1 | 2026-02-26 | feat: add `--output-format stream-json` and `--verbose` to Claude CLI calls for streaming JSON output. Change retry behavior: exit immediately on max retries reached instead of prompting user. |
 | 3.4.0 | 2026-02-26 | feat: simplify version management — single source of truth from pyproject.toml, dynamic version loading in `__init__.py`, remove duplicate SE3_FRAMEWORK_VERSION definition. feat: add step execution timing display in `se3 run` (shows duration in seconds after each step completes). Update version checks in commit, version, and utils modules to use pyproject.toml. |
 | 3.3.6 | 2026-02-26 | feat: centralized robust JSON parsing utility in `src/se3/engine/utils/json_parser.py`. Refactor all 8 step handlers (analyze, propose, design, plan_tasks, implement, verify_spec, summarize, update_spec) to use the centralized JSON parser, improving resilience against malformed LLM outputs. |
