@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.4.9** — feat: real-time stream-json progress output in se3 run.
+**3.4.10** — fix: se3 run hangs due to stdin inheritance.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.4.10 | 2026-02-26 | fix: se3 run hangs due to stdin inheritance. Add `stdin=subprocess.DEVNULL` to prevent subprocess from waiting for input. Add `require_json` parameter to LLMCaller.call() with automatic JSON format retry logic. When LLM doesn't return valid JSON, automatically prompt it to retry with JSON format. |
 | 3.4.9 | 2026-02-26 | feat: real-time stream-json progress output in se3 run. Add StreamJSONTracker class to process each NDJSON line immediately, printing live progress including text chunks, tool calls, and tool results. Users can now see Claude Code's progress in real-time instead of waiting for all output. |
 | 3.4.8 | 2026-02-26 | fix: simplify stream-json parsing logic. Parse NDJSON line by line, collect text from assistant messages only. Remove redundant extraction functions. All steps now work correctly with stream-json format. |
 | 3.4.7 | 2026-02-26 | fix: add `--verbose` flag required for `--output-format stream-json`. Claude CLI requires verbose mode when using stream-json format. Fix exit code 1 error. |

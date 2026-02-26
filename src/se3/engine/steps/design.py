@@ -104,7 +104,7 @@ def design_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Call LLM for design
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         caller = LLMCaller(project_root)
-        response = caller.call(prompt=prompt)
+        response = caller.call(prompt=prompt, require_json=True)
 
         # Parse JSON response
         design = parse_json_response(response, required_keys=["overview"])

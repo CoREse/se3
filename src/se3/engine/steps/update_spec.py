@@ -96,7 +96,7 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Call LLM for spec updates
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         caller = LLMCaller(project_root)
-        response = caller.call(prompt=prompt)
+        response = caller.call(prompt=prompt, require_json=True)
 
         # Parse JSON response
         update_plan = parse_json_response(response, required_keys=["specs_to_update"])

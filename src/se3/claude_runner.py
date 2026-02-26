@@ -582,6 +582,7 @@ class ClaudeRunner:
             full_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL,  # Prevent hanging on stdin read
             cwd=cwd,
             env=env,
             bufsize=1,

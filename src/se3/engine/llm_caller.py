@@ -132,6 +132,7 @@ class LLMCaller:
         timeout: int = 600,
         context_files: Optional[List[Path]] = None,
         on_output: Optional[Callable[[str], None]] = None,
+        require_json: bool = False,
         **kwargs,
     ) -> str:
         """Call LLM with prompt and return output text.
@@ -141,6 +142,7 @@ class LLMCaller:
             timeout: Timeout in seconds
             context_files: Optional files to include as context
             on_output: Optional callback for real-time output
+            require_json: If True, automatically retry if response is not valid JSON
             **kwargs: Ignored (accepts model, max_tokens, temperature
                       for forward-compatibility but they don't apply
                       to claude -p subprocess calls)
@@ -158,7 +160,26 @@ class LLMCaller:
             logger.info(f"Injected extra prompt: {_extra_prompt[:80]}")
             _extra_prompt = None  # Consume after use
 
-        # Use stream-json format for real-time streaming output (requires --verbose)
+        return self._call_with_retry(
+            prompt=prompt,
+            timeout=timeout,
+            context_files=context_files,
+            on_output=on_output,
+            require_json=require_json,
+            json_retry_count=0,
+        )
+
+    def _call_with_retry(
+        self,
+        prompt: str,
+        timeout: int,
+        context_files: Optional[List[Path]],
+        on_output: Optional[Callable[[str], None]],
+        require_json: bool,
+        json_retry_count: int,
+        max_json_retries: int = 2,
+    ) -> str:
+        """Internal method to call LLM with retry logic."""
         args = ["--output-format", "stream-json", "--verbose", "-p", prompt]
 
         if context_files:
@@ -167,8 +188,6 @@ class LLMCaller:
                     args.extend(["--file", str(f)])
 
         env = dict(os.environ)
-        # Remove CLAUDECODE to avoid nested session detection
-        # This allows se3 run to invoke Claude CLI from within a Claude session
         env.pop("CLAUDECODE", None)
 
         start_time = time.time()
@@ -178,8 +197,6 @@ class LLMCaller:
             try:
                 logger.debug(f"LLM call attempt {attempt + 1}/{self.max_retries}")
 
-                # Use run() instead of run_with_monitor() for better compatibility
-                # with non-interactive shells (e.g., SSH + nohup environments)
                 if on_output:
                     result = self._runner.run_with_monitor(
                         args=args,
@@ -190,11 +207,9 @@ class LLMCaller:
                         on_output=on_output,
                     )
                 else:
-                    # Use stream-json format with real-time tracking
                     stream_tracker = StreamJSONTracker()
                     
                     def on_stream_output(line: str) -> None:
-                        """Process each line of output in real-time."""
                         stream_tracker.process_line(line)
                     
                     result = self._runner.run_with_monitor(
@@ -210,6 +225,21 @@ class LLMCaller:
                         stream_tracker.print_summary()
 
                 if result.success:
+                    # Check if JSON is required but not received
+                    if require_json and json_retry_count < max_json_retries:
+                        if not self._contains_valid_json(result.output):
+                            print(f"  [llm-caller] ⚠️  Response is not valid JSON, requesting JSON format (retry {json_retry_count + 1}/{max_json_retries})")
+                            json_prompt = self._create_json_retry_prompt(prompt, result.output)
+                            return self._call_with_retry(
+                                prompt=json_prompt,
+                                timeout=timeout,
+                                context_files=context_files,
+                                on_output=on_output,
+                                require_json=require_json,
+                                json_retry_count=json_retry_count + 1,
+                                max_json_retries=max_json_retries,
+                            )
+                    
                     duration_s = time.time() - start_time
                     logger.debug(f"LLM call succeeded in {int(duration_s * 1000)}ms")
                     return result.output
@@ -225,5 +255,42 @@ class LLMCaller:
                 time.sleep(self.retry_delay)
 
         raise LLMCallError(f"LLM call failed after {self.max_retries} attempts: {last_error}")
+
+    @staticmethod
+    def _contains_valid_json(output: str) -> bool:
+        """Check if the output contains valid JSON in the assistant's text content."""
+        from .utils.json_parser import parse_json_response
+        result = parse_json_response(output)
+        return result is not None
+
+    @staticmethod
+    def _create_json_retry_prompt(original_prompt: str, bad_output: str) -> str:
+        """Create a prompt asking LLM to return JSON format."""
+        # Extract what the LLM said (from assistant messages)
+        text_content = ""
+        for line in bad_output.strip().split('\n'):
+            try:
+                data = json.loads(line)
+                if isinstance(data, dict) and data.get('type') == 'assistant':
+                    message = data.get('message', {})
+                    content = message.get('content', [])
+                    for item in content:
+                        if isinstance(item, dict) and item.get('type') == 'text':
+                            text = item.get('text', '')
+                            if text:
+                                text_content += text
+            except json.JSONDecodeError:
+                continue
+        
+        retry_prompt = f"""{original_prompt}
+
+IMPORTANT: Your previous response was not in the required JSON format. You responded with:
+---
+{text_content[:500]}
+---
+
+Please respond ONLY with valid JSON as specified in the instructions above. Do not include any explanatory text before or after the JSON."""
+        
+        return retry_prompt
 
 
