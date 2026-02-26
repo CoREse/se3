@@ -35,6 +35,79 @@ class LLMCallError(Exception):
     pass
 
 
+class StreamJSONTracker:
+    """Tracks and prints real-time summary for stream-json output.
+    
+    Processes each line of NDJSON output immediately and prints a summary,
+    allowing users to see progress as Claude Code runs.
+    """
+    
+    def __init__(self):
+        self.message_count = 0
+        self.tool_calls = []
+        self.tool_results = []
+        self.text_chunks = 0
+        self.total_text_len = 0
+        self.start_time = time.time()
+    
+    def process_line(self, line: str) -> None:
+        """Process a single line of NDJSON output."""
+        line = line.strip()
+        if not line:
+            return
+        
+        try:
+            data = json.loads(line)
+            msg_type = data.get('type', '')
+            
+            if msg_type == 'assistant':
+                self.message_count += 1
+                message = data.get('message', {})
+                content = message.get('content', [])
+                for item in content:
+                    if isinstance(item, dict):
+                        if item.get('type') == 'text':
+                            text = item.get('text', '')
+                            if text:
+                                self.text_chunks += 1
+                                self.total_text_len += len(text)
+                                # Print progress for text chunks
+                                if self.text_chunks <= 3 or self.text_chunks % 10 == 0:
+                                    preview = text[:60].replace('\n', ' ')
+                                    print(f"  [llm-stream] 💬 Text chunk #{self.text_chunks}: {preview}...")
+                        elif item.get('type') == 'tool_use':
+                            name = item.get('name', 'unknown')
+                            self.tool_calls.append(name)
+                            print(f"  [llm-stream] 🔧 Tool call: {name}")
+                            
+            elif msg_type == 'tool_result':
+                result = data.get('result', {})
+                tool_use_id = result.get('toolUseId', 'unknown')
+                self.tool_results.append(tool_use_id)
+                # Check if there's content in the result
+                content = result.get('content', '')
+                if content:
+                    content_preview = str(content)[:60].replace('\n', ' ')
+                    print(f"  [llm-stream] ✅ Tool result: {content_preview}...")
+                else:
+                    print(f"  [llm-stream] ✅ Tool result received")
+                    
+            elif msg_type == 'error':
+                error_msg = data.get('error', 'Unknown error')
+                print(f"  [llm-stream] ❌ Error: {error_msg}")
+                
+        except json.JSONDecodeError:
+            # Not valid JSON, might be a partial line
+            pass
+    
+    def print_summary(self) -> None:
+        """Print final summary of the stream."""
+        duration = time.time() - self.start_time
+        print(f"  [llm-stream] ✓ Stream complete: {self.message_count} messages, "
+              f"{len(self.tool_calls)} tool calls, {self.total_text_len} chars "
+              f"({duration:.1f}s)")
+
+
 class LLMCaller:
     """Manages LLM calls within flow engine steps.
 
@@ -117,26 +190,28 @@ class LLMCaller:
                         on_output=on_output,
                     )
                 else:
-                    result = self._runner.run(
+                    # Use stream-json format with real-time tracking
+                    stream_tracker = StreamJSONTracker()
+                    
+                    def on_stream_output(line: str) -> None:
+                        """Process each line of output in real-time."""
+                        stream_tracker.process_line(line)
+                    
+                    result = self._runner.run_with_monitor(
                         args=args,
-                        timeout=timeout,
+                        wall_timeout=timeout,
+                        inactivity_timeout=300,
                         cwd=self.project_root,
                         env=env,
+                        on_output=on_stream_output,
                     )
-                    # Convert CompletedProcess to MonitoredResult-like object
-                    from ..claude_runner import MonitoredResult
-                    result = MonitoredResult(
-                        returncode=result.returncode,
-                        output=result.stdout or "",
-                        cmd_used="claude",
-                        cmd_index=0,
-                        was_retry=False,
-                    )
+                    
+                    if result.success:
+                        stream_tracker.print_summary()
 
                 if result.success:
                     duration_s = time.time() - start_time
                     logger.debug(f"LLM call succeeded in {int(duration_s * 1000)}ms")
-                    _print_response_summary(result.output, duration_s)
                     return result.output
 
                 last_error = f"Command '{result.cmd_used}' failed with exit code {result.returncode}"
@@ -152,48 +227,3 @@ class LLMCaller:
         raise LLMCallError(f"LLM call failed after {self.max_retries} attempts: {last_error}")
 
 
-def _print_response_summary(output: str, duration_s: float) -> None:
-    """Print a summary of the LLM response to terminal."""
-    size_kb = len(output.encode("utf-8")) / 1024
-    duration_str = f"{duration_s:.1f}s"
-
-    text = output.strip()
-
-    # Check for NDJSON format (stream-json output)
-    lines = text.split('\n')
-    if len(lines) > 1:
-        # Try to parse first few lines to detect NDJSON
-        json_lines = 0
-        for line in lines[:10]:  # Check first 10 lines
-            line = line.strip()
-            if line:
-                try:
-                    json.loads(line)
-                    json_lines += 1
-                except json.JSONDecodeError:
-                    pass
-
-        if json_lines > 1:
-            # This is NDJSON format
-            print(f"  [llm-response] ✓ NDJSON received: {len(lines)} lines ({size_kb:.1f}KB, {duration_str})")
-            return
-
-    # Try to detect and parse single JSON in the output
-    # Handle markdown code blocks wrapping JSON
-    if text.startswith("```"):
-        first_newline = text.find("\n")
-        last_fence = text.rfind("```")
-        if first_newline != -1 and last_fence > first_newline:
-            text = text[first_newline + 1:last_fence].strip()
-
-    try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            keys = ", ".join(parsed.keys())
-            print(f"  [llm-response] ✓ JSON received: {{{keys}}} ({size_kb:.1f}KB, {duration_str})")
-        else:
-            print(f"  [llm-response] ✓ JSON received ({size_kb:.1f}KB, {duration_str})")
-    except (json.JSONDecodeError, ValueError):
-        # Not JSON — show text length summary
-        lines = output.count("\n") + 1
-        print(f"  [llm-response] ✓ Text received: {lines} lines ({size_kb:.1f}KB, {duration_str})")
