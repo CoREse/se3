@@ -68,9 +68,6 @@ def _extract_from_stream_json(response: str) -> Optional[str]:
         Extracted text content or None if not stream format
     """
     lines = response.strip().split('\n')
-    if len(lines) < 2:
-        return None
-
     text_parts = []
     for line in lines:
         line = line.strip()
