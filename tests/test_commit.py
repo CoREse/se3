@@ -19,9 +19,9 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3_tools.commands.commit import (
+from se3.commands.commit import (
     detect_test_command,
     check_sensitive_files,
     get_changed_files,

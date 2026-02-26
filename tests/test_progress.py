@@ -15,9 +15,9 @@ from unittest.mock import patch, MagicMock
 import pytest
 
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3_tools.progress import (
+from se3.progress import (
     ensure_current_session_section,
     get_current_session_entries,
     get_session_number,

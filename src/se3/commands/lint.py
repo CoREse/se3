@@ -8,7 +8,7 @@ from typing import Dict, List, Any
 
 import typer
 
-from se3_tools.utils import discover_specs, parse_spec, get_exit_code
+from se3.utils import discover_specs, parse_spec, get_exit_code
 
 app = typer.Typer(invoke_without_command=True)
 

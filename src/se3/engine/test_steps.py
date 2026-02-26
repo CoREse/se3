@@ -22,7 +22,7 @@ from .steps import (
 class TestAnalyzeStep:
     """Tests for the analyze step."""
 
-    @patch("se3_tools.engine.steps.analyze.LLMCaller")
+    @patch("se3.engine.steps.analyze.LLMCaller")
     def test_analyze_success(self, MockLLMCaller):
         """Test successful analysis."""
         mock_caller = MagicMock()
@@ -44,7 +44,7 @@ class TestAnalyzeStep:
         assert "task_type" in step.outputs
         assert step.outputs["task_type"] == "feature"
 
-    @patch("se3_tools.engine.steps.analyze.LLMCaller")
+    @patch("se3.engine.steps.analyze.LLMCaller")
     def test_analyze_invalid_json(self, MockLLMCaller):
         """Test handling of invalid JSON from LLM."""
         mock_caller = MagicMock()
@@ -60,7 +60,7 @@ class TestAnalyzeStep:
         assert result == StepStatus.FAILED
         assert step.error_message is not None
 
-    @patch("se3_tools.engine.steps.analyze.LLMCaller")
+    @patch("se3.engine.steps.analyze.LLMCaller")
     def test_analyze_llm_error(self, MockLLMCaller):
         """Test handling of LLM call failure."""
         from .llm_caller import LLMCallError
@@ -176,7 +176,7 @@ class TestStepHandlers:
 class TestLLMCallerIntegration:
     """Tests for LLM caller integration with retry logic."""
 
-    @patch("se3_tools.engine.llm_caller.ClaudeRunner")
+    @patch("se3.engine.llm_caller.ClaudeRunner")
     def test_llm_retry_success(self, MockRunner):
         """Test that retries eventually succeed."""
         from .llm_caller import LLMCaller
@@ -198,7 +198,7 @@ class TestLLMCallerIntegration:
         assert result == "success"
         assert mock_runner.run_with_monitor.call_count == 3
 
-    @patch("se3_tools.engine.llm_caller.ClaudeRunner")
+    @patch("se3.engine.llm_caller.ClaudeRunner")
     def test_llm_retry_exhausted(self, MockRunner):
         """Test that retry exhaustion raises LLMCallError."""
         from .llm_caller import LLMCaller, LLMCallError

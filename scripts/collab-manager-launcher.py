@@ -23,7 +23,7 @@ if tools_path not in sys.path:
     sys.path.insert(0, tools_path)
 
 try:
-    from se3_tools.claude_runner import ClaudeRunner
+    from se3.claude_runner import ClaudeRunner
 except ImportError as e:
     print(f"Error: Cannot import ClaudeRunner from {tools_path}: {e}", file=sys.stderr)
     sys.exit(1)

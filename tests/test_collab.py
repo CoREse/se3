@@ -20,7 +20,7 @@ from datetime import datetime
 import pytest
 
 # Add tools to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts" / "mcp-collab"))
 
 
@@ -338,7 +338,7 @@ class TestCollabCli:
 
     def test_status_no_session(self):
         """--status with no active session should not crash."""
-        from se3_tools.commands.collab import find_project_root, get_collab_dir
+        from se3.commands.collab import find_project_root, get_collab_dir
         collab_dir = get_collab_dir(Path(self.tmpdir))
         assert not (collab_dir / "config.json").exists()
 

@@ -265,7 +265,7 @@ def compute_actions(state: Dict[str, Any], auto_archive: bool = False) -> List[D
 
     # 0. Run health check first - OpenSpec integrity is foundational
     # This ensures the system is healthy before we proceed with shutdown
-    from se3_tools.commands.health import run_health_check
+    from se3.commands.health import run_health_check
     health_results = run_health_check(".", stale_days=30, include_archived=False, skip_test_changes=True)
     state["health_results"] = health_results
 

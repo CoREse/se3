@@ -944,7 +944,7 @@ EOF
 import sys
 sys.path.insert(0, '$PROJECT_ROOT/tools')
 try:
-    from se3_tools.progress import append_collab_report
+    from se3.progress import append_collab_report
     from pathlib import Path
     report = open('$report_file').read()
     append_collab_report(Path('$PROJECT_ROOT'), report)

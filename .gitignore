@@ -25,3 +25,5 @@ tmp*.prompt
 
 # SE3 session file
 .claude/.session.json
+src/se3/__pycache__/
+*.egg-info/

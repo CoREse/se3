@@ -49,10 +49,10 @@ class TestSanitizeChangeName:
 class TestRunFullCycle:
     """Test the run_full_cycle function."""
 
-    @patch("se3_tools.commands.fullcycle.run_session_start")
-    @patch("se3_tools.commands.fullcycle.run_session_done")
-    @patch("se3_tools.commands.fullcycle.Path.mkdir")
-    @patch("se3_tools.commands.fullcycle.Path.write_text")
+    @patch("se3.commands.fullcycle.run_session_start")
+    @patch("se3.commands.fullcycle.run_session_done")
+    @patch("se3.commands.fullcycle.Path.mkdir")
+    @patch("se3.commands.fullcycle.Path.write_text")
     def test_quick_mode(self, mock_write_text, mock_mkdir, mock_done, mock_start, tmp_path):
         """Quick mode should use 'small' workflow."""
         mock_start.return_value = {
@@ -70,10 +70,10 @@ class TestRunFullCycle:
         assert result["quick_mode"] is True
         assert result["phases"]["work"]["workflow"] == "small"
 
-    @patch("se3_tools.commands.fullcycle.run_session_start")
-    @patch("se3_tools.commands.fullcycle.run_session_done")
-    @patch("se3_tools.commands.fullcycle.Path.mkdir")
-    @patch("se3_tools.commands.fullcycle.Path.write_text")
+    @patch("se3.commands.fullcycle.run_session_start")
+    @patch("se3.commands.fullcycle.run_session_done")
+    @patch("se3.commands.fullcycle.Path.mkdir")
+    @patch("se3.commands.fullcycle.Path.write_text")
     def test_normal_mode(self, mock_write_text, mock_mkdir, mock_done, mock_start, tmp_path):
         """Normal mode should use 'feature' workflow."""
         mock_start.return_value = {
@@ -91,7 +91,7 @@ class TestRunFullCycle:
         assert result["quick_mode"] is False
         assert result["phases"]["work"]["workflow"] == "feature"
 
-    @patch("se3_tools.commands.fullcycle.run_session_start")
+    @patch("se3.commands.fullcycle.run_session_start")
     def test_start_phase_actions(self, mock_start, tmp_path):
         """Should handle critical start phase actions."""
         mock_start.return_value = {
@@ -105,11 +105,11 @@ class TestRunFullCycle:
         assert "error" in result
         assert result["error"] == "Start phase requires manual intervention"
 
-    @patch("se3_tools.commands.fullcycle.run_session_start")
-    @patch("se3_tools.commands.fullcycle.run_session_done")
-    @patch("se3_tools.commands.fullcycle.Path.mkdir")
-    @patch("se3_tools.commands.fullcycle.Path.write_text")
-    @patch("se3_tools.commands.fullcycle.Path.exists")
+    @patch("se3.commands.fullcycle.run_session_start")
+    @patch("se3.commands.fullcycle.run_session_done")
+    @patch("se3.commands.fullcycle.Path.mkdir")
+    @patch("se3.commands.fullcycle.Path.write_text")
+    @patch("se3.commands.fullcycle.Path.exists")
     def test_duplicate_change_name(self, mock_exists, mock_write_text, mock_mkdir, mock_done, mock_start, tmp_path):
         """Should handle duplicate change names by appending timestamp."""
         mock_exists.return_value = True
@@ -129,10 +129,10 @@ class TestRunFullCycle:
         # Change name should have timestamp appended
         assert "-20" in result["change_name"]  # Timestamp format includes year
 
-    @patch("se3_tools.commands.fullcycle.run_session_start")
-    @patch("se3_tools.commands.fullcycle.run_session_done")
-    @patch("se3_tools.commands.fullcycle.Path.mkdir")
-    @patch("se3_tools.commands.fullcycle.Path.write_text")
+    @patch("se3.commands.fullcycle.run_session_start")
+    @patch("se3.commands.fullcycle.run_session_done")
+    @patch("se3.commands.fullcycle.Path.mkdir")
+    @patch("se3.commands.fullcycle.Path.write_text")
     def test_result_structure(self, mock_write_text, mock_mkdir, mock_done, mock_start, tmp_path):
         """Result should have expected structure."""
         mock_start.return_value = {
@@ -160,10 +160,10 @@ class TestRunFullCycle:
         assert "implementation" in result["phases"]
         assert "done" in result["phases"]
 
-    @patch("se3_tools.commands.fullcycle.run_session_start")
-    @patch("se3_tools.commands.fullcycle.run_session_done")
-    @patch("se3_tools.commands.fullcycle.Path.mkdir")
-    @patch("se3_tools.commands.fullcycle.Path.write_text")
+    @patch("se3.commands.fullcycle.run_session_start")
+    @patch("se3.commands.fullcycle.run_session_done")
+    @patch("se3.commands.fullcycle.Path.mkdir")
+    @patch("se3.commands.fullcycle.Path.write_text")
     def test_actions_include_commit_when_changes(self, mock_write_text, mock_mkdir, mock_done, mock_start, tmp_path):
         """Should include commit action when there are uncommitted changes."""
         mock_start.return_value = {

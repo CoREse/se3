@@ -21,15 +21,15 @@ from unittest.mock import patch, MagicMock, call
 import pytest
 
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3_tools.config import (
+from se3.config import (
     load_global_config,
     load_project_config,
     merge_configs,
     load_claude_commands,
 )
-from se3_tools.claude_runner import (
+from se3.claude_runner import (
     ClaudeRunner,
     USAGE_LIMIT_KEYWORDS,
 )
@@ -43,7 +43,7 @@ class TestLoadGlobalConfig:
     """Test global config loading from ~/.se3/config.yaml."""
 
     def test_no_config_file(self, tmp_path):
-        with patch("se3_tools.config.Path.home", return_value=tmp_path):
+        with patch("se3.config.Path.home", return_value=tmp_path):
             result = load_global_config()
         assert result == {}
 
@@ -53,7 +53,7 @@ class TestLoadGlobalConfig:
         config = se3_dir / "config.yaml"
         config.write_text("claude_commands:\n  - cmd: claude\n    priority: 10\n")
 
-        with patch("se3_tools.config.Path.home", return_value=tmp_path):
+        with patch("se3.config.Path.home", return_value=tmp_path):
             result = load_global_config()
         assert "claude_commands" in result
         assert result["claude_commands"][0]["cmd"] == "claude"
@@ -64,7 +64,7 @@ class TestLoadGlobalConfig:
         config = se3_dir / "config.yaml"
         config.write_text(": invalid: yaml: [[[")
 
-        with patch("se3_tools.config.Path.home", return_value=tmp_path):
+        with patch("se3.config.Path.home", return_value=tmp_path):
             result = load_global_config()
         assert result == {}
 
@@ -118,7 +118,7 @@ class TestLoadClaudeCommands:
     """Test loading and sorting claude commands."""
 
     def test_default_when_no_config(self, tmp_path):
-        with patch("se3_tools.config.load_global_config", return_value={}):
+        with patch("se3.config.load_global_config", return_value={}):
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 1
         assert commands[0]["cmd"] == "claude"
@@ -128,8 +128,8 @@ class TestLoadClaudeCommands:
         global_cfg = {"claude_commands": [{"cmd": "global-claude", "priority": 10}]}
         project_cfg = {"claude_commands": [{"cmd": "project-claude", "priority": 5}]}
 
-        with patch("se3_tools.config.load_global_config", return_value=global_cfg), \
-             patch("se3_tools.config.load_project_config", return_value=project_cfg):
+        with patch("se3.config.load_global_config", return_value=global_cfg), \
+             patch("se3.config.load_project_config", return_value=project_cfg):
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 1
         assert commands[0]["cmd"] == "project-claude"
@@ -138,8 +138,8 @@ class TestLoadClaudeCommands:
         global_cfg = {"claude_commands": [{"cmd": "global-claude", "priority": 10}]}
         project_cfg = {"other_key": "value"}
 
-        with patch("se3_tools.config.load_global_config", return_value=global_cfg), \
-             patch("se3_tools.config.load_project_config", return_value=project_cfg):
+        with patch("se3.config.load_global_config", return_value=global_cfg), \
+             patch("se3.config.load_project_config", return_value=project_cfg):
             commands = load_claude_commands(tmp_path)
         assert commands[0]["cmd"] == "global-claude"
 
@@ -150,16 +150,16 @@ class TestLoadClaudeCommands:
             {"cmd": "mid", "priority": 5},
         ]}
 
-        with patch("se3_tools.config.load_global_config", return_value={}), \
-             patch("se3_tools.config.load_project_config", return_value=cfg):
+        with patch("se3.config.load_global_config", return_value={}), \
+             patch("se3.config.load_project_config", return_value=cfg):
             commands = load_claude_commands(tmp_path)
         assert [c["cmd"] for c in commands] == ["high", "mid", "low"]
 
     def test_string_entries_normalized(self, tmp_path):
         cfg = {"claude_commands": ["claude", "kclaude"]}
 
-        with patch("se3_tools.config.load_global_config", return_value={}), \
-             patch("se3_tools.config.load_project_config", return_value=cfg):
+        with patch("se3.config.load_global_config", return_value={}), \
+             patch("se3.config.load_project_config", return_value=cfg):
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 2
         assert all(isinstance(c, dict) for c in commands)
@@ -168,15 +168,15 @@ class TestLoadClaudeCommands:
     def test_missing_priority_defaults_to_zero(self, tmp_path):
         cfg = {"claude_commands": [{"cmd": "claude"}]}
 
-        with patch("se3_tools.config.load_global_config", return_value={}), \
-             patch("se3_tools.config.load_project_config", return_value=cfg):
+        with patch("se3.config.load_global_config", return_value={}), \
+             patch("se3.config.load_project_config", return_value=cfg):
             commands = load_claude_commands(tmp_path)
         assert commands[0]["priority"] == 0
 
     def test_no_project_root_uses_global_only(self):
         global_cfg = {"claude_commands": [{"cmd": "global-only", "priority": 1}]}
 
-        with patch("se3_tools.config.load_global_config", return_value=global_cfg):
+        with patch("se3.config.load_global_config", return_value=global_cfg):
             commands = load_claude_commands(None)
         assert commands[0]["cmd"] == "global-only"
 

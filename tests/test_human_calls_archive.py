@@ -15,9 +15,9 @@ from pathlib import Path
 import pytest
 
 # Add tools to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3_tools.commands.human_calls_cmd import (
+from se3.commands.human_calls_cmd import (
     find_project_root,
     get_archive_dir,
     ensure_archive_dir,
@@ -25,7 +25,7 @@ from se3_tools.commands.human_calls_cmd import (
     get_pending_calls_count,
     get_responded_calls_count,
 )
-from se3_tools.human_calls import (
+from se3.human_calls import (
     HumanCall,
     HumanCallStore,
     CallStatus,
@@ -207,7 +207,7 @@ class TestArchiveCommandIntegration:
             assert responded.file_path.exists()
 
             # Archive the calls
-            from se3_tools.commands.human_calls_cmd import archive_calls
+            from se3.commands.human_calls_cmd import archive_calls
             import typer
 
             # Mock the typer echo to capture output
@@ -252,7 +252,7 @@ class TestArchiveCommandIntegration:
             responded.file_path.write_text(content)
 
             # Archive in dry-run mode
-            from se3_tools.commands.human_calls_cmd import archive_calls
+            from se3.commands.human_calls_cmd import archive_calls
             import typer
 
             outputs = []
@@ -302,7 +302,7 @@ class TestArchiveCommandIntegration:
             new_path.write_text(content)
 
             # Archive the call
-            from se3_tools.commands.human_calls_cmd import archive_calls
+            from se3.commands.human_calls_cmd import archive_calls
             import typer
 
             outputs = []
@@ -336,7 +336,7 @@ class TestListCommandIntegration:
             store = HumanCallStore(calls_dir)
             store.create_call("Pending Call", "This is pending")
 
-            from se3_tools.commands.human_calls_cmd import list_calls
+            from se3.commands.human_calls_cmd import list_calls
             import typer
 
             outputs = []
@@ -369,7 +369,7 @@ class TestListCommandIntegration:
             archived_file = archive_dir / "20260218-120000-test.md"
             archived_file.write_text("Archived content")
 
-            from se3_tools.commands.human_calls_cmd import list_calls
+            from se3.commands.human_calls_cmd import list_calls
             import typer
 
             outputs = []
@@ -395,7 +395,7 @@ class TestListCommandIntegration:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
 
-            from se3_tools.commands.human_calls_cmd import list_calls
+            from se3.commands.human_calls_cmd import list_calls
             import typer
 
             outputs = []

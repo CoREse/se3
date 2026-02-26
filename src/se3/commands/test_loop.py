@@ -8,7 +8,7 @@ import queue
 import subprocess
 import time
 
-from se3_tools.commands.loop import (
+from se3.commands.loop import (
     LoopState,
     sanitize_change_name,
     run_claude_with_renderer,
@@ -174,12 +174,12 @@ class TestLoopCollabIntegration:
 
     def test_run_loop_collab_imports(self):
         """Test that run_loop_collab function can be imported."""
-        from se3_tools.commands.loop import run_loop_collab
+        from se3.commands.loop import run_loop_collab
         assert callable(run_loop_collab)
 
     def test_run_loop_collab_function_signature(self):
         """Test that run_loop_collab has correct function signature."""
-        from se3_tools.commands.loop import run_loop_collab
+        from se3.commands.loop import run_loop_collab
         import inspect
 
         sig = inspect.signature(run_loop_collab)
@@ -197,12 +197,12 @@ class TestCreateLoopBranch:
 
     def test_create_loop_branch_imports(self):
         """Test that create_loop_branch function can be imported."""
-        from se3_tools.commands.loop import create_loop_branch
+        from se3.commands.loop import create_loop_branch
         assert callable(create_loop_branch)
 
     def test_create_loop_branch_creates_branch_with_timestamp(self):
         """Test that create_loop_branch creates a branch with timestamp."""
-        from se3_tools.commands.loop import create_loop_branch, is_loop_branch
+        from se3.commands.loop import create_loop_branch, is_loop_branch
         from pathlib import Path
         from unittest.mock import patch, MagicMock
 
@@ -224,7 +224,7 @@ class TestCreateLoopBranch:
 
     def test_create_loop_branch_sets_config(self):
         """Test that create_loop_branch records base branch in git config."""
-        from se3_tools.commands.loop import create_loop_branch
+        from se3.commands.loop import create_loop_branch
         from pathlib import Path
         from unittest.mock import patch, MagicMock, call
 
@@ -245,7 +245,7 @@ class TestCreateLoopBranch:
 
     def test_create_loop_branch_handles_existing_branch(self):
         """Test that create_loop_branch handles branch name collision."""
-        from se3_tools.commands.loop import create_loop_branch
+        from se3.commands.loop import create_loop_branch
         from pathlib import Path
         from unittest.mock import patch, MagicMock
 
@@ -280,12 +280,12 @@ class TestInferLoopBranchBase:
 
     def test_infer_loop_branch_base_imports(self):
         """Test that infer_loop_branch_base function can be imported."""
-        from se3_tools.commands.loop import infer_loop_branch_base
+        from se3.commands.loop import infer_loop_branch_base
         assert callable(infer_loop_branch_base)
 
     def test_infer_loop_branch_base_returns_master_when_ancestor(self):
         """Test that infer_loop_branch_base returns master when it's an ancestor."""
-        from se3_tools.commands.loop import infer_loop_branch_base
+        from se3.commands.loop import infer_loop_branch_base
         from pathlib import Path
         from unittest.mock import patch, MagicMock
 
@@ -307,7 +307,7 @@ class TestInferLoopBranchBase:
 
     def test_infer_loop_branch_base_returns_main_when_master_not_found(self):
         """Test that infer_loop_branch_base returns main when master not found but main is."""
-        from se3_tools.commands.loop import infer_loop_branch_base
+        from se3.commands.loop import infer_loop_branch_base
         from pathlib import Path
         from unittest.mock import patch, MagicMock
 
@@ -333,7 +333,7 @@ class TestInferLoopBranchBase:
 
     def test_infer_loop_branch_base_returns_none_when_no_match(self):
         """Test that infer_loop_branch_base returns None when no base branch matches."""
-        from se3_tools.commands.loop import infer_loop_branch_base
+        from se3.commands.loop import infer_loop_branch_base
         from pathlib import Path
         from unittest.mock import patch, MagicMock
 
@@ -353,19 +353,19 @@ class TestIsLoopBranch:
 
     def test_is_loop_branch_imports(self):
         """Test that is_loop_branch function can be imported."""
-        from se3_tools.commands.loop import is_loop_branch
+        from se3.commands.loop import is_loop_branch
         assert callable(is_loop_branch)
 
     def test_is_loop_branch_returns_true_for_loop_branch(self):
         """Test that is_loop_branch returns True for loop branch names."""
-        from se3_tools.commands.loop import is_loop_branch
+        from se3.commands.loop import is_loop_branch
 
         assert is_loop_branch("se3-loop/1234567890") is True
         assert is_loop_branch("se3-loop/1234567890-1") is True
 
     def test_is_loop_branch_returns_false_for_non_loop_branch(self):
         """Test that is_loop_branch returns False for non-loop branch names."""
-        from se3_tools.commands.loop import is_loop_branch
+        from se3.commands.loop import is_loop_branch
 
         assert is_loop_branch("master") is False
         assert is_loop_branch("main") is False
@@ -378,12 +378,12 @@ class TestGetLoopBranchBase:
 
     def test_get_loop_branch_base_imports(self):
         """Test that get_loop_branch_base function can be imported."""
-        from se3_tools.commands.loop import get_loop_branch_base
+        from se3.commands.loop import get_loop_branch_base
         assert callable(get_loop_branch_base)
 
     def test_get_loop_branch_base_returns_none_when_not_set(self):
         """Test that get_loop_branch_base returns None when base branch not recorded."""
-        from se3_tools.commands.loop import get_loop_branch_base
+        from se3.commands.loop import get_loop_branch_base
         from pathlib import Path
         from unittest.mock import patch, MagicMock
 
@@ -397,7 +397,7 @@ class TestGetLoopBranchBase:
 
     def test_get_loop_branch_base_returns_value_when_set(self):
         """Test that get_loop_branch_base returns value when base branch is recorded."""
-        from se3_tools.commands.loop import get_loop_branch_base
+        from se3.commands.loop import get_loop_branch_base
         from pathlib import Path
         from unittest.mock import patch, MagicMock
 
@@ -416,15 +416,15 @@ class TestAutoMergeWithClaude:
 
     def test_auto_merge_can_be_imported(self):
         """Test that auto_merge_with_claude can be imported."""
-        from se3_tools.commands.loop import auto_merge_with_claude
+        from se3.commands.loop import auto_merge_with_claude
         assert callable(auto_merge_with_claude)
 
-    @patch('se3_tools.commands.loop.run_claude_with_renderer')
-    @patch('se3_tools.commands.loop.load_claude_commands')
+    @patch('se3.commands.loop.run_claude_with_renderer')
+    @patch('se3.commands.loop.load_claude_commands')
     @patch('shutil.which', return_value='/usr/bin/claude')
     def test_auto_merge_success(self, mock_which, mock_load_cmds, mock_run_claude):
         """Test auto_merge_with_claude returns True on success."""
-        from se3_tools.commands.loop import auto_merge_with_claude
+        from se3.commands.loop import auto_merge_with_claude
         from pathlib import Path
 
         mock_load_cmds.return_value = [{"cmd": "claude"}]
@@ -440,12 +440,12 @@ class TestAutoMergeWithClaude:
         assert "se3-loop/123" in prompt
         assert "master" in prompt
 
-    @patch('se3_tools.commands.loop.run_claude_with_renderer')
-    @patch('se3_tools.commands.loop.load_claude_commands')
+    @patch('se3.commands.loop.run_claude_with_renderer')
+    @patch('se3.commands.loop.load_claude_commands')
     @patch('shutil.which', return_value='/usr/bin/claude')
     def test_auto_merge_failure(self, mock_which, mock_load_cmds, mock_run_claude):
         """Test auto_merge_with_claude returns False on failure."""
-        from se3_tools.commands.loop import auto_merge_with_claude
+        from se3.commands.loop import auto_merge_with_claude
         from pathlib import Path
 
         mock_load_cmds.return_value = [{"cmd": "claude"}]
@@ -454,11 +454,11 @@ class TestAutoMergeWithClaude:
         result = auto_merge_with_claude("se3-loop/123", "master", Path("/tmp"))
         assert result is False
 
-    @patch('se3_tools.commands.loop.load_claude_commands')
+    @patch('se3.commands.loop.load_claude_commands')
     @patch('shutil.which', return_value=None)
     def test_auto_merge_no_claude(self, mock_which, mock_load_cmds):
         """Test auto_merge_with_claude returns False when claude not found."""
-        from se3_tools.commands.loop import auto_merge_with_claude
+        from se3.commands.loop import auto_merge_with_claude
         from pathlib import Path
 
         mock_load_cmds.return_value = [{"cmd": "claude"}]

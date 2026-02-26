@@ -712,7 +712,7 @@ def run_work(
                 active_changes.append(change_name)
 
         # Check health for warnings to display
-        from se3_tools.commands.health import run_health_check
+        from se3.commands.health import run_health_check
         health_results = run_health_check(str(root), stale_days=30, include_archived=False, skip_test_changes=True)
 
         if active_changes:

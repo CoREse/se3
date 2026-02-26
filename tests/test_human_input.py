@@ -18,9 +18,9 @@ from pathlib import Path
 import pytest
 
 # Add tools to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "tools"))
+sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3_tools.human_input import (
+from se3.human_input import (
     HumanInput,
     HumanInputStore,
     InputStatus,
