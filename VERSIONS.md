@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.4.4** — feat: properly implement stream-json parsing.
+**3.4.5** — fix: handle single-line stream-json format.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.4.5 | 2026-02-26 | fix: handle single-line stream-json format. Remove `len(lines) < 2` check in `_extract_from_stream_json()` to properly parse single-line stream-json events. All JSON parser test cases now pass. |
 | 3.4.4 | 2026-02-26 | feat: properly implement stream-json parsing. Add `_extract_from_stream_json()` to extract text content from stream-json format. Rewrite `parse_json_response()` to handle stream-json, NDJSON, and single JSON formats correctly. |
 | 3.4.3 | 2026-02-26 | fix: remove `--output-format stream-json` due to parsing compatibility issues. Revert to standard text format which works correctly with existing JSON parsing. Add debug logging for response diagnosis. |
 | 3.4.2 | 2026-02-26 | fix: handle NDJSON (newline-delimited JSON) format from `--output-format stream-json`. Add `_parse_ndjson()` function to extract valid JSON from stream output. Fix JSON parsing error that caused "Failed to parse LLM response". |
