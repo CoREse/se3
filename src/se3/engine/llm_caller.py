@@ -157,8 +157,28 @@ def _print_response_summary(output: str, duration_s: float) -> None:
     size_kb = len(output.encode("utf-8")) / 1024
     duration_str = f"{duration_s:.1f}s"
 
-    # Try to detect and parse JSON in the output
     text = output.strip()
+
+    # Check for NDJSON format (stream-json output)
+    lines = text.split('\n')
+    if len(lines) > 1:
+        # Try to parse first few lines to detect NDJSON
+        json_lines = 0
+        for line in lines[:10]:  # Check first 10 lines
+            line = line.strip()
+            if line:
+                try:
+                    json.loads(line)
+                    json_lines += 1
+                except json.JSONDecodeError:
+                    pass
+
+        if json_lines > 1:
+            # This is NDJSON format
+            print(f"  [llm-response] ✓ NDJSON received: {len(lines)} lines ({size_kb:.1f}KB, {duration_str})")
+            return
+
+    # Try to detect and parse single JSON in the output
     # Handle markdown code blocks wrapping JSON
     if text.startswith("```"):
         first_newline = text.find("\n")
@@ -170,10 +190,10 @@ def _print_response_summary(output: str, duration_s: float) -> None:
         parsed = json.loads(text)
         if isinstance(parsed, dict):
             keys = ", ".join(parsed.keys())
-            print(f"  [llm-response] \u2713 JSON received: {{{keys}}} ({size_kb:.1f}KB, {duration_str})")
+            print(f"  [llm-response] ✓ JSON received: {{{keys}}} ({size_kb:.1f}KB, {duration_str})")
         else:
-            print(f"  [llm-response] \u2713 JSON received ({size_kb:.1f}KB, {duration_str})")
+            print(f"  [llm-response] ✓ JSON received ({size_kb:.1f}KB, {duration_str})")
     except (json.JSONDecodeError, ValueError):
         # Not JSON — show text length summary
         lines = output.count("\n") + 1
-        print(f"  [llm-response] \u2713 Text received: {lines} lines ({size_kb:.1f}KB, {duration_str})")
+        print(f"  [llm-response] ✓ Text received: {lines} lines ({size_kb:.1f}KB, {duration_str})")

@@ -16,6 +16,9 @@ T = TypeVar("T", bound=Dict[str, Any])
 def parse_json_response(response: str, required_keys: Optional[list[str]] = None) -> Optional[Dict[str, Any]]:
     """Parse JSON from LLM response with robust error recovery.
 
+    Handles both single JSON responses and NDJSON (newline-delimited JSON)
+    from stream-json format.
+
     Args:
         response: Raw LLM response string
         required_keys: Optional list of keys that must be present
@@ -26,14 +29,19 @@ def parse_json_response(response: str, required_keys: Optional[list[str]] = None
     if not response:
         return None
 
-    # 1. Try to find JSON block using regex for better extraction
-    # This handles extra text before/after and markdown blocks
+    # First, try NDJSON format (stream-json output)
+    # Each line is a separate JSON object, we need to find the one with content
+    ndjson_result = _parse_ndjson(response, required_keys)
+    if ndjson_result:
+        return ndjson_result
+
+    # Fall back to single JSON parsing
     json_str = _extract_json_string(response)
     if not json_str:
         logger.warning("No JSON-like structure found in response")
         return None
 
-    # 2. Try standard parsing first
+    # Try standard parsing
     try:
         data = json.loads(json_str)
         if _validate_keys(data, required_keys):
@@ -43,7 +51,7 @@ def parse_json_response(response: str, required_keys: Optional[list[str]] = None
     except json.JSONDecodeError:
         pass
 
-    # 3. If standard parsing fails, try to repair common LLM JSON mistakes
+    # If standard parsing fails, try to repair common LLM JSON mistakes
     repaired_json = _repair_json(json_str)
     try:
         data = json.loads(repaired_json)
@@ -52,9 +60,61 @@ def parse_json_response(response: str, required_keys: Optional[list[str]] = None
             return data
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse JSON even after repair: {e}")
-        # Log a snippet of the failed JSON for debugging
         snippet = json_str[:200] + "..." if len(json_str) > 200 else json_str
         logger.debug(f"JSON snippet: {snippet}")
+
+    return None
+
+
+def _parse_ndjson(response: str, required_keys: Optional[list[str]] = None) -> Optional[Dict[str, Any]]:
+    """Parse NDJSON (newline-delimited JSON) format.
+
+    Stream-json format outputs one JSON object per line.
+    We look for the line containing the actual response content.
+
+    Args:
+        response: Raw response potentially in NDJSON format
+        required_keys: Keys that must be present in the result
+
+    Returns:
+        Parsed dict from the content line, or None if not NDJSON or no valid content found
+    """
+    lines = response.strip().split('\n')
+    if len(lines) < 2:
+        # Not NDJSON format (single line)
+        return None
+
+    # Try to parse each line as JSON
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        try:
+            data = json.loads(line)
+            if not isinstance(data, dict):
+                continue
+
+            # Check for stream-json format indicators
+            # Claude stream-json outputs objects with 'type' field
+            # The actual content is usually in a 'content' or 'message' field
+            # or we look for objects that have our required keys
+
+            # If this line has the required keys, use it
+            if _validate_keys(data, required_keys):
+                logger.debug(f"Found valid JSON in NDJSON line with keys: {list(data.keys())}")
+                return data
+
+            # Also check nested 'content' or 'output' fields
+            for key in ['content', 'output', 'message', 'result']:
+                if key in data and isinstance(data[key], dict):
+                    if _validate_keys(data[key], required_keys):
+                        logger.debug(f"Found valid JSON in NDJSON line['{key}']")
+                        return data[key]
+
+        except json.JSONDecodeError:
+            # This line isn't valid JSON, skip it
+            continue
 
     return None
 
