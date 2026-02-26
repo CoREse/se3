@@ -197,7 +197,19 @@ def _parse_summary_response(response: str) -> dict[str, Any] | None:
 
         response = response.strip()
 
-        result = json.loads(response)
+        # Try to find JSON object boundaries
+        # Handle case where LLM adds extra text after JSON
+        json_start = response.find('{')
+        json_end = response.rfind('}')
+
+        if json_start == -1 or json_end == -1 or json_end <= json_start:
+            logger.warning("No JSON object found in response")
+            return None
+
+        # Extract just the JSON part
+        json_str = response[json_start:json_end + 1]
+
+        result = json.loads(json_str)
 
         if "summary" not in result:
             logger.warning("Missing 'summary' in summarize response")
@@ -207,6 +219,8 @@ def _parse_summary_response(response: str) -> dict[str, Any] | None:
 
     except json.JSONDecodeError as e:
         logger.error(f"Failed to parse JSON response: {e}")
+        # Log the problematic response for debugging
+        logger.debug(f"Response content: {response[:500]}...")
         return None
     except Exception as e:
         logger.error(f"Unexpected error parsing response: {e}")
