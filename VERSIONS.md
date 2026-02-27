@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.5.0** — feat: LLM-driven read_spec + PROJECT_SUMMARY step + se3 summary CLI + roadmap migration to _backlog.
+**3.6.0** — feat: base spec mechanism + `se3 init` command. Auto-load base spec in read_spec step.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.6.0 | 2026-02-27 | feat: Base spec mechanism. New `se3 init` command generates project structure and `se3/specs/base/spec.md` from template. `read_spec` step auto-loads base spec before LLM selection, ensuring all flows have access to project-level conventions. New `src/se3/templates/` package with base spec skeleton. 9 new tests. |
 | 3.5.0 | 2026-02-27 | feat: LLM-driven read_spec replaces keyword matching. New PROJECT_SUMMARY step generates project context summary for downstream LLM steps. New `se3 summary` CLI command. ProjectContextCollector collects git, flow engine, backlog, specs. Migrated roadmap.md to se3/specs/_backlog/ (9 backlog items). Updated propose/design prompts with project context. |
 | 3.4.11 | 2026-02-26 | feat: improved spec matching with expanded keywords. Add comprehensive keyword-to-spec mapping covering all 17 specs (agent-team, se3-commands, se3-config, etc.). Add word boundary matching to prevent partial matches (e.g., "about" matching "agent"). Add fallback content-based matching when keyword matching finds no results. |
 | 3.4.10 | 2026-02-26 | fix: se3 run hangs due to stdin inheritance. Add `stdin=subprocess.DEVNULL` to prevent subprocess from waiting for input. Add `require_json` parameter to LLMCaller.call() with automatic JSON format retry logic. When LLM doesn't return valid JSON, automatically prompt it to retry with JSON format. |

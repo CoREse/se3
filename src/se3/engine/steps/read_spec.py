@@ -83,6 +83,16 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         builder = ContextBuilder(project_root)
         specs_dir = str(builder.specs_dir.resolve())
 
+        # Auto-load base spec if it exists (before LLM selection)
+        spec_contents: dict[str, str] = {}
+        relevant_specs: list[str] = []
+
+        base_spec_content = builder._load_spec_content("base")
+        if base_spec_content:
+            spec_contents["base"] = base_spec_content
+            relevant_specs.append("base")
+            logger.info(f"Auto-loaded base spec ({len(base_spec_content)} chars)")
+
         # Build prompt for LLM
         prompt = READ_SPEC_PROMPT.format(
             specs_dir=specs_dir,
@@ -102,12 +112,14 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         result = parse_json_response(response, required_keys=["selected_specs"])
 
         if result:
-            relevant_specs = result.get("selected_specs", [])
+            llm_specs = result.get("selected_specs", [])
             reasoning = result.get("reasoning", "")
-            logger.info(f"LLM selected specs: {relevant_specs} — {reasoning}")
+            logger.info(f"LLM selected specs: {llm_specs} — {reasoning}")
+            for spec in llm_specs:
+                if spec not in relevant_specs:
+                    relevant_specs.append(spec)
         else:
             logger.warning("Failed to parse LLM spec selection response, using empty list")
-            relevant_specs = []
 
         # Merge with analyze step's required_specs
         if flow.state.context.get("required_specs"):
@@ -118,9 +130,10 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         logger.info(f"Final spec selection: {len(relevant_specs)} specs: {relevant_specs}")
 
-        # Load spec content programmatically
-        spec_contents: dict[str, str] = {}
+        # Load spec content for non-base specs (base already loaded)
         for spec_name in relevant_specs:
+            if spec_name in spec_contents:
+                continue
             content = builder._load_spec_content(spec_name)
             if content:
                 spec_contents[spec_name] = content
