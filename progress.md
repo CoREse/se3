@@ -3252,3 +3252,4 @@ README.md                                                     |  2 +-
 - `f1e7ca6` Extract centralized JSON parser and refactor all 8 step handlers to use it (12 files)
 - `a4dbf6e` Add robust JSON parser utility to handle LLM output normalization (3 files)
 - `91b9bf1` feat: real-time stream-json progress output in se3 run (4 files)
+- `719e2a3` fix: se3 run hangs due to stdin inheritance, add require_json retry (14 files)

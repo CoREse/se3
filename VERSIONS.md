@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.4.10** — fix: se3 run hangs due to stdin inheritance.
+**3.4.11** — feat: improved spec matching with expanded keywords.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.4.11 | 2026-02-26 | feat: improved spec matching with expanded keywords. Add comprehensive keyword-to-spec mapping covering all 17 specs (agent-team, se3-commands, se3-config, etc.). Add word boundary matching to prevent partial matches (e.g., "about" matching "agent"). Add fallback content-based matching when keyword matching finds no results. |
 | 3.4.10 | 2026-02-26 | fix: se3 run hangs due to stdin inheritance. Add `stdin=subprocess.DEVNULL` to prevent subprocess from waiting for input. Add `require_json` parameter to LLMCaller.call() with automatic JSON format retry logic. When LLM doesn't return valid JSON, automatically prompt it to retry with JSON format. |
 | 3.4.9 | 2026-02-26 | feat: real-time stream-json progress output in se3 run. Add StreamJSONTracker class to process each NDJSON line immediately, printing live progress including text chunks, tool calls, and tool results. Users can now see Claude Code's progress in real-time instead of waiting for all output. |
 | 3.4.8 | 2026-02-26 | fix: simplify stream-json parsing logic. Parse NDJSON line by line, collect text from assistant messages only. Remove redundant extraction functions. All steps now work correctly with stream-json format. |
