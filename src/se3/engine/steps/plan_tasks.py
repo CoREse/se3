@@ -124,9 +124,37 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
     revision_feedback = step.inputs.get("revision_feedback", "")
     is_revision = step.inputs.get("is_revision", False)
 
+    # If no design_doc available, create a minimal one from proposal or task description
+    # This handles cases where DESIGN step was skipped (e.g., directive task type)
     if not design_doc:
-        step.error_message = "No design document available from previous step"
-        return StepStatus.FAILED
+        logger.info("No design document available, creating minimal design from context")
+        
+        # Try to extract information from proposal
+        if proposal:
+            files_to_modify = proposal.get("files_to_modify", [])
+            files_to_create = proposal.get("files_to_create", [])
+            summary = proposal.get("summary", task_description)
+            
+            design_doc = {
+                "overview": summary,
+                "components": [{
+                    "name": "Implementation",
+                    "responsibilities": f"Modify: {files_to_modify}, Create: {files_to_create}" if files_to_modify or files_to_create else "Implement required changes",
+                    "interfaces": [],
+                }],
+                "architecture_decisions": [],
+            }
+        else:
+            # Minimal design from task description only
+            design_doc = {
+                "overview": task_description,
+                "components": [{
+                    "name": "Implementation",
+                    "responsibilities": "Implement required changes as specified in task description",
+                    "interfaces": [],
+                }],
+                "architecture_decisions": [],
+            }
 
     # Format inputs for prompt
     design_text = _format_design_doc(design_doc)
@@ -174,7 +202,7 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["task_list"] = all_tasks
 
         logger.info(f"Task groups generated: {len(task_groups)} groups, {len(all_tasks)} total tasks")
-        for task in tasks:
+        for task in all_tasks:
             logger.debug(f"  - [{task.get('complexity', '?')}] {task.get('description', '')[:50]}...")
 
         return StepStatus.COMPLETED

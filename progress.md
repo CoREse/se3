@@ -3261,3 +3261,4 @@ README.md                                                     |  2 +-
 - `eef21c4` feat: base spec mechanism + se3 init command (10 files)
 - `fcc2400` feat: chat history system — LLM call tracking, retry context injection, se3 history CLI (20 files)
 - `70f28b4` feat: confirmation steps with human/LLM reviewers for propose/design/plan_tasks (14 files)
+- `dff41ad` feat: Task group implementation with isolated context per group (8 files)

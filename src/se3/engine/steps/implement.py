@@ -121,9 +121,34 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 "tasks": task_list,
             }]
 
+    # If still no task groups, create a default one from task description
+    # This handles cases where PLAN_TASKS step was skipped or failed
     if not task_groups:
-        step.error_message = "No task groups available from previous step"
-        return StepStatus.FAILED
+        # Extract files from proposal if available
+        files_to_modify = proposal.get("files_to_modify", []) if proposal else []
+        files_to_create = proposal.get("files_to_create", []) if proposal else []
+        all_files = files_to_modify + files_to_create
+        
+        # Create a single default task
+        default_task = {
+            "id": 1,
+            "description": task_description,
+            "complexity": "medium",
+            "acceptance_criteria": ["Implementation complete", "Code works as expected"],
+            "files": all_files if all_files else [],
+            "depends_on": [],
+        }
+        
+        task_groups = [{
+            "group_id": "G1",
+            "name": "Implementation",
+            "description": f"Implement: {task_description[:100]}..." if len(task_description) > 100 else f"Implement: {task_description}",
+            "group_order": 1,
+            "depends_on": [],
+            "tasks": [default_task],
+        }]
+        
+        logger.info(f"Created default task group for: {task_description[:50]}...")
 
     # For small tasks or when design is skipped, create minimal design from proposal/task
     if not design_doc:

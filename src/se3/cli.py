@@ -356,6 +356,97 @@ def loop_cmd(
     raise typer.Exit(code=0)
 
 
+def _read_multiline_input() -> Optional[str]:
+    """Read multiline input from stdin with smart display for pasted content.
+    
+    Normal character-by-character input is never abbreviated.
+    Pasted content (multi-line input at once) exceeding 3 lines is abbreviated.
+    Returns None if input is empty.
+    """
+    import sys
+    
+    # Check if stdin is a tty (interactive terminal)
+    if not sys.stdin.isatty():
+        # Non-interactive mode (pipe/redirect): read all at once, show abbreviated if >3 lines
+        try:
+            content = sys.stdin.read()
+            lines = content.split("\n")
+            
+            # Show abbreviated view for multi-line pipe input >3 lines
+            if len(lines) > 3:
+                print(f"{lines[0]}")
+                print(f"{lines[1]}")
+                print("...")
+                print(f"{lines[-1]}")
+                print()
+            
+            content = content.strip()
+            return content if content else None
+        except (EOFError, KeyboardInterrupt):
+            return None
+    
+    # Interactive mode
+    print("Enter task description (Ctrl+D to finish, Ctrl+C to cancel):")
+    
+    lines = []
+    is_paste_mode = False
+    
+    # Platform-specific paste detection
+    def _has_pending_input() -> bool:
+        """Check if there's more input immediately available."""
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+                return msvcrt.kbhit()
+            else:
+                import select
+                readable, _, _ = select.select([sys.stdin], [], [], 0.05)
+                return bool(readable)
+        except Exception:
+            return False
+    
+    try:
+        while True:
+            try:
+                # Read a line
+                line = input()
+                lines.append(line)
+                
+                # Check if there's more input immediately available (paste detection)
+                # Use a small timeout to detect batch input vs character-by-character
+                if not is_paste_mode and len(lines) >= 1:
+                    if _has_pending_input():
+                        is_paste_mode = True
+                
+                # In paste mode, continue reading without displaying each line
+                if is_paste_mode:
+                    continue
+                
+                # Normal mode: just display the line as usual
+                
+            except EOFError:
+                # Ctrl+D pressed - finish input
+                break
+    except KeyboardInterrupt:
+        print("\nCancelled.")
+        return None
+    
+    # Handle display based on mode and line count
+    if is_paste_mode and len(lines) > 3:
+        # For pasted content >3 lines, show abbreviated view
+        print(f"{lines[0]}")
+        print(f"{lines[1]}")
+        print("...")
+        print(f"{lines[-1]}")
+    # If normal mode or <=3 lines, lines are already displayed
+    
+    print()  # New line after input
+    
+    # Join lines and return
+    content = "\n".join(lines).strip()
+    return content if content else None
+
+
 @app.command(name="run")
 def run_cmd(
     task: Optional[str] = typer.Argument(None, help="Task description"),
@@ -405,16 +496,22 @@ def run_cmd(
             raise typer.Exit(exit_code)
         else:
             if not task:
-                print("Error: Task description required for new flow", file=sys.stderr)
-                raise typer.Exit(1)
+                # No task provided, enter interactive multiline input mode
+                task = _read_multiline_input()
+                if not task:
+                    print("Error: Task description required for new flow", file=sys.stderr)
+                    raise typer.Exit(1)
 
     # New flow mode
     if not task:
-        print("Error: Task description required (or use --resume)", file=sys.stderr)
-        print("\nExamples:", file=sys.stderr)
-        print('  se3 run "Implement feature X"', file=sys.stderr)
-        print("  se3 run --resume", file=sys.stderr)
-        raise typer.Exit(1)
+        # Enter interactive multiline input mode
+        task = _read_multiline_input()
+        if not task:
+            print("Error: Task description required (or use --resume)", file=sys.stderr)
+            print("\nExamples:", file=sys.stderr)
+            print('  se3 run "Implement feature X"', file=sys.stderr)
+            print("  se3 run --resume", file=sys.stderr)
+            raise typer.Exit(1)
 
     exit_code = run_flow(
         project_root=project_root,
