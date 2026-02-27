@@ -149,7 +149,8 @@ def guardrails_cmd(
         # Try to get original from git
         result = subprocess.run(
             ["git", "show", f"HEAD:{spec_file}"],
-            capture_output=True, text=True, cwd=spec_file.parent
+            cwd=spec_file.parent,
+            capture_output=True, text=True
         )
         if result.returncode == 0:
             original_content = result.stdout
@@ -452,6 +453,7 @@ def run_cmd(
     task: Optional[str] = typer.Argument(None, help="Task description"),
     resume: bool = typer.Option(False, "--resume", "-r", help="Resume interrupted flow"),
     loop: bool = typer.Option(False, "--loop", "-l", help="Loop mode (continuous task execution)"),
+    max_iterations: int = typer.Option(10, "--max-iterations", "-n", help="Maximum iterations for loop mode"),
     type: str = typer.Option("feature", "--type", "-t", help="Task type (feature, bugfix, refactor, etc.)"),
     change: Optional[str] = typer.Option(None, "--change", "-c", help="Change name for this task"),
     flow_id: Optional[str] = typer.Option(None, "--flow-id", help="Specific flow ID to resume"),
@@ -479,6 +481,7 @@ def run_cmd(
             project_root=project_root,
             initial_task=task,
             task_type=type,
+            max_iterations=max_iterations,
         )
         raise typer.Exit(exit_code)
 

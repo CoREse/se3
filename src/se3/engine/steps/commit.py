@@ -119,8 +119,8 @@ def _generate_commit_message(flow: FlowInstance, step: Step) -> str:
     task_description = flow.task_description or ""
 
     # Get inputs from previous steps
-    changes_made = step.inputs.get("changes_made", {})
-    proposal = step.inputs.get("proposal", {})
+    changes_made = step.inputs.get("changes_made") or {}
+    proposal = step.inputs.get("proposal") or {}
 
     # Use proposal summary if available
     summary = proposal.get("summary", "")

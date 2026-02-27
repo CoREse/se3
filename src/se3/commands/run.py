@@ -312,6 +312,7 @@ def run_loop_mode(
     project_root: Path,
     initial_task: Optional[str] = None,
     task_type: str = "feature",
+    max_iterations: Optional[int] = None,
 ) -> int:
     """Run in loop mode - continuously find and execute tasks.
 
@@ -319,6 +320,7 @@ def run_loop_mode(
         project_root: Project root directory
         initial_task: Optional initial task to start with
         task_type: Type of tasks to look for
+        max_iterations: Maximum number of iterations (None for unlimited)
 
     Returns:
         Exit code
@@ -330,11 +332,16 @@ def run_loop_mode(
     print("Each task runs in an isolated branch.")
     print()
 
-    iteration = 0
     current_task = initial_task
 
-    while True:
-        iteration += 1
+    # Use range-based iteration with max_iterations
+    if max_iterations is not None and max_iterations > 0:
+        iteration_range = range(1, max_iterations + 1)
+    else:
+        # Unlimited iterations - use a large number and check for overflow
+        iteration_range = range(1, 2**31)
+
+    for iteration in iteration_range:
         print(f"\n{'='*60}")
         print(f"Loop iteration #{iteration}")
         print(f"{'='*60}")
@@ -369,6 +376,13 @@ def run_loop_mode(
         current_task = None
 
         print("\nTask complete. Looking for next task...")
+
+        # Check if max iterations reached
+        if max_iterations is not None and iteration >= max_iterations:
+            print(f"\n{'='*60}")
+            print(f"Loop mode completed: Reached maximum iterations ({max_iterations})")
+            print(f"{'='*60}")
+            break
 
     print("\nLoop mode ended.")
     return 0

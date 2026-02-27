@@ -3262,3 +3262,4 @@ README.md                                                     |  2 +-
 - `fcc2400` feat: chat history system — LLM call tracking, retry context injection, se3 history CLI (20 files)
 - `70f28b4` feat: confirmation steps with human/LLM reviewers for propose/design/plan_tasks (14 files)
 - `dff41ad` feat: Task group implementation with isolated context per group (8 files)
+- `99e96d6` Add multiline input support for se3 run and fix task group handling for directive tasks (11 files)
