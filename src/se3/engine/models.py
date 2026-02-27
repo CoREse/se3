@@ -376,10 +376,10 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
     },
     StepType.PLAN_TASKS: {
         "name": "plan_tasks",
-        "description": "Break down into concrete tasks",
+        "description": "Break down into logical task groups",
         "uses_llm": True,
         "inputs": ["design_doc"],
-        "outputs": ["task_list"],
+        "outputs": ["task_groups", "task_list"],
     },
     StepType.CONFIRM: {
         "name": "confirm",
@@ -390,10 +390,10 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
     },
     StepType.IMPLEMENT: {
         "name": "implement",
-        "description": "Write code implementation",
+        "description": "Write code implementation (task groups)",
         "uses_llm": True,
-        "inputs": ["task_list", "design_doc"],
-        "outputs": ["implemented_code", "changes_made"],
+        "inputs": ["task_groups", "task_list", "design_doc"],
+        "outputs": ["implemented_groups", "files_changed", "total_groups"],
     },
     StepType.TEST: {
         "name": "test",

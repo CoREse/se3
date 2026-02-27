@@ -2,7 +2,15 @@
 
 ## Current Version
 
-**3.8.0** — feat: Confirmation (review) steps with human/LLM reviewers for propose/design/plan_tasks.
+**3.9.0** — feat: Task group implementation with isolated context per group.
+
+## Version History
+
+| Version | Date | Changes |
+|---------|------|--------|
+| 3.9.0 | 2026-02-27 | feat: Task group architecture for plan_tasks and implement steps. plan_tasks now generates `task_groups` (logical task groups with group_id, name, description, group_order, depends_on). implement step executes each group in separate LLM call with isolated context - same base context (design_doc, proposal, project_context) but only group's tasks. Each group has independent retry mechanism with max_retries. Sequential execution with immediate file application per group. Backward compatible with legacy task_list format. Updated STEP_POOL definitions for plan_tasks and implement. |
+|---------|------|--------|
+| 3.8.0 | 2026-02-27 | feat: Confirmation (review) steps with human/LLM reviewers for propose/design/plan_tasks.
 
 ## Version History
 

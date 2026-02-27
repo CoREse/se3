@@ -18,7 +18,7 @@ from ..utils.json_parser import parse_json_response
 logger = logging.getLogger(__name__)
 
 
-PLAN_TASKS_PROMPT = """You are an expert software engineering assistant. Break down the following implementation into concrete tasks.
+PLAN_TASKS_PROMPT = """You are an expert software engineering assistant. Break down the following implementation into logical task groups.
 
 ## Task Description
 {task_description}
@@ -32,30 +32,54 @@ PLAN_TASKS_PROMPT = """You are an expert software engineering assistant. Break d
 {revision_section}
 
 ## Instructions
-Create a list of concrete, verifiable tasks for implementing this design.
+Create a structured task plan organized into **logical task groups**. Each group contains highly related tasks that should be implemented together in a single context.
 
+### Grouping Principles
+- **High cohesion within groups**: Tasks in the same group should be logically related (e.g., same component, same data flow, same abstraction layer)
+- **Low coupling between groups**: Groups should be as independent as possible
+- **Clear dependencies**: Use `depends_on` to express inter-group dependencies
+- **Sequential execution**: Groups will be executed in order, so later groups can assume earlier groups are complete
+
+### Task Structure (within each group)
 Each task should:
 - Have a clear objective that can be verified as complete
 - Be small enough to implement in one focused session
 - Include specific acceptance criteria
 - Have estimated complexity (small/medium/large)
 
-Consider:
-- Implementation order (dependencies between tasks)
-- Testing requirements for each task
-- Files that need to be modified
+Guidelines for complexity:
+- small: < 30 minutes, < 50 lines of code
+- medium: 30-90 minutes, 50-200 lines of code
+- large: > 90 minutes, > 200 lines of code (should be broken down further if possible)
 
 Respond in JSON format:
 ```json
 {{
-    "tasks": [
+    "task_groups": [
         {{
-            "id": 1,
-            "description": "Clear task description",
-            "complexity": "small|medium|large",
-            "acceptance_criteria": ["criterion 1", "criterion 2"],
-            "files": ["file1.py", "file2.py"],
-            "depends_on": []
+            "group_id": "G1",
+            "name": "Group name describing the focus",
+            "description": "What this group accomplishes and why these tasks are grouped together",
+            "group_order": 1,
+            "depends_on": [],
+            "tasks": [
+                {{
+                    "id": 1,
+                    "description": "Clear task description",
+                    "complexity": "small|medium|large",
+                    "acceptance_criteria": ["criterion 1", "criterion 2"],
+                    "files": ["file1.py", "file2.py"],
+                    "depends_on": []
+                }}
+            ]
+        }},
+        {{
+            "group_id": "G2",
+            "name": "Another group",
+            "description": "...",
+            "group_order": 2,
+            "depends_on": ["G1"],
+            "tasks": [...]
         }}
     ],
     "total_complexity": "small|medium|large",
@@ -63,10 +87,12 @@ Respond in JSON format:
 }}
 ```
 
-Guidelines for complexity:
-- small: < 30 minutes, < 50 lines of code
-- medium: 30-90 minutes, 50-200 lines of code
-- large: > 90 minutes, > 200 lines of code (should be broken down further if possible)
+Important:
+- `group_id` should be unique (G1, G2, G3...)
+- `group_order` determines execution sequence (1, 2, 3...)
+- `depends_on` lists group_ids that must complete before this group
+- Each group will be implemented in a **separate LLM call with isolated context**
+- Groups should not assume knowledge of other groups' implementation details
 """
 
 REVISION_SECTION = """
@@ -129,19 +155,25 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
         response = caller.call(prompt=prompt, require_json=True)
 
         # Parse JSON response
-        task_plan = parse_json_response(response, required_keys=["tasks"])
+        task_plan = parse_json_response(response, required_keys=["task_groups"])
 
         if not task_plan:
-            step.error_message = "Failed to parse task list from LLM response"
+            step.error_message = "Failed to parse task groups from LLM response"
             return StepStatus.FAILED
 
         # Store outputs
-        step.outputs["task_list"] = task_plan.get("tasks", [])
+        task_groups = task_plan.get("task_groups", [])
+        step.outputs["task_groups"] = task_groups
         step.outputs["total_complexity"] = task_plan.get("total_complexity", "medium")
         step.outputs["estimated_effort"] = task_plan.get("estimated_effort", "")
 
-        tasks = task_plan.get("tasks", [])
-        logger.info(f"Task list generated: {len(tasks)} tasks")
+        # Also flatten tasks for backward compatibility
+        all_tasks = []
+        for group in task_groups:
+            all_tasks.extend(group.get("tasks", []))
+        step.outputs["task_list"] = all_tasks
+
+        logger.info(f"Task groups generated: {len(task_groups)} groups, {len(all_tasks)} total tasks")
         for task in tasks:
             logger.debug(f"  - [{task.get('complexity', '?')}] {task.get('description', '')[:50]}...")
 

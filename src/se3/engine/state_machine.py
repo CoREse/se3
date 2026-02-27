@@ -429,6 +429,8 @@ class StateMachine:
                     inputs["design_doc"] = step.outputs.get("design_doc")
                     inputs["decisions"] = step.outputs.get("decisions")
                 elif step.step_type == StepType.PLAN_TASKS:
+                    inputs["task_groups"] = step.outputs.get("task_groups")
+                    # Keep task_list for backward compatibility
                     inputs["task_list"] = step.outputs.get("task_list")
                 elif step.step_type == StepType.IMPLEMENT:
                     inputs["changes_made"] = step.outputs.get("changes_made")
