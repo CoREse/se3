@@ -64,6 +64,68 @@ def get_project_root() -> Path:
     return cwd
 
 
+def _check_confirm_response(flow: FlowInstance, current_step: Any, project_root: Path) -> Optional[StepStatus]:
+    """Check for existing human response when resuming a CONFIRM step.
+
+    This prevents duplicate call files and enables immediate continuation
+    if the human has already responded.
+
+    Args:
+        flow: Current flow instance
+        current_step: The CONFIRM step being resumed
+        project_root: Project root directory
+
+    Returns:
+        StepStatus if response found and processed, None otherwise
+    """
+    calls_dir = project_root / "se3" / "calls"
+    if not calls_dir.exists():
+        return None
+
+    # Find the call file for this step/change
+    change_id = flow.state.context.get("change_id") or flow.change_name or flow.flow_id
+
+    for call_file in calls_dir.glob("confirm_*.json"):
+        try:
+            with open(call_file) as f:
+                data = json.load(f)
+
+            # Match by change_id or step_id
+            if data.get('change_id') == change_id or data.get('step') == current_step.step_id:
+                # Check for response file
+                response_path = call_file.parent / f"{call_file.stem}.response"
+                if response_path.exists():
+                    try:
+                        with open(response_path) as f:
+                            response_data = json.load(f)
+
+                        approved = response_data.get('approved', False)
+                        feedback = response_data.get('feedback')
+
+                        # Store result in step outputs for state machine
+                        current_step.outputs['review_result'] = {
+                            'approved': approved,
+                            'feedback': feedback,
+                            'step_to_review_id': current_step.inputs.get('step_to_review_id'),
+                            'step_to_review_type': current_step.inputs.get('step_to_review_type'),
+                        }
+
+                        if approved:
+                            current_step.outputs['revision_feedback'] = feedback
+                            return StepStatus.COMPLETED
+                        else:
+                            current_step.outputs['revision_feedback'] = feedback
+                            return StepStatus.REVISION_NEEDED
+
+                    except (json.JSONDecodeError, IOError):
+                        logger.warning(f"Failed to parse response file: {response_path}")
+                        continue
+        except (json.JSONDecodeError, IOError):
+            continue
+
+    return None
+
+
 def find_existing_flows(project_root: Path) -> List[Dict[str, Any]]:
     """Find all existing flow state files."""
     flows = []
@@ -144,7 +206,7 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
         choice = prompt_user_choice("What would you like to do?", options)
 
         if choice == 0:
-            return flow["id"]
+            return flow['id']
         return None
 
     # Multiple active flows
@@ -159,6 +221,34 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
     if choice < len(active_flows):
         return active_flows[choice]["id"]
     return None
+
+
+def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: PersistenceManager) -> Optional[StepStatus]:
+    """Handle KeyboardInterrupt during step execution.
+
+    Returns:
+        StepStatus to continue, or None to exit
+    """
+    print("\n\n⏸  Interrupted. Enter additional instruction for this step")
+    print("   (empty to retry as-is, Ctrl+C again to exit):")
+    try:
+        user_input = input("   > ").strip()
+        if user_input:
+            set_extra_prompt(user_input)
+            print(f"   ✓ Extra prompt set, retrying step...")
+        else:
+            print("   → Retrying step as-is...")
+        # Reset step to PENDING so it re-runs
+        current_step.status = StepStatus.PENDING
+        persistence.save_flow(flow)
+        # Return a special marker to indicate retry
+        return StepStatus.PENDING
+    except (KeyboardInterrupt, EOFError):
+        # Second Ctrl+C (or EOF): save and exit
+        persistence.save_flow(flow)
+        print("\n\nInterrupted by user. Flow state saved.")
+        print(f"Resume with: se3 run --resume")
+        return None
 
 
 def run_flow(
@@ -228,29 +318,29 @@ def run_flow(
         print(f"{'='*60}")
 
         step_start_time = datetime.now()
-        try:
-            result = state_machine.run_step(flow, current_step)
-        except KeyboardInterrupt:
-            # First Ctrl+C: interrupt current step, offer prompt injection
-            print("\n\n⏸  Interrupted. Enter additional instruction for this step")
-            print("   (empty to retry as-is, Ctrl+C again to exit):")
+
+        # Special handling for CONFIRM steps on resume - check for existing response
+        if current_step.step_type == StepType.CONFIRM and flow_id and current_step.status == StepStatus.PAUSED:
+            existing_result = _check_confirm_response(flow, current_step, project_root)
+            if existing_result:
+                print(f"  Found existing confirmation response: {existing_result.value}")
+                result = existing_result
+            else:
+                try:
+                    result = state_machine.run_step(flow, current_step)
+                except KeyboardInterrupt:
+                    result = _handle_step_interrupt(flow, current_step, persistence)
+                    if result is None:
+                        return 130
+                    continue
+        else:
             try:
-                user_input = input("   > ").strip()
-                if user_input:
-                    set_extra_prompt(user_input)
-                    print(f"   ✓ Extra prompt set, retrying step...")
-                else:
-                    print("   → Retrying step as-is...")
-                # Reset step to PENDING so it re-runs
-                current_step.status = StepStatus.PENDING
-                persistence.save_flow(flow)
+                result = state_machine.run_step(flow, current_step)
+            except KeyboardInterrupt:
+                result = _handle_step_interrupt(flow, current_step, persistence)
+                if result is None:
+                    return 130
                 continue
-            except (KeyboardInterrupt, EOFError):
-                # Second Ctrl+C (or EOF): save and exit
-                persistence.save_flow(flow)
-                print("\n\nInterrupted by user. Flow state saved.")
-                print(f"Resume with: se3 run --resume")
-                return 130
 
         if result == StepStatus.FAILED:
             error_msg = current_step.error_message or "Unknown error"
@@ -284,6 +374,16 @@ def run_flow(
                 flow.status = FlowStatus.FAILED
                 persistence.save_flow(flow)
                 return 1
+
+        # Handle REVISION_NEEDED status from CONFIRM step
+        if result == StepStatus.REVISION_NEEDED:
+            print(f"  Revision requested - transitioning to previous step")
+            # Mark the CONFIRM step as completed with revision info
+            current_step.status = StepStatus.REVISION_NEEDED
+            # Transition will handle going back to the previous step
+            state_machine.transition_to_next(flow)
+            persistence.save_flow(flow)
+            continue
 
         step_duration = (datetime.now() - step_start_time).total_seconds()
         print(f"Step completed: {current_step.step_type.value} ({step_duration:.1f}s)")

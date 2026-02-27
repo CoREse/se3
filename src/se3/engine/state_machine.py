@@ -280,7 +280,7 @@ class StateMachine:
             raise TransitionError("No current step")
 
         # Check if current step completed successfully
-        if current_step.status not in (StepStatus.COMPLETED, StepStatus.PAUSED):
+        if current_step.status not in (StepStatus.COMPLETED, StepStatus.PAUSED, StepStatus.REVISION_NEEDED):
             logger.warning(
                 f"Cannot transition from {current_step.status.value} step"
             )
@@ -289,7 +289,12 @@ class StateMachine:
         # Handle review loop: if current step is CONFIRM and revision was requested
         if current_step.step_type == StepType.CONFIRM:
             review_result = current_step.outputs.get("review_result", {})
-            if not review_result.get("approved", True):
+            approved = review_result.get("approved", True)
+
+            if approved:
+                # Approval received - continue to next step
+                logger.info(f"Confirmation approved for {review_result.get('step_to_review_type', 'unknown')}")
+            else:
                 # Revision requested - go back to the step being reviewed
                 step_to_review_id = current_step.outputs.get("step_to_review_id")
                 revision_step = self._transition_to_revision(flow, current_step, step_to_review_id)
@@ -508,6 +513,12 @@ class StateMachine:
                 flow.status = FlowStatus.PAUSED
                 logger.info("Flow paused - waiting for user input")
                 break
+
+            if step_status == StepStatus.REVISION_NEEDED:
+                # Special case: revision was triggered, transition already handled by confirm handler
+                # Just continue the loop - the state machine will handle the transition
+                logger.info("Revision triggered, continuing flow")
+                continue
 
             # Transition to next step
             next_step = self.transition_to_next(flow)

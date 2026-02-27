@@ -40,6 +40,7 @@ class StepStatus(Enum):
     FAILED = "failed"  # Failed after retries
     RETRYING = "retrying"  # Currently retrying
     PAUSED = "paused"  # Paused waiting for user input
+    REVISION_NEEDED = "revision_needed"  # Changes requested, go back to previous step
 
 
 @dataclass
