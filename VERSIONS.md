@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.4.11** — feat: improved spec matching with expanded keywords.
+**3.5.0** — feat: LLM-driven read_spec + PROJECT_SUMMARY step + se3 summary CLI + roadmap migration to _backlog.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.5.0 | 2026-02-27 | feat: LLM-driven read_spec replaces keyword matching. New PROJECT_SUMMARY step generates project context summary for downstream LLM steps. New `se3 summary` CLI command. ProjectContextCollector collects git, flow engine, backlog, specs. Migrated roadmap.md to se3/specs/_backlog/ (9 backlog items). Updated propose/design prompts with project context. |
 | 3.4.11 | 2026-02-26 | feat: improved spec matching with expanded keywords. Add comprehensive keyword-to-spec mapping covering all 17 specs (agent-team, se3-commands, se3-config, etc.). Add word boundary matching to prevent partial matches (e.g., "about" matching "agent"). Add fallback content-based matching when keyword matching finds no results. |
 | 3.4.10 | 2026-02-26 | fix: se3 run hangs due to stdin inheritance. Add `stdin=subprocess.DEVNULL` to prevent subprocess from waiting for input. Add `require_json` parameter to LLMCaller.call() with automatic JSON format retry logic. When LLM doesn't return valid JSON, automatically prompt it to retry with JSON format. |
 | 3.4.9 | 2026-02-26 | feat: real-time stream-json progress output in se3 run. Add StreamJSONTracker class to process each NDJSON line immediately, printing live progress including text chunks, tool calls, and tool results. Users can now see Claude Code's progress in real-time instead of waiting for all output. |
