@@ -114,6 +114,43 @@ se3 run "修复内存泄漏" --type=bugfix
 - **THEN** 流程引擎执行重试策略（最多 3 次）
 - **AND** 如果重试仍失败，暂停流程并通知用户
 
+### Requirement: 聊天记录系统（Chat History）
+
+流程引擎 SHALL 记录每次 LLM 调用的 prompt 和回应，支持重试时注入对话上下文，并提供人类浏览接口。
+
+**存储格式：**
+- 存储路径：`se3/history/{flow_id}/{step_id}.jsonl`
+- 每行一个 ChatMessage（JSON 序列化）
+- 存储层保存原始 NDJSON（完整保真）
+- 给 LLM 重试时使用解析后的文本内容（减少 token 浪费）
+
+**数据结构：**
+- `ChatMessage`: role, content, raw_ndjson, timestamp, step_type, attempt
+- `ChatSession`: flow_id, step_id, step_type, messages
+
+**核心功能：**
+- `record_prompt()` — 记录发送的 prompt
+- `record_response()` — 记录 LLM 原始回应
+- `format_history_for_retry()` — 为重试格式化之前的对话上下文
+- `extract_assistant_text()` — 从 NDJSON 提取 assistant 文本内容
+
+#### Scenario: 记录 LLM 对话
+- **WHEN** LLMCaller 发送 prompt 给 LLM
+- **THEN** 自动记录 prompt 到 `se3/history/{flow_id}/{step_id}.jsonl`
+- **AND** LLM 回应后记录原始 NDJSON 输出
+
+#### Scenario: 重试时注入对话上下文
+- **WHEN** LLM 调用失败并重试
+- **THEN** 从聊天记录中获取之前的对话上下文
+- **AND** 将上下文注入到重试 prompt 前面
+- **AND** 格式为 `[Previous conversation context for this step]: ... [The above attempt(s) failed.]`
+
+#### Scenario: 人类浏览聊天记录
+- **WHEN** 用户执行 `se3 history`
+- **THEN** 展示所有 flow 的对话概要
+- **AND** 支持按 flow_id 和 step_type 筛选查看
+- **AND** 区分通讯 JSON（解析渲染）和 LLM 输出 JSON（原样展示）
+
 ### Requirement: 状态持久化与恢复
 
 流程引擎 SHALL 将运行状态持久化为 JSON 文件（`se3/state/engine.json`），支持任意步骤中断后精确恢复。

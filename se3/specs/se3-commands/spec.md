@@ -219,12 +219,52 @@ se3 migrate [--dry-run] [--force]
 3. Move existing data preserving structure
 4. Update `.gitignore`
 
+### Requirement: `se3 history` Command
+
+The `se3 history` command SHALL provide human-readable browsing of LLM chat history recorded by the flow engine.
+
+**Interface:**
+```bash
+# List all flows with history
+se3 history
+
+# Show all step conversations for a flow
+se3 history <flow_id>
+
+# Show detailed conversation for a specific step
+se3 history <flow_id> <step_type>
+
+# JSON output
+se3 history <flow_id> --format json
+```
+
+**Rendering Rules:**
+- `role=user`: Displayed as `[User Prompt]` + prompt text (truncatable)
+- `role=assistant`: Parsed from raw NDJSON:
+  - Text content: displayed directly
+  - Tool calls: shown as `[Tool Call: {name}]` + parameter summary
+  - Tool results: shown as `[Tool Result]` + content summary
+- LLM output JSON (e.g. analyze results): shown as-is (it is content, not protocol)
+
+#### Scenario: List all flows
+- **WHEN** user executes `se3 history` with existing history
+- **THEN** it lists all flow IDs with step count and message count
+
+#### Scenario: View flow details
+- **WHEN** user executes `se3 history <flow_id>`
+- **THEN** it shows all step conversations for that flow
+- **AND** renders assistant responses from NDJSON as human-readable text
+
+#### Scenario: No history exists
+- **WHEN** user executes `se3 history` with no recorded history
+- **THEN** it displays "No chat history found" with guidance
+
 ## Command Categories
 
 | Category | Commands | Purpose |
 |----------|----------|---------|
 | **Core** | `se3 run` | Unified workflow entry point |
-| **Status** | `se3 status` | Project and flow state |
+| **Status** | `se3 status`, `se3 history` | Project and flow state |
 | **Quality** | `se3 lint`, `se3 verify`, `se3 guardrails` | Validation and verification |
 | **Maintenance** | `se3 health`, `se3 migrate`, `se3 init` | Framework maintenance |
 | **Session** | `se3 commit`, `se3 handoff` | Session lifecycle |

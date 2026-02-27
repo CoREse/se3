@@ -120,10 +120,16 @@ class LLMCaller:
         project_root: Optional[Path] = None,
         max_retries: int = 3,
         retry_delay: float = 2.0,
+        flow_id: Optional[str] = None,
+        step_id: Optional[str] = None,
+        step_type: Optional[str] = None,
     ):
         self.project_root = Path(project_root) if project_root else Path.cwd()
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.flow_id = flow_id
+        self.step_id = step_id
+        self.step_type = step_type or ""
         self._runner = ClaudeRunner(self.project_root)
 
     def call(
@@ -178,6 +184,45 @@ class LLMCaller:
             json_retry_count=0,
         )
 
+    def _record_prompt(self, prompt: str, attempt: int) -> None:
+        """Record a prompt to chat history if flow context is available."""
+        if not self.flow_id or not self.step_id:
+            return
+        try:
+            from .chat_history import record_prompt
+            record_prompt(
+                self.project_root, self.flow_id, self.step_id,
+                self.step_type, prompt, attempt,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to record prompt to history: {e}")
+
+    def _record_response(self, raw_ndjson: str, attempt: int) -> None:
+        """Record an LLM response to chat history if flow context is available."""
+        if not self.flow_id or not self.step_id:
+            return
+        try:
+            from .chat_history import record_response
+            record_response(
+                self.project_root, self.flow_id, self.step_id,
+                self.step_type, raw_ndjson, attempt,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to record response to history: {e}")
+
+    def _get_retry_context(self) -> Optional[str]:
+        """Get previous conversation context for retry injection."""
+        if not self.flow_id or not self.step_id:
+            return None
+        try:
+            from .chat_history import format_history_for_retry
+            return format_history_for_retry(
+                self.project_root, self.flow_id, self.step_id,
+            )
+        except Exception as e:
+            logger.debug(f"Failed to get retry context: {e}")
+            return None
+
     def _call_with_retry(
         self,
         prompt: str,
@@ -189,12 +234,7 @@ class LLMCaller:
         max_json_retries: int = 2,
     ) -> str:
         """Internal method to call LLM with retry logic."""
-        args = ["--output-format", "stream-json", "--verbose", "-p", prompt]
-
-        if context_files:
-            for f in context_files:
-                if f.exists():
-                    args.extend(["--file", str(f)])
+        original_prompt = prompt
 
         env = dict(os.environ)
         env.pop("CLAUDECODE", None)
@@ -203,6 +243,26 @@ class LLMCaller:
         last_error = ""
 
         for attempt in range(self.max_retries):
+            # On retry, inject previous conversation context
+            if attempt > 0:
+                retry_context = self._get_retry_context()
+                if retry_context:
+                    effective_prompt = f"{retry_context}\n{original_prompt}"
+                else:
+                    effective_prompt = original_prompt
+            else:
+                effective_prompt = prompt
+
+            args = ["--output-format", "stream-json", "--verbose", "-p", effective_prompt]
+
+            if context_files:
+                for f in context_files:
+                    if f.exists():
+                        args.extend(["--file", str(f)])
+
+            # Record the prompt to chat history
+            self._record_prompt(effective_prompt, attempt)
+
             try:
                 logger.debug(f"LLM call attempt {attempt + 1}/{self.max_retries}")
 
@@ -217,10 +277,10 @@ class LLMCaller:
                     )
                 else:
                     stream_tracker = StreamJSONTracker()
-                    
+
                     def on_stream_output(line: str) -> None:
                         stream_tracker.process_line(line)
-                    
+
                     result = self._runner.run_with_monitor(
                         args=args,
                         wall_timeout=timeout,
@@ -229,9 +289,12 @@ class LLMCaller:
                         env=env,
                         on_output=on_stream_output,
                     )
-                    
+
                     if result.success:
                         stream_tracker.print_summary()
+
+                # Record the response (whether success or failure)
+                self._record_response(result.output or "", attempt)
 
                 if result.success:
                     # Check if JSON is required but not received
@@ -239,6 +302,8 @@ class LLMCaller:
                         if not self._contains_valid_json(result.output):
                             print(f"  [llm-caller] ⚠️  Response is not valid JSON, requesting JSON format (retry {json_retry_count + 1}/{max_json_retries})")
                             json_prompt = self._create_json_retry_prompt(prompt, result.output)
+                            # Record the JSON retry prompt too
+                            self._record_prompt(json_prompt, attempt)
                             return self._call_with_retry(
                                 prompt=json_prompt,
                                 timeout=timeout,
@@ -248,7 +313,7 @@ class LLMCaller:
                                 json_retry_count=json_retry_count + 1,
                                 max_json_retries=max_json_retries,
                             )
-                    
+
                     duration_s = time.time() - start_time
                     logger.debug(f"LLM call succeeded in {int(duration_s * 1000)}ms")
                     return result.output

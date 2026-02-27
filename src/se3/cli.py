@@ -16,7 +16,7 @@ def get_framework_version() -> str:
     return __version__
 
 
-from .commands import lint, status, verify, collab, commit, human_calls_cmd, human_input, work, health, run, dashboard, summary, init_cmd
+from .commands import lint, status, verify, collab, commit, human_calls_cmd, human_input, work, health, run, dashboard, summary, init_cmd, history
 
 app = typer.Typer(
     name="se3",
@@ -57,6 +57,7 @@ app.add_typer(human_input.app, name="human", help="Manage human input")
 app.add_typer(dashboard.app, name="dashboard", help="Display project status dashboard")
 app.add_typer(summary.app, name="summary", help="Generate project context summary")
 app.add_typer(init_cmd.app, name="init", help="Initialize SE3 project structure and base spec")
+app.add_typer(history.app, name="history", help="Browse LLM chat history")
 
 # Register direct commands (simple single-command tools with positional args)
 # These are registered as direct commands to avoid sub-typer nesting issues

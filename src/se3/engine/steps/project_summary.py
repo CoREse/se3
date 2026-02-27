@@ -54,7 +54,12 @@ Respond in JSON format:
 """
 
 
-def generate_project_summary(project_root: Path) -> str:
+def generate_project_summary(
+    project_root: Path,
+    flow_id: str | None = None,
+    step_id: str | None = None,
+    step_type: str | None = None,
+) -> str:
     """Generate a project summary using ProjectContextCollector + LLM.
 
     This is the shared core logic used by both the PROJECT_SUMMARY step
@@ -62,6 +67,9 @@ def generate_project_summary(project_root: Path) -> str:
 
     Args:
         project_root: Project root directory
+        flow_id: Optional flow ID for chat history tracking
+        step_id: Optional step ID for chat history tracking
+        step_type: Optional step type for chat history tracking
 
     Returns:
         Project summary string
@@ -114,7 +122,7 @@ def generate_project_summary(project_root: Path) -> str:
         specs_list=specs_list,
     )
 
-    caller = LLMCaller(project_root)
+    caller = LLMCaller(project_root, flow_id=flow_id, step_id=step_id, step_type=step_type)
     response = caller.call(prompt=prompt, require_json=True)
 
     result = parse_json_response(response, required_keys=["summary"])
@@ -143,7 +151,12 @@ def project_summary_handler(step: Step, flow: FlowInstance) -> StepStatus:
     logger.info("Generating project summary...")
 
     try:
-        summary = generate_project_summary(project_root)
+        summary = generate_project_summary(
+            project_root,
+            flow_id=flow.flow_id,
+            step_id=step.step_id,
+            step_type=step.step_type.value,
+        )
 
         step.outputs["project_summary"] = summary
 

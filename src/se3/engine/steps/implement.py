@@ -140,7 +140,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     try:
         # Call LLM for implementation
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
-        caller = LLMCaller(project_root)
+        caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value)
         response = caller.call(prompt=prompt, require_json=True)
 
         # Parse JSON response
