@@ -85,4 +85,5 @@ if analysis.suggests_decomposition:
 ## Related
 
 - `se3/specs/_backlog/autonomous-collaboration.md` — Phase 3 overall goals
+- `se3/specs/_backlog/parallel-execution.md` — Phase 2 parallel foundation
 - `se3/specs/flow-engine/spec.md` — Flow engine foundation

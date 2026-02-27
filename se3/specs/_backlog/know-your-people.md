@@ -70,4 +70,3 @@ best_model = capability_db.best_for(task_type, language="python")
 ## Related
 
 - `se3/specs/_backlog/intelligent-scheduling.md` — Phase 4 overall goals
-- `se3/specs/flow-engine/spec.md` — Model dispatch specification

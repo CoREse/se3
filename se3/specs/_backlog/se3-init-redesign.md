@@ -5,7 +5,7 @@
 
 ## Idea
 
-Redesign `se3 init` to only initialize `openspec/` and `se3.config.yaml` — no more `.claude/` SE3 spec installation.
+Redesign `se3 init` to only initialize `se3/specs/` and `se3.yaml` — no more `.claude/` SE3 spec installation.
 
 ## Motivation
 
