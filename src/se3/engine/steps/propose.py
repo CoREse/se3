@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 PROPOSE_PROMPT = """You are an expert software engineering assistant. Create a change proposal for the following task.
 
+## Project Context
+{project_summary}
+
 ## Task Description
 {task_description}
 
@@ -80,6 +83,7 @@ def propose_handler(step: Step, flow: FlowInstance) -> StepStatus:
     task_type = step.inputs.get("task_type", "feature")
     scope = step.inputs.get("scope", "")
     spec_content = step.inputs.get("spec_content", {})
+    project_summary = step.inputs.get("project_summary", "Not available")
 
     if not task_description:
         step.error_message = "No task description provided"
@@ -94,6 +98,7 @@ def propose_handler(step: Step, flow: FlowInstance) -> StepStatus:
         task_type=task_type,
         scope=scope,
         spec_content=spec_text,
+        project_summary=project_summary,
     )
 
     logger.info(f"Generating proposal for: {task_description[:60]}...")

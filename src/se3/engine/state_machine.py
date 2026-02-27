@@ -303,6 +303,8 @@ class StateMachine:
                 if step.step_type == StepType.ANALYZE:
                     inputs["task_type"] = step.outputs.get("task_type")
                     inputs["scope"] = step.outputs.get("scope")
+                elif step.step_type == StepType.PROJECT_SUMMARY:
+                    inputs["project_summary"] = step.outputs.get("project_summary")
                 elif step.step_type == StepType.READ_SPEC:
                     inputs["relevant_specs"] = step.outputs.get("relevant_specs")
                     inputs["spec_content"] = step.outputs.get("spec_content")

@@ -10,6 +10,7 @@ from .commit import commit_handler
 from .design import design_handler
 from .implement import implement_handler
 from .plan_tasks import plan_tasks_handler
+from .project_summary import project_summary_handler
 from .propose import propose_handler
 from .read_spec import read_spec_handler
 from .summarize import summarize_handler
@@ -20,6 +21,7 @@ from .verify_spec import verify_spec_handler
 # Registry of all step handlers for the state machine
 STEP_HANDLERS = {
     StepType.ANALYZE: analyze_handler,
+    StepType.PROJECT_SUMMARY: project_summary_handler,
     StepType.READ_SPEC: read_spec_handler,
     StepType.PROPOSE: propose_handler,
     StepType.DESIGN: design_handler,
@@ -34,6 +36,7 @@ STEP_HANDLERS = {
 
 __all__ = [
     "analyze_handler",
+    "project_summary_handler",
     "read_spec_handler",
     "propose_handler",
     "design_handler",

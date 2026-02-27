@@ -192,6 +192,7 @@ def _update_flow_steps(
     # Map step names to StepType enum
     step_type_map = {
         "analyze": StepType.ANALYZE,
+        "project_summary": StepType.PROJECT_SUMMARY,
         "read_spec": StepType.READ_SPEC,
         "propose": StepType.PROPOSE,
         "design": StepType.DESIGN,

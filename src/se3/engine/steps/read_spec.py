@@ -1,7 +1,8 @@
 """Read Spec step handler.
 
-Programmatically reads relevant OpenSpec specifications based on
-the task type and scope determined in the analyze step.
+Uses LLM to intelligently select relevant specs from the specs directory.
+The LLM has access to file system tools and can browse spec content to
+determine which specs are relevant to the current task.
 """
 
 from __future__ import annotations
@@ -11,16 +12,57 @@ from pathlib import Path
 from typing import Any
 
 from ..context_builder import ContextBuilder
+from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
+
+
+READ_SPEC_PROMPT = """You are the spec selector for the SE3 flow engine.
+
+Your job: browse the specs directory and select which specifications are relevant to the current task.
+
+## Specs Directory
+{specs_dir}
+
+## Task Description
+{task_description}
+
+## Task Type
+{task_type}
+
+## Scope
+{scope}
+
+## Project Context
+{project_summary}
+
+## Instructions
+
+1. Use the Glob tool to list directories in the specs directory (each subdirectory is a spec).
+2. For specs that look potentially relevant based on their name, use the Read tool to read their spec.md file.
+3. Based on the content, decide which specs are truly relevant to this task.
+4. Return your selection.
+
+Respond with ONLY this JSON (no other text):
+{{
+    "selected_specs": ["spec-name-1", "spec-name-2"],
+    "reasoning": "Brief explanation of why these specs were selected"
+}}
+
+Important:
+- Skip directories starting with "_" (internal directories like _changelog, _backlog).
+- Be selective — only include specs that are genuinely relevant to the task.
+- If no specs are relevant, return an empty list.
+"""
 
 
 def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the read_spec step.
 
-    Reads relevant OpenSpec specifications and stores their content.
-    This is a non-LLM step - it performs file operations only.
+    Uses LLM to browse specs directory and select relevant specs.
+    Then loads their full content programmatically.
 
     Args:
         step: The current step being executed
@@ -31,28 +73,52 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """
     task_type = step.inputs.get("task_type", "feature")
     scope = step.inputs.get("scope", "")
+    project_summary = step.inputs.get("project_summary", "Not available")
 
     # Determine project root
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
 
     try:
-        # Initialize context builder
+        # Initialize context builder for spec loading
         builder = ContextBuilder(project_root)
+        specs_dir = str(builder.specs_dir.resolve())
 
-        # Get relevant specs based on task description and analysis
-        task_description = flow.task_description
-        relevant_specs = builder.find_relevant_specs(task_description)
+        # Build prompt for LLM
+        prompt = READ_SPEC_PROMPT.format(
+            specs_dir=specs_dir,
+            task_description=flow.task_description,
+            task_type=task_type,
+            scope=scope,
+            project_summary=project_summary,
+        )
 
-        # Also check if analyze step suggested specific specs
+        logger.info(f"LLM-based spec selection for: {flow.task_description[:60]}...")
+
+        # Call LLM for spec selection
+        caller = LLMCaller(project_root)
+        response = caller.call(prompt=prompt, require_json=True)
+
+        # Parse LLM response
+        result = parse_json_response(response, required_keys=["selected_specs"])
+
+        if result:
+            relevant_specs = result.get("selected_specs", [])
+            reasoning = result.get("reasoning", "")
+            logger.info(f"LLM selected specs: {relevant_specs} — {reasoning}")
+        else:
+            logger.warning("Failed to parse LLM spec selection response, using empty list")
+            relevant_specs = []
+
+        # Merge with analyze step's required_specs
         if flow.state.context.get("required_specs"):
             additional_specs = flow.state.context["required_specs"]
             for spec in additional_specs:
                 if spec not in relevant_specs:
                     relevant_specs.append(spec)
 
-        logger.info(f"Found {len(relevant_specs)} relevant specs: {relevant_specs}")
+        logger.info(f"Final spec selection: {len(relevant_specs)} specs: {relevant_specs}")
 
-        # Load spec content
+        # Load spec content programmatically
         spec_contents: dict[str, str] = {}
         for spec_name in relevant_specs:
             content = builder._load_spec_content(spec_name)
@@ -67,7 +133,7 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["spec_content"] = spec_contents
         step.outputs["spec_count"] = len(spec_contents)
 
-        # Build a summary for context
+        # Build summary
         summary = _build_spec_summary(spec_contents, task_type)
         step.outputs["spec_summary"] = summary
 

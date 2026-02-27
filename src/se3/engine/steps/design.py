@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 DESIGN_PROMPT = """You are an expert software architect. Create a design document for the following implementation.
 
+## Project Context
+{project_summary}
+
 ## Task Description
 {task_description}
 
@@ -82,6 +85,7 @@ def design_handler(step: Step, flow: FlowInstance) -> StepStatus:
     task_description = step.inputs.get("task_description", "")
     proposal = step.inputs.get("proposal", {})
     spec_content = step.inputs.get("spec_content", {})
+    project_summary = step.inputs.get("project_summary", "Not available")
 
     if not proposal:
         step.error_message = "No proposal available from previous step"
@@ -96,6 +100,7 @@ def design_handler(step: Step, flow: FlowInstance) -> StepStatus:
         task_description=task_description,
         proposal=proposal_text,
         spec_content=spec_text,
+        project_summary=project_summary,
     )
 
     logger.info("Generating design document...")

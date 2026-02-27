@@ -17,7 +17,8 @@ class StepType(Enum):
     """Types of workflow steps in the step pool."""
 
     ANALYZE = "analyze"  # Analyze input, determine task type and scope
-    READ_SPEC = "read_spec"  # Programmatically read relevant OpenSpec specs
+    PROJECT_SUMMARY = "project_summary"  # Generate project context summary
+    READ_SPEC = "read_spec"  # Read relevant OpenSpec specs (LLM-driven)
     PROPOSE = "propose"  # Generate change proposal
     DESIGN = "design"  # Design solution and architecture decisions
     PLAN_TASKS = "plan_tasks"  # Break down into concrete tasks
@@ -294,11 +295,18 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "inputs": ["task_description", "project_context"],
         "outputs": ["task_type", "scope", "required_steps"],
     },
+    StepType.PROJECT_SUMMARY: {
+        "name": "project_summary",
+        "description": "Generate project context summary via LLM",
+        "uses_llm": True,
+        "inputs": ["task_description"],
+        "outputs": ["project_summary"],
+    },
     StepType.READ_SPEC: {
         "name": "read_spec",
-        "description": "Programmatically read relevant OpenSpec specs",
-        "uses_llm": False,
-        "inputs": ["task_type", "scope"],
+        "description": "Read relevant OpenSpec specs (LLM-driven selection)",
+        "uses_llm": True,
+        "inputs": ["task_type", "scope", "project_summary"],
         "outputs": ["relevant_specs", "spec_content"],
     },
     StepType.PROPOSE: {
@@ -380,6 +388,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
     sequences: Dict[str, List[StepType]] = {
         "feature": [
             StepType.ANALYZE,
+            StepType.PROJECT_SUMMARY,
             StepType.READ_SPEC,
             StepType.PROPOSE,
             StepType.DESIGN,
@@ -393,6 +402,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
         ],
         "bugfix": [
             StepType.ANALYZE,
+            StepType.PROJECT_SUMMARY,
             StepType.READ_SPEC,
             StepType.PLAN_TASKS,
             StepType.IMPLEMENT,
@@ -403,6 +413,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
         ],
         "review": [
             StepType.ANALYZE,
+            StepType.PROJECT_SUMMARY,
             StepType.READ_SPEC,
             StepType.VERIFY_SPEC,
             StepType.SUMMARIZE,
@@ -416,6 +427,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
         ],
         "directive": [
             StepType.ANALYZE,
+            StepType.PROJECT_SUMMARY,
             StepType.READ_SPEC,
             StepType.PLAN_TASKS,
             StepType.IMPLEMENT,
