@@ -3263,3 +3263,4 @@ README.md                                                     |  2 +-
 - `70f28b4` feat: confirmation steps with human/LLM reviewers for propose/design/plan_tasks (14 files)
 - `dff41ad` feat: Task group implementation with isolated context per group (8 files)
 - `99e96d6` Add multiline input support for se3 run and fix task group handling for directive tasks (11 files)
+- `2ba5e14` Fix commit step to handle None values in changes_made and proposal (4 files)
