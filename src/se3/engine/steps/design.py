@@ -32,6 +32,8 @@ DESIGN_PROMPT = """You are an expert software architect. Create a design documen
 ## Relevant Specifications
 {spec_content}
 
+{revision_section}
+
 ## Instructions
 Create a design document that includes:
 
@@ -69,11 +71,21 @@ Respond in JSON format:
 ```
 """
 
+REVISION_SECTION = """
+## Previous Design Feedback
+The previous design was reviewed and requires changes:
+
+{revision_feedback}
+
+Please revise the design document addressing the feedback above.
+"""
+
 
 def design_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the design step.
 
     Creates a design document using LLM based on proposal and specs.
+    Supports revision mode when revision_feedback is provided.
 
     Args:
         step: The current step being executed
@@ -86,6 +98,8 @@ def design_handler(step: Step, flow: FlowInstance) -> StepStatus:
     proposal = step.inputs.get("proposal", {})
     spec_content = step.inputs.get("spec_content", {})
     project_summary = step.inputs.get("project_summary", "Not available")
+    revision_feedback = step.inputs.get("revision_feedback", "")
+    is_revision = step.inputs.get("is_revision", False)
 
     if not proposal:
         step.error_message = "No proposal available from previous step"
@@ -95,12 +109,19 @@ def design_handler(step: Step, flow: FlowInstance) -> StepStatus:
     proposal_text = _format_proposal(proposal)
     spec_text = _format_spec_content(spec_content)
 
+    # Build revision section if this is a revision
+    if is_revision and revision_feedback:
+        revision_section = REVISION_SECTION.format(revision_feedback=revision_feedback)
+    else:
+        revision_section = ""
+
     # Build prompt
     prompt = DESIGN_PROMPT.format(
         task_description=task_description,
         proposal=proposal_text,
         spec_content=spec_text,
         project_summary=project_summary,
+        revision_section=revision_section,
     )
 
     logger.info("Generating design document...")

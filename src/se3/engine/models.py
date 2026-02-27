@@ -22,6 +22,7 @@ class StepType(Enum):
     PROPOSE = "propose"  # Generate change proposal
     DESIGN = "design"  # Design solution and architecture decisions
     PLAN_TASKS = "plan_tasks"  # Break down into concrete tasks
+    CONFIRM = "confirm"  # Review and confirm previous step output
     IMPLEMENT = "implement"  # Write code (most critical step)
     TEST = "test"  # Run tests (program execution, not LLM)
     VERIFY_SPEC = "verify_spec"  # Check implementation vs spec consistency
@@ -160,6 +161,9 @@ class State:
     selected_steps: List[StepType] = field(default_factory=list)
     current_step_index: int = 0
 
+    # Review cycle tracking: step_id -> review iteration count
+    review_iterations: Dict[str, int] = field(default_factory=dict)
+
     def get_current_step(self) -> Optional[Step]:
         """Get the currently active step."""
         if self.current_step_id:
@@ -172,6 +176,51 @@ class State:
         if step.step_id not in self.step_history:
             self.step_history.append(step.step_id)
 
+    def get_step_to_review(self, confirm_step_id: str) -> Optional[Step]:
+        """Get the step that needs review (the one before confirm).
+        
+        In a review cycle, the confirm step follows the step being reviewed.
+        This finds that preceding step from history.
+        
+        Args:
+            confirm_step_id: The ID of the confirm step
+            
+        Returns:
+            The step being reviewed, or None if not found
+        """
+        try:
+            idx = self.step_history.index(confirm_step_id)
+            if idx > 0:
+                prev_step_id = self.step_history[idx - 1]
+                return self.steps.get(prev_step_id)
+        except ValueError:
+            pass
+        return None
+
+    def increment_review_iteration(self, step_id: str) -> int:
+        """Increment and return the review iteration count for a step.
+        
+        Args:
+            step_id: The step being reviewed
+            
+        Returns:
+            New iteration count (1-based)
+        """
+        current = self.review_iterations.get(step_id, 0)
+        self.review_iterations[step_id] = current + 1
+        return current + 1
+
+    def get_review_iteration(self, step_id: str) -> int:
+        """Get the current review iteration count for a step.
+        
+        Args:
+            step_id: The step being reviewed
+            
+        Returns:
+            Current iteration count (0 if never reviewed)
+        """
+        return self.review_iterations.get(step_id, 0)
+
     def to_dict(self) -> Dict[str, Any]:
         """Serialize state to dictionary."""
         return {
@@ -181,6 +230,7 @@ class State:
             "context": self.context,
             "selected_steps": [s.value for s in self.selected_steps],
             "current_step_index": self.current_step_index,
+            "review_iterations": self.review_iterations,
         }
 
     @classmethod
@@ -192,6 +242,7 @@ class State:
             context=data.get("context", {}),
             selected_steps=[StepType(s) for s in data.get("selected_steps", [])],
             current_step_index=data.get("current_step_index", 0),
+            review_iterations=data.get("review_iterations", {}),
         )
         state.steps = {
             sid: Step.from_dict(step_data) for sid, step_data in data.get("steps", {}).items()
@@ -329,6 +380,13 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "uses_llm": True,
         "inputs": ["design_doc"],
         "outputs": ["task_list"],
+    },
+    StepType.CONFIRM: {
+        "name": "confirm",
+        "description": "Review and confirm previous step output",
+        "uses_llm": False,  # Uses LLM only in llm reviewer mode
+        "inputs": ["previous_step_output", "previous_step_type"],
+        "outputs": ["review_result", "approved"],
     },
     StepType.IMPLEMENT: {
         "name": "implement",

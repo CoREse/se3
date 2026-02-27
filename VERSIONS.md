@@ -2,11 +2,13 @@
 
 ## Current Version
 
-**3.7.0** — feat: Chat history system for LLM call tracking, retry context injection, and human browsing.
+**3.8.0** — feat: Confirmation (review) steps with human/LLM reviewers for propose/design/plan_tasks.
 
 ## Version History
 
 | Version | Date | Changes |
+|---------|------|--------|
+| 3.8.0 | 2026-02-27 | feat: Confirmation steps with configurable human or LLM review. New `CONFIRM` step type inserted after `propose`, `design`, and optionally `plan_tasks`. Human reviewer mode creates MCP call files and listens for file edits or CLI input (y=approve, n=abort, anything else=revision feedback). LLM reviewer mode uses separate LLM calls to evaluate completeness, spec compliance, and maintainability. Supports review loop: if changes requested, flow returns to original step with feedback for revision. New `confirmation` config in se3.yaml with `enabled`, `steps`, `reviewer`, `llm_reviewer` options. Updated propose/design/plan_tasks handlers to support revision mode. 3 new step handlers, state machine supports review iteration tracking. |
 |---------|------|---------|
 | 3.7.0 | 2026-02-27 | feat: Chat history system. New `ChatMessage`/`ChatSession` data model records every LLM prompt and response to `se3/history/{flow_id}/{step_id}.jsonl`. LLMCaller now accepts `flow_id`/`step_id`/`step_type` and automatically records all calls. On retry, previous conversation context is injected into the prompt. New `se3 history` CLI command for browsing chat history (list flows, view step conversations, JSON/text output). All 10 LLM-using step handlers updated. 24 new tests. Updated flow-engine and se3-commands specs. |
 | 3.6.0 | 2026-02-27 | feat: Base spec mechanism. New `se3 init` command generates project structure and `se3/specs/base/spec.md` from template. `read_spec` step auto-loads base spec before LLM selection, ensuring all flows have access to project-level conventions. New `src/se3/templates/` package with base spec skeleton. 9 new tests. |

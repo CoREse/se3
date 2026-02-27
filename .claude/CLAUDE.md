@@ -40,3 +40,21 @@ se3 commit -m "描述" -f "file1.py file2.py"
 - `se3.yaml` — 项目配置（可选）
 - `.claude/` = 开发依赖的框架规范（只读）
 - `tools/` = 工具实现（可写）
+
+## 确认步骤配置（可选）
+
+在 `se3.yaml` 中配置确认/审阅步骤：
+
+```yaml
+confirmation:
+  enabled: true                    # 启用确认步骤
+  steps: ["propose", "design"]     # 在哪些步骤后插入确认
+  reviewer: "human"                # 审阅者：human 或 llm
+  llm_reviewer:
+    model: null                    # LLM 模型（null=默认）
+    max_iterations: 3              # 最大审阅-修改循环次数
+```
+
+审阅模式：
+- `human` — 创建 MCP call 文件，等待人工确认
+- `llm` — 自动 LLM 审阅，根据配置可能循环修改

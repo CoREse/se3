@@ -199,3 +199,40 @@ def is_chinese_language(language: str) -> bool:
     Returns True if the language is a Chinese variant.
     """
     return language.lower().startswith("zh")
+
+
+def load_confirmation_config(project_root: Optional[Path] = None) -> Dict[str, Any]:
+    """Load confirmation (review) configuration from config.
+
+    Resolution order:
+    1. Project se3.yaml confirmation (if present, overrides global)
+    2. Global ~/.se3/config.yaml confirmation
+    3. Default values
+
+    Returns dict with:
+        - enabled: Whether confirmation steps are enabled (default: True)
+        - steps: List of step types after which to insert confirmation (default: ["propose", "design"])
+        - reviewer: Default reviewer type - "human" or "llm" (default: "human")
+        - llm_reviewer: LLM reviewer configuration
+            - model: Model to use for review (default: None, uses default model)
+            - max_iterations: Max review-modify cycles (default: 3)
+    """
+    global_cfg = load_global_config()
+    project_cfg = load_project_config(project_root) if project_root else {}
+
+    # Merge confirmation configs: project overrides global
+    global_confirm = global_cfg.get("confirmation", {})
+    project_confirm = project_cfg.get("confirmation", {})
+
+    merged = dict(global_confirm)
+    merged.update(project_confirm)
+
+    return {
+        "enabled": merged.get("enabled", True),
+        "steps": merged.get("steps", ["propose", "design"]),
+        "reviewer": merged.get("reviewer", "human"),
+        "llm_reviewer": merged.get("llm_reviewer", {
+            "model": None,
+            "max_iterations": 3,
+        }),
+    }

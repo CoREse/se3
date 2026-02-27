@@ -12,6 +12,17 @@ session:
   progress_file: progress.md
   max_progress_entries: 20
 
+# Confirmation (Review) Configuration
+# Controls the confirmation steps that review propose/design/plan_tasks outputs
+confirmation:
+  enabled: true                       # Enable confirmation steps
+  steps: ["propose", "design"]        # Steps after which to insert confirmation
+  reviewer: "human"                   # Default reviewer: "human" or "llm"
+  # LLM reviewer configuration (used when reviewer="llm")
+  llm_reviewer:
+    model: null                       # Model to use (null = default)
+    max_iterations: 3                 # Max review-modify cycles per step
+
 # Claude command resolution (optional)
 # Multiple commands with priority-based fallback on usage limit / timeout
 # Higher priority = tried first. Project-level overrides global (~/.se3/config.yaml)

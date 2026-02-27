@@ -21,6 +21,7 @@ from .models import (
     get_step_info,
 )
 from .persistence import PersistenceManager
+from ..config import load_confirmation_config
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,9 @@ class StateMachine:
         # Determine initial step sequence
         selected_steps = get_default_step_sequence(task_type)
 
+        # Insert confirmation steps based on config
+        selected_steps = self._insert_confirmation_steps(selected_steps)
+
         flow = FlowInstance(
             task_description=task_description,
             task_type=task_type,
@@ -143,6 +147,39 @@ class StateMachine:
         logger.info(f"Created flow {flow.flow_id} for task: {task_description[:50]}...")
 
         return flow
+
+    def _insert_confirmation_steps(self, steps: list[StepType]) -> list[StepType]:
+        """Insert CONFIRM steps after configured step types.
+
+        Args:
+            steps: Original step sequence
+
+        Returns:
+            Modified step sequence with CONFIRM steps inserted
+        """
+        config = load_confirmation_config(self.project_root)
+
+        if not config.get("enabled", True):
+            return steps
+
+        steps_requiring_confirm = config.get("steps", ["propose", "design"])
+        step_type_names = {s.value for s in steps}
+
+        # Only insert confirm for steps that are actually in the sequence
+        steps_to_confirm = [s for s in steps_requiring_confirm if s in step_type_names]
+
+        if not steps_to_confirm:
+            return steps
+
+        result = []
+        for step in steps:
+            result.append(step)
+            if step.value in steps_to_confirm:
+                # Insert CONFIRM step after this step
+                result.append(StepType.CONFIRM)
+                logger.debug(f"Inserted CONFIRM step after {step.value}")
+
+        return result
 
     def load_or_create_flow(
         self,
@@ -229,6 +266,8 @@ class StateMachine:
     def transition_to_next(self, flow: FlowInstance) -> Optional[Step]:
         """Transition to the next step based on current state.
 
+        Handles normal progression and review loop (going back to previous step).
+
         Args:
             flow: Current flow instance
 
@@ -246,6 +285,17 @@ class StateMachine:
                 f"Cannot transition from {current_step.status.value} step"
             )
             return None
+
+        # Handle review loop: if current step is CONFIRM and revision was requested
+        if current_step.step_type == StepType.CONFIRM:
+            review_result = current_step.outputs.get("review_result", {})
+            if not review_result.get("approved", True):
+                # Revision requested - go back to the step being reviewed
+                step_to_review_id = current_step.outputs.get("step_to_review_id")
+                revision_step = self._transition_to_revision(flow, current_step, step_to_review_id)
+                if revision_step:
+                    return revision_step
+                # If transition failed, continue to normal flow (will likely fail later)
 
         # Find next step in selected sequence
         selected = flow.state.selected_steps
@@ -280,6 +330,68 @@ class StateMachine:
 
         return next_step
 
+    def _transition_to_revision(
+        self,
+        flow: FlowInstance,
+        confirm_step: Step,
+        step_to_review_id: Optional[str],
+    ) -> Optional[Step]:
+        """Transition back to the step being reviewed for revision.
+
+        Args:
+            flow: Current flow instance
+            confirm_step: The confirm step that triggered the revision
+            step_to_review_id: ID of the step to re-run
+
+        Returns:
+            The step being revised, or None if failed
+        """
+        if not step_to_review_id:
+            logger.warning("No step_to_review_id provided for revision")
+            return None
+
+        step_to_review = flow.state.steps.get(step_to_review_id)
+        if not step_to_review:
+            logger.warning(f"Step {step_to_review_id} not found for revision")
+            return None
+
+        # Get feedback
+        feedback = confirm_step.outputs.get("revision_feedback", "")
+        iteration = flow.state.increment_review_iteration(step_to_review_id)
+
+        logger.info(f"Transitioning to revision of {step_to_review.step_type.value} (iteration {iteration})")
+
+        # Reset the step for re-execution
+        step_to_review.status = StepStatus.PENDING
+        step_to_review.inputs["revision_feedback"] = feedback
+        step_to_review.inputs["is_revision"] = True
+        step_to_review.inputs["revision_iteration"] = iteration
+        step_to_review.error_message = None
+        step_to_review.error_details = None
+        # Keep the outputs for reference, but mark that they may be outdated
+        step_to_review.outputs["_is_outdated"] = True
+
+        # Update flow state to point back to this step
+        flow.state.current_step_id = step_to_review_id
+
+        # Find the index of this step type in selected_steps
+        try:
+            step_index = flow.state.selected_steps.index(step_to_review.step_type)
+            flow.state.current_step_index = step_index
+        except ValueError:
+            logger.warning(f"Step type {step_to_review.step_type} not in selected sequence")
+
+        self.persistence.save_flow(flow)
+
+        print(f"\n{'='*60}")
+        print(f"🔁 REVISION REQUESTED: {step_to_review.step_type.value.upper()}")
+        print(f"{'='*60}")
+        print(f"Iteration: {iteration}")
+        print(f"Feedback: {feedback[:200]}..." if len(feedback) > 200 else f"Feedback: {feedback}")
+        print(f"{'='*60}\n")
+
+        return step_to_review
+
     def _build_step_inputs(self, flow: FlowInstance, step_type: StepType) -> Dict[str, Any]:
         """Build inputs for a step based on previous outputs.
 
@@ -294,6 +406,9 @@ class StateMachine:
             "task_description": flow.task_description,
             "flow_id": flow.flow_id,
         }
+
+        # Load confirmation config for reviewer settings
+        config = load_confirmation_config(self.project_root)
 
         # Gather outputs from previous steps
         for step_id in flow.state.step_history:
@@ -317,6 +432,34 @@ class StateMachine:
                     inputs["task_list"] = step.outputs.get("task_list")
                 elif step.step_type == StepType.IMPLEMENT:
                     inputs["changes_made"] = step.outputs.get("changes_made")
+                elif step.step_type == StepType.CONFIRM:
+                    # Pass through review result for tracking
+                    inputs["last_review_result"] = step.outputs.get("review_result")
+
+        # Special handling for CONFIRM step
+        if step_type == StepType.CONFIRM:
+            # Determine which step we're confirming
+            # Find the most recent non-confirm step that hasn't been confirmed yet
+            last_non_confirm_step = None
+            for step_id in reversed(flow.state.step_history):
+                step = flow.state.steps.get(step_id)
+                if step and step.step_type != StepType.CONFIRM:
+                    # Check if this step has been confirmed
+                    already_confirmed = False
+                    for sid in flow.state.step_history:
+                        s = flow.state.steps.get(sid)
+                        if s and s.step_type == StepType.CONFIRM:
+                            if s.outputs.get("step_to_review_id") == step_id:
+                                already_confirmed = True
+                                break
+                    if not already_confirmed:
+                        last_non_confirm_step = step
+                        break
+
+            if last_non_confirm_step:
+                inputs["step_to_review_id"] = last_non_confirm_step.step_id
+                inputs["step_to_review_type"] = last_non_confirm_step.step_type.value
+                inputs["reviewer"] = config.get("reviewer", "human")
 
         return inputs
 

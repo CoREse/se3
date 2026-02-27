@@ -29,6 +29,8 @@ PLAN_TASKS_PROMPT = """You are an expert software engineering assistant. Break d
 ## Proposal
 {proposal}
 
+{revision_section}
+
 ## Instructions
 Create a list of concrete, verifiable tasks for implementing this design.
 
@@ -67,11 +69,21 @@ Guidelines for complexity:
 - large: > 90 minutes, > 200 lines of code (should be broken down further if possible)
 """
 
+REVISION_SECTION = """
+## Previous Task Plan Feedback
+The previous task plan was reviewed and requires changes:
+
+{revision_feedback}
+
+Please revise the task plan addressing the feedback above.
+"""
+
 
 def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the plan_tasks step.
 
     Breaks down implementation into concrete tasks using LLM.
+    Supports revision mode when revision_feedback is provided.
 
     Args:
         step: The current step being executed
@@ -83,6 +95,8 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
     task_description = step.inputs.get("task_description", "")
     design_doc = step.inputs.get("design_doc", {})
     proposal = step.inputs.get("proposal", {})
+    revision_feedback = step.inputs.get("revision_feedback", "")
+    is_revision = step.inputs.get("is_revision", False)
 
     if not design_doc:
         step.error_message = "No design document available from previous step"
@@ -92,11 +106,18 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
     design_text = _format_design_doc(design_doc)
     proposal_text = _format_proposal(proposal)
 
+    # Build revision section if this is a revision
+    if is_revision and revision_feedback:
+        revision_section = REVISION_SECTION.format(revision_feedback=revision_feedback)
+    else:
+        revision_section = ""
+
     # Build prompt
     prompt = PLAN_TASKS_PROMPT.format(
         task_description=task_description,
         design_doc=design_text,
         proposal=proposal_text,
+        revision_section=revision_section,
     )
 
     logger.info("Generating task list...")

@@ -10,6 +10,7 @@
 - Persists state for interrupt/resume
 - Handles context gathering automatically
 - Runs steps programmatically
+- **NEW:** Supports confirmation/review steps with human or LLM reviewers
 
 ## Usage
 
@@ -44,6 +45,7 @@ se3 run --loop "Initial task"
 | `--type, -t` | Task type: feature, bugfix, refactor, small (default: feature) |
 | `--change, -c` | Change name for this task |
 | `--flow-id` | Specific flow ID to resume |
+| `--reviewer` | Override confirmation reviewer: `human` or `llm` |
 
 ## Flow Steps
 
@@ -52,16 +54,100 @@ The flow engine executes steps from a fixed step pool:
 1. **analyze** - Analyze task and determine required steps
 2. **read-spec** - Read relevant OpenSpec specifications
 3. **propose** - Generate change proposal (if needed)
-4. **design** - Design solution (for medium/large changes)
-5. **plan-tasks** - Break down into specific tasks
-6. **implement** - Write code
-7. **test** - Run tests
-8. **verify-spec** - Verify implementation matches spec
-9. **update-spec** - Update spec to reflect changes
-10. **commit** - Commit changes
-11. **summarize** - Generate summary
+4. **confirm** - Review proposal (configurable)
+5. **design** - Design solution (for medium/large changes)
+6. **confirm** - Review design (configurable)
+7. **plan-tasks** - Break down into specific tasks
+8. **implement** - Write code
+9. **test** - Run tests
+10. **verify-spec** - Verify implementation matches spec
+11. **update-spec** - Update spec to reflect changes
+12. **commit** - Commit changes
+13. **summarize** - Generate summary
 
-Steps are selected dynamically based on task analysis.
+Steps are selected dynamically based on task analysis. Confirmation steps are inserted based on configuration.
+
+## Confirmation (Review) Steps
+
+SE3 3.0 supports optional confirmation steps after `propose`, `design`, and `plan_tasks`. These steps allow human or LLM reviewers to verify outputs before proceeding.
+
+### Configuration
+
+Add to your `se3.yaml`:
+
+```yaml
+confirmation:
+  enabled: true                    # Enable confirmation steps
+  steps: ["propose", "design"]     # Steps to confirm (default)
+  reviewer: "human"                # Default: "human" or "llm"
+  llm_reviewer:
+    model: null                    # Model to use (null = default)
+    max_iterations: 3              # Max review-modify cycles
+```
+
+### Reviewer Types
+
+| Type | Description |
+|------|-------------|
+| `human` | Creates MCP call file; waits for human input via file edit or CLI |
+| `llm` | Uses another LLM call to review; automatically approves or requests changes |
+
+### Human Review Workflow
+
+When `reviewer: human`:
+
+1. Step output is displayed
+2. MCP call file created in `se3/calls/`
+3. Agent waits for response via:
+   - **File edit:** Modify the Response section in the call file
+   - **CLI input:** Interactive commands (y/n/r:feedback)
+4. Three possible outcomes:
+   - ✅ **Approve** - Continue to next step
+   - 🔄 **Request Changes** - Return to previous step with feedback
+   - ❌ **Abort** - Stop the workflow
+
+### LLM Review Workflow
+
+When `reviewer: llm`:
+
+1. Step output is sent to LLM for review
+2. LLM evaluates: completeness, spec compliance, maintainability
+3. Automatic decision:
+   - **Approved** - Continue
+   - **Changes Requested** - Return to previous step (up to max_iterations)
+   - **Max Iterations** - Mark flow as failed
+
+### CLI Commands for Human Review
+
+When waiting for confirmation in interactive mode, simply type:
+
+| Input | Action |
+|-------|--------|
+| `y`, `yes`, `approve` | ✅ Approve and continue |
+| `n`, `no`, `abort` | ❌ Abort the workflow |
+| **Anything else** | 🔄 Request changes (your input becomes the feedback) |
+
+**Simple rule:** Type `y` to pass, `n` to stop, or just type your feedback directly to request changes.
+
+Examples:
+```
+> y                    # Approve
+> yes                  # Approve
+> n                    # Abort
+> Please add error handling for the edge case  # Request changes with this feedback
+> The design should use a factory pattern instead  # Request changes
+> Missing unit tests   # Request changes
+```
+
+### Review Loop
+
+If changes are requested, the flow returns to the original step with feedback:
+
+```
+propose → confirm (needs changes) → propose (with feedback) → confirm → design → confirm → ...
+```
+
+Each step tracks its review iteration count to prevent infinite loops.
 
 ## State Persistence
 

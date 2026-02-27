@@ -7,6 +7,7 @@ Handlers are registered with the state machine and called during flow execution.
 from ..models import StepType
 from .analyze import analyze_handler
 from .commit import commit_handler
+from .confirm import confirm_handler
 from .design import design_handler
 from .implement import implement_handler
 from .plan_tasks import plan_tasks_handler
@@ -26,6 +27,7 @@ STEP_HANDLERS = {
     StepType.PROPOSE: propose_handler,
     StepType.DESIGN: design_handler,
     StepType.PLAN_TASKS: plan_tasks_handler,
+    StepType.CONFIRM: confirm_handler,
     StepType.IMPLEMENT: implement_handler,
     StepType.TEST: test_handler,
     StepType.VERIFY_SPEC: verify_spec_handler,

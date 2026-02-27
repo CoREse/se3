@@ -35,6 +35,8 @@ PROPOSE_PROMPT = """You are an expert software engineering assistant. Create a c
 ## Relevant Specifications
 {spec_content}
 
+{revision_section}
+
 ## Instructions
 Create a detailed change proposal that includes:
 
@@ -66,11 +68,21 @@ Respond in JSON format:
 ```
 """
 
+REVISION_SECTION = """
+## Previous Proposal Feedback
+The previous proposal was reviewed and requires changes:
+
+{revision_feedback}
+
+Please revise the proposal addressing the feedback above.
+"""
+
 
 def propose_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the propose step.
 
     Generates a change proposal using LLM based on task and specs.
+    Supports revision mode when revision_feedback is provided.
 
     Args:
         step: The current step being executed
@@ -84,6 +96,8 @@ def propose_handler(step: Step, flow: FlowInstance) -> StepStatus:
     scope = step.inputs.get("scope", "")
     spec_content = step.inputs.get("spec_content", {})
     project_summary = step.inputs.get("project_summary", "Not available")
+    revision_feedback = step.inputs.get("revision_feedback", "")
+    is_revision = step.inputs.get("is_revision", False)
 
     if not task_description:
         step.error_message = "No task description provided"
@@ -92,6 +106,12 @@ def propose_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Format spec content for prompt
     spec_text = _format_spec_content(spec_content)
 
+    # Build revision section if this is a revision
+    if is_revision and revision_feedback:
+        revision_section = REVISION_SECTION.format(revision_feedback=revision_feedback)
+    else:
+        revision_section = ""
+
     # Build prompt
     prompt = PROPOSE_PROMPT.format(
         task_description=task_description,
@@ -99,6 +119,7 @@ def propose_handler(step: Step, flow: FlowInstance) -> StepStatus:
         scope=scope,
         spec_content=spec_text,
         project_summary=project_summary,
+        revision_section=revision_section,
     )
 
     logger.info(f"Generating proposal for: {task_description[:60]}...")
