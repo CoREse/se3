@@ -160,6 +160,15 @@ class LLMCaller:
             logger.info(f"Injected extra prompt: {_extra_prompt[:80]}")
             _extra_prompt = None  # Consume after use
 
+        # Wrap prompt with JSON constraints when require_json is set
+        if require_json:
+            prompt = (
+                "CRITICAL: You MUST respond with ONLY valid JSON. "
+                "Do NOT include any text, explanation, or markdown before or after the JSON.\n\n"
+                f"{prompt}\n\n"
+                "REMINDER: Respond with ONLY the JSON object. No other text."
+            )
+
         return self._call_with_retry(
             prompt=prompt,
             timeout=timeout,
