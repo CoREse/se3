@@ -2,7 +2,15 @@
 
 ## Current Version
 
-**3.10.0** — feat: Multiline input for se3 run and task group fallback.
+**3.10.1** — fix: Handle None values in commit step inputs.
+
+## Version History
+
+| Version | Date | Changes |
+|---------|------|--------|
+| 3.10.1 | 2026-02-27 | fix: Commit step now handles None values in `changes_made` and `proposal` inputs using `or {}` fallback. Prevents AttributeError when previous steps don't produce these outputs. |
+|---------|------|--------|
+| 3.10.0 | 2026-02-27 | feat: Multiline input for se3 run and task group fallback.
 
 ## Version History
 
