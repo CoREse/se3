@@ -2,11 +2,13 @@
 
 ## Current Version
 
-**3.9.0** — feat: Task group implementation with isolated context per group.
+**3.10.0** — feat: Multiline input for se3 run and task group fallback.
 
 ## Version History
 
 | Version | Date | Changes |
+|---------|------|--------|
+| 3.10.0 | 2026-02-27 | feat: `se3 run` without arguments enters interactive multiline input mode. Supports paste detection (>3 lines abbreviates display). Fix task group handling for directive tasks: create default task group when PLAN_TASKS is skipped, create minimal design doc when DESIGN is skipped. Fix undefined variable bug in plan_tasks.py. |
 |---------|------|--------|
 | 3.9.0 | 2026-02-27 | feat: Task group architecture for plan_tasks and implement steps. plan_tasks now generates `task_groups` (logical task groups with group_id, name, description, group_order, depends_on). implement step executes each group in separate LLM call with isolated context - same base context (design_doc, proposal, project_context) but only group's tasks. Each group has independent retry mechanism with max_retries. Sequential execution with immediate file application per group. Backward compatible with legacy task_list format. Updated STEP_POOL definitions for plan_tasks and implement. |
 |---------|------|--------|
