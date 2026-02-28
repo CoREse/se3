@@ -2,11 +2,13 @@
 
 ## Current Version
 
-**3.10.1** — fix: Handle None values in commit step inputs.
+**3.11.0** — feat: Add version bumper framework with auto-bump on se3 run commit step.
 
 ## Version History
 
 | Version | Date | Changes |
+|---------|------|--------|
+| 3.11.0 | 2026-02-28 | feat: Add version bumper framework with auto-bump on se3 run commit step. Supports pyproject.toml, package.json, version.py, setup.py. Task type -> bump level mapping (feature->minor, bugfix->patch, breaking->major). Fix JSON parser truncated response handling. Fix Version dataclass order conflict. |
 |---------|------|--------|
 | 3.10.1 | 2026-02-27 | fix: Commit step now handles None values in `changes_made` and `proposal` inputs using `or {}` fallback. Prevents AttributeError when previous steps don't produce these outputs. |
 |---------|------|--------|
