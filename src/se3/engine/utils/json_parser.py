@@ -113,6 +113,11 @@ def _extract_json_string(text: str) -> Optional[str]:
     if start != -1 and end != -1 and end > start:
         return text[start:end+1].strip()
     
+    # Handle truncated JSON: if we have an opening brace but no closing brace,
+    # return from opening brace to end (will be repaired later)
+    if start != -1 and end == -1:
+        return text[start:].strip()
+    
     return None
 
 
@@ -127,7 +132,108 @@ def _repair_json(json_str: str) -> str:
     json_str = re.sub(r',\s*\'([^\']*)\'(?=\s*[,}\]])', r', "\1"', json_str)
     json_str = re.sub(r'\[\s*\'([^\']*)\'(?=\s*[,}\]])', r'["\1"', json_str)
     
+    # Handle truncated JSON by closing open structures
+    json_str = _close_truncated_json(json_str)
+    
     return json_str
+
+
+def _close_truncated_json(json_str: str) -> str:
+    """Attempt to close truncated JSON structures.
+    
+    When LLM output is truncated due to length limits, this function
+    attempts to close open strings, objects, and arrays to make the
+    JSON parseable, even if incomplete.
+    
+    Args:
+        json_str: Potentially truncated JSON string
+        
+    Returns:
+        JSON string with structures closed
+    """
+    result = json_str
+    
+    # Check if we're inside a string (odd number of unescaped quotes)
+    # Remove escaped quotes first for accurate counting
+    temp = result.replace('\\"', '')
+    quote_count = temp.count('"')
+    in_string = quote_count % 2 == 1
+    
+    # Track what we need to close
+    needs_string_close = False
+    
+    # If we're inside a string that's been truncated, we need to handle it carefully
+    if in_string:
+        # Find the last unescaped quote to find where the string started
+        last_quote_idx = -1
+        for i, c in enumerate(result):
+            if c == '"' and (i == 0 or result[i-1] != '\\'):
+                last_quote_idx = i
+        
+        if last_quote_idx > 0:
+            # Look at what comes before the last quote to understand context
+            before_quote = result[:last_quote_idx].rstrip()
+            
+            # Check if this looks like a "content": " pattern (common in file changes)
+            if before_quote.endswith(':'):
+                # This is a key string, not a value - just close it
+                result += '"'
+            else:
+                # This is a value string that got truncated
+                # Try to find a safe truncation point (last newline)
+                # and add ellipsis to indicate truncation
+                current_content = result[last_quote_idx+1:]
+                last_newline = current_content.rfind('\\n')
+                if last_newline > 0:
+                    # Truncate to last complete line and add ellipsis
+                    result = result[:last_quote_idx+1+last_newline+2] + '..."'
+                else:
+                    # No newline found, just close the string
+                    result += '"'
+            needs_string_close = True
+    
+    # Remove trailing comma if present
+    result = result.rstrip()
+    if result.endswith(','):
+        result = result[:-1]
+    
+    # Count open/close braces and brackets after string handling
+    open_braces = result.count('{')
+    close_braces = result.count('}')
+    open_brackets = result.count('[')
+    close_brackets = result.count(']')
+    
+    # If we closed a string that was inside a value (like content field),
+    # we need to close the enclosing object first, then array, then root
+    # Typical structure: { "files_changed": [{ "content": "..." }] }
+    if needs_string_close:
+        # We just closed a value string, so we need to close:
+        # 1. The enclosing object (if any unclosed braces after the last bracket)
+        # 2. The enclosing array (if any unclosed brackets)
+        # 3. The root object (if any remaining unclosed braces)
+        
+        # Find positions of last [ and {
+        last_bracket = result.rfind('[')
+        last_brace = result.rfind('{')
+        
+        # Check if there's an unclosed object inside the array
+        # (this would be the file object containing our string value)
+        if last_brace > last_bracket and close_braces < open_braces:
+            # Close the file object first
+            result += '}'
+            close_braces += 1
+    
+    # Close arrays
+    while close_brackets < open_brackets:
+        result += ']'
+        close_brackets += 1
+    
+    # Close remaining objects (including root)
+    while close_braces < open_braces:
+        result += '}'
+        close_braces += 1
+    
+    return result
 
 
 def _validate_keys(data: Any, required_keys: Optional[list[str]]) -> bool:

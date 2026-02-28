@@ -2,6 +2,7 @@
 
 Commits the changes using git.
 This is a non-LLM step that executes git commands.
+Integrates with VersionBumper for automatic version bumping.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ import subprocess
 from pathlib import Path
 
 from ..models import FlowInstance, Step, StepStatus
+from ..version_bumper import BumpType, TaskType, VersionBumper, VersionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,9 @@ logger = logging.getLogger(__name__)
 def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the commit step.
 
-    Commits changes using git commands.
+    Commits changes using git commands. If version bumping is enabled,
+    bumps the version before committing and includes the new version
+    in the commit message.
 
     Args:
         step: The current step being executed
@@ -36,12 +40,48 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["committed"] = False
         return StepStatus.COMPLETED
 
-    # Generate commit message
-    commit_message = _generate_commit_message(flow, step)
+    # Load version bumping configuration
+    version_config = _load_version_config(project_root)
 
-    logger.info(f"Committing changes with message: {commit_message[:60]}...")
+    # Initialize version bumping state
+    version_bumper: VersionBumper | None = None
+    version_file: Path | None = None
+    original_version: str | None = None
+    new_version: str | None = None
+    version_bumped = False
 
     try:
+        # Attempt version bumping if enabled
+        if version_config.enabled:
+            version_bumper = VersionBumper(version_config)
+            version_file = version_bumper.detect_version_file(project_root)
+
+            if version_file:
+                # Determine task type and corresponding bump type
+                task_type = _get_task_type(flow)
+                bump_type = version_config.bump_rules.get(task_type, BumpType.PATCH)
+
+                # Save original version for potential rollback
+                original_version = version_bumper.read_version(version_file)
+
+                # Bump the version
+                new_version = version_bumper.bump_version(
+                    path=version_file,
+                    bump_type=bump_type
+                )
+                version_bumped = True
+                logger.info(f"Bumped version: {original_version} -> {new_version}")
+
+                # Stage the version file
+                _stage_file(project_root, version_file)
+            else:
+                logger.debug("No version file detected, skipping version bump")
+
+        # Generate commit message (including version if bumped)
+        commit_message = _generate_commit_message(flow, step, new_version, version_config)
+
+        logger.info(f"Committing changes with message: {commit_message[:60]}...")
+
         # Add all changes
         result = subprocess.run(
             ["git", "add", "-A"],
@@ -51,6 +91,9 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
         )
 
         if result.returncode != 0:
+            # Rollback version if staging failed
+            if version_bumped and version_bumper and version_file and original_version:
+                _rollback_version(version_bumper, version_file, original_version)
             step.error_message = f"Failed to stage changes: {result.stderr}"
             return StepStatus.FAILED
 
@@ -63,25 +106,118 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
         )
 
         if result.returncode != 0:
+            # Rollback version if commit failed
+            if version_bumped and version_bumper and version_file and original_version:
+                _rollback_version(version_bumper, version_file, original_version)
             step.error_message = f"Failed to commit: {result.stderr}"
             return StepStatus.FAILED
 
         # Get commit hash
         commit_hash = _get_commit_hash(project_root)
 
+        # Clear version backup on successful commit (make bump permanent)
+        if version_bumper:
+            version_bumper.clear_backup()
+
         # Store outputs
         step.outputs["commit_hash"] = commit_hash
         step.outputs["committed"] = True
         step.outputs["commit_message"] = commit_message
+        if new_version:
+            step.outputs["version"] = new_version
+            step.outputs["version_bumped"] = True
 
         logger.info(f"Changes committed: {commit_hash[:8]}")
 
         return StepStatus.COMPLETED
 
     except Exception as e:
+        # Rollback version on any exception
+        if version_bumped and version_bumper and version_file and original_version:
+            try:
+                _rollback_version(version_bumper, version_file, original_version)
+            except Exception as rollback_error:
+                logger.error(f"Failed to rollback version: {rollback_error}")
+
         logger.exception("Commit step failed")
         step.error_message = f"Failed to commit: {str(e)}"
         return StepStatus.FAILED
+
+
+def _load_version_config(project_root: Path) -> VersionConfig:
+    """Load version bumping configuration.
+
+    Args:
+        project_root: Project root directory
+
+    Returns:
+        VersionConfig instance
+    """
+    # Import here to avoid circular imports
+    from ...config import load_version_config as load_cfg
+    return load_cfg(project_root)
+
+
+def _get_task_type(flow: FlowInstance) -> TaskType:
+    """Determine task type from flow context.
+
+    Args:
+        flow: The flow instance
+
+    Returns:
+        TaskType enum value
+    """
+    task_type_str = flow.task_type or "feature"
+    try:
+        return TaskType(task_type_str.lower())
+    except ValueError:
+        # Default to feature for unknown task types
+        return TaskType.FEATURE
+
+
+def _stage_file(project_root: Path, file_path: Path) -> None:
+    """Stage a specific file for commit.
+
+    Args:
+        project_root: Project root directory
+        file_path: Path to the file to stage
+    """
+    # Get relative path if file is within project root
+    try:
+        rel_path = file_path.relative_to(project_root)
+    except ValueError:
+        rel_path = file_path
+
+    result = subprocess.run(
+        ["git", "add", str(rel_path)],
+        capture_output=True,
+        text=True,
+        cwd=project_root,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to stage {rel_path}: {result.stderr}")
+
+
+def _rollback_version(
+    version_bumper: VersionBumper,
+    version_file: Path,
+    original_version: str
+) -> None:
+    """Rollback version to original value.
+
+    Args:
+        version_bumper: VersionBumper instance
+        version_file: Path to version file
+        original_version: Original version string to restore
+    """
+    logger.warning(f"Rolling back version to {original_version}")
+    try:
+        version_bumper.rollback()
+        logger.info(f"Version rolled back to {original_version}")
+    except Exception as e:
+        logger.error(f"Version rollback failed: {e}")
+        raise
 
 
 def _has_changes(project_root: Path) -> bool:
@@ -105,12 +241,19 @@ def _has_changes(project_root: Path) -> bool:
         return False
 
 
-def _generate_commit_message(flow: FlowInstance, step: Step) -> str:
+def _generate_commit_message(
+    flow: FlowInstance,
+    step: Step,
+    new_version: str | None = None,
+    version_config: VersionConfig | None = None
+) -> str:
     """Generate a commit message based on the flow context.
 
     Args:
         flow: The flow instance
         step: The current step
+        new_version: Optional new version string if version was bumped
+        version_config: Version configuration
 
     Returns:
         Commit message string
@@ -143,6 +286,14 @@ def _generate_commit_message(flow: FlowInstance, step: Step) -> str:
             file_list += f" and {len(files_changed) - 3} more"
 
         message += f"\n\nFiles: {file_list}"
+
+    # Add version information if bumping occurred and is configured to include
+    include_version = (
+        version_config is None or
+        version_config.include_in_commit_message
+    )
+    if new_version and include_version:
+        message += f"\n\nVersion: {new_version}"
 
     # Add flow reference
     message += f"\n\nFlow: {flow.flow_id}"

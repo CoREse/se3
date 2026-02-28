@@ -11,7 +11,10 @@ Supports two-level config:
 # Verify: se3-config/Project overrides global
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+if TYPE_CHECKING:
+    from .engine.version_bumper import VersionConfig
 
 
 def load_global_config() -> Dict[str, Any]:
@@ -236,3 +239,47 @@ def load_confirmation_config(project_root: Optional[Path] = None) -> Dict[str, A
             "max_iterations": 3,
         }),
     }
+
+
+def load_version_config(project_root: Optional[Path] = None) -> "VersionConfig":
+    """Load version bumping configuration from config.
+
+    Resolution order:
+    1. Project se3.yaml version (if present, overrides global)
+    2. Global ~/.se3/config.yaml version
+    3. Default values
+
+    Returns VersionConfig with:
+        - enabled: Whether version bumping is enabled (default: True)
+        - file_path: Optional explicit path to version file (default: None = auto-detect)
+        - bump_rules: Mapping of task types to bump types
+        - include_in_commit_message: Whether to include version in commit message (default: True)
+    """
+    # Import here to avoid circular imports
+    from .engine.version_bumper import VersionConfig, BumpType, TaskType
+
+    global_cfg = load_global_config()
+    project_cfg = load_project_config(project_root) if project_root else {}
+
+    # Merge version configs: project overrides global
+    global_version = global_cfg.get("version", {})
+    project_version = project_cfg.get("version", {})
+
+    merged = dict(global_version)
+    merged.update(project_version)
+
+    # Build bump rules from config if provided
+    bump_rules = None
+    if "bump_rules" in merged:
+        bump_rules = {}
+        for task_str, bump_str in merged["bump_rules"].items():
+            task_type = TaskType(task_str)
+            bump_type = BumpType(bump_str)
+            bump_rules[task_type] = bump_type
+
+    return VersionConfig(
+        enabled=merged.get("enabled", True),
+        file_path=merged.get("file_path"),
+        bump_rules=bump_rules,
+        include_in_commit_message=merged.get("include_in_commit_message", True),
+    )

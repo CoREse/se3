@@ -34,6 +34,17 @@ claude_commands:
   - cmd: "hclaude"
     priority: 1
 
+# Version Bumping Configuration
+# Automatically bump version on commit step based on task type
+version:
+  enabled: true                       # Enable automatic version bumping
+  file_path: null                     # Explicit version file path (null = auto-detect)
+  include_in_commit_message: true     # Include version in commit message
+  bump_rules:                         # Task type to bump type mapping
+    feature: minor                    # Feature tasks bump minor version
+    bugfix: patch                     # Bugfix tasks bump patch version
+    breaking: major                   # Breaking changes bump major version
+
 # E2E / Visual regression testing (optional)
 # Requires Puppeteer MCP or similar browser automation tool
 e2e:
