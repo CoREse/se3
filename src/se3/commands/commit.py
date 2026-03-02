@@ -441,6 +441,10 @@ def commit(
         False, "--no-ai",
         help="Skip AI message generation, use fallback"
     ),
+    bump: Optional[str] = typer.Option(
+        None, "--bump",
+        help="Bump version: major, minor, or patch"
+    ),
     project_root: Optional[str] = typer.Option(
         None, "--project-root", "-p",
         help="Project root directory"
@@ -540,6 +544,33 @@ def commit(
                 typer.echo(f"    - {issue}")
     else:
         typer.echo("  Version check OK.")
+
+    # Step 4b: Manual version bump if --bump flag provided
+    if bump:
+        typer.echo(f"\n[4b/6] Bumping version ({bump})...")
+        try:
+            from ..engine.version_bumper import VersionBumper, BumpType
+            from ..config import load_version_config
+            
+            version_config = load_version_config(root)
+            version_bumper = VersionBumper(version_config)
+            version_file = version_bumper.detect_version_file(root)
+            
+            if version_file:
+                original_version = version_bumper.read_version(version_file)
+                bump_type = BumpType(bump.lower())
+                new_version = version_bumper.bump_version(
+                    path=version_file,
+                    bump_type=bump_type
+                )
+                typer.echo(f"  Version bumped: {original_version} -> {new_version}")
+                # Stage the version file
+                stage_files(root, [str(version_file.relative_to(root))])
+            else:
+                typer.echo("  Warning: No version file detected, skipping version bump")
+        except Exception as e:
+            typer.echo(f"  Error bumping version: {e}")
+            raise typer.Exit(1)
 
     # Step 5: Generate/validate commit message
     typer.echo("\n[5/6] Preparing commit message...")

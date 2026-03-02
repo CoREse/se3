@@ -2,36 +2,20 @@
 
 ## Current Version
 
-**3.12.0** — fix: Chat history now preserves full conversation structure for retry context.
+**3.14.0** — feat: Fix retry context inheritance in implement step. Add complete version management spec and base_spec template. Add --bump flag to se3 commit command.
 
 ## Version History
 
 | Version | Date | Changes |
-|---------|------|--------|
-| 3.12.0 | 2026-03-02 | fix: Chat history retry context now preserves full conversation structure. Extracts tool calls and results from raw NDJSON instead of using simplified summaries. Each user message has independent tool_results. Supports both snake_case and camelCase field names. Proper field access with defaults to prevent KeyError. |
-|---------|------|--------|
-| 3.11.0 | 2026-02-28 | feat: Add version bumper framework with auto-bump on se3 run commit step. Supports pyproject.toml, package.json, version.py, setup.py. Task type -> bump level mapping (feature->minor, bugfix->patch, breaking->major). Fix JSON parser truncated response handling. Fix Version dataclass order conflict. |
-|---------|------|--------|
-| 3.10.1 | 2026-02-27 | fix: Commit step now handles None values in `changes_made` and `proposal` inputs using `or {}` fallback. Prevents AttributeError when previous steps don't produce these outputs. |
-|---------|------|--------|
-| 3.10.0 | 2026-02-27 | feat: Multiline input for se3 run and task group fallback.
-
-## Version History
-
-| Version | Date | Changes |
-|---------|------|--------|
-| 3.10.0 | 2026-02-27 | feat: `se3 run` without arguments enters interactive multiline input mode. Supports paste detection (>3 lines abbreviates display). Fix task group handling for directive tasks: create default task group when PLAN_TASKS is skipped, create minimal design doc when DESIGN is skipped. Fix undefined variable bug in plan_tasks.py. |
-|---------|------|--------|
-| 3.9.0 | 2026-02-27 | feat: Task group architecture for plan_tasks and implement steps. plan_tasks now generates `task_groups` (logical task groups with group_id, name, description, group_order, depends_on). implement step executes each group in separate LLM call with isolated context - same base context (design_doc, proposal, project_context) but only group's tasks. Each group has independent retry mechanism with max_retries. Sequential execution with immediate file application per group. Backward compatible with legacy task_list format. Updated STEP_POOL definitions for plan_tasks and implement. |
-|---------|------|--------|
-| 3.8.0 | 2026-02-27 | feat: Confirmation (review) steps with human/LLM reviewers for propose/design/plan_tasks.
-
-## Version History
-
-| Version | Date | Changes |
-|---------|------|--------|
-| 3.8.0 | 2026-02-27 | feat: Confirmation steps with configurable human or LLM review. New `CONFIRM` step type inserted after `propose`, `design`, and optionally `plan_tasks`. Human reviewer mode creates MCP call files and listens for file edits or CLI input (y=approve, n=abort, anything else=revision feedback). LLM reviewer mode uses separate LLM calls to evaluate completeness, spec compliance, and maintainability. Supports review loop: if changes requested, flow returns to original step with feedback for revision. New `confirmation` config in se3.yaml with `enabled`, `steps`, `reviewer`, `llm_reviewer` options. Updated propose/design/plan_tasks handlers to support revision mode. 3 new step handlers, state machine supports review iteration tracking. |
 |---------|------|---------|
+| 3.14.0 | 2026-03-02 | feat: Fix retry context inheritance in implement step. Add complete version management spec and base_spec template. Add --bump flag to se3 commit command. |
+| 3.13.0 | 2026-03-02 | feat: Add DocumentationUpdater class for README.md and VERSIONS.md updates. Add version bump integration in commit step. Add load_session_config, load_confirmation_config, load_claude_commands, get_language_labels, is_chinese_language functions to config.py. |
+| 3.12.0 | 2026-03-02 | fix: Chat history retry context now preserves full conversation structure. Extracts tool calls and results from raw NDJSON instead of using simplified summaries. Each user message has independent tool_results. Supports both snake_case and camelCase field names. Proper field access with defaults to prevent KeyError. |
+| 3.11.0 | 2026-02-28 | feat: Add version bumper framework with auto-bump on se3 run commit step. Supports pyproject.toml, package.json, version.py, setup.py. Task type -> bump level mapping (feature->minor, bugfix->patch, breaking->major). Fix JSON parser truncated response handling. Fix Version dataclass order conflict. |
+| 3.10.1 | 2026-02-27 | fix: Commit step now handles None values in `changes_made` and `proposal` inputs using `or {}` fallback. Prevents AttributeError when previous steps don't produce these outputs. |
+| 3.10.0 | 2026-02-27 | feat: `se3 run` without arguments enters interactive multiline input mode. Supports paste detection (>3 lines abbreviates display). Fix task group handling for directive tasks: create default task group when PLAN_TASKS is skipped, create minimal design doc when DESIGN is skipped. Fix undefined variable bug in plan_tasks.py. |
+| 3.9.0 | 2026-02-27 | feat: Task group architecture for plan_tasks and implement steps. plan_tasks now generates `task_groups` (logical task groups with group_id, name, description, group_order, depends_on). implement step executes each group in separate LLM call with isolated context - same base context (design_doc, proposal, project_context) but only group's tasks. Each group has independent retry mechanism with max_retries. Sequential execution with immediate file application per group. Backward compatible with legacy task_list format. Updated STEP_POOL definitions for plan_tasks and implement. |
+| 3.8.0 | 2026-02-27 | feat: Confirmation steps with configurable human or LLM review. New `CONFIRM` step type inserted after `propose`, `design`, and optionally `plan_tasks`. Human reviewer mode creates MCP call files and listens for file edits or CLI input (y=approve, n=abort, anything else=revision feedback). LLM reviewer mode uses separate LLM calls to evaluate completeness, spec compliance, and maintainability. Supports review loop: if changes requested, flow returns to original step with feedback for revision. New `confirmation` config in se3.yaml with `enabled`, `steps`, `reviewer`, `llm_reviewer` options. Updated propose/design/plan_tasks handlers to support revision mode. 3 new step handlers, state machine supports review iteration tracking. |
 | 3.7.0 | 2026-02-27 | feat: Chat history system. New `ChatMessage`/`ChatSession` data model records every LLM prompt and response to `se3/history/{flow_id}/{step_id}.jsonl`. LLMCaller now accepts `flow_id`/`step_id`/`step_type` and automatically records all calls. On retry, previous conversation context is injected into the prompt. New `se3 history` CLI command for browsing chat history (list flows, view step conversations, JSON/text output). All 10 LLM-using step handlers updated. 24 new tests. Updated flow-engine and se3-commands specs. |
 | 3.6.0 | 2026-02-27 | feat: Base spec mechanism. New `se3 init` command generates project structure and `se3/specs/base/spec.md` from template. `read_spec` step auto-loads base spec before LLM selection, ensuring all flows have access to project-level conventions. New `src/se3/templates/` package with base spec skeleton. 9 new tests. |
 | 3.5.0 | 2026-02-27 | feat: LLM-driven read_spec replaces keyword matching. New PROJECT_SUMMARY step generates project context summary for downstream LLM steps. New `se3 summary` CLI command. ProjectContextCollector collects git, flow engine, backlog, specs. Migrated roadmap.md to se3/specs/_backlog/ (9 backlog items). Updated propose/design prompts with project context. |

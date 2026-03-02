@@ -1,5 +1,7 @@
 # SE 3.0 — Software Engineering 3.0 Framework
 
+![Version](https://img.shields.io/badge/version-3.14.0-blue)
+
 An AI-first long-horizon development framework for Claude Code.
 
 ## Overview

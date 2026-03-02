@@ -223,6 +223,7 @@ class LLMCaller:
         flow_id: Optional[str] = None,
         step_id: Optional[str] = None,
         step_type: Optional[str] = None,
+        external_attempt: int = 0,
     ):
         self.project_root = Path(project_root) if project_root else Path.cwd()
         self.max_retries = max_retries
@@ -230,6 +231,7 @@ class LLMCaller:
         self.flow_id = flow_id
         self.step_id = step_id
         self.step_type = step_type or ""
+        self.external_attempt = external_attempt  # Track external retry (e.g., from implement.py)
         self._runner = ClaudeRunner(self.project_root)
 
     def call(
@@ -342,9 +344,13 @@ class LLMCaller:
         start_time = time.time()
         last_error = ""
 
-        for attempt in range(self.max_retries):
-            # On retry, inject previous conversation context
-            if attempt > 0:
+        for internal_attempt in range(self.max_retries):
+            # Combine external attempt (from caller) with internal attempt (network retries)
+            # to determine if we should inject history context
+            total_attempt = self.external_attempt * self.max_retries + internal_attempt
+            
+            # On retry (either external or internal), inject previous conversation context
+            if total_attempt > 0:
                 retry_context = self._get_retry_context()
                 if retry_context:
                     effective_prompt = f"{retry_context}\n{original_prompt}"
@@ -360,11 +366,11 @@ class LLMCaller:
                     if f.exists():
                         args.extend(["--file", str(f)])
 
-            # Record the prompt to chat history
-            self._record_prompt(effective_prompt, attempt)
+            # Record the prompt to chat history using external_attempt for grouping
+            self._record_prompt(effective_prompt, self.external_attempt)
 
             try:
-                logger.debug(f"LLM call attempt {attempt + 1}/{self.max_retries}")
+                logger.debug(f"LLM call internal_attempt {internal_attempt + 1}/{self.max_retries}, external_attempt {self.external_attempt}")
 
                 if on_output:
                     result = self._runner.run_with_monitor(
@@ -394,7 +400,7 @@ class LLMCaller:
                         stream_tracker.print_summary()
 
                 # Record the response (whether success or failure)
-                self._record_response(result.output or "", attempt)
+                self._record_response(result.output or "", self.external_attempt)
 
                 if result.success:
                     # Check if JSON is required but not received
@@ -402,8 +408,9 @@ class LLMCaller:
                         if not self._contains_valid_json(result.output):
                             print(f"  [llm-caller] ⚠️  Response is not valid JSON, requesting JSON format (retry {json_retry_count + 1}/{max_json_retries})")
                             json_prompt = self._create_json_retry_prompt(prompt, result.output)
-                            # Record the JSON retry prompt too
-                            self._record_prompt(json_prompt, attempt)
+                            # Record the JSON retry prompt too (use a distinct attempt number for JSON retries)
+                            json_attempt = self.external_attempt * 100 + json_retry_count  # Distinguish JSON retries
+                            self._record_prompt(json_prompt, json_attempt)
                             return self._call_with_retry(
                                 prompt=json_prompt,
                                 timeout=timeout,
@@ -419,13 +426,13 @@ class LLMCaller:
                     return result.output
 
                 last_error = f"Command '{result.cmd_used}' failed with exit code {result.returncode}"
-                logger.warning(f"LLM call failed: {last_error}, attempt {attempt + 1}/{self.max_retries}")
+                logger.warning(f"LLM call failed: {last_error}, internal attempt {internal_attempt + 1}/{self.max_retries}")
 
             except Exception as e:
                 last_error = str(e)
-                logger.warning(f"LLM call exception: {last_error}, attempt {attempt + 1}/{self.max_retries}")
+                logger.warning(f"LLM call exception: {last_error}, internal attempt {internal_attempt + 1}/{self.max_retries}")
 
-            if attempt < self.max_retries - 1:
+            if internal_attempt < self.max_retries - 1:
                 time.sleep(self.retry_delay)
 
         raise LLMCallError(f"LLM call failed after {self.max_retries} attempts: {last_error}")

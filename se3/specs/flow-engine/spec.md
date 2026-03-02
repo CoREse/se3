@@ -197,6 +197,59 @@ se3 run "修复内存泄漏" --type=bugfix
 - **THEN** 根据规则自动构建步骤输入
 - **AND** 包含所有相关的前序输出
 
+### Requirement: Commit 步骤版本管理
+
+`commit` 步骤 SHALL 集成自动版本更新功能，根据任务类型自动 bump 版本号，并更新相关文档。
+
+**版本更新流程：**
+1. 检测项目类型（Python/Node.js）并定位版本文件（pyproject.toml/package.json）
+2. 根据任务类型确定 bump 类型：
+   - `feature` → minor (X.Y+1.0)
+   - `bugfix` → patch (X.Y.Z+1)
+   - `breaking` → major (X+1.0.0)
+3. 使用语义化版本规范（SemVer 2.0.0）计算新版本
+4. 更新版本文件中的版本号
+5. 自动更新 README.md 和 VERSIONS.md（如配置了模板）
+6. 将版本文件和文档变更一起提交
+
+**版本回滚机制：**
+- 如果提交失败，自动回滚版本文件到原始版本
+- 成功提交后清除备份，使版本变更永久生效
+
+**配置选项（se3.yaml）：**
+```yaml
+version:
+  enabled: true                    # 启用自动版本更新
+  file_path: null                  # 版本文件路径（null=自动检测）
+  include_in_commit_message: true  # 在提交消息中包含版本号
+  bump_rules:                      # 任务类型到 bump 类型的映射
+    feature: minor
+    bugfix: patch
+    breaking: major
+  templates:                       # 文档更新模板
+    readme_badge: "![Version](https://img.shields.io/badge/version-{version}-blue)"
+    versions_entry: "## {version} - {date}\n\n{changes}\n"
+```
+
+#### Scenario: Feature 任务自动更新版本
+- **GIVEN** 当前版本为 1.2.3
+- **WHEN** 执行 feature 类型的任务并进入 commit 步骤
+- **THEN** 版本自动 bump 为 1.3.0
+- **AND** README.md 和 VERSIONS.md 自动更新
+- **AND** 所有变更一起提交
+
+#### Scenario: Bugfix 任务自动更新版本
+- **GIVEN** 当前版本为 1.2.3
+- **WHEN** 执行 bugfix 类型的任务并进入 commit 步骤
+- **THEN** 版本自动 bump 为 1.2.4
+- **AND** 提交消息包含新版本号
+
+#### Scenario: 版本更新失败回滚
+- **GIVEN** 版本已成功 bump 但提交失败
+- **WHEN** commit 步骤检测到提交错误
+- **THEN** 自动将版本文件回滚到原始版本
+- **AND** 报告错误信息
+
 ### Requirement: 错误处理和重试
 
 流程引擎 SHALL 提供错误处理和重试机制。

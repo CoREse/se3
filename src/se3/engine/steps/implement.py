@@ -358,9 +358,15 @@ def _implement_single_group(
     logger.info(f"Generating implementation for group {group_id} (attempt {attempt + 1})...")
 
     # Call LLM for implementation
-    # Create a unique step_id for each group attempt for logging
-    group_step_id = f"{step.step_id}-{group_id}-{attempt}"
-    caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=group_step_id, step_type=f"implement-{group_id}")
+    # Use consistent step_id for all attempts of the same group so that retries inherit context
+    group_step_id = f"{step.step_id}-{group_id}"
+    caller = LLMCaller(
+        project_root,
+        flow_id=flow.flow_id,
+        step_id=group_step_id,
+        step_type=f"implement-{group_id}",
+        external_attempt=attempt,  # Pass attempt so retries inject history context
+    )
     response = caller.call(prompt=prompt, require_json=True)
 
     # Parse JSON response

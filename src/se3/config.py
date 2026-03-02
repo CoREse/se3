@@ -1,285 +1,380 @@
-"""Unified configuration loading for SE3.
-
-Supports two-level config:
-- Global: ~/.se3/config.yaml (shared across all projects)
-- Project: se3.yaml (project-specific, overrides global)
-"""
-
-# Verify: se3-config/Using default configuration
-# Verify: se3-config/Custom configuration
-# Verify: se3-config/Global configuration
-# Verify: se3-config/Project overrides global
+"""SE3 configuration management."""
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Optional
+from dataclasses import dataclass, field
+from enum import Enum
+import yaml
 
-if TYPE_CHECKING:
-    from .engine.version_bumper import VersionConfig
+
+class BumpType(Enum):
+    """Version bump types following Semantic Versioning."""
+    MAJOR = "major"
+    MINOR = "minor"
+    PATCH = "patch"
+    NONE = "none"
 
 
-def load_global_config() -> Dict[str, Any]:
-    """Load global config from ~/.se3/config.yaml."""
-    config_file = Path.home() / ".se3" / "config.yaml"
-    if config_file.exists():
+@dataclass
+class VersionConfig:
+    """Version management configuration.
+    
+    Loads version-related settings from se3.yaml with sensible defaults.
+    """
+    # Version file location (relative to project root)
+    version_file: Optional[str] = None  # Auto-detect if None
+    
+    # Bump rules: map task type to bump type
+    bump_rules: dict[str, str] = field(default_factory=lambda: {
+        "feature": "minor",
+        "feat": "minor",
+        "bugfix": "patch",
+        "fix": "patch",
+        "small": "patch",
+        "refactor": "patch",
+        "docs": "none",
+        "test": "none",
+        "chore": "none",
+        "review": "none",
+    })
+    
+    # Pre-release configuration
+    prerelease_prefix: str = ""
+    prerelease_number: int = 0
+    
+    # Template definitions
+    templates: dict[str, str] = field(default_factory=lambda: {
+        "readme_badge": "![Version](https://img.shields.io/badge/version-{version}-blue)",
+        "versions_entry": "## {version} - {date}\n\n{changes}\n",
+    })
+    
+    # README update settings
+    readme_enabled: bool = True
+    readme_marker: str = "<!-- SE3-VERSION -->"
+    
+    # VERSIONS.md settings  
+    versions_enabled: bool = True
+    versions_file: str = "VERSIONS.md"
+    versions_header: str = "# Version History\n\n"
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> "VersionConfig":
+        """Create VersionConfig from dictionary (typically loaded from se3.yaml)."""
+        if not data:
+            return cls()
+        
+        # Extract version section if nested
+        version_data = data.get("version", data)
+        
+        # Build bump rules from config or use defaults
+        bump_rules = version_data.get("bump_rules", {})
+        if not bump_rules:
+            bump_rules = cls().bump_rules
+        
+        # Build templates from config or use defaults
+        templates = cls().templates.copy()
+        templates.update(version_data.get("templates", {}))
+        
+        return cls(
+            version_file=version_data.get("version_file"),
+            bump_rules=bump_rules,
+            prerelease_prefix=version_data.get("prerelease_prefix", ""),
+            prerelease_number=version_data.get("prerelease_number", 0),
+            templates=templates,
+            readme_enabled=version_data.get("readme_enabled", True),
+            readme_marker=version_data.get("readme_marker", "<!-- SE3-VERSION -->"),
+            versions_enabled=version_data.get("versions_enabled", True),
+            versions_file=version_data.get("versions_file", "VERSIONS.md"),
+            versions_header=version_data.get("versions_header", "# Version History\n\n"),
+        )
+    
+    @classmethod
+    def load(cls, project_root: Path) -> "VersionConfig":
+        """Load version configuration from se3.yaml in project root."""
+        config_path = project_root / "se3.yaml"
+        if not config_path.exists():
+            return cls()
+        
         try:
-            import yaml
-            with open(config_file) as f:
-                return yaml.safe_load(f) or {}
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            return cls.from_dict(data)
+        except Exception:
+            return cls()
+    
+    def get_bump_type(self, task_type: str) -> BumpType:
+        """Get the bump type for a given task type.
+        
+        Args:
+            task_type: The type of task (feature, bugfix, small, etc.)
+            
+        Returns:
+            The corresponding BumpType enum value
+        """
+        bump_rule = self.bump_rules.get(task_type, "none")
+        try:
+            return BumpType(bump_rule)
+        except ValueError:
+            return BumpType.NONE
+    
+    def get_template(self, name: str) -> str:
+        """Get a template by name.
+        
+        Args:
+            name: Template name (e.g., "readme_badge", "versions_entry")
+            
+        Returns:
+            The template string, or empty string if not found
+        """
+        return self.templates.get(name, "")
+    
+    def should_update_readme(self) -> bool:
+        """Check if README.md should be updated."""
+        return self.readme_enabled
+    
+    def should_update_versions(self) -> bool:
+        """Check if VERSIONS.md should be updated."""
+        return self.versions_enabled
+
+
+@dataclass
+class Config:
+    """Main SE3 configuration."""
+    
+    project_root: Path
+    confirmation_enabled: bool = False
+    confirmation_steps: list[str] = field(default_factory=list)
+    
+    def __post_init__(self):
+        if isinstance(self.project_root, str):
+            self.project_root = Path(self.project_root)
+    
+    @classmethod
+    def load(cls, project_root: Path) -> "Config":
+        """Load configuration from se3.yaml."""
+        config_path = project_root / "se3.yaml"
+        
+        if not config_path.exists():
+            return cls(project_root=project_root)
+        
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        
+        confirmation = data.get("confirmation", {})
+        
+        return cls(
+            project_root=project_root,
+            confirmation_enabled=confirmation.get("enabled", False),
+            confirmation_steps=confirmation.get("steps", []),
+        )
+
+
+def load_version_config(project_root: Optional[Path] = None) -> VersionConfig:
+    """Load version configuration from project.
+    
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+        
+    Returns:
+        VersionConfig instance with loaded or default settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    
+    return VersionConfig.load(project_root)
+
+
+def load_config(project_root: Optional[Path] = None) -> Config:
+    """Load main SE3 configuration.
+    
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+        
+    Returns:
+        Config instance with loaded or default settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    
+    return Config.load(project_root)
+
+
+def load_session_config(project_root: Optional[Path] = None) -> dict:
+    """Load session configuration from project.
+    
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+        
+    Returns:
+        Dictionary with session configuration settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    
+    config_path = project_root / "se3.yaml"
+    
+    if not config_path.exists():
+        return {"max_tasks_per_change": 5}
+    
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        
+        # Get session settings from config
+        session = data.get("session", {})
+        return {
+            "max_tasks_per_change": session.get("max_tasks_per_change", 5),
+        }
+    except Exception:
+        return {"max_tasks_per_change": 5}
+
+
+def load_confirmation_config(project_root: Optional[Path] = None) -> dict:
+    """Load confirmation configuration from project.
+    
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+        
+    Returns:
+        Dictionary with confirmation configuration settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    
+    config_path = project_root / "se3.yaml"
+    
+    if not config_path.exists():
+        return {"enabled": True, "steps": ["propose", "design"]}
+    
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        
+        confirmation = data.get("confirmation", {})
+        return {
+            "enabled": confirmation.get("enabled", True),
+            "steps": confirmation.get("steps", ["propose", "design"]),
+            "reviewer": confirmation.get("reviewer", "human"),
+            "llm_reviewer": confirmation.get("llm_reviewer", {}),
+        }
+    except Exception:
+        return {"enabled": True, "steps": ["propose", "design"]}
+
+
+def load_claude_commands(project_root: Optional[Path] = None) -> list[dict]:
+    """Load Claude CLI commands from project and global configuration.
+    
+    Loads commands from se3.yaml (project-level) and ~/.se3/config.yaml (global-level).
+    Commands are sorted by priority (higher first). String entries are normalized to dicts.
+    
+    Args:
+        project_root: Project root directory. If None, uses global config only.
+        
+    Returns:
+        List of command dictionaries with 'cmd' and 'priority' keys, sorted by priority.
+    """
+    commands = []
+    
+    # Load global config
+    global_config_path = Path.home() / ".se3" / "config.yaml"
+    if global_config_path.exists():
+        try:
+            with open(global_config_path, "r", encoding="utf-8") as f:
+                global_data = yaml.safe_load(f) or {}
+            global_commands = global_data.get("claude_commands", [])
+            commands.extend(_normalize_commands(global_commands))
         except Exception:
             pass
-    return {}
-
-
-def load_project_config(project_root: Path | str) -> Dict[str, Any]:
-    """Load project config from se3.yaml (fallback: se3.config.yaml)."""
-    if isinstance(project_root, str):
+    
+    # Load project config (overrides global)
+    if project_root is not None:
         project_root = Path(project_root)
-    config_file = project_root / "se3.yaml"
-    if not config_file.exists():
-        config_file = project_root / "se3.config.yaml"  # legacy fallback
-    if config_file.exists():
-        try:
-            import yaml
-            with open(config_file) as f:
-                return yaml.safe_load(f) or {}
-        except Exception as e:
-            import sys
-            print(f"[se3-config] Warning: Failed to parse {config_file}: {e}", file=sys.stderr)
-            pass
-    return {}
-
-
-def merge_configs(global_cfg: Dict[str, Any], project_cfg: Dict[str, Any]) -> Dict[str, Any]:
-    """Merge global and project configs. Project-level overrides global.
-
-    Top-level keys from project_cfg replace global_cfg entirely (no deep merge).
-    """
-    merged = dict(global_cfg)
-    merged.update(project_cfg)
-    return merged
-
-
-def load_claude_commands(project_root: Optional[Path] = None) -> List[Dict[str, Any]]:
-    """Load and sort claude commands from config.
-
-    Resolution order:
-    1. Project se3.yaml claude_commands (if present, replaces global)
-    2. Global ~/.se3/config.yaml claude_commands
-    3. Default: [{cmd: "claude", priority: 0}]
-
-    Returns list sorted by priority descending, then list order.
-    """
-    global_cfg = load_global_config()
-    project_cfg = load_project_config(project_root) if project_root else {}
-
-    # Project-level claude_commands fully overrides global
-    commands = project_cfg.get("claude_commands") or global_cfg.get("claude_commands")
-
+        project_config_path = project_root / "se3.yaml"
+        if project_config_path.exists():
+            try:
+                with open(project_config_path, "r", encoding="utf-8") as f:
+                    project_data = yaml.safe_load(f) or {}
+                project_commands = project_data.get("claude_commands", [])
+                if project_commands:
+                    # Project commands override global
+                    commands = _normalize_commands(project_commands)
+            except Exception:
+                pass
+    
+    # If no commands found, use default
     if not commands:
-        return [{"cmd": "claude", "priority": 0}]
+        commands = [{"cmd": "claude", "priority": 0}]
+    
+    # Sort by priority (higher first)
+    commands.sort(key=lambda x: x.get("priority", 0), reverse=True)
+    
+    return commands
 
-    # Normalize: ensure each entry has cmd and priority
+
+def _normalize_commands(commands: list) -> list[dict]:
+    """Normalize command entries to dictionaries.
+    
+    Args:
+        commands: List of command entries (dicts or strings)
+        
+    Returns:
+        List of normalized command dictionaries
+    """
     normalized = []
-    for entry in commands:
-        if isinstance(entry, str):
-            normalized.append({"cmd": entry, "priority": 0})
-        elif isinstance(entry, dict):
-            normalized.append({
-                "cmd": entry.get("cmd", "claude"),
-                "priority": entry.get("priority", 0),
-            })
-
-    if not normalized:
-        return [{"cmd": "claude", "priority": 0}]
-
-    # Sort by priority descending (higher first), stable sort preserves list order for ties
-    normalized.sort(key=lambda x: -x["priority"])
-
+    for cmd in commands:
+        if isinstance(cmd, str):
+            normalized.append({"cmd": cmd, "priority": 0})
+        elif isinstance(cmd, dict):
+            if "cmd" in cmd:
+                normalized.append({
+                    "cmd": cmd["cmd"],
+                    "priority": cmd.get("priority", 0)
+                })
     return normalized
 
 
-def load_human_call_config(project_root: Optional[Path] = None) -> Dict[str, Any]:
-    """Load human call configuration from config.
-
-    Resolution order:
-    1. Project se3.yaml human_call (if present, overrides global)
-    2. Global ~/.se3/config.yaml human_call
-    3. Default values
-
-    Returns dict with:
-        - language: Language code (default: "en")
-        - timeout_days: Async call timeout in days (default: 7)
-        - directory: Human calls directory (default: "human-calls")
-    """
-    global_cfg = load_global_config()
-    project_cfg = load_project_config(project_root) if project_root else {}
-
-    # Merge human_call configs: project overrides global
-    global_hc = global_cfg.get("human_call", {})
-    project_hc = project_cfg.get("human_call", {})
-
-    merged = dict(global_hc)
-    merged.update(project_hc)
-
-    return {
-        "language": merged.get("language", "en"),
-        "timeout_days": merged.get("timeout_days", 7),
-        "directory": merged.get("directory", "human-calls"),
-    }
-
-
-def load_session_config(project_root: Optional[Path] = None) -> Dict[str, Any]:
-    """Load session configuration from config.
-
-    Resolution order:
-    1. Project se3.yaml session (if present, overrides global)
-    2. Global ~/.se3/config.yaml session
-    3. Default values
-
-    Returns dict with:
-        - max_tasks_per_change: Max tasks per group (default: 5)
-        - max_progress_entries: Max progress entries before archiving (default: 20)
-    """
-    global_cfg = load_global_config()
-    project_cfg = load_project_config(project_root) if project_root else {}
-
-    # Merge session configs: project overrides global
-    global_session = global_cfg.get("session", {})
-    project_session = project_cfg.get("session", {})
-
-    merged = dict(global_session)
-    merged.update(project_session)
-
-    return {
-        "max_tasks_per_change": merged.get("max_tasks_per_change", 5),
-        "max_progress_entries": merged.get("max_progress_entries", 20),
-    }
-
-
-def get_language_labels(language: str) -> Dict[str, str]:
-    """Get human call template labels for a given language.
-
+def get_language_labels(language: str) -> dict[str, str]:
+    """Get translated labels for a given language.
+    
     Args:
-        language: Language code (e.g., "en", "zh-CN", "zh-TW")
-
-    Returns dict with localized labels for human call templates.
+        language: Language code (e.g., 'en', 'zh', 'zh-CN')
+        
+    Returns:
+        Dictionary of translated labels
     """
-    # Normalize language code
-    lang_lower = language.lower()
-
-    # Chinese variants (zh-CN, zh-TW, zh-HK, zh, etc.)
-    if lang_lower.startswith("zh"):
-        return {
-            "type": "类型",
-            "urgency": "紧急程度",
-            "context": "上下文",
-            "tasks": "当前任务状态",
-            "response": "回复",
-            "prompt": "<!-- 人类：请在下方输入您的回复 -->",
-            "request_prefix": "请求",
-            "source": "来源",
-        }
-
-    # Default to English
-    return {
-        "type": "Type",
-        "urgency": "Urgency",
-        "context": "Context",
-        "tasks": "Current Task States",
-        "response": "Response",
-        "prompt": "<!-- Human: write your response below -->",
-        "request_prefix": "Request",
-        "source": "Source",
+    labels = {
+        "en": {
+            "human_input": "Human Input",
+            "review": "Review",
+            "approve": "Approve",
+            "reject": "Reject",
+            "comment": "Comment",
+            "submit": "Submit",
+        },
+        "zh": {
+            "human_input": "人工输入",
+            "review": "审查",
+            "approve": "批准",
+            "reject": "拒绝",
+            "comment": "评论",
+            "submit": "提交",
+        },
     }
+    
+    # Map language codes
+    lang = language.lower()
+    if lang.startswith("zh"):
+        return labels["zh"]
+    return labels["en"]
 
 
 def is_chinese_language(language: str) -> bool:
-    """Check if the language code is a Chinese variant.
-
+    """Check if the language is Chinese.
+    
     Args:
-        language: Language code (e.g., "zh-CN", "zh-TW", "en-US")
-
-    Returns True if the language is a Chinese variant.
+        language: Language code (e.g., 'en', 'zh', 'zh-CN')
+        
+    Returns:
+        True if the language is Chinese
     """
     return language.lower().startswith("zh")
-
-
-def load_confirmation_config(project_root: Optional[Path] = None) -> Dict[str, Any]:
-    """Load confirmation (review) configuration from config.
-
-    Resolution order:
-    1. Project se3.yaml confirmation (if present, overrides global)
-    2. Global ~/.se3/config.yaml confirmation
-    3. Default values
-
-    Returns dict with:
-        - enabled: Whether confirmation steps are enabled (default: True)
-        - steps: List of step types after which to insert confirmation (default: ["propose", "design"])
-        - reviewer: Default reviewer type - "human" or "llm" (default: "human")
-        - llm_reviewer: LLM reviewer configuration
-            - model: Model to use for review (default: None, uses default model)
-            - max_iterations: Max review-modify cycles (default: 3)
-    """
-    global_cfg = load_global_config()
-    project_cfg = load_project_config(project_root) if project_root else {}
-
-    # Merge confirmation configs: project overrides global
-    global_confirm = global_cfg.get("confirmation", {})
-    project_confirm = project_cfg.get("confirmation", {})
-
-    merged = dict(global_confirm)
-    merged.update(project_confirm)
-
-    return {
-        "enabled": merged.get("enabled", True),
-        "steps": merged.get("steps", ["propose", "design"]),
-        "reviewer": merged.get("reviewer", "human"),
-        "llm_reviewer": merged.get("llm_reviewer", {
-            "model": None,
-            "max_iterations": 3,
-        }),
-    }
-
-
-def load_version_config(project_root: Optional[Path] = None) -> "VersionConfig":
-    """Load version bumping configuration from config.
-
-    Resolution order:
-    1. Project se3.yaml version (if present, overrides global)
-    2. Global ~/.se3/config.yaml version
-    3. Default values
-
-    Returns VersionConfig with:
-        - enabled: Whether version bumping is enabled (default: True)
-        - file_path: Optional explicit path to version file (default: None = auto-detect)
-        - bump_rules: Mapping of task types to bump types
-        - include_in_commit_message: Whether to include version in commit message (default: True)
-    """
-    # Import here to avoid circular imports
-    from .engine.version_bumper import VersionConfig, BumpType, TaskType
-
-    global_cfg = load_global_config()
-    project_cfg = load_project_config(project_root) if project_root else {}
-
-    # Merge version configs: project overrides global
-    global_version = global_cfg.get("version", {})
-    project_version = project_cfg.get("version", {})
-
-    merged = dict(global_version)
-    merged.update(project_version)
-
-    # Build bump rules from config if provided
-    bump_rules = None
-    if "bump_rules" in merged:
-        bump_rules = {}
-        for task_str, bump_str in merged["bump_rules"].items():
-            task_type = TaskType(task_str)
-            bump_type = BumpType(bump_str)
-            bump_rules[task_type] = bump_type
-
-    return VersionConfig(
-        enabled=merged.get("enabled", True),
-        file_path=merged.get("file_path"),
-        bump_rules=bump_rules,
-        include_in_commit_message=merged.get("include_in_commit_message", True),
-    )
