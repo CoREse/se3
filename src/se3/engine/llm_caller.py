@@ -29,6 +29,100 @@ def get_extra_prompt() -> Optional[str]:
     return _extra_prompt
 
 
+def truncate_preview(text: str, max_length: int = 60, ellipsis_str: str = '...') -> str:
+    """Truncate text to a preview with ellipsis if too long.
+
+    Args:
+        text: The text to truncate
+        max_length: Maximum length before truncation
+        ellipsis_str: String to append when truncated
+
+    Returns:
+        Truncated text with ellipsis if needed
+    """
+    if not text:
+        return ""
+    text = str(text).replace('\n', ' ')
+    if len(text) <= max_length:
+        return text
+    return text[:max_length] + ellipsis_str
+
+
+def format_tool_use_preview(tool_name: str, input_data: dict) -> str:
+    """Format a tool_use preview showing key parameters.
+
+    Args:
+        tool_name: Name of the tool being called
+        input_data: Tool input parameters dictionary
+
+    Returns:
+        Formatted preview string like 'Tool: <name> | Input: <param1>=<value1>, ...'
+    """
+    if not input_data or not isinstance(input_data, dict):
+        return f"Tool: {tool_name} | Input: (none)"
+
+    # Extract key parameters - show up to 3 key=value pairs
+    params = []
+    for i, (key, value) in enumerate(input_data.items()):
+        if i >= 3:
+            params.append("...")
+            break
+
+        # Format the value based on type
+        if isinstance(value, str):
+            val_preview = truncate_preview(value, max_length=30)
+            params.append(f"{key}={val_preview}")
+        elif isinstance(value, (int, float, bool)):
+            params.append(f"{key}={value}")
+        elif isinstance(value, (list, dict)):
+            val_str = json.dumps(value, ensure_ascii=False)
+            val_preview = truncate_preview(val_str, max_length=30)
+            params.append(f"{key}={val_preview}")
+        else:
+            val_preview = truncate_preview(str(value), max_length=30)
+            params.append(f"{key}={val_preview}")
+
+    if not params:
+        return f"Tool: {tool_name} | Input: (none)"
+
+    return f"Tool: {tool_name} | Input: {', '.join(params)}"
+
+
+def format_tool_result_preview(result_data: Any) -> str:
+    """Format a tool_result preview.
+
+    Args:
+        result_data: Tool result data (can be string, dict, list, etc.)
+
+    Returns:
+        Formatted preview string like 'Result: <preview>'
+    """
+    if result_data is None:
+        return "Result: (empty)"
+
+    if isinstance(result_data, str):
+        if not result_data.strip():
+            return "Result: (empty)"
+        return f"Result: {truncate_preview(result_data)}"
+
+    if isinstance(result_data, dict):
+        # Check for error in result
+        if result_data.get('isError') or result_data.get('is_error'):
+            error_msg = result_data.get('content', 'Unknown error')
+            return f"Result (error): {truncate_preview(str(error_msg))}"
+
+        # Format dict as JSON string
+        result_str = json.dumps(result_data, ensure_ascii=False)
+        return f"Result: {truncate_preview(result_str)}"
+
+    if isinstance(result_data, list):
+        result_str = json.dumps(result_data, ensure_ascii=False)
+        return f"Result: {truncate_preview(result_str)}"
+
+    # Default to string representation
+    return f"Result: {truncate_preview(str(result_data))}"
+
+
 class LLMCallError(Exception):
     """Error during LLM call."""
 
@@ -37,11 +131,11 @@ class LLMCallError(Exception):
 
 class StreamJSONTracker:
     """Tracks and prints real-time summary for stream-json output.
-    
+
     Processes each line of NDJSON output immediately and prints a summary,
     allowing users to see progress as Claude Code runs.
     """
-    
+
     def __init__(self):
         self.message_count = 0
         self.tool_calls = []
@@ -49,17 +143,17 @@ class StreamJSONTracker:
         self.text_chunks = 0
         self.total_text_len = 0
         self.start_time = time.time()
-    
+
     def process_line(self, line: str) -> None:
         """Process a single line of NDJSON output."""
         line = line.strip()
         if not line:
             return
-        
+
         try:
             data = json.loads(line)
             msg_type = data.get('type', '')
-            
+
             if msg_type == 'assistant':
                 self.message_count += 1
                 message = data.get('message', {})
@@ -73,33 +167,39 @@ class StreamJSONTracker:
                                 self.total_text_len += len(text)
                                 # Print progress for text chunks
                                 if self.text_chunks <= 3 or self.text_chunks % 10 == 0:
-                                    preview = text[:60].replace('\n', ' ')
+                                    preview = truncate_preview(text)
                                     print(f"  [llm-stream] 💬 Text chunk #{self.text_chunks}: {preview}...")
                         elif item.get('type') == 'tool_use':
                             name = item.get('name', 'unknown')
+                            tool_input = item.get('input', {})
                             self.tool_calls.append(name)
-                            print(f"  [llm-stream] 🔧 Tool call: {name}")
-                            
+                            # Format and print tool_use preview
+                            preview = format_tool_use_preview(name, tool_input)
+                            print(f"  [llm-stream] 🔧 {preview}...")
+
             elif msg_type == 'tool_result':
                 result = data.get('result', {})
                 tool_use_id = result.get('toolUseId', 'unknown')
                 self.tool_results.append(tool_use_id)
-                # Check if there's content in the result
+                # Extract and format tool result preview
                 content = result.get('content', '')
-                if content:
-                    content_preview = str(content)[:60].replace('\n', ' ')
-                    print(f"  [llm-stream] ✅ Tool result: {content_preview}...")
+                is_error = result.get('isError', False)
+
+                if is_error:
+                    error_preview = truncate_preview(str(content)) if content else "Unknown error"
+                    print(f"  [llm-stream] ❌ Tool error: {error_preview}...")
                 else:
-                    print(f"  [llm-stream] ✅ Tool result received")
-                    
+                    preview = format_tool_result_preview(content)
+                    print(f"  [llm-stream] ✅ {preview}...")
+
             elif msg_type == 'error':
                 error_msg = data.get('error', 'Unknown error')
-                print(f"  [llm-stream] ❌ Error: {error_msg}")
-                
+                print(f"  [llm-stream] ❌ Error: {truncate_preview(str(error_msg))}")
+
         except json.JSONDecodeError:
             # Not valid JSON, might be a partial line
             pass
-    
+
     def print_summary(self) -> None:
         """Print final summary of the stream."""
         duration = time.time() - self.start_time
@@ -355,7 +455,7 @@ class LLMCaller:
                                 text_content += text
             except json.JSONDecodeError:
                 continue
-        
+
         retry_prompt = f"""{original_prompt}
 
 IMPORTANT: Your previous response was not in the required JSON format. You responded with:
@@ -364,7 +464,5 @@ IMPORTANT: Your previous response was not in the required JSON format. You respo
 ---
 
 Please respond ONLY with valid JSON as specified in the instructions above. Do not include any explanatory text before or after the JSON."""
-        
+
         return retry_prompt
-
-

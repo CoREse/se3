@@ -18,6 +18,103 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+# Formatting utilities for consistent preview display
+
+def _truncate_preview(text: str, max_length: int = 60, ellipsis_str: str = '...') -> str:
+    """Truncate text to a preview with ellipsis if too long.
+
+    Args:
+        text: The text to truncate
+        max_length: Maximum length before truncation
+        ellipsis_str: String to append when truncated
+
+    Returns:
+        Truncated text with ellipsis if needed
+    """
+    if not text:
+        return ""
+    text = str(text).replace('\n', ' ')
+    if len(text) <= max_length:
+        return text
+    return text[:max_length] + ellipsis_str
+
+
+def _format_tool_use_preview(tool_name: str, input_data: dict) -> str:
+    """Format a tool_use preview showing key parameters.
+
+    Args:
+        tool_name: Name of the tool being called
+        input_data: Tool input parameters dictionary
+
+    Returns:
+        Formatted preview string like 'Tool: <name> | Input: <param1>=<value1>, ...'
+    """
+    if not input_data or not isinstance(input_data, dict):
+        return f"Tool: {tool_name} | Input: (none)"
+
+    # Extract key parameters - show up to 3 key=value pairs
+    params = []
+    for i, (key, value) in enumerate(input_data.items()):
+        if i >= 3:
+            params.append("...")
+            break
+
+        # Format the value based on type
+        if isinstance(value, str):
+            val_preview = _truncate_preview(value, max_length=30)
+            params.append(f"{key}={val_preview}")
+        elif isinstance(value, (int, float, bool)):
+            params.append(f"{key}={value}")
+        elif isinstance(value, (list, dict)):
+            val_str = json.dumps(value, ensure_ascii=False)
+            val_preview = _truncate_preview(val_str, max_length=30)
+            params.append(f"{key}={val_preview}")
+        else:
+            val_preview = _truncate_preview(str(value), max_length=30)
+            params.append(f"{key}={val_preview}")
+
+    if not params:
+        return f"Tool: {tool_name} | Input: (none)"
+
+    return f"Tool: {tool_name} | Input: {', '.join(params)}"
+
+
+def _format_tool_result_preview(result_data: Any) -> str:
+    """Format a tool_result preview.
+
+    Args:
+        result_data: Tool result data (can be string, dict, list, etc.)
+
+    Returns:
+        Formatted preview string like 'Result: <preview>'
+    """
+    if result_data is None:
+        return "Result: (empty)"
+
+    if isinstance(result_data, str):
+        if not result_data.strip():
+            return "Result: (empty)"
+        return f"Result: {_truncate_preview(result_data)}"
+
+    if isinstance(result_data, dict):
+        # Check for error in result
+        if result_data.get('isError') or result_data.get('is_error'):
+            error_msg = result_data.get('content', 'Unknown error')
+            return f"Result (error): {_truncate_preview(str(error_msg))}"
+
+        # Format dict as JSON string
+        result_str = json.dumps(result_data, ensure_ascii=False)
+        return f"Result: {_truncate_preview(result_str)}"
+
+    if isinstance(result_data, list):
+        result_str = json.dumps(result_data, ensure_ascii=False)
+        return f"Result: {_truncate_preview(result_str)}"
+
+    # Default to string representation
+    return f"Result: {_truncate_preview(str(result_data))}"
+
+
 # Default project root for history storage
 _SE3_DIR = "se3"
 _HISTORY_DIR = "history"
@@ -556,21 +653,27 @@ def _render_ndjson_for_human(raw_ndjson: str) -> str:
                         elif item.get("type") == "tool_use":
                             name = item.get("name", "unknown")
                             tool_input = item.get("input", {})
-                            input_preview = json.dumps(tool_input)[:200]
-                            parts.append(f"[Tool Call: {name}] {input_preview}")
+                            # Use consistent formatting with stream output
+                            preview = _format_tool_use_preview(name, tool_input)
+                            parts.append(f"[{preview}]")
 
             elif msg_type == "tool_result":
                 result = data.get("result", {})
                 content = result.get("content", "")
-                if content:
-                    preview = str(content)[:300]
-                    parts.append(f"[Tool Result] {preview}")
+                is_error = result.get("isError", False)
+
+                if is_error:
+                    # Format error result
+                    error_preview = _truncate_preview(str(content)) if content else "Unknown error"
+                    parts.append(f"[Result (error): {error_preview}]")
                 else:
-                    parts.append("[Tool Result] (empty)")
+                    # Format normal result
+                    preview = _format_tool_result_preview(content)
+                    parts.append(f"[{preview}]")
 
             elif msg_type == "error":
                 error_msg = data.get("error", "Unknown error")
-                parts.append(f"[Error] {error_msg}")
+                parts.append(f"[Error] {_truncate_preview(str(error_msg))}")
 
         except json.JSONDecodeError:
             # Not protocol JSON - show as-is
