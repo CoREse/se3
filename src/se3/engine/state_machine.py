@@ -439,6 +439,12 @@ class StateMachine:
                     inputs["task_list"] = step.outputs.get("task_list")
                 elif step.step_type == StepType.IMPLEMENT:
                     inputs["changes_made"] = step.outputs.get("changes_made")
+                elif step.step_type == StepType.TEST:
+                    inputs["test_results"] = step.outputs.get("test_results")
+                elif step.step_type == StepType.VERIFY_SPEC:
+                    inputs["verification_result"] = step.outputs.get("verification_result")
+                elif step.step_type == StepType.COMMIT:
+                    inputs["commit_hash"] = step.outputs.get("commit_hash")
                 elif step.step_type == StepType.CONFIRM:
                     # Pass through review result for tracking
                     inputs["last_review_result"] = step.outputs.get("review_result")

@@ -11,13 +11,6 @@ import typer
 from . import __version__
 
 
-def get_framework_version() -> str:
-    """Get framework version from single source of truth (pyproject.toml via __init__.py)."""
-    return __version__
-
-
-from .commands import lint, status, verify, collab, commit, human_calls_cmd, human_input, work, health, run, dashboard, summary, init_cmd, history
-
 app = typer.Typer(
     name="se3",
     help="SE 3.0 framework CLI tools",
@@ -27,8 +20,7 @@ app = typer.Typer(
 def _version_callback(value: bool):
     """Handle --version flag."""
     if value:
-        typer.echo(f"se3 CLI version: {__version__}")
-        typer.echo(f"SE3 Framework version: {get_framework_version()}")
+        typer.echo(f"se3 version {__version__}")
         raise typer.Exit()
 
 @app.callback()
@@ -45,6 +37,8 @@ def main(
 
 
 # Register sub-typer commands (complex multi-command tools)
+from .commands import lint, status, verify, collab, commit, human_calls_cmd, human_input, work, health, run, dashboard, summary, init_cmd, history
+
 app.add_typer(lint.app, name="lint", help="Lint OpenSpec files")
 app.add_typer(status.app, name="status", help="Check project status")
 app.add_typer(health.app, name="health", help="Check OpenSpec system health and integrity")

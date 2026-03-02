@@ -3264,3 +3264,4 @@ README.md                                                     |  2 +-
 - `dff41ad` feat: Task group implementation with isolated context per group (8 files)
 - `99e96d6` Add multiline input support for se3 run and fix task group handling for directive tasks (11 files)
 - `2ba5e14` Fix commit step to handle None values in changes_made and proposal (4 files)
+- `2e4576b` feat: Remove wall timeout limit and extend inactivity timeout to 30 minutes (6 files)
