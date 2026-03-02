@@ -14,7 +14,7 @@ import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -163,10 +163,231 @@ def list_flows(project_root: Path) -> List[str]:
     )
 
 
+@dataclass
+class ConversationMessage:
+    """A single message in a conversation for LLM context."""
+
+    role: str  # "user" | "assistant"
+    content: str
+    tool_calls: Optional[List[dict]] = None  # For assistant messages with tool calls
+    tool_results: Optional[List[dict]] = None  # For user messages with tool results
+
+
+def extract_conversation_from_ndjson(raw_ndjson: str) -> List[ConversationMessage]:
+    """Extract structured conversation from NDJSON output.
+
+    Parses the stream-json format and reconstructs the conversation flow
+    including assistant messages, tool calls, and tool results.
+
+    Args:
+        raw_ndjson: The raw NDJSON output from Claude CLI
+
+    Returns:
+        List of ConversationMessage objects representing the conversation
+    """
+    if not raw_ndjson:
+        return []
+
+    messages: List[ConversationMessage] = []
+    pending_tool_calls: List[dict] = []
+    pending_tool_results: List[dict] = []
+
+    for line in raw_ndjson.strip().split("\n"):
+        line = line.strip()
+        if not line or line.startswith("==="):
+            continue
+
+        try:
+            data = json.loads(line)
+            msg_type = data.get("type", "")
+
+            if msg_type == "assistant":
+                message = data.get("message", {})
+                content = message.get("content", [])
+
+                text_parts = []
+                tool_calls = []
+
+                for item in content:
+                    if not isinstance(item, dict):
+                        continue
+
+                    if item.get("type") == "text":
+                        text = item.get("text", "")
+                        if text:
+                            text_parts.append(text)
+                    elif item.get("type") == "tool_use":
+                        tool_calls.append({
+                            "id": item.get("id", ""),
+                            "name": item.get("name", "unknown"),
+                            "input": item.get("input", {}),
+                        })
+
+                # If we have pending tool results from previous turn, add them first
+                if pending_tool_results:
+                    messages.append(ConversationMessage(
+                        role="user",
+                        content="",
+                        tool_results=pending_tool_results.copy()
+                    ))
+                    pending_tool_results = []
+
+                # Add the assistant message
+                assistant_content = "\n".join(text_parts)
+                messages.append(ConversationMessage(
+                    role="assistant",
+                    content=assistant_content,
+                    tool_calls=tool_calls if tool_calls else None
+                ))
+                pending_tool_calls = tool_calls
+
+            elif msg_type == "tool_result":
+                # Standalone tool_result message (not inside user message)
+                result = data.get("result", {})
+                tool_result = {
+                    "tool_use_id": result.get("toolUseId", ""),
+                    "content": result.get("content", ""),
+                    "is_error": result.get("isError", False),
+                }
+                pending_tool_results.append(tool_result)
+
+            elif msg_type == "user":
+                # In Claude CLI protocol, 'user' messages often contain tool results
+                message = data.get("message", {})
+                content = message.get("content", [])
+
+                # Extract tool results from this user message
+                current_tool_results = []
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "tool_result":
+                        current_tool_results.append({
+                            "tool_use_id": item.get("tool_use_id", "") or item.get("toolUseId", ""),
+                            "content": item.get("content", ""),
+                            "is_error": item.get("is_error", False) or item.get("isError", False),
+                        })
+
+                # Add any pending tool results first (from previous standalone tool_result messages)
+                if pending_tool_results:
+                    current_tool_results = pending_tool_results + current_tool_results
+                    pending_tool_results = []
+
+                # Create user message immediately with tool results from this message
+                if current_tool_results:
+                    messages.append(ConversationMessage(
+                        role="user",
+                        content="",
+                        tool_results=current_tool_results
+                    ))
+
+        except json.JSONDecodeError:
+            continue
+
+    # Add any remaining tool results as a user message
+    if pending_tool_results:
+        messages.append(ConversationMessage(
+            role="user",
+            content="",
+            tool_results=pending_tool_results
+        ))
+
+    return messages
+
+
+def format_conversation_for_llm(messages: List[ConversationMessage]) -> str:
+    """Format conversation messages for LLM context.
+
+    Creates a text representation that preserves the structure of
+    the conversation including tool calls and results.
+    Merges consecutive assistant messages for cleaner output.
+
+    Args:
+        messages: List of ConversationMessage objects
+
+    Returns:
+        Formatted string suitable for LLM context
+    """
+    if not messages:
+        return ""
+
+    # Merge consecutive assistant messages
+    merged_messages: List[ConversationMessage] = []
+    current_assistant: Optional[ConversationMessage] = None
+
+    for msg in messages:
+        if msg.role == "assistant":
+            if current_assistant is None:
+                current_assistant = ConversationMessage(
+                    role="assistant",
+                    content=msg.content or "",
+                    tool_calls=list(msg.tool_calls) if msg.tool_calls else None,
+                )
+            else:
+                # Merge with previous assistant message
+                if msg.content:
+                    if current_assistant.content:
+                        current_assistant.content += "\n" + msg.content
+                    else:
+                        current_assistant.content = msg.content
+                if msg.tool_calls:
+                    if current_assistant.tool_calls:
+                        current_assistant.tool_calls.extend(msg.tool_calls)
+                    else:
+                        current_assistant.tool_calls = list(msg.tool_calls)
+        else:
+            # User message - flush current assistant if any
+            if current_assistant is not None:
+                merged_messages.append(current_assistant)
+                current_assistant = None
+            merged_messages.append(msg)
+
+    # Don't forget the last assistant message
+    if current_assistant is not None:
+        merged_messages.append(current_assistant)
+
+    parts = []
+
+    for msg in merged_messages:
+        if msg.role == "assistant":
+            parts.append("[Assistant]")
+
+            if msg.content:
+                parts.append(msg.content)
+
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    tool_name = tc.get("name", "unknown")
+                    tool_input = tc.get("input", {})
+                    input_str = json.dumps(tool_input, ensure_ascii=False)
+                    if len(input_str) > 200:
+                        input_str = input_str[:200] + "..."
+                    parts.append(f"[Tool Call: {tool_name}] {input_str}")
+
+        elif msg.role == "user":
+            parts.append("[User]")
+
+            if msg.content:
+                parts.append(msg.content)
+
+            if msg.tool_results:
+                for tr in msg.tool_results:
+                    content = str(tr["content"])
+                    if len(content) > 500:
+                        content = content[:500] + "\n... [truncated]"
+                    status = " (error)" if tr.get("is_error") else ""
+                    parts.append(f"[Tool Result{status}]: {content}")
+
+        parts.append("")  # Empty line between messages
+
+    return "\n".join(parts)
+
+
 def format_history_for_retry(
     project_root: Path, flow_id: str, step_id: str
 ) -> Optional[str]:
     """Format previous conversation attempts for retry context injection.
+
+    Extracts the full conversation from raw NDJSON to preserve tool calls
+    and results structure, rather than using simplified text summaries.
 
     Returns a string to prepend to the retry prompt, or None if no history.
     """
@@ -183,23 +404,44 @@ def format_history_for_retry(
         return None
 
     parts = ["[Previous conversation context for this step]:"]
+
     for attempt_num in sorted(attempts.keys()):
         msgs = attempts[attempt_num]
-        parts.append("---")
+        parts.append(f"\n=== Attempt {attempt_num + 1} ===")
+
         for msg in msgs:
             if msg.role == "user":
                 # Truncate very long prompts in context
                 content = msg.content
                 if len(content) > 2000:
                     content = content[:2000] + "\n... [truncated]"
-                parts.append(f"User prompt: {content}")
-            elif msg.role == "assistant":
-                content = msg.content
-                if len(content) > 2000:
-                    content = content[:2000] + "\n... [truncated]"
-                parts.append(f"Assistant response: {content}")
-        parts.append("---")
+                parts.append(f"\n[User Prompt]:")
+                parts.append(content)
 
+            elif msg.role == "assistant":
+                # Extract full conversation from raw_ndjson
+                if msg.raw_ndjson:
+                    conversation = extract_conversation_from_ndjson(msg.raw_ndjson)
+                    if conversation:
+                        formatted = format_conversation_for_llm(conversation)
+                        parts.append(f"\n[Assistant Response]:")
+                        parts.append(formatted)
+                    else:
+                        # Fallback to simplified content if parsing fails
+                        content = msg.content
+                        if len(content) > 2000:
+                            content = content[:2000] + "\n... [truncated]"
+                        parts.append(f"\n[Assistant Response]:")
+                        parts.append(content)
+                else:
+                    # No raw_ndjson, use simplified content
+                    content = msg.content
+                    if len(content) > 2000:
+                        content = content[:2000] + "\n... [truncated]"
+                    parts.append(f"\n[Assistant Response]:")
+                    parts.append(content)
+
+    parts.append("\n" + "=" * 40)
     parts.append("[The above attempt(s) failed. Please try again with the same task.]")
     parts.append("")
 

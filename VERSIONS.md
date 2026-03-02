@@ -2,11 +2,13 @@
 
 ## Current Version
 
-**3.11.0** — feat: Add version bumper framework with auto-bump on se3 run commit step.
+**3.12.0** — fix: Chat history now preserves full conversation structure for retry context.
 
 ## Version History
 
 | Version | Date | Changes |
+|---------|------|--------|
+| 3.12.0 | 2026-03-02 | fix: Chat history retry context now preserves full conversation structure. Extracts tool calls and results from raw NDJSON instead of using simplified summaries. Each user message has independent tool_results. Supports both snake_case and camelCase field names. Proper field access with defaults to prevent KeyError. |
 |---------|------|--------|
 | 3.11.0 | 2026-02-28 | feat: Add version bumper framework with auto-bump on se3 run commit step. Supports pyproject.toml, package.json, version.py, setup.py. Task type -> bump level mapping (feature->minor, bugfix->patch, breaking->major). Fix JSON parser truncated response handling. Fix Version dataclass order conflict. |
 |---------|------|--------|
