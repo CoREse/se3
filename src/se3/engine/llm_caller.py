@@ -411,6 +411,10 @@ class LLMCaller:
                             # Record the JSON retry prompt too (use a distinct attempt number for JSON retries)
                             json_attempt = self.external_attempt * 100 + json_retry_count  # Distinguish JSON retries
                             self._record_prompt(json_prompt, json_attempt)
+                            # Increment external_attempt to ensure retry context is injected
+                            # This is crucial because JSON retry needs the previous conversation context
+                            # (including tool calls/results) to avoid re-reading files
+                            self.external_attempt += 1
                             return self._call_with_retry(
                                 prompt=json_prompt,
                                 timeout=timeout,
