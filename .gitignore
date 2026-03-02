@@ -19,6 +19,7 @@ se3/logs/
 se3/tmp/
 se3/collab/
 se3/calls/
+se3/history/
 tmp*.prompt
 
 # SE3 tracked content: se3/specs/ and se3.yaml are NOT ignored
