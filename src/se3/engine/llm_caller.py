@@ -237,7 +237,7 @@ class LLMCaller:
     def call(
         self,
         prompt: str,
-        timeout: int = 600,
+        timeout: Optional[int] = None,
         context_files: Optional[List[Path]] = None,
         on_output: Optional[Callable[[str], None]] = None,
         require_json: bool = False,
@@ -247,7 +247,7 @@ class LLMCaller:
 
         Args:
             prompt: Main prompt text
-            timeout: Timeout in seconds
+            timeout: Timeout in seconds (None for no limit)
             context_files: Optional files to include as context
             on_output: Optional callback for real-time output
             require_json: If True, automatically retry if response is not valid JSON
@@ -376,7 +376,7 @@ class LLMCaller:
                     result = self._runner.run_with_monitor(
                         args=args,
                         wall_timeout=timeout,
-                        inactivity_timeout=300,
+                        inactivity_timeout=1800,
                         cwd=self.project_root,
                         env=env,
                         on_output=on_output,
@@ -390,7 +390,7 @@ class LLMCaller:
                     result = self._runner.run_with_monitor(
                         args=args,
                         wall_timeout=timeout,
-                        inactivity_timeout=300,
+                        inactivity_timeout=1800,
                         cwd=self.project_root,
                         env=env,
                         on_output=on_stream_output,

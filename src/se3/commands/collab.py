@@ -485,7 +485,7 @@ def launch_worker(project_root: Path, task_id: str) -> WorkerResult:
             args=args,
             log_file=log_file,
             wall_timeout=timeout_min * 60,
-            inactivity_timeout=300,  # 5 minutes without output = stuck
+            inactivity_timeout=1800,  # 30 minutes without output = stuck
             cwd=Path(worktree),
             env=env,
             on_activity=on_activity,

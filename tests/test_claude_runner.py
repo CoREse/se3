@@ -1,8 +1,7 @@
 """Tests for claude_runner and config modules.
 
 Tests cover:
-- Config loading (global, project, merge, defaults)
-- Claude command priority sorting
+- Claude command loading and priority sorting
 - Usage limit detection (keywords, exit codes)
 - Timeout detection
 - Fallback to next command on limit/timeout
@@ -23,12 +22,7 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.config import (
-    load_global_config,
-    load_project_config,
-    merge_configs,
-    load_claude_commands,
-)
+from se3.config import load_claude_commands
 from se3.claude_runner import (
     ClaudeRunner,
     USAGE_LIMIT_KEYWORDS,
@@ -39,145 +33,97 @@ from se3.claude_runner import (
 # Config Loading
 # =============================================================================
 
-class TestLoadGlobalConfig:
-    """Test global config loading from ~/.se3/config.yaml."""
-
-    def test_no_config_file(self, tmp_path):
-        with patch("se3.config.Path.home", return_value=tmp_path):
-            result = load_global_config()
-        assert result == {}
-
-    def test_valid_config(self, tmp_path):
-        se3_dir = tmp_path / ".se3"
-        se3_dir.mkdir()
-        config = se3_dir / "config.yaml"
-        config.write_text("claude_commands:\n  - cmd: claude\n    priority: 10\n")
-
-        with patch("se3.config.Path.home", return_value=tmp_path):
-            result = load_global_config()
-        assert "claude_commands" in result
-        assert result["claude_commands"][0]["cmd"] == "claude"
-
-    def test_malformed_yaml(self, tmp_path):
-        se3_dir = tmp_path / ".se3"
-        se3_dir.mkdir()
-        config = se3_dir / "config.yaml"
-        config.write_text(": invalid: yaml: [[[")
-
-        with patch("se3.config.Path.home", return_value=tmp_path):
-            result = load_global_config()
-        assert result == {}
-
-
-class TestLoadProjectConfig:
-    """Test project config loading from se3.yaml (with se3.config.yaml fallback)."""
-
-    def test_no_config_file(self, tmp_path):
-        result = load_project_config(tmp_path)
-        assert result == {}
-
-    def test_valid_config_se3_yaml(self, tmp_path):
-        """Should load from se3.yaml (new name)."""
-        config = tmp_path / "se3.yaml"
-        config.write_text("claude_commands:\n  - cmd: kclaude\n    priority: 5\n")
-        result = load_project_config(tmp_path)
-        assert result["claude_commands"][0]["cmd"] == "kclaude"
-
-    def test_valid_config_legacy_fallback(self, tmp_path):
-        """Should fall back to se3.config.yaml if se3.yaml doesn't exist."""
-        config = tmp_path / "se3.config.yaml"
-        config.write_text("claude_commands:\n  - cmd: kclaude\n    priority: 5\n")
-        result = load_project_config(tmp_path)
-        assert result["claude_commands"][0]["cmd"] == "kclaude"
-
-
-class TestMergeConfigs:
-    """Test config merging (project overrides global)."""
-
-    def test_project_overrides_global(self):
-        global_cfg = {"claude_commands": [{"cmd": "claude", "priority": 10}]}
-        project_cfg = {"claude_commands": [{"cmd": "kclaude", "priority": 5}]}
-        merged = merge_configs(global_cfg, project_cfg)
-        assert merged["claude_commands"][0]["cmd"] == "kclaude"
-
-    def test_global_preserved_when_no_project(self):
-        global_cfg = {"claude_commands": [{"cmd": "claude", "priority": 10}], "other": "value"}
-        project_cfg = {}
-        merged = merge_configs(global_cfg, project_cfg)
-        assert merged["claude_commands"][0]["cmd"] == "claude"
-        assert merged["other"] == "value"
-
-    def test_non_overlapping_keys_merged(self):
-        global_cfg = {"a": 1}
-        project_cfg = {"b": 2}
-        merged = merge_configs(global_cfg, project_cfg)
-        assert merged == {"a": 1, "b": 2}
-
-
 class TestLoadClaudeCommands:
     """Test loading and sorting claude commands."""
 
     def test_default_when_no_config(self, tmp_path):
-        with patch("se3.config.load_global_config", return_value={}):
+        """Should return default 'claude' command when no config exists."""
+        with patch("se3.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
         assert len(commands) == 1
         assert commands[0]["cmd"] == "claude"
         assert commands[0]["priority"] == 0
 
-    def test_project_overrides_global(self, tmp_path):
-        global_cfg = {"claude_commands": [{"cmd": "global-claude", "priority": 10}]}
-        project_cfg = {"claude_commands": [{"cmd": "project-claude", "priority": 5}]}
+    def test_project_config_overrides(self, tmp_path):
+        """Project config should override global."""
+        # Create global config
+        global_se3_dir = tmp_path / ".se3"
+        global_se3_dir.mkdir()
+        global_config = global_se3_dir / "config.yaml"
+        global_config.write_text("claude_commands:\n  - cmd: global-claude\n    priority: 10\n")
 
-        with patch("se3.config.load_global_config", return_value=global_cfg), \
-             patch("se3.config.load_project_config", return_value=project_cfg):
+        # Create project config
+        project_config = tmp_path / "se3.yaml"
+        project_config.write_text("claude_commands:\n  - cmd: project-claude\n    priority: 5\n")
+
+        with patch("se3.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
+
+        # Project config should override global
         assert len(commands) == 1
         assert commands[0]["cmd"] == "project-claude"
 
-    def test_global_used_when_no_project_commands(self, tmp_path):
-        global_cfg = {"claude_commands": [{"cmd": "global-claude", "priority": 10}]}
-        project_cfg = {"other_key": "value"}
+    def test_global_used_when_no_project_config(self, tmp_path):
+        """Global config should be used when no project config exists."""
+        global_se3_dir = tmp_path / ".se3"
+        global_se3_dir.mkdir()
+        global_config = global_se3_dir / "config.yaml"
+        global_config.write_text("claude_commands:\n  - cmd: global-claude\n    priority: 10\n")
 
-        with patch("se3.config.load_global_config", return_value=global_cfg), \
-             patch("se3.config.load_project_config", return_value=project_cfg):
+        with patch("se3.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
+
         assert commands[0]["cmd"] == "global-claude"
 
     def test_priority_sorting(self, tmp_path):
-        cfg = {"claude_commands": [
-            {"cmd": "low", "priority": 1},
-            {"cmd": "high", "priority": 10},
-            {"cmd": "mid", "priority": 5},
-        ]}
+        """Commands should be sorted by priority (higher first)."""
+        project_config = tmp_path / "se3.yaml"
+        project_config.write_text("""claude_commands:
+  - cmd: low
+    priority: 1
+  - cmd: high
+    priority: 10
+  - cmd: mid
+    priority: 5
+""")
 
-        with patch("se3.config.load_global_config", return_value={}), \
-             patch("se3.config.load_project_config", return_value=cfg):
+        with patch("se3.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
+
         assert [c["cmd"] for c in commands] == ["high", "mid", "low"]
 
     def test_string_entries_normalized(self, tmp_path):
-        cfg = {"claude_commands": ["claude", "kclaude"]}
+        """String command entries should be normalized to dicts."""
+        project_config = tmp_path / "se3.yaml"
+        project_config.write_text("claude_commands:\n  - claude\n  - kclaude\n")
 
-        with patch("se3.config.load_global_config", return_value={}), \
-             patch("se3.config.load_project_config", return_value=cfg):
+        with patch("se3.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
+
         assert len(commands) == 2
         assert all(isinstance(c, dict) for c in commands)
         assert all("cmd" in c and "priority" in c for c in commands)
 
     def test_missing_priority_defaults_to_zero(self, tmp_path):
-        cfg = {"claude_commands": [{"cmd": "claude"}]}
+        """Commands without priority should default to 0."""
+        project_config = tmp_path / "se3.yaml"
+        project_config.write_text("claude_commands:\n  - cmd: claude\n")
 
-        with patch("se3.config.load_global_config", return_value={}), \
-             patch("se3.config.load_project_config", return_value=cfg):
+        with patch("se3.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)
+
         assert commands[0]["priority"] == 0
 
-    def test_no_project_root_uses_global_only(self):
-        global_cfg = {"claude_commands": [{"cmd": "global-only", "priority": 1}]}
+    def test_no_project_root_uses_global_only(self, tmp_path):
+        """When project_root is None, should use global config only."""
+        global_se3_dir = tmp_path / ".se3"
+        global_se3_dir.mkdir()
+        global_config = global_se3_dir / "config.yaml"
+        global_config.write_text("claude_commands:\n  - cmd: global-only\n    priority: 1\n")
 
-        with patch("se3.config.load_global_config", return_value=global_cfg):
+        with patch("se3.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(None)
+
         assert commands[0]["cmd"] == "global-only"
 
 

@@ -41,7 +41,7 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
             capture_output=True,
             text=True,
             cwd=project_root,
-            timeout=300,  # 5 minute timeout
+            timeout=1800,  # 30 minute timeout
         )
 
         # Parse test results
@@ -68,7 +68,7 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     except subprocess.TimeoutExpired:
         logger.error("Test execution timed out")
-        step.error_message = "Tests timed out after 5 minutes"
+        step.error_message = "Tests timed out after 30 minutes"
         step.outputs["test_results"] = {"error": "timeout", "passed": False}
         return StepStatus.COMPLETED  # Continue to verify step
 

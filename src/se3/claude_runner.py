@@ -398,7 +398,7 @@ class ClaudeRunner:
         args: List[str],
         log_file: Optional[Path] = None,
         wall_timeout: Optional[int] = None,
-        inactivity_timeout: int = 300,
+        inactivity_timeout: int = 1800,
         cwd: Optional[Path] = None,
         env: Optional[Dict[str, str]] = None,
         on_output: Optional[Callable[[str], None]] = None,
