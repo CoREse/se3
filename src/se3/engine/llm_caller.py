@@ -150,6 +150,11 @@ class StreamJSONTracker:
         if not line:
             return
 
+        # ANSI color codes
+        GRAY = "\033[90m"      # Bright black (silver/gray)
+        ITALIC = "\033[3m"     # Italic
+        RESET = "\033[0m"      # Reset
+
         try:
             data = json.loads(line)
             msg_type = data.get('type', '')
@@ -160,22 +165,26 @@ class StreamJSONTracker:
                 content = message.get('content', [])
                 for item in content:
                     if isinstance(item, dict):
-                        if item.get('type') == 'text':
+                        item_type = item.get('type', '')
+                        if item_type == 'text':
                             text = item.get('text', '')
                             if text:
                                 self.text_chunks += 1
                                 self.total_text_len += len(text)
-                                # Print progress for text chunks
-                                if self.text_chunks <= 3 or self.text_chunks % 10 == 0:
-                                    preview = truncate_preview(text)
-                                    print(f"  [llm-stream] 💬 Text chunk #{self.text_chunks}: {preview}...")
-                        elif item.get('type') == 'tool_use':
+                                # Stream full text content directly
+                                print(text, end='', flush=True)
+                        elif item_type == 'thinking':
+                            thinking = item.get('thinking', '')
+                            if thinking:
+                                # Stream thinking content in gray italic
+                                print(f"{GRAY}{ITALIC}{thinking}{RESET}", end='', flush=True)
+                        elif item_type == 'tool_use':
                             name = item.get('name', 'unknown')
                             tool_input = item.get('input', {})
                             self.tool_calls.append(name)
                             # Format and print tool_use preview
                             preview = format_tool_use_preview(name, tool_input)
-                            print(f"  [llm-stream] 🔧 {preview}...")
+                            print(f"\n  [llm-stream] 🔧 {preview}...")
 
             elif msg_type == 'tool_result':
                 result = data.get('result', {})
