@@ -179,13 +179,13 @@ class State:
 
     def get_step_to_review(self, confirm_step_id: str) -> Optional[Step]:
         """Get the step that needs review (the one before confirm).
-        
+
         In a review cycle, the confirm step follows the step being reviewed.
         This finds that preceding step from history.
-        
+
         Args:
             confirm_step_id: The ID of the confirm step
-            
+
         Returns:
             The step being reviewed, or None if not found
         """
@@ -200,10 +200,10 @@ class State:
 
     def increment_review_iteration(self, step_id: str) -> int:
         """Increment and return the review iteration count for a step.
-        
+
         Args:
             step_id: The step being reviewed
-            
+
         Returns:
             New iteration count (1-based)
         """
@@ -213,14 +213,33 @@ class State:
 
     def get_review_iteration(self, step_id: str) -> int:
         """Get the current review iteration count for a step.
-        
+
         Args:
             step_id: The step being reviewed
-            
+
         Returns:
             Current iteration count (0 if never reviewed)
         """
         return self.review_iterations.get(step_id, 0)
+
+    def update_task_type(self, task_type: str) -> None:
+        """Update the resolved task type after analyze step.
+
+        This stores the LLM-determined task type in the context,
+        separate from any explicitly provided type.
+
+        Args:
+            task_type: The task type determined by analyze step
+        """
+        self.context["resolved_type"] = task_type
+
+    def is_type_pending(self) -> bool:
+        """Check if task type is still pending (not yet resolved).
+
+        Returns:
+            True if no resolved_type is set, False otherwise
+        """
+        return "resolved_type" not in self.context
 
     def to_dict(self) -> Dict[str, Any]:
         """Serialize state to dictionary."""

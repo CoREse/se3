@@ -356,11 +356,61 @@ def _display_step_output(current_step: Any) -> None:
                 break
 
 
+def _should_show_type(current_step_type: str, flow: FlowInstance) -> bool:
+    """Check if task type should be displayed for the current step.
+
+    Type should not be shown before analyze completes (when still pending).
+
+    Args:
+        current_step_type: The current step type being executed
+        flow: The flow instance
+
+    Returns:
+        True if type should be shown, False otherwise
+    """
+    # Don't show type during analyze step or when type is still pending
+    if current_step_type == StepType.ANALYZE.value:
+        return False
+
+    # Check if type is still pending
+    if flow.state.is_type_pending():
+        return False
+
+    return True
+
+
+def _get_display_task_type(flow: FlowInstance) -> Optional[str]:
+    """Get the task type to display, or None if pending.
+
+    Args:
+        flow: The flow instance
+
+    Returns:
+        Type string for display, or None if pending
+    """
+    # Check for resolved type first
+    resolved = flow.state.context.get("resolved_type")
+    if resolved:
+        return resolved
+
+    # Check for explicit type
+    explicit = flow.state.context.get("explicit_type")
+    if explicit:
+        return explicit
+
+    # Check flow's task_type
+    if flow.task_type:
+        return flow.task_type
+
+    # Still pending
+    return None
+
+
 def run_flow(
     project_root: Path,
     flow_id: Optional[str] = None,
     task_description: Optional[str] = None,
-    task_type: str = "feature",
+    task_type: str = "pending",
     change_name: Optional[str] = None,
     is_loop_mode: bool = False,
 ) -> int:
@@ -370,7 +420,7 @@ def run_flow(
         project_root: Project root directory
         flow_id: Flow ID to resume (None for new flow)
         task_description: Task description for new flow
-        task_type: Type of task (feature, bugfix, etc.)
+        task_type: Type of task (feature, bugfix, etc., or 'pending' to auto-detect)
         change_name: Optional change name
         is_loop_mode: Whether to run in loop mode
 
@@ -410,12 +460,24 @@ def run_flow(
             change_name=change_name,
             is_loop_mode=is_loop_mode,
         )
+
+        # Store explicit_type if user provided --type flag
+        if task_type and task_type != "pending":
+            flow.state.context["explicit_type"] = task_type
+            persistence.save_flow(flow)
+
         # Display new flow info with full content
         content = [
             f"Created new flow: {flow.flow_id}",
             f"Task: {task_description}",
-            f"Type: {task_type}",
         ]
+
+        # Only show type if explicitly provided (pending is auto-detect)
+        if task_type and task_type != "pending":
+            content.append(f"Type: {task_type} (user-specified)")
+        else:
+            content.append("Type: pending (will be determined by analyze)")
+
         if change_name:
             content.append(f"Change: {change_name}")
         render_full("\n".join(content), title="New Flow")
@@ -428,9 +490,22 @@ def run_flow(
             flow.status = FlowStatus.COMPLETED
             break
 
-        # Display step header
+        # Display step header with type information only when appropriate
+        step_type_value = current_step.step_type.value
+        show_type = _should_show_type(step_type_value, flow)
+        display_type = _get_display_task_type(flow) if show_type else None
+
+        step_header_lines = [
+            f"Step: {step_type_value}",
+            f"Status: {current_step.status.value}",
+        ]
+        if display_type:
+            step_header_lines.append(f"Type: {display_type}")
+        elif flow.state.is_type_pending():
+            step_header_lines.append("Type: pending")
+
         render_full(
-            f"Step: {current_step.step_type.value}\nStatus: {current_step.status.value}",
+            "\n".join(step_header_lines),
             title="Current Step"
         )
 
@@ -540,7 +615,7 @@ def run_flow(
 def run_loop_mode(
     project_root: Path,
     initial_task: Optional[str] = None,
-    task_type: str = "feature",
+    task_type: str = "pending",
     max_iterations: Optional[int] = None,
 ) -> int:
     """Run in loop mode - continuously find and execute tasks.
@@ -548,7 +623,7 @@ def run_loop_mode(
     Args:
         project_root: Project root directory
         initial_task: Optional initial task to start with
-        task_type: Type of tasks to look for
+        task_type: Type of tasks to look for (default 'pending' for auto-detect)
         max_iterations: Maximum number of iterations (None for unlimited)
 
     Returns:

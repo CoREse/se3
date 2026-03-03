@@ -106,6 +106,15 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
             logger.warning(f"Invalid task_type '{task_type}', defaulting to 'feature'")
             task_type = "feature"
 
+        # Extract task_type from analyze result
+        resolved_task_type = _extract_task_type(result)
+
+        # Check for conflict with explicit --type flag
+        _handle_type_conflict(flow, resolved_task_type)
+
+        # Update state with resolved task type
+        flow.state.update_task_type(resolved_task_type)
+
         # Store outputs
         step.outputs["task_type"] = task_type
         step.outputs["scope"] = result.get("scope", "")
@@ -125,6 +134,42 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.exception("Analyze step failed")
         step.error_message = f"Analysis failed: {str(e)}"
         return StepStatus.FAILED
+
+
+def _extract_task_type(analyze_output: dict) -> str:
+    """Extract task_type from LLM analyze output.
+
+    Args:
+        analyze_output: The parsed JSON output from analyze step
+
+    Returns:
+        The extracted task type string
+    """
+    valid_types = ["feature", "bugfix", "review", "small", "directive"]
+    task_type = analyze_output.get("task_type", "feature")
+
+    if task_type not in valid_types:
+        logger.warning(f"Invalid task_type '{task_type}' from analyze, defaulting to 'feature'")
+        task_type = "feature"
+
+    return task_type
+
+
+def _handle_type_conflict(flow: FlowInstance, resolved_type: str) -> None:
+    """Detect and warn when analyze type differs from explicit --type.
+
+    Args:
+        flow: The flow instance containing context
+        resolved_type: The task type determined by analyze step
+    """
+    explicit_type = flow.state.context.get("explicit_type")
+
+    if explicit_type and explicit_type != resolved_type:
+        logger.warning(
+            f"Task type conflict: explicit --type='{explicit_type}' "
+            f"differs from analyzed type='{resolved_type}'. "
+            f"Using analyzed type."
+        )
 
 
 def _gather_project_context(flow: FlowInstance) -> str:

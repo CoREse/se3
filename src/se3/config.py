@@ -21,6 +21,9 @@ class VersionConfig:
     
     Loads version-related settings from se3.yaml with sensible defaults.
     """
+    # Whether automatic version bumping is enabled
+    enabled: bool = True
+    
     # Version file location (relative to project root)
     version_file: Optional[str] = None  # Auto-detect if None
     
@@ -57,6 +60,9 @@ class VersionConfig:
     versions_file: str = "VERSIONS.md"
     versions_header: str = "# Version History\n\n"
     
+    # Whether to include version in commit message
+    include_in_commit_message: bool = True
+    
     @classmethod
     def from_dict(cls, data: dict) -> "VersionConfig":
         """Create VersionConfig from dictionary (typically loaded from se3.yaml)."""
@@ -76,6 +82,7 @@ class VersionConfig:
         templates.update(version_data.get("templates", {}))
         
         return cls(
+            enabled=version_data.get("enabled", True),
             version_file=version_data.get("version_file"),
             bump_rules=bump_rules,
             prerelease_prefix=version_data.get("prerelease_prefix", ""),
@@ -86,6 +93,7 @@ class VersionConfig:
             versions_enabled=version_data.get("versions_enabled", True),
             versions_file=version_data.get("versions_file", "VERSIONS.md"),
             versions_header=version_data.get("versions_header", "# Version History\n\n"),
+            include_in_commit_message=version_data.get("include_in_commit_message", True),
         )
     
     @classmethod
