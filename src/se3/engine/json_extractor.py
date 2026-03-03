@@ -39,7 +39,7 @@ class JSONExtractor:
         self,
         project_root: Optional[Any] = None,
         timeout: int = 60,
-        max_content_length: int = 12000,
+        max_content_length: int = 200000,  # ~200KB for large code outputs
     ):
         """Initialize extractor.
 
