@@ -1,0 +1,31 @@
+# SE3 Project Configuration
+# See: se3/specs/se3-config/spec.md
+
+project:
+  name: "task-cli"
+  description: "A simple CLI task manager for testing SE3 workflows"
+
+max_tasks_per_change: 5
+
+human_call:
+  timeout_days: 7
+  directory: se3/calls
+  language: zh-CN
+
+session:
+  progress_file: progress.md
+  max_progress_entries: 20
+
+confirmation:
+  enabled: true
+  steps: ["propose", "design"]
+  reviewer: "human"
+
+version:
+  enabled: true
+  file_path: null
+  include_in_commit_message: true
+  bump_rules:
+    feature: minor
+    bugfix: patch
+    breaking: major
