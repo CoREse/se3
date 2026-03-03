@@ -481,10 +481,11 @@ def launch_worker(project_root: Path, task_id: str) -> WorkerResult:
 
     try:
         # Use run_with_monitor for activity-based monitoring and command fallback
+        # No wall time limit - only inactivity timeout (30 min) to detect stuck processes
         result = runner.run_with_monitor(
             args=args,
             log_file=log_file,
-            wall_timeout=timeout_min * 60,
+            wall_timeout=None,
             inactivity_timeout=1800,  # 30 minutes without output = stuck
             cwd=Path(worktree),
             env=env,

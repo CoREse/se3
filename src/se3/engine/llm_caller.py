@@ -268,7 +268,7 @@ class LLMCaller:
 
         Args:
             prompt: Main prompt text
-            timeout: Timeout in seconds (None for no limit)
+            timeout: Deprecated, kept for API compatibility. Only inactivity timeout is used.
             context_files: Optional files to include as context
             on_output: Optional callback for real-time output
             require_json: Legacy flag for STRICT mode (kept for compatibility)
@@ -421,7 +421,7 @@ class LLMCaller:
 
         extractor = JSONExtractor(
             project_root=self.project_root,
-            timeout=60,
+            timeout=180,  # 3 minutes for large outputs
         )
 
         result = extractor.extract(
@@ -469,7 +469,7 @@ class LLMCaller:
 
         extractor = JSONExtractor(
             project_root=self.project_root,
-            timeout=60,
+            timeout=180,  # 3 minutes for large outputs
         )
 
         result = extractor.extract(
@@ -596,8 +596,8 @@ class LLMCaller:
                 if on_output:
                     result = self._runner.run_with_monitor(
                         args=args,
-                        wall_timeout=timeout,
-                        inactivity_timeout=1800,
+                        wall_timeout=None,  # No wall time limit, only inactivity timeout
+                        inactivity_timeout=1800,  # 30 minutes
                         cwd=self.project_root,
                         env=env,
                         on_output=on_output,
@@ -610,8 +610,8 @@ class LLMCaller:
 
                     result = self._runner.run_with_monitor(
                         args=args,
-                        wall_timeout=timeout,
-                        inactivity_timeout=1800,
+                        wall_timeout=None,  # No wall time limit, only inactivity timeout
+                        inactivity_timeout=1800,  # 30 minutes
                         cwd=self.project_root,
                         env=env,
                         on_output=on_stream_output,
