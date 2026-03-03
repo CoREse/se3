@@ -166,6 +166,39 @@ class TestDiscoveryHandler:
         assert "refined_description" in step.outputs
         assert "Additional context from discovery" in step.outputs["refined_description"]
 
+    @patch("se3.engine.steps.discovery.LLMCaller")
+    def test_discovery_max_rounds_with_user_confirmation(self, mock_caller_class):
+        """Should allow user confirmation even at max rounds."""
+        mock_caller = Mock()
+        mock_caller_class.return_value = mock_caller
+        mock_caller.call.return_value = json.dumps({
+            "mode": "confirmation",
+            "content": "Confirmed at final round!",
+            "refined_description": "Final round refined description",
+            "ready_to_proceed": True,
+            "thinking": "User confirmed",
+        })
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={
+                "task_description": "Initial idea",
+                "discovery_state": {"round": 10, "history": [
+                    {"role": "assistant", "content": "Please confirm"},
+                ]},
+                "resumed": True,
+                "user_response": "yes",  # User confirming at max rounds
+            },
+        )
+        flow = FlowInstance(task_description="Initial idea")
+
+        result = discovery_handler(step, flow)
+
+        # Should process the confirmation, not just fallback
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["refined_description"] == "Final round refined description"
+        assert step.outputs["requirements_clarified"] is True
+
 
 class TestUserResponseParsing:
     """Test user response parsing."""

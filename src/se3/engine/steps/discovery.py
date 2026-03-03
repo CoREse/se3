@@ -114,7 +114,8 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
     user_response = step.inputs.get("user_response", "")
 
     # Check for max rounds to prevent infinite loops
-    if round_number >= MAX_DISCOVERY_ROUNDS:
+    # But allow one more round if user has provided a response (to process confirmation)
+    if round_number >= MAX_DISCOVERY_ROUNDS and not (resumed and user_response):
         logger.warning(f"Discovery reached max rounds ({MAX_DISCOVERY_ROUNDS}), forcing completion")
         # Generate a best-effort refined description from conversation
         refined = _generate_fallback_description(initial_description, conversation_history)
