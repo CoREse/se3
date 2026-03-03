@@ -16,6 +16,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from ..context_builder import ContextBuilder
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus, StepType
 from ..utils.json_parser import parse_json_response
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 # Maximum number of discovery rounds before forcing a conclusion
 MAX_DISCOVERY_ROUNDS = 10
+
 
 # Prompt for initial discovery analysis
 INITIAL_DISCOVERY_PROMPT = """You are an expert software engineering assistant in DISCOVERY mode.
@@ -35,7 +37,19 @@ Ask thoughtful questions to understand:
 - Any constraints or requirements
 - The desired outcome
 
-Current context:
+## Project Context
+
+{project_context}
+
+## Available Specifications
+
+{specs_info}
+
+## Base Specification (if available)
+
+{base_spec_content}
+
+## Discovery Context
 - Initial description: {initial_description}
 - Discovery round: {round_number}
 - Conversation history: {conversation_history}
@@ -50,7 +64,9 @@ Respond in JSON format:
 }}
 
 Guidelines:
-- Start with questions to understand the problem (mode: "question")
+- Start by understanding the current project context (see Project Context above)
+- Ask questions that help narrow down what fits within the existing architecture
+- Consider available specifications when exploring requirements
 - After gathering enough info, provide a synthesis (mode: "synthesis")
 - Once user confirms, finalize the description (mode: "confirmation")
 - Be conversational but focused on understanding requirements
@@ -62,7 +78,15 @@ CONTINUE_DISCOVERY_PROMPT = """You are an expert software engineering assistant 
 
 Continue the discovery conversation based on the user's latest response.
 
-Current context:
+## Project Context
+
+{project_context}
+
+## Available Specifications
+
+{specs_info}
+
+## Discovery Context
 - Initial description: {initial_description}
 - Discovery round: {round_number}
 - Conversation history: {conversation_history}
@@ -79,11 +103,123 @@ Respond in JSON format:
 }}
 
 Guidelines:
+- Consider the existing project architecture when asking questions
+- Reference available specifications when relevant
 - If the user provides clear direction, acknowledge it and move toward synthesis
 - If things are still unclear, ask more specific questions
 - When you have enough information, provide a refined description and ask for confirmation
 - Be ready to proceed only when the user explicitly confirms
 """
+
+
+def _gather_project_context(project_root: Path) -> str:
+    """Gather project context information.
+
+    Args:
+        project_root: Project root directory
+
+    Returns:
+        Formatted project context string
+    """
+    context_parts = []
+
+    # Detect project type
+    if (project_root / "pyproject.toml").exists():
+        context_parts.append("Project Type: Python (pyproject.toml found)")
+        # Try to get project name
+        try:
+            import tomllib
+            with open(project_root / "pyproject.toml", "rb") as f:
+                pyproject = tomllib.load(f)
+                project_name = pyproject.get("project", {}).get("name", "Unknown")
+                context_parts.append(f"Project Name: {project_name}")
+        except Exception:
+            pass
+    elif (project_root / "package.json").exists():
+        context_parts.append("Project Type: Node.js (package.json found)")
+        try:
+            import json
+            with open(project_root / "package.json") as f:
+                package = json.load(f)
+                context_parts.append(f"Project Name: {package.get('name', 'Unknown')}")
+        except Exception:
+            pass
+    elif (project_root / "Cargo.toml").exists():
+        context_parts.append("Project Type: Rust (Cargo.toml found)")
+    elif (project_root / "go.mod").exists():
+        context_parts.append("Project Type: Go (go.mod found)")
+
+    # Check for test framework
+    if (project_root / "pytest.ini").exists() or (project_root / "setup.py").exists():
+        context_parts.append("Testing: pytest")
+    elif (project_root / "package.json").exists():
+        context_parts.append("Testing: npm/jest")
+
+    # Check for git info
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            context_parts.append(f"Git Remote: {result.stdout.strip()}")
+
+        # Get current branch
+        result = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            context_parts.append(f"Current Branch: {result.stdout.strip()}")
+    except Exception:
+        pass
+
+    return "\n".join(context_parts) if context_parts else "No additional context available"
+
+
+def _gather_specs_info(builder: ContextBuilder) -> tuple[str, str]:
+    """Gather information about available specs.
+
+    Args:
+        builder: ContextBuilder instance
+
+    Returns:
+        Tuple of (specs_info_str, base_spec_content)
+    """
+    specs_info_lines = []
+    base_spec_content = ""
+
+    # List all specs directories
+    try:
+        specs = []
+        if builder.specs_dir.exists():
+            for item in builder.specs_dir.iterdir():
+                if item.is_dir() and not item.name.startswith("_"):
+                    specs.append(item.name)
+
+        if specs:
+            specs_info_lines.append(f"Specs Directory: {builder.specs_dir}")
+            specs_info_lines.append(f"Available Specs: {', '.join(sorted(specs))}")
+            specs_info_lines.append(f"Total Specs: {len(specs)}")
+        else:
+            specs_info_lines.append("No specs found in specs directory")
+
+        # Try to load base spec
+        base_spec_content = builder._load_spec_content("base")
+        if base_spec_content:
+            specs_info_lines.append("\nBase spec loaded successfully")
+        else:
+            specs_info_lines.append("\nNo base spec found (optional)")
+
+    except Exception as e:
+        specs_info_lines.append(f"Error listing specs: {e}")
+
+    return "\n".join(specs_info_lines), base_spec_content or "No base spec available"
 
 
 def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
@@ -127,6 +263,13 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
 
+    # Gather project context
+    project_context = _gather_project_context(project_root)
+
+    # Gather specs information
+    builder = ContextBuilder(project_root)
+    specs_info, base_spec_content = _gather_specs_info(builder)
+
     try:
         if round_number == 0 and not resumed:
             # Initial discovery round
@@ -138,6 +281,9 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 initial_description=initial_description,
                 round_number=round_number,
                 conversation_history=conversation_history,
+                project_context=project_context,
+                specs_info=specs_info,
+                base_spec_content=base_spec_content,
             )
         else:
             # Continuing discovery with user response
@@ -158,6 +304,9 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 round_number=round_number,
                 conversation_history=conversation_history,
                 user_response=user_response if resumed else "",
+                project_context=project_context,
+                specs_info=specs_info,
+                base_spec_content=base_spec_content,
             )
 
         # Parse result
@@ -223,6 +372,9 @@ def _run_discovery_round(
     round_number: int,
     conversation_history: List[Dict[str, str]],
     user_response: str = "",
+    project_context: str = "",
+    specs_info: str = "",
+    base_spec_content: str = "",
 ) -> Dict[str, Any]:
     """Run a single discovery round with the LLM.
 
@@ -235,6 +387,9 @@ def _run_discovery_round(
         round_number: Current round number
         conversation_history: List of conversation entries
         user_response: Latest user response (if any)
+        project_context: Project context information
+        specs_info: Information about available specs
+        base_spec_content: Content of base spec (if available)
 
     Returns:
         Parsed JSON result from LLM
@@ -248,6 +403,9 @@ def _run_discovery_round(
         round_number=round_number,
         conversation_history=history_text,
         user_response=user_response,
+        project_context=project_context,
+        specs_info=specs_info,
+        base_spec_content=base_spec_content,
     )
 
     logger.info(f"Running discovery round {round_number}")
