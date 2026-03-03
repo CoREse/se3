@@ -9,6 +9,7 @@ from .analyze import analyze_handler
 from .commit import commit_handler
 from .confirm import confirm_handler
 from .design import design_handler
+from .discovery import discovery_handler
 from .implement import implement_handler
 from .plan_tasks import plan_tasks_handler
 from .project_summary import project_summary_handler
@@ -21,6 +22,7 @@ from .verify_spec import verify_spec_handler
 
 # Registry of all step handlers for the state machine
 STEP_HANDLERS = {
+    StepType.DISCOVERY: discovery_handler,
     StepType.ANALYZE: analyze_handler,
     StepType.PROJECT_SUMMARY: project_summary_handler,
     StepType.READ_SPEC: read_spec_handler,
@@ -37,6 +39,7 @@ STEP_HANDLERS = {
 }
 
 __all__ = [
+    "discovery_handler",
     "analyze_handler",
     "project_summary_handler",
     "read_spec_handler",

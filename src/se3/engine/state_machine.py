@@ -133,10 +133,17 @@ class StateMachine:
 
         # Create first step
         first_step_type = selected_steps[0] if selected_steps else StepType.ANALYZE
+        first_step_inputs = {"task_description": task_description}
+
+        # For discovery mode, mark the initial description
+        if task_type == "discovery":
+            first_step_inputs["initial_description"] = task_description
+            first_step_inputs["discovery_mode"] = True
+
         first_step = Step(
             step_type=first_step_type,
             status=StepStatus.PENDING,
-            inputs={"task_description": task_description},
+            inputs=first_step_inputs,
         )
         flow.state.add_step(first_step)
         flow.state.current_step_id = first_step.step_id
@@ -420,7 +427,10 @@ class StateMachine:
             step = flow.state.steps.get(step_id)
             if step and step.status == StepStatus.COMPLETED:
                 # Add key outputs based on step type
-                if step.step_type == StepType.ANALYZE:
+                if step.step_type == StepType.DISCOVERY:
+                    inputs["refined_description"] = step.outputs.get("refined_description")
+                    inputs["discovery_summary"] = step.outputs.get("discovery_summary")
+                elif step.step_type == StepType.ANALYZE:
                     inputs["task_type"] = step.outputs.get("task_type")
                     inputs["scope"] = step.outputs.get("scope")
                 elif step.step_type == StepType.PROJECT_SUMMARY:

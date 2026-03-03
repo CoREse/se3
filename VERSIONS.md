@@ -2,9 +2,14 @@
 
 ## Current Version
 
-**3.17.6** — fix: Add newline after each assistant message to separate text/thinking content from subsequent output.
+**3.18.0** — feat: Add Discovery Workflow for requirements exploration. New `discovery` step type with multi-turn conversation support. New `--discover` / `-d` CLI flag for `se3 run`. Discovery mode helps users clarify vague ideas before entering analyze step. Supports pause/resume with state persistence. Max 10 rounds to prevent infinite loops. Refined description automatically passed to analyze step.
 
 ## Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 3.18.0 | 2026-03-03 | feat: Add Discovery Workflow for requirements exploration. New `discovery` step type with multi-turn conversation support. New `--discover` / `-d` CLI flag. Supports pause/resume, max 10 rounds, refined description passed to analyze. |
+| 3.17.6 | 2026-03-03 | fix: Add newline after each assistant message to separate text/thinking content from subsequent output.
 
 | Version | Date | Changes |
 |---------|------|---------|

@@ -8,10 +8,11 @@ Define the standard workflows for SE3 development: bug fix, feature, review, dir
 
 ### Requirement: Workflow Types
 
-The system SHALL support five workflow types:
+The system SHALL support six workflow types:
 
 | Type | Steps | When Used |
 |------|-------|-----------|
+| `discovery` | explore → clarify → confirm | Vague ideas, requirements unclear |
 | `bugfix` | analyze → fix → verify | Bug reports |
 | `feature` | clarify → propose → spec → design → implement → verify | Feature requests |
 | `review` | inspect → report → fix | Code review requests |
@@ -29,6 +30,55 @@ The system SHALL support five workflow types:
 #### Scenario: Small workflow selection
 - **WHEN** the change is simple (no spec changes needed, ≤3 tasks)
 - **THEN** the system uses the small workflow for efficiency
+
+### Requirement: Discovery Workflow
+
+The discovery workflow SHALL be used when the user has a vague idea but needs help clarifying requirements.
+
+**Steps:**
+
+**1. EXPLORE**
+   - Ask clarifying questions based on initial description
+   - Understand the problem space and constraints
+   - Identify stakeholders and requirements
+
+**2. CLARIFY**
+   - Synthesize understanding from conversation
+   - Generate refined task description
+   - Present to user for confirmation
+
+**3. CONFIRM**
+   - Wait for user approval or feedback
+   - If feedback provided: iterate back to EXPLORE
+   - If approved: proceed with refined description
+
+**Interface:**
+```bash
+se3 run --discover "I want to build something related to user management"
+```
+
+**Features:**
+- Multi-turn conversation with pause/resume support
+- Maximum 10 rounds to prevent infinite loops
+- Conversation history preserved in flow state
+- Refined description automatically passed to analyze step
+
+#### Scenario: Discovery mode entry
+- **WHEN** user executes `se3 run --discover "vague idea"`
+- **THEN** the system enters discovery workflow
+- **AND** starts multi-turn conversation to clarify requirements
+
+#### Scenario: Discovery synthesis
+- **GIVEN** several rounds of clarifying questions
+- **WHEN** the system has enough information
+- **THEN** it generates a refined task description
+- **AND** pauses for user confirmation
+
+#### Scenario: Discovery to feature transition
+- **GIVEN** user confirms the refined description
+- **WHEN** discovery workflow completes
+- **THEN** the system automatically proceeds to feature workflow
+- **AND** uses the refined description as input
 
 ### Requirement: Bug Fix Workflow
 

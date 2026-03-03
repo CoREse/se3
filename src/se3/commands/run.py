@@ -286,6 +286,56 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
         return None
 
 
+def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: PersistenceManager) -> Optional[str]:
+    """Handle discovery step pause - get user response.
+
+    Args:
+        flow: Current flow instance
+        current_step: The discovery step
+        persistence: Persistence manager
+
+    Returns:
+        User response string, "__RESUME__" if resuming, or None to exit
+    """
+    render_full(
+        "Discovery mode is exploring your requirements.\n"
+        "Please respond to the questions above to help clarify what you want to build.",
+        title="Discovery Pause"
+    )
+
+    try:
+        # Get user input
+        user_input = input("\nYour response: ").strip()
+
+        if not user_input:
+            # Empty input - check if we're resuming
+            if current_step.inputs.get("resumed"):
+                return "__RESUME__"
+            # Otherwise ask again
+            render_full("Please provide a response or press Ctrl+C to exit.", title="Input Required")
+            return _handle_discovery_pause(flow, current_step, persistence)
+
+        # Parse the response to check if user is confirming
+        from ..engine.steps.discovery import parse_user_response
+        parsed = parse_user_response(user_input)
+
+        # If user confirmed a synthesis, mark it
+        if parsed["confirmed"] and current_step.outputs.get("mode") == "synthesis":
+            current_step.outputs["user_confirmed"] = True
+
+        return user_input
+
+    except (KeyboardInterrupt, EOFError):
+        # User wants to exit
+        persistence.save_flow(flow)
+        render_full(
+            "Discovery paused. Flow state saved.\n"
+            "Resume with: se3 run --resume",
+            title="Paused"
+        )
+        return None
+
+
 def _display_step_output(current_step: Any) -> None:
     """Display step output using full-content rendering.
 
@@ -548,6 +598,26 @@ def run_flow(
 
         # Display step output with full content
         _display_step_output(current_step)
+
+        # Handle discovery step PAUSED state - need user input to continue
+        if current_step.step_type == StepType.DISCOVERY and result == StepStatus.PAUSED:
+            # Discovery is waiting for user response
+            user_response = _handle_discovery_pause(flow, current_step, persistence)
+
+            if user_response is None:
+                # User chose to exit
+                return 130
+
+            if user_response == "__RESUME__":
+                # User is resuming from a saved state, re-run the step
+                continue
+
+            # Store user response and re-run discovery step
+            current_step.inputs["user_response"] = user_response
+            current_step.inputs["resumed"] = True
+            current_step.status = StepStatus.PENDING
+            persistence.save_flow(flow)
+            continue
 
         if result == StepStatus.FAILED:
             error_msg = current_step.error_message or "Unknown error"

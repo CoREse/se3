@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Set
 class StepType(Enum):
     """Types of workflow steps in the step pool."""
 
+    DISCOVERY = "discovery"  # Discovery mode: explore requirements with user
     ANALYZE = "analyze"  # Analyze input, determine task type and scope
     PROJECT_SUMMARY = "project_summary"  # Generate project context summary
     READ_SPEC = "read_spec"  # Read relevant OpenSpec specs (LLM-driven)
@@ -359,6 +360,13 @@ class FlowInstance:
 
 # Step pool definition - all available steps
 STEP_POOL: Dict[StepType, Dict[str, Any]] = {
+    StepType.DISCOVERY: {
+        "name": "discovery",
+        "description": "Discovery mode: explore requirements with user through multi-turn conversation",
+        "uses_llm": True,
+        "inputs": ["initial_description", "conversation_history"],
+        "outputs": ["refined_description", "discovery_summary", "requirements_clarified"],
+    },
     StepType.ANALYZE: {
         "name": "analyze",
         "description": "Analyze input, determine task type and scope",
@@ -509,6 +517,21 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.READ_SPEC,
             StepType.PLAN_TASKS,
             StepType.IMPLEMENT,
+            StepType.COMMIT,
+            StepType.SUMMARIZE,
+        ],
+        "discovery": [
+            StepType.DISCOVERY,
+            StepType.ANALYZE,
+            StepType.PROJECT_SUMMARY,
+            StepType.READ_SPEC,
+            StepType.PROPOSE,
+            StepType.DESIGN,
+            StepType.PLAN_TASKS,
+            StepType.IMPLEMENT,
+            StepType.TEST,
+            StepType.VERIFY_SPEC,
+            StepType.UPDATE_SPEC,
             StepType.COMMIT,
             StepType.SUMMARIZE,
         ],

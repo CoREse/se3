@@ -1,6 +1,6 @@
 # SE 3.0 — Software Engineering 3.0 Framework
 
-![Version](https://img.shields.io/badge/version-3.17.4-blue)
+![Version](https://img.shields.io/badge/version-3.18.0-blue)
 
 An AI-first long-horizon development framework for Claude Code.
 
@@ -135,6 +135,31 @@ se3 claude-cmd
 ```
 
 See `output/TOOLS.md` for detailed documentation.
+
+### Discovery Mode (New)
+
+When you have a vague idea but need help clarifying requirements, use **Discovery Mode**:
+
+```bash
+# Start discovery mode to explore requirements
+se3 run --discover "I want to build something related to user authentication"
+
+# Or use the short form
+se3 run -d "I need a feature to manage user roles"
+```
+
+Discovery mode will:
+1. Ask clarifying questions to understand your needs
+2. Summarize the understanding and propose a refined description
+3. Wait for your confirmation before proceeding
+4. Use the refined description for the rest of the workflow
+
+You can interrupt and resume discovery at any time:
+```bash
+se3 run --resume  # Continue from where you left off
+```
+
+See [docs/discovery-workflow.md](docs/discovery-workflow.md) for detailed documentation.
 
 ## Key Concepts
 

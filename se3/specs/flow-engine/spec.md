@@ -23,12 +23,22 @@ se3 run --loop
 
 # 指定任务类型
 se3 run "修复内存泄漏" --type=bugfix
+
+# Discovery 模式（需求探索）
+se3 run --discover "我想做一个用户管理功能"
 ```
 
 #### Scenario: 新任务启动
 - **WHEN** 用户执行 `se3 run "实现用户登录功能"`
 - **THEN** 流程引擎创建新的流程实例
 - **AND** 从 `analyze` 步骤开始执行
+
+#### Scenario: Discovery 模式启动
+- **WHEN** 用户执行 `se3 run --discover "初步想法"`
+- **THEN** 流程引擎创建 discovery 类型的流程实例
+- **AND** 从 `discovery` 步骤开始执行
+- **AND** 通过多轮对话与用户探索需求
+- **AND** 用户确认后使用精炼描述进入 `analyze` 步骤
 
 #### Scenario: 恢复已有任务
 - **WHEN** 用户执行 `se3 run` 且存在未完成的流程状态
@@ -39,6 +49,50 @@ se3 run "修复内存泄漏" --type=bugfix
 - **WHEN** 用户执行 `se3 run --loop`
 - **THEN** 流程引擎在完成一个任务后自动寻找下一个任务
 - **AND** 支持从 backlog、roadmap、TODO 中发现任务
+
+### Requirement: Discovery Workflow
+
+`discovery` 步骤 SHALL 实现多轮对话机制，帮助用户在需求不明确时探索并澄清需求。
+
+**工作流程：**
+1. **初始探索**: 根据用户的初步描述，AI 提出澄清问题
+2. **对话迭代**: 用户回答后，AI 继续追问或转向综合
+3. **综合确认**: AI 总结理解并生成精炼的任务描述
+4. **用户确认**: 用户确认或要求修改
+5. **进入分析**: 确认后使用精炼描述继续 `analyze` 步骤
+
+**状态管理：**
+- 对话历史保存在 `discovery_state` 中
+- 支持任意轮次中断并通过 `se3 run --resume` 恢复
+- 最大对话轮数限制（默认 10 轮）防止无限循环
+
+**LLM 调用模式：**
+- `question` 模式: 向用户提出具体问题
+- `synthesis` 模式: 总结理解并生成精炼描述
+- `confirmation` 模式: 用户确认后完成 discovery
+
+#### Scenario: 需求探索对话
+- **GIVEN** 用户执行 `se3 run --discover "我想做一个用户相关功能"`
+- **WHEN** discovery 步骤执行
+- **THEN** AI 询问："这个用户功能是给谁用的？管理员还是普通用户？"
+- **AND** 用户回答后继续追问或综合
+
+#### Scenario: 生成精炼描述
+- **GIVEN** 经过多轮对话后
+- **WHEN** AI 进入 synthesis 模式
+- **THEN** 生成结构化的任务描述
+- **AND** 暂停等待用户确认
+
+#### Scenario: Discovery 中断恢复
+- **GIVEN** 用户在第 3 轮对话时中断（Ctrl+C）
+- **WHEN** 用户执行 `se3 run --resume`
+- **THEN** 恢复到 discovery 步骤
+- **AND** 继续第 3 轮对话
+
+#### Scenario: Discovery 输出传递
+- **GIVEN** discovery 步骤完成且用户已确认
+- **WHEN** 流程进入 `analyze` 步骤
+- **THEN** `refined_description` 自动作为 `task_description` 传递给 analyze
 
 ### Requirement: 状态机驱动流程
 
@@ -60,12 +114,13 @@ se3 run "修复内存泄漏" --type=bugfix
 - **THEN** 根据分析结果从固定步骤池中选取后续需要的步骤
 - **AND** 步骤池是预定义的有限集合，不由 LLM 凭空生成
 
-### Requirement: 11 步流程池
+### Requirement: 12 步流程池
 
-流程引擎 SHALL 定义固定的 11 步骤池，所有流程步骤从此池中选取。
+流程引擎 SHALL 定义固定的 12 步骤池，所有流程步骤从此池中选取。
 
 | 步骤 | 职责 | LLM 参与 | JSON 模式 | 输入 | 输出 |
 |------|------|---------|-----------|------|------|
+| `discovery` | 需求探索（多轮对话） | 是 | STRICT | initial_description | refined_description, discovery_summary |
 | `analyze` | 分析任务类型和范围 | 是 | STRICT | task_description | task_type, scope, complexity, required_steps |
 | `read_spec` | 读取相关 spec 文件 | 否（程序自动） | - | scope | relevant_specs, spec_content |
 | `propose` | 生成变更提案 | 是 | EXTRACT | spec_content, task_description | proposal, files_to_modify, files_to_create |
@@ -80,6 +135,7 @@ se3 run "修复内存泄漏" --type=bugfix
 | `project_summary` | 生成项目上下文摘要 | 是 | 文本 | 项目状态 | 摘要字符串 |
 
 **不同任务类型的步骤序列：**
+- `discovery`: discovery → analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → commit → summarize
 - `feature`: analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → commit → summarize
 - `bugfix`: analyze → read_spec → propose → plan_tasks → implement → test → verify_spec → update_spec → commit → summarize
 - `review`: analyze → read_spec → verify_spec → summarize
@@ -325,7 +381,8 @@ version:
         ▼                   ▼                   ▼
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
 │ Step Handler │    │ Persistence  │    │ LLM Caller   │
-│  (11 steps)  │    │(engine.json) │    │(claude -p)   │
+│  (12 steps)  │    │(engine.json) │    │(claude -p)   │
+│  +discovery  │    │              │    │              │
 └──────────────┘    └──────────────┘    └──────┬───────┘
                                                │
                                         ┌──────▼───────┐
@@ -345,11 +402,16 @@ version:
 
 **Step:**
 - step_id: 唯一标识
-- step_type: 步骤类型（11 种之一）
-- status: 步骤状态 (PENDING, RUNNING, COMPLETED, FAILED, RETRYING)
+- step_type: 步骤类型（12 种之一，包括 discovery）
+- status: 步骤状态 (PENDING, RUNNING, COMPLETED, FAILED, RETRYING, PAUSED)
 - inputs: 输入字典
 - outputs: 输出字典
 - retry_count: 重试次数
+
+**Discovery 步骤特殊字段：**
+- `discovery_state`: { round, history, mode }
+- `refined_description`: 精炼后的任务描述
+- `conversation_history`: 对话历史记录
 
 ## CLI 命令
 
@@ -361,10 +423,12 @@ version:
 se3 run [TASK_DESCRIPTION] [OPTIONS]
 
 Options:
-  --resume          恢复中断的流程
-  --loop            循环模式
-  --type TYPE       指定任务类型 (feature|bugfix|review|small|directive)
-  --change NAME     关联到指定 change
+  --resume, -r      恢复中断的流程
+  --loop, -l        循环模式
+  --type, -t TYPE   指定任务类型 (feature|bugfix|review|small|directive|discovery)
+  --change, -c NAME 关联到指定 change
+  --discover, -d    Discovery 模式（需求探索）
+  --flow-id ID      恢复指定流程 ID
 ```
 
 ### se3 status

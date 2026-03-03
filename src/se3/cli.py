@@ -483,6 +483,7 @@ def run_cmd(
     type: str = typer.Option("feature", "--type", "-t", help="Task type (feature, bugfix, refactor, etc.)"),
     change: Optional[str] = typer.Option(None, "--change", "-c", help="Change name for this task"),
     flow_id: Optional[str] = typer.Option(None, "--flow-id", help="Specific flow ID to resume"),
+    discover: bool = typer.Option(False, "--discover", "-d", help="Discovery mode - explore requirements with user before analyzing"),
 ):
     """SE3 Run — Unified entry point for the flow engine.
 
@@ -491,6 +492,7 @@ def run_cmd(
         se3 run "Fix login bug" --type=bugfix
         se3 run --resume
         se3 run --loop
+        se3 run --discover "I want to build something related to authentication"
     """
     from .commands.run import run_flow, run_loop_mode, get_project_root, handle_resume_interactive, SE3_DIR
 
@@ -501,6 +503,10 @@ def run_cmd(
     se3_dir.mkdir(exist_ok=True)
     (se3_dir / "state").mkdir(exist_ok=True)
     (se3_dir / "cache").mkdir(exist_ok=True)
+
+    # Handle discovery mode - force task_type to "discovery"
+    if discover:
+        type = "discovery"
 
     if loop:
         exit_code = run_loop_mode(

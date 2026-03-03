@@ -70,7 +70,10 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     Returns:
         StepStatus.COMPLETED on success, StepStatus.FAILED on error
     """
-    task_description = step.inputs.get("task_description", "")
+    # Check if we have a refined description from discovery
+    refined_description = step.inputs.get("refined_description")
+    task_description = refined_description or step.inputs.get("task_description", "")
+
     if not task_description:
         step.error_message = "No task description provided"
         return StepStatus.FAILED
@@ -121,6 +124,11 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["complexity"] = result.get("complexity", "medium")
         step.outputs["required_steps"] = result.get("required_steps", [])
         step.outputs["reasoning"] = result.get("reasoning", "")
+
+        # Record if we used refined description from discovery
+        if refined_description:
+            step.outputs["used_refined_description"] = True
+            step.outputs["original_description"] = step.inputs.get("task_description", "")
 
         # Update flow's selected steps based on analysis
         _update_flow_steps(flow, result.get("required_steps", []), task_type)
