@@ -88,6 +88,47 @@ class JSONExtractor:
 
         return parse_json_response(raw_output, required_keys=required_keys)
 
+    def _extract_text_from_stream_json(self, raw_output: str) -> str:
+        """Extract assistant text content from stream-json (NDJSON) format.
+        
+        Parses the stream-json format and extracts text from assistant messages.
+        Only extracts the final assistant message(s), filtering out tool calls
+        and tool results.
+        
+        Args:
+            raw_output: Raw NDJSON output from LLM
+            
+        Returns:
+            Extracted text content from assistant messages
+        """
+        if not raw_output:
+            return ""
+        
+        text_parts = []
+        for line in raw_output.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+                msg_type = data.get("type", "")
+                
+                # Only process assistant messages
+                if msg_type == "assistant":
+                    message = data.get("message", {})
+                    content = message.get("content", [])
+                    for item in content:
+                        if isinstance(item, dict) and item.get("type") == "text":
+                            text = item.get("text", "")
+                            if text:
+                                text_parts.append(text)
+                                
+            except json.JSONDecodeError:
+                # Not valid JSON, might be a partial line
+                continue
+        
+        return "\n".join(text_parts)
+
     def _extract_with_llm(
         self,
         raw_output: str,
@@ -98,14 +139,26 @@ class JSONExtractor:
         # Import here to avoid circular imports
         from .llm_caller import LLMCaller
 
-        # Truncate if too long to avoid overwhelming the extractor
-        content = raw_output
+        # First, extract text content from stream-json format
+        # This filters out tool results and other non-assistant messages
+        extracted_text = self._extract_text_from_stream_json(raw_output)
+        
+        # Use extracted text if available, otherwise fall back to raw output
+        content = extracted_text if extracted_text else raw_output
+        
+        # Log if content was reduced
+        if len(content) < len(raw_output):
+            logger.info(f"Extracted {len(content)} chars of text from {len(raw_output)} chars of raw output")
+        
+        # Truncate if still too long
         if len(content) > self.max_content_length:
-            # Try to truncate at a reasonable boundary
-            truncate_point = content.rfind("\n", 0, self.max_content_length)
+            # Try to truncate at a reasonable boundary (end of a JSON structure)
+            truncate_point = content.rfind("}", 0, self.max_content_length)
+            if truncate_point < self.max_content_length * 0.8:
+                truncate_point = content.rfind("\n", 0, self.max_content_length)
             if truncate_point < self.max_content_length * 0.8:
                 truncate_point = self.max_content_length
-            content = content[:truncate_point]
+            content = content[:truncate_point + 1]  # Include the closing brace
             logger.warning(f"Content truncated from {len(raw_output)} to {len(content)} for extraction")
 
         schema_section = f"Expected schema: {schema_hint}" if schema_hint else "Ensure all relevant data is included in the JSON."
