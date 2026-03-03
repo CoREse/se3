@@ -14,7 +14,6 @@ from pathlib import Path
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
 from ..project_context import ProjectContextCollector
-from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +46,42 @@ Recent commits:
 ### Available Specs
 {specs_list}
 
-Respond in JSON format:
-{{
-    "summary": "The concise project context summary text"
-}}
+Provide a concise natural language summary:
 """
+
+
+def _extract_text_from_stream_json(response: str) -> str:
+    """Extract text content from stream-json (NDJSON) response.
+    
+    Args:
+        response: Raw NDJSON response from LLM
+        
+    Returns:
+        Extracted text content
+    """
+    if not response:
+        return ""
+    
+    text_parts = []
+    for line in response.strip().split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+            if isinstance(data, dict) and data.get('type') == 'assistant':
+                message = data.get('message', {})
+                content = message.get('content', [])
+                for item in content:
+                    if isinstance(item, dict) and item.get('type') == 'text':
+                        text = item.get('text', '')
+                        if text:
+                            text_parts.append(text)
+        except json.JSONDecodeError:
+            # Not valid JSON, might be a partial line or plain text
+            continue
+    
+    return ''.join(text_parts).strip()
 
 
 def generate_project_summary(
@@ -123,18 +153,14 @@ def generate_project_summary(
     )
 
     caller = LLMCaller(project_root, flow_id=flow_id, step_id=step_id, step_type=step_type)
+    # No JSON needed - just return the LLM's natural language output
     response = caller.call(
         prompt=prompt,
-        json_mode="extract",
-        json_schema_hint='{"summary": "..."}',
+        json_mode="off",
     )
 
-    result = parse_json_response(response, required_keys=["summary"])
-    if result:
-        return result["summary"]
-
-    # Fallback: return raw response text if JSON parsing fails
-    return response
+    # Extract text from stream-json response
+    return _extract_text_from_stream_json(response)
 
 
 def project_summary_handler(step: Step, flow: FlowInstance) -> StepStatus:
