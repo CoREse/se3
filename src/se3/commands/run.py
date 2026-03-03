@@ -280,7 +280,7 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
         persistence.save_flow(flow)
         render_full(
             "Interrupted by user. Flow state saved.\n"
-            f"Resume with: se3 run --resume",
+            "Resume with: se3 run --resume",
             title="Exit"
         )
         return None
@@ -441,6 +441,15 @@ def run_flow(
         if not flow or flow.flow_id != flow_id:
             display_error(f"Flow '{flow_id}' not found")
             return 1
+
+        # Detect and handle resume of a RUNNING step
+        current_step = flow.state.get_current_step()
+        if current_step and current_step.status == StepStatus.RUNNING:
+            # Step was interrupted - prepare for resumption
+            current_step.status = StepStatus.PENDING
+            current_step.inputs["resumed"] = True
+            logger.info(f"Resuming interrupted step: {current_step.step_id} ({current_step.step_type.value})")
+            persistence.save_flow(flow)
 
         # Display flow info with full content
         content = [

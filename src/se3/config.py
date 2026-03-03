@@ -63,6 +63,11 @@ class VersionConfig:
     # Whether to include version in commit message
     include_in_commit_message: bool = True
     
+    @property
+    def file_path(self) -> Optional[str]:
+        """Alias for version_file (compatibility with version_bumper.VersionConfig)."""
+        return self.version_file
+    
     @classmethod
     def from_dict(cls, data: dict) -> "VersionConfig":
         """Create VersionConfig from dictionary (typically loaded from se3.yaml)."""
