@@ -64,19 +64,19 @@ se3 run "修复内存泄漏" --type=bugfix
 
 流程引擎 SHALL 定义固定的 11 步骤池，所有流程步骤从此池中选取。
 
-| 步骤 | 职责 | LLM 参与 | 输入 | 输出 |
-|------|------|---------|------|------|
-| `analyze` | 分析任务类型和范围 | 是 | task_description | task_type, scope, complexity, required_steps |
-| `read_spec` | 读取相关 spec 文件 | 否（程序自动） | scope | relevant_specs, spec_content |
-| `propose` | 生成变更提案 | 是 | spec_content, task_description | proposal, files_to_modify, files_to_create |
-| `design` | 设计方案和架构决策 | 是 | proposal, spec_content | design_doc, decisions, components |
-| `plan_tasks` | 分解为具体可执行任务 | 是 | design_doc | task_list |
-| `implement` | 编写代码实现 | 是 | design_doc, task_list | implementation, files_changed |
-| `test` | 运行测试验证 | 否（程序执行） | - | test_results, tests_passed |
-| `verify_spec` | 检查实现与 spec 一致性 | 是 | implementation, spec_content | verification_result, issues |
-| `update_spec` | 更新 spec 记录变更 | 是 | changes_made | updated_specs |
-| `commit` | 提交变更 | 否（程序执行） | changes_made | commit_hash |
-| `summarize` | 生成总结和 handoff | 是 | all_previous_outputs | summary, handoff_context |
+| 步骤 | 职责 | LLM 参与 | JSON 模式 | 输入 | 输出 |
+|------|------|---------|-----------|------|------|
+| `analyze` | 分析任务类型和范围 | 是 | STRICT | task_description | task_type, scope, complexity, required_steps |
+| `read_spec` | 读取相关 spec 文件 | 否（程序自动） | - | scope | relevant_specs, spec_content |
+| `propose` | 生成变更提案 | 是 | EXTRACT | spec_content, task_description | proposal, files_to_modify, files_to_create |
+| `design` | 设计方案和架构决策 | 是 | EXTRACT | proposal, spec_content | design_doc, decisions, components |
+| `plan_tasks` | 分解为具体可执行任务 | 是 | EXTRACT | design_doc | task_list |
+| `implement` | 编写代码实现 | 是 | TWO_PHASE | design_doc, task_list | implementation, files_changed |
+| `test` | 运行测试验证 | 否（程序执行） | - | - | test_results, tests_passed |
+| `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | implementation, spec_content | verification_result, issues |
+| `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | changes_made | updated_specs |
+| `commit` | 提交变更 | 否（程序执行） | - | changes_made | commit_hash |
+| `summarize` | 生成总结和 handoff | 是 | EXTRACT | all_previous_outputs | summary, handoff_context |
 
 **不同任务类型的步骤序列：**
 - `feature`: analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → commit → summarize
@@ -113,6 +113,39 @@ se3 run "修复内存泄漏" --type=bugfix
 - **WHEN** 步骤内的 LLM 调用失败（超时、API 错误、输出无效）
 - **THEN** 流程引擎执行重试策略（最多 3 次）
 - **AND** 如果重试仍失败，暂停流程并通知用户
+
+### Requirement: JSON 提取模式
+
+流程引擎 SHALL 支持三种 JSON 提取模式，根据步骤特性选择最优策略：
+
+| 模式 | 描述 | 适用场景 |
+|------|------|----------|
+| **STRICT** | 强制 JSON 格式，失败重试 | 简单输出（analyze, read_spec） |
+| **EXTRACT** | 要求 JSON 格式，失败时用 LLM 提取 | 中等复杂度（propose, design, plan_tasks, verify_spec, update_spec） |
+| **TWO_PHASE** | 自然生成 + LLM 提取 | 复杂/大输出（implement） |
+
+**模式选择原则：**
+- 简单输出（<1K tokens）：STRICT（成本低，可靠性高）
+- 中等复杂度（1K-5K tokens）：EXTRACT（平衡可靠性和 token 效率）
+- 大输出（>5K tokens）：TWO_PHASE（避免提示词污染，处理截断）
+
+#### Scenario: STRICT 模式
+- **WHEN** analyze 步骤需要简单的任务分类
+- **THEN** 使用 STRICT 模式：prompt 添加强制 JSON 指令
+- **AND** 如果输出非 JSON，重试整个调用
+
+#### Scenario: EXTRACT 模式
+- **WHEN** design 步骤生成嵌套的设计文档
+- **THEN** 使用 EXTRACT 模式：prompt 要求 JSON 格式
+- **AND** 如果输出非 JSON，使用轻量级 LLM 调用来提取 JSON
+- **AND** 不重试主调用，节省 token
+
+#### Scenario: TWO_PHASE 模式
+- **WHEN** implement 步骤生成包含大文件内容的输出
+- **THEN** 使用 TWO_PHASE 模式：prompt 不添加 JSON 约束
+- **AND** LLM 自然生成内容
+- **AND** 第二次 LLM 调用从自然输出中提取 JSON
+- **AND** 避免提示词污染，更好地处理截断
 
 ### Requirement: 聊天记录系统（Chat History）
 
@@ -292,7 +325,12 @@ version:
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
 │ Step Handler │    │ Persistence  │    │ LLM Caller   │
 │  (11 steps)  │    │(engine.json) │    │(claude -p)   │
-└──────────────┘    └──────────────┘    └──────────────┘
+└──────────────┘    └──────────────┘    └──────┬───────┘
+                                               │
+                                        ┌──────▼───────┐
+                                        │ JSON Extract │
+                                        │  (3 modes)   │
+                                        └──────────────┘
 ```
 
 ### 数据模型
