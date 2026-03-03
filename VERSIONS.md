@@ -2,12 +2,14 @@
 
 ## Current Version
 
-**3.14.0** — feat: Fix retry context inheritance in implement step. Add complete version management spec and base_spec template. Add --bump flag to se3 commit command.
+**3.16.0** — feat: Implement full-content display system for LLM outputs. New display.py module with render_full(), render_proposal(), render_design(), render_spec_content(). New output.py module with truncation-free formatting. Updated run.py and cli.py to use full-content display.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.16.0 | 2026-03-03 | feat: Implement full-content display system for LLM outputs. New display.py module with render_full(), render_proposal(), render_design(), render_spec_content(). New output.py module with truncation-free formatting. Updated run.py and cli.py to use full-content display. |
+| 3.15.0 | 2026-03-03 | feat: Remove wall timeout limit and extend inactivity timeout to 30 minutes for se3 run. Fix version display and commit step output propagation. |
 | 3.14.0 | 2026-03-02 | feat: Fix retry context inheritance in implement step. Add complete version management spec and base_spec template. Add --bump flag to se3 commit command. |
 | 3.13.0 | 2026-03-02 | feat: Add DocumentationUpdater class for README.md and VERSIONS.md updates. Add version bump integration in commit step. Add load_session_config, load_confirmation_config, load_claude_commands, get_language_labels, is_chinese_language functions to config.py. |
 | 3.12.0 | 2026-03-02 | fix: Chat history retry context now preserves full conversation structure. Extracts tool calls and results from raw NDJSON instead of using simplified summaries. Each user message has independent tool_results. Supports both snake_case and camelCase field names. Proper field access with defaults to prevent KeyError. |
