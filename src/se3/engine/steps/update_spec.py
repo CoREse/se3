@@ -93,10 +93,14 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     logger.info("Determining spec updates needed...")
 
     try:
-        # Call LLM for spec updates
+        # Call LLM for spec updates (use EXTRACT mode for nested array structures)
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value)
-        response = caller.call(prompt=prompt, require_json=True)
+        response = caller.call(
+            prompt=prompt,
+            json_mode="extract",
+            json_schema_hint='{"specs_to_update": [{"spec_name": "...", "section": "...", "change_description": "..."}], "new_capabilities": [], "notes": "..."}',
+        )
 
         # Parse JSON response
         update_plan = parse_json_response(response, required_keys=["specs_to_update"])

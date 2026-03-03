@@ -177,10 +177,14 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
     logger.info("Generating task list...")
 
     try:
-        # Call LLM for task planning
+        # Call LLM for task planning (use EXTRACT mode for deeply nested structures)
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value)
-        response = caller.call(prompt=prompt, require_json=True)
+        response = caller.call(
+            prompt=prompt,
+            json_mode="extract",
+            json_schema_hint='{"task_groups": [{"group_id": "G1", "name": "...", "tasks": [{"id": 1, "description": "...", "complexity": "..."}]}], "total_complexity": "..."}',
+        )
 
         # Parse JSON response
         task_plan = parse_json_response(response, required_keys=["task_groups"])

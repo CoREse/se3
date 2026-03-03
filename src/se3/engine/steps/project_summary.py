@@ -123,7 +123,11 @@ def generate_project_summary(
     )
 
     caller = LLMCaller(project_root, flow_id=flow_id, step_id=step_id, step_type=step_type)
-    response = caller.call(prompt=prompt, require_json=True)
+    response = caller.call(
+        prompt=prompt,
+        json_mode="extract",
+        json_schema_hint='{"summary": "..."}',
+    )
 
     result = parse_json_response(response, required_keys=["summary"])
     if result:

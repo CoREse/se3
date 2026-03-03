@@ -94,10 +94,14 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     logger.info("Verifying implementation against specifications...")
 
     try:
-        # Call LLM for verification
+        # Call LLM for verification (use EXTRACT mode to avoid retry on format issues)
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value)
-        response = caller.call(prompt=prompt, require_json=True)
+        response = caller.call(
+            prompt=prompt,
+            json_mode="extract",
+            json_schema_hint='{"verified": true|false, "issues": [{"severity": "error|warning", "message": "..."}], "summary": "...", "recommendations": []}',
+        )
 
         # Parse JSON response
         verification = parse_json_response(response, required_keys=["verified"])

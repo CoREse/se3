@@ -241,26 +241,53 @@ class LLMCaller:
         context_files: Optional[List[Path]] = None,
         on_output: Optional[Callable[[str], None]] = None,
         require_json: bool = False,
+        json_mode: Optional[str] = None,
+        two_phase_json: bool = False,
+        json_schema_hint: Optional[str] = None,
         **kwargs,
     ) -> str:
         """Call LLM with prompt and return output text.
+
+        Three JSON extraction modes are supported:
+
+        1. STRICT (require_json=True, default):
+           - Wraps prompt with strict JSON constraints
+           - Retries up to max_retries if output is invalid
+           - Best for: Simple, reliable outputs
+
+        2. EXTRACT (json_mode="extract"):
+           - Wraps prompt with JSON constraints
+           - NO retries on parse failure
+           - Uses LLM extraction as recovery instead
+           - Best for: Balanced reliability and efficiency
+
+        3. TWO_PHASE (json_mode="two_phase" or two_phase_json=True):
+           - Clean prompt without JSON constraints
+           - LLM extracts JSON from natural output
+           - Best for: Complex outputs, avoiding prompt pollution
 
         Args:
             prompt: Main prompt text
             timeout: Timeout in seconds (None for no limit)
             context_files: Optional files to include as context
             on_output: Optional callback for real-time output
-            require_json: If True, automatically retry if response is not valid JSON
+            require_json: Legacy flag for STRICT mode (kept for compatibility)
+            json_mode: Explicit mode selection - "strict", "extract", "two_phase", or "off"
+            two_phase_json: Legacy flag for TWO_PHASE mode (kept for compatibility)
+            json_schema_hint: Optional hint about expected JSON schema for extraction
             **kwargs: Ignored (accepts model, max_tokens, temperature
                       for forward-compatibility but they don't apply
                       to claude -p subprocess calls)
 
         Returns:
-            LLM output text
+            LLM output text (JSON if json_mode is not "off")
 
         Raises:
-            LLMCallError: If all retries exhausted
+            LLMCallError: If all retries exhausted or extraction fails
         """
+        # Resolve JSON mode from various parameter combinations
+        mode = self._resolve_json_mode(json_mode, require_json, two_phase_json)
+
         # Inject extra prompt if set (from Ctrl+C user injection)
         global _extra_prompt
         if _extra_prompt:
@@ -268,23 +295,217 @@ class LLMCaller:
             logger.info(f"Injected extra prompt: {_extra_prompt[:80]}")
             _extra_prompt = None  # Consume after use
 
-        # Wrap prompt with JSON constraints when require_json is set
-        if require_json:
-            prompt = (
-                "CRITICAL: You MUST respond with ONLY valid JSON. "
-                "Do NOT include any text, explanation, or markdown before or after the JSON.\n\n"
-                f"{prompt}\n\n"
-                "REMINDER: Respond with ONLY the JSON object. No other text."
+        # Dispatch to appropriate handler based on mode
+        if mode == "two_phase":
+            return self._call_two_phase(
+                prompt=prompt,
+                timeout=timeout,
+                context_files=context_files,
+                on_output=on_output,
+                json_schema_hint=json_schema_hint,
+            )
+        elif mode == "extract":
+            return self._call_extract(
+                prompt=prompt,
+                timeout=timeout,
+                context_files=context_files,
+                on_output=on_output,
+                json_schema_hint=json_schema_hint,
+            )
+        elif mode == "strict":
+            return self._call_strict(
+                prompt=prompt,
+                timeout=timeout,
+                context_files=context_files,
+                on_output=on_output,
+            )
+        else:  # mode == "off"
+            return self._call_with_retry(
+                prompt=prompt,
+                timeout=timeout,
+                context_files=context_files,
+                on_output=on_output,
+                require_json=False,
+                json_retry_count=0,
             )
 
+    @staticmethod
+    def _resolve_json_mode(
+        json_mode: Optional[str],
+        require_json: bool,
+        two_phase_json: bool,
+    ) -> str:
+        """Resolve JSON mode from various parameter combinations.
+
+        Priority:
+        1. Explicit json_mode parameter
+        2. two_phase_json=True -> "two_phase"
+        3. require_json=True -> "strict"
+        4. Default -> "off"
+        """
+        if json_mode is not None:
+            mode = json_mode.lower()
+            if mode in ("strict", "extract", "two_phase", "off"):
+                return mode
+            logger.warning(f"Unknown json_mode '{json_mode}', defaulting to 'off'")
+            return "off"
+
+        if two_phase_json:
+            return "two_phase"
+
+        if require_json:
+            return "strict"
+
+        return "off"
+
+    def _call_strict(
+        self,
+        prompt: str,
+        timeout: Optional[int],
+        context_files: Optional[List[Path]],
+        on_output: Optional[Callable[[str], None]],
+    ) -> str:
+        """Mode 1: STRICT - Force JSON with retry on failure."""
+        # Wrap prompt with strict JSON constraints
+        json_prompt = (
+            "CRITICAL: You MUST respond with ONLY valid JSON. "
+            "Do NOT include any text, explanation, or markdown before or after the JSON.\n\n"
+            f"{prompt}\n\n"
+            "REMINDER: Respond with ONLY the JSON object. No other text."
+        )
+
         return self._call_with_retry(
+            prompt=json_prompt,
+            timeout=timeout,
+            context_files=context_files,
+            on_output=on_output,
+            require_json=True,
+            json_retry_count=0,
+        )
+
+    def _call_extract(
+        self,
+        prompt: str,
+        timeout: Optional[int],
+        context_files: Optional[List[Path]],
+        on_output: Optional[Callable[[str], None]],
+        json_schema_hint: Optional[str],
+    ) -> str:
+        """Mode 2: EXTRACT - Request JSON, extract with LLM on failure."""
+        # Wrap prompt with JSON constraints (like STRICT)
+        json_prompt = (
+            "CRITICAL: You MUST respond with ONLY valid JSON. "
+            "Do NOT include any text, explanation, or markdown before or after the JSON.\n\n"
+            f"{prompt}\n\n"
+            "REMINDER: Respond with ONLY the JSON object. No other text."
+        )
+
+        # Call without JSON retry - extraction is the recovery
+        output = self._call_with_retry(
+            prompt=json_prompt,
+            timeout=timeout,
+            context_files=context_files,
+            on_output=on_output,
+            require_json=False,  # Don't retry on JSON error
+            json_retry_count=0,
+        )
+
+        # Check if output is valid JSON
+        if self._contains_valid_json(output):
+            return output
+
+        # Extract JSON using LLM
+        print("  [llm-caller] 🔍 Extracting JSON from output (extract mode)...")
+
+        from .json_extractor import JSONExtractor
+
+        extractor = JSONExtractor(
+            project_root=self.project_root,
+            timeout=60,
+        )
+
+        result = extractor.extract(
+            raw_output=output,
+            schema_hint=json_schema_hint,
+        )
+
+        if result is None:
+            raise LLMCallError(
+                "JSON extraction failed: Could not extract valid JSON from output"
+            )
+
+        # Convert back to stream-json format
+        json_str = json.dumps(result, ensure_ascii=False, indent=2)
+        synthetic_output = self._format_as_stream_json(json_str)
+
+        print("  [llm-caller] ✅ JSON extraction complete")
+        return synthetic_output
+
+    def _call_two_phase(
+        self,
+        prompt: str,
+        timeout: Optional[int],
+        context_files: Optional[List[Path]],
+        on_output: Optional[Callable[[str], None]],
+        json_schema_hint: Optional[str],
+    ) -> str:
+        """Mode 3: TWO_PHASE - Natural generation + LLM extraction."""
+        logger.info("Using two-phase JSON extraction")
+
+        # Phase 1: Generate without JSON constraints (clean prompt)
+        phase1_output = self._call_with_retry(
             prompt=prompt,
             timeout=timeout,
             context_files=context_files,
             on_output=on_output,
-            require_json=require_json,
+            require_json=False,  # No JSON constraint in phase 1
             json_retry_count=0,
         )
+
+        # Phase 2: Extract JSON
+        print("  [llm-caller] 🔍 Phase 2: Extracting JSON from output...")
+
+        from .json_extractor import JSONExtractor
+
+        extractor = JSONExtractor(
+            project_root=self.project_root,
+            timeout=60,
+        )
+
+        result = extractor.extract(
+            raw_output=phase1_output,
+            schema_hint=json_schema_hint,
+        )
+
+        if result is None:
+            raise LLMCallError(
+                "Two-phase JSON extraction failed: Could not extract valid JSON from output"
+            )
+
+        # Convert back to stream-json format for compatibility
+        json_str = json.dumps(result, ensure_ascii=False, indent=2)
+        synthetic_output = self._format_as_stream_json(json_str)
+
+        print("  [llm-caller] ✅ JSON extraction complete")
+        return synthetic_output
+
+    @staticmethod
+    def _format_as_stream_json(content: str) -> str:
+        """Format content as stream-json (NDJSON) format for compatibility.
+
+        Args:
+            content: The text content to format
+
+        Returns:
+            NDJSON-formatted string
+        """
+        message = {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": content}]
+            }
+        }
+        return json.dumps(message, ensure_ascii=False)
 
     def _record_prompt(self, prompt: str, attempt: int) -> None:
         """Record a prompt to chat history if flow context is available."""

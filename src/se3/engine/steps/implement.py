@@ -367,7 +367,12 @@ def _implement_single_group(
         step_type=f"implement-{group_id}",
         external_attempt=attempt,  # Pass attempt so retries inject history context
     )
-    response = caller.call(prompt=prompt, require_json=True)
+    # Use two-phase JSON extraction for better reliability with large outputs
+    response = caller.call(
+        prompt=prompt,
+        two_phase_json=True,
+        json_schema_hint='{"files_changed": [{"path": "...", "action": "create|modify", "content": "...", "explanation": "..."}], "tests_added": [], "notes": "..."}',
+    )
 
     # Parse JSON response
     implementation = parse_json_response(response, required_keys=["files_changed"])

@@ -102,10 +102,14 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     logger.info("Generating summary...")
 
     try:
-        # Call LLM for summary
+        # Call LLM for summary (use EXTRACT mode - has fallback if parsing fails)
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value)
-        response = caller.call(prompt=prompt, require_json=True)
+        response = caller.call(
+            prompt=prompt,
+            json_mode="extract",
+            json_schema_hint='{"summary": "...", "key_changes": [], "files_modified": [], "testing_status": "...", "remaining_work": [], "handoff_context": "...", "next_steps": []}',
+        )
 
         # Parse JSON response
         summary = parse_json_response(response, required_keys=["summary"])

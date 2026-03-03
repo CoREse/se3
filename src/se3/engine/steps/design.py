@@ -127,10 +127,14 @@ def design_handler(step: Step, flow: FlowInstance) -> StepStatus:
     logger.info("Generating design document...")
 
     try:
-        # Call LLM for design
+        # Call LLM for design (use EXTRACT mode for complex nested structures)
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value)
-        response = caller.call(prompt=prompt, require_json=True)
+        response = caller.call(
+            prompt=prompt,
+            json_mode="extract",
+            json_schema_hint='{"overview": "...", "architecture_decisions": [{"decision": "...", "rationale": "..."}], "components": [{"name": "...", "responsibilities": "..."}], "data_flow": "...", "implementation_plan": [], "testing_strategy": "..."}',
+        )
 
         # Parse JSON response
         design = parse_json_response(response, required_keys=["overview"])
