@@ -2,13 +2,13 @@
 
 ## Current Version
 
-**3.17.3** — fix: Increase max_content_length to 200KB for large code outputs. Fix JSON parsing bug in EXTRACT and TWO_PHASE modes. Remove wall time timeout from all LLM calls, use only inactivity timeout (30 minutes).
+**3.17.4** — fix: Increase max_content_length to 200KB for large code outputs. Fix JSON parsing bug in EXTRACT and TWO_PHASE modes. Remove wall time timeout from all LLM calls, use only inactivity timeout (30 minutes).
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 3.17.3 | 2026-03-03 | fix: Fix JSON parsing bug in EXTRACT and TWO_PHASE modes. Return plain JSON string instead of stream-json wrapper. Remove wall time timeout from all LLM calls, use only inactivity timeout (30 minutes). |
+| 3.17.4 | 2026-03-03 | fix: Fix JSON parsing bug in EXTRACT and TWO_PHASE modes. Return plain JSON string instead of stream-json wrapper. Remove wall time timeout from all LLM calls, use only inactivity timeout (30 minutes). |
 | 3.17.0 | 2026-03-03 | feat: Three JSON extraction modes (STRICT/EXTRACT/TWO_PHASE) for LLM output handling. STRICT mode forces JSON with retry. EXTRACT mode uses LLM extraction on failure without retry. TWO_PHASE mode uses natural generation + LLM extraction for large outputs. Summarize and project_summary steps now use plain text output instead of JSON. Updated flow-engine spec with JSON mode documentation. |
 | 3.16.0 | 2026-03-03 | feat: Implement full-content display system for LLM outputs. New display.py module with render_full(), render_proposal(), render_design(), render_spec_content(). New output.py module with truncation-free formatting. Updated run.py and cli.py to use full-content display. |
 | 3.15.0 | 2026-03-03 | feat: Remove wall timeout limit and extend inactivity timeout to 30 minutes for se3 run. Fix version display and commit step output propagation. |
