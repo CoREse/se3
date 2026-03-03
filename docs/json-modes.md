@@ -15,9 +15,9 @@ SE3 支持三种 JSON 提取模式，以适应不同的使用场景。
 ### 1. STRICT 模式（默认）
 
 ```python
-response = caller.call(prompt=prompt, require_json=True)
-# 或者
 response = caller.call(prompt=prompt, json_mode="strict")
+# 或者
+response = caller.call(prompt=prompt, require_json=True)
 ```
 
 **流程：**
@@ -34,7 +34,7 @@ Prompt + JSON约束 → LLM调用 → 解析JSON
 
 **适用：**
 - `analyze` - 任务分类，输出简单
-- `verify_spec` - 验证结果，格式规整
+- `read_spec` - 规范选择，格式规整
 
 ---
 
@@ -61,8 +61,11 @@ Prompt + JSON约束 → LLM调用 → 解析JSON
 - 节省 token（提取调用比重新生成便宜）
 
 **适用：**
-- `propose` - 提案生成，偶尔格式出错
-- `plan_tasks` - 任务规划，结构复杂但不算太大
+- `propose` - 提案生成
+- `design` - 设计文档
+- `plan_tasks` - 任务规划
+- `verify_spec` - 规范验证
+- `update_spec` - 更新规范
 
 ---
 
@@ -72,7 +75,7 @@ Prompt + JSON约束 → LLM调用 → 解析JSON
 response = caller.call(
     prompt=prompt,
     json_mode="two_phase",
-    # 或者 two_phase_json=True（向后兼容）
+    # 或者 two_phase_json=True
     json_schema_hint='{"files_changed": [{"path": "...", "content": "..."}]}'
 )
 ```
@@ -91,7 +94,6 @@ Clean Prompt → LLM调用（自然生成）→ LLM提取 → JSON输出
 
 **适用：**
 - `implement` - 代码实现，大文件内容，最容易截断
-- 任何需要生成大量文本然后结构化的场景
 
 ---
 
@@ -112,25 +114,24 @@ Clean Prompt → LLM调用（自然生成）→ LLM提取 → JSON输出
 
 ---
 
-## 使用建议
+## 最终模式分配
 
-### 按步骤选择
+| 步骤 | JSON 模式 | 理由 |
+|------|-----------|------|
+| `analyze` | STRICT | 简单输出，可靠性第一 |
+| `read_spec` | STRICT | 简单输出 |
+| `propose` | EXTRACT | 中等复杂度 |
+| `design` | EXTRACT | 嵌套结构 |
+| `plan_tasks` | EXTRACT | 复杂嵌套 |
+| `implement` | TWO_PHASE | 大文件内容 |
+| `verify_spec` | EXTRACT | 验证不重试 |
+| `update_spec` | EXTRACT | 嵌套数组 |
+| `summarize` | **OFF** | 纯文本输出，无需 JSON |
+| `project_summary` | **OFF** | 纯文本输出 |
 
-```python
-# analyze - 简单输出，用 STRICT
-response = caller.call(prompt=prompt, json_mode="strict")
+---
 
-# propose - 中等复杂度，用 EXTRACT
-response = caller.call(prompt=prompt, json_mode="extract")
-
-# implement - 大输出，用 TWO_PHASE
-response = caller.call(prompt=prompt, json_mode="two_phase")
-
-# summarize - 不需要 JSON，用 off
-response = caller.call(prompt=prompt, json_mode="off")
-```
-
-### 向后兼容
+## 向后兼容
 
 旧代码无需修改：
 
@@ -139,41 +140,3 @@ response = caller.call(prompt=prompt, json_mode="off")
 response = caller.call(prompt=prompt, require_json=True)  # -> STRICT
 response = caller.call(prompt=prompt, two_phase_json=True)  # -> TWO_PHASE
 ```
-
----
-
-## 实现细节
-
-### 模式解析优先级
-
-```python
-# 1. 显式 json_mode 参数优先
-response = caller.call(prompt=prompt, json_mode="extract", require_json=True)
-# 结果：EXTRACT 模式
-
-# 2. 其次 two_phase_json 标志
-response = caller.call(prompt=prompt, two_phase_json=True)
-# 结果：TWO_PHASE 模式
-
-# 3. 最后 require_json 标志
-response = caller.call(prompt=prompt, require_json=True)
-# 结果：STRICT 模式
-
-# 4. 默认
-response = caller.call(prompt=prompt)
-# 结果：OFF 模式（不要求 JSON）
-```
-
-### Schema Hint
-
-`json_schema_hint` 帮助提取 LLM 理解期望的输出格式：
-
-```python
-response = caller.call(
-    prompt=prompt,
-    json_mode="extract",
-    json_schema_hint='{"files_changed": [{"path": "...", "action": "create|modify"}]}'
-)
-```
-
-这在 EXTRACT 和 TWO_PHASE 模式中特别有用。
