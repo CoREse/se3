@@ -29,3 +29,12 @@ version:
     feature: minor
     bugfix: patch
     breaking: major
+
+# Claude command resolution (optional)
+# Multiple commands with priority-based fallback on usage limit / timeout
+# Higher priority = tried first. Project-level overrides global (~/.se3/config.yaml)
+claude_commands:
+  - cmd: "kclaude"
+    priority: 5
+  - cmd: "hclaude"
+    priority: 1
