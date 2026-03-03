@@ -2,19 +2,14 @@
 
 ## Current Version
 
-**3.18.1** — fix: Allow user confirmation at max discovery rounds. Fix boundary case where confirmation at round 10 would trigger fallback.
+**3.18.2** — feat: Discovery mode with project context. Discovery now provides rich project context to help users explore requirements: project type/name/git info, available specs list, base spec content. Helps AI ask more relevant questions considering existing architecture.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 3.18.1 | 2026-03-03 | fix: Allow user confirmation at max discovery rounds. Fix boundary case where confirmation at round 10 would trigger fallback instead of processing properly. |
-| 3.18.0 | 2026-03-03 | feat: Add Discovery Workflow for requirements exploration. New `discovery` step type with multi-turn conversation support. New `--discover` / `-d` CLI flag for `se3 run`. Discovery mode helps users clarify vague ideas before entering analyze step. Supports pause/resume with state persistence. Max 10 rounds to prevent infinite loops. Refined description automatically passed to analyze step.
-
-## Version History
-
-| Version | Date | Changes |
-|---------|------|---------|
+| 3.18.2 | 2026-03-03 | feat: Discovery mode with project context. Provides project info (type, name, git), specs list, and base spec content to help exploration. |
+| 3.18.1 | 2026-03-03 | fix: Allow user confirmation at max discovery rounds. Fix boundary case where confirmation at round 10 would trigger fallback. |
 | 3.18.0 | 2026-03-03 | feat: Add Discovery Workflow for requirements exploration. New `discovery` step type with multi-turn conversation support. New `--discover` / `-d` CLI flag. Supports pause/resume, max 10 rounds, refined description passed to analyze. |
 | 3.17.6 | 2026-03-03 | fix: Add newline after each assistant message to separate text/thinking content from subsequent output.
 
