@@ -10,6 +10,10 @@ import typer
 
 from . import __version__
 
+# Import display utilities early to ensure console is initialized
+# This must happen before any command execution to ensure consistent output
+from .engine.display import get_console, render_full, render_text
+
 
 app = typer.Typer(
     name="se3",
@@ -30,10 +34,38 @@ def main(
         False, "--version", "-v", help="Show version information", callback=_version_callback, is_eager=True
     ),
 ):
-    """SE 3.0 framework CLI tools."""
+    """SE 3.0 framework CLI tools.
+
+    Initializes display utilities for consistent full-content output
+    across all subcommands.
+    """
+    # Initialize display console at CLI startup
+    # This ensures consistent output configuration across all commands
+    _init_display()
+
     if ctx.invoked_subcommand is None:
         typer.echo(ctx.get_help())
         raise typer.Exit()
+
+
+def _init_display() -> None:
+    """Initialize display utilities for consistent output.
+
+    This function is called at CLI startup to ensure:
+    - Console is initialized before any output
+    - Consistent output configuration across all subcommands
+    - Full-content display is ready for all LLM-generated outputs
+    """
+    # Initialize the console (creates global console instance)
+    console = get_console()
+
+    # Configure console for optimal display
+    # (Console is already configured with sensible defaults)
+
+    # Log initialization for debugging
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.debug("Display utilities initialized")
 
 
 # Register sub-typer commands (complex multi-command tools)
@@ -155,21 +187,28 @@ def guardrails_cmd(
 
     violations = check_spec_guardrails(spec_file, original_content, new_content)
 
-    typer.echo(f"\n{'=' * 60}")
-    typer.echo("SE 3.0 Spec Guardrails Check")
-    typer.echo(f"{'=' * 60}")
-    typer.echo(f"\nFile: {spec_file}")
+    # Use full-content display for guardrails output
+    lines = [
+        "",
+        "=" * 60,
+        "SE 3.0 Spec Guardrails Check",
+        "=" * 60,
+        "",
+        f"File: {spec_file}",
+    ]
 
     if violations:
-        typer.echo(f"\n⚠️  {len(violations)} violation(s) found:")
+        lines.append(f"\n⚠️  {len(violations)} violation(s) found:")
         for v in violations:
-            typer.echo(f"\n  [{v['type']}] {v['message']}")
-            typer.echo(f"  Rule: {v['guardrail']}")
-        typer.echo(f"\n{'=' * 60}")
+            lines.append(f"\n  [{v['type']}] {v['message']}")
+            lines.append(f"  Rule: {v['guardrail']}")
+        lines.append(f"\n{'=' * 60}")
+        render_full("\n".join(lines), title="Guardrails Check")
         raise typer.Exit(code=1)
     else:
-        typer.echo(f"\n✓ All guardrails passed - no violations found")
-        typer.echo(f"\n{'=' * 60}")
+        lines.append("\n✓ All guardrails passed - no violations found")
+        lines.append(f"\n{'=' * 60}")
+        render_full("\n".join(lines), title="Guardrails Check")
         raise typer.Exit(code=0)
 
 @app.command(name="done")
@@ -353,39 +392,35 @@ def loop_cmd(
 
 def _read_multiline_input() -> Optional[str]:
     """Read multiline input from stdin with smart display for pasted content.
-    
+
     Normal character-by-character input is never abbreviated.
     Pasted content (multi-line input at once) exceeding 3 lines is abbreviated.
     Returns None if input is empty.
     """
     import sys
-    
+
     # Check if stdin is a tty (interactive terminal)
     if not sys.stdin.isatty():
-        # Non-interactive mode (pipe/redirect): read all at once, show abbreviated if >3 lines
+        # Non-interactive mode (pipe/redirect): read all at once, show full content
         try:
             content = sys.stdin.read()
             lines = content.split("\n")
-            
-            # Show abbreviated view for multi-line pipe input >3 lines
-            if len(lines) > 3:
-                print(f"{lines[0]}")
-                print(f"{lines[1]}")
-                print("...")
-                print(f"{lines[-1]}")
-                print()
-            
+
+            # Show full content for all input (no truncation)
+            if lines:
+                render_full("\n".join(lines), title="Input")
+
             content = content.strip()
             return content if content else None
         except (EOFError, KeyboardInterrupt):
             return None
-    
+
     # Interactive mode
-    print("Enter task description (Ctrl+D to finish, Ctrl+C to cancel):")
-    
+    render_text("Enter task description (Ctrl+D to finish, Ctrl+C to cancel):", title="Input")
+
     lines = []
     is_paste_mode = False
-    
+
     # Platform-specific paste detection
     def _has_pending_input() -> bool:
         """Check if there's more input immediately available."""
@@ -399,44 +434,41 @@ def _read_multiline_input() -> Optional[str]:
                 return bool(readable)
         except Exception:
             return False
-    
+
     try:
         while True:
             try:
                 # Read a line
                 line = input()
                 lines.append(line)
-                
+
                 # Check if there's more input immediately available (paste detection)
                 # Use a small timeout to detect batch input vs character-by-character
                 if not is_paste_mode and len(lines) >= 1:
                     if _has_pending_input():
                         is_paste_mode = True
-                
+
                 # In paste mode, continue reading without displaying each line
                 if is_paste_mode:
                     continue
-                
+
                 # Normal mode: just display the line as usual
-                
+
             except EOFError:
                 # Ctrl+D pressed - finish input
                 break
     except KeyboardInterrupt:
-        print("\nCancelled.")
+        render_text("\nCancelled.", title="Cancelled")
         return None
-    
-    # Handle display based on mode and line count
+
+    # Handle display based on mode and line count - show full content
     if is_paste_mode and len(lines) > 3:
-        # For pasted content >3 lines, show abbreviated view
-        print(f"{lines[0]}")
-        print(f"{lines[1]}")
-        print("...")
-        print(f"{lines[-1]}")
+        # For pasted content, show full view (no truncation)
+        render_full("\n".join(lines), title="Input Content")
     # If normal mode or <=3 lines, lines are already displayed
-    
+
     print()  # New line after input
-    
+
     # Join lines and return
     content = "\n".join(lines).strip()
     return content if content else None
@@ -496,7 +528,14 @@ def run_cmd(
                 # No task provided, enter interactive multiline input mode
                 task = _read_multiline_input()
                 if not task:
-                    print("Error: Task description required for new flow", file=sys.stderr)
+                    # Use full-content display for error
+                    render_full(
+                        "Error: Task description required for new flow\n\n"
+                        "Examples:\n"
+                        '  se3 run "Implement feature X"\n'
+                        "  se3 run --resume",
+                        title="Error"
+                    )
                     raise typer.Exit(1)
 
     # New flow mode
@@ -504,10 +543,14 @@ def run_cmd(
         # Enter interactive multiline input mode
         task = _read_multiline_input()
         if not task:
-            print("Error: Task description required (or use --resume)", file=sys.stderr)
-            print("\nExamples:", file=sys.stderr)
-            print('  se3 run "Implement feature X"', file=sys.stderr)
-            print("  se3 run --resume", file=sys.stderr)
+            # Use full-content display for error
+            render_full(
+                "Error: Task description required (or use --resume)\n\n"
+                "Examples:\n"
+                '  se3 run "Implement feature X"\n'
+                "  se3 run --resume",
+                title="Error"
+            )
             raise typer.Exit(1)
 
     exit_code = run_flow(

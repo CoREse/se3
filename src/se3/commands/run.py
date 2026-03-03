@@ -32,6 +32,16 @@ try:
     from ..engine.context_builder import ContextBuilder
     from ..engine.steps import STEP_HANDLERS
     from ..engine.llm_caller import set_extra_prompt
+    from ..engine.output import (
+        display_analysis,
+        display_design,
+        display_error,
+        display_proposal,
+        display_step_result,
+        display_success,
+        format_output,
+        render_full,
+    )
 except ImportError:
     # Direct import for development
     import sys
@@ -42,6 +52,16 @@ except ImportError:
     from engine.context_builder import ContextBuilder
     from engine.steps import STEP_HANDLERS
     from engine.llm_caller import set_extra_prompt
+    from engine.output import (
+        display_analysis,
+        display_design,
+        display_error,
+        display_proposal,
+        display_step_result,
+        display_success,
+        format_output,
+        render_full,
+    )
 
 
 app = typer.Typer()
@@ -142,7 +162,7 @@ def find_existing_flows(project_root: Path) -> List[Dict[str, Any]]:
             flows.append({
                 "id": data.get("flow_id", "unknown"),
                 "status": data.get("status", "unknown"),
-                "description": data.get("task_description", "No description")[:60],
+                "description": data.get("task_description", "No description"),
                 "current_step": state_data.get("current_step_id"),
                 "file": state_file.name,
             })
@@ -182,7 +202,7 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
     flows = find_existing_flows(project_root)
 
     if not flows:
-        print("No existing flows found. Starting new flow.")
+        render_full("No existing flows found. Starting new flow.", title="Resume")
         return None
 
     # Filter to active (non-terminal) flows
@@ -190,17 +210,21 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
     active_flows = [f for f in flows if f["status"] not in terminal_statuses]
 
     if not active_flows:
-        print("No in-progress flows found.")
+        render_full("No in-progress flows found.", title="Resume")
         if flows:
-            print(f"Found {len(flows)} completed/failed flows.")
+            render_full(f"Found {len(flows)} completed/failed flows.", title="Info")
         return None
 
     if len(active_flows) == 1:
         flow = active_flows[0]
-        print(f"\nFound interrupted flow:")
-        print(f"  ID: {flow['id']}")
-        print(f"  Description: {flow['description']}")
-        print(f"  Current step: {flow['current_step']}")
+        content = [
+            "Found interrupted flow:",
+            "",
+            f"  ID: {flow['id']}",
+            f"  Description: {flow['description']}",
+            f"  Current step: {flow['current_step']}",
+        ]
+        render_full("\n".join(content), title="Resume Flow")
 
         options = ["Resume this flow", "Start new flow"]
         choice = prompt_user_choice("What would you like to do?", options)
@@ -210,12 +234,17 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
         return None
 
     # Multiple active flows
-    print(f"\nFound {len(active_flows)} interrupted flows:")
+    content = [f"Found {len(active_flows)} interrupted flows:", ""]
     options = []
     for flow in active_flows:
-        options.append(f"{flow['description']}... (step: {flow['current_step']})")
+        options.append(f"{flow['description']} (step: {flow['current_step']})")
     options.append("Start new flow")
 
+    for i, opt in enumerate(options[:-1], 1):
+        content.append(f"  {i}. {opt}")
+    content.append(f"  {len(options)}. Start new flow")
+
+    render_full("\n".join(content), title="Resume Flow")
     choice = prompt_user_choice("Which flow to resume?", options)
 
     if choice < len(active_flows):
@@ -229,15 +258,18 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
     Returns:
         StepStatus to continue, or None to exit
     """
-    print("\n\n⏸  Interrupted. Enter additional instruction for this step")
-    print("   (empty to retry as-is, Ctrl+C again to exit):")
+    render_full(
+        "Interrupted. Enter additional instruction for this step\n"
+        "(empty to retry as-is, Ctrl+C again to exit):",
+        title="Pause"
+    )
     try:
         user_input = input("   > ").strip()
         if user_input:
             set_extra_prompt(user_input)
-            print(f"   ✓ Extra prompt set, retrying step...")
+            render_full("Extra prompt set, retrying step...", title="Info")
         else:
-            print("   → Retrying step as-is...")
+            render_full("Retrying step as-is...", title="Info")
         # Reset step to PENDING so it re-runs
         current_step.status = StepStatus.PENDING
         persistence.save_flow(flow)
@@ -246,9 +278,82 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
     except (KeyboardInterrupt, EOFError):
         # Second Ctrl+C (or EOF): save and exit
         persistence.save_flow(flow)
-        print("\n\nInterrupted by user. Flow state saved.")
-        print(f"Resume with: se3 run --resume")
+        render_full(
+            "Interrupted by user. Flow state saved.\n"
+            f"Resume with: se3 run --resume",
+            title="Exit"
+        )
         return None
+
+
+def _display_step_output(current_step: Any) -> None:
+    """Display step output using full-content rendering.
+
+    Args:
+        current_step: The current step being executed
+    """
+    # Display step header with full content
+    step_header = f"Step: {current_step.step_type.value}"
+    step_info = f"Status: {current_step.status.value}"
+
+    # Build full content for display
+    lines = [f"[bold]{step_info}[/bold]", ""]
+
+    # Display inputs if present
+    if current_step.inputs:
+        lines.append("[bold cyan]Inputs:[/bold cyan]")
+        for key, value in current_step.inputs.items():
+            formatted_value = format_output(value)
+            # Show full value without truncation
+            lines.append(f"  [bold]{key}:[/bold] {formatted_value}")
+        lines.append("")
+
+    # Display outputs if present
+    if current_step.outputs:
+        lines.append("[bold green]Outputs:[/bold green]")
+        for key, value in current_step.outputs.items():
+            # Check if this is a proposal, design, or analysis output
+            if key in ("proposal", "proposal_data") and isinstance(value, dict):
+                lines.append(f"\n  [bold]{key}:[/bold] (see Proposal display below)")
+            elif key in ("design", "design_doc", "design_document") and isinstance(value, dict):
+                lines.append(f"\n  [bold]{key}:[/bold] (see Design Document display below)")
+            elif key in ("analysis", "analysis_result") and isinstance(value, dict):
+                lines.append(f"\n  [bold]{key}:[/bold] (see Analysis display below)")
+            else:
+                formatted_value = format_output(value)
+                lines.append(f"  [bold]{key}:[/bold] {formatted_value}")
+        lines.append("")
+
+    # Display error if present
+    if current_step.error_message:
+        lines.append(f"[bold red]Error:[/bold red] {current_step.error_message}")
+
+    content = "\n".join(lines)
+    render_full(content, title=step_header)
+
+    # Now display specific structured outputs with dedicated renderers
+    outputs = current_step.outputs or {}
+
+    # Display proposal if present
+    for key in ("proposal", "proposal_data"):
+        if key in outputs and isinstance(outputs[key], dict):
+            display_proposal(outputs[key])
+            break
+
+    # Display design if present
+    for key in ("design", "design_doc", "design_document"):
+        if key in outputs and isinstance(outputs[key], dict):
+            display_design(outputs[key])
+            break
+
+    # Display analysis if present
+    for key in ("analysis", "analysis_result", "result"):
+        if key in outputs and isinstance(outputs[key], dict):
+            # Check if it looks like an analysis result
+            value = outputs[key]
+            if any(k in value for k in ("summary", "findings", "insights", "recommendations")):
+                display_analysis(value)
+                break
 
 
 def run_flow(
@@ -284,14 +389,19 @@ def run_flow(
     if flow_id:
         flow = persistence.load_flow()
         if not flow or flow.flow_id != flow_id:
-            print(f"Error: Flow '{flow_id}' not found", file=sys.stderr)
+            display_error(f"Flow '{flow_id}' not found")
             return 1
-        print(f"Resuming flow: {flow.flow_id}")
-        print(f"Current step: {flow.state.current_step_id}")
-        print(f"Task: {flow.task_description[:60]}...")
+
+        # Display flow info with full content
+        content = [
+            f"Resuming flow: {flow.flow_id}",
+            f"Current step: {flow.state.current_step_id}",
+            f"Task: {flow.task_description}",
+        ]
+        render_full("\n".join(content), title="Flow Info")
     else:
         if not task_description:
-            print("Error: Task description required for new flow", file=sys.stderr)
+            display_error("Task description required for new flow")
             return 1
 
         flow = state_machine.create_flow(
@@ -300,22 +410,29 @@ def run_flow(
             change_name=change_name,
             is_loop_mode=is_loop_mode,
         )
-        print(f"Created new flow: {flow.flow_id}")
-        print(f"Task: {task_description}")
-        print(f"Type: {task_type}")
+        # Display new flow info with full content
+        content = [
+            f"Created new flow: {flow.flow_id}",
+            f"Task: {task_description}",
+            f"Type: {task_type}",
+        ]
+        if change_name:
+            content.append(f"Change: {change_name}")
+        render_full("\n".join(content), title="New Flow")
 
     # Execute flow
     while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED):
         current_step = flow.state.get_current_step()
         if not current_step:
-            print("No current step, marking flow as complete")
+            render_full("No current step, marking flow as complete", title="Info")
             flow.status = FlowStatus.COMPLETED
             break
 
-        print(f"\n{'='*60}")
-        print(f"Step: {current_step.step_type.value}")
-        print(f"Status: {current_step.status.value}")
-        print(f"{'='*60}")
+        # Display step header
+        render_full(
+            f"Step: {current_step.step_type.value}\nStatus: {current_step.status.value}",
+            title="Current Step"
+        )
 
         step_start_time = datetime.now()
 
@@ -323,7 +440,10 @@ def run_flow(
         if current_step.step_type == StepType.CONFIRM and flow_id and current_step.status == StepStatus.PAUSED:
             existing_result = _check_confirm_response(flow, current_step, project_root)
             if existing_result:
-                print(f"  Found existing confirmation response: {existing_result.value}")
+                render_full(
+                    f"Found existing confirmation response: {existing_result.value}",
+                    title="Confirmation"
+                )
                 result = existing_result
             else:
                 try:
@@ -342,13 +462,18 @@ def run_flow(
                     return 130
                 continue
 
+        # Display step output with full content
+        _display_step_output(current_step)
+
         if result == StepStatus.FAILED:
             error_msg = current_step.error_message or "Unknown error"
-            print(f"Step failed: {error_msg}", file=sys.stderr)
+            display_error(f"Step failed: {error_msg}")
 
             max_retries = 3
             if current_step.retry_count >= max_retries:
-                print(f"Max retries ({max_retries}) reached for step {current_step.step_type.value}", file=sys.stderr)
+                display_error(
+                    f"Max retries ({max_retries}) reached for step {current_step.step_type.value}"
+                )
                 # Auto-fail: exit without asking user
                 flow.status = FlowStatus.FAILED
                 persistence.save_flow(flow)
@@ -377,7 +502,10 @@ def run_flow(
 
         # Handle REVISION_NEEDED status from CONFIRM step
         if result == StepStatus.REVISION_NEEDED:
-            print(f"  Revision requested - transitioning to previous step")
+            render_full(
+                "Revision requested - transitioning to previous step",
+                title="Revision"
+            )
             # Mark the CONFIRM step as completed with revision info
             current_step.status = StepStatus.REVISION_NEEDED
             # Transition will handle going back to the previous step
@@ -386,7 +514,10 @@ def run_flow(
             continue
 
         step_duration = (datetime.now() - step_start_time).total_seconds()
-        print(f"Step completed: {current_step.step_type.value} ({step_duration:.1f}s)")
+        render_full(
+            f"Step completed: {current_step.step_type.value} ({step_duration:.1f}s)",
+            title="Progress"
+        )
 
         # Transition to next step
         state_machine.transition_to_next(flow)
@@ -394,17 +525,15 @@ def run_flow(
 
     # Flow complete
     if flow.status == FlowStatus.COMPLETED:
-        print(f"\n{'='*60}")
-        print("Flow completed successfully!")
-        print(f"{'='*60}")
+        display_success("Flow completed successfully!")
         return 0
     elif flow.status == FlowStatus.FAILED:
         current_step = flow.state.get_current_step()
         error_msg = current_step.error_message if current_step else "Unknown error"
-        print(f"\nFlow failed: {error_msg}", file=sys.stderr)
+        display_error(f"Flow failed: {error_msg}")
         return 1
     else:
-        print(f"\nFlow ended with status: {flow.status.value}")
+        render_full(f"Flow ended with status: {flow.status.value}", title="Status")
         return 0
 
 
@@ -425,12 +554,12 @@ def run_loop_mode(
     Returns:
         Exit code
     """
-    print("="*60)
-    print("SE3 Loop Mode")
-    print("="*60)
-    print("Loop mode will automatically find and execute tasks.")
-    print("Each task runs in an isolated branch.")
-    print()
+    render_full(
+        "SE3 Loop Mode\n\n"
+        "Loop mode will automatically find and execute tasks.\n"
+        "Each task runs in an isolated branch.",
+        title="Loop Mode"
+    )
 
     current_task = initial_task
 
@@ -442,19 +571,17 @@ def run_loop_mode(
         iteration_range = range(1, 2**31)
 
     for iteration in iteration_range:
-        print(f"\n{'='*60}")
-        print(f"Loop iteration #{iteration}")
-        print(f"{'='*60}")
+        render_full(f"Loop iteration #{iteration}", title="Iteration")
 
         if not current_task:
             # Find next task from backlog/roadmap
             current_task = find_next_task(project_root)
 
             if not current_task:
-                print("No more tasks found. Loop mode complete.")
+                render_full("No more tasks found. Loop mode complete.", title="Done")
                 break
 
-        print(f"Task: {current_task}")
+        render_full(f"Task: {current_task}", title="Current Task")
 
         # Run the flow for this task
         exit_code = run_flow(
@@ -465,7 +592,7 @@ def run_loop_mode(
         )
 
         if exit_code != 0:
-            print(f"\nTask failed with exit code {exit_code}")
+            display_error(f"Task failed with exit code {exit_code}")
             options = ["Continue to next task", "Exit loop mode"]
             choice = prompt_user_choice("What would you like to do?", options)
 
@@ -475,16 +602,16 @@ def run_loop_mode(
         # Clear for next iteration
         current_task = None
 
-        print("\nTask complete. Looking for next task...")
+        render_full("Task complete. Looking for next task...", title="Progress")
 
         # Check if max iterations reached
         if max_iterations is not None and iteration >= max_iterations:
-            print(f"\n{'='*60}")
-            print(f"Loop mode completed: Reached maximum iterations ({max_iterations})")
-            print(f"{'='*60}")
+            display_success(
+                f"Loop mode completed: Reached maximum iterations ({max_iterations})"
+            )
             break
 
-    print("\nLoop mode ended.")
+    render_full("Loop mode ended.", title="Done")
     return 0
 
 
@@ -537,7 +664,7 @@ def find_next_task(project_root: Path) -> Optional[str]:
             pass
 
     # Check for TODO comments in code
-    print("Scanning for TODOs in codebase...")
+    render_full("Scanning for TODOs in codebase...", title="Search")
     try:
         result = subprocess.run(
             ["git", "grep", "-n", "TODO", "--", "*.py", "*.md"],
@@ -550,7 +677,7 @@ def find_next_task(project_root: Path) -> Optional[str]:
             if lines:
                 first_todo = lines[0].split(":", 2)
                 if len(first_todo) >= 3:
-                    return f"[TODO] {first_todo[2].strip()[:80]}"
+                    return f"[TODO] {first_todo[2].strip()}"
     except Exception:
         pass
 
