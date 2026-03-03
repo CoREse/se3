@@ -422,7 +422,6 @@ class LLMCaller:
         extractor = JSONExtractor(
             project_root=self.project_root,
             timeout=300,  # 5 minutes for large outputs
-            max_content_length=200000,  # ~200KB for code with file contents
         )
 
         result = extractor.extract(
@@ -470,7 +469,6 @@ class LLMCaller:
         extractor = JSONExtractor(
             project_root=self.project_root,
             timeout=300,  # 5 minutes for large outputs
-            max_content_length=200000,  # ~200KB for code with file contents
         )
 
         result = extractor.extract(

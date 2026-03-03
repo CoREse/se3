@@ -39,18 +39,15 @@ class JSONExtractor:
         self,
         project_root: Optional[Any] = None,
         timeout: int = 60,
-        max_content_length: int = 200000,  # ~200KB for large code outputs
     ):
         """Initialize extractor.
 
         Args:
             project_root: Project root for LLM caller
-            timeout: Timeout for extraction call (short, as this is fast)
-            max_content_length: Truncate content if too long
+            timeout: Timeout for extraction call
         """
         self.project_root = project_root
         self.timeout = timeout
-        self.max_content_length = max_content_length
 
     def extract(
         self,
@@ -149,17 +146,6 @@ class JSONExtractor:
         # Log if content was reduced
         if len(content) < len(raw_output):
             logger.info(f"Extracted {len(content)} chars of text from {len(raw_output)} chars of raw output")
-        
-        # Truncate if still too long
-        if len(content) > self.max_content_length:
-            # Try to truncate at a reasonable boundary (end of a JSON structure)
-            truncate_point = content.rfind("}", 0, self.max_content_length)
-            if truncate_point < self.max_content_length * 0.8:
-                truncate_point = content.rfind("\n", 0, self.max_content_length)
-            if truncate_point < self.max_content_length * 0.8:
-                truncate_point = self.max_content_length
-            content = content[:truncate_point + 1]  # Include the closing brace
-            logger.warning(f"Content truncated from {len(raw_output)} to {len(content)} for extraction")
 
         schema_section = f"Expected schema: {schema_hint}" if schema_hint else "Ensure all relevant data is included in the JSON."
 
