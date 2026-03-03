@@ -1,20 +1,18 @@
 """Summarize step handler.
 
 Generates a summary and handoff context for the completed work.
-Uses LLM to create a comprehensive summary.
+Uses LLM to create a comprehensive summary in natural language.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from ..llm_caller import LLMCaller, LLMCallError
+from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
-from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -40,28 +38,53 @@ SUMMARIZE_PROMPT = """You are an expert software engineering assistant. Generate
 {commit_info}
 
 ## Instructions
-Generate a comprehensive summary including:
+Generate a comprehensive summary in Markdown format. Include:
 
-1. **What was accomplished**: Brief description of what was done
-2. **Key changes**: List of major changes made
-3. **Files modified**: List of files that were changed
-4. **Testing status**: Whether tests pass and any notes
-5. **Remaining work**: Any follow-up tasks or TODOs
-6. **Handoff context**: Information useful for future sessions
+1. **What was accomplished** - Brief description of what was done
+2. **Key changes** - List of major changes made  
+3. **Files modified** - List of files that were changed
+4. **Testing status** - Whether tests pass and any notes
+5. **Remaining work** - Any follow-up tasks or TODOs
+6. **Handoff context** - Information useful for future sessions
+7. **Suggested next steps** - Recommended next actions
 
-Respond in JSON format:
-```json
-{{
-    "summary": "Brief summary of work completed",
-    "key_changes": ["change1", "change2", ...],
-    "files_modified": ["file1.py", "file2.py"],
-    "testing_status": "pass|fail|partial - with details",
-    "remaining_work": ["task1", "task2"] or [],
-    "handoff_context": "Context for future sessions",
-    "next_steps": ["suggested next action1", "action2"]
-}}
-```
+Format your response as clean Markdown with clear headings and bullet points.
 """
+
+
+def _extract_text_from_stream_json(response: str) -> str:
+    """Extract text content from stream-json (NDJSON) response.
+    
+    Args:
+        response: Raw NDJSON response from LLM
+        
+    Returns:
+        Extracted text content
+    """
+    if not response:
+        return ""
+    
+    import json
+    text_parts = []
+    
+    for line in response.strip().split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            data = json.loads(line)
+            if isinstance(data, dict) and data.get('type') == 'assistant':
+                message = data.get('message', {})
+                content = message.get('content', [])
+                for item in content:
+                    if isinstance(item, dict) and item.get('type') == 'text':
+                        text = item.get('text', '')
+                        if text:
+                            text_parts.append(text)
+        except json.JSONDecodeError:
+            continue
+    
+    return ''.join(text_parts).strip()
 
 
 def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
@@ -102,32 +125,32 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     logger.info("Generating summary...")
 
     try:
-        # Call LLM for summary (use EXTRACT mode - has fallback if parsing fails)
+        # Call LLM for summary (natural language output, no JSON required)
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value)
         response = caller.call(
             prompt=prompt,
-            json_mode="extract",
-            json_schema_hint='{"summary": "...", "key_changes": [], "files_modified": [], "testing_status": "...", "remaining_work": [], "handoff_context": "...", "next_steps": []}',
+            json_mode="off",
         )
 
-        # Parse JSON response
-        summary = parse_json_response(response, required_keys=["summary"])
+        # Extract text from response
+        summary_text = _extract_text_from_stream_json(response)
 
-        if not summary:
-            # Create a basic summary if parsing fails
-            summary = _create_basic_summary(flow, changes_made, test_results)
+        if not summary_text:
+            summary_text = _create_basic_summary_text(flow, changes_made, test_results)
 
-        # Store outputs
-        step.outputs["summary"] = summary
-        step.outputs["handoff_context"] = summary.get("handoff_context", "")
-        step.outputs["next_steps"] = summary.get("next_steps", [])
+        # Store output
+        step.outputs["summary"] = summary_text
 
-        # Also save to a standard location
-        _save_summary(flow, summary)
+        # Print to terminal for user visibility
+        print("\n" + "=" * 60)
+        print("📋 WORK SUMMARY")
+        print("=" * 60)
+        print(summary_text)
+        print("=" * 60)
 
-        # Print summary to terminal for user visibility
-        _print_summary(summary)
+        # Save to file
+        _save_summary(flow, summary_text)
 
         logger.info("Summary generated successfully")
 
@@ -136,9 +159,8 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     except Exception as e:
         logger.exception("Summarize step failed")
         # Don't fail the flow - create a basic summary
-        summary = _create_basic_summary(flow, changes_made, test_results)
-        step.outputs["summary"] = summary
-        step.outputs["handoff_context"] = summary.get("handoff_context", "")
+        summary_text = _create_basic_summary_text(flow, changes_made, test_results)
+        step.outputs["summary"] = summary_text
         return StepStatus.COMPLETED
 
 
@@ -189,11 +211,11 @@ def _format_verification(verification_result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _create_basic_summary(
+def _create_basic_summary_text(
     flow: FlowInstance,
     changes_made: dict[str, Any],
     test_results: dict[str, Any],
-) -> dict[str, Any]:
+) -> str:
     """Create a basic summary if LLM generation fails.
 
     Args:
@@ -202,95 +224,63 @@ def _create_basic_summary(
         test_results: Test results
 
     Returns:
-        Basic summary dictionary
+        Basic summary text in Markdown format
     """
     files_changed = changes_made.get("files_changed", [])
     file_list = [f.get("path", "?") for f in files_changed]
 
-    return {
-        "summary": f"Completed {flow.task_type or 'task'}: {flow.task_description[:50]}...",
-        "key_changes": [f"Modified {len(file_list)} files"],
-        "files_modified": file_list,
-        "testing_status": "passed" if test_results.get("passed") else "unknown",
-        "remaining_work": [],
-        "handoff_context": f"Flow {flow.flow_id} completed on {datetime.now().isoformat()}",
-        "next_steps": [],
-    }
+    lines = [
+        f"## Work Summary\n",
+        f"Completed {flow.task_type or 'task'}: {flow.task_description[:100]}...\n",
+        f"### Key Changes",
+        f"- Modified {len(file_list)} files\n",
+        f"### Files Modified",
+    ]
+    for f in file_list[:10]:
+        lines.append(f"- {f}")
+    if len(file_list) > 10:
+        lines.append(f"- ... and {len(file_list) - 10} more")
+    
+    lines.extend([
+        "",
+        f"### Testing Status",
+        f"{'Tests passed' if test_results.get('passed') else 'Test status unknown'}",
+        "",
+        f"### Handoff Context",
+        f"Flow {flow.flow_id} completed on {datetime.now().isoformat()}",
+    ])
+
+    return "\n".join(lines)
 
 
-def _print_summary(summary: dict[str, Any]) -> None:
-    """Print summary to terminal for user visibility.
-
-    Args:
-        summary: Summary dictionary
-    """
-    print("\n" + "=" * 60)
-    print("📋 WORK SUMMARY")
-    print("=" * 60)
-
-    if "summary" in summary:
-        print(f"\n{summary['summary']}")
-
-    if "key_changes" in summary and summary["key_changes"]:
-        print("\n📝 Key Changes:")
-        for change in summary["key_changes"]:
-            print(f"  • {change}")
-
-    if "files_modified" in summary and summary["files_modified"]:
-        print("\n📁 Files Modified:")
-        for file in summary["files_modified"][:10]:  # Limit to 10 files
-            print(f"  • {file}")
-        if len(summary["files_modified"]) > 10:
-            print(f"  ... and {len(summary['files_modified']) - 10} more")
-
-    if "testing_status" in summary:
-        print(f"\n✅ Testing Status: {summary['testing_status']}")
-
-    if "remaining_work" in summary and summary["remaining_work"]:
-        print("\n⏭️  Remaining Work:")
-        for task in summary["remaining_work"]:
-            print(f"  • {task}")
-
-    if "next_steps" in summary and summary["next_steps"]:
-        print("\n➡️  Suggested Next Steps:")
-        for step in summary["next_steps"]:
-            print(f"  • {step}")
-
-    print("\n" + "=" * 60)
-
-
-def _save_summary(flow: FlowInstance, summary: dict[str, Any]) -> None:
+def _save_summary(flow: FlowInstance, summary_text: str) -> None:
     """Save the summary to a standard location.
 
     Args:
         flow: The flow instance
-        summary: Summary dictionary
+        summary_text: Summary text to save
     """
-    from pathlib import Path
-
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
 
-    # Save to se3/state/summary.json
+    # Save to se3/state/summary-{flow_id}.md (Markdown format)
     summary_dir = project_root / "se3" / "state"
     summary_dir.mkdir(parents=True, exist_ok=True)
 
-    summary_file = summary_dir / f"summary-{flow.flow_id}.json"
+    summary_file = summary_dir / f"summary-{flow.flow_id}.md"
 
     try:
         import json
-        summary_file.write_text(
-            json.dumps(
-                {
-                    "flow_id": flow.flow_id,
-                    "task_description": flow.task_description,
-                    "completed_at": datetime.now().isoformat(),
-                    **summary,
-                },
-                indent=2,
-                default=str,
-            ),
-            encoding="utf-8",
-        )
+        content = f"""# Work Summary
+
+**Flow ID:** {flow.flow_id}
+**Task:** {flow.task_description}
+**Completed:** {datetime.now().isoformat()}
+
+---
+
+{summary_text}
+"""
+        summary_file.write_text(content, encoding="utf-8")
         logger.debug(f"Summary saved to {summary_file}")
     except Exception as e:
         logger.warning(f"Failed to save summary: {e}")

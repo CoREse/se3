@@ -76,7 +76,7 @@ se3 run "修复内存泄漏" --type=bugfix
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | implementation, spec_content | verification_result, issues |
 | `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | changes_made | updated_specs |
 | `commit` | 提交变更 | 否（程序执行） | - | changes_made | commit_hash |
-| `summarize` | 生成总结和 handoff | 是 | EXTRACT | all_previous_outputs | summary, handoff_context |
+| `summarize` | 生成总结和 handoff | 是 | 文本 | all_previous_outputs | summary (Markdown 文本) |
 | `project_summary` | 生成项目上下文摘要 | 是 | 文本 | 项目状态 | 摘要字符串 |
 
 **不同任务类型的步骤序列：**

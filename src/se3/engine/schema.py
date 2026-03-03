@@ -385,7 +385,7 @@ def _summarize_outputs(outputs: Dict[str, Any], step_type: str) -> Dict[str, Any
         "verify_spec": ["verification_passed"],
         "update_spec": ["specs_updated"],
         "commit": ["commit_hash"],
-        "summarize": ["summary", "handoff_context"]
+        "summarize": ["summary"]
     }
 
     fields = key_fields.get(step_type, list(outputs.keys())[:3])
@@ -415,7 +415,7 @@ def _extract_key_outputs(outputs: Dict[str, Any], step_type: str) -> Dict[str, A
         "verify_spec": ["verification_result", "issues_found"],
         "update_spec": ["updated_specs"],
         "commit": ["commit_hash", "commit_message"],
-        "summarize": ["summary", "handoff_context"]
+        "summarize": ["summary"]
     }
 
     keys = key_map.get(step_type, [])

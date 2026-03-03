@@ -212,7 +212,7 @@ openspec/changes/
 
 **Modern Flow-Based Tracking:**
 - Flow instances tracked in `se3/state/engine.json`
-- Summaries stored in `se3/state/summary-<flow-id>.json`
+- Summaries stored in `se3/state/summary-<flow-id>.md` (Markdown format)
 - `progress.md` aggregates completed flows
 
 #### Scenario: Create new flow

@@ -429,7 +429,7 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "description": "Generate summary and handoff",
         "uses_llm": True,
         "inputs": ["changes_made", "commit_hash"],
-        "outputs": ["summary", "handoff_context"],
+        "outputs": ["summary"],
     },
 }
 
