@@ -434,12 +434,11 @@ class LLMCaller:
                 "JSON extraction failed: Could not extract valid JSON from output"
             )
 
-        # Convert back to stream-json format
+        # Return as JSON string (parse_json_response will handle it)
         json_str = json.dumps(result, ensure_ascii=False, indent=2)
-        synthetic_output = self._format_as_stream_json(json_str)
 
         print("  [llm-caller] ✅ JSON extraction complete")
-        return synthetic_output
+        return json_str
 
     def _call_two_phase(
         self,
@@ -482,12 +481,11 @@ class LLMCaller:
                 "Two-phase JSON extraction failed: Could not extract valid JSON from output"
             )
 
-        # Convert back to stream-json format for compatibility
+        # Return as JSON string (parse_json_response will handle it)
         json_str = json.dumps(result, ensure_ascii=False, indent=2)
-        synthetic_output = self._format_as_stream_json(json_str)
 
         print("  [llm-caller] ✅ JSON extraction complete")
-        return synthetic_output
+        return json_str
 
     @staticmethod
     def _format_as_stream_json(content: str) -> str:
