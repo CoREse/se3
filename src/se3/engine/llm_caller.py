@@ -163,6 +163,7 @@ class StreamJSONTracker:
                 self.message_count += 1
                 message = data.get('message', {})
                 content = message.get('content', [])
+                has_text_or_thinking = False
                 for item in content:
                     if isinstance(item, dict):
                         item_type = item.get('type', '')
@@ -171,11 +172,13 @@ class StreamJSONTracker:
                             if text:
                                 self.text_chunks += 1
                                 self.total_text_len += len(text)
+                                has_text_or_thinking = True
                                 # Stream full text content directly
                                 print(text, end='', flush=True)
                         elif item_type == 'thinking':
                             thinking = item.get('thinking', '')
                             if thinking:
+                                has_text_or_thinking = True
                                 # Stream thinking content in gray italic
                                 print(f"{GRAY}{ITALIC}{thinking}{RESET}", end='', flush=True)
                         elif item_type == 'tool_use':
@@ -185,6 +188,9 @@ class StreamJSONTracker:
                             # Format and print tool_use preview
                             preview = format_tool_use_preview(name, tool_input)
                             print(f"\n  [llm-stream] 🔧 {preview}...")
+                # Add newline after text/thinking content to separate from next message
+                if has_text_or_thinking:
+                    print()  # Newline
 
             elif msg_type == 'tool_result':
                 result = data.get('result', {})
