@@ -168,21 +168,16 @@ def _load_version_config(project_root: Path) -> VersionConfig:
     return load_cfg(project_root)
 
 
-def _get_task_type(flow: FlowInstance) -> TaskType:
+def _get_task_type(flow: FlowInstance) -> str:
     """Determine task type from flow context.
 
     Args:
         flow: The flow instance
 
     Returns:
-        TaskType enum value
+        Task type string (feature, bugfix, small, etc.)
     """
-    task_type_str = flow.task_type or "feature"
-    try:
-        return TaskType(task_type_str.lower())
-    except ValueError:
-        # Default to feature for unknown task types
-        return TaskType.FEATURE
+    return flow.task_type or "feature"
 
 
 def _stage_file(project_root: Path, file_path: Path) -> None:

@@ -2,14 +2,16 @@
 
 ## Current Version
 
-**3.18.6** — fix: Fix commit step to properly skip version bump for 'none' bump type.
-- Fixed commit step to check if bump_rule is 'none' and skip version bump
-- Small/review/directive tasks now correctly preserve version
+**3.18.7** — fix: Fix _get_task_type to return string instead of TaskType enum.
+- _get_task_type now returns task type string (e.g., 'small', 'feature')
+- This fixes bump rule lookup for non-standard task types
+- Small/review/directive tasks now correctly skip version bump
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.18.7 | 2026-03-04 | fix: _get_task_type returns string. Fixes version bump for small/review/directive task types. |
 | 3.18.6 | 2026-03-04 | fix: Commit step version bump fix. Properly skip bump for 'none' bump type tasks (small, review, directive). |
 | 3.18.5 | 2026-03-04 | fix: Implement step code validation and version bump fix. Prevents file corruption from LLM descriptive text, small/review/directive tasks no longer bump version. |
 | 3.18.4 | 2026-03-04 | feat: se3 init now creates VERSIONS.md and README.md. Auto-generates initial project documentation with version tracking. |
