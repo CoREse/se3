@@ -266,6 +266,18 @@ se3 run "Fix typo in README" --type=small
 
 The analyze step SHALL auto-detect task type if not specified, but explicit type SHALL override.
 
+#### Scenario: Entry with explicit type
+- **GIVEN** user wants to run a specific workflow type
+- **WHEN** user executes `se3 run "task" --type=bugfix`
+- **THEN** the system uses the bugfix workflow
+- **AND** skips the design step
+
+#### Scenario: Entry with auto-detection
+- **GIVEN** user provides a task description
+- **WHEN** user executes `se3 run "Implement new feature"`
+- **THEN** the analyze step auto-detects the task type
+- **AND** selects appropriate workflow
+
 ### Requirement: Step Retry and Recovery
 
 The system SHALL handle step failures with retry and recovery options.

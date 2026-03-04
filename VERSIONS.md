@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.18.2** — feat: Discovery mode with project context. Discovery now provides rich project context to help users explore requirements: project type/name/git info, available specs list, base spec content. Helps AI ask more relevant questions considering existing architecture.
+**3.18.3** — fix: Add missing WHEN/THEN scenarios to spec requirements. Fixed 9 spec lint errors by adding scenarios to SHALL requirements in se3-commands, se3-workflows, and test-project specs.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.18.3 | 2026-03-04 | fix: Add missing WHEN/THEN scenarios to spec requirements. Fixed spec lint errors in se3-commands (7), se3-workflows (1), and test-project (1) specs. |
 | 3.18.2 | 2026-03-03 | feat: Discovery mode with project context. Provides project info (type, name, git), specs list, and base spec content to help exploration. |
 | 3.18.1 | 2026-03-03 | fix: Allow user confirmation at max discovery rounds. Fix boundary case where confirmation at round 10 would trigger fallback. |
 | 3.18.0 | 2026-03-03 | feat: Add Discovery Workflow for requirements exploration. New `discovery` step type with multi-turn conversation support. New `--discover` / `-d` CLI flag. Supports pause/resume, max 10 rounds, refined description passed to analyze. |

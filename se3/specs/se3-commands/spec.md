@@ -58,6 +58,17 @@ The system MAY support legacy commands (`se3:start`, `se3:work`, `se3:done`) for
 - New projects SHOULD use `se3 run` exclusively
 - Documentation prioritizes `se3 run` workflow
 
+#### Scenario: Legacy command execution
+- **GIVEN** a user executes a legacy command like `se3:start`
+- **WHEN** the command runs
+- **THEN** it executes successfully but displays a deprecation warning
+- **AND** suggests using `se3 run` instead
+
+#### Scenario: New project uses modern command
+- **GIVEN** a new SE3 project
+- **WHEN** user runs `se3 run "task description"`
+- **THEN** the command executes without deprecation warnings
+
 ### Requirement: `se3 status` Command
 
 The `se3 status` command SHALL display the current project and flow state.
@@ -152,6 +163,17 @@ se3 lint [<path>] [--fix]
 3. No duplicate scenario names
 4. Requirement IDs must be unique
 
+#### Scenario: Valid specs pass linting
+- **GIVEN** all spec files follow SE3 conventions
+- **WHEN** user runs `se3 lint`
+- **THEN** the command reports success with no errors
+
+#### Scenario: Invalid specs report errors
+- **GIVEN** a spec file is missing required sections
+- **WHEN** user runs `se3 lint`
+- **THEN** the command reports validation errors
+- **AND** indicates which files need fixes
+
 ### Requirement: `se3 verify` Command
 
 The `se3 verify` command SHALL verify that spec scenarios have corresponding implementation.
@@ -160,6 +182,12 @@ The `se3 verify` command SHALL verify that spec scenarios have corresponding imp
 ```bash
 se3 verify [<spec-path>] [--format json]
 ```
+
+#### Scenario: Verify implementation matches spec
+- **GIVEN** a spec file with defined scenarios
+- **WHEN** user runs `se3 verify <spec-path>`
+- **THEN** the command checks if all scenarios are implemented
+- **AND** reports any missing implementations
 
 ### Requirement: `se3 guardrails` Command
 
@@ -173,6 +201,12 @@ se3 guardrails <spec-file> [--original <original-file>]
 **Guardrail Checks:**
 1. **must_not_delete**: Detect deleted WHEN/THEN scenarios
 2. **must_not_weaken**: Detect weakened language (SHALL → SHOULD, MUST → SHOULD)
+
+#### Scenario: Detect spec violations
+- **GIVEN** a modified spec file
+- **WHEN** user runs `se3 guardrails <spec-file>`
+- **THEN** the command compares with original spec
+- **AND** reports any deleted requirements or weakened language
 
 ### Requirement: `se3 health` Command
 
@@ -189,6 +223,12 @@ se3 health [--format json] [--stale-days <n>]
 - Directory structure drift
 - Orphaned state files
 
+#### Scenario: Check system health
+- **GIVEN** an SE3 project with active flows
+- **WHEN** user runs `se3 health`
+- **THEN** the command checks for zombie/stale flows
+- **AND** reports any integrity issues found
+
 ### Requirement: `se3 init` Command
 
 The `se3 init` command SHALL initialize a new SE3 project.
@@ -204,6 +244,13 @@ se3 init [--force]
 3. Create `se3.yaml` configuration file (if not exists)
 4. Create `se3/` directory structure
 
+#### Scenario: Initialize new project
+- **GIVEN** a directory without SE3 configuration
+- **WHEN** user runs `se3 init`
+- **THEN** the command creates `.claude/` directory
+- **AND** creates `CLAUDE.md` and `se3.yaml` files
+- **AND** sets up `se3/` directory structure
+
 ### Requirement: `se3 migrate` Command
 
 The `se3 migrate` command SHALL migrate legacy directory structures to the current format.
@@ -214,10 +261,17 @@ se3 migrate [--dry-run] [--force]
 ```
 
 **Migration Steps:**
-1. Detect legacy directories (`human-calls/`, `.collab/`)
+1. Detect legacy directories (`human-cells/`, `.collab/`)
 2. Create new `se3/` structure
 3. Move existing data preserving structure
 4. Update `.gitignore`
+
+#### Scenario: Migrate legacy project
+- **GIVEN** a project with legacy SE3 structure
+- **WHEN** user runs `se3 migrate`
+- **THEN** the command detects legacy directories
+- **AND** migrates data to new `se3/` structure
+- **AND** updates `.gitignore` accordingly
 
 ### Requirement: `se3 history` Command
 

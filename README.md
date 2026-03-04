@@ -1,6 +1,6 @@
 # SE 3.0 — Software Engineering 3.0 Framework
 
-![Version](https://img.shields.io/badge/version-3.18.2-blue)
+![Version](https://img.shields.io/badge/version-3.18.3-blue)
 
 An AI-first long-horizon development framework for Claude Code.
 
@@ -216,7 +216,7 @@ Native Task tool. Parent spawns sub-agents per openspec change. Specs on the fil
 
 See [VERSIONS.md](VERSIONS.md) for the complete version history.
 
-**Current Version: 3.17.4**
+**Current Version: 3.18.3**
 
 When modifying framework files:
 1. Bump `SE3_FRAMEWORK_VERSION` in `tools/se3_tools/__init__.py`

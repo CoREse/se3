@@ -93,6 +93,12 @@
         └── task-cli/spec.md
 ```
 
+#### Scenario: Verify project structure
+- **GIVEN** the test project is initialized
+- **WHEN** checking the directory structure
+- **THEN** all required files and directories exist
+- **AND** the project can be imported and run
+
 ### Requirement: Test Reset Capability
 
 测试项目 SHALL 支持通过 git 恢复到测试前状态。
