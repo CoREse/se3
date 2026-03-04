@@ -27,19 +27,19 @@ class VersionConfig:
     # Version file location (relative to project root)
     version_file: Optional[str] = None  # Auto-detect if None
     
-    # Bump rules: map task type to bump type
+    # Bump rules: map task type to bump type (following SemVer 2.0.0)
     bump_rules: dict[str, str] = field(default_factory=lambda: {
-        "feature": "minor",
+        "feature": "minor",   # New functionality
         "feat": "minor",
-        "bugfix": "patch",
+        "bugfix": "patch",    # Bug fixes
         "fix": "patch",
-        "small": "none",  # Small changes don't bump version
-        "refactor": "patch",
-        "docs": "none",
-        "test": "none",
-        "chore": "none",
-        "review": "none",  # Review doesn't bump version
-        "directive": "none",  # Directive doesn't bump version
+        "small": "patch",     # Small changes are also fixes (typo, etc.)
+        "refactor": "patch",  # Refactoring is internal change
+        "docs": "patch",      # Doc fixes are still fixes
+        "test": "patch",      # Test additions/fixes
+        "chore": "patch",     # Maintenance tasks
+        "review": "none",     # No code changes
+        "directive": "minor", # Following instructions may add features
     })
     
     # Pre-release configuration
