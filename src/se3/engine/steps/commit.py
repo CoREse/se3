@@ -59,18 +59,28 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
             if version_file:
                 # Determine task type and corresponding bump type
                 task_type = _get_task_type(flow)
-                bump_type = version_config.bump_rules.get(task_type, BumpType.PATCH)
+                bump_type_str = version_config.bump_rules.get(task_type, "patch")
+                
+                # Skip version bump for 'none' bump type
+                if bump_type_str == "none":
+                    logger.info(f"Skipping version bump for task type '{task_type}' (bump rule: none)")
+                else:
+                    # Convert string to BumpType enum
+                    try:
+                        bump_type = BumpType(bump_type_str)
+                    except ValueError:
+                        bump_type = BumpType.PATCH
 
-                # Save original version for potential rollback
-                original_version = version_bumper.read_version(version_file)
+                    # Save original version for potential rollback
+                    original_version = version_bumper.read_version(version_file)
 
-                # Bump the version
-                new_version = version_bumper.bump_version(
-                    path=version_file,
-                    bump_type=bump_type
-                )
-                version_bumped = True
-                logger.info(f"Bumped version: {original_version} -> {new_version}")
+                    # Bump the version
+                    new_version = version_bumper.bump_version(
+                        path=version_file,
+                        bump_type=bump_type
+                    )
+                    version_bumped = True
+                    logger.info(f"Bumped version: {original_version} -> {new_version}")
 
                 # Stage the version file
                 _stage_file(project_root, version_file)

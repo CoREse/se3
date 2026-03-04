@@ -2,15 +2,15 @@
 
 ## Current Version
 
-**3.18.5** — fix: Add code syntax validation to implement step and fix small mode version bump.
-- Implement step now validates Python code with AST parsing before writing files
-- Added detection of descriptive text vs actual code
-- Fixed small/directive/review task types to not bump version (changed from patch to none)
+**3.18.6** — fix: Fix commit step to properly skip version bump for 'none' bump type.
+- Fixed commit step to check if bump_rule is 'none' and skip version bump
+- Small/review/directive tasks now correctly preserve version
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.18.6 | 2026-03-04 | fix: Commit step version bump fix. Properly skip bump for 'none' bump type tasks (small, review, directive). |
 | 3.18.5 | 2026-03-04 | fix: Implement step code validation and version bump fix. Prevents file corruption from LLM descriptive text, small/review/directive tasks no longer bump version. |
 | 3.18.4 | 2026-03-04 | feat: se3 init now creates VERSIONS.md and README.md. Auto-generates initial project documentation with version tracking. |
 | 3.18.3 | 2026-03-04 | fix: Add missing WHEN/THEN scenarios to spec requirements. Fixed spec lint errors in se3-commands (7), se3-workflows (1), and test-project (1) specs. |
