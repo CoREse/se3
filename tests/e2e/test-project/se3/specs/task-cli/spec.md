@@ -1,1 +1,0 @@
-Added Requirement: Task Filtering section with GIVEN-WHEN-THEN scenarios for: List all tasks (default), List all tasks explicitly, List only pending tasks, List only done tasks, No tasks match filter

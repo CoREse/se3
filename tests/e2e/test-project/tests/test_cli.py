@@ -1,1 +1,0 @@
-Added TestListFilterCommand test class with comprehensive tests: test_list_default_shows_all_tasks, test_list_status_all_explicit, test_list_status_pending, test_list_status_done, test_list_pending_empty, test_list_done_empty, test_list_all_empty, test_list_status_invalid_value, test_list_pending_all_done, test_list_done_all_pending

@@ -1,1 +1,0 @@
-Added _filter_tasks_by_status() function to filter tasks by status. Modified the list command to accept a --status option with choices: all, pending, done. Added appropriate table titles based on the filter. Added contextual messages when no tasks match the filter.
