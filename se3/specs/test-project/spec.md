@@ -64,7 +64,12 @@
 ├── pyproject.toml          # Python 项目配置
 ├── README.md               # 项目文档
 ├── se3.yaml                # SE3 配置
+├── .se3_auto_test.yaml     # 自动测试配置
 ├── .gitignore              # Git 忽略规则
+├── LLM_TEST_GUIDE.md       # LLM 自动化测试指南
+├── scripts/                # 自动化脚本
+│   ├── auto_test.py        # 主测试脚本
+│   └── llm_test_wrapper.py # 交互式包装器
 ├── src/
 │   └── task_cli/
 │       ├── __init__.py     # 包初始化
@@ -126,9 +131,15 @@
 测试项目 SHALL 包含完整的测试文档。
 
 **文档清单：**
+- `LLM_TEST_GUIDE.md` - LLM 自动化测试指南
 - `tests/TEST_WORKFLOW.md` - 详细测试流程
 - `tests/prompts/README.md` - 测试 prompts 索引
 - `tests/prompts/*.md` - 各模式测试 prompt
+
+**自动化测试设施：**
+- `scripts/auto_test.py` - 主自动化测试脚本
+- `scripts/llm_test_wrapper.py` - 交互式包装器
+- `.se3_auto_test.yaml` - 自动测试配置
 
 #### Scenario: Follow test documentation
 - **GIVEN** 开发者需要运行测试
@@ -209,6 +220,56 @@ se3 run --discover "我想添加导出功能"
 cd /data/cre/workspace/test-project
 ./tests/reset.sh
 ```
+
+### LLM 自动化测试
+
+测试项目支持 LLM 完全自动化的测试流程，无需人类干预。
+
+**使用自动化测试脚本：**
+
+```bash
+# 运行所有模式测试
+cd /data/cre/workspace/test-project
+python scripts/auto_test.py --all
+
+# 运行特定模式测试
+python scripts/auto_test.py --mode=feature
+python scripts/auto_test.py --mode=bugfix
+python scripts/auto_test.py --mode=review
+python scripts/auto_test.py --mode=small
+
+# 使用 LLM 包装器（处理交互式提示）
+python scripts/llm_test_wrapper.py \
+  --mode=feature \
+  --prompt="实现任务导出功能" \
+  --timeout=600
+```
+
+**自动化测试特性：**
+
+1. **自动响应**: LLM 包装器自动检测提示并生成响应
+   - 恢复流程选择 → `1\n`
+   - 确认变更 → `y\n`
+   - 工具调用 → 安全检查后批准
+   - 多选提示 → 选择第一个选项
+
+2. **安全保护**: 自动拒绝危险命令
+   - `rm -rf /`, `mkfs`, `format` 等命令会被拒绝
+
+3. **状态监控**: 监控 `se3/state/engine.json` 跟踪执行进度
+
+4. **结果验证**: 自动验证：
+   - 文件变更是否符合预期
+   - 测试是否通过
+   - 版本是否正确更新
+
+**LLM 测试指南：**
+
+详见 `LLM_TEST_GUIDE.md`，包含：
+- 每个测试模式的详细说明
+- 验证清单模板
+- 错误处理策略
+- 输出报告格式
 
 ## Maintenance
 
