@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.18.3** — fix: Add missing WHEN/THEN scenarios to spec requirements. Fixed 9 spec lint errors by adding scenarios to SHALL requirements in se3-commands, se3-workflows, and test-project specs.
+**3.18.4** — feat: se3 init now creates VERSIONS.md and README.md. Updated init command to automatically create VERSIONS.md with initial 0.1.0 entry and README.md with version badge and VERSIONS.md reference. Updated se3-scaffold and se3-commands specs to document this behavior.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.18.4 | 2026-03-04 | feat: se3 init now creates VERSIONS.md and README.md. Auto-generates initial project documentation with version tracking. |
 | 3.18.3 | 2026-03-04 | fix: Add missing WHEN/THEN scenarios to spec requirements. Fixed spec lint errors in se3-commands (7), se3-workflows (1), and test-project (1) specs. |
 | 3.18.2 | 2026-03-03 | feat: Discovery mode with project context. Provides project info (type, name, git), specs list, and base spec content to help exploration. |
 | 3.18.1 | 2026-03-03 | fix: Allow user confirmation at max discovery rounds. Fix boundary case where confirmation at round 10 would trigger fallback. |

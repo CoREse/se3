@@ -235,21 +235,36 @@ The `se3 init` command SHALL initialize a new SE3 project.
 
 **Interface:**
 ```bash
-se3 init [--force]
+se3 init [--project-root PATH] [--name PROJECT_NAME]
 ```
 
 **Process:**
-1. Create `.claude/` directory
-2. Create `CLAUDE.md` with project-specific content
-3. Create `se3.yaml` configuration file (if not exists)
-4. Create `se3/` directory structure
+1. Create `se3/specs/` directory structure
+2. Create `se3.yaml` configuration file (if not exists)
+3. Create `se3/specs/base/spec.md` from template (if not exists)
+4. Create `VERSIONS.md` with initial version entry (if not exists)
+5. Create `README.md` with version badge (if not exists)
+
+**Created Files:**
+| File | Purpose |
+|------|---------|
+| `se3.yaml` | Project configuration |
+| `se3/specs/base/spec.md` | Base specification template |
+| `VERSIONS.md` | Version history (initial: 0.1.0) |
+| `README.md` | Project documentation with version badge |
 
 #### Scenario: Initialize new project
 - **GIVEN** a directory without SE3 configuration
 - **WHEN** user runs `se3 init`
-- **THEN** the command creates `.claude/` directory
-- **AND** creates `CLAUDE.md` and `se3.yaml` files
-- **AND** sets up `se3/` directory structure
+- **THEN** the command creates all required files
+- **AND** `README.md` includes reference to `VERSIONS.md`
+- **AND** `VERSIONS.md` contains initial 0.1.0 entry
+
+#### Scenario: Initialize with existing files
+- **GIVEN** a directory with existing README.md or VERSIONS.md
+- **WHEN** user runs `se3 init`
+- **THEN** existing files are preserved (not overwritten)
+- **AND** only missing SE3-specific files are created
 
 ### Requirement: `se3 migrate` Command
 

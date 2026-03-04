@@ -96,20 +96,40 @@ The system SHALL support configuring framework behavior via `se3.yaml` (with leg
 - **WHEN** no se3.yaml file exists in the project
 - **THEN** the framework runs with built-in default values
 
-### Requirement: SE3.md Generation via se3 init
+### Requirement: Project Initialization via se3 init
 
-The system SHALL generate SE3.md file via the `se3 init` command.
+The system SHALL initialize a new SE3 project via the `se3 init` command.
 
-The `se3 init` command MUST:
-1. Create the .claude/ directory if it doesn't exist
-2. Generate SE3.md with the complete framework implementation
-3. Generate CLAUDE.md with minimal framework references
-4. Ensure both files are properly formatted
-5. Preserve existing files if they already exist
+The `se3 init` command MUST create the following files (if they don't exist):
 
-#### Scenario: SE3.md generation on initialization
-- **WHEN** a user runs `se3 init` in a project directory
-- **THEN** the system creates .claude/SE3.md with the complete framework and .claude/CLAUDE.md with minimal content
+**Required Files:**
+1. **se3.yaml** — Project configuration with project name
+2. **se3/specs/base/spec.md** — Base specification from template
+3. **VERSIONS.md** — Version history with initial 0.1.0 entry
+4. **README.md** — Project documentation with:
+   - Version badge referencing current version
+   - Reference to VERSIONS.md for complete version history
+   - Basic project structure documentation
+
+**Optional/Existing Files:**
+- If any of the above files already exist, they are preserved (not overwritten)
+- A message is displayed indicating which files were skipped
+
+#### Scenario: Initialize new project
+- **GIVEN** a clean project directory without SE3 configuration
+- **WHEN** a user runs `se3 init` in the project directory
+- **THEN** the system creates:
+  - `se3.yaml` with project configuration
+  - `se3/specs/base/spec.md` with base specification template
+  - `VERSIONS.md` with initial 0.1.0 version entry
+  - `README.md` with project documentation and version badge
+
+#### Scenario: Initialize with existing files
+- **GIVEN** a project directory with existing README.md and VERSIONS.md
+- **WHEN** a user runs `se3 init`
+- **THEN** the system preserves the existing README.md and VERSIONS.md
+- **AND** creates only the missing SE3-specific files
+- **AND** displays a message indicating which files were skipped
 
 ### Requirement: Output Artifacts
 

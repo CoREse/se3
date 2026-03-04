@@ -1,6 +1,7 @@
 """SE3 init command — initialize project structure and base spec."""
 
 import logging
+from datetime import datetime
 from pathlib import Path
 
 import typer
@@ -13,6 +14,7 @@ SE3_DIR = "se3"
 SPECS_DIR = "specs"
 BASE_SPEC_DIR = "base"
 BASE_SPEC_FILE = "spec.md"
+TEMPLATES_DIR = "templates"
 
 # Default se3.yaml content
 DEFAULT_SE3_YAML = """\
@@ -24,11 +26,11 @@ project:
 """
 
 
-def _get_template_content() -> str:
-    """Load base spec template from package templates."""
-    template_path = Path(__file__).parent.parent / "templates" / "base_spec.md"
+def _get_template_content(template_name: str) -> str:
+    """Load template content from package templates."""
+    template_path = Path(__file__).parent.parent / "templates" / template_name
     if not template_path.exists():
-        raise FileNotFoundError(f"Base spec template not found: {template_path}")
+        raise FileNotFoundError(f"Template not found: {template_path}")
     return template_path.read_text()
 
 
@@ -39,6 +41,8 @@ def run_init(project_root: Path, project_name: str) -> dict:
     - se3/specs/ directory
     - se3.yaml (if not exists)
     - se3/specs/base/spec.md (from template, if not exists)
+    - VERSIONS.md (if not exists)
+    - README.md (if not exists)
 
     Args:
         project_root: Root directory of the project
@@ -70,7 +74,7 @@ def run_init(project_root: Path, project_name: str) -> dict:
 
     if not base_spec_path.exists():
         base_dir.mkdir(parents=True, exist_ok=True)
-        template = _get_template_content()
+        template = _get_template_content("base_spec.md")
         content = template.replace("{project_name}", project_name)
         base_spec_path.write_text(content)
         result["created"].append(f"{SE3_DIR}/{SPECS_DIR}/{BASE_SPEC_DIR}/{BASE_SPEC_FILE}")
@@ -78,6 +82,33 @@ def run_init(project_root: Path, project_name: str) -> dict:
     else:
         result["skipped"].append(f"{SE3_DIR}/{SPECS_DIR}/{BASE_SPEC_DIR}/{BASE_SPEC_FILE} (already exists)")
         logger.info(f"Skipped base spec (already exists): {base_spec_path}")
+
+    # 4. Create VERSIONS.md if not exists
+    versions_path = project_root / "VERSIONS.md"
+    if not versions_path.exists():
+        template = _get_template_content("versions_md.md")
+        content = template.replace("{project_name}", project_name)
+        content = content.replace("{date}", datetime.now().strftime("%Y-%m-%d"))
+        versions_path.write_text(content)
+        result["created"].append("VERSIONS.md")
+        logger.info(f"Created VERSIONS.md")
+    else:
+        result["skipped"].append("VERSIONS.md (already exists)")
+        logger.info("Skipped VERSIONS.md (already exists)")
+
+    # 5. Create README.md if not exists
+    readme_path = project_root / "README.md"
+    if not readme_path.exists():
+        template = _get_template_content("readme_md.md")
+        content = template.replace("{project_name}", project_name)
+        content = content.replace("{project_description}", f"{project_name} project.")
+        content = content.replace("{project_overview}", "Add project overview here.")
+        readme_path.write_text(content)
+        result["created"].append("README.md")
+        logger.info(f"Created README.md")
+    else:
+        result["skipped"].append("README.md (already exists)")
+        logger.info("Skipped README.md (already exists)")
 
     return result
 
@@ -90,8 +121,8 @@ def init(
 ):
     """Initialize SE3 project structure and generate base spec.
 
-    Creates the se3/ directory structure, se3.yaml config, and a base spec
-    template in se3/specs/base/spec.md.
+    Creates the se3/ directory structure, se3.yaml config, base spec
+    template, VERSIONS.md, and README.md.
 
     Examples:
         se3 init
