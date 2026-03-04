@@ -33,12 +33,13 @@ class VersionConfig:
         "feat": "minor",
         "bugfix": "patch",
         "fix": "patch",
-        "small": "patch",
+        "small": "none",  # Small changes don't bump version
         "refactor": "patch",
         "docs": "none",
         "test": "none",
         "chore": "none",
-        "review": "none",
+        "review": "none",  # Review doesn't bump version
+        "directive": "none",  # Directive doesn't bump version
     })
     
     # Pre-release configuration

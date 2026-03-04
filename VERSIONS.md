@@ -2,12 +2,16 @@
 
 ## Current Version
 
-**3.18.4** — feat: se3 init now creates VERSIONS.md and README.md. Updated init command to automatically create VERSIONS.md with initial 0.1.0 entry and README.md with version badge and VERSIONS.md reference. Updated se3-scaffold and se3-commands specs to document this behavior.
+**3.18.5** — fix: Add code syntax validation to implement step and fix small mode version bump.
+- Implement step now validates Python code with AST parsing before writing files
+- Added detection of descriptive text vs actual code
+- Fixed small/directive/review task types to not bump version (changed from patch to none)
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.18.5 | 2026-03-04 | fix: Implement step code validation and version bump fix. Prevents file corruption from LLM descriptive text, small/review/directive tasks no longer bump version. |
 | 3.18.4 | 2026-03-04 | feat: se3 init now creates VERSIONS.md and README.md. Auto-generates initial project documentation with version tracking. |
 | 3.18.3 | 2026-03-04 | fix: Add missing WHEN/THEN scenarios to spec requirements. Fixed spec lint errors in se3-commands (7), se3-workflows (1), and test-project (1) specs. |
 | 3.18.2 | 2026-03-03 | feat: Discovery mode with project context. Provides project info (type, name, git), specs list, and base spec content to help exploration. |

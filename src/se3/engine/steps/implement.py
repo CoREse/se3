@@ -6,6 +6,7 @@ Each task group is implemented in a separate LLM call with isolated context.
 
 from __future__ import annotations
 
+import ast
 import json
 import logging
 from pathlib import Path
@@ -483,6 +484,44 @@ def _gather_project_context(flow: FlowInstance) -> str:
     return "; ".join(context_parts) if context_parts else "Standard project"
 
 
+def _validate_code_syntax(file_path: str, content: str) -> tuple[bool, str]:
+    """Validate code syntax before writing to file.
+    
+    Args:
+        file_path: Path to the file (used to determine language)
+        content: The content to validate
+        
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    # Skip validation for non-code files
+    if not file_path.endswith('.py'):
+        return True, ""
+    
+    # Skip validation for empty content or descriptive text
+    content_stripped = content.strip()
+    if not content_stripped:
+        return True, ""
+    
+    # Heuristic: Check if content looks like descriptive text rather than code
+    # Descriptive text often starts with phrases like "Added", "Modified", "Created"
+    descriptive_prefixes = (
+        "added ", "modified ", "created ", "updated ", "deleted ",
+        "adds ", "modifies ", "creates ", "updates ", "deletes ",
+        "this ", "the ", "in this", "we ", "i ",
+    )
+    first_line_lower = content_stripped.split('\n')[0].lower()
+    if any(first_line_lower.startswith(prefix) for prefix in descriptive_prefixes):
+        return False, f"Content appears to be descriptive text, not Python code: '{content_stripped[:100]}...'"
+    
+    # Try to parse as Python AST
+    try:
+        ast.parse(content)
+        return True, ""
+    except SyntaxError as e:
+        return False, f"Python syntax error: {e}"
+
+
 def _apply_changes(flow: FlowInstance, files_changed: list[dict[str, Any]]) -> None:
     """Apply file changes to the project.
 
@@ -502,6 +541,15 @@ def _apply_changes(flow: FlowInstance, files_changed: list[dict[str, Any]]) -> N
                 continue
 
             file_path = project_root / path_str
+            
+            # Validate code syntax before writing
+            is_valid, error_msg = _validate_code_syntax(path_str, content)
+            if not is_valid:
+                logger.error(f"Code validation failed for {path_str}: {error_msg}")
+                print(f"   ❌ Code validation failed for {path_str}")
+                print(f"      Error: {error_msg[:100]}...")
+                # Skip this file - don't write invalid content
+                continue
 
             if action == "create":
                 # Ensure parent directory exists
