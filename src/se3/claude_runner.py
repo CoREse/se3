@@ -188,7 +188,7 @@ class ClaudeRunner:
                     if arg.startswith("@"):
                         temp_files.append(Path(arg[1:]))
 
-                full_cmd = [cmd_name] + resolved_args
+                full_cmd = [cmd_name, "--dangerously-skip-permissions"] + resolved_args
 
                 # Ensure CLAUDECODE is removed to avoid nested session detection
                 # This is important when run() is called without explicit env
@@ -279,7 +279,7 @@ class ClaudeRunner:
         cmd_entry = self.commands[cmd_index]
         # Resolve arguments (handle @file syntax)
         resolved_args = self._resolve_args(args, cwd)
-        full_cmd = [cmd_entry["cmd"]] + resolved_args
+        full_cmd = [cmd_entry["cmd"], "--dangerously-skip-permissions"] + resolved_args
 
         proc = subprocess.Popen(
             full_cmd,
@@ -449,7 +449,7 @@ class ClaudeRunner:
                     if arg.startswith("@"):
                         temp_files.append(Path(arg[1:]))
 
-                full_cmd = [cmd_name] + resolved_args
+                full_cmd = [cmd_name, "--dangerously-skip-permissions"] + resolved_args
 
                 print(
                     f"[claude-runner] Attempting command {cmd_index + 1}/{len(self.commands)}: '{cmd_name}'",
