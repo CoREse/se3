@@ -4,7 +4,7 @@
 
 定义 SE3 框架的端到端测试项目。该项目是一个使用 SE3 开发的实际软件项目，用于测试 `se3 run` 命令的各种工作流模式。
 
-测试项目位置: `tests/e2e/test-project/`
+**测试项目位置**: `/data/cre/workspace/test-project/` (与 se3.0 同级目录，独立 git 仓库)
 
 ## Requirements
 
@@ -20,7 +20,7 @@
 
 #### Scenario: Test project structure
 - **GIVEN** 开发者需要测试 SE3 工作流
-- **WHEN** 进入 `tests/e2e/test-project/`
+- **WHEN** 进入 `/data/cre/workspace/test-project/`
 - **THEN** 看到一个完整的 Python 项目
 - **AND** 包含源码、测试、specs、SE3 配置
 
@@ -60,7 +60,7 @@
 测试项目 SHALL 具有以下目录结构：
 
 ```
-tests/e2e/test-project/
+/data/cre/workspace/test-project/
 ├── pyproject.toml          # Python 项目配置
 ├── README.md               # 项目文档
 ├── se3.yaml                # SE3 配置
@@ -171,7 +171,7 @@ tests/e2e/test-project/
 
 ```bash
 # 1. 进入测试项目
-cd tests/e2e/test-project
+cd /data/cre/workspace/test-project
 
 # 2. 确认干净状态
 git status
@@ -184,7 +184,7 @@ se3 run "实现搜索功能" --type=feature
 
 ```bash
 # Feature 模式
-cd tests/e2e/test-project
+cd /data/cre/workspace/test-project
 se3 run "实现任务搜索功能" --type=feature
 
 # Bugfix 模式（需先注入 bug）
@@ -206,7 +206,7 @@ se3 run --discover "我想添加导出功能"
 ### 重置测试项目
 
 ```bash
-cd tests/e2e/test-project
+cd /data/cre/workspace/test-project
 ./tests/reset.sh
 ```
 
