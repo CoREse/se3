@@ -3272,3 +3272,4 @@ README.md                                                     |  2 +-
 - `c504729` fix: Add code syntax validation to implement step and fix version bump rules (6 files)
 - `4baff48` fix: Fix commit step to properly skip version bump for 'none' bump type (5 files)
 - `518d36c` fix: Fix _get_task_type to return string instead of TaskType enum (5 files)
+- `d2b4f4e` fix: Correct version bump rules following SemVer 2.0.0 specification (5 files)

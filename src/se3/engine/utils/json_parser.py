@@ -102,10 +102,37 @@ def _extract_json_string(text: str) -> Optional[str]:
     """Extract JSON string from text (handles markdown code blocks)."""
     text = text.strip()
     
-    # Handle markdown code blocks
-    md_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
+    # Remove tool call preview lines (e.g., "[Tool Call: Read]")
+    # These are added by extract_assistant_text when LLM uses tools
+    lines = text.split('\n')
+    cleaned_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith('[Tool Call:') and not stripped.startswith('[Tool Result:'):
+            cleaned_lines.append(line)
+    text = '\n'.join(cleaned_lines)
+    text = text.strip()
+    
+    # Handle markdown code blocks - look for ```json specifically
+    # If found, try to parse it as JSON
+    md_match = re.search(r'```json\s*([\s\S]*?)\s*```', text)
     if md_match:
-        return md_match.group(1).strip()
+        json_str = md_match.group(1).strip()
+        try:
+            json.loads(json_str)
+            return json_str
+        except json.JSONDecodeError:
+            pass  # Not valid JSON, fall through
+    
+    # Also try generic code blocks, but verify it's valid JSON
+    md_match = re.search(r'```\s*([\s\S]*?)\s*```', text)
+    if md_match:
+        json_str = md_match.group(1).strip()
+        try:
+            json.loads(json_str)
+            return json_str
+        except json.JSONDecodeError:
+            pass  # Not valid JSON, fall through
     
     # Find first { and last }
     start = text.find('{')

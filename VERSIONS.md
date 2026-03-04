@@ -2,7 +2,14 @@
 
 ## Current Version
 
-**3.18.8** — fix: Correct version bump rules following SemVer 2.0.0.
+**3.18.9** — fix: Discover mode JSON parsing with tool calls. Fixed `_extract_json_string` to handle LLM responses containing tool call previews and markdown code blocks.
+
+## Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 3.18.9 | 2026-03-04 | fix: Discover mode JSON parsing with tool calls. Cleans `[Tool Call: ...]` previews and handles markdown blocks correctly. |
+| 3.18.8 | 2026-03-04 | fix: Correct bump rules per SemVer 2.0.0. Small/docs/test/chore all bump patch.
 - small: patch (small fixes like typo corrections are still fixes)
 - docs: patch (documentation fixes)
 - test: patch (test additions/fixes)

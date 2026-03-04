@@ -347,4 +347,4 @@ class TestRenderSessionText:
         )
         text = render_session_text(session)
         assert "Here is the analysis" in text
-        assert "[Tool Call: Read]" in text
+        assert "Tool: Read" in text
