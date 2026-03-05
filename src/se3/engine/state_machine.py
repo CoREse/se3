@@ -448,7 +448,11 @@ class StateMachine:
                     # Keep task_list for backward compatibility
                     inputs["task_list"] = step.outputs.get("task_list")
                 elif step.step_type == StepType.IMPLEMENT:
-                    inputs["changes_made"] = step.outputs.get("changes_made")
+                    # Build changes_made from implement outputs
+                    inputs["changes_made"] = {
+                        "files_changed": step.outputs.get("files_changed", []),
+                        "implemented_groups": step.outputs.get("implemented_groups", []),
+                    }
                 elif step.step_type == StepType.TEST:
                     inputs["test_results"] = step.outputs.get("test_results")
                 elif step.step_type == StepType.VERIFY_SPEC:
