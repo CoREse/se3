@@ -2,7 +2,14 @@
 
 ## Current Version
 
-**3.18.9** — fix: Discover mode JSON parsing with tool calls. Fixed `_extract_json_string` to handle LLM responses containing tool call previews and markdown code blocks.
+**3.19.4** — fix: Confirmation steps now properly preserved after analyze step. Fixed bug where `_update_flow_steps()` in analyze handler would overwrite the step sequence without re-inserting CONFIRM steps. Also fixed `transition_to_next()` to correctly read `step_to_review_id` from `review_result` output.
+
+## Version History
+
+| Version | Date | Changes |
+|---------|------|---------|
+| 3.19.4 | 2026-03-05 | fix: Confirmation steps preservation after analyze. Fixed step sequence overwrite bug and revision transition logic. |
+| 3.18.9 | 2026-03-04 | fix: Discover mode JSON parsing with tool calls. Cleans `[Tool Call: ...]` previews and handles markdown blocks correctly. |
 
 ## Version History
 

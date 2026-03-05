@@ -16,6 +16,7 @@ from typing import Any
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus, StepType, get_default_step_sequence
 from ..utils.json_parser import parse_json_response
+from ...config import insert_confirmation_steps
 
 logger = logging.getLogger(__name__)
 
@@ -236,11 +237,18 @@ def _update_flow_steps(
     
     Uses predefined step sequences for each task type.
     Discover mode is handled separately via --discover flag.
+    Also inserts CONFIRM steps based on configuration.
 
     Args:
         flow: The flow instance to update
         task_type: The determined task type (feature, bugfix, small, review, directive)
     """
     # Get default sequence for task type (fixed sequences per spec)
-    flow.state.selected_steps = get_default_step_sequence(task_type)
+    selected_steps = get_default_step_sequence(task_type)
+    
+    # Insert confirmation steps based on config
+    # This ensures CONFIRM steps are added after propose/design as configured
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    flow.state.selected_steps = insert_confirmation_steps(selected_steps, project_root)
+    
     logger.info(f"Using step sequence for {task_type}: {[s.value for s in flow.state.selected_steps]}")

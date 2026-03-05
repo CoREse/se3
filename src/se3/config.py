@@ -294,6 +294,59 @@ def load_confirmation_config(project_root: Optional[Path] = None) -> dict:
         return {"enabled": True, "steps": ["propose", "design"]}
 
 
+def insert_confirmation_steps(
+    steps: list,
+    project_root: Optional[Path] = None,
+) -> list:
+    """Insert CONFIRM steps after configured step types.
+    
+    This is a standalone function that can be used by both the state machine
+    and the analyze step handler to consistently insert confirmation steps.
+    
+    Args:
+        steps: Original step sequence (list of StepType or StepType-like objects)
+        project_root: Project root directory for loading config
+        
+    Returns:
+        Modified step sequence with CONFIRM steps inserted
+    """
+    config = load_confirmation_config(project_root)
+    
+    if not config.get("enabled", True):
+        return steps
+    
+    steps_requiring_confirm = config.get("steps", ["propose", "design"])
+    
+    # Handle both StepType enum and string step types
+    # Get step type values for comparison
+    step_type_names = set()
+    for s in steps:
+        if hasattr(s, 'value'):
+            step_type_names.add(s.value)
+        else:
+            step_type_names.add(str(s))
+    
+    # Only insert confirm for steps that are actually in the sequence
+    steps_to_confirm = [s for s in steps_requiring_confirm if s in step_type_names]
+    
+    if not steps_to_confirm:
+        return steps
+    
+    # Import StepType here to avoid circular imports
+    from .engine.models import StepType
+    
+    result = []
+    for step in steps:
+        result.append(step)
+        # Get step value for comparison
+        step_value = step.value if hasattr(step, 'value') else str(step)
+        if step_value in steps_to_confirm:
+            # Insert CONFIRM step after this step
+            result.append(StepType.CONFIRM)
+    
+    return result
+
+
 def load_claude_commands(project_root: Optional[Path] = None) -> list[dict]:
     """Load Claude CLI commands from project and global configuration.
     

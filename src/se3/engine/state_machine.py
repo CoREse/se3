@@ -21,7 +21,7 @@ from .models import (
     get_step_info,
 )
 from .persistence import PersistenceManager
-from ..config import load_confirmation_config
+from ..config import insert_confirmation_steps, load_confirmation_config
 
 logger = logging.getLogger(__name__)
 
@@ -158,34 +158,26 @@ class StateMachine:
     def _insert_confirmation_steps(self, steps: list[StepType]) -> list[StepType]:
         """Insert CONFIRM steps after configured step types.
 
+        Uses the shared insert_confirmation_steps function from config module
+        to ensure consistency with analyze step handler.
+
         Args:
             steps: Original step sequence
 
         Returns:
             Modified step sequence with CONFIRM steps inserted
         """
+        result = insert_confirmation_steps(steps, self.project_root)
+        
+        # Log inserted steps for debugging
         config = load_confirmation_config(self.project_root)
-
-        if not config.get("enabled", True):
-            return steps
-
-        steps_requiring_confirm = config.get("steps", ["propose", "design"])
-        step_type_names = {s.value for s in steps}
-
-        # Only insert confirm for steps that are actually in the sequence
-        steps_to_confirm = [s for s in steps_requiring_confirm if s in step_type_names]
-
-        if not steps_to_confirm:
-            return steps
-
-        result = []
-        for step in steps:
-            result.append(step)
-            if step.value in steps_to_confirm:
-                # Insert CONFIRM step after this step
-                result.append(StepType.CONFIRM)
-                logger.debug(f"Inserted CONFIRM step after {step.value}")
-
+        if config.get("enabled", True):
+            for i, step in enumerate(result):
+                if step == StepType.CONFIRM:
+                    prev_step = result[i-1] if i > 0 else None
+                    if prev_step:
+                        logger.debug(f"Inserted CONFIRM step after {prev_step.value}")
+        
         return result
 
     def load_or_create_flow(
@@ -303,7 +295,8 @@ class StateMachine:
                 logger.info(f"Confirmation approved for {review_result.get('step_to_review_type', 'unknown')}")
             else:
                 # Revision requested - go back to the step being reviewed
-                step_to_review_id = current_step.outputs.get("step_to_review_id")
+                # Get step_to_review_id from review_result (set by confirm_handler)
+                step_to_review_id = review_result.get("step_to_review_id")
                 revision_step = self._transition_to_revision(flow, current_step, step_to_review_id)
                 if revision_step:
                     return revision_step
