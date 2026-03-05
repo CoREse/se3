@@ -130,7 +130,7 @@ se3 run --discover "我想做一个用户管理功能"
 | `test` | 运行测试验证 | 否（程序执行） | - | - | test_results, tests_passed |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | implementation, spec_content | verification_result, issues |
 | `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | changes_made | updated_specs |
-| `version_analyze` | 分析变更确定版本类型 | 是 | STRICT | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning |
+| `version_analyze` | 分析变更确定版本类型 | 是 | EXTRACT | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning |
 | `commit` | 提交变更 | 否（程序执行） | - | changes_made, bump_type | commit_hash |
 | `summarize` | 生成总结和 handoff | 是 | 文本 | all_previous_outputs | summary (Markdown 文本) |
 | `project_summary` | 生成项目上下文摘要 | 是 | 文本 | 项目状态 | 摘要字符串 |
