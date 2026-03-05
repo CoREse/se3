@@ -119,7 +119,18 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """
     task_type = flow.task_type or "feature"
     task_description = flow.task_description or ""
-    changes_made = step.inputs.get("changes_made", {})
+    
+    # Get changes - implement step uses different output names
+    changes_made = step.inputs.get("changes_made") or {}
+    if not changes_made:
+        # Try alternative output names from implement step
+        files_changed = step.inputs.get("files_changed", [])
+        implemented_groups = step.inputs.get("implemented_groups", [])
+        changes_made = {
+            "files_changed": files_changed,
+            "implemented_groups": implemented_groups,
+        }
+    
     verification_result = step.inputs.get("verification_result", {})
     spec_changes = step.inputs.get("updated_specs", {})  # From update_spec step
     
