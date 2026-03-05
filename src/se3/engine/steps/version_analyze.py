@@ -155,7 +155,8 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     logger.info("Analyzing changes to determine version bump type...")
     
     try:
-        # Call LLM for version analysis
+        # Call LLM for version analysis using EXTRACT mode
+        # This mode requests JSON but uses LLM extraction on parse failure (no retry)
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         caller = LLMCaller(
             project_root,
@@ -165,10 +166,10 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         )
         response = caller.call(
             prompt=prompt,
-            json_mode="on",  # Request JSON output
+            json_mode="extract",  # Request JSON, use LLM extraction on failure
         )
         
-        # Parse the response
+        # Parse the response (should be valid JSON due to json_mode="extract")
         result = _parse_response(response)
         
         # Store outputs
@@ -377,52 +378,47 @@ def _format_verification(verification_result: dict[str, Any]) -> str:
 def _parse_response(response: str) -> dict[str, Any]:
     """Parse the LLM response to extract version analysis.
     
+    With json_mode="extract", the LLM caller should already have attempted
+    to extract valid JSON. This function handles edge cases and validation.
+    
     Args:
-        response: Raw LLM response
+        response: Raw LLM response (expected to be JSON when using json_mode="extract")
         
     Returns:
         Parsed result dictionary
     """
-    # Try to extract JSON from the response
+    if not response or not response.strip():
+        raise ValueError("Empty response from LLM")
+    
+    # Try to parse as JSON (json_mode="extract" should ensure this)
     try:
-        # First, try to parse as-is
-        result = json.loads(response)
+        result = json.loads(response.strip())
         return _validate_result(result)
-    except json.JSONDecodeError:
-        pass
-    
-    # Try to extract JSON from markdown code blocks
-    import re
-    
-    # Look for JSON in ```json blocks
-    json_match = re.search(r'```json\s*(.*?)\s*```', response, re.DOTALL)
-    if json_match:
-        try:
-            result = json.loads(json_match.group(1))
-            return _validate_result(result)
-        except json.JSONDecodeError:
-            pass
-    
-    # Look for JSON in ``` blocks
-    json_match = re.search(r'```\s*(\{.*?)\s*```', response, re.DOTALL)
-    if json_match:
-        try:
-            result = json.loads(json_match.group(1))
-            return _validate_result(result)
-        except json.JSONDecodeError:
-            pass
-    
-    # Look for JSON object directly
-    json_match = re.search(r'(\{[^{}]*"bump_type"[^{}]*\})', response, re.DOTALL)
-    if json_match:
-        try:
-            result = json.loads(json_match.group(1))
-            return _validate_result(result)
-        except json.JSONDecodeError:
-            pass
-    
-    # If all parsing fails, raise an error
-    raise ValueError(f"Could not parse version analysis response: {response[:200]}...")
+    except json.JSONDecodeError as e:
+        # If somehow we still got non-JSON, try extraction patterns
+        import re
+        
+        # Look for JSON in markdown code blocks
+        json_match = re.search(r'```(?:json)?\s*(\{.*\})\s*```', response, re.DOTALL)
+        if json_match:
+            try:
+                result = json.loads(json_match.group(1))
+                return _validate_result(result)
+            except json.JSONDecodeError:
+                pass
+        
+        # Look for JSON object directly
+        json_match = re.search(r'(\{[^{}]*"bump_type"[^{}]*\})', response, re.DOTALL)
+        if json_match:
+            try:
+                result = json.loads(json_match.group(1))
+                return _validate_result(result)
+            except json.JSONDecodeError:
+                pass
+        
+        # If all parsing fails, raise an error with context
+        preview = response[:200].replace('\n', ' ')
+        raise ValueError(f"Could not parse JSON response: {e}. Preview: {preview}...")
 
 
 def _validate_result(result: dict[str, Any]) -> dict[str, Any]:
