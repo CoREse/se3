@@ -23,31 +23,25 @@ logger = logging.getLogger(__name__)
 ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze the following task description and determine:
 
 1. **task_type**: The type of task. Choose from:
-   - "feature": New functionality or significant enhancement
-   - "bugfix": Fixing a bug or issue
+   - "feature": New functionality or significant enhancement (adds new capabilities)
+   - "bugfix": Fixing a bug or issue (corrects incorrect behavior)
    - "review": Code review, audit, or analysis without code changes
-   - "small": Minor fix, typo, or simple change (trivial scope)
+   - "small": Minor fix, typo, or simple change (trivial scope, e.g., README update, comment fix)
    - "directive": Following specific instructions or requirements
+   
+   IMPORTANT: Do NOT use "discovery" - discovery mode is triggered separately via --discover flag.
 
 2. **scope**: Brief description of what files/modules are likely affected
 
 3. **complexity**: "simple", "medium", or "complex"
 
-4. **required_steps**: List of step names needed (choose from: analyze, read_spec, propose, design, plan_tasks, implement, test, verify_spec, update_spec, version_analyze, commit, summarize)
-   - Always include "analyze" (already done)
-   - "small" tasks can skip propose/design
-   - "review" tasks only need analyze, read_spec, verify_spec, summarize
-   - "bugfix" may skip propose but usually needs design if complex
-   - "version_analyze" runs before commit to determine version bump type
-
-5. **reasoning**: Brief explanation of your classification
+4. **reasoning**: Brief explanation of your classification
 
 Respond in JSON format:
 {{
     "task_type": "feature|bugfix|review|small|directive",
     "scope": "description of affected areas",
     "complexity": "simple|medium|complex",
-    "required_steps": ["step1", "step2", ...],
     "reasoning": "explanation"
 }}
 
@@ -110,8 +104,8 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
             logger.warning(f"Invalid task_type '{task_type}', defaulting to 'feature'")
             task_type = "feature"
 
-        # Extract task_type from analyze result
-        resolved_task_type = _extract_task_type(result)
+        # Extract task_type from analyze result (discovery only valid with --discover flag)
+        resolved_task_type = _extract_task_type(result, flow)
 
         # Check for conflict with explicit --type flag
         _handle_type_conflict(flow, resolved_task_type)
@@ -123,7 +117,6 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["task_type"] = task_type
         step.outputs["scope"] = result.get("scope", "")
         step.outputs["complexity"] = result.get("complexity", "medium")
-        step.outputs["required_steps"] = result.get("required_steps", [])
         step.outputs["reasoning"] = result.get("reasoning", "")
 
         # Record if we used refined description from discovery
@@ -131,11 +124,11 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step.outputs["used_refined_description"] = True
             step.outputs["original_description"] = step.inputs.get("task_description", "")
 
-        # Update flow's selected steps based on analysis
-        _update_flow_steps(flow, result.get("required_steps", []), task_type)
+        # Update flow's selected steps based on task_type (fixed sequences)
+        # Note: discover mode is handled separately via --discover flag, not by analyze
+        _update_flow_steps(flow, resolved_task_type)
 
-        logger.info(f"Analysis complete: type={task_type}, complexity={result.get('complexity')}")
-        logger.debug(f"Required steps: {result.get('required_steps')}")
+        logger.info(f"Analysis complete: type={resolved_task_type}, complexity={result.get('complexity')}")
 
         return StepStatus.COMPLETED
 
@@ -145,18 +138,28 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         return StepStatus.FAILED
 
 
-def _extract_task_type(analyze_output: dict) -> str:
+def _extract_task_type(analyze_output: dict, flow: FlowInstance) -> str:
     """Extract task_type from LLM analyze output.
 
     Args:
         analyze_output: The parsed JSON output from analyze step
+        flow: The flow instance (for checking explicit_type)
 
     Returns:
         The extracted task type string
     """
     valid_types = ["feature", "bugfix", "review", "small", "directive"]
     task_type = analyze_output.get("task_type", "feature")
-
+    
+    # Discovery mode can ONLY be triggered by --discover flag, never by analyze
+    # If analyze returns "discovery", treat it as "feature"
+    if task_type == "discovery":
+        explicit_type = flow.state.context.get("explicit_type")
+        if explicit_type != "discovery":
+            logger.warning(f"Analyze returned 'discovery' but --discover flag not set, treating as 'feature'")
+            task_type = "feature"
+    
+    # Validate and normalize task type
     if task_type not in valid_types:
         logger.warning(f"Invalid task_type '{task_type}' from analyze, defaulting to 'feature'")
         task_type = "feature"
@@ -227,64 +230,17 @@ def _gather_project_context(flow: FlowInstance) -> str:
 
 def _update_flow_steps(
     flow: FlowInstance,
-    required_steps: list[str],
     task_type: str,
 ) -> None:
-    """Update the flow's selected steps based on analysis result.
+    """Update the flow's selected steps based on task type.
+    
+    Uses predefined step sequences for each task type.
+    Discover mode is handled separately via --discover flag.
 
     Args:
         flow: The flow instance to update
-        required_steps: List of required step names from analysis
-        task_type: The determined task type
+        task_type: The determined task type (feature, bugfix, small, review, directive)
     """
-    # If no specific steps provided, use default sequence for task type
-    if not required_steps:
-        flow.state.selected_steps = get_default_step_sequence(task_type)
-        logger.info(f"Using default step sequence for {task_type}")
-        return
-
-    # Map step names to StepType enum
-    step_type_map = {
-        "analyze": StepType.ANALYZE,
-        "project_summary": StepType.PROJECT_SUMMARY,
-        "read_spec": StepType.READ_SPEC,
-        "propose": StepType.PROPOSE,
-        "design": StepType.DESIGN,
-        "plan_tasks": StepType.PLAN_TASKS,
-        "implement": StepType.IMPLEMENT,
-        "test": StepType.TEST,
-        "verify_spec": StepType.VERIFY_SPEC,
-        "update_spec": StepType.UPDATE_SPEC,
-        "version_analyze": StepType.VERSION_ANALYZE,
-        "commit": StepType.COMMIT,
-        "summarize": StepType.SUMMARIZE,
-    }
-
-    selected = []
-    for step_name in required_steps:
-        step_name_normalized = step_name.lower().replace("-", "_")
-        if step_name_normalized in step_type_map:
-            selected.append(step_type_map[step_name_normalized])
-        else:
-            logger.warning(f"Unknown step name: {step_name}")
-
-    # Ensure analyze is first if present (it's already done)
-    if selected and selected[0] != StepType.ANALYZE:
-        # Insert analyze at the beginning for tracking
-        selected.insert(0, StepType.ANALYZE)
-
-    # Enforce step dependency constraints
-    # DESIGN requires PROPOSE to have run before it (for proposal input)
-    if StepType.DESIGN in selected and StepType.PROPOSE not in selected:
-        design_idx = selected.index(StepType.DESIGN)
-        selected.insert(design_idx, StepType.PROPOSE)
-        logger.info("Auto-inserted PROPOSE before DESIGN (required dependency)")
-
-    # Update flow state
-    if selected:
-        flow.state.selected_steps = selected
-        logger.info(f"Updated step sequence: {[s.value for s in selected]}")
-    else:
-        # Fallback to default
-        flow.state.selected_steps = get_default_step_sequence(task_type)
-        logger.info(f"Falling back to default sequence for {task_type}")
+    # Get default sequence for task type (fixed sequences per spec)
+    flow.state.selected_steps = get_default_step_sequence(task_type)
+    logger.info(f"Using step sequence for {task_type}: {[s.value for s in flow.state.selected_steps]}")

@@ -121,7 +121,7 @@ se3 run --discover "我想做一个用户管理功能"
 | 步骤 | 职责 | LLM 参与 | JSON 模式 | 输入 | 输出 |
 |------|------|---------|-----------|------|------|
 | `discovery` | 需求探索（多轮对话） | 是 | STRICT | initial_description | refined_description, discovery_summary |
-| `analyze` | 分析任务类型和范围 | 是 | STRICT | task_description | task_type, scope, complexity, required_steps |
+| `analyze` | 分析任务类型和范围 | 是 | STRICT | task_description | task_type, scope, complexity, reasoning |
 | `read_spec` | 读取相关 spec 文件 | 否（程序自动） | - | scope | relevant_specs, spec_content |
 | `propose` | 生成变更提案 | 是 | EXTRACT | spec_content, task_description | proposal, files_to_modify, files_to_create |
 | `design` | 设计方案和架构决策 | 是 | EXTRACT | proposal, spec_content | design_doc, decisions, components |
