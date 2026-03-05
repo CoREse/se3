@@ -378,11 +378,11 @@ def _format_verification(verification_result: dict[str, Any]) -> str:
 def _parse_response(response: str) -> dict[str, Any]:
     """Parse the LLM response to extract version analysis.
     
-    With json_mode="extract", the LLM caller should already have attempted
-    to extract valid JSON. This function handles edge cases and validation.
+    With json_mode="extract", the LLM caller already extracts valid JSON.
+    This function mainly validates the result.
     
     Args:
-        response: Raw LLM response (expected to be JSON when using json_mode="extract")
+        response: Raw LLM response (should be valid JSON when using json_mode="extract")
         
     Returns:
         Parsed result dictionary
@@ -390,39 +390,17 @@ def _parse_response(response: str) -> dict[str, Any]:
     if not response or not response.strip():
         raise ValueError("Empty response from LLM")
     
-    response = response.strip()
+    # json_mode="extract" should already provide valid JSON
+    # Use the shared json_parser for consistency
+    from ..utils.json_parser import parse_json_response
     
-    # Try to parse as-is first
-    try:
-        result = json.loads(response)
-        return _validate_result(result)
-    except json.JSONDecodeError:
-        pass
+    result = parse_json_response(response, required_keys=["bump_type"])
     
-    # Try to extract JSON from markdown code blocks
-    import re
+    if result is None:
+        preview = response[:200].replace('\n', ' ')
+        raise ValueError(f"Could not parse JSON response. Preview: {preview}...")
     
-    # Look for JSON in ```json or ``` blocks (non-greedy match)
-    json_match = re.search(r'```(?:json)?\s*\n?(.*?)\n?```', response, re.DOTALL)
-    if json_match:
-        try:
-            result = json.loads(json_match.group(1).strip())
-            return _validate_result(result)
-        except json.JSONDecodeError:
-            pass
-    
-    # Look for JSON object directly (first occurrence of {...})
-    json_match = re.search(r'(\{.*"bump_type".*\})', response, re.DOTALL)
-    if json_match:
-        try:
-            result = json.loads(json_match.group(1))
-            return _validate_result(result)
-        except json.JSONDecodeError:
-            pass
-    
-    # If all parsing fails, raise an error with context
-    preview = response[:200].replace('\n', ' ')
-    raise ValueError(f"Could not parse JSON response. Preview: {preview}...")
+    return _validate_result(result)
 
 
 def _validate_result(result: dict[str, Any]) -> dict[str, Any]:
