@@ -132,7 +132,14 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         }
     
     verification_result = step.inputs.get("verification_result", {})
-    spec_changes = step.inputs.get("updated_specs", {})  # From update_spec step
+    
+    # Get spec changes - handle both dict (legacy) and list (current) formats
+    spec_changes_raw = step.inputs.get("updated_specs", {})  # From update_spec step
+    if isinstance(spec_changes_raw, list):
+        # Convert list format to dict format for consistent handling
+        spec_changes = {"updated_specs": spec_changes_raw}
+    else:
+        spec_changes = spec_changes_raw
     
     # Get current version if available
     current_version = _get_current_version(flow)
@@ -292,7 +299,7 @@ def _format_spec_changes(spec_changes: dict[str, Any]) -> str:
     and are key to determining breaking vs non-breaking changes.
     
     Args:
-        spec_changes: Spec changes from update_spec step
+        spec_changes: Spec changes from update_spec step (dict or list)
         
     Returns:
         Formatted spec changes text
@@ -300,10 +307,14 @@ def _format_spec_changes(spec_changes: dict[str, Any]) -> str:
     if not spec_changes:
         return "No spec changes recorded."
     
+    # Handle list format (direct list of specs)
+    if isinstance(spec_changes, list):
+        spec_changes = {"updated_specs": spec_changes}
+    
     lines = []
     
     # Format updated specs
-    updated_specs = spec_changes.get("updated_specs", [])
+    updated_specs = spec_changes.get("updated_specs", []) if isinstance(spec_changes, dict) else []
     if updated_specs:
         lines.append("### Spec Files Updated:")
         for spec in updated_specs:
