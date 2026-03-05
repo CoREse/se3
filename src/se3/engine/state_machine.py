@@ -453,6 +453,8 @@ class StateMachine:
                     inputs["test_results"] = step.outputs.get("test_results")
                 elif step.step_type == StepType.VERIFY_SPEC:
                     inputs["verification_result"] = step.outputs.get("verification_result")
+                elif step.step_type == StepType.UPDATE_SPEC:
+                    inputs["updated_specs"] = step.outputs.get("updated_specs")
                 elif step.step_type == StepType.COMMIT:
                     inputs["commit_hash"] = step.outputs.get("commit_hash")
                 elif step.step_type == StepType.CONFIRM:

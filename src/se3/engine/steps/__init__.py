@@ -19,6 +19,7 @@ from .summarize import summarize_handler
 from .test import test_handler
 from .update_spec import update_spec_handler
 from .verify_spec import verify_spec_handler
+from .version_analyze import version_analyze_handler
 
 # Registry of all step handlers for the state machine
 STEP_HANDLERS = {
@@ -34,6 +35,7 @@ STEP_HANDLERS = {
     StepType.TEST: test_handler,
     StepType.VERIFY_SPEC: verify_spec_handler,
     StepType.UPDATE_SPEC: update_spec_handler,
+    StepType.VERSION_ANALYZE: version_analyze_handler,
     StepType.COMMIT: commit_handler,
     StepType.SUMMARIZE: summarize_handler,
 }
@@ -50,6 +52,7 @@ __all__ = [
     "test_handler",
     "verify_spec_handler",
     "update_spec_handler",
+    "version_analyze_handler",
     "commit_handler",
     "summarize_handler",
     "STEP_HANDLERS",

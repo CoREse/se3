@@ -87,13 +87,65 @@ SE3 SHALL automatically detect project type and locate the version file with the
 - **THEN** returns `package.json` as version file
 - **AND** extracts version `2.1.0`
 
+### Requirement: Smart Version Analysis
+
+SE3 SHALL provide intelligent version bumping using LLM analysis of actual changes, rather than relying solely on task type classification.
+
+**Version Analyze Step:**
+A dedicated `version_analyze` step SHALL run after `update_spec` and before `commit` to determine the appropriate SemVer bump type based on:
+- **Spec changes (updated_specs)**: API contract changes - PRIMARY indicator for breaking/non-breaking
+- **Files changed (changes_made)**: Implementation details and scope
+- **Verification results**: Consistency checks against specs
+
+Spec changes are prioritized as they directly reflect API contract modifications.
+
+**LLM Analysis Output:**
+```json
+{
+  "bump_type": "major|minor|patch|none",
+  "reasoning": "Explanation based on SemVer 2.0.0 rules and specific changes",
+  "confidence": "high|medium|low",
+  "suggested_version": "X.Y.Z"
+}
+```
+
+**Semantic Versioning 2.0.0 Decision Criteria:**
+- **MAJOR**: Incompatible API changes, removed functionality, breaking behavioral changes
+- **MINOR**: New backward-compatible functionality, new features, new optional parameters
+- **PATCH**: Backward-compatible bug fixes, performance improvements, internal refactoring
+- **NONE**: No version-worthy changes (formatting, comments only)
+
+**Confidence Levels:**
+- `high`: Clear change type (e.g., obvious breaking change or simple bugfix)
+- `medium`: Some ambiguity but reasonable determination possible
+- `low`: Complex changes with unclear impact, borderline cases
+
+#### Scenario: Smart Version Analysis for Breaking Change
+- **GIVEN** a `small` task that removed a public function parameter
+- **WHEN** the `version_analyze` step runs
+- **THEN** LLM identifies this as a breaking change
+- **AND** recommends `bump_type: major` despite task type being `small`
+
+#### Scenario: Confidence-Based Fallback
+- **GIVEN** LLM analysis returns `confidence: low`
+- **WHEN** auto_bump is enabled (default)
+- **THEN** system applies the suggested bump type anyway
+- **AND** logs a warning about low confidence
+
 ### Requirement: Automatic Version Bumping
 
 SE3 SHALL provide automatic version bumping integrated into the commit workflow.
 
-**Bump Rules:**
-Map task types to version bump types via configuration:
+**Bump Process with Smart Analysis:**
+1. Detect current version from version file
+2. Run `version_analyze` step to determine bump type via LLM analysis
+3. If smart analysis is disabled or fails, fall back to task type based rules
+4. Calculate new version following SemVer rules
+5. Update version file atomically
+6. Create backup for potential rollback
+7. Stage version file for commit
 
+**Fallback Bump Rules (when smart analysis is disabled):**
 | Task Type | Bump Type | Version Change |
 |-----------|-----------|----------------|
 | `feature` | minor | X.Y.Z → X.Y+1.0 |
@@ -101,18 +153,9 @@ Map task types to version bump types via configuration:
 | `bugfix` | patch | X.Y.Z → X.Y.Z+1 |
 | `fix` | patch | X.Y.Z → X.Y.Z+1 |
 | `breaking` | major | X.Y.Z → X+1.0.0 |
-| `docs` | none | No version change |
-| `test` | none | No version change |
-| `chore` | none | No version change |
-
-**Bump Process:**
-1. Detect current version from version file
-2. Determine task type from flow context
-3. Look up bump type from configuration
-4. Calculate new version following SemVer rules
-5. Update version file atomically
-6. Create backup for potential rollback
-7. Stage version file for commit
+| `small` | patch | X.Y.Z → X.Y.Z+1 |
+| `docs` | patch | X.Y.Z → X.Y.Z+1 |
+| `refactor` | patch | X.Y.Z → X.Y.Z+1 |
 
 **Configuration (se3.yaml):**
 ```yaml
@@ -120,28 +163,37 @@ version:
   enabled: true                       # Enable automatic version bumping
   file_path: null                     # Explicit version file path (null = auto-detect)
   include_in_commit_message: true     # Include version in commit message
-  bump_rules:                         # Task type to bump type mapping
+  
+  # Smart Version Analysis
+  smart_version_analysis: true        # Enable LLM-based version analysis
+  auto_bump: true                     # Auto-apply bump without confirmation
+  confidence_threshold: null          # Threshold for human confirmation (null=never)
+  
+  # Fallback bump rules (used when smart analysis is disabled)
+  bump_rules:
     feature: minor
-    feat: minor
     bugfix: patch
-    fix: patch
     breaking: major
-    docs: none
-    test: none
-    chore: none
+    small: patch
 ```
 
-#### Scenario: Feature Task Version Bump
+#### Scenario: Feature Task Version Bump with Smart Analysis
 - **GIVEN** current version is `1.2.3`
-- **WHEN** commit step executes for a `feature` task
-- **THEN** version bumps to `1.3.0`
-- **AND** version file is staged for commit
+- **AND** `smart_version_analysis: true`
+- **WHEN** `version_analyze` step executes for a `feature` task
+- **THEN** LLM analyzes the actual changes
+- **AND** version bumps according to analysis result (typically `1.3.0`)
 
 #### Scenario: Bugfix Task Version Bump
 - **GIVEN** current version is `1.2.3`
 - **WHEN** commit step executes for a `bugfix` task
 - **THEN** version bumps to `1.2.4`
 - **AND** commit message includes new version
+
+#### Scenario: Disabled Smart Analysis
+- **GIVEN** `smart_version_analysis: false` in se3.yaml
+- **WHEN** commit step executes
+- **THEN** system uses task type based bump rules from configuration
 
 #### Scenario: Disabled Version Bumping
 - **GIVEN** `version.enabled: false` in se3.yaml

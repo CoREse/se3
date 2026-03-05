@@ -28,6 +28,7 @@ class StepType(Enum):
     TEST = "test"  # Run tests (program execution, not LLM)
     VERIFY_SPEC = "verify_spec"  # Check implementation vs spec consistency
     UPDATE_SPEC = "update_spec"  # Update spec to record changes
+    VERSION_ANALYZE = "version_analyze"  # Analyze changes to determine version bump type
     COMMIT = "commit"  # Commit changes (program execution)
     SUMMARIZE = "summarize"  # Generate summary and handoff
 
@@ -444,11 +445,18 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "inputs": ["changes_made", "verification_result"],
         "outputs": ["updated_specs"],
     },
+    StepType.VERSION_ANALYZE: {
+        "name": "version_analyze",
+        "description": "Analyze changes using LLM to determine SemVer bump type",
+        "uses_llm": True,
+        "inputs": ["changes_made", "summary", "verification_result", "task_type"],
+        "outputs": ["bump_type", "reasoning", "confidence", "suggested_version"],
+    },
     StepType.COMMIT: {
         "name": "commit",
         "description": "Commit changes",
         "uses_llm": False,
-        "inputs": ["changes_made", "updated_specs"],
+        "inputs": ["changes_made", "updated_specs", "bump_type"],
         "outputs": ["commit_hash"],
     },
     StepType.SUMMARIZE: {
@@ -483,6 +491,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.TEST,
             StepType.VERIFY_SPEC,
             StepType.UPDATE_SPEC,
+            StepType.VERSION_ANALYZE,
             StepType.COMMIT,
             StepType.SUMMARIZE,
         ],
@@ -494,6 +503,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.IMPLEMENT,
             StepType.TEST,
             StepType.VERIFY_SPEC,
+            StepType.VERSION_ANALYZE,
             StepType.COMMIT,
             StepType.SUMMARIZE,
         ],
@@ -508,6 +518,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.ANALYZE,
             StepType.IMPLEMENT,
             StepType.TEST,
+            StepType.VERSION_ANALYZE,
             StepType.COMMIT,
             StepType.SUMMARIZE,
         ],
@@ -517,6 +528,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.READ_SPEC,
             StepType.PLAN_TASKS,
             StepType.IMPLEMENT,
+            StepType.VERSION_ANALYZE,
             StepType.COMMIT,
             StepType.SUMMARIZE,
         ],
@@ -532,6 +544,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.TEST,
             StepType.VERIFY_SPEC,
             StepType.UPDATE_SPEC,
+            StepType.VERSION_ANALYZE,
             StepType.COMMIT,
             StepType.SUMMARIZE,
         ],

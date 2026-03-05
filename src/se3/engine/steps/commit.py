@@ -3,6 +3,7 @@
 Commits the changes using git.
 This is a non-LLM step that executes git commands.
 Integrates with VersionBumper for automatic version bumping.
+Uses version analysis from the version_analyze step when available.
 """
 
 from __future__ import annotations
@@ -23,6 +24,9 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     Commits changes using git commands. If version bumping is enabled,
     bumps the version before committing and includes the new version
     in the commit message.
+    
+    Uses the bump_type from version_analyze step if available, otherwise
+    falls back to task type based bump rules.
 
     Args:
         step: The current step being executed
@@ -57,20 +61,13 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
             version_file = version_bumper.detect_version_file(project_root)
 
             if version_file:
-                # Determine task type and corresponding bump type
-                task_type = _get_task_type(flow)
-                bump_type_str = version_config.bump_rules.get(task_type, "patch")
+                # Get bump type from version_analyze step or fallback to task type
+                bump_type = _get_bump_type(step, flow, version_config)
                 
                 # Skip version bump for 'none' bump type
-                if bump_type_str == "none":
-                    logger.info(f"Skipping version bump for task type '{task_type}' (bump rule: none)")
+                if bump_type is None:
+                    logger.info("Skipping version bump (bump_type: none)")
                 else:
-                    # Convert string to BumpType enum
-                    try:
-                        bump_type = BumpType(bump_type_str)
-                    except ValueError:
-                        bump_type = BumpType.PATCH
-
                     # Save original version for potential rollback
                     original_version = version_bumper.read_version(version_file)
 
@@ -166,6 +163,74 @@ def _load_version_config(project_root: Path) -> VersionConfig:
     # Import here to avoid circular imports
     from ...config import load_version_config as load_cfg
     return load_cfg(project_root)
+
+
+def _get_bump_type(step: Step, flow: FlowInstance, version_config: VersionConfig) -> BumpType | None:
+    """Determine bump type from version_analyze step or fallback to task type.
+    
+    First checks if version_analyze step provided a bump_type, then falls back
+    to the task type based bump rules from configuration.
+
+    Args:
+        step: The current step (may have bump_type in inputs)
+        flow: The flow instance
+        version_config: Version configuration with bump rules
+
+    Returns:
+        BumpType enum value, or None if bump should be skipped
+    """
+    # First, try to get bump_type from version_analyze step input
+    bump_type_str = step.inputs.get("bump_type")
+    confidence = step.inputs.get("confidence", "low")
+    
+    # Check if we should use the LLM analysis result
+    # Use it if confidence is sufficient or if auto_confirm is enabled
+    if bump_type_str:
+        # Get configuration for confirmation behavior
+        auto_confirm = getattr(version_config, 'auto_bump', True)
+        confidence_threshold = getattr(version_config, 'confidence_threshold', None)
+        
+        # Determine if we need human confirmation
+        need_confirmation = False
+        if not auto_confirm:
+            need_confirmation = True
+        elif confidence_threshold:
+            confidence_levels = {"high": 3, "medium": 2, "low": 1}
+            threshold_level = confidence_levels.get(confidence_threshold, 0)
+            current_level = confidence_levels.get(confidence, 0)
+            if current_level < threshold_level:
+                need_confirmation = True
+        
+        if not need_confirmation:
+            logger.info(f"Using version_analyze result: bump_type={bump_type_str}, confidence={confidence}")
+            if bump_type_str == "none":
+                return None
+            try:
+                return BumpType(bump_type_str)
+            except ValueError:
+                logger.warning(f"Invalid bump_type from version_analyze: {bump_type_str}, falling back")
+        else:
+            logger.info(f"Version analysis confidence ({confidence}) below threshold, may need confirmation")
+            # For now, we still use it but log the concern
+            # TODO: Implement human confirmation for version bump
+            if bump_type_str == "none":
+                return None
+            try:
+                return BumpType(bump_type_str)
+            except ValueError:
+                logger.warning(f"Invalid bump_type from version_analyze: {bump_type_str}, falling back")
+    
+    # Fallback to task type based bump rules
+    task_type = flow.task_type or "feature"
+    bump_type_str = version_config.bump_rules.get(task_type, "patch")
+    
+    if bump_type_str == "none":
+        return None
+    
+    try:
+        return BumpType(bump_type_str)
+    except ValueError:
+        return BumpType.PATCH
 
 
 def _get_task_type(flow: FlowInstance) -> str:

@@ -130,17 +130,18 @@ se3 run --discover "我想做一个用户管理功能"
 | `test` | 运行测试验证 | 否（程序执行） | - | - | test_results, tests_passed |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | implementation, spec_content | verification_result, issues |
 | `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | changes_made | updated_specs |
-| `commit` | 提交变更 | 否（程序执行） | - | changes_made | commit_hash |
+| `version_analyze` | 分析变更确定版本类型 | 是 | STRICT | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning |
+| `commit` | 提交变更 | 否（程序执行） | - | changes_made, bump_type | commit_hash |
 | `summarize` | 生成总结和 handoff | 是 | 文本 | all_previous_outputs | summary (Markdown 文本) |
 | `project_summary` | 生成项目上下文摘要 | 是 | 文本 | 项目状态 | 摘要字符串 |
 
 **不同任务类型的步骤序列：**
-- `discovery`: discovery → analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → commit → summarize
-- `feature`: analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → commit → summarize
-- `bugfix`: analyze → read_spec → propose → plan_tasks → implement → test → verify_spec → update_spec → commit → summarize
+- `discovery`: discovery → analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
+- `feature`: analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
+- `bugfix`: analyze → read_spec → propose → plan_tasks → implement → test → verify_spec → **version_analyze** → commit → summarize
 - `review`: analyze → read_spec → verify_spec → summarize
-- `small`: analyze → implement → test → commit → summarize
-- `directive`: analyze → read_spec → plan_tasks → implement → test → verify_spec → commit → summarize
+- `small`: analyze → implement → test → **version_analyze** → commit → summarize
+- `directive`: analyze → read_spec → plan_tasks → implement → **version_analyze** → commit → summarize
 
 #### Scenario: Feature 任务完整流程
 - **WHEN** 任务类型为 `feature`
@@ -287,20 +288,61 @@ se3 run --discover "我想做一个用户管理功能"
 - **THEN** 根据规则自动构建步骤输入
 - **AND** 包含所有相关的前序输出
 
+### Requirement: Version Analyze 步骤
+
+`version_analyze` 步骤 SHALL 使用 LLM 智能分析实际变更内容，依据 Semantic Versioning 2.0.0 规则确定版本变更类型。
+
+**分析输入：**
+- `updated_specs`: Spec 变更（API 契约变化）- **主要判断依据**
+- `changes_made`: 变更的文件列表和详细说明
+- `verification_result`: 与 spec 的一致性检查结果
+- `task_type`: 任务类型（作为参考，不作为决定因素）
+- `task_description`: 原始任务描述
+- `current_version`: 当前版本号
+
+**分析输出：**
+```json
+{
+  "bump_type": "major|minor|patch|none",
+  "reasoning": "基于 SemVer 2.0.0 的详细解释",
+  "confidence": "high|medium|low",
+  "suggested_version": "X.Y.Z"
+}
+```
+
+**决策规则：**
+- **MAJOR**: 不兼容的 API 变更、删除功能、破坏性行为变更
+- **MINOR**: 向后兼容的新功能、新增可选参数、功能增强
+- **PATCH**: 向后兼容的 bug 修复、性能优化、内部重构
+- **NONE**: 无版本价值的变更（仅格式化、注释等）
+
+#### Scenario: 智能版本分析识别破坏性变更
+- **GIVEN** 任务类型为 `small`
+- **AND** 实际变更删除了公共函数的参数
+- **WHEN** `version_analyze` 步骤执行
+- **THEN** LLM 识别为 breaking change
+- **AND** 返回 `bump_type: major`
+
+#### Scenario: 低置信度处理
+- **GIVEN** `version_analyze` 返回 `confidence: low`
+- **AND** `auto_bump: true` (默认)
+- **WHEN** 进入 commit 步骤
+- **THEN** 系统仍应用建议的 bump 类型
+- **AND** 记录警告日志
+
 ### Requirement: Commit 步骤版本管理
 
-`commit` 步骤 SHALL 集成自动版本更新功能，根据任务类型自动 bump 版本号，并更新相关文档。
+`commit` 步骤 SHALL 集成自动版本更新功能，根据 `version_analyze` 的结果自动 bump 版本号，并更新相关文档。
 
 **版本更新流程：**
 1. 检测项目类型（Python/Node.js）并定位版本文件（pyproject.toml/package.json）
-2. 根据任务类型确定 bump 类型：
-   - `feature` → minor (X.Y+1.0)
-   - `bugfix` → patch (X.Y.Z+1)
-   - `breaking` → major (X+1.0.0)
-3. 使用语义化版本规范（SemVer 2.0.0）计算新版本
-4. 更新版本文件中的版本号
-5. 自动更新 README.md 和 VERSIONS.md（如配置了模板）
-6. 将版本文件和文档变更一起提交
+2. 从 `version_analyze` 步骤获取 `bump_type` 和 `confidence`
+3. 如果智能分析不可用或禁用，回退到基于任务类型的规则
+4. 根据配置决定是否应用自动 bump（`auto_bump` 和 `confidence_threshold`）
+5. 使用语义化版本规范（SemVer 2.0.0）计算新版本
+6. 更新版本文件中的版本号
+7. 自动更新 README.md 和 VERSIONS.md（如配置了模板）
+8. 将版本文件和文档变更一起提交
 
 **版本回滚机制：**
 - 如果提交失败，自动回滚版本文件到原始版本
@@ -312,25 +354,36 @@ version:
   enabled: true                    # 启用自动版本更新
   file_path: null                  # 版本文件路径（null=自动检测）
   include_in_commit_message: true  # 在提交消息中包含版本号
-  bump_rules:                      # 任务类型到 bump 类型的映射
+  
+  # 智能版本分析
+  smart_version_analysis: true     # 启用 LLM 分析
+  auto_bump: true                  # 自动应用 bump（无需确认）
+  confidence_threshold: null       # 置信度阈值（null=总是自动）
+  
+  # 回退规则（智能分析禁用时使用）
+  bump_rules:
     feature: minor
     bugfix: patch
     breaking: major
-  templates:                       # 文档更新模板
+  
+  # 文档更新模板
+  templates:
     readme_badge: "![Version](https://img.shields.io/badge/version-{version}-blue)"
     versions_entry: "## {version} - {date}\n\n{changes}\n"
 ```
 
 #### Scenario: Feature 任务自动更新版本
 - **GIVEN** 当前版本为 1.2.3
-- **WHEN** 执行 feature 类型的任务并进入 commit 步骤
+- **AND** `smart_version_analysis: true`
+- **WHEN** `version_analyze` 分析变更后建议 `minor` bump
 - **THEN** 版本自动 bump 为 1.3.0
 - **AND** README.md 和 VERSIONS.md 自动更新
 - **AND** 所有变更一起提交
 
 #### Scenario: Bugfix 任务自动更新版本
 - **GIVEN** 当前版本为 1.2.3
-- **WHEN** 执行 bugfix 类型的任务并进入 commit 步骤
+- **WHEN** 执行 bugfix 类型的任务
+- **AND** `version_analyze` 返回 `bump_type: patch`
 - **THEN** 版本自动 bump 为 1.2.4
 - **AND** 提交消息包含新版本号
 

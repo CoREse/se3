@@ -40,10 +40,21 @@ version:
   enabled: true                       # Enable automatic version bumping
   file_path: null                     # Explicit version file path (null = auto-detect)
   include_in_commit_message: true     # Include version in commit message
-  bump_rules:                         # Task type to bump type mapping
+  
+  # Smart Version Analysis (NEW)
+  # Uses LLM to analyze actual changes and determine appropriate SemVer bump
+  smart_version_analysis: true        # Enable intelligent version analysis
+  auto_bump: true                     # Auto-apply bump without human confirmation
+  confidence_threshold: null          # Confidence threshold for confirmation (null=never ask, low, medium, high)
+  
+  # Fallback bump rules (used when smart_version_analysis is disabled or fails)
+  bump_rules:
     feature: minor                    # Feature tasks bump minor version
     bugfix: patch                     # Bugfix tasks bump patch version
     breaking: major                   # Breaking changes bump major version
+    small: patch                      # Small changes bump patch version
+    docs: patch                       # Documentation changes bump patch
+    refactor: patch                   # Refactoring bumps patch version
 
 # E2E / Visual regression testing (optional)
 # Requires Puppeteer MCP or similar browser automation tool

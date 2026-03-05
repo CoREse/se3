@@ -28,6 +28,8 @@ class VersionConfig:
     version_file: Optional[str] = None  # Auto-detect if None
     
     # Bump rules: map task type to bump type (following SemVer 2.0.0)
+    # Note: These are used as fallback when version_analyze step is not available
+    # or when smart_version_analysis is disabled
     bump_rules: dict[str, str] = field(default_factory=lambda: {
         "feature": "minor",   # New functionality
         "feat": "minor",
@@ -41,6 +43,20 @@ class VersionConfig:
         "review": "none",     # No code changes
         "directive": "minor", # Following instructions may add features
     })
+    
+    # Smart version analysis configuration
+    # Uses LLM to analyze actual changes and determine bump type
+    smart_version_analysis: bool = True  # Enable version_analyze step
+    
+    # Auto-confirmation settings
+    # If True, version bump is applied automatically without human confirmation
+    auto_bump: bool = True
+    
+    # Confidence threshold for requiring human confirmation
+    # None = no threshold (even "low" confidence is auto-confirmed)
+    # "medium" = require confirmation for "low" confidence
+    # "high" = require confirmation for "medium" or "low" confidence
+    confidence_threshold: Optional[str] = None
     
     # Pre-release configuration
     prerelease_prefix: str = ""
@@ -91,6 +107,9 @@ class VersionConfig:
             enabled=version_data.get("enabled", True),
             version_file=version_data.get("version_file"),
             bump_rules=bump_rules,
+            smart_version_analysis=version_data.get("smart_version_analysis", True),
+            auto_bump=version_data.get("auto_bump", True),
+            confidence_threshold=version_data.get("confidence_threshold", None),
             prerelease_prefix=version_data.get("prerelease_prefix", ""),
             prerelease_number=version_data.get("prerelease_number", 0),
             templates=templates,
