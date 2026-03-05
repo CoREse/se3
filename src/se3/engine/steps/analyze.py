@@ -33,11 +33,12 @@ ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze th
 
 3. **complexity**: "simple", "medium", or "complex"
 
-4. **required_steps**: List of step names needed (choose from: analyze, read_spec, propose, design, plan_tasks, implement, test, verify_spec, update_spec, commit, summarize)
+4. **required_steps**: List of step names needed (choose from: analyze, read_spec, propose, design, plan_tasks, implement, test, verify_spec, update_spec, version_analyze, commit, summarize)
    - Always include "analyze" (already done)
    - "small" tasks can skip propose/design
    - "review" tasks only need analyze, read_spec, verify_spec, summarize
    - "bugfix" may skip propose but usually needs design if complex
+   - "version_analyze" runs before commit to determine version bump type
 
 5. **reasoning**: Brief explanation of your classification
 
@@ -254,6 +255,7 @@ def _update_flow_steps(
         "test": StepType.TEST,
         "verify_spec": StepType.VERIFY_SPEC,
         "update_spec": StepType.UPDATE_SPEC,
+        "version_analyze": StepType.VERSION_ANALYZE,
         "commit": StepType.COMMIT,
         "summarize": StepType.SUMMARIZE,
     }
