@@ -167,6 +167,10 @@ class State:
     # Review cycle tracking: step_id -> review iteration count
     review_iterations: Dict[str, int] = field(default_factory=dict)
 
+    # Fix loop tracking: for test-verify-fix iterations
+    fix_iterations: int = 0
+    fix_history: List[Dict[str, Any]] = field(default_factory=list)
+
     def get_current_step(self) -> Optional[Step]:
         """Get the currently active step."""
         if self.current_step_id:
@@ -224,6 +228,40 @@ class State:
         """
         return self.review_iterations.get(step_id, 0)
 
+    def increment_fix_iteration(self, fix_context: Optional[Dict[str, Any]] = None) -> int:
+        """Increment and return the fix iteration count for the test-verify-fix loop.
+
+        Args:
+            fix_context: Optional context about the fix (step_id, reason, etc.)
+
+        Returns:
+            New iteration count (1-based)
+        """
+        self.fix_iterations += 1
+
+        # Track in history for debugging
+        history_entry = {
+            "iteration": self.fix_iterations,
+            "timestamp": datetime.now().isoformat(),
+        }
+        if fix_context:
+            history_entry.update(fix_context)
+        self.fix_history.append(history_entry)
+
+        # Also store in context for easy access by steps
+        self.context["fix_iterations"] = self.fix_iterations
+        self.context["fix_history"] = self.fix_history
+
+        return self.fix_iterations
+
+    def get_fix_iteration(self) -> int:
+        """Get the current fix iteration count.
+
+        Returns:
+            Current iteration count (0 if no fix iterations yet)
+        """
+        return self.fix_iterations
+
     def update_task_type(self, task_type: str) -> None:
         """Update the resolved task type after analyze step.
 
@@ -253,6 +291,8 @@ class State:
             "selected_steps": [s.value for s in self.selected_steps],
             "current_step_index": self.current_step_index,
             "review_iterations": self.review_iterations,
+            "fix_iterations": self.fix_iterations,
+            "fix_history": self.fix_history,
         }
 
     @classmethod
@@ -265,6 +305,8 @@ class State:
             selected_steps=[StepType(s) for s in data.get("selected_steps", [])],
             current_step_index=data.get("current_step_index", 0),
             review_iterations=data.get("review_iterations", {}),
+            fix_iterations=data.get("fix_iterations", 0),
+            fix_history=data.get("fix_history", []),
         )
         state.steps = {
             sid: Step.from_dict(step_data) for sid, step_data in data.get("steps", {}).items()
@@ -435,8 +477,8 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "name": "verify_spec",
         "description": "Check implementation vs spec consistency",
         "uses_llm": True,
-        "inputs": ["changes_made", "relevant_specs"],
-        "outputs": ["verification_result"],
+        "inputs": ["changes_made", "spec_content", "test_results", "fix_iteration"],
+        "outputs": ["verification_result", "verified", "issues", "fix_needed", "fix_instructions", "fix_context"],
     },
     StepType.UPDATE_SPEC: {
         "name": "update_spec",

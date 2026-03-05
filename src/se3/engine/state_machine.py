@@ -130,6 +130,7 @@ class StateMachine:
         flow.state.current_step_index = 0
         flow.state.context["task_description"] = task_description
         flow.state.context["task_type"] = task_type
+        flow.state.context["project_root"] = str(self.project_root)
 
         # Create first step
         first_step_type = selected_steps[0] if selected_steps else StepType.ANALYZE
@@ -285,6 +286,27 @@ class StateMachine:
             )
             return None
 
+        # Handle test-verify-fix loop: if VERIFY_SPEC returns REVISION_NEEDED
+        if (
+            current_step.step_type == StepType.VERIFY_SPEC
+            and current_step.status == StepStatus.REVISION_NEEDED
+        ):
+            # Check if max iterations reached
+            max_fix_iterations = self._get_max_fix_iterations()
+            current_iteration = flow.state.get_fix_iteration()
+
+            if current_iteration >= max_fix_iterations:
+                logger.warning(
+                    f"Max fix iterations ({max_fix_iterations}) reached, continuing to next step"
+                )
+                print(f"\n⚠️  Max fix iterations ({max_fix_iterations}) reached, proceeding...\n")
+                # Fall through to normal progression - will go to next step
+            else:
+                fix_step = self._transition_to_fix(flow, current_step)
+                if fix_step:
+                    return fix_step
+                # If transition failed, fall through to normal progression
+
         # Handle review loop: if current step is CONFIRM and revision was requested
         if current_step.step_type == StepType.CONFIRM:
             review_result = current_step.outputs.get("review_result", {})
@@ -397,6 +419,107 @@ class StateMachine:
 
         return step_to_review
 
+    def _transition_to_fix(
+        self,
+        flow: FlowInstance,
+        verify_step: Step,
+    ) -> Optional[Step]:
+        """Transition from VERIFY_SPEC back to IMPLEMENT for fixing issues.
+
+        This implements the test-verify-fix loop. When tests fail or spec
+        compliance issues are found, the verify_spec step returns REVISION_NEEDED
+        and this method transitions back to the implement step with fix context.
+
+        Args:
+            flow: Current flow instance
+            verify_step: The verify_spec step that detected issues
+
+        Returns:
+            The implement step being re-run, or None if failed
+        """
+        # Get fix instructions and context from verify step outputs
+        fix_instructions = verify_step.outputs.get("fix_instructions", "")
+        fix_context = verify_step.outputs.get("fix_context", {})
+        fix_needed = verify_step.outputs.get("fix_needed", True)
+
+        if not fix_needed:
+            logger.warning("Fix transition called but fix_needed is False")
+            return None
+
+        # Find the implement step in history
+        implement_step: Optional[Step] = None
+        for step_id in reversed(flow.state.step_history):
+            step = flow.state.steps.get(step_id)
+            if step and step.step_type == StepType.IMPLEMENT:
+                implement_step = step
+                break
+
+        if not implement_step:
+            logger.warning("No implement step found for fix transition")
+            return None
+
+        # Increment fix iteration counter
+        iteration = flow.state.increment_fix_iteration(
+            fix_context={
+                "verify_step_id": verify_step.step_id,
+                "implement_step_id": implement_step.step_id,
+                "reason": "test_failure" if fix_context.get("test_failed") else "spec_compliance",
+            }
+        )
+
+        logger.info(
+            f"Transitioning to fix iteration {iteration} for {implement_step.step_type.value}"
+        )
+
+        # Reset the implement step for re-execution
+        implement_step.status = StepStatus.PENDING
+        implement_step.inputs["fix_instructions"] = fix_instructions
+        implement_step.inputs["fix_context"] = fix_context
+        implement_step.inputs["is_fix_iteration"] = True
+        implement_step.inputs["fix_iteration"] = iteration
+        implement_step.error_message = None
+        implement_step.error_details = None
+        # Keep the outputs for reference, but mark that they may be outdated
+        implement_step.outputs["_is_outdated"] = True
+
+        # Update flow state to point back to implement step
+        flow.state.current_step_id = implement_step.step_id
+
+        # Find the index of IMPLEMENT in selected_steps
+        try:
+            step_index = flow.state.selected_steps.index(StepType.IMPLEMENT)
+            flow.state.current_step_index = step_index
+        except ValueError:
+            logger.warning("IMPLEMENT step type not in selected sequence")
+
+        self.persistence.save_flow(flow)
+
+        print(f"\n{'='*60}")
+        print(f"🔧 FIX LOOP: RETURNING TO IMPLEMENT STEP")
+        print(f"{'='*60}")
+        print(f"Iteration: {iteration}")
+        if fix_context.get("test_failed"):
+            print(f"Reason: Tests failed")
+        if fix_context.get("spec_issues"):
+            print(f"Reason: Spec compliance issues found")
+        print(f"Instructions: {fix_instructions[:200]}..." if len(fix_instructions) > 200 else f"Instructions: {fix_instructions}")
+        print(f"{'='*60}\n")
+
+        return implement_step
+
+    def _get_max_fix_iterations(self) -> int:
+        """Get the maximum number of fix iterations allowed.
+
+        Returns:
+            Maximum fix iterations (default: 3)
+        """
+        # Try to import from config, fallback to default
+        try:
+            from ..config import get_max_fix_iterations
+            return get_max_fix_iterations(self.project_root)
+        except ImportError:
+            return 3
+
     def _build_step_inputs(self, flow: FlowInstance, step_type: StepType) -> Dict[str, Any]:
         """Build inputs for a step based on previous outputs.
 
@@ -450,6 +573,8 @@ class StateMachine:
                     inputs["test_results"] = step.outputs.get("test_results")
                 elif step.step_type == StepType.VERIFY_SPEC:
                     inputs["verification_result"] = step.outputs.get("verification_result")
+                    inputs["fix_instructions"] = step.outputs.get("fix_instructions")
+                    inputs["fix_context"] = step.outputs.get("fix_context")
                 elif step.step_type == StepType.UPDATE_SPEC:
                     inputs["updated_specs"] = step.outputs.get("updated_specs")
                 elif step.step_type == StepType.COMMIT:
@@ -482,6 +607,27 @@ class StateMachine:
                 inputs["step_to_review_id"] = last_non_confirm_step.step_id
                 inputs["step_to_review_type"] = last_non_confirm_step.step_type.value
                 inputs["reviewer"] = config.get("reviewer", "human")
+
+        # Special handling for IMPLEMENT step when in fix iteration
+        if step_type == StepType.IMPLEMENT:
+            # Check if we're in a fix loop
+            fix_iteration = flow.state.get_fix_iteration()
+            if fix_iteration > 0:
+                # Include fix context for the implement step
+                inputs["fix_iteration"] = fix_iteration
+                inputs["fix_history"] = flow.state.fix_history
+
+                # Find the most recent TEST and VERIFY_SPEC steps for context
+                for step_id in reversed(flow.state.step_history):
+                    step = flow.state.steps.get(step_id)
+                    if step and step.step_type == StepType.TEST:
+                        if "test_results" not in inputs:
+                            inputs["test_results"] = step.outputs.get("test_results")
+                    elif step and step.step_type == StepType.VERIFY_SPEC:
+                        # Always use the most recent VERIFY_SPEC in fix loop
+                        inputs["verification_result"] = step.outputs.get("verification_result")
+                        inputs["fix_instructions"] = step.outputs.get("fix_instructions")
+                        inputs["fix_context"] = step.outputs.get("fix_context")
 
         return inputs
 

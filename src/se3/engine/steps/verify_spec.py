@@ -2,20 +2,27 @@
 
 Checks implementation against specifications for consistency.
 Uses LLM to verify that requirements are met.
+Detects test failures and triggers fix loop when appropriate.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
 from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_MAX_FIX_ITERATIONS = 3
 
 
 VERIFY_PROMPT = """You are an expert software quality assurance engineer. Verify that the implementation matches the specifications.
@@ -32,6 +39,9 @@ VERIFY_PROMPT = """You are an expert software quality assurance engineer. Verify
 ## Test Results
 {test_results}
 
+## Fix Context
+{fix_context}
+
 ## Instructions
 Verify the implementation against the specifications. Check:
 
@@ -39,6 +49,14 @@ Verify the implementation against the specifications. Check:
 2. **Design Compliance**: Does the code follow the specified design?
 3. **No Unintended Changes**: Are there any changes that weren't specified?
 4. **Correctness**: Is the implementation logically correct?
+5. **Test Results**: Did all tests pass? If not, analyze the failures.
+
+### Test Failure Analysis
+If tests failed, analyze the test output to identify:
+- Which specific tests failed
+- What error messages were produced
+- Root cause of the failures (implementation bug, missing code, etc.)
+- Specific fix instructions for the implement step
 
 Respond in JSON format:
 ```json
@@ -52,12 +70,20 @@ Respond in JSON format:
         }}
     ],
     "summary": "Brief summary of verification results",
-    "recommendations": ["recommendation1", "recommendation2"]
+    "recommendations": ["recommendation1", "recommendation2"],
+    "test_analysis": {{
+        "tests_passed": true|false,
+        "failure_summary": "Summary of test failures (if any)",
+        "root_cause": "Root cause analysis of failures (if any)"
+    }},
+    "fix_instructions": "Detailed instructions for fixing issues, especially test failures. Include specific file paths, code changes needed, and approach to resolve."
 }}
 ```
 
 Set "verified" to true if the implementation is acceptable (may have minor issues).
 Set "verified" to false only if there are critical errors that must be fixed.
+
+The "fix_instructions" field is REQUIRED when tests failed. Provide clear, actionable instructions that the implement step can use to fix the issues.
 """
 
 
@@ -65,23 +91,31 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the verify_spec step.
 
     Verifies implementation against specifications using LLM.
+    Detects test failures and triggers REVISION_NEEDED when appropriate.
 
     Args:
         step: The current step being executed
         flow: The flow instance containing context
 
     Returns:
-        StepStatus.COMPLETED on success, StepStatus.FAILED on error
+        StepStatus.COMPLETED on success,
+        StepStatus.REVISION_NEEDED when tests failed and fix needed,
+        StepStatus.FAILED on error
     """
     task_description = step.inputs.get("task_description", "")
     spec_content = step.inputs.get("spec_content", {})
     changes_made = step.inputs.get("changes_made", {})
     test_results = step.inputs.get("test_results", {})
 
+    # Get fix iteration count from inputs
+    fix_iteration = step.inputs.get("fix_iteration", 0)
+    max_iterations = _get_max_fix_iterations(flow)
+
     # Format inputs
     spec_text = _format_spec_content(spec_content)
     changes_text = _format_changes(changes_made)
     test_text = _format_test_results(test_results)
+    fix_context_text = _format_fix_context(fix_iteration, max_iterations)
 
     # Build prompt
     prompt = VERIFY_PROMPT.format(
@@ -89,9 +123,10 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         spec_content=spec_text,
         changes_made=changes_text,
         test_results=test_text,
+        fix_context=fix_context_text,
     )
 
-    logger.info("Verifying implementation against specifications...")
+    logger.info(f"Verifying implementation against specifications (fix iteration: {fix_iteration})...")
 
     try:
         # Call LLM for verification (use EXTRACT mode to avoid retry on format issues)
@@ -100,7 +135,7 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         response = caller.call(
             prompt=prompt,
             json_mode="extract",
-            json_schema_hint='{"verified": true|false, "issues": [{"severity": "error|warning", "message": "..."}], "summary": "...", "recommendations": []}',
+            json_schema_hint='{"verified": true|false, "issues": [{"severity": "error|warning", "message": "..."}], "summary": "...", "recommendations": [], "test_analysis": {"tests_passed": true|false, "failure_summary": "...", "root_cause": "..."}, "fix_instructions": "..."}',
         )
 
         # Parse JSON response
@@ -118,6 +153,44 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         issues = verification.get("issues", [])
         error_count = sum(1 for i in issues if i.get("severity") == "error")
 
+        # Check test results
+        tests_passed = test_results.get("passed", False) if test_results else True
+        test_analysis = verification.get("test_analysis", {})
+        fix_instructions = verification.get("fix_instructions", "")
+
+        # Store fix instructions in outputs
+        if fix_instructions:
+            step.outputs["fix_instructions"] = fix_instructions
+
+        # Determine if we need to fix
+        if not tests_passed:
+            logger.warning(f"Tests failed - fix iteration {fix_iteration}/{max_iterations}")
+
+            if fix_iteration < max_iterations:
+                # Return REVISION_NEEDED to trigger fix loop
+                logger.info(f"Returning REVISION_NEEDED - will attempt fix (iteration {fix_iteration + 1})")
+
+                # Store fix context for next implement step
+                step.outputs["fix_needed"] = True
+                step.outputs["fix_iteration"] = fix_iteration
+                step.outputs["max_fix_iterations"] = max_iterations
+                step.outputs["fix_context"] = {
+                    "test_results": test_results,
+                    "test_analysis": test_analysis,
+                    "fix_instructions": fix_instructions,
+                    "iteration": fix_iteration + 1,
+                }
+
+                return StepStatus.REVISION_NEEDED
+            else:
+                # Max iterations reached - complete with warning
+                logger.warning(f"Max fix iterations ({max_iterations}) reached - completing with test failures")
+                step.outputs["max_iterations_reached"] = True
+                step.outputs["warning"] = f"Tests still failing after {max_iterations} fix attempts"
+
+                return StepStatus.COMPLETED
+
+        # Tests passed - check spec compliance
         if verification.get("verified", False):
             logger.info(f"Verification passed ({len(issues)} issues found, {error_count} errors)")
         else:
@@ -129,6 +202,47 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.exception("Verify step failed")
         step.error_message = f"Verification failed: {str(e)}"
         return StepStatus.FAILED
+
+
+def _get_max_fix_iterations(flow: FlowInstance) -> int:
+    """Get max fix iterations from config or use default.
+
+    Args:
+        flow: Current flow instance
+
+    Returns:
+        Maximum number of fix iterations (default: 3)
+    """
+    # Try to get from flow context first
+    max_iter = flow.state.context.get("max_fix_iterations")
+    if max_iter is not None:
+        return int(max_iter)
+
+    # Try to load from se3.yaml
+    try:
+        # Get project root from context or derive from change_path
+        project_root_str = flow.state.context.get("project_root")
+        if project_root_str:
+            project_root = Path(project_root_str)
+        elif flow.change_path:
+            # Fallback: derive from change_path (parent of change_path.parent)
+            # change_path is typically openspec/changes/change_name
+            # so we need to go up 3 levels to get project root
+            project_root = flow.change_path.parent.parent.parent
+        else:
+            project_root = Path.cwd()
+
+        config_path = project_root / "se3.yaml"
+        if config_path.exists():
+            with open(config_path) as f:
+                config = yaml.safe_load(f) or {}
+            workflow_config = config.get("workflow", {})
+            max_iter = workflow_config.get("max_fix_iterations", DEFAULT_MAX_FIX_ITERATIONS)
+            return int(max_iter)
+    except Exception as e:
+        logger.debug(f"Could not load max_fix_iterations from config: {e}")
+
+    return DEFAULT_MAX_FIX_ITERATIONS
 
 
 def _format_spec_content(spec_content: dict[str, str]) -> str:
@@ -181,5 +295,27 @@ def _format_test_results(test_results: dict[str, Any]) -> str:
         # Include last 1000 chars of stdout
         stdout_preview = stdout[-1000:] if len(stdout) > 1000 else stdout
         lines.append(f"\nTest output:\n{stdout_preview}")
+
+    stderr = test_results.get("stderr", "")
+    if stderr:
+        # Include last 500 chars of stderr
+        stderr_preview = stderr[-500:] if len(stderr) > 500 else stderr
+        lines.append(f"\nError output:\n{stderr_preview}")
+
+    return "\n".join(lines)
+
+
+def _format_fix_context(fix_iteration: int, max_iterations: int) -> str:
+    """Format fix context for inclusion in prompt."""
+    if fix_iteration == 0:
+        return "This is the initial verification (no previous fix attempts)."
+
+    lines = [
+        f"Fix iteration: {fix_iteration} of {max_iterations}",
+        f"Previous fix attempts: {fix_iteration}",
+    ]
+
+    if fix_iteration >= max_iterations:
+        lines.append("WARNING: This is the final fix attempt. If tests still fail, the flow will complete with failures.")
 
     return "\n".join(lines)

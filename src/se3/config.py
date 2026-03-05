@@ -456,11 +456,42 @@ def get_language_labels(language: str) -> dict[str, str]:
 
 def is_chinese_language(language: str) -> bool:
     """Check if the language is Chinese.
-    
+
     Args:
         language: Language code (e.g., 'en', 'zh', 'zh-CN')
-        
+
     Returns:
         True if the language is Chinese
     """
     return language.lower().startswith("zh")
+
+
+def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
+    """Get the maximum number of fix iterations for the test-verify-fix loop.
+
+    Reads from se3.yaml workflow.max_fix_iterations, defaults to 3.
+
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+
+    Returns:
+        Maximum number of fix iterations allowed.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    else:
+        project_root = Path(project_root)
+
+    config_path = project_root / "se3.yaml"
+
+    if not config_path.exists():
+        return 3
+
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+
+        workflow = data.get("workflow", {})
+        return workflow.get("max_fix_iterations", 3)
+    except Exception:
+        return 3
