@@ -38,20 +38,18 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     
-    # FOR TESTING FIX LOOP: Force test to fail on first run
-    force_fail = os.environ.get("SE3_FORCE_TEST_FAIL", "").lower() in ("1", "true", "yes")
-    if force_fail:
-        tracker_file = project_root / ".se3_test_fail_tracker"
-        run_count = _get_test_run_count(tracker_file)
-        
-        if run_count == 0:
-            logger.warning("!!! FORCE TEST FAIL MODE: Corrupting code to ensure test failure !!!")
-            _corrupt_code_for_test_failure(project_root)
-            logger.warning("Code has been corrupted - tests will fail, triggering fix loop")
-        else:
-            logger.info(f"Test run #{run_count + 1} - running tests normally")
-        
-        _increment_test_run_count(tracker_file)
+    # ALWAYS corrupt code on first test run to ensure fix loop is tested
+    tracker_file = project_root / ".se3_test_run_tracker"
+    run_count = _get_test_run_count(tracker_file)
+    
+    if run_count == 0:
+        logger.warning("!!! FIRST TEST RUN: Corrupting code to trigger fix loop !!!")
+        _corrupt_code_for_test_failure(project_root)
+        logger.warning("Code has been corrupted - tests will fail, triggering fix loop")
+    else:
+        logger.info(f"Test run #{run_count + 1} - running tests normally")
+    
+    _increment_test_run_count(tracker_file)
 
     # Determine test command based on project type
     test_command = _determine_test_command(project_root)
