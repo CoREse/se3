@@ -676,10 +676,13 @@ class StateMachine:
                 break
 
             if step_status == StepStatus.REVISION_NEEDED:
-                # Special case: revision was triggered, transition already handled by confirm handler
-                # Just continue the loop - the state machine will handle the transition
-                logger.info("Revision triggered, continuing flow")
-                continue
+                # Special case: revision was triggered
+                # For CONFIRM steps, the handler already handled the transition
+                # For VERIFY_SPEC steps, we need to call transition_to_next to trigger fix loop
+                if current_step.step_type == StepType.CONFIRM:
+                    logger.info("Revision triggered by CONFIRM, continuing flow")
+                    continue
+                # For VERIFY_SPEC, fall through to transition_to_next which will handle fix loop
 
             # Transition to next step
             next_step = self.transition_to_next(flow)
