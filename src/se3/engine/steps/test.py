@@ -3,10 +3,10 @@
 Runs tests to verify the implementation.
 This is a non-LLM step that executes test commands.
 
-Special mode for testing fix loop:
-Set SE3_TEST_FAIL_LOOP=1 to enable first-run failure mode.
-This introduces a temporary bug on the first test run to ensure
-the test-verify-fix loop is triggered for testing purposes.
+FOR TESTING FIX LOOP:
+Set SE3_FORCE_TEST_FAIL=1 environment variable.
+This will intentionally corrupt the code on the FIRST test run
+to ensure tests fail and trigger the fix loop.
 """
 
 from __future__ import annotations
@@ -38,18 +38,20 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     
-    # Check for fail-loop test mode (for testing fix loop)
-    fail_loop_mode = os.environ.get("SE3_TEST_FAIL_LOOP", "").lower() in ("1", "true", "yes")
-    if fail_loop_mode:
-        tracker_file = project_root / ".se3_test_run_count"
+    # FOR TESTING FIX LOOP: Force test to fail on first run
+    force_fail = os.environ.get("SE3_FORCE_TEST_FAIL", "").lower() in ("1", "true", "yes")
+    if force_fail:
+        tracker_file = project_root / ".se3_test_fail_tracker"
         run_count = _get_test_run_count(tracker_file)
         
         if run_count == 0:
-            logger.warning("TEST FAIL-LOOP MODE: Introducing temporary bug on first run")
-            _introduce_temporary_bug(project_root)
+            logger.warning("!!! FORCE TEST FAIL MODE: Corrupting code to ensure test failure !!!")
+            _corrupt_code_for_test_failure(project_root)
+            logger.warning("Code has been corrupted - tests will fail, triggering fix loop")
+        else:
+            logger.info(f"Test run #{run_count + 1} - running tests normally")
         
         _increment_test_run_count(tracker_file)
-        logger.info(f"Test run count: {run_count + 1}")
 
     # Determine test command based on project type
     test_command = _determine_test_command(project_root)
@@ -149,41 +151,52 @@ def _increment_test_run_count(tracker_file: Path) -> int:
     return count
 
 
-def _introduce_temporary_bug(project_root: Path):
-    """Introduce a temporary bug for testing fix loop.
+def _corrupt_code_for_test_failure(project_root: Path):
+    """Aggressively corrupt code to ensure test failure.
     
-    This modifies a common Python file to introduce a simple bug
-    that will cause tests to fail on first run.
+    This modifies Python files to introduce obvious bugs
+    that will definitely cause tests to fail.
     """
-    # Try to find a suitable Python file to modify
-    potential_files = [
-        project_root / "src/task_cli/calculator.py",
-        project_root / "src/task_cli/math_utils.py",
-    ]
-    
-    target_file = None
-    for f in potential_files:
-        if f.exists():
-            target_file = f
-            break
-    
-    if not target_file:
-        logger.warning("No suitable file found to introduce temporary bug")
+    # Find all Python files in src directory
+    src_dir = project_root / "src"
+    if not src_dir.exists():
+        logger.warning(f"Source directory not found: {src_dir}")
         return
     
-    try:
-        content = target_file.read_text()
-        
-        # Check if we can introduce a simple bug (change + to -)
-        if "return a + b" in content and "return a - b" not in content:
-            buggy_content = content.replace(
-                "return a + b",
-                "return a - b  # SE3_TEST_FAIL_LOOP: Intentional bug"
-            )
-            target_file.write_text(buggy_content)
-            logger.info(f"Introduced temporary bug in {target_file}")
-        else:
-            logger.warning(f"Could not introduce bug in {target_file} - pattern not found")
+    corrupted_count = 0
+    
+    for py_file in src_dir.rglob("*.py"):
+        # Skip __init__.py and test files
+        if "__init__" in py_file.name or "test_" in py_file.name:
+            continue
             
-    except Exception as e:
-        logger.warning(f"Failed to introduce temporary bug: {e}")
+        try:
+            content = py_file.read_text()
+            original_content = content
+            
+            # Aggressive corruption: replace return statements with wrong values
+            import re
+            
+            # Pattern 1: Replace simple return statements with 0
+            content = re.sub(
+                r'return ([a-zA-Z_][a-zA-Z0-9_]*(?:\s*[-+*/]\s*[a-zA-Z0-9_]+)?)',
+                r'return 0  # SE3_CORRUPTED: was \1',
+                content
+            )
+            
+            # Pattern 2: Replace comparison operators
+            content = content.replace(" == ", " != ")
+            content = content.replace(" != ", " == ")
+            
+            if content != original_content:
+                py_file.write_text(content)
+                logger.warning(f"CORRUPTED: {py_file}")
+                corrupted_count += 1
+                
+        except Exception as e:
+            logger.debug(f"Could not corrupt {py_file}: {e}")
+    
+    if corrupted_count == 0:
+        logger.warning("Could not corrupt any files - test may pass unexpectedly")
+    else:
+        logger.warning(f"Corrupted {corrupted_count} files - tests should fail now")
