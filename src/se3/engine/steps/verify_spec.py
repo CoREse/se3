@@ -153,10 +153,26 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         issues = verification.get("issues", [])
         error_count = sum(1 for i in issues if i.get("severity") == "error")
 
-        # Check test results
-        tests_passed = test_results.get("passed", False) if test_results else True
+        # Check test results - CRITICAL: Check raw test results first
+        if test_results and isinstance(test_results, dict):
+            tests_passed = test_results.get("passed", False)
+            returncode = test_results.get("returncode", 0)
+            # Also consider non-zero return code as test failure
+            if returncode != 0 and tests_passed:
+                logger.warning(f"Test return code is {returncode}, marking as failed")
+                tests_passed = False
+        else:
+            tests_passed = True
+        
         test_analysis = verification.get("test_analysis", {})
         fix_instructions = verification.get("fix_instructions", "")
+        
+        # If tests failed but LLM didn't provide fix instructions, generate default
+        if not tests_passed and not fix_instructions:
+            stdout = test_results.get("stdout", "") if isinstance(test_results, dict) else ""
+            stderr = test_results.get("stderr", "") if isinstance(test_results, dict) else ""
+            fix_instructions = f"Tests are failing. Please review and fix the implementation.\n\nTest output:\n{stdout[:1000]}\n\nStderr:\n{stderr[:500]}"
+            logger.warning("Tests failed but LLM didn't provide fix instructions - using default")
 
         # Store fix instructions in outputs
         if fix_instructions:
@@ -164,7 +180,7 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         # Determine if we need to fix
         if not tests_passed:
-            logger.warning(f"Tests failed - fix iteration {fix_iteration}/{max_iterations}")
+            logger.warning(f"TESTS FAILED - fix iteration {fix_iteration}/{max_iterations}")
 
             if fix_iteration < max_iterations:
                 # Return REVISION_NEEDED to trigger fix loop
