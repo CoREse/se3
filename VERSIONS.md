@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.21.0** — BREAKING: Remove deprecated commands and legacy code. SE3 3.0 now only provides `se3 run` as the unified entry point. Removed: start/work/done/loop/full-cycle/collab and all related scripts. Removed .claude/commands and .claude/skills (moved to external repo).
+**3.22.0** — feat: Restore `se3 init` command and align specs with 3.0 CLI. Simplified init creates se3.yaml and base/spec.md. Updated all se3-* specs to reflect current CLI (run/init/guardrails only). Removed obsolete specs for deleted functionality.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.22.0 | 2026-03-06 | feat: Restore se3 init command. Align all specs with 3.0 CLI reality. |
 | 3.21.0 | 2026-03-06 | BREAKING: Remove deprecated commands for 3.0. Only `se3 run` remains as unified entry point. |
 | 3.20.1 | 2026-03-06 | fix: Fix loop now creates new implement steps per iteration. Fixed REVISION_NEEDED transition handling. |
 | 3.20.0 | 2026-03-05 | feat: Test-verify-fix loop. Auto-routes to implement on test failure with max_fix_iterations config. |
