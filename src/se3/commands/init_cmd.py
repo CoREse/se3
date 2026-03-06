@@ -5,7 +5,8 @@ from typing import Optional
 
 import typer
 
-app = typer.Typer()
+# Note: This module exports the init function directly to be registered by cli.py
+# Not using app.command() here because cli.py registers it directly
 
 DEFAULT_SE3_YAML = """# SE3 Project Configuration
 # https://github.com/Fission-AI/SE3
@@ -85,7 +86,6 @@ def _get_base_spec_template(project_name: str) -> str:
 """
 
 
-@app.command(name="init")
 def init_cmd(
     project_root: str = typer.Option(".", "--project-root", "-p", help="Project root directory"),
     name: Optional[str] = typer.Option(None, "--name", "-n", help="Project name"),

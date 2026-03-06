@@ -219,9 +219,24 @@ def run_cmd(
     raise typer.Exit(exit_code)
 
 
-# Register init command
-from .commands import init_cmd
-app.add_typer(init_cmd.app, name="init", help="Initialize SE3 project structure")
+# Import init command function (registered below)
+from .commands.init_cmd import init_cmd as init_command
+
+
+@app.command(name="init")
+def init_cmd(
+    project_root: str = typer.Option(".", "--project-root", "-p", help="Project root directory"),
+    name: Optional[str] = typer.Option(None, "--name", "-n", help="Project name"),
+    force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing files"),
+):
+    """Initialize a new SE3 project.
+    
+    Creates the standard SE3 directory structure:
+    - se3.yaml - Project configuration
+    - se3/specs/ - Specification directory
+    - se3/specs/base/spec.md - Base project specification
+    """
+    init_command(project_root=project_root, name=name, force=force)
 
 
 @app.command(name="guardrails")
