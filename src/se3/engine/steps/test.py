@@ -2,10 +2,16 @@
 
 Runs tests to verify the implementation.
 This is a non-LLM step that executes test commands.
+
+Special mode for testing fix loop:
+Set SE3_TEST_FAIL_LOOP=1 to enable first-run failure mode.
+This introduces a temporary bug on the first test run to ensure
+the test-verify-fix loop is triggered for testing purposes.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
 from pathlib import Path
@@ -28,7 +34,22 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     Returns:
         StepStatus.COMPLETED on success, StepStatus.FAILED on error
     """
+    import os
+    
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    
+    # Check for fail-loop test mode (for testing fix loop)
+    fail_loop_mode = os.environ.get("SE3_TEST_FAIL_LOOP", "").lower() in ("1", "true", "yes")
+    if fail_loop_mode:
+        tracker_file = project_root / ".se3_test_run_count"
+        run_count = _get_test_run_count(tracker_file)
+        
+        if run_count == 0:
+            logger.warning("TEST FAIL-LOOP MODE: Introducing temporary bug on first run")
+            _introduce_temporary_bug(project_root)
+        
+        _increment_test_run_count(tracker_file)
+        logger.info(f"Test run count: {run_count + 1}")
 
     # Determine test command based on project type
     test_command = _determine_test_command(project_root)
@@ -106,3 +127,63 @@ def _determine_test_command(project_root: Path) -> list[str]:
 
     # Default: try pytest
     return ["python", "-m", "pytest", "-v"]
+
+
+def _get_test_run_count(tracker_file: Path) -> int:
+    """Get the current test run count for fail-loop mode."""
+    if tracker_file.exists():
+        try:
+            with open(tracker_file) as f:
+                data = json.load(f)
+            return data.get("count", 0)
+        except Exception:
+            pass
+    return 0
+
+
+def _increment_test_run_count(tracker_file: Path) -> int:
+    """Increment and save the test run count."""
+    import json
+    count = _get_test_run_count(tracker_file) + 1
+    tracker_file.write_text(json.dumps({"count": count}))
+    return count
+
+
+def _introduce_temporary_bug(project_root: Path):
+    """Introduce a temporary bug for testing fix loop.
+    
+    This modifies a common Python file to introduce a simple bug
+    that will cause tests to fail on first run.
+    """
+    # Try to find a suitable Python file to modify
+    potential_files = [
+        project_root / "src/task_cli/calculator.py",
+        project_root / "src/task_cli/math_utils.py",
+    ]
+    
+    target_file = None
+    for f in potential_files:
+        if f.exists():
+            target_file = f
+            break
+    
+    if not target_file:
+        logger.warning("No suitable file found to introduce temporary bug")
+        return
+    
+    try:
+        content = target_file.read_text()
+        
+        # Check if we can introduce a simple bug (change + to -)
+        if "return a + b" in content and "return a - b" not in content:
+            buggy_content = content.replace(
+                "return a + b",
+                "return a - b  # SE3_TEST_FAIL_LOOP: Intentional bug"
+            )
+            target_file.write_text(buggy_content)
+            logger.info(f"Introduced temporary bug in {target_file}")
+        else:
+            logger.warning(f"Could not introduce bug in {target_file} - pattern not found")
+            
+    except Exception as e:
+        logger.warning(f"Failed to introduce temporary bug: {e}")
