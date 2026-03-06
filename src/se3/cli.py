@@ -219,6 +219,11 @@ def run_cmd(
     raise typer.Exit(exit_code)
 
 
+# Register init command
+from .commands import init_cmd
+app.add_typer(init_cmd.app, name="init", help="Initialize SE3 project structure")
+
+
 @app.command(name="guardrails")
 def guardrails_cmd(
     spec_file: Path = typer.Argument(..., help="Path to spec file to check"),

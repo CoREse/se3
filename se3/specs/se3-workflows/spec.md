@@ -94,7 +94,7 @@ The feature workflow SHALL follow these steps:
 **10. COMMIT**
    - Stage and commit all changes
    - Generate meaningful commit message
-   - Auto-append to progress.md
+   - Update version according to bump rules
 
 **11. SUMMARIZE**
    - Generate session summary

@@ -52,7 +52,7 @@ Agents CAN perform the following actions:
 The system SHALL enforce guardrails through automated checks.
 
 **Enforcement points:**
-1. Before archiving a change, review the git diff of `openspec/specs/`
+1. Before committing, review the git diff of `se3/specs/`
 2. If spec drift is detected, revert and investigate
 3. Use `se3 guardrails` command to check spec files for violations
 

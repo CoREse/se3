@@ -1,56 +1,101 @@
 # requirement-intake Specification
 
 ## Purpose
-Define the requirement intake process for SE3, governing how new requirements enter the system from three sources: autonomous discovery, human-MCP calls, and human-initiated input. This spec ensures all requirements are captured through a unified change creation workflow with proper context preservation.
+
+Define the requirement intake process for SE3, governing how new requirements enter the system through the unified `se3 run` entry point.
+
 ## Requirements
-### Requirement: Three-Source Requirement Intake
-The system SHALL accept new requirements from three distinct sources and route them through a unified `openspec change` creation process.
 
-**Source 1: Autonomous Discovery (Agent-Initiated)**
-- Trigger: Agent identifies missing capability during implementation
-- Flow: Agent creates new openspec change directly → proposal captures the discovered requirement
-- Marker: `[Source: autonomous-discovery]` in proposal
+### Requirement: Requirement Intake via se3 run
 
-**Source 2: Human-MCP Call (Requested)**
-- Trigger: Agent issues human call asking for requirements input
-- Flow: Human responds → Agent parses response → Creates openspec change
-- Marker: `[Source: human-mcp]` in proposal
+The system SHALL accept new requirements through the `se3 run` command interface.
 
-**Source 3: Human-Initiated (External)**
-- Trigger: Human provides new requirement through any interaction (at natural conversation boundary or during active session)
-- Flow: Agent recognizes human-initiated input → Creates new openspec change
-- Marker: `[Source: human-initiated]` in proposal
-- Note: "Human-initiated" is about **who originated the requirement** (human, not agent), not **how it was delivered** (interrupt or natural turn). All human-proposed requirements go through this path.
+**Intake methods:**
 
-#### Scenario: Autonomous discovery during implementation
-- **WHEN** an agent realizes a needed feature wasn't in the original spec during coding
-- **THEN** the agent creates a new openspec change with `[Source: autonomous-discovery]` marker
+**Method 1: Direct Task Description**
+- Command: `se3 run "Implement user authentication"`
+- Flow: Task description → analyze step → workflow execution
+- Use for: Clear, well-defined tasks
 
-#### Scenario: Human provides requirements via MCP response
-- **WHEN** a human fills in the Response section of a requirements-request call
-- **THEN** the agent parses it and creates an openspec change with `[Source: human-mcp]` marker
+**Method 2: Discovery Mode**
+- Command: `se3 run --discover "I want to build something..."`
+- Flow: Multi-turn exploration → refined description → analyze step
+- Use for: Vague ideas that need clarification
 
-#### Scenario: Human provides requirement through any interaction
-- **WHEN** a human provides a new requirement (whether at natural conversation boundary or by interrupting active session)
-- **THEN** the agent recognizes this as human-initiated input and creates an openspec change with `[Source: human-initiated]` marker
-- **NOTE** The distinction between "interrupt" and "natural turn" is not functionally significant; both are human-initiated requirements
+**Method 3: Resume Existing Flow**
+- Command: `se3 run --resume`
+- Flow: Load persisted state → continue from interrupted step
+- Use for: Continuing interrupted work
 
-### Requirement: Unified Change Creation
-All three intake sources SHALL result in the same downstream process: an openspec change with proposal → specs → implementation.
+#### Scenario: Direct task intake
+- **WHEN** user executes `se3 run "Implement feature X"`
+- **THEN** the flow engine creates a new flow instance
+- **AND** starts execution from the analyze step
 
-#### Scenario: Consistent processing regardless of source
-- **WHEN** any of the three sources triggers
-- **THEN** the resulting openspec change follows the same SDD workflow (proposal → specs → design → tasks → code → verify → archive)
+#### Scenario: Discovery mode intake
+- **WHEN** user executes `se3 run --discover "Idea"`
+- **THEN** the flow engine starts discovery step
+- **AND** explores requirements through conversation
+- **AND** proceeds to analyze after user confirms refined description
 
-### Requirement: Interruption Context Preservation
-When Source 3 (human interrupt) occurs, the system SHALL preserve context of interrupted work.
+#### Scenario: Resume flow
+- **WHEN** user executes `se3 run --resume`
+- **THEN** the flow engine loads the active flow state
+- **AND** continues execution from the interrupted step
 
-**Context preservation options:**
-1. **Stack-based**: Push current change to stack, create new interrupt change, pop on completion
-2. **Link-based**: New change references "interrupted from: <change-id>"
-3. **Checkpoint-based**: Mark checkpoint in current change, resume from there after interrupt
+### Requirement: Task Type Classification
 
-#### Scenario: Resume after interrupt
-- **WHEN** a human-interrupt change completes
-- **THEN** agent asks: "Resume previous work on `<change-id>`? [Y/n]"
+The system SHALL classify tasks into types during the analyze step.
 
+**Task Types:**
+- `feature` - New functionality or significant enhancement
+- `bugfix` - Fixing a bug or issue
+- `review` - Code review, audit, or analysis
+- `small` - Minor fix, typo, or simple change
+- `directive` - Following specific instructions
+
+**Classification Factors:**
+- Scope of changes
+- Complexity
+- Need for design documentation
+- Test requirements
+
+#### Scenario: Feature classification
+- **GIVEN** task description "Add user authentication system"
+- **WHEN** analyze step executes
+- **THEN** task type is classified as `feature`
+- **AND** full 11-step workflow is selected
+
+#### Scenario: Small change classification
+- **GIVEN** task description "Fix typo in README"
+- **WHEN** analyze step executes
+- **THEN** task type is classified as `small`
+- **AND** abbreviated workflow is selected
+
+### Requirement: Flow State Persistence
+
+The system SHALL persist flow state after each step for resumability.
+
+**Persistence:**
+- State stored in `se3/state/engine.json`
+- Each step completion updates the state
+- Flow can be resumed from any step
+
+#### Scenario: Interrupt and resume
+- **GIVEN** a flow is executing the implement step
+- **WHEN** user interrupts (Ctrl+C)
+- **THEN** current state is persisted
+- **AND** next `se3 run --resume` continues from implement step
+
+### Requirement: Task Source Tracking
+
+The system MAY track the source of tasks for analytics.
+
+**Source markers (optional):**
+- `direct` - Direct `se3 run "task"` command
+- `discovery` - Discovery mode refined description
+- `loop` - Loop mode auto-discovered task
+
+#### Scenario: Source tracking
+- **WHEN** a flow completes
+- **THEN** the summary MAY include the task source

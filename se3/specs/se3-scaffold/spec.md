@@ -2,35 +2,9 @@
 
 ## Purpose
 
-Define the SE3 project scaffold system, including the CLAUDE.md + SE3.md template system, standard project structure, configuration system, and unified workflow via `se3 run`.
+Define the SE3 project scaffold system, including the standard project structure, configuration system, and project initialization via `se3 init`.
 
 ## Requirements
-
-### Requirement: CLAUDE.md + SE3.md Template System
-
-The system SHALL produce a two-part template system:
-1. **CLAUDE.md** - Minimal project-level configuration file with core framework references
-2. **SE3.md** - Complete framework implementation with all process definitions
-
-The **CLAUDE.md template MUST include**:
-- Core principles references
-- Session protocol references
-- Minimal project structure specification
-- Reference to SE3.md for complete framework documentation
-
-The **SE3.md template MUST include**:
-- Complete standard process definitions (startup, execution, shutdown protocols)
-- Detailed special file specifications (progress.md, human-calls/, etc.)
-- Full conventional behavior definitions (self-iterate, change management, etc.)
-- Human-as-MCP invocation specifications
-- Agent Team collaboration specifications
-- Verification protocol
-- Spec guardrails
-- Flow Engine workflow
-
-#### Scenario: New project adopts SE3
-- **WHEN** a user initializes SE3 framework in a new project
-- **THEN** the system generates both CLAUDE.md (minimal) and SE3.md (complete) in the .claude/ directory
 
 ### Requirement: SE3 Project Structure
 
@@ -39,232 +13,133 @@ The system SHALL define the standard SE3 project file structure.
 **Standard structure:**
 ```
 project/
-├── init.sh                # Environment setup (optional)
-├── progress.md            # Cross-session progress tracking
 ├── se3.yaml               # Framework configuration (optional)
 ├── README.md              # Project documentation
-├── specs/                 # Source of truth for requirements
-│   ├── _changelog/        # Spec change log
-│   └── <capability>/      # Capability specs
-│       └── spec.md
-├── .claude/               # Framework implementation (read-only for users)
-│   ├── CLAUDE.md          # SE3 minimal framework reference (project-level)
-│   ├── SE3.md             # Complete SE3 framework implementation
-│   └── commands/          # Claude command definitions
-└── se3/                   # SE3 runtime metadata and state (VISIBLE for human-as-MCP)
-    ├── calls/             # Human call queue
-    │   ├── active/        # Pending human calls
-    │   └── archive/       # Completed/archived calls
-    ├── collab/            # Multi-agent collaboration state
-    ├── tmp/               # Temporary files (auto-cleaned)
-    └── state/             # Session state files
-        └── engine.json    # Flow Engine state persistence
+├── se3/                   # SE3 runtime directory
+│   ├── specs/             # Source of truth for requirements
+│   │   ├── base/          # Base project specification
+│   │   │   └── spec.md    # Required: project conventions
+│   │   └── <capability>/  # Capability specs
+│   │       └── spec.md
+│   ├── state/             # Flow engine state persistence
+│   └── cache/             # Cache files
+├── src/                   # Source code (conventional)
+└── tests/                 # Test files (conventional)
 ```
 
-**Key Directories:**
-- `specs/` - Spec files (migrated from `openspec/specs/`)
-- `se3/` - Runtime state (intentionally NOT hidden for human discoverability)
-- `.claude/` - Framework files (managed by se3 tool)
+**Required Files:**
+- `se3/specs/base/spec.md` — Base project specification (auto-loaded in all flows)
+- `se3.yaml` — Project configuration (optional but recommended)
 
-**Migration Notes:**
-- `openspec/specs/` → `specs/` (SE3 3.0)
-- `openspec/changes/` → managed via flow engine or archived
-- `human-calls/` → `se3/calls/`
-- `.collab/` → `se3/collab/`
+**Key Directories:**
+- `se3/specs/` — Spec files (the source of truth for requirements)
+- `se3/state/` — Flow engine state persistence
+- `se3/cache/` — Cache files
 
 #### Scenario: Project initialization
-- **WHEN** SE3 is initialized in a directory
-- **THEN** the standard file structure is created with `.claude/`, `se3/`, and `specs/` directories
+- **WHEN** SE3 is initialized in a directory via `se3 init`
+- **THEN** the standard structure is created with `se3/specs/base/spec.md`
 
-#### Scenario: Migration from legacy structure
-- **WHEN** a project has legacy directories (`human-calls/`, `.collab/` in root)
-- **THEN** `se3 migrate` moves them to `se3/` structure
-- **AND** preserves all existing data
+### Requirement: Base Specification
+
+The system SHALL require a base specification at `se3/specs/base/spec.md` in every SE3 project.
+
+**Base spec purpose:**
+- Define project identity (name, description, languages)
+- Define directory structure conventions
+- Define coding conventions
+- Define key constraints
+- Define workflow conventions
+- Define version management rules
+
+**Base spec auto-loading:**
+- The base spec SHALL be automatically loaded in all `se3 run` flows
+- It provides context for the discovery and analyze steps
+- It helps the AI understand project conventions without manual prompting
+
+#### Scenario: Base spec discovered
+- **GIVEN** a project with `se3/specs/base/spec.md`
+- **WHEN** `se3 run` executes discovery or analyze steps
+- **THEN** the base spec content is automatically loaded into context
+
+#### Scenario: Base spec missing
+- **GIVEN** a project without `se3/specs/base/spec.md`
+- **WHEN** `se3 init` is run
+- **THEN** a base spec template is created automatically
 
 ### Requirement: Configuration System
 
-The system SHALL support configuring framework behavior via `se3.yaml` (with legacy fallback to `se3.config.yaml`).
+The system SHALL support configuring framework behavior via `se3.yaml`.
+
+**Configuration file location:** Project root (`se3.yaml`)
 
 **Configuration options:**
-- `max_tasks_per_change`: Maximum tasks per change (default: 5)
-- `human_call.timeout_days`: Default timeout days for human calls (default: 7)
-- `agent_team.roles`: List of enabled agent roles
-- `session.max_progress_entries`: Maximum session records to keep in progress (default: 20)
-- `flow_engine.default_task_type`: Default task type for `se3 run` (default: feature)
+- `version.enabled`: Enable automatic version bumping (default: true)
+- `version.bump_rules`: Map task types to bump types (feature→minor, bugfix→patch, etc.)
+- `confirmation.enabled`: Enable confirmation steps (default: false)
+- `confirmation.steps`: Steps after which to insert CONFIRM (default: [propose, design])
+- `claude_commands`: List of Claude CLI commands with priorities
 
 #### Scenario: Using default configuration
 - **WHEN** no se3.yaml file exists in the project
 - **THEN** the framework runs with built-in default values
 
+#### Scenario: Custom configuration
+- **WHEN** se3.yaml exists and specifies custom settings
+- **THEN** the framework uses those settings to customize behavior
+
 ### Requirement: Project Initialization via se3 init
 
 The system SHALL initialize a new SE3 project via the `se3 init` command.
 
-The `se3 init` command MUST create the following files (if they don't exist):
+**Interface:**
+```bash
+se3 init [--project-root PATH] [--name PROJECT_NAME] [--force]
+```
 
-**Required Files:**
-1. **se3.yaml** — Project configuration with project name
-2. **se3/specs/base/spec.md** — Base specification from template
-3. **VERSIONS.md** — Version history with initial 0.1.0 entry
-4. **README.md** — Project documentation with:
-   - Version badge referencing current version
-   - Reference to VERSIONS.md for complete version history
-   - Basic project structure documentation
-
-**Optional/Existing Files:**
-- If any of the above files already exist, they are preserved (not overwritten)
-- A message is displayed indicating which files were skipped
+**Created Files:**
+1. **se3.yaml** — Project configuration
+2. **se3/specs/base/spec.md** — Base specification template
 
 #### Scenario: Initialize new project
 - **GIVEN** a clean project directory without SE3 configuration
 - **WHEN** a user runs `se3 init` in the project directory
 - **THEN** the system creates:
-  - `se3.yaml` with project configuration
+  - `se3.yaml` with default configuration
+  - `se3/specs/` directory structure
   - `se3/specs/base/spec.md` with base specification template
-  - `VERSIONS.md` with initial 0.1.0 version entry
-  - `README.md` with project documentation and version badge
 
-#### Scenario: Initialize with existing files
-- **GIVEN** a project directory with existing README.md and VERSIONS.md
-- **WHEN** a user runs `se3 init`
-- **THEN** the system preserves the existing README.md and VERSIONS.md
-- **AND** creates only the missing SE3-specific files
-- **AND** displays a message indicating which files were skipped
+#### Scenario: Initialize with custom name
+- **GIVEN** a directory at /path/to/my-project
+- **WHEN** user runs `se3 init --name "My Project"`
+- **THEN** the base spec contains "My Project" as project name
 
-### Requirement: Output Artifacts
-
-The system SHALL produce the following deliverables:
-1. Project-level CLAUDE.md template (minimal, English)
-2. Project-level SE3.md template (complete, English)
-3. Configuration file template (se3.yaml)
-4. Documentation and best practices guide
-5. CLI tools documentation
-
-#### Scenario: Complete delivery
-- **WHEN** SE3 framework design is complete
-- **THEN** all deliverables are available for direct use in new projects
-
-### Requirement: Temporary File Management
-
-The system SHALL manage temporary files to prevent root directory pollution.
-
-**Temporary file locations:**
-- All temporary files MUST be created in `se3/tmp/` instead of project root
-- Temporary files include: session buffers, intermediate outputs
-
-**Cleanup policy:**
-- Flow completion automatically cleans `se3/tmp/` files older than 7 days
-- Files in root are considered legacy and SHOULD be migrated
-
-**Git ignore:**
-- The CLAUDE.md template MUST include `se3/tmp/` in `.gitignore` recommendations
-
-#### Scenario: Temporary file creation
-- **WHEN** a tool needs to create a temporary file
-- **THEN** it creates it in `se3/tmp/` with a unique name
-- **AND** the file is automatically cleaned up after session ends or per retention policy
-
-### Requirement: CLI Tools
-
-The system SHALL provide CLI tools for validating and enforcing SE3 conventions.
-
-**Core Tools:**
-- `se3 run` — Unified workflow entry point (SE3 3.0+)
-- `se3 status` — Diagnose session state and identify issues
-- `se3 commit` — Commit changes with test verification and sensitive file checks
-- `se3 handoff` — Generate session summary and end flow
-
-**Quality Tools:**
-- `se3 lint` — Validate spec file format and content
-- `se3 verify` — Verify change implementation covers all spec scenarios
-- `se3 guardrails` — Check spec integrity
-
-**Maintenance Tools:**
-- `se3 health` — Check SE3 system integrity
-- `se3 migrate` — Migrate legacy directory structures
-- `se3 init` — Initialize a new SE3 project
-- `se3 update` — Update SE3.md to the latest framework version
-
-#### Scenario: Spec validation
-- **WHEN** a developer runs `se3 lint`
-- **THEN** the tool validates all specs and reports any format violations
-
-#### Scenario: Change verification
-- **WHEN** an agent completes implementing a change
-- **THEN** `se3 verify` confirms all scenarios are covered
-
-### Requirement: Self-Iterate Flow
-
-The system SHALL define a self-iterate behavior that drives the project from human intent to working implementation.
-
-**Flow via `se3 run --loop`:**
-1. Obtain direction via human call → create flow
-2. Execute flow through Flow Engine (analyze → ... → summarize)
-3. Check if more tasks exist in backlog/roadmap
-4. If yes: continue to next task
-5. If no: exit loop
-
-#### Scenario: Self-iterate execution
-- **WHEN** agent runs `se3 run --loop`
-- **THEN** agent executes flows continuously until no more tasks
-
-### Requirement: Change Lifecycle Management
-
-The system SHALL define a complete change lifecycle managed by the Flow Engine.
-
-**Flow-Based Changes:**
-- Changes are tracked within flow instances
-- Each flow has a unique ID and associated metadata
-- Flow state persists in `se3/state/engine.json`
-- Completed flows generate summaries in `progress.md`
-
-**Legacy Change Directory Structure (deprecated):**
-```
-openspec/changes/
-├── active-change/          # Active change with .openspec.yaml
-│   ├── .openspec.yaml      # Change metadata
-│   ├── proposal.md         # Change proposal
-│   ├── tasks.md            # Implementation tasks
-│   └── specs/              # Optional: specs created/modified
-└── archive/                # Archived changes
-    └── YYYY-MM-DD-change-name/
-```
-
-**Modern Flow-Based Tracking:**
-- Flow instances tracked in `se3/state/engine.json`
-- Summaries stored in `se3/state/summary-<flow-id>.md` (Markdown format)
-- `progress.md` aggregates completed flows
-
-#### Scenario: Create new flow
-- **WHEN** `se3 run "Implement feature X"` is executed
-- **THEN** a new flow is created with unique ID
-- **AND** state is persisted after each step
-
-#### Scenario: Archive completed flow
-- **WHEN** a flow reaches summarize step
-- **THEN** a summary is generated
-- **AND** the flow is marked COMPLETED
+#### Scenario: Force re-initialization
+- **GIVEN** a project with existing se3.yaml
+- **WHEN** user runs `se3 init --force`
+- **THEN** existing files are overwritten with fresh templates
 
 ### Requirement: Spec Directory Structure
 
 The system SHALL define the specs directory structure.
 
 **Specs Location:**
-- Primary: `specs/` (SE3 3.0+)
-- Legacy fallback: `openspec/specs/` (for backward compatibility)
+- Primary: `se3/specs/` (SE3 3.0+)
 
 **Spec Organization:**
 ```
-specs/
-├── _changelog/             # Spec change log
+se3/specs/
+├── base/                   # Base project specification (REQUIRED)
+│   └── spec.md
+├── _changelog/             # Spec change log (optional)
 │   └── YYYY-MM-DD-change.md
-├── flow-engine/            # Core flow engine spec
+├── _backlog/               # Backlog specs (optional)
+├── flow-engine/            # Flow engine spec (if customizing)
 │   └── spec.md
-├── se3-commands/           # CLI commands spec
+├── se3-commands/           # Commands spec (if customizing)
 │   └── spec.md
-├── se3-workflows/          # Workflow definitions
-│   └── spec.md
-└── ...
+└── <project-specific>/     # Project capability specs
+    └── spec.md
 ```
 
 **Spec Format:**
@@ -274,4 +149,63 @@ specs/
 
 #### Scenario: Spec discovery
 - **WHEN** flow engine reads specs
-- **THEN** it looks in `specs/` first, then `openspec/specs/` as fallback
+- **THEN** it discovers all `*/spec.md` files under `se3/specs/`
+- **AND** it always includes `se3/specs/base/spec.md` first
+
+## Base Spec Template
+
+The base specification template SHALL include the following sections:
+
+```markdown
+# {project_name} — Base Specification
+
+## Purpose
+
+项目基础约定。此 spec 由 `se3 init` 生成，在所有 `se3 run` 流程中自动加载。
+
+## Requirements
+
+### Requirement: Project Identity
+
+- **项目名称**: {project_name}
+- **简述**: （请填写项目简述）
+- **主要语言/框架**: （请填写语言和框架）
+
+### Requirement: Directory Structure
+
+- `src/` — 源码目录
+- `tests/` — 测试目录
+- `se3/specs/` — SE3 规范目录
+
+### Requirement: Coding Conventions
+
+- （请填写代码规范）
+
+### Requirement: Key Constraints
+
+- （请填写关键约束）
+
+### Requirement: Workflow Conventions
+
+- 使用 `se3 run "task description"` 启动开发流程
+- 运行测试后才可标记功能完成
+- 主分支保持可运行状态
+
+### Requirement: Version Management
+
+项目 SHALL 使用语义化版本控制（Semantic Versioning 2.0.0）。
+
+**版本格式:** `MAJOR.MINOR.PATCH`
+- MAJOR: 不兼容的 API 修改
+- MINOR: 向下兼容的功能添加  
+- PATCH: 向下兼容的问题修复
+
+**版本更新规则:**
+- `feature` 任务 → bump minor 版本
+- `bugfix` 任务 → bump patch 版本
+
+#### Scenario: 版本自动更新
+- **GIVEN** 当前版本为 1.2.3
+- **WHEN** 完成 feature 任务并执行 commit 步骤
+- **THEN** 版本自动更新为 1.3.0
+```
