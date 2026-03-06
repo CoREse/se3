@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.20.0** — feat: Implement test-verify-fix loop in flow engine. Automatically routes back to implement step when tests fail, allowing iterative fixes. Added max_fix_iterations config (default: 3), fix context tracking, and comprehensive test coverage.
+**3.20.1** — fix: Fix loop now properly triggers with multiple implement steps. Fixed state_machine to create new implement step for each fix iteration instead of resetting old one. Fixed verify_spec REVISION_NEEDED handling to properly trigger transition_to_next.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.20.1 | 2026-03-06 | fix: Fix loop now creates new implement steps per iteration. Fixed REVISION_NEEDED transition handling. |
 | 3.20.0 | 2026-03-05 | feat: Test-verify-fix loop. Auto-routes to implement on test failure with max_fix_iterations config. |
 | 3.19.4 | 2026-03-05 | fix: Confirmation steps preservation after analyze. Fixed step sequence overwrite bug and revision transition logic. |
 | 3.18.9 | 2026-03-04 | fix: Discover mode JSON parsing with tool calls. Cleans `[Tool Call: ...]` previews and handles markdown blocks correctly. |
