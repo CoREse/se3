@@ -471,19 +471,28 @@ class StateMachine:
             f"Transitioning to fix iteration {iteration} for {implement_step.step_type.value}"
         )
 
-        # Reset the implement step for re-execution
-        implement_step.status = StepStatus.PENDING
-        implement_step.inputs["fix_instructions"] = fix_instructions
-        implement_step.inputs["fix_context"] = fix_context
-        implement_step.inputs["is_fix_iteration"] = True
-        implement_step.inputs["fix_iteration"] = iteration
-        implement_step.error_message = None
-        implement_step.error_details = None
-        # Keep the outputs for reference, but mark that they may be outdated
-        implement_step.outputs["_is_outdated"] = True
-
-        # Update flow state to point back to implement step
-        flow.state.current_step_id = implement_step.step_id
+        # Create a new implement step for the fix iteration
+        # This ensures proper tracking and history
+        new_implement_step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.PENDING,
+            inputs={
+                "task_description": flow.task_description,
+                "fix_instructions": fix_instructions,
+                "fix_context": fix_context,
+                "is_fix_iteration": True,
+                "fix_iteration": iteration,
+            },
+        )
+        
+        # Copy relevant outputs from previous implement as reference
+        prev_changes = implement_step.outputs.get("changes_made", {})
+        if prev_changes:
+            new_implement_step.inputs["previous_changes"] = prev_changes
+        
+        # Add the new step to flow
+        flow.state.add_step(new_implement_step)
+        flow.state.current_step_id = new_implement_step.step_id
 
         # Find the index of IMPLEMENT in selected_steps
         try:
