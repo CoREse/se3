@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.20.1** — fix: Fix loop now properly triggers with multiple implement steps. Fixed state_machine to create new implement step for each fix iteration instead of resetting old one. Fixed verify_spec REVISION_NEEDED handling to properly trigger transition_to_next.
+**3.21.0** — BREAKING: Remove deprecated commands and legacy code. SE3 3.0 now only provides `se3 run` as the unified entry point. Removed: start/work/done/loop/full-cycle/collab and all related scripts. Removed .claude/commands and .claude/skills (moved to external repo).
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 3.21.0 | 2026-03-06 | BREAKING: Remove deprecated commands for 3.0. Only `se3 run` remains as unified entry point. |
 | 3.20.1 | 2026-03-06 | fix: Fix loop now creates new implement steps per iteration. Fixed REVISION_NEEDED transition handling. |
 | 3.20.0 | 2026-03-05 | feat: Test-verify-fix loop. Auto-routes to implement on test failure with max_fix_iterations config. |
 | 3.19.4 | 2026-03-05 | fix: Confirmation steps preservation after analyze. Fixed step sequence overwrite bug and revision transition logic. |

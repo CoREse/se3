@@ -6,10 +6,6 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 import shutil
 
-# Re-export human_calls functions for backwards compatibility
-from .human_calls import discover_human_calls, HumanCallStore
-
-
 def _resolve_specs_dir(base_path: Path) -> Path:
     """Resolve specs directory: se3/specs/ preferred, specs/ fallback, openspec/specs/ legacy."""
     primary = base_path / "se3" / "specs"
