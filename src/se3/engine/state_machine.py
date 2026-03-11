@@ -326,10 +326,12 @@ class StateMachine:
 
         # Find next step in selected sequence
         selected = flow.state.selected_steps
-        try:
-            current_index = selected.index(current_step.step_type)
-        except ValueError:
-            raise TransitionError(f"Current step {current_step.step_type} not in selected sequence")
+        current_index = flow.state.current_step_index
+        if current_index >= len(selected) or selected[current_index] != current_step.step_type:
+            try:
+                current_index = selected.index(current_step.step_type)
+            except ValueError:
+                raise TransitionError(f"Current step {current_step.step_type} not in selected sequence")
 
         if current_index >= len(selected) - 1:
             # Flow complete

@@ -11,6 +11,8 @@ import typer
 DEFAULT_SE3_YAML = """# SE3 Project Configuration
 # https://github.com/Fission-AI/SE3
 
+project_name: {project_name}
+
 # Version management settings
 version:
   enabled: true
@@ -86,51 +88,78 @@ def _get_base_spec_template(project_name: str) -> str:
 """
 
 
+def run_init(project_root: Path, project_name: str, force: bool = False) -> dict:
+    """Core init logic, separated for testability.
+
+    Args:
+        project_root: Root directory of the project
+        project_name: Name of the project
+        force: Whether to overwrite existing files
+
+    Returns:
+        dict with "created" (list of relative paths) and "skipped" (list of messages)
+    """
+    root = Path(project_root).resolve()
+    created = []
+    skipped = []
+
+    # Create se3 directory structure
+    se3_dir = root / "se3"
+    specs_dir = se3_dir / "specs"
+    base_dir = specs_dir / "base"
+
+    se3_dir.mkdir(exist_ok=True)
+    specs_dir.mkdir(exist_ok=True)
+    base_dir.mkdir(exist_ok=True)
+
+    # Create se3.yaml
+    se3_yaml = root / "se3.yaml"
+    if not se3_yaml.exists() or force:
+        se3_yaml.write_text(
+            DEFAULT_SE3_YAML.format(project_name=project_name), encoding="utf-8"
+        )
+        created.append(str(se3_yaml.relative_to(root)))
+    else:
+        skipped.append(f"{se3_yaml.relative_to(root)} already exists (use --force to overwrite)")
+
+    # Create base spec
+    base_spec = base_dir / "spec.md"
+    if not base_spec.exists() or force:
+        base_spec.write_text(_get_base_spec_template(project_name), encoding="utf-8")
+        created.append(str(base_spec.relative_to(root)))
+    else:
+        skipped.append(f"{base_spec.relative_to(root)} already exists (use --force to overwrite)")
+
+    return {"created": created, "skipped": skipped}
+
+
 def init_cmd(
     project_root: str = typer.Option(".", "--project-root", "-p", help="Project root directory"),
     name: Optional[str] = typer.Option(None, "--name", "-n", help="Project name"),
     force: bool = typer.Option(False, "--force", "-f", help="Overwrite existing files"),
 ):
     """Initialize a new SE3 project.
-    
+
     Creates the standard SE3 directory structure:
     - se3.yaml - Project configuration
     - se3/specs/ - Specification directory
     - se3/specs/base/spec.md - Base project specification
     """
     root = Path(project_root).resolve()
-    
+
     # Detect project name if not provided
     if not name:
         name = root.name or "my-project"
-    
-    # Create se3 directory structure
-    se3_dir = root / "se3"
-    specs_dir = se3_dir / "specs"
-    base_dir = specs_dir / "base"
-    
-    se3_dir.mkdir(exist_ok=True)
-    specs_dir.mkdir(exist_ok=True)
-    base_dir.mkdir(exist_ok=True)
-    
-    # Create se3.yaml
-    se3_yaml = root / "se3.yaml"
-    if not se3_yaml.exists() or force:
-        se3_yaml.write_text(DEFAULT_SE3_YAML, encoding="utf-8")
-        typer.echo(f"✓ Created {se3_yaml.relative_to(root)}")
-    else:
-        typer.echo(f"⚠ {se3_yaml.relative_to(root)} already exists (use --force to overwrite)")
-    
-    # Create base spec
-    base_spec = base_dir / "spec.md"
-    if not base_spec.exists() or force:
-        base_spec.write_text(_get_base_spec_template(name), encoding="utf-8")
-        typer.echo(f"✓ Created {base_spec.relative_to(root)}")
-    else:
-        typer.echo(f"⚠ {base_spec.relative_to(root)} already exists (use --force to overwrite)")
-    
+
+    result = run_init(root, name, force)
+
+    for path in result["created"]:
+        typer.echo(f"✓ Created {path}")
+    for msg in result["skipped"]:
+        typer.echo(f"⚠ {msg}")
+
     typer.echo(f"\n🎉 SE3 project initialized: {name}")
     typer.echo(f"\nNext steps:")
-    typer.echo(f"  1. Edit {se3_yaml.relative_to(root)} to configure your project")
-    typer.echo(f"  2. Edit {base_spec.relative_to(root)} to define project conventions")
+    typer.echo(f"  1. Edit se3.yaml to configure your project")
+    typer.echo(f"  2. Edit se3/specs/base/spec.md to define project conventions")
     typer.echo(f"  3. Run 'se3 run \"your task\"' to start developing")

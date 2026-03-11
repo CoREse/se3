@@ -67,7 +67,7 @@ class Version:
     # Pattern for parsing SemVer strings
     # Follows Semantic Versioning 2.0.0 specification
     _SEMVER_PATTERN = re.compile(
-        r'^(?:[vV])?(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)\.(?P<patch>0|[1-9]\d*)'
+        r'^(?:[vV])?(?P<major>0|[1-9]\d*)\.(?P<minor>0|[1-9]\d*)(?:\.(?P<patch>0|[1-9]\d*))?'
         r'(?:-(?P<prerelease>(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)'
         r'(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?'
         r'(?:\+(?P<build>[0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$'
@@ -101,7 +101,7 @@ class Version:
         return cls(
             major=int(groups["major"]),
             minor=int(groups["minor"]),
-            patch=int(groups["patch"]),
+            patch=int(groups["patch"]) if groups.get("patch") is not None else 0,
             prerelease=groups.get("prerelease"),
             build=groups.get("build"),
         )
@@ -226,7 +226,9 @@ class Version:
             return self.bump_patch()
 
     def __eq__(self, other: object) -> bool:
-        """Check equality with another Version."""
+        """Check equality with another Version or tuple."""
+        if isinstance(other, tuple) and len(other) == 3:
+            return (self.major, self.minor, self.patch) == other
         if not isinstance(other, Version):
             return NotImplemented
         # For comparison, ignore build metadata per SemVer spec
