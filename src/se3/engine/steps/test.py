@@ -2,20 +2,13 @@
 
 Runs tests to verify the implementation.
 This is a non-LLM step that executes test commands.
-
-FOR TESTING FIX LOOP:
-Set SE3_FORCE_TEST_FAIL=1 environment variable.
-This will intentionally corrupt the code on the FIRST test run
-to ensure tests fail and trigger the fix loop.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any
 
 from ..models import FlowInstance, Step, StepStatus
 
@@ -34,22 +27,7 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     Returns:
         StepStatus.COMPLETED on success, StepStatus.FAILED on error
     """
-    import os
-    
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
-    
-    # ALWAYS corrupt code on first test run to ensure fix loop is tested
-    tracker_file = project_root / ".se3_test_run_tracker"
-    run_count = _get_test_run_count(tracker_file)
-    
-    if run_count == 0:
-        logger.warning("!!! FIRST TEST RUN: Corrupting code to trigger fix loop !!!")
-        _corrupt_code_for_test_failure(project_root)
-        logger.warning("Code has been corrupted - tests will fail, triggering fix loop")
-    else:
-        logger.info(f"Test run #{run_count + 1} - running tests normally")
-    
-    _increment_test_run_count(tracker_file)
 
     # Determine test command based on project type
     test_command = _determine_test_command(project_root)
@@ -127,74 +105,3 @@ def _determine_test_command(project_root: Path) -> list[str]:
 
     # Default: try pytest
     return ["python", "-m", "pytest", "-v"]
-
-
-def _get_test_run_count(tracker_file: Path) -> int:
-    """Get the current test run count for fail-loop mode."""
-    if tracker_file.exists():
-        try:
-            with open(tracker_file) as f:
-                data = json.load(f)
-            return data.get("count", 0)
-        except Exception:
-            pass
-    return 0
-
-
-def _increment_test_run_count(tracker_file: Path) -> int:
-    """Increment and save the test run count."""
-    import json
-    count = _get_test_run_count(tracker_file) + 1
-    tracker_file.write_text(json.dumps({"count": count}))
-    return count
-
-
-def _corrupt_code_for_test_failure(project_root: Path):
-    """Aggressively corrupt code to ensure test failure.
-    
-    This modifies Python files to introduce obvious bugs
-    that will definitely cause tests to fail.
-    """
-    # Find all Python files in src directory
-    src_dir = project_root / "src"
-    if not src_dir.exists():
-        logger.warning(f"Source directory not found: {src_dir}")
-        return
-    
-    corrupted_count = 0
-    
-    for py_file in src_dir.rglob("*.py"):
-        # Skip __init__.py and test files
-        if "__init__" in py_file.name or "test_" in py_file.name:
-            continue
-            
-        try:
-            content = py_file.read_text()
-            original_content = content
-            
-            # Aggressive corruption: replace return statements with wrong values
-            import re
-            
-            # Pattern 1: Replace simple return statements with 0
-            content = re.sub(
-                r'return ([a-zA-Z_][a-zA-Z0-9_]*(?:\s*[-+*/]\s*[a-zA-Z0-9_]+)?)',
-                r'return 0  # SE3_CORRUPTED: was \1',
-                content
-            )
-            
-            # Pattern 2: Replace comparison operators
-            content = content.replace(" == ", " != ")
-            content = content.replace(" != ", " == ")
-            
-            if content != original_content:
-                py_file.write_text(content)
-                logger.warning(f"CORRUPTED: {py_file}")
-                corrupted_count += 1
-                
-        except Exception as e:
-            logger.debug(f"Could not corrupt {py_file}: {e}")
-    
-    if corrupted_count == 0:
-        logger.warning("Could not corrupt any files - test may pass unexpectedly")
-    else:
-        logger.warning(f"Corrupted {corrupted_count} files - tests should fail now")
