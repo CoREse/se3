@@ -318,6 +318,16 @@ Write the code to implement the design. Focus on:
 - Clean, readable code
 - Following project conventions
 - Proper error handling
+- Writing tests for new functionality
+
+**Test Contract (REQUIRED):**
+You MUST declare these in your JSON output:
+- `tests_added`: List of test file paths you created (relative to project root)
+- `test_mapping`: Dict mapping test IDs to spec scenarios they verify
+  - Python (pytest): "tests/test_foo.py::test_bar" -> "spec-name::Scenario Name"
+  - JavaScript (jest): "tests/foo.test.js > describe > it" -> "spec-name::Scenario Name"
+  - Go: "package.TestFunc" -> "spec-name::Scenario Name"
+If no tests were added, use empty list/dict.
 
 Use the context from previous steps for requirements.
 """,

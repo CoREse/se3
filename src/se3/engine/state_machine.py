@@ -578,6 +578,9 @@ class StateMachine:
                         "files_changed": step.outputs.get("files_changed", []),
                         "implemented_groups": step.outputs.get("implemented_groups", []),
                     }
+                    # Forward implement-test contract
+                    inputs["tests_added"] = step.outputs.get("tests_added", [])
+                    inputs["test_mapping"] = step.outputs.get("test_mapping", {})
                 elif step.step_type == StepType.TEST:
                     inputs["test_results"] = step.outputs.get("test_results")
                 elif step.step_type == StepType.VERIFY_SPEC:
@@ -616,6 +619,13 @@ class StateMachine:
                 inputs["step_to_review_id"] = last_non_confirm_step.step_id
                 inputs["step_to_review_type"] = last_non_confirm_step.step_type.value
                 inputs["reviewer"] = config.get("reviewer", "human")
+
+        # Special handling for TEST step when in fix iteration
+        if step_type == StepType.TEST:
+            fix_iteration = flow.state.get_fix_iteration()
+            if fix_iteration > 0:
+                inputs["is_fix_iteration"] = True
+                inputs["fix_iteration"] = fix_iteration
 
         # Special handling for IMPLEMENT step when in fix iteration
         if step_type == StepType.IMPLEMENT:

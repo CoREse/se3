@@ -466,6 +466,46 @@ def is_chinese_language(language: str) -> bool:
     return language.lower().startswith("zh")
 
 
+@dataclass
+class TestConfig:
+    """Test step configuration loaded from se3.yaml test: section."""
+
+    command: Optional[str] = None
+    timeout: int = 1800
+    phases: list[dict] = field(default_factory=list)
+    fix_loop_max_iterations: int = 3
+
+    @classmethod
+    def load(cls, project_root: Path) -> "TestConfig":
+        """Load test configuration from se3.yaml."""
+        config_path = Path(project_root) / "se3.yaml"
+        if not config_path.exists():
+            return cls()
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            test_data = data.get("test", {})
+            if not test_data:
+                return cls()
+            fix_loop = test_data.get("fix_loop", {})
+            return cls(
+                command=test_data.get("command"),
+                timeout=test_data.get("timeout", 1800),
+                phases=test_data.get("phases", []),
+                fix_loop_max_iterations=fix_loop.get("max_iterations", 3),
+            )
+        except Exception:
+            return cls()
+
+    def get_phases_for_run(self, is_fix_iteration: bool = False) -> list[dict]:
+        """Get phases to run, filtering by fix loop if needed."""
+        if not self.phases:
+            return []
+        if not is_fix_iteration:
+            return self.phases
+        return [p for p in self.phases if p.get("in_fix_loop", True)]
+
+
 def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
     """Get the maximum number of fix iterations for the test-verify-fix loop.
 

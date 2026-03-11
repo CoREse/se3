@@ -412,6 +412,92 @@ version:
 - **THEN** 将步骤标记为完成
 - **AND** 继续执行后续步骤
 
+### Requirement: Implement-Test 契约
+
+implement 步骤 SHALL 在输出中声明 `tests_added` 和 `test_mapping`，形成与 test 步骤的显式契约。
+
+**输出字段：**
+- `tests_added`: 列表，本次新增的测试文件路径（相对于项目根目录）
+- `test_mapping`: 字典，键为测试 ID，值为 spec scenario 标识（`{spec_name}::{scenario_name}`）
+
+**测试 ID 格式（语言相关）：**
+| 语言 | 格式 | 示例 |
+|------|------|------|
+| Python (pytest) | `file::function` | `tests/test_auth.py::test_login_success` |
+| JavaScript (jest/vitest) | `file > describe > it` | `tests/auth.test.js > LoginService > authenticates user` |
+| Go | `package.TestFunc` | `auth.TestLoginSuccess` |
+| Rust | `module::test_func` | `auth::test_login_success` |
+
+**Base Spec 约定引用：**
+- 测试文件的放置和命名遵循 base spec 的 Coding Conventions 和 Directory Structure
+
+#### Scenario: implement 步骤声明新增测试
+- **WHEN** implement 步骤完成实现
+- **THEN** 输出包含 `tests_added` 列表
+- **AND** 输出包含 `test_mapping` 字典
+
+#### Scenario: 无新增测试的实现
+- **WHEN** implement 步骤完成但未新增测试文件
+- **THEN** `tests_added` 为空列表
+- **AND** `test_mapping` 为空字典
+
+### Requirement: Test 步骤配置与多阶段执行
+
+test 步骤 SHALL 支持通过 `se3.yaml` 的 `test:` 配置段进行多阶段测试，并输出结构化结果。
+
+**se3.yaml 配置：**
+```yaml
+test:
+  command: null                # 主测试命令（null=自动检测）
+  timeout: 1800                # 秒
+  phases:                      # 额外测试阶段
+    - name: "e2e"
+      command: "python -m pytest tests/e2e -v"
+      cwd: null                # 工作目录（null=项目根目录，支持绝对/相对路径）
+      timeout: 600
+      required: false          # false=失败只警告
+      in_fix_loop: false       # false=fix loop 中跳过
+```
+
+**结构化输出：**
+```json
+{
+  "new_tests": {"passed": [...], "failed": [...], "count": 0},
+  "regression": {"passed": [...], "failed": [...], "count": 0},
+  "phases": [{"name": "default", "passed": true, ...}],
+  "overall_passed": true
+}
+```
+
+**分类逻辑：**
+- `new_tests`: 文件路径匹配 implement 步骤的 `tests_added`
+- `regression`: 其余所有测试
+- `overall_passed`: 所有 `required: true` 阶段全部通过
+
+**verify_spec 消费 test_mapping：**
+- 对比 `test_mapping` 值与 spec 中的 scenario 列表
+- 未覆盖的 scenario 记录为 warning 级别 issue
+
+#### Scenario: 无配置时的默认行为
+- **WHEN** `se3.yaml` 不包含 `test:` 配置
+- **THEN** 使用自动检测的测试命令（现有行为）
+- **AND** 所有测试归入 `regression` 类别
+
+#### Scenario: 多阶段测试执行
+- **WHEN** 配置了多个 `phases`
+- **THEN** 按顺序执行每个阶段
+- **AND** 每个阶段结果独立记录
+- **AND** `overall_passed` 基于 `required: true` 阶段
+
+#### Scenario: fix loop 中的选择性执行
+- **WHEN** test 步骤在 fix iteration 中执行
+- **THEN** 跳过 `in_fix_loop: false` 的阶段
+
+#### Scenario: verify_spec 检查 spec coverage
+- **WHEN** verify_spec 接收到 `test_mapping`
+- **THEN** 检查 spec scenario 的测试覆盖
+- **AND** 未覆盖的 scenario 记为 warning
+
 ## Architecture
 
 ### 核心组件

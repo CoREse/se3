@@ -44,4 +44,9 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     step.outputs["files_changed"] = step.outputs.get("files_changed", [])
     step.outputs["implemented_groups"] = step.inputs.get("task_groups", [])
 
+    # Implement-Test contract: declare test artifacts
+    # When fully implemented, the LLM will populate these via the prompt template
+    step.outputs["tests_added"] = step.outputs.get("tests_added", [])
+    step.outputs["test_mapping"] = step.outputs.get("test_mapping", {})
+
     return StepStatus.COMPLETED

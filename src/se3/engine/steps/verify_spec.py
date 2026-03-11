@@ -153,11 +153,11 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         issues = verification.get("issues", [])
         error_count = sum(1 for i in issues if i.get("severity") == "error")
 
-        # Check test results - CRITICAL: Check raw test results first
+        # Check test results - support both old flat format and new structured format
         if test_results and isinstance(test_results, dict):
-            tests_passed = test_results.get("passed", False)
+            # New structured format has "overall_passed"; old format has "passed"
+            tests_passed = test_results.get("overall_passed", test_results.get("passed", False))
             returncode = test_results.get("returncode", 0)
-            # Also consider non-zero return code as test failure
             if returncode != 0 and tests_passed:
                 logger.warning(f"Test return code is {returncode}, marking as failed")
                 tests_passed = False
@@ -297,26 +297,59 @@ def _format_changes(changes_made: dict[str, Any]) -> str:
 
 
 def _format_test_results(test_results: dict[str, Any]) -> str:
-    """Format test results for inclusion in prompt."""
+    """Format test results for inclusion in prompt.
+
+    Supports both old flat format (has "stdout" at top level) and
+    new structured format (has "phases" and "new_tests"/"regression").
+    """
     if not test_results:
         return "No test results available."
 
+    lines = []
+
+    # New structured format
+    if "phases" in test_results:
+        overall = test_results.get("overall_passed", False)
+        lines.append(f"Overall passed: {overall}")
+
+        new_tests = test_results.get("new_tests", {})
+        if new_tests.get("count", 0) > 0:
+            lines.append(f"\nNew tests ({new_tests['count']}):")
+            for t in new_tests.get("failed", []):
+                lines.append(f"  FAILED: {t}")
+            lines.append(f"  Passed: {len(new_tests.get('passed', []))}, Failed: {len(new_tests.get('failed', []))}")
+
+        regression = test_results.get("regression", {})
+        if regression.get("failed"):
+            lines.append(f"\nRegression failures:")
+            for t in regression["failed"]:
+                lines.append(f"  FAILED: {t}")
+
+        for phase in test_results["phases"]:
+            name = phase.get("name", "?")
+            passed = phase.get("passed", False)
+            lines.append(f"\nPhase '{name}': {'PASSED' if passed else 'FAILED'} (exit code: {phase.get('returncode', '?')})")
+            stdout = phase.get("stdout", "")
+            if stdout and not passed:
+                lines.append(f"Output (last 1000 chars):\n{stdout[-1000:]}")
+            stderr = phase.get("stderr", "")
+            if stderr and not passed:
+                lines.append(f"Stderr (last 500 chars):\n{stderr[-500:]}")
+
+        return "\n".join(lines)
+
+    # Old flat format (backward compat)
     passed = test_results.get("passed", False)
     returncode = test_results.get("returncode", "?")
-
-    lines = [f"Tests passed: {passed} (exit code: {returncode})"]
+    lines.append(f"Tests passed: {passed} (exit code: {returncode})")
 
     stdout = test_results.get("stdout", "")
     if stdout:
-        # Include last 1000 chars of stdout
-        stdout_preview = stdout[-1000:] if len(stdout) > 1000 else stdout
-        lines.append(f"\nTest output:\n{stdout_preview}")
+        lines.append(f"\nTest output:\n{stdout[-1000:]}")
 
     stderr = test_results.get("stderr", "")
     if stderr:
-        # Include last 500 chars of stderr
-        stderr_preview = stderr[-500:] if len(stderr) > 500 else stderr
-        lines.append(f"\nError output:\n{stderr_preview}")
+        lines.append(f"\nError output:\n{stderr[-500:]}")
 
     return "\n".join(lines)
 
