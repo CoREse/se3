@@ -113,6 +113,7 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         # Update state with resolved task type
         flow.state.update_task_type(resolved_task_type)
+        flow.task_type = resolved_task_type
 
         # Store outputs
         step.outputs["task_type"] = task_type
