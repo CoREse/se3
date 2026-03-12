@@ -578,11 +578,16 @@ class ClaudeRunner:
                 should_retry=True,
             )
 
+        # Use stdin=None when in interactive terminal to support proper
+        # Unicode input (e.g., Chinese character deletion). Use DEVNULL
+        # in non-interactive mode to prevent hanging.
+        stdin_arg = None if sys.stdin.isatty() else subprocess.DEVNULL
+
         proc = subprocess.Popen(
             full_cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,  # Prevent hanging on stdin read
+            stdin=stdin_arg,
             cwd=cwd,
             env=env,
             bufsize=1,
