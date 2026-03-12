@@ -84,7 +84,7 @@ def _read_multiline_input() -> Optional[str]:
         # Create a prompt session with multiline support
         session = PromptSession(
             multiline=True,
-            prompt_message="> ",
+            message="> ",
         )
         
         with patch_stdout():
