@@ -1,9 +1,9 @@
 """Commit step handler.
 
 Commits the changes using git.
-This is a non-LLM step that executes git commands.
 Integrates with VersionBumper for automatic version bumping.
 Uses version analysis from the version_analyze step when available.
+Generates descriptive commit messages using LLM when proposal summary is not available.
 """
 
 from __future__ import annotations
@@ -12,10 +12,36 @@ import logging
 import subprocess
 from pathlib import Path
 
+from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
 from ..version_bumper import BumpType, TaskType, VersionBumper, VersionConfig
 
 logger = logging.getLogger(__name__)
+
+# Prompt for generating concise commit message when proposal summary is not available
+COMMIT_MESSAGE_PROMPT = """You are an expert at writing clear, concise git commit messages.
+
+Task Type: {task_type}
+Task Description: {task_description}
+
+Changes Made:
+{changes_text}
+
+Instructions:
+1. Write a concise commit message summary (first line only, max 72 characters)
+2. Use imperative mood (e.g., "Add feature" not "Added feature")
+3. Start with a verb describing the action
+4. Be specific but brief
+5. Do not include the task type prefix (like "feat:" or "fix:")
+6. Output ONLY the commit message summary, no explanation
+
+Examples:
+- "Add user authentication with JWT tokens"
+- "Fix memory leak in connection pool"
+- "Refactor database query optimization"
+- "Update API documentation for v2 endpoints"
+
+Write a concise commit message summary:"""
 
 
 def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
@@ -311,6 +337,28 @@ def _has_changes(project_root: Path) -> bool:
         return False
 
 
+def _format_changes_for_prompt(changes_made: dict) -> str:
+    """Format changes for the commit message prompt."""
+    files_changed = changes_made.get("files_changed", [])
+    if not files_changed:
+        return "No files changed"
+    
+    lines = []
+    for f in files_changed[:10]:  # Limit to 10 files
+        path = f.get("path", "")
+        action = f.get("action", "modified")
+        explanation = f.get("explanation", "")
+        if explanation:
+            lines.append(f"- {path} ({action}): {explanation}")
+        else:
+            lines.append(f"- {path} ({action})")
+    
+    if len(files_changed) > 10:
+        lines.append(f"- ... and {len(files_changed) - 10} more files")
+    
+    return "\n".join(lines)
+
+
 def _generate_commit_message(
     flow: FlowInstance,
     step: Step,
@@ -318,6 +366,9 @@ def _generate_commit_message(
     version_config: VersionConfig | None = None
 ) -> str:
     """Generate a commit message based on the flow context.
+
+    Uses proposal summary if available, otherwise uses LLM to generate
+    a concise commit message from the task description and changes.
 
     Args:
         flow: The flow instance
@@ -344,9 +395,41 @@ def _generate_commit_message(
             first_line = first_line[:69] + "..."
         message = f"{task_type}: {first_line}"
     else:
-        # Use task description
-        desc = task_description[:60] if len(task_description) > 60 else task_description
-        message = f"{task_type}: {desc}"
+        # Use LLM to generate commit message from changes and task description
+        project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+        try:
+            changes_text = _format_changes_for_prompt(changes_made)
+            prompt = COMMIT_MESSAGE_PROMPT.format(
+                task_type=task_type,
+                task_description=task_description,
+                changes_text=changes_text
+            )
+            
+            caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id="commit_summary")
+            response = caller.call(prompt=prompt, require_json=False)
+            
+            # Clean up the response
+            generated_summary = response.strip().strip('"\'')
+            # Remove any "Commit message:" or similar prefixes
+            for prefix in ["Commit message:", "Summary:", "Message:", "Commit:"]:
+                if generated_summary.startswith(prefix):
+                    generated_summary = generated_summary[len(prefix):].strip()
+            
+            # Truncate if too long
+            if len(generated_summary) > 72:
+                generated_summary = generated_summary[:69] + "..."
+            
+            if generated_summary:
+                message = f"{task_type}: {generated_summary}"
+            else:
+                # Fallback to truncated task description
+                desc = task_description[:60] if len(task_description) > 60 else task_description
+                message = f"{task_type}: {desc}"
+        except Exception as e:
+            logger.warning(f"Failed to generate commit message with LLM: {e}. Using fallback.")
+            # Fallback to truncated task description
+            desc = task_description[:60] if len(task_description) > 60 else task_description
+            message = f"{task_type}: {desc}"
 
     # Add context about the change
     files_changed = changes_made.get("files_changed", [])

@@ -496,9 +496,9 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
     },
     StepType.COMMIT: {
         "name": "commit",
-        "description": "Commit changes",
-        "uses_llm": False,
-        "inputs": ["changes_made", "updated_specs", "bump_type"],
+        "description": "Commit changes with LLM-generated message when needed",
+        "uses_llm": True,
+        "inputs": ["changes_made", "updated_specs", "bump_type", "proposal"],
         "outputs": ["commit_hash"],
     },
     StepType.SUMMARIZE: {
