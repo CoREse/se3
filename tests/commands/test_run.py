@@ -104,72 +104,62 @@ class TestResumeDetection:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @patch("se3.commands.run.PersistenceManager")
     @patch("se3.commands.run.StateMachine")
     @patch("se3.commands.run.STEP_HANDLERS", {})
     def test_resume_detects_running_step_and_transitions_to_pending(
-        self, mock_sm_class
+        self, mock_sm_class, mock_pm_class
     ):
         """Test that resuming a flow with RUNNING step transitions it to PENDING."""
+        # Setup mock persistence to return self.flow directly
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = self.flow
+
         # Setup mock state machine
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
-
-        # Capture saved flow to verify state changes
-        saved_flows = []
-
-        def capture_save(flow):
-            saved_flows.append(flow)
-            return Path("test")
-
-        mock_sm.persistence = MagicMock()
-        mock_sm.persistence.save_flow = capture_save
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         # Call run_flow with resume (flow_id provided)
         with patch("se3.commands.run.display_step_result"):
             with patch("se3.commands.run.render_full"):
                 with patch("se3.commands.run._display_step_output"):
-                    with patch.object(
-                        self.persistence, "load_flow", return_value=self.flow
-                    ):
-                        # The flow execution will fail since we're mocking everything
-                        # but we just need to verify the resume detection happens
-                        try:
-                            run_flow(
-                                project_root=self.project_root,
-                                flow_id="test-flow-001",
-                            )
-                        except Exception:
-                            pass
+                    run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-001",
+                    )
 
         # Verify step status was changed from RUNNING to PENDING
         assert self.implement_step.status == StepStatus.PENDING
 
+    @patch("se3.commands.run.PersistenceManager")
     @patch("se3.commands.run.StateMachine")
     @patch("se3.commands.run.STEP_HANDLERS", {})
     def test_resume_injects_resumed_flag_into_step_inputs(
-        self, mock_sm_class
+        self, mock_sm_class, mock_pm_class
     ):
         """Test that resumed flag is injected into step.inputs during resume."""
+        # Setup mock persistence to return self.flow directly
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = self.flow
+
         # Setup mock state machine
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
-        mock_sm.persistence = MagicMock()
-        mock_sm.persistence.save_flow = MagicMock()
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         # Call run_flow with resume
         with patch("se3.commands.run.display_step_result"):
             with patch("se3.commands.run.render_full"):
                 with patch("se3.commands.run._display_step_output"):
-                    with patch.object(
-                        self.persistence, "load_flow", return_value=self.flow
-                    ):
-                        try:
-                            run_flow(
-                                project_root=self.project_root,
-                                flow_id="test-flow-001",
-                            )
-                        except Exception:
-                            pass
+                    run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-001",
+                    )
 
         # Verify resumed flag was injected
         assert "resumed" in self.implement_step.inputs
@@ -213,10 +203,11 @@ class TestResumeDetection:
         assert len(created_flows) == 1
         assert created_flows[0].task_description == "New task"
 
+    @patch("se3.commands.run.PersistenceManager")
     @patch("se3.commands.run.StateMachine")
     @patch("se3.commands.run.STEP_HANDLERS", {})
     def test_resume_preserves_existing_step_outputs(
-        self, mock_sm_class
+        self, mock_sm_class, mock_pm_class
     ):
         """Test that resume preserves existing step outputs."""
         # Add some partial progress to outputs (simulating partial completion)
@@ -224,28 +215,26 @@ class TestResumeDetection:
             "implemented_groups": ["G1"],  # G1 was completed before interrupt
             "total_files_changed": 2,
         }
-        self.persistence.save_flow(self.flow)
 
-        # Setup mock
+        # Setup mock persistence to return self.flow directly
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = self.flow
+
+        # Setup mock state machine
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
-        mock_sm.persistence = MagicMock()
-        mock_sm.persistence.save_flow = MagicMock()
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         # Call run_flow with resume
         with patch("se3.commands.run.display_step_result"):
             with patch("se3.commands.run.render_full"):
                 with patch("se3.commands.run._display_step_output"):
-                    with patch.object(
-                        self.persistence, "load_flow", return_value=self.flow
-                    ):
-                        try:
-                            run_flow(
-                                project_root=self.project_root,
-                                flow_id="test-flow-001",
-                            )
-                        except Exception:
-                            pass
+                    run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-001",
+                    )
 
         # Verify existing outputs are preserved
         assert "implemented_groups" in self.implement_step.outputs
@@ -254,21 +243,26 @@ class TestResumeDetection:
         # And resumed flag was added to inputs, not outputs
         assert self.implement_step.inputs.get("resumed") is True
 
+    @patch("se3.commands.run.PersistenceManager")
     @patch("se3.commands.run.StateMachine")
     @patch("se3.commands.run.STEP_HANDLERS", {})
     def test_resume_with_non_running_step_does_not_modify_status(
-        self, mock_sm_class
+        self, mock_sm_class, mock_pm_class
     ):
         """Test that resume with non-RUNNING step doesn't modify status."""
         # Change step status to PENDING (not RUNNING)
         self.implement_step.status = StepStatus.PENDING
-        self.persistence.save_flow(self.flow)
 
-        # Setup mock
+        # Setup mock persistence to return self.flow directly
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = self.flow
+
+        # Setup mock state machine
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
-        mock_sm.persistence = MagicMock()
-        mock_sm.persistence.save_flow = MagicMock()
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         original_status = self.implement_step.status
 
@@ -276,50 +270,44 @@ class TestResumeDetection:
         with patch("se3.commands.run.display_step_result"):
             with patch("se3.commands.run.render_full"):
                 with patch("se3.commands.run._display_step_output"):
-                    with patch.object(
-                        self.persistence, "load_flow", return_value=self.flow
-                    ):
-                        try:
-                            run_flow(
-                                project_root=self.project_root,
-                                flow_id="test-flow-001",
-                            )
-                        except Exception:
-                            pass
+                    run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-001",
+                    )
 
         # Verify status wasn't changed (remains PENDING)
         assert self.implement_step.status == original_status
         # And no resumed flag was injected
         assert "resumed" not in self.implement_step.inputs
 
+    @patch("se3.commands.run.PersistenceManager")
     @patch("se3.commands.run.StateMachine")
     @patch("se3.commands.run.STEP_HANDLERS", {})
     def test_resume_logs_interrupted_step_info(
-        self, mock_sm_class, caplog
+        self, mock_sm_class, mock_pm_class, caplog
     ):
         """Test that resume logs information about interrupted step."""
         import logging
 
-        # Setup mock
+        # Setup mock persistence to return self.flow directly
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = self.flow
+
+        # Setup mock state machine
         mock_sm = MagicMock()
         mock_sm_class.return_value = mock_sm
-        mock_sm.persistence = MagicMock()
-        mock_sm.persistence.save_flow = MagicMock()
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         with caplog.at_level(logging.INFO):
             with patch("se3.commands.run.display_step_result"):
                 with patch("se3.commands.run.render_full"):
                     with patch("se3.commands.run._display_step_output"):
-                        with patch.object(
-                            self.persistence, "load_flow", return_value=self.flow
-                        ):
-                            try:
-                                run_flow(
-                                    project_root=self.project_root,
-                                    flow_id="test-flow-001",
-                                )
-                            except Exception:
-                                pass
+                        run_flow(
+                            project_root=self.project_root,
+                            flow_id="test-flow-001",
+                        )
 
         # Verify log message about resuming
         assert "Resuming interrupted step" in caplog.text

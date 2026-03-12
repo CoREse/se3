@@ -562,12 +562,16 @@ confirmation:
         """Full flow: human approves, flow continues forward."""
         from se3.engine.steps.confirm import confirm_handler
 
+        # change_path must be a child of project_root so that
+        # change_path.parent resolves back to project_root
+        change_path = self.project_root / "test-change"
+
         # Create flow with PROPOSE and CONFIRM
         flow = FlowInstance(
             task_description="Test feature",
             task_type="feature",
             change_name="test-change",
-            change_path=self.project_root,
+            change_path=change_path,
         )
 
         # Add PROPOSE step
@@ -622,12 +626,16 @@ confirmation:
         """Full flow: human requests changes, flow returns to previous step."""
         from se3.engine.steps.confirm import confirm_handler
 
+        # change_path must be a child of project_root so that
+        # change_path.parent resolves back to project_root
+        change_path = self.project_root / "test-change"
+
         # Create flow with PROPOSE and CONFIRM
         flow = FlowInstance(
             task_description="Test feature",
             task_type="feature",
             change_name="test-change",
-            change_path=self.project_root,
+            change_path=change_path,
         )
 
         # Add PROPOSE step
