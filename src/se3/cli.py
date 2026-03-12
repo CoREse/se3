@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from prompt_toolkit import PromptSession
+from prompt_toolkit.patch_stdout import patch_stdout
 
 from . import __version__
 
@@ -54,7 +56,11 @@ def _init_display() -> None:
 
 
 def _read_multiline_input() -> Optional[str]:
-    """Read multiline input from stdin with smart display for pasted content."""
+    """Read multiline input from stdin with proper Unicode support.
+    
+    Uses prompt_toolkit for interactive mode to correctly handle
+    wide characters (e.g., Chinese) and multiline input.
+    """
     # Check if stdin is a tty (interactive terminal)
     if not sys.stdin.isatty():
         # Non-interactive mode (pipe/redirect): read all at once, show full content
@@ -71,59 +77,35 @@ def _read_multiline_input() -> Optional[str]:
         except (EOFError, KeyboardInterrupt):
             return None
 
-    # Interactive mode
-    render_text("Enter task description (Ctrl+D to finish, Ctrl+C to cancel):", title="Input")
-
-    lines = []
-    is_paste_mode = False
-
-    # Platform-specific paste detection
-    def _has_pending_input() -> bool:
-        """Check if there's more input immediately available."""
-        try:
-            if sys.platform == "win32":
-                import msvcrt
-                return msvcrt.kbhit()
-            else:
-                import select
-                readable, _, _ = select.select([sys.stdin], [], [], 0.05)
-                return bool(readable)
-        except Exception:
-            return False
+    # Interactive mode with prompt_toolkit for proper Unicode handling
+    render_text("Enter task description (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):", title="Input")
 
     try:
-        while True:
-            try:
-                # Read a line
-                line = input()
-                lines.append(line)
-
-                # Check if there's more input immediately available (paste detection)
-                if not is_paste_mode and len(lines) >= 1:
-                    if _has_pending_input():
-                        is_paste_mode = True
-
-                # In paste mode, continue reading without displaying each line
-                if is_paste_mode:
-                    continue
-
-            except EOFError:
-                # Ctrl+D pressed - finish input
-                break
+        # Create a prompt session with multiline support
+        session = PromptSession(
+            multiline=True,
+            prompt_message="> ",
+        )
+        
+        with patch_stdout():
+            # Read input with prompt_toolkit
+            content = session.prompt()
+        
+        # Show full content for review
+        content = content.strip()
+        if content:
+            lines = content.split("\n")
+            if len(lines) > 1:
+                render_full(content, title="Input Content")
+        
+        return content if content else None
+        
     except KeyboardInterrupt:
         render_text("\nCancelled.", title="Cancelled")
         return None
-
-    # Handle display based on mode and line count - show full content
-    if is_paste_mode and len(lines) > 3:
-        # For pasted content, show full view (no truncation)
-        render_full("\n".join(lines), title="Input Content")
-
-    print()  # New line after input
-
-    # Join lines and return
-    content = "\n".join(lines).strip()
-    return content if content else None
+    except EOFError:
+        # Ctrl+D pressed with empty input
+        return None
 
 
 @app.command(name="run")
