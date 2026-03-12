@@ -78,10 +78,10 @@ class Context:
         Returns:
             Type string for display, or None if pending
         """
-        current_type = self.task_type
-        if current_type == self.PENDING_TYPE:
-            return None
-        return current_type
+        resolved = self._state.context.get("resolved_type")
+        if resolved:
+            return resolved
+        return None
 
     def is_type_pending(self) -> bool:
         """Check if task type is still pending (not yet resolved by analyze).

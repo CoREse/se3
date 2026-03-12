@@ -45,7 +45,10 @@ def truncate_preview(text: str, max_length: int = 60, ellipsis_str: str = '...')
     text = str(text).replace('\n', ' ')
     if len(text) <= max_length:
         return text
-    return text[:max_length] + ellipsis_str
+    truncate_at = max_length - len(ellipsis_str)
+    if truncate_at <= 0:
+        return ellipsis_str[:max_length]
+    return text[:truncate_at] + ellipsis_str
 
 
 def format_tool_use_preview(tool_name: str, input_data: dict) -> str:

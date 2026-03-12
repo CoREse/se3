@@ -31,8 +31,8 @@ class TestTruncatePreview:
         """Long text should be truncated with ellipsis."""
         text = "x" * 100
         result = truncate_preview(text)
-        assert result == "x" * 60 + "..."
-        assert len(result) == 63
+        assert result == "x" * 57 + "..."
+        assert len(result) == 60
 
     def test_newlines_replaced_with_spaces(self):
         """Newlines should be replaced with spaces."""
@@ -53,13 +53,15 @@ class TestTruncatePreview:
         """Custom max_length should be respected."""
         text = "x" * 50
         result = truncate_preview(text, max_length=30)
-        assert result == "x" * 30 + "..."
+        assert result == "x" * 27 + "..."
+        assert len(result) == 30
 
     def test_custom_ellipsis(self):
         """Custom ellipsis string should be used."""
         text = "x" * 100
         result = truncate_preview(text, max_length=60, ellipsis_str=" [...]")
-        assert result == "x" * 60 + " [...]"
+        assert result == "x" * 54 + " [...]"
+        assert len(result) == 60
 
     def test_non_string_input(self):
         """Non-string input should be converted to string."""
@@ -69,7 +71,8 @@ class TestTruncatePreview:
     def test_number_input(self):
         """Number input should be converted to string."""
         result = truncate_preview(12345678901234567890, max_length=10)
-        assert result == "1234567890..."
+        assert result == "1234567..."
+        assert len(result) == 10
 
 
 class TestFormatToolUsePreview:

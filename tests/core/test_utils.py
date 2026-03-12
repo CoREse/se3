@@ -53,7 +53,7 @@ class TestTruncatePreview:
         """Custom ellipsis string is used correctly."""
         text = "Hello world"
         result = truncate_preview(text, max_length=10, ellipsis_str="..")
-        assert result == "Hello w.."
+        assert result == "Hello wo.."
         assert len(result) == 10
 
     def test_ellipsis_longer_than_max_length(self):

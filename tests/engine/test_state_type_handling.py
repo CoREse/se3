@@ -412,25 +412,33 @@ class TestFlowInstanceTypeHandling:
 class TestAnalyzeStepTypeExtraction:
     """Test the _extract_task_type helper function."""
 
+    def _make_flow(self):
+        """Create a minimal flow for _extract_task_type."""
+        return FlowInstance(
+            flow_id="test-flow",
+            task_description="test",
+            status=FlowStatus.RUNNING,
+        )
+
     def test_extract_valid_task_type(self):
         """Should extract valid task types."""
         from se3.engine.steps.analyze import _extract_task_type
 
-        result = _extract_task_type({"task_type": "bugfix"})
+        result = _extract_task_type({"task_type": "bugfix"}, self._make_flow())
         assert result == "bugfix"
 
     def test_extract_defaults_to_feature(self):
         """Should default to feature when task_type missing."""
         from se3.engine.steps.analyze import _extract_task_type
 
-        result = _extract_task_type({})
+        result = _extract_task_type({}, self._make_flow())
         assert result == "feature"
 
     def test_extract_defaults_invalid_type(self):
         """Should default to feature for invalid task_type."""
         from se3.engine.steps.analyze import _extract_task_type
 
-        result = _extract_task_type({"task_type": "invalid_type"})
+        result = _extract_task_type({"task_type": "invalid_type"}, self._make_flow())
         assert result == "feature"
 
     def test_extract_all_valid_types(self):
@@ -438,7 +446,8 @@ class TestAnalyzeStepTypeExtraction:
         from se3.engine.steps.analyze import _extract_task_type
 
         valid_types = ["feature", "bugfix", "review", "small", "directive"]
+        flow = self._make_flow()
 
         for task_type in valid_types:
-            result = _extract_task_type({"task_type": task_type})
+            result = _extract_task_type({"task_type": task_type}, flow)
             assert result == task_type
