@@ -343,6 +343,15 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step.outputs["discovery_summary"] = _generate_summary(conversation_history)
             step.outputs["requirements_clarified"] = True
             logger.info("Discovery complete - user confirmed refined description")
+
+            # Show final confirmation to user
+            _display_discovery_message(
+                "✅ Discovery complete! Here's the confirmed task description:",
+                refined_description,
+                questions=None,
+                is_confirmation=True,
+            )
+
             return StepStatus.COMPLETED
 
         elif mode == "synthesis" and refined_description:
@@ -489,6 +498,7 @@ def _display_discovery_message(
     content: str,
     refined_description: Optional[str],
     questions: Optional[List[str]] = None,
+    is_confirmation: bool = False,
 ) -> None:
     """Display discovery message to user.
 
@@ -496,12 +506,22 @@ def _display_discovery_message(
         content: Message content from assistant
         refined_description: Proposed refined description (if in synthesis mode)
         questions: List of questions (if in question mode)
+        is_confirmation: If True, this is a final confirmation display (not asking for input)
     """
     from ..output import render_full
 
     lines = []
 
-    if refined_description:
+    if refined_description and is_confirmation:
+        # Final confirmation - show the confirmed description
+        lines.extend([
+            content,
+            "",
+            "=" * 60,
+            refined_description,
+            "",
+        ])
+    elif refined_description:
         # Synthesis mode - focus on the proposed description
         lines.extend([
             "📋 PROPOSED TASK DESCRIPTION:",
