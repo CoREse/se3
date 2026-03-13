@@ -78,39 +78,26 @@ class TestConfirmStepHandler:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("se3.engine.steps.confirm._wait_for_human_response")
-    def test_confirm_handler_approval(self, mock_wait):
-        """Test that approval returns COMPLETED status."""
+    def test_confirm_handler_no_response_returns_paused(self):
+        """Test that confirm handler returns PAUSED when no response exists."""
         from se3.engine.steps.confirm import confirm_handler
-
-        # Mock the human response as approved
-        mock_wait.return_value = {
-            "approved": True,
-            "feedback": "Looks good!",
-        }
 
         result = confirm_handler(self.confirm_step, self.flow)
 
-        assert result == StepStatus.COMPLETED
-        assert self.confirm_step.outputs["review_result"]["approved"] is True
-        assert self.confirm_step.outputs["review_result"]["feedback"] == "Looks good!"
+        assert result == StepStatus.PAUSED
+        # Should have created a call file and stored its path
+        assert "call_file" in self.confirm_step.outputs
 
-    @patch("se3.engine.steps.confirm._wait_for_human_response")
-    def test_confirm_handler_revision_requested(self, mock_wait):
-        """Test that revision request returns REVISION_NEEDED status."""
+    def test_confirm_handler_paused_creates_call_file(self):
+        """Test that PAUSED creates a call file for the run loop to find."""
         from se3.engine.steps.confirm import confirm_handler
-
-        # Mock the human response as changes requested
-        mock_wait.return_value = {
-            "approved": False,
-            "feedback": "Please fix this",
-        }
 
         result = confirm_handler(self.confirm_step, self.flow)
 
-        assert result == StepStatus.REVISION_NEEDED
-        assert self.confirm_step.outputs["review_result"]["approved"] is False
-        assert self.confirm_step.outputs["review_result"]["feedback"] == "Please fix this"
+        assert result == StepStatus.PAUSED
+        call_file_path = self.confirm_step.outputs.get("call_file")
+        assert call_file_path is not None
+        assert Path(call_file_path).exists()
 
     def test_confirm_handler_existing_approval_response(self):
         """Test that existing approval response is used without waiting."""

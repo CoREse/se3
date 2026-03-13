@@ -190,37 +190,13 @@ def confirm_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 step.outputs['revision_feedback'] = feedback
                 return StepStatus.REVISION_NEEDED
 
-    # No existing response - create call file and wait
+    # No existing response - create call file and pause for interactive handling
     if not call_file:
         call_file = _create_call_file(step, flow, project_root)
 
-    # Wait for human response
-    try:
-        response = _wait_for_human_response(call_file, timeout=None)
+    # Store the call file path so the run loop can find it
+    step.outputs['call_file'] = str(call_file)
 
-        approved = response['approved']
-        feedback = response['feedback']
-        step_to_review_id = step.inputs.get('step_to_review_id')
-        step_to_review_type = step.inputs.get('step_to_review_type')
-
-        # Store result in step outputs for state machine
-        step.outputs['review_result'] = {
-            'approved': approved,
-            'feedback': feedback,
-            'step_to_review_id': step_to_review_id,
-            'step_to_review_type': step_to_review_type,
-        }
-
-        if approved:
-            # Return COMPLETED for approval so state machine transitions forward
-            step.outputs['revision_feedback'] = feedback
-            return StepStatus.COMPLETED
-        else:
-            # Return REVISION_NEEDED to trigger backward transition
-            step.outputs['revision_feedback'] = feedback
-            return StepStatus.REVISION_NEEDED
-
-    except TimeoutError:
-        logger.error("Timeout waiting for human response")
-        step.error_message = "Timeout waiting for human confirmation"
-        return StepStatus.FAILED
+    # Return PAUSED so the run loop can prompt the user interactively
+    logger.info("Confirm step paused, waiting for interactive response")
+    return StepStatus.PAUSED

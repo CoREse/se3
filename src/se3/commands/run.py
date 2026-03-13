@@ -146,6 +146,102 @@ def _check_confirm_response(flow: FlowInstance, current_step: Any, project_root:
     return None
 
 
+def _handle_confirm_pause(
+    flow: FlowInstance,
+    current_step: Any,
+    persistence: Any,
+    project_root: Path,
+) -> Optional[bool]:
+    """Handle interactive confirmation when CONFIRM step is paused.
+
+    Displays the reviewed step's content and prompts the user to approve or
+    request changes. Writes the response file so the confirm handler can
+    process it on re-run.
+
+    Returns:
+        True if response was written, None if user chose to exit.
+    """
+    step_to_review_id = current_step.inputs.get("step_to_review_id")
+    step_to_review_type = current_step.inputs.get("step_to_review_type", "unknown")
+
+    # Show what we're confirming
+    reviewed_step = flow.state.steps.get(step_to_review_id) if step_to_review_id else None
+    if reviewed_step and reviewed_step.outputs:
+        # Display the outputs of the step being reviewed
+        review_content = []
+        review_content.append(f"Step: {step_to_review_type}")
+        review_content.append("")
+
+        outputs = reviewed_step.outputs
+        # Show summary/proposal/design depending on step type
+        for key in ("summary", "proposal", "design_doc", "task_list"):
+            if key in outputs:
+                val = outputs[key]
+                if isinstance(val, dict):
+                    review_content.append(json.dumps(val, indent=2, ensure_ascii=False))
+                elif isinstance(val, str):
+                    review_content.append(val)
+                break
+        else:
+            # Fallback: show all outputs except internal fields
+            for k, v in outputs.items():
+                if k.startswith("_") or k == "result":
+                    continue
+                if isinstance(v, dict):
+                    review_content.append(f"**{k}**:")
+                    review_content.append(json.dumps(v, indent=2, ensure_ascii=False))
+                else:
+                    review_content.append(f"**{k}**: {v}")
+
+        render_full("\n".join(review_content), title=f"Review: {step_to_review_type}")
+
+    # Prompt the user
+    options = ["Approve and continue", "Request changes", "Exit (pause flow)"]
+    try:
+        choice = prompt_user_choice(
+            f"Please review the {step_to_review_type} step output above:", options
+        )
+    except (KeyboardInterrupt, EOFError):
+        persistence.save_flow(flow)
+        return None
+
+    if choice == 2:
+        # Exit
+        persistence.save_flow(flow)
+        return None
+
+    approved = choice == 0
+    feedback = None
+
+    if not approved:
+        # Get feedback from user
+        try:
+            print("\nPlease describe the changes you'd like:")
+            feedback = input("> ").strip()
+        except (KeyboardInterrupt, EOFError):
+            persistence.save_flow(flow)
+            return None
+
+    # Write the response file
+    call_file_path = current_step.outputs.get("call_file")
+    if call_file_path:
+        call_file = Path(call_file_path)
+        response_path = call_file.parent / f"{call_file.stem}.response"
+        response_data = {
+            "approved": approved,
+            "feedback": feedback,
+            "step_to_review_id": step_to_review_id,
+            "step_to_review_type": step_to_review_type,
+        }
+        with open(response_path, "w") as f:
+            json.dump(response_data, f, indent=2, ensure_ascii=False)
+
+    status_text = "Approved" if approved else f"Changes requested: {feedback}"
+    render_full(status_text, title="Confirmation Result")
+
+    return True
+
+
 def find_existing_flows(project_root: Path) -> List[Dict[str, Any]]:
     """Find all existing flow state files."""
     flows = []
@@ -598,6 +694,17 @@ def run_flow(
 
         # Display step output with full content
         _display_step_output(current_step)
+
+        # Handle CONFIRM step PAUSED state - prompt user for approval
+        if current_step.step_type == StepType.CONFIRM and result == StepStatus.PAUSED:
+            confirm_result = _handle_confirm_pause(flow, current_step, persistence, project_root)
+            if confirm_result is None:
+                # User chose to exit
+                return 130
+            # Re-run confirm step to process the response
+            current_step.status = StepStatus.PENDING
+            persistence.save_flow(flow)
+            continue
 
         # Handle discovery step PAUSED state - need user input to continue
         if current_step.step_type == StepType.DISCOVERY and result == StepStatus.PAUSED:

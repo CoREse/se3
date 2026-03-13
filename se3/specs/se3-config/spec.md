@@ -21,6 +21,7 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - `version.auto_bump`: Auto-apply version bump without confirmation (default: true)
 - `confirmation.enabled`: Enable CONFIRM steps (default: false)
 - `confirmation.steps`: Steps after which to insert CONFIRM (default: [propose, design])
+- `confirmation.reviewer`: Who reviews — "human" or "llm" (default: "human")
 - `claude_commands`: List of `{cmd, priority}` for Claude CLI resolution
 
 #### Scenario: Using default configuration
@@ -72,13 +73,35 @@ The system SHALL support confirmation step configuration.
 **Confirmation section options:**
 - `enabled`: Whether to insert CONFIRM steps (default: false)
 - `steps`: List of steps after which to insert CONFIRM (default: [propose, design])
-- `auto_confirm`: Auto-confirm after timeout (default: false)
+- `reviewer`: Who performs the review — "human" or "llm" (default: "human")
+- `llm_reviewer.model`: LLM model for review (default: null = default model)
+- `llm_reviewer.max_iterations`: Max review-modify cycles (default: 3)
+
+**Human review response mechanism:**
+
+The CONFIRM step supports two response pathways:
+1. **Interactive**: When `se3 run` is running, the run loop displays the reviewed step's outputs and prompts the user to approve or request changes directly in the terminal.
+2. **File-based**: A call file is created at `se3/calls/confirm_{step_id}_{timestamp}.json`. A response file with `.response` suffix containing `{"approved": bool, "feedback": string}` can be placed alongside it. On resume, the confirm step detects and processes the response file.
+
+The interactive pathway writes the `.response` file automatically, so both pathways converge on the same mechanism.
 
 #### Scenario: Enable confirmation
 - **GIVEN** se3.yaml has `confirmation.enabled: true`
 - **WHEN** flow reaches a configured step
 - **THEN** a CONFIRM step is inserted after it
-- **AND** user can review and request revision
+- **AND** the step pauses and prompts the user for review
+
+#### Scenario: Interactive approval
+- **GIVEN** a CONFIRM step is paused
+- **WHEN** the run loop detects the pause
+- **THEN** it displays the reviewed step's outputs
+- **AND** prompts the user to approve, request changes, or exit
+
+#### Scenario: File-based approval
+- **GIVEN** a CONFIRM step created a call file
+- **WHEN** a `.response` file is placed alongside it
+- **AND** user runs `se3 run --resume`
+- **THEN** the confirm step reads the response and continues
 
 ### Requirement: Claude Commands Configuration
 
