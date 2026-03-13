@@ -119,6 +119,22 @@ def _run_command(
     cmd_str = " ".join(command)
 
     try:
+        # Guard against recursive test invocation: if a test spawns se3 run
+        # which spawns test_handler which spawns pytest again, the inner
+        # pytest would run the same tests forever.  Set a sentinel env var
+        # so nested invocations can be detected.
+        env = dict(__import__("os").environ)
+        if env.get("SE3_TEST_RUNNING"):
+            logger.warning("Recursive test invocation detected, skipping")
+            return {
+                "command": " ".join(command),
+                "returncode": 0,
+                "stdout": "Skipped: recursive test invocation detected (SE3_TEST_RUNNING set)",
+                "stderr": "",
+                "passed": True,
+            }
+        env["SE3_TEST_RUNNING"] = "1"
+
         # Start the process with Popen to enable progress indication
         process = subprocess.Popen(
             command,
@@ -126,6 +142,7 @@ def _run_command(
             stderr=subprocess.PIPE,
             text=True,
             cwd=cwd,
+            env=env,
         )
 
         # Show dot progress while waiting
