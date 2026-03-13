@@ -8,6 +8,8 @@ from typing import Optional
 
 import typer
 from prompt_toolkit import PromptSession
+from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.patch_stdout import patch_stdout
 
 from . import __version__
@@ -81,25 +83,41 @@ def _read_multiline_input() -> Optional[str]:
     render_text("Enter task description (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):", title="Input")
 
     try:
-        # Create a prompt session with multiline support
+        # Create custom key bindings to make Ctrl+D accept input
+        # (mimicking traditional Unix behavior for multiline input)
+        kb = KeyBindings()
+
+        @kb.add(Keys.ControlD)
+        def _(event):
+            """Pressing Ctrl+D accepts the input (like traditional EOF)."""
+            buf = event.app.current_buffer
+            if buf.text:
+                # Has content — accept it (same as Esc+Enter)
+                buf.validate_and_handle()
+            else:
+                # Empty buffer — treat as cancel
+                event.app.exit(exception=EOFError)
+
+        # Create a prompt session with multiline support and custom key bindings
         session = PromptSession(
             multiline=True,
             message="> ",
+            key_bindings=kb,
         )
-        
+
         with patch_stdout():
             # Read input with prompt_toolkit
             content = session.prompt()
-        
+
         # Show full content for review
         content = content.strip()
         if content:
             lines = content.split("\n")
             if len(lines) > 1:
                 render_full(content, title="Input Content")
-        
+
         return content if content else None
-        
+
     except KeyboardInterrupt:
         render_text("\nCancelled.", title="Cancelled")
         return None
