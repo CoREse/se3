@@ -156,7 +156,7 @@ def confirm_handler(step: Step, flow: FlowInstance) -> StepStatus:
             try:
                 with open(f) as cf:
                     data = json.load(cf)
-                if data.get('change_id') == change_id or data.get('step') == step.step_id:
+                if data.get('step') == step.step_id:
                     call_file = f
                     break
             except (json.JSONDecodeError, IOError):

@@ -102,16 +102,14 @@ def _check_confirm_response(flow: FlowInstance, current_step: Any, project_root:
     if not calls_dir.exists():
         return None
 
-    # Find the call file for this step/change
-    change_id = flow.state.context.get("change_id") or flow.change_name or flow.flow_id
-
     for call_file in calls_dir.glob("confirm_*.json"):
         try:
             with open(call_file) as f:
                 data = json.load(f)
 
-            # Match by change_id or step_id
-            if data.get('change_id') == change_id or data.get('step') == current_step.step_id:
+            # Match by step_id only — change_id is flow-level and would
+            # cause different confirm steps to share the same response
+            if data.get('step') == current_step.step_id:
                 # Check for response file
                 response_path = call_file.parent / f"{call_file.stem}.response"
                 if response_path.exists():
