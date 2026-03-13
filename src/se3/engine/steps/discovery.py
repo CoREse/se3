@@ -258,7 +258,6 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["refined_description"] = refined
         step.outputs["discovery_summary"] = _generate_summary(conversation_history)
         step.outputs["requirements_clarified"] = True
-        step.outputs["conversation_history"] = conversation_history
         return StepStatus.COMPLETED
 
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
@@ -323,24 +322,26 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
             "mode": mode,
         })
 
-        # Update discovery state
+        # Update discovery state (internal tracking only)
         step.inputs["discovery_state"] = {
             "round": round_number + 1,
             "history": conversation_history,
             "mode": mode,
         }
 
-        # Store outputs for display
-        step.outputs["last_message"] = content
-        step.outputs["mode"] = mode
-        step.outputs["round"] = round_number + 1
+        # Store mode-specific outputs for user-facing display
+        # Clear previous outputs to avoid confusion
+        step.outputs.clear()
+        step.outputs["message"] = content
+
+        # Internal state should not be in user-facing outputs
+        # (mode, round are tracked in discovery_state above)
 
         if mode == "confirmation" and ready_to_proceed and refined_description:
             # Discovery complete - user has confirmed
             step.outputs["refined_description"] = refined_description
             step.outputs["discovery_summary"] = _generate_summary(conversation_history)
             step.outputs["requirements_clarified"] = True
-            step.outputs["conversation_history"] = conversation_history
             logger.info("Discovery complete - user confirmed refined description")
             return StepStatus.COMPLETED
 
@@ -348,13 +349,14 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
             # Have a refined description but need user confirmation
             step.outputs["proposed_description"] = refined_description
             # Pause to wait for user confirmation
-            _display_discovery_message(content, refined_description, round_number + 1)
+            _display_discovery_message(content, refined_description, questions=None)
             return StepStatus.PAUSED
 
         else:
             # Still in question mode - continue discovery
             questions = result.get("questions", [])
-            _display_discovery_message(content, None, round_number + 1, questions)
+            step.outputs["questions"] = questions
+            _display_discovery_message(content, None, questions)
             return StepStatus.PAUSED
 
     except Exception as e:
@@ -486,7 +488,6 @@ def _generate_fallback_description(initial: str, history: List[Dict[str, str]]) 
 def _display_discovery_message(
     content: str,
     refined_description: Optional[str],
-    round_number: int,
     questions: Optional[List[str]] = None,
 ) -> None:
     """Display discovery message to user.
@@ -494,45 +495,45 @@ def _display_discovery_message(
     Args:
         content: Message content from assistant
         refined_description: Proposed refined description (if in synthesis mode)
-        round_number: Current round number
         questions: List of questions (if in question mode)
     """
     from ..output import render_full
 
-    lines = [
-        f"Discovery Round {round_number}",
-        "=" * 60,
-        "",
-        content,
-        "",
-    ]
+    lines = []
 
     if refined_description:
+        # Synthesis mode - focus on the proposed description
         lines.extend([
-            "-" * 60,
             "📋 PROPOSED TASK DESCRIPTION:",
-            "-" * 60,
+            "=" * 60,
             refined_description,
             "",
+            "-" * 60,
             "Does this accurately capture what you want to build?",
+            "",
             "Reply with:",
-            "  - 'yes' or 'ok' to proceed with this description",
-            "  - 'no' or provide corrections/clarifications",
+            "  • 'yes' or 'ok' to proceed with this description",
+            "  • 'no' or provide corrections/clarifications",
             "",
         ])
     elif questions:
+        # Question mode - show the message and questions
+        lines.append(content)
         lines.extend([
+            "",
             "-" * 60,
-            "🤔 QUESTIONS:",
+            "🤔 QUESTIONS FOR YOU:",
             "-" * 60,
         ])
         for i, q in enumerate(questions, 1):
             lines.append(f"  {i}. {q}")
         lines.append("")
+    else:
+        # General message mode
+        lines.append(content)
+        lines.append("")
 
-    lines.append("=" * 60)
-
-    render_full("\n".join(lines), title="Discovery Mode")
+    render_full("\n".join(lines), title="Discovery")
 
 
 def parse_user_response(response: str) -> Dict[str, Any]:

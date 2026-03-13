@@ -384,7 +384,7 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
         parsed = parse_user_response(user_input)
 
         # If user confirmed a synthesis, mark it
-        if parsed["confirmed"] and current_step.outputs.get("mode") == "synthesis":
+        if parsed["confirmed"] and current_step.inputs.get("discovery_state", {}).get("mode") == "synthesis":
             current_step.outputs["user_confirmed"] = True
 
         return user_input
@@ -670,8 +670,8 @@ def run_flow(
                     return 130
                 continue
 
-        # Display step output with full content (skip for CONFIRM — handled by prompt)
-        if current_step.step_type != StepType.CONFIRM:
+        # Display step output with full content (skip for CONFIRM and DISCOVERY — handled by prompt)
+        if current_step.step_type not in (StepType.CONFIRM, StepType.DISCOVERY):
             _display_step_output(current_step)
 
         # Handle CONFIRM step PAUSED state - prompt user for approval

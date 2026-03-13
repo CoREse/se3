@@ -91,8 +91,13 @@ class TestDiscoveryHandler:
         result = discovery_handler(step, flow)
 
         assert result == StepStatus.PAUSED
-        assert step.outputs["mode"] == "question"
-        assert step.outputs["round"] == 1
+        # Internal state stored in discovery_state
+        assert step.inputs["discovery_state"]["mode"] == "question"
+        assert step.inputs["discovery_state"]["round"] == 1
+        # User-facing outputs
+        assert "message" in step.outputs
+        assert "questions" in step.outputs
+        assert step.outputs["questions"] == ["Who is the target user?", "What are the key features?"]
 
     @patch("se3.engine.steps.discovery.LLMCaller")
     def test_discovery_synthesis_needs_confirmation(self, mock_caller_class):
@@ -115,8 +120,12 @@ class TestDiscoveryHandler:
         result = discovery_handler(step, flow)
 
         assert result == StepStatus.PAUSED
+        # User-facing outputs for synthesis mode
+        assert "message" in step.outputs
         assert "proposed_description" in step.outputs
         assert step.outputs["proposed_description"] == "Build a user authentication system with login/logout"
+        # Internal state stored in discovery_state
+        assert step.inputs["discovery_state"]["mode"] == "synthesis"
 
     @patch("se3.engine.steps.discovery.LLMCaller")
     def test_discovery_confirmation_completes(self, mock_caller_class):
@@ -143,8 +152,13 @@ class TestDiscoveryHandler:
         result = discovery_handler(step, flow)
 
         assert result == StepStatus.COMPLETED
+        # Confirmation mode outputs only refined_description and status
         assert step.outputs["refined_description"] == "Build a user authentication system"
         assert step.outputs["requirements_clarified"] is True
+        assert "message" in step.outputs  # Always present
+        # Internal state should not be in outputs
+        assert "mode" not in step.outputs
+        assert "round" not in step.outputs
 
     def test_discovery_max_rounds_fallback(self):
         """Should complete with fallback after max rounds."""
