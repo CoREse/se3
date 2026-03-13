@@ -403,42 +403,50 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
 def _display_step_output(current_step: Any) -> None:
     """Display step output using full-content rendering.
 
+    Inputs are omitted — they are internal context passed between steps and
+    not useful for the user.  Large output fields (spec content, test results,
+    etc.) are summarised rather than dumped verbatim.
+
     Args:
         current_step: The current step being executed
     """
-    # Display step header with full content
     step_header = f"Step: {current_step.step_type.value}"
     step_info = f"Status: {current_step.status.value}"
 
-    # Build full content for display
     lines = [f"[bold]{step_info}[/bold]", ""]
 
-    # Display inputs if present
-    if current_step.inputs:
-        lines.append("[bold cyan]Inputs:[/bold cyan]")
-        for key, value in current_step.inputs.items():
-            formatted_value = format_output(value)
-            # Show full value without truncation
-            lines.append(f"  [bold]{key}:[/bold] {formatted_value}")
-        lines.append("")
+    # --- Outputs only (inputs are internal plumbing) ---
+    # Keys whose raw content is too large to display directly
+    DEFERRED_KEYS = {"proposal", "proposal_data", "design", "design_doc",
+                     "design_document", "analysis", "analysis_result"}
+    LARGE_KEYS = {"spec_content", "spec_summary", "test_results",
+                  "project_summary"}
+    HIDDEN_KEYS = {"result", "call_file"}
 
-    # Display outputs if present
     if current_step.outputs:
         lines.append("[bold green]Outputs:[/bold green]")
         for key, value in current_step.outputs.items():
-            # Check if this is a proposal, design, or analysis output
-            if key in ("proposal", "proposal_data") and isinstance(value, dict):
-                lines.append(f"\n  [bold]{key}:[/bold] (see Proposal display below)")
-            elif key in ("design", "design_doc", "design_document") and isinstance(value, dict):
-                lines.append(f"\n  [bold]{key}:[/bold] (see Design Document display below)")
-            elif key in ("analysis", "analysis_result") and isinstance(value, dict):
-                lines.append(f"\n  [bold]{key}:[/bold] (see Analysis display below)")
+            if key in HIDDEN_KEYS:
+                continue
+
+            if key in DEFERRED_KEYS and isinstance(value, dict):
+                label = key.replace("_", " ").title()
+                lines.append(f"\n  [bold]{key}:[/bold] (see {label} display below)")
+            elif key in LARGE_KEYS:
+                # Show a short summary instead of the full blob
+                if isinstance(value, str):
+                    preview = value[:120].replace("\n", " ")
+                    lines.append(f"  [bold]{key}:[/bold] {preview}... ({len(value)} chars)")
+                elif isinstance(value, dict):
+                    lines.append(f"  [bold]{key}:[/bold] ({len(value)} entries)")
+                else:
+                    formatted_value = format_output(value)
+                    lines.append(f"  [bold]{key}:[/bold] {formatted_value}")
             else:
                 formatted_value = format_output(value)
                 lines.append(f"  [bold]{key}:[/bold] {formatted_value}")
         lines.append("")
 
-    # Display error if present
     if current_step.error_message:
         lines.append(f"[bold red]Error:[/bold red] {current_step.error_message}")
 
