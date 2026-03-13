@@ -162,42 +162,12 @@ def _handle_confirm_pause(
     step_to_review_id = current_step.inputs.get("step_to_review_id")
     step_to_review_type = current_step.inputs.get("step_to_review_type", "unknown")
 
-    # Show what we're confirming
-    reviewed_step = flow.state.steps.get(step_to_review_id) if step_to_review_id else None
-    if reviewed_step and reviewed_step.outputs:
-        # Display the outputs of the step being reviewed
-        review_content = []
-        review_content.append(f"Step: {step_to_review_type}")
-        review_content.append("")
-
-        outputs = reviewed_step.outputs
-        # Show summary/proposal/design depending on step type
-        for key in ("summary", "proposal", "design_doc", "task_list"):
-            if key in outputs:
-                val = outputs[key]
-                if isinstance(val, dict):
-                    review_content.append(json.dumps(val, indent=2, ensure_ascii=False))
-                elif isinstance(val, str):
-                    review_content.append(val)
-                break
-        else:
-            # Fallback: show all outputs except internal fields
-            for k, v in outputs.items():
-                if k.startswith("_") or k == "result":
-                    continue
-                if isinstance(v, dict):
-                    review_content.append(f"**{k}**:")
-                    review_content.append(json.dumps(v, indent=2, ensure_ascii=False))
-                else:
-                    review_content.append(f"**{k}**: {v}")
-
-        render_full("\n".join(review_content), title=f"Review: {step_to_review_type}")
-
-    # Prompt the user
+    # The reviewed step's output was already displayed by _display_step_output
+    # in the previous iteration, so just prompt directly.
     options = ["Approve and continue", "Request changes", "Exit (pause flow)"]
     try:
         choice = prompt_user_choice(
-            f"Please review the {step_to_review_type} step output above:", options
+            f"Review {step_to_review_type} output above:", options
         )
     except (KeyboardInterrupt, EOFError):
         persistence.save_flow(flow)
@@ -644,23 +614,25 @@ def run_flow(
             break
 
         # Display step header with type information only when appropriate
+        # Skip header for CONFIRM steps — the prompt speaks for itself
         step_type_value = current_step.step_type.value
-        show_type = _should_show_type(step_type_value, flow)
-        display_type = _get_display_task_type(flow) if show_type else None
+        if current_step.step_type != StepType.CONFIRM:
+            show_type = _should_show_type(step_type_value, flow)
+            display_type = _get_display_task_type(flow) if show_type else None
 
-        step_header_lines = [
-            f"Step: {step_type_value}",
-            f"Status: {current_step.status.value}",
-        ]
-        if display_type:
-            step_header_lines.append(f"Type: {display_type}")
-        elif flow.state.is_type_pending():
-            step_header_lines.append("Type: pending")
+            step_header_lines = [
+                f"Step: {step_type_value}",
+                f"Status: {current_step.status.value}",
+            ]
+            if display_type:
+                step_header_lines.append(f"Type: {display_type}")
+            elif flow.state.is_type_pending():
+                step_header_lines.append("Type: pending")
 
-        render_full(
-            "\n".join(step_header_lines),
-            title="Current Step"
-        )
+            render_full(
+                "\n".join(step_header_lines),
+                title="Current Step"
+            )
 
         step_start_time = datetime.now()
 
@@ -690,8 +662,9 @@ def run_flow(
                     return 130
                 continue
 
-        # Display step output with full content
-        _display_step_output(current_step)
+        # Display step output with full content (skip for CONFIRM — handled by prompt)
+        if current_step.step_type != StepType.CONFIRM:
+            _display_step_output(current_step)
 
         # Handle CONFIRM step PAUSED state - prompt user for approval
         if current_step.step_type == StepType.CONFIRM and result == StepStatus.PAUSED:
