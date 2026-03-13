@@ -13,6 +13,7 @@ Acceptance Criteria:
 
 from __future__ import annotations
 
+import os
 import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
@@ -428,20 +429,21 @@ class TestTestStepFailureHandling:
             inputs={},
         )
 
-        # Mock subprocess.run to simulate test failure
-        with patch("se3.engine.steps.test.subprocess.run") as mock_run:
-            mock_result = Mock()
-            mock_result.returncode = 1
-            mock_result.stdout = "Test output"
-            mock_result.stderr = "Test failed"
-            mock_run.return_value = mock_result
+        # Must remove SE3_TEST_RUNNING so the recursion guard doesn't
+        # short-circuit before our Popen mock gets called.
+        env_without_guard = {k: v for k, v in os.environ.items() if k != "SE3_TEST_RUNNING"}
+        with patch.dict("os.environ", env_without_guard, clear=True):
+            with patch("se3.engine.steps.test.subprocess.Popen") as mock_popen:
+                mock_process = Mock()
+                mock_process.returncode = 1
+                mock_process.communicate.return_value = ("Test output", "Test failed")
+                mock_popen.return_value = mock_process
 
-            result = test_handler(step, flow)
+                result = test_handler(step, flow)
 
-            # Should return COMPLETED so flow continues to verify_spec
-            assert result == StepStatus.COMPLETED
-            assert step.outputs["test_results"]["passed"] is False
-            assert step.outputs["test_results"]["returncode"] == 1
+                assert result == StepStatus.COMPLETED
+                assert step.outputs["test_results"]["passed"] is False
+                assert step.outputs["test_results"]["returncode"] == 1
 
     def test_test_step_stores_detailed_results(self):
         """Test that test step stores detailed test results."""
@@ -459,21 +461,22 @@ class TestTestStepFailureHandling:
             inputs={},
         )
 
-        with patch("se3.engine.steps.test.subprocess.run") as mock_run:
-            mock_result = Mock()
-            mock_result.returncode = 1
-            mock_result.stdout = "Test stdout content"
-            mock_result.stderr = "Test stderr content"
-            mock_run.return_value = mock_result
+        env_without_guard = {k: v for k, v in os.environ.items() if k != "SE3_TEST_RUNNING"}
+        with patch.dict("os.environ", env_without_guard, clear=True):
+            with patch("se3.engine.steps.test.subprocess.Popen") as mock_popen:
+                mock_process = Mock()
+                mock_process.returncode = 1
+                mock_process.communicate.return_value = ("Test stdout content", "Test stderr content")
+                mock_popen.return_value = mock_process
 
-            result = test_handler(step, flow)
+                result = test_handler(step, flow)
 
-            assert result == StepStatus.COMPLETED
-            test_results = step.outputs["test_results"]
-            assert test_results["passed"] is False
-            assert test_results["returncode"] == 1
-            assert test_results["stdout"] == "Test stdout content"
-            assert test_results["stderr"] == "Test stderr content"
+                assert result == StepStatus.COMPLETED
+                test_results = step.outputs["test_results"]
+                assert test_results["passed"] is False
+                assert test_results["returncode"] == 1
+                assert test_results["stdout"] == "Test stdout content"
+                assert test_results["stderr"] == "Test stderr content"
 
 
 class TestMaxIterationEnforcement:
