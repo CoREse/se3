@@ -9,6 +9,7 @@ Supports:
 - Multi-phase test execution via se3.yaml test.phases
 - Result classification into new_tests vs regression
 - Fix-loop aware phase filtering
+- Dot progress indicator during test execution
 """
 
 from __future__ import annotations
@@ -17,6 +18,8 @@ import logging
 import re
 import shlex
 import subprocess
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -107,27 +110,66 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
 def _run_command(
     command: list[str], cwd: Path, timeout: int,
 ) -> dict[str, Any]:
-    """Run a test command and return result dict."""
+    """Run a test command and return result dict.
+
+    Shows dot progress indicator while tests are running to indicate
+    the process is still active and not stuck.
+    """
     logger.info(f"Running: {' '.join(command)} in {cwd}")
+    cmd_str = " ".join(command)
+
     try:
-        result = subprocess.run(
+        # Start the process with Popen to enable progress indication
+        process = subprocess.Popen(
             command,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             cwd=cwd,
-            timeout=timeout,
         )
-        return {
-            "command": " ".join(command),
-            "returncode": result.returncode,
-            "stdout": result.stdout,
-            "stderr": result.stderr,
-            "passed": result.returncode == 0,
-        }
+
+        # Show dot progress while waiting
+        print(f"Running tests: {cmd_str}", end="", flush=True)
+        dots = 0
+        max_dots = 60  # Limit dots to avoid infinite horizontal scrolling
+
+        try:
+            while True:
+                try:
+                    stdout, stderr = process.communicate(timeout=1.0)
+                    break
+                except subprocess.TimeoutExpired:
+                    print(".", end="", flush=True)
+                    dots += 1
+                    if dots >= max_dots:
+                        print("\n  ... still running ...", flush=True)
+                        dots = 0
+                    continue
+
+            # Newline after progress dots
+            print(flush=True)
+
+            return {
+                "command": cmd_str,
+                "returncode": process.returncode,
+                "stdout": stdout,
+                "stderr": stderr,
+                "passed": process.returncode == 0,
+            }
+
+        except KeyboardInterrupt:
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+            raise
+
     except subprocess.TimeoutExpired:
-        logger.error(f"Test timed out after {timeout}s: {' '.join(command)}")
+        logger.error(f"Test timed out after {timeout}s: {cmd_str}")
+        print(f"\n[timeout after {timeout}s]", flush=True)
         return {
-            "command": " ".join(command),
+            "command": cmd_str,
             "returncode": -1,
             "stdout": "",
             "stderr": f"Timeout after {timeout}s",
@@ -135,8 +177,9 @@ def _run_command(
         }
     except Exception as e:
         logger.exception(f"Test execution failed: {command}")
+        print(f"\n[error: {e}]", flush=True)
         return {
-            "command": " ".join(command),
+            "command": cmd_str,
             "returncode": -1,
             "stdout": "",
             "stderr": str(e),

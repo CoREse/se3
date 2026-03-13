@@ -81,14 +81,13 @@ class TestAnalyzeStep:
 class TestTestStep:
     """Tests for the test step."""
 
-    @patch("subprocess.run")
-    def test_test_success(self, mock_run):
+    @patch("subprocess.Popen")
+    def test_test_success(self, mock_popen):
         """Test successful test execution."""
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="5 passed, 0 failed",
-            stderr="",
-        )
+        mock_process = MagicMock()
+        mock_process.returncode = 0
+        mock_process.communicate.return_value = ("5 passed, 0 failed", "")
+        mock_popen.return_value = mock_process
 
         flow = FlowInstance(task_description="Test feature")
         step = Step(step_type=StepType.TEST)
@@ -98,14 +97,13 @@ class TestTestStep:
         assert result == StepStatus.COMPLETED
         assert "test_results" in step.outputs
 
-    @patch("subprocess.run")
-    def test_test_failure(self, mock_run):
+    @patch("subprocess.Popen")
+    def test_test_failure(self, mock_popen):
         """Test handling of test failures."""
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stdout="3 passed, 2 failed",
-            stderr="FAILED test_foo",
-        )
+        mock_process = MagicMock()
+        mock_process.returncode = 1
+        mock_process.communicate.return_value = ("3 passed, 2 failed", "FAILED test_foo")
+        mock_popen.return_value = mock_process
 
         flow = FlowInstance(task_description="Test feature")
         step = Step(step_type=StepType.TEST)
