@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import typer
 
@@ -69,6 +70,19 @@ logger = logging.getLogger(__name__)
 
 SE3_DIR = "se3"
 STATE_FILE = "state/engine.json"
+
+# Global flag set by SIGINT handler to detect interrupt requests
+_interrupt_requested = False
+
+
+def _sigint_handler(signum: int, frame: Any) -> None:
+    """Handle SIGINT by setting a flag and re-raising KeyboardInterrupt.
+
+    This ensures Ctrl-C is never lost, even during blocking subprocess calls.
+    """
+    global _interrupt_requested
+    _interrupt_requested = True
+    raise KeyboardInterrupt
 
 
 def get_project_root() -> Path:
@@ -549,10 +563,36 @@ def run_flow(
     Returns:
         Exit code (0 for success, non-zero for failure)
     """
-    # Initialize components
+    # Initialize components before signal handler (for clean state on early exit)
     persistence = PersistenceManager(project_root)
     state_machine = StateMachine(project_root, persistence)
 
+    # Register SIGINT handler for reliable Ctrl-C handling
+    global _interrupt_requested
+    _interrupt_requested = False
+    old_sigint_handler = signal.signal(signal.SIGINT, _sigint_handler)
+
+    try:
+        return _run_flow_impl(
+            project_root, flow_id, task_description, task_type, change_name,
+            is_loop_mode, persistence, state_machine
+        )
+    finally:
+        # Restore original signal handler
+        signal.signal(signal.SIGINT, old_sigint_handler)
+
+
+def _run_flow_impl(
+    project_root: Path,
+    flow_id: Optional[str],
+    task_description: Optional[str],
+    task_type: str,
+    change_name: Optional[str],
+    is_loop_mode: bool,
+    persistence: PersistenceManager,
+    state_machine: StateMachine,
+) -> int:
+    """Internal implementation of flow execution."""
     # Register all step handlers
     for step_type, handler in STEP_HANDLERS.items():
         state_machine.register_handler(step_type, handler)

@@ -755,8 +755,15 @@ class ClaudeRunner:
             if log_fh:
                 log_fh.close()
             if proc.poll() is None:
-                proc.kill()
-                proc.wait()
+                try:
+                    proc.kill()
+                    proc.wait(timeout=5)  # Non-blocking wait with timeout
+                except (subprocess.TimeoutExpired, KeyboardInterrupt):
+                    # Force kill if still running or interrupted
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
 
 
 @dataclass
