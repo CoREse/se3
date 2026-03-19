@@ -271,12 +271,18 @@ def _format_changes(changes_made: dict[str, Any]) -> str:
     if files_changed:
         lines.append("### Files Changed:")
         for file_change in files_changed:
-            path = file_change.get("path", "?")
-            action = file_change.get("action", "?")
-            explanation = file_change.get("explanation", "")
-            lines.append(f"- [{action}] {path}")
-            if explanation:
-                lines.append(f"  Reason: {explanation}")
+            if isinstance(file_change, str):
+                # implement step may output plain file paths
+                lines.append(f"- [modified] {file_change}")
+            elif isinstance(file_change, dict):
+                path = file_change.get("path", "?")
+                action = file_change.get("action", "?")
+                explanation = file_change.get("explanation", "")
+                lines.append(f"- [{action}] {path}")
+                if explanation:
+                    lines.append(f"  Reason: {explanation}")
+            else:
+                lines.append(f"- {file_change}")
         lines.append("")
     
     # Format implementation summary if available

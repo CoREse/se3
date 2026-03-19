@@ -337,8 +337,10 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Internal state should not be in user-facing outputs
         # (mode, round are tracked in discovery_state above)
 
-        if mode == "confirmation" and ready_to_proceed and refined_description:
-            # Discovery complete - user has confirmed
+        questions = result.get("questions", [])
+
+        if mode == "confirmation" and ready_to_proceed and refined_description and not questions:
+            # Discovery complete - user has confirmed and no remaining questions
             step.outputs["refined_description"] = refined_description
             step.outputs["discovery_summary"] = _generate_summary(conversation_history)
             step.outputs["requirements_clarified"] = True
@@ -354,18 +356,16 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
             return StepStatus.COMPLETED
 
-        elif mode == "synthesis" and refined_description:
-            # Have a refined description but need user confirmation
+        elif mode == "synthesis" and refined_description and not questions:
+            # Have a refined description and no pending questions - ask for confirmation
             step.outputs["proposed_description"] = refined_description
-            # Pause to wait for user confirmation
             _display_discovery_message(content, refined_description, questions=None)
             return StepStatus.PAUSED
 
         else:
-            # Still in question mode - continue discovery
-            questions = result.get("questions", [])
+            # Still in question/synthesis mode with pending questions - continue discovery
             step.outputs["questions"] = questions
-            _display_discovery_message(content, None, questions)
+            _display_discovery_message(content, refined_description if mode == "synthesis" else None, questions)
             return StepStatus.PAUSED
 
     except Exception as e:
@@ -521,8 +521,26 @@ def _display_discovery_message(
             refined_description,
             "",
         ])
+    elif refined_description and questions:
+        # Synthesis with pending questions - show content, proposed description, then questions
+        if content:
+            lines.extend([content, ""])
+        lines.extend([
+            "📋 PROPOSED TASK DESCRIPTION:",
+            "=" * 60,
+            refined_description,
+            "",
+            "-" * 60,
+            "🤔 QUESTIONS FOR YOU:",
+            "-" * 60,
+        ])
+        for i, q in enumerate(questions, 1):
+            lines.append(f"  {i}. {q}")
+        lines.append("")
     elif refined_description:
-        # Synthesis mode - focus on the proposed description
+        # Synthesis mode - show content explanation and proposed description
+        if content:
+            lines.extend([content, ""])
         lines.extend([
             "📋 PROPOSED TASK DESCRIPTION:",
             "=" * 60,
@@ -538,9 +556,9 @@ def _display_discovery_message(
         ])
     elif questions:
         # Question mode - show the message and questions
-        lines.append(content)
+        if content:
+            lines.extend([content, ""])
         lines.extend([
-            "",
             "-" * 60,
             "🤔 QUESTIONS FOR YOU:",
             "-" * 60,
