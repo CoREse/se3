@@ -146,6 +146,7 @@ class StreamJSONTracker:
         self.text_chunks = 0
         self.total_text_len = 0
         self.start_time = time.time()
+        self._last_ended_with_newline = True
 
     def process_line(self, line: str) -> None:
         """Process a single line of NDJSON output."""
@@ -166,7 +167,6 @@ class StreamJSONTracker:
                 self.message_count += 1
                 message = data.get('message', {})
                 content = message.get('content', [])
-                has_text_or_thinking = False
                 for item in content:
                     if isinstance(item, dict):
                         item_type = item.get('type', '')
@@ -175,25 +175,26 @@ class StreamJSONTracker:
                             if text:
                                 self.text_chunks += 1
                                 self.total_text_len += len(text)
-                                has_text_or_thinking = True
                                 # Stream full text content directly
                                 print(text, end='', flush=True)
+                                self._last_ended_with_newline = text.endswith('\n')
                         elif item_type == 'thinking':
                             thinking = item.get('thinking', '')
                             if thinking:
-                                has_text_or_thinking = True
                                 # Stream thinking content in gray italic
                                 print(f"{GRAY}{ITALIC}{thinking}{RESET}", end='', flush=True)
+                                self._last_ended_with_newline = thinking.endswith('\n')
                         elif item_type == 'tool_use':
                             name = item.get('name', 'unknown')
                             tool_input = item.get('input', {})
                             self.tool_calls.append(name)
                             # Format and print tool_use preview
                             preview = format_tool_use_preview(name, tool_input)
-                            print(f"\n  [llm-stream] 🔧 {preview}...")
-                # Add newline after text/thinking content to separate from next message
-                if has_text_or_thinking:
-                    print()  # Newline
+                            # Only add leading newline if previous output didn't end with one
+                            if not self._last_ended_with_newline:
+                                print()
+                            print(f"  [llm-stream] 🔧 {preview}...")
+                            self._last_ended_with_newline = True
 
             elif msg_type == 'tool_result':
                 result = data.get('result', {})
@@ -209,10 +210,12 @@ class StreamJSONTracker:
                 else:
                     preview = format_tool_result_preview(content)
                     print(f"  [llm-stream] ✅ {preview}...")
+                self._last_ended_with_newline = True
 
             elif msg_type == 'error':
                 error_msg = data.get('error', 'Unknown error')
                 print(f"  [llm-stream] ❌ Error: {truncate_preview(str(error_msg))}")
+                self._last_ended_with_newline = True
 
         except json.JSONDecodeError:
             # Not valid JSON, might be a partial line
