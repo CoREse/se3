@@ -286,9 +286,9 @@ class StateMachine:
             )
             return None
 
-        # Handle test-verify-fix loop: if VERIFY_SPEC returns REVISION_NEEDED
+        # Handle test-verify-fix loop: if TEST or VERIFY_SPEC returns REVISION_NEEDED
         if (
-            current_step.step_type == StepType.VERIFY_SPEC
+            current_step.step_type in (StepType.TEST, StepType.VERIFY_SPEC)
             and current_step.status == StepStatus.REVISION_NEEDED
         ):
             # Check if max iterations reached
@@ -424,25 +424,25 @@ class StateMachine:
     def _transition_to_fix(
         self,
         flow: FlowInstance,
-        verify_step: Step,
+        trigger_step: Step,
     ) -> Optional[Step]:
-        """Transition from VERIFY_SPEC back to IMPLEMENT for fixing issues.
+        """Transition from TEST or VERIFY_SPEC back to IMPLEMENT for fixing issues.
 
-        This implements the test-verify-fix loop. When tests fail or spec
-        compliance issues are found, the verify_spec step returns REVISION_NEEDED
-        and this method transitions back to the implement step with fix context.
+        This implements the test-verify-fix loop. When tests fail (detected by TEST
+        or VERIFY_SPEC step), the step returns REVISION_NEEDED and this method
+        transitions back to the implement step with fix context.
 
         Args:
             flow: Current flow instance
-            verify_step: The verify_spec step that detected issues
+            trigger_step: The step (TEST or VERIFY_SPEC) that detected issues
 
         Returns:
             The implement step being re-run, or None if failed
         """
-        # Get fix instructions and context from verify step outputs
-        fix_instructions = verify_step.outputs.get("fix_instructions", "")
-        fix_context = verify_step.outputs.get("fix_context", {})
-        fix_needed = verify_step.outputs.get("fix_needed", True)
+        # Get fix instructions and context from trigger step outputs
+        fix_instructions = trigger_step.outputs.get("fix_instructions", "")
+        fix_context = trigger_step.outputs.get("fix_context", {})
+        fix_needed = trigger_step.outputs.get("fix_needed", True)
 
         if not fix_needed:
             logger.warning("Fix transition called but fix_needed is False")
@@ -461,9 +461,11 @@ class StateMachine:
             return None
 
         # Increment fix iteration counter
+        trigger_step_type = trigger_step.step_type.value
         iteration = flow.state.increment_fix_iteration(
             fix_context={
-                "verify_step_id": verify_step.step_id,
+                "trigger_step_id": trigger_step.step_id,
+                "trigger_step_type": trigger_step_type,
                 "implement_step_id": implement_step.step_id,
                 "reason": "test_failure" if fix_context.get("test_failed") else "spec_compliance",
             }
@@ -504,6 +506,8 @@ class StateMachine:
         print(f"Iteration: {iteration}")
         if fix_context.get("test_failed"):
             print(f"Reason: Tests failed")
+        if trigger_step_type == "verify_spec":
+            print(f"Source: verify_spec (spec compliance check)")
         if fix_context.get("spec_issues"):
             print(f"Reason: Spec compliance issues found")
         print(f"Instructions: {fix_instructions[:200]}..." if len(fix_instructions) > 200 else f"Instructions: {fix_instructions}")
@@ -692,11 +696,11 @@ class StateMachine:
             if step_status == StepStatus.REVISION_NEEDED:
                 # Special case: revision was triggered
                 # For CONFIRM steps, the handler already handled the transition
-                # For VERIFY_SPEC steps, we need to call transition_to_next to trigger fix loop
+                # For TEST/VERIFY_SPEC steps, we need to call transition_to_next to trigger fix loop
                 if current_step.step_type == StepType.CONFIRM:
                     logger.info("Revision triggered by CONFIRM, continuing flow")
                     continue
-                # For VERIFY_SPEC, fall through to transition_to_next which will handle fix loop
+                # For TEST and VERIFY_SPEC, fall through to transition_to_next which will handle fix loop
 
             # Transition to next step
             next_step = self.transition_to_next(flow)

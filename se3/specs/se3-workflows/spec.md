@@ -79,7 +79,8 @@ The feature workflow SHALL follow these steps:
 **7. TEST**
    - Run test suite automatically
    - Report test results
-   - Continue even if tests fail (verify_spec handles decision)
+   - If tests fail, trigger fix loop to return to implement step
+   - If tests pass, continue to verify_spec for spec compliance check
 
 **8. VERIFY_SPEC**
    - Check implementation against specifications

@@ -409,11 +409,11 @@ class TestFixContextPassing:
 class TestTestStepFailureHandling:
     """Test cases for test step behavior when tests fail."""
 
-    def test_test_step_returns_completed_on_failure(self):
-        """Test that test step returns COMPLETED (not FAILED) when tests fail.
+    def test_test_step_returns_revision_needed_on_failure(self):
+        """Test that test step returns REVISION_NEEDED when tests fail.
 
-        The test step should return COMPLETED so the flow continues to verify_spec,
-        which then decides whether to trigger the fix loop.
+        The test step now triggers the fix loop directly when tests fail,
+        skipping verify_spec for faster iteration.
         """
         from se3.engine.steps.test import test_handler
 
@@ -441,12 +441,15 @@ class TestTestStepFailureHandling:
 
                 result = test_handler(step, flow)
 
-                assert result == StepStatus.COMPLETED
+                assert result == StepStatus.REVISION_NEEDED
                 assert step.outputs["test_results"]["passed"] is False
                 assert step.outputs["test_results"]["returncode"] == 1
+                assert step.outputs["fix_needed"] is True
+                assert "fix_instructions" in step.outputs
+                assert "fix_context" in step.outputs
 
-    def test_test_step_stores_detailed_results(self):
-        """Test that test step stores detailed test results."""
+    def test_test_step_stores_detailed_results_and_fix_context(self):
+        """Test that test step stores detailed test results and fix context when failing."""
         from se3.engine.steps.test import test_handler
 
         flow = FlowInstance(
@@ -471,12 +474,18 @@ class TestTestStepFailureHandling:
 
                 result = test_handler(step, flow)
 
-                assert result == StepStatus.COMPLETED
+                assert result == StepStatus.REVISION_NEEDED
                 test_results = step.outputs["test_results"]
                 assert test_results["passed"] is False
                 assert test_results["returncode"] == 1
                 assert test_results["stdout"] == "Test stdout content"
                 assert test_results["stderr"] == "Test stderr content"
+                # Verify fix loop context is stored
+                assert step.outputs["fix_needed"] is True
+                assert "fix_instructions" in step.outputs
+                fix_context = step.outputs["fix_context"]
+                assert fix_context["test_failed"] is True
+                assert fix_context["reason"] == "test_failure"
 
 
 class TestMaxIterationEnforcement:

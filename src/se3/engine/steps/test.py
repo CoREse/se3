@@ -104,6 +104,32 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         stderr_tail = primary_result["stderr"][-500:] if primary_result["stderr"] else ""
         step.error_message = f"Tests failed:\n{stderr_tail}"
 
+    # If tests failed, prepare fix loop context and return REVISION_NEEDED
+    if not overall_passed:
+        stdout = primary_result.get("stdout", "")
+        stderr = primary_result.get("stderr", "")
+
+        # Build default fix instructions from test output
+        fix_instructions = f"""Tests are failing. Please review and fix the implementation.
+
+Test output:
+{stdout[-1500:]}
+
+Error output:
+{stderr[:1000]}
+"""
+
+        # Store fix context in outputs for the fix loop
+        step.outputs["fix_needed"] = True
+        step.outputs["fix_instructions"] = fix_instructions
+        step.outputs["fix_context"] = {
+            "test_failed": True,
+            "test_results": step.outputs["test_results"],
+            "reason": "test_failure",
+        }
+
+        return StepStatus.REVISION_NEEDED
+
     return StepStatus.COMPLETED
 
 

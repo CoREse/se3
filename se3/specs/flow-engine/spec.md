@@ -493,6 +493,17 @@ test:
 - **WHEN** test 步骤在 fix iteration 中执行
 - **THEN** 跳过 `in_fix_loop: false` 的阶段
 
+#### Scenario: test 失败触发 fix loop
+- **WHEN** test 步骤执行完成且 `overall_passed` 为 false
+- **THEN** test 步骤返回 `REVISION_NEEDED` 状态
+- **AND** 流程直接进入 fix loop 返回 implement 步骤
+- **AND** 跳过 verify_spec 步骤（因为问题已通过测试发现）
+
+#### Scenario: test 通过后进行 spec 验证
+- **WHEN** test 步骤执行完成且 `overall_passed` 为 true
+- **THEN** test 步骤返回 `COMPLETED` 状态
+- **AND** 流程继续到 verify_spec 步骤进行 spec 合规性检查
+
 #### Scenario: verify_spec 检查 spec coverage
 - **WHEN** verify_spec 接收到 `test_mapping`
 - **THEN** 检查 spec scenario 的测试覆盖
