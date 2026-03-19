@@ -192,16 +192,16 @@ def record_response(
     # Parse NDJSON string into list of dicts for storage
     raw_json: list[dict] = []
     if raw_ndjson and raw_ndjson.strip():
-        try:
-            for line in raw_ndjson.strip().split("\n"):
-                line = line.strip()
-                if line:
-                    parsed = json.loads(line)
-                    if isinstance(parsed, dict):
-                        raw_json.append(parsed)
-        except (json.JSONDecodeError, TypeError):
-            # If parsing fails, store empty list
-            pass
+        for line in raw_ndjson.strip().split("\n"):
+            line = line.strip()
+            if not line or line.startswith("==="):
+                continue
+            try:
+                parsed = json.loads(line)
+                if isinstance(parsed, dict):
+                    raw_json.append(parsed)
+            except (json.JSONDecodeError, TypeError):
+                continue
     msg = ChatMessage(
         role="assistant",
         content=text,

@@ -230,6 +230,38 @@ class TestRecordAndRetrieve:
         session = get_step_history(tmp_project, "nonexistent", "step1")
         assert session is None
 
+    def test_record_response_with_header_lines(self, tmp_project):
+        """Test that '=== Command:' header lines are skipped during parsing."""
+        ndjson_dict = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Response with headers"}]}
+        }
+        # Simulate NDJSON with header lines (as produced by CLI runner)
+        raw_ndjson = "=== Command: analyze ===\n" + json.dumps(ndjson_dict) + "\n=== End ==="
+        record_response(tmp_project, "flow1", "step1", "analyze", raw_ndjson, 0)
+
+        session = get_step_history(tmp_project, "flow1", "step1")
+        assert session is not None
+        assert session.messages[0].content == "Response with headers"
+        # raw_json should contain the parsed dict, not be empty
+        assert session.messages[0].raw_json == [ndjson_dict]
+
+    def test_record_response_with_mixed_valid_invalid_lines(self, tmp_project):
+        """Test that one bad JSON line doesn't prevent parsing other lines."""
+        ndjson_dict = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Valid response"}]}
+        }
+        # Mix valid JSON with invalid lines
+        raw_ndjson = f"not valid json\n{json.dumps(ndjson_dict)}\nalso not json"
+        record_response(tmp_project, "flow1", "step1", "analyze", raw_ndjson, 0)
+
+        session = get_step_history(tmp_project, "flow1", "step1")
+        assert session is not None
+        assert session.messages[0].content == "Valid response"
+        # raw_json should still contain the valid parsed dict
+        assert session.messages[0].raw_json == [ndjson_dict]
+
 
 # --- Flow history ---
 
