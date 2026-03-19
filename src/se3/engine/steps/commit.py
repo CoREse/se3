@@ -434,7 +434,15 @@ def _generate_commit_message(
     # Add context about the change
     files_changed = changes_made.get("files_changed", [])
     if files_changed:
-        file_list = ", ".join(f.get("path", "") for f in files_changed[:3])
+        file_paths = []
+        for f in files_changed[:3]:
+            if isinstance(f, str):
+                file_paths.append(f)
+            elif isinstance(f, dict):
+                file_paths.append(f.get("path", "?"))
+            else:
+                file_paths.append(str(f))
+        file_list = ", ".join(file_paths)
         if len(files_changed) > 3:
             file_list += f" and {len(files_changed) - 3} more"
 

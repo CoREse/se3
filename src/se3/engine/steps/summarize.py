@@ -172,12 +172,18 @@ def _format_changes(changes_made: dict[str, Any]) -> str:
     lines = []
     files_changed = changes_made.get("files_changed", [])
     for file_change in files_changed:
-        path = file_change.get("path", "?")
-        action = file_change.get("action", "?")
-        explanation = file_change.get("explanation", "")
-        lines.append(f"- [{action}] {path}")
-        if explanation:
-            lines.append(f"  ({explanation})")
+        if isinstance(file_change, str):
+            # implement step may output plain file paths
+            lines.append(f"- [modified] {file_change}")
+        elif isinstance(file_change, dict):
+            path = file_change.get("path", "?")
+            action = file_change.get("action", "?")
+            explanation = file_change.get("explanation", "")
+            lines.append(f"- [{action}] {path}")
+            if explanation:
+                lines.append(f"  ({explanation})")
+        else:
+            lines.append(f"- {file_change}")
 
     return "\n".join(lines) if lines else "Changes made but details unavailable."
 
@@ -227,7 +233,14 @@ def _create_basic_summary_text(
         Basic summary text in Markdown format
     """
     files_changed = changes_made.get("files_changed", [])
-    file_list = [f.get("path", "?") for f in files_changed]
+    file_list = []
+    for f in files_changed:
+        if isinstance(f, str):
+            file_list.append(f)
+        elif isinstance(f, dict):
+            file_list.append(f.get("path", "?"))
+        else:
+            file_list.append(str(f))
 
     lines = [
         f"## Work Summary\n",
