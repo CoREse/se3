@@ -212,11 +212,12 @@ se3 run --discover "我想做一个用户管理功能"
 **存储格式：**
 - 存储路径：`se3/history/{flow_id}/{step_id}.jsonl`
 - 每行一个 ChatMessage（JSON 序列化）
-- 存储层保存原始 NDJSON（完整保真）
+- 存储层保存解析后的 JSON 对象数组（完整保真，无需双重编码）
 - 给 LLM 重试时使用解析后的文本内容（减少 token 浪费）
 
 **数据结构：**
-- `ChatMessage`: role, content, raw_ndjson, timestamp, step_type, attempt
+- `ChatMessage`: role, content, raw_json, timestamp, step_type, attempt
+  - `raw_json`: `list[dict]` - NDJSON 流解析后的 JSON 对象数组，每个元素是一行 NDJSON
 - `ChatSession`: flow_id, step_id, step_type, messages
 
 **核心功能：**
@@ -228,7 +229,13 @@ se3 run --discover "我想做一个用户管理功能"
 #### Scenario: 记录 LLM 对话
 - **WHEN** LLMCaller 发送 prompt 给 LLM
 - **THEN** 自动记录 prompt 到 `se3/history/{flow_id}/{step_id}.jsonl`
-- **AND** LLM 回应后记录原始 NDJSON 输出
+- **AND** LLM 回应后记录解析后的 JSON 对象数组（`raw_json: list[dict]`）
+
+#### Scenario: raw_json 格式存储
+- **WHEN** LLM 返回 NDJSON 流（多行 JSON）
+- **THEN** 将每行解析为 dict 并存储为数组
+- **AND** 避免双重编码（不再将 JSON 转为字符串存储）
+- **AND** 可直接用 jq 等工具查询历史记录
 
 #### Scenario: 重试时注入对话上下文
 - **WHEN** LLM 调用失败并重试

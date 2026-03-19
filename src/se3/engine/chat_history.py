@@ -14,7 +14,7 @@ import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,7 @@ class ChatMessage:
 
     role: str  # "user" | "assistant"
     content: str  # Parsed text content
-    raw_ndjson: str  # Original NDJSON output (assistant only)
+    raw_json: list[dict]  # Parsed JSON messages from NDJSON stream (assistant only)
     timestamp: str  # ISO format
     step_type: str  # e.g. "analyze", "propose"
     attempt: int  # 0-based attempt number
@@ -171,7 +171,7 @@ def record_prompt(
     msg = ChatMessage(
         role="user",
         content=prompt,
-        raw_ndjson="",
+        raw_json=[],
         timestamp=datetime.now().isoformat(),
         step_type=step_type,
         attempt=attempt,
@@ -189,10 +189,23 @@ def record_response(
 ) -> None:
     """Record an LLM response (raw NDJSON output)."""
     text = extract_assistant_text(raw_ndjson)
+    # Parse NDJSON string into list of dicts for storage
+    raw_json: list[dict] = []
+    if raw_ndjson and raw_ndjson.strip():
+        try:
+            for line in raw_ndjson.strip().split("\n"):
+                line = line.strip()
+                if line:
+                    parsed = json.loads(line)
+                    if isinstance(parsed, dict):
+                        raw_json.append(parsed)
+        except (json.JSONDecodeError, TypeError):
+            # If parsing fails, store empty list
+            pass
     msg = ChatMessage(
         role="assistant",
         content=text,
-        raw_ndjson=raw_ndjson,
+        raw_json=raw_json,
         timestamp=datetime.now().isoformat(),
         step_type=step_type,
         attempt=attempt,
@@ -270,14 +283,14 @@ class ConversationMessage:
     tool_results: Optional[List[dict]] = None  # For user messages with tool results
 
 
-def extract_conversation_from_ndjson(raw_ndjson: str) -> List[ConversationMessage]:
+def extract_conversation_from_ndjson(raw_ndjson: Union[str, list[dict]]) -> List[ConversationMessage]:
     """Extract structured conversation from NDJSON output.
 
     Parses the stream-json format and reconstructs the conversation flow
     including assistant messages, tool calls, and tool results.
 
     Args:
-        raw_ndjson: The raw NDJSON output from Claude CLI
+        raw_ndjson: The raw NDJSON output from Claude CLI (str) or parsed list[dict]
 
     Returns:
         List of ConversationMessage objects representing the conversation
@@ -285,11 +298,19 @@ def extract_conversation_from_ndjson(raw_ndjson: str) -> List[ConversationMessag
     if not raw_ndjson:
         return []
 
+    # Handle list[dict] input (new format)
+    if isinstance(raw_ndjson, list):
+        # Process list of parsed JSON objects directly
+        json_lines = [json.dumps(item) for item in raw_ndjson]
+    else:
+        # Original string format
+        json_lines = raw_ndjson.strip().split("\n")
+
     messages: List[ConversationMessage] = []
     pending_tool_calls: List[dict] = []
     pending_tool_results: List[dict] = []
 
-    for line in raw_ndjson.strip().split("\n"):
+    for line in json_lines:
         line = line.strip()
         if not line or line.startswith("==="):
             continue
@@ -516,9 +537,9 @@ def format_history_for_retry(
                 parts.append(content)
 
             elif msg.role == "assistant":
-                # Extract full conversation from raw_ndjson
-                if msg.raw_ndjson:
-                    conversation = extract_conversation_from_ndjson(msg.raw_ndjson)
+                # Extract full conversation from raw_json
+                if msg.raw_json:
+                    conversation = extract_conversation_from_ndjson(msg.raw_json)
                     if conversation:
                         formatted = format_conversation_for_llm(conversation)
                         parts.append(f"\n[Assistant Response]:")
@@ -531,7 +552,7 @@ def format_history_for_retry(
                         parts.append(f"\n[Assistant Response]:")
                         parts.append(content)
                 else:
-                    # No raw_ndjson, use simplified content
+                    # No raw_json, use simplified content
                     content = msg.content
                     if len(content) > 2000:
                         content = content[:2000] + "\n... [truncated]"
@@ -614,9 +635,9 @@ def render_session_text(session: ChatSession, truncate_prompt: int = 500) -> str
             lines.append(content)
         elif msg.role == "assistant":
             lines.append(f"[Assistant Response] (attempt {msg.attempt}, {ts})")
-            # Render from raw_ndjson if available, otherwise use content
-            if msg.raw_ndjson:
-                rendered = _render_ndjson_for_human(msg.raw_ndjson)
+            # Render from raw_json if available, otherwise use content
+            if msg.raw_json:
+                rendered = _render_ndjson_for_human(msg.raw_json)
                 lines.append(rendered)
             else:
                 lines.append(msg.content)
@@ -625,7 +646,7 @@ def render_session_text(session: ChatSession, truncate_prompt: int = 500) -> str
     return "\n".join(lines)
 
 
-def _render_ndjson_for_human(raw_ndjson: str) -> str:
+def _render_ndjson_for_human(raw_ndjson: Union[str, list[dict]]) -> str:
     """Render raw NDJSON output as human-readable text.
 
     Distinguishes between:
@@ -633,12 +654,25 @@ def _render_ndjson_for_human(raw_ndjson: str) -> str:
     - LLM output JSON (e.g. analyze results): shown as-is (it's content)
     """
     parts = []
-    for line in raw_ndjson.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
+
+    # Handle list[dict] input (new format)
+    if isinstance(raw_ndjson, list):
+        json_items = raw_ndjson
+    else:
+        # Handle string input (NDJSON format) - parse lines
+        json_items = []
+        for line in raw_ndjson.strip().split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                json_items.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+    # Process items
+    for data in json_items:
         try:
-            data = json.loads(line)
             msg_type = data.get("type", "")
 
             if msg_type == "assistant":
@@ -675,9 +709,9 @@ def _render_ndjson_for_human(raw_ndjson: str) -> str:
                 error_msg = data.get("error", "Unknown error")
                 parts.append(f"[Error] {_truncate_preview(str(error_msg))}")
 
-        except json.JSONDecodeError:
-            # Not protocol JSON - show as-is
-            parts.append(line)
+        except (json.JSONDecodeError, AttributeError):
+            # Not protocol JSON - skip or show as-is
+            continue
 
     return "\n".join(parts)
 

@@ -35,7 +35,7 @@ class TestChatMessage:
         msg = ChatMessage(
             role="user",
             content="Hello",
-            raw_ndjson="",
+            raw_json=[],
             timestamp="2026-01-01T00:00:00",
             step_type="analyze",
             attempt=0,
@@ -49,7 +49,7 @@ class TestChatMessage:
         d = {
             "role": "assistant",
             "content": "Response text",
-            "raw_ndjson": '{"type":"assistant"}',
+            "raw_json": {"type": "assistant"},
             "timestamp": "2026-01-01T00:00:00",
             "step_type": "propose",
             "attempt": 1,
@@ -63,7 +63,7 @@ class TestChatMessage:
         msg = ChatMessage(
             role="user",
             content="Test prompt",
-            raw_ndjson="",
+            raw_json=[],
             timestamp="2026-02-27T12:00:00",
             step_type="design",
             attempt=0,
@@ -71,6 +71,22 @@ class TestChatMessage:
         d = msg.to_dict()
         msg2 = ChatMessage.from_dict(d)
         assert msg == msg2
+
+    def test_roundtrip_with_dict_raw_json(self):
+        """Test that raw_json as dict survives roundtrip."""
+        raw_dict = {"type": "assistant", "message": {"content": [{"type": "text", "text": "Hello"}]}}
+        msg = ChatMessage(
+            role="assistant",
+            content="Hello",
+            raw_json=raw_dict,
+            timestamp="2026-02-27T12:00:00",
+            step_type="analyze",
+            attempt=0,
+        )
+        d = msg.to_dict()
+        assert d["raw_json"] == raw_dict
+        msg2 = ChatMessage.from_dict(d)
+        assert msg2.raw_json == raw_dict
 
 
 # --- NDJSON parsing ---
@@ -163,10 +179,11 @@ class TestRecordAndRetrieve:
         assert session.messages[0].content == "What is this?"
 
     def test_record_response(self, tmp_project):
-        ndjson = json.dumps({
+        ndjson_dict = {
             "type": "assistant",
             "message": {"content": [{"type": "text", "text": "It is a test"}]}
-        })
+        }
+        ndjson = json.dumps(ndjson_dict)
         record_response(tmp_project, "flow1", "step1", "analyze", ndjson, 0)
 
         session = get_step_history(tmp_project, "flow1", "step1")
@@ -174,7 +191,8 @@ class TestRecordAndRetrieve:
         assert len(session.messages) == 1
         assert session.messages[0].role == "assistant"
         assert session.messages[0].content == "It is a test"
-        assert session.messages[0].raw_ndjson == ndjson
+        # raw_json is now a list[dict], not a string
+        assert session.messages[0].raw_json == [ndjson_dict]
 
     def test_full_conversation(self, tmp_project):
         record_prompt(tmp_project, "flow1", "step1", "analyze", "Analyze this", 0)
@@ -280,7 +298,7 @@ class TestRenderSessionText:
                 ChatMessage(
                     role="user",
                     content="Analyze task",
-                    raw_ndjson="",
+                    raw_json=[],
                     timestamp="2026-01-01T12:00:00",
                     step_type="analyze",
                     attempt=0,
@@ -288,7 +306,7 @@ class TestRenderSessionText:
                 ChatMessage(
                     role="assistant",
                     content="Analysis complete",
-                    raw_ndjson="",
+                    raw_json=[],
                     timestamp="2026-01-01T12:00:05",
                     step_type="analyze",
                     attempt=0,
@@ -310,7 +328,7 @@ class TestRenderSessionText:
                 ChatMessage(
                     role="user",
                     content="x" * 1000,
-                    raw_ndjson="",
+                    raw_json=[],
                     timestamp="2026-01-01T12:00:00",
                     step_type="analyze",
                     attempt=0,
@@ -321,7 +339,7 @@ class TestRenderSessionText:
         assert "[truncated]" in text
 
     def test_render_with_ndjson(self):
-        ndjson = json.dumps({
+        ndjson_dict = {
             "type": "assistant",
             "message": {
                 "content": [
@@ -329,7 +347,7 @@ class TestRenderSessionText:
                     {"type": "tool_use", "name": "Read", "input": {"path": "foo.py"}},
                 ]
             }
-        })
+        }
         session = ChatSession(
             flow_id="flow1",
             step_id="step1",
@@ -338,7 +356,7 @@ class TestRenderSessionText:
                 ChatMessage(
                     role="assistant",
                     content="Here is the analysis",
-                    raw_ndjson=ndjson,
+                    raw_json=[ndjson_dict],
                     timestamp="2026-01-01T12:00:00",
                     step_type="analyze",
                     attempt=0,
