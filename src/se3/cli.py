@@ -222,6 +222,9 @@ def run_cmd(
 # Import init command function (registered below)
 from .commands.init_cmd import init_cmd as init_command
 
+# Import history command
+from .commands.history_cmd import app as history_app
+
 
 @app.command(name="init")
 def init_cmd(
@@ -308,6 +311,10 @@ def guardrails_cmd(
         lines.append(f"\n{'=' * 60}")
         render_full("\n".join(lines), title="Guardrails Check")
         raise typer.Exit(code=0)
+
+
+# Register history command
+app.add_typer(history_app, name="history", help="View and manage session history")
 
 
 if __name__ == "__main__":

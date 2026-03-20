@@ -29,8 +29,8 @@ confirmation:
 claude_commands:
   # - cmd: "claude"
   #   priority: 10
-  - cmd: "kclaude"
-    priority: 5
+  # - cmd: "kclaude"
+  #   priority: 5
   - cmd: "hclaude"
     priority: 1
 
