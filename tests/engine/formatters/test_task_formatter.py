@@ -1,0 +1,337 @@
+"""Unit tests for TaskFormatter and TaskDataValidator."""
+
+from __future__ import annotations
+
+import pytest
+from rich.console import Console
+
+from se3.engine.formatters import (
+    TaskDataValidator,
+    TaskFormatter,
+    TaskValidationError,
+    format_task_groups,
+)
+
+
+class TestTaskDataValidator:
+    """Tests for TaskDataValidator."""
+
+    def test_valid_task_structure(self):
+        """Test validation of a valid task structure."""
+        tasks = [
+            {
+                "id": 1,
+                "description": "Test task",
+                "complexity": "small",
+                "dependencies": [],
+                "verification_criteria": ["Test passes"],
+            }
+        ]
+
+        result = TaskDataValidator.validate(tasks)
+        assert len(result) == 1
+        assert result[0]["id"] == 1
+        assert result[0]["complexity"] == "small"
+
+    def test_missing_required_field(self):
+        """Test validation fails when required field is missing."""
+        tasks = [
+            {
+                "id": 1,
+                # missing "description"
+            }
+        ]
+
+        with pytest.raises(TaskValidationError) as exc_info:
+            TaskDataValidator.validate(tasks)
+
+        assert "Missing required fields" in str(exc_info.value)
+
+    def test_invalid_complexity(self):
+        """Test validation normalizes invalid complexity."""
+        tasks = [
+            {
+                "id": 1,
+                "description": "Test task",
+                "complexity": "invalid",
+            }
+        ]
+
+        result = TaskDataValidator.validate(tasks)
+        assert result[0]["complexity"] == "medium"
+
+    def test_duplicate_task_ids(self):
+        """Test validation fails on duplicate task IDs."""
+        tasks = [
+            {"id": 1, "description": "Task 1"},
+            {"id": 1, "description": "Task 2"},
+        ]
+
+        with pytest.raises(TaskValidationError) as exc_info:
+            TaskDataValidator.validate(tasks)
+
+        assert "Duplicate task ID" in str(exc_info.value)
+
+    def test_circular_dependencies(self):
+        """Test validation fails on circular dependencies."""
+        tasks = [
+            {"id": 1, "description": "Task 1", "dependencies": [2]},
+            {"id": 2, "description": "Task 2", "dependencies": [1]},
+        ]
+
+        with pytest.raises(TaskValidationError) as exc_info:
+            TaskDataValidator.validate(tasks)
+
+        assert "Circular dependency detected" in str(exc_info.value)
+
+    def test_invalid_dependency_reference(self):
+        """Test validation fails on invalid dependency reference."""
+        tasks = [
+            {"id": 1, "description": "Task 1", "dependencies": [999]},
+        ]
+
+        with pytest.raises(TaskValidationError) as exc_info:
+            TaskDataValidator.validate(tasks)
+
+        assert "not found" in str(exc_info.value)
+
+    def test_empty_task_list(self):
+        """Test validation of empty task list."""
+        result = TaskDataValidator.validate([])
+        assert result == []
+
+    def test_task_with_defaults(self):
+        """Test that optional fields get default values."""
+        tasks = [
+            {
+                "id": 1,
+                "description": "Minimal task",
+            }
+        ]
+
+        result = TaskDataValidator.validate(tasks)
+        task = result[0]
+
+        assert task["complexity"] == "medium"
+        assert task["dependencies"] == []
+        assert task["verification_criteria"] == []
+        assert task["files"] == []
+        assert task["depends_on"] == []
+
+
+class TestTaskFormatter:
+    """Tests for TaskFormatter."""
+
+    @pytest.fixture
+    def console(self):
+        """Create a test console."""
+        return Console(width=120, force_terminal=True)
+
+    @pytest.fixture
+    def formatter(self, console):
+        """Create a test formatter."""
+        return TaskFormatter(console=console)
+
+    @pytest.fixture
+    def sample_task_groups(self):
+        """Create sample task groups for testing."""
+        return [
+            {
+                "group_id": "G1",
+                "name": "Core Implementation",
+                "description": "Implement core functionality",
+                "group_order": 1,
+                "depends_on": [],
+                "tasks": [
+                    {
+                        "id": 1,
+                        "description": "Create base class",
+                        "complexity": "small",
+                        "dependencies": [],
+                        "verification_criteria": ["Tests pass"],
+                        "files": ["base.py"],
+                    },
+                    {
+                        "id": 2,
+                        "description": "Implement core methods",
+                        "complexity": "medium",
+                        "dependencies": [1],
+                        "verification_criteria": ["Tests pass", "Coverage > 80%"],
+                        "files": ["core.py", "utils.py"],
+                    },
+                ],
+            },
+            {
+                "group_id": "G2",
+                "name": "Integration",
+                "description": "Integrate with existing system",
+                "group_order": 2,
+                "depends_on": ["G1"],
+                "tasks": [
+                    {
+                        "id": 3,
+                        "description": "Add integration layer with external API",
+                        "complexity": "large",
+                        "dependencies": [2],
+                        "verification_criteria": ["Integration tests pass"],
+                        "files": ["integration.py"],
+                    },
+                ],
+            },
+        ]
+
+    def test_format_tasks_tree_mode(self, formatter, sample_task_groups, console):
+        """Test tree mode formatting."""
+        panel = formatter.format_tasks(sample_task_groups, mode="tree")
+
+        assert panel is not None
+        assert "Task Plan" in str(panel.title)
+
+        # Check that panel can be rendered
+        with console.capture() as capture:
+            console.print(panel)
+        output = capture.get()
+
+        # Verify tree structure is present
+        assert "G1" in output
+        assert "G2" in output
+        assert "Core Implementation" in output
+        assert "Integration" in output
+
+    def test_format_tasks_table_mode(self, formatter, sample_task_groups, console):
+        """Test table mode formatting."""
+        panel = formatter.format_tasks(sample_task_groups, mode="table")
+
+        assert panel is not None
+        assert "Task Plan" in str(panel.title)
+
+        # Check that panel can be rendered
+        with console.capture() as capture:
+            console.print(panel)
+        output = capture.get()
+
+        # Verify table columns are present
+        assert "ID" in output or "Task" in output
+        assert "Description" in output or "description" in output.lower()
+        assert "Complexity" in output or "complexity" in output.lower()
+
+    def test_format_tasks_empty(self, formatter):
+        """Test formatting empty task groups."""
+        panel = formatter.format_tasks([], mode="tree")
+
+        assert panel is not None
+        assert "No tasks" in str(panel.renderable) or "No tasks" in str(panel)
+
+    def test_format_task_detail(self, formatter, console):
+        """Test formatting single task detail."""
+        task = {
+            "id": 1,
+            "description": "Test task description",
+            "complexity": "medium",
+            "dependencies": [2, 3],
+            "verification_criteria": ["Test passes", "Coverage > 80%"],
+            "files": ["test.py", "utils.py"],
+        }
+
+        panel = formatter.format_task_detail(task)
+
+        assert panel is not None
+
+        with console.capture() as capture:
+            console.print(panel)
+        output = capture.get()
+
+        # Verify task details are present
+        assert "1" in output
+        assert "Test task description" in output
+        assert "medium" in output.lower() or "Medium" in output
+        assert "test.py" in output or "files" in output.lower()
+
+    def test_format_summary(self, formatter, sample_task_groups, console):
+        """Test formatting summary statistics."""
+        panel = formatter.format_summary(sample_task_groups)
+
+        assert panel is not None
+        assert "Summary" in str(panel.title)
+
+        with console.capture() as capture:
+            console.print(panel)
+        output = capture.get()
+
+        # Verify summary stats are present
+        assert "2" in output  # 2 groups
+        assert "3" in output  # 3 tasks total
+        assert "small" in output.lower() or "medium" in output.lower() or "large" in output.lower()
+
+    def test_format_dependencies(self, formatter, sample_task_groups, console):
+        """Test formatting dependency map."""
+        panel = formatter.format_dependencies(sample_task_groups)
+
+        assert panel is not None
+        assert "Dependencies" in str(panel.title)
+
+        with console.capture() as capture:
+            console.print(panel)
+        output = capture.get()
+
+        # Verify dependency info is present
+        assert "G1" in output or "G2" in output or "ID" in output
+
+    def test_complexity_colors(self, formatter):
+        """Test that complexity colors are defined."""
+        assert "small" in formatter.COMPLEXITY_COLORS
+        assert "medium" in formatter.COMPLEXITY_COLORS
+        assert "large" in formatter.COMPLEXITY_COLORS
+
+    def test_estimate_effort(self, formatter):
+        """Test effort estimation logic."""
+        assert formatter._estimate_effort(0, 2.0) == "N/A"
+        assert "hour" in formatter._estimate_effort(1, 1.0).lower()
+        assert "days" in formatter._estimate_effort(10, 2.0).lower() or "weeks" in formatter._estimate_effort(10, 2.0).lower()
+
+    def test_calculate_avg_complexity(self, formatter):
+        """Test average complexity calculation."""
+        counts = {"small": 1, "medium": 1, "large": 1}
+        avg = formatter._calculate_avg_complexity(3, counts)
+        assert 1.8 < avg < 2.2  # Should be around 2.0
+
+
+class TestFormatTaskGroupsConvenience:
+    """Tests for the format_task_groups convenience function."""
+
+    @pytest.fixture
+    def sample_task_groups(self):
+        """Create sample task groups for testing."""
+        return [
+            {
+                "group_id": "G1",
+                "name": "Test Group",
+                "description": "A test group",
+                "group_order": 1,
+                "depends_on": [],
+                "tasks": [
+                    {
+                        "id": 1,
+                        "description": "Test task",
+                        "complexity": "small",
+                        "dependencies": [],
+                        "verification_criteria": [],
+                    },
+                ],
+            },
+        ]
+
+    def test_format_task_groups_default(self, sample_task_groups):
+        """Test format_task_groups with default parameters."""
+        panel = format_task_groups(sample_task_groups)
+        assert panel is not None
+
+    def test_format_task_groups_with_summary(self, sample_task_groups):
+        """Test format_task_groups with summary enabled."""
+        panel = format_task_groups(sample_task_groups, show_summary=True)
+        assert panel is not None
+
+    def test_format_task_groups_with_dependencies(self, sample_task_groups):
+        """Test format_task_groups with dependencies enabled."""
+        panel = format_task_groups(sample_task_groups, show_dependencies=True)
+        assert panel is not None

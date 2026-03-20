@@ -6,12 +6,13 @@ Uses LLM to generate a structured task list.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from typing import Any
 
-from ..llm_caller import LLMCaller, LLMCallError
+from ..display import get_console
+from ..formatters import TaskFormatter, format_task_groups
+from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
 from ..utils.json_parser import parse_json_response
 
@@ -208,6 +209,23 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.info(f"Task groups generated: {len(task_groups)} groups, {len(all_tasks)} total tasks")
         for task in all_tasks:
             logger.debug(f"  - [{task.get('complexity', '?')}] {task.get('description', '')[:50]}...")
+
+        # Display formatted task plan using TaskFormatter
+        try:
+            console = get_console()
+            formatter = TaskFormatter(console=console)
+
+            # Display tree view of tasks
+            tree_panel = formatter.format_tasks(task_groups, mode="tree")
+            console.print(tree_panel)
+
+            # Display summary
+            summary_panel = formatter.format_summary(task_groups)
+            console.print(summary_panel)
+
+        except Exception as e:
+            # Fallback to logging if formatting fails
+            logger.warning(f"Failed to format task plan: {e}")
 
         return StepStatus.COMPLETED
 
