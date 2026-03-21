@@ -5,6 +5,8 @@ Tests cover:
 - se3.yaml creation
 - Idempotency (no overwrite of existing files)
 - Project name handling
+- Git repository initialization
+- .gitignore creation
 """
 
 import sys
@@ -15,7 +17,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.commands.init_cmd import run_init
+from se3.commands.init_cmd import (
+    run_init,
+    is_git_repository,
+    init_repository,
+    create_gitignore,
+    DEFAULT_GITIGNORE_TEMPLATE,
+)
 
 
 class TestRunInit:
@@ -88,7 +96,124 @@ class TestRunInit:
         result = run_init(tmp_path, "TestProject")
 
         assert result["created"] == []
-        assert len(result["skipped"]) == 2  # se3.yaml + base spec
+        # se3.yaml + base spec are skipped; .gitignore is tracked separately
+        assert len(result["skipped"]) == 2
+        # .gitignore should be marked as already existed
+        assert result["gitignore_already_existed"] is True
+
+    def test_init_creates_git_repo(self, tmp_path):
+        """se3 init creates a git repository in non-git directory."""
+        result = run_init(tmp_path, "TestProject")
+
+        assert result["git_initialized"] is True
+        assert result["git_already_existed"] is False
+        assert (tmp_path / ".git").is_dir()
+
+    def test_init_respects_existing_git(self, tmp_path):
+        """se3 init does not reinitialize when already in a git repo."""
+        # Pre-initialize git
+        import subprocess
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+
+        result = run_init(tmp_path, "TestProject")
+
+        assert result["git_initialized"] is False
+        assert result["git_already_existed"] is True
+
+    def test_init_creates_gitignore(self, tmp_path):
+        """se3 init creates .gitignore file."""
+        result = run_init(tmp_path, "TestProject")
+
+        assert result["gitignore_created"] is True
+        assert result["gitignore_already_existed"] is False
+
+        gitignore = tmp_path / ".gitignore"
+        assert gitignore.exists()
+        content = gitignore.read_text()
+        assert "se3/state/" in content
+        assert "__pycache__/" in content
+
+    def test_init_force_overwrites_gitignore(self, tmp_path):
+        """se3 init --force overwrites existing .gitignore."""
+        # Create pre-existing .gitignore
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("# Custom content")
+
+        result = run_init(tmp_path, "TestProject", force=True)
+
+        assert result["gitignore_created"] is True
+        content = gitignore.read_text()
+        assert "se3/state/" in content
+        assert "# Custom content" not in content
+
+
+class TestGitHelpers:
+    """Tests for git helper functions."""
+
+    def test_is_git_repository_returns_true_in_git_repo(self, tmp_path):
+        """is_git_repository returns True when inside a git repo."""
+        import subprocess
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+
+        result = is_git_repository(tmp_path)
+
+        assert result is True
+
+    def test_is_git_repository_returns_false_outside_git_repo(self, tmp_path):
+        """is_git_repository returns False when not inside a git repo."""
+        result = is_git_repository(tmp_path)
+
+        assert result is False
+
+    def test_is_git_repository_finds_parent_git_repo(self, tmp_path):
+        """is_git_repository finds .git in parent directory."""
+        import subprocess
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+
+        subdir = tmp_path / "subdir" / "nested"
+        subdir.mkdir(parents=True)
+
+        result = is_git_repository(subdir)
+
+        assert result is True
+
+    def test_init_repository_creates_git_repo(self, tmp_path):
+        """init_repository creates a git repository."""
+        success, message = init_repository(tmp_path)
+
+        assert success is True
+        assert (tmp_path / ".git").is_dir()
+        assert "initialized" in message.lower() or "empty" in message.lower()
+
+    def test_create_gitignore_creates_file(self, tmp_path):
+        """create_gitignore creates .gitignore with template."""
+        created, message = create_gitignore(tmp_path)
+
+        assert created is True
+        gitignore = tmp_path / ".gitignore"
+        assert gitignore.exists()
+        assert gitignore.read_text() == DEFAULT_GITIGNORE_TEMPLATE
+
+    def test_create_gitignore_skips_existing(self, tmp_path):
+        """create_gitignore skips existing .gitignore without force."""
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("# existing content")
+
+        created, message = create_gitignore(tmp_path)
+
+        assert created is False
+        assert "already exists" in message
+        assert gitignore.read_text() == "# existing content"
+
+    def test_create_gitignore_overwrites_with_force(self, tmp_path):
+        """create_gitignore overwrites existing .gitignore with force=True."""
+        gitignore = tmp_path / ".gitignore"
+        gitignore.write_text("# existing content")
+
+        created, message = create_gitignore(tmp_path, force=True)
+
+        assert created is True
+        assert gitignore.read_text() == DEFAULT_GITIGNORE_TEMPLATE
 
 
 class TestReadSpecBaseLoading:

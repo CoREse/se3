@@ -1,5 +1,6 @@
 """SE3 Init command - Initialize a new SE3 project."""
 
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -30,6 +31,119 @@ version:
 #   - cmd: claude
 #     priority: 0
 """
+
+# Default .gitignore template for SE3 projects
+DEFAULT_GITIGNORE_TEMPLATE = """# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# SE3 runtime (do not commit runtime state)
+se3/state/
+se3/cache/
+se3/logs/
+se3/calls/
+se3/collab/
+
+# Keep specs directory (contains project requirements)
+!se3/specs/
+"""
+
+
+def is_git_repository(path: Path) -> bool:
+    """Check if the given path is already inside a git repository.
+
+    Args:
+        path: Directory to check
+
+    Returns:
+        True if the path is inside a git repository, False otherwise
+    """
+    # Check for .git directory in the path or any parent directory
+    current = path.resolve()
+    while current != current.parent:
+        if (current / ".git").exists():
+            return True
+        current = current.parent
+    return False
+
+
+def init_repository(path: Path) -> tuple[bool, str]:
+    """Initialize a new git repository at the given path.
+
+    Args:
+        path: Directory where git repository should be initialized
+
+    Returns:
+        Tuple of (success: bool, message: str)
+    """
+    try:
+        result = subprocess.run(
+            ["git", "init"],
+            cwd=str(path),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return True, result.stdout.strip() if result.stdout else "Git repository initialized"
+    except subprocess.CalledProcessError as e:
+        return False, f"Failed to initialize git repository: {e.stderr.strip() if e.stderr else str(e)}"
+    except FileNotFoundError:
+        return False, "Git is not installed or not in PATH"
+
+
+def create_gitignore(path: Path, force: bool = False) -> tuple[bool, str]:
+    """Create .gitignore file at the given path.
+
+    Args:
+        path: Directory where .gitignore should be created
+        force: Whether to overwrite existing .gitignore
+
+    Returns:
+        Tuple of (created: bool, message: str)
+    """
+    gitignore_path = path / ".gitignore"
+
+    if gitignore_path.exists() and not force:
+        return False, f".gitignore already exists (use --force to overwrite)"
+
+    try:
+        gitignore_path.write_text(DEFAULT_GITIGNORE_TEMPLATE, encoding="utf-8")
+        return True, ".gitignore created"
+    except Exception as e:
+        return False, f"Failed to create .gitignore: {str(e)}"
 
 
 def _get_base_spec_template(project_name: str) -> str:
@@ -97,7 +211,8 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
         force: Whether to overwrite existing files
 
     Returns:
-        dict with "created" (list of relative paths) and "skipped" (list of messages)
+        dict with "created" (list of relative paths), "skipped" (list of messages),
+        and git/gitignore status flags
     """
     root = Path(project_root).resolve()
     created = []
@@ -130,7 +245,40 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
     else:
         skipped.append(f"{base_spec.relative_to(root)} already exists (use --force to overwrite)")
 
-    return {"created": created, "skipped": skipped}
+    # Initialize git repository if not already in one
+    git_initialized = False
+    git_already_existed = False
+    git_message = ""
+
+    if is_git_repository(root):
+        git_already_existed = True
+        git_message = "Already inside a git repository"
+    else:
+        success, git_message = init_repository(root)
+        if success:
+            git_initialized = True
+
+    # Create .gitignore
+    gitignore_created = False
+    gitignore_already_existed = False
+    gitignore_message = ""
+
+    gitignore_created_result, gitignore_message = create_gitignore(root, force=force)
+    if gitignore_created_result:
+        gitignore_created = True
+    elif "already exists" in gitignore_message:
+        gitignore_already_existed = True
+
+    return {
+        "created": created,
+        "skipped": skipped,
+        "git_initialized": git_initialized,
+        "git_already_existed": git_already_existed,
+        "git_message": git_message,
+        "gitignore_created": gitignore_created,
+        "gitignore_already_existed": gitignore_already_existed,
+        "gitignore_message": gitignore_message,
+    }
 
 
 def init_cmd(
@@ -157,6 +305,18 @@ def init_cmd(
         typer.echo(f"✓ Created {path}")
     for msg in result["skipped"]:
         typer.echo(f"⚠ {msg}")
+
+    # Display git initialization status
+    if result.get("git_initialized"):
+        typer.echo(f"✓ Initialized git repository")
+    elif result.get("git_already_existed"):
+        typer.echo(f"⚠ Git repository already exists")
+
+    # Display .gitignore creation status
+    if result.get("gitignore_created"):
+        typer.echo(f"✓ Created .gitignore")
+    elif result.get("gitignore_already_existed"):
+        typer.echo(f"⚠ .gitignore already exists (use --force to overwrite)")
 
     typer.echo(f"\n🎉 SE3 project initialized: {name}")
     typer.echo(f"\nNext steps:")
