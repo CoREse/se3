@@ -364,6 +364,22 @@ class VersionFileHandler(abc.ABC):
         """
         pass
 
+    def create_version_file(self, project_root: Path, initial_version: str = "0.1.0") -> Path:
+        """Create a new version file with the initial version.
+
+        Args:
+            project_root: Root directory of the project
+            initial_version: Initial version string (default: "0.1.0")
+
+        Returns:
+            Path to the created version file
+
+        Raises:
+            FileExistsError: If the version file already exists
+            PermissionError: If the file cannot be created
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support creating version files")
+
 
 class JsonVersionHandler(VersionFileHandler):
     """Handler for JSON-based version files (e.g., package.json)."""
@@ -386,6 +402,26 @@ class JsonVersionHandler(VersionFileHandler):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
             f.write("\n")
+
+    def create_version_file(self, project_root: Path, initial_version: str = "0.1.0") -> Path:
+        """Create a package.json file with the initial version."""
+        path = project_root / "package.json"
+        if path.exists():
+            raise FileExistsError(f"package.json already exists at {path}")
+
+        # Create a minimal package.json with version
+        data = {
+            "name": project_root.name.lower().replace(" ", "-").replace("_", "-"),
+            "version": initial_version,
+            "description": "",
+            "main": "index.js",
+        }
+
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.write("\n")
+
+        return path
 
 
 class TomlVersionHandler(VersionFileHandler):
@@ -447,6 +483,28 @@ class TomlVersionHandler(VersionFileHandler):
 
         raise ValueError(f"Could not find version field to update in {path}")
 
+    def create_version_file(self, project_root: Path, initial_version: str = "0.1.0") -> Path:
+        """Create a pyproject.toml file with the initial version."""
+        path = project_root / "pyproject.toml"
+        if path.exists():
+            raise FileExistsError(f"pyproject.toml already exists at {path}")
+
+        # Create a minimal pyproject.toml with PEP 621 project section
+        content = f'''[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "{project_root.name.lower().replace(" ", "-").replace("_", "-")}"
+version = "{initial_version}"
+description = ""
+readme = "README.md"
+requires-python = ">=3.8"
+'''
+
+        path.write_text(content, encoding="utf-8")
+        return path
+
 
 class PythonVersionHandler(VersionFileHandler):
     """Handler for Python files containing __version__ or version variables."""
@@ -499,6 +557,35 @@ class PythonVersionHandler(VersionFileHandler):
             return
 
         raise ValueError(f"Could not find version variable to update in {path}")
+
+    def create_version_file(self, project_root: Path, initial_version: str = "0.1.0") -> Path:
+        """Create a version.py file with the initial version."""
+        # Determine package directory
+        src_dir = project_root / "src"
+        if src_dir.exists() and src_dir.is_dir():
+            # Look for Python packages in src/
+            for item in src_dir.iterdir():
+                if item.is_dir() and (item / "__init__.py").exists():
+                    pkg_dir = item
+                    break
+            else:
+                pkg_dir = src_dir / project_root.name.lower().replace(" ", "_").replace("-", "_")
+        else:
+            # Use project root directly
+            pkg_dir = project_root
+
+        # Ensure directory exists
+        pkg_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create version.py
+        version_file = pkg_dir / "version.py"
+        if version_file.exists():
+            raise FileExistsError(f"version.py already exists at {version_file}")
+
+        content = f'__version__ = "{initial_version}"\n'
+        version_file.write_text(content, encoding="utf-8")
+
+        return version_file
 
 
 class SetupPyHandler(VersionFileHandler):
@@ -584,6 +671,26 @@ class SetupPyHandler(VersionFileHandler):
 
         path.write_text('\n'.join(lines), encoding="utf-8")
 
+    def create_version_file(self, project_root: Path, initial_version: str = "0.1.0") -> Path:
+        """Create a setup.py file with the initial version."""
+        path = project_root / "setup.py"
+        if path.exists():
+            raise FileExistsError(f"setup.py already exists at {path}")
+
+        # Create a minimal setup.py with version
+        content = f'''from setuptools import setup
+
+setup(
+    name="{project_root.name.lower().replace(" ", "-").replace("_", "-")}",
+    version="{initial_version}",
+    description="",
+    author="",
+    packages=[],
+)
+'''
+        path.write_text(content, encoding="utf-8")
+        return path
+
 
 class VersionDetector:
     """Detects project type and version file location.
@@ -657,6 +764,59 @@ class VersionDetector:
         for marker in nodejs_markers:
             if (project_root / marker).exists():
                 return ProjectType.NODEJS
+
+        return ProjectType.UNKNOWN
+
+    def detect_project_type_without_version_file(self, project_root: Union[Path, str]) -> ProjectType:
+        """Detect project type from markers without requiring a version file.
+
+        This is similar to detect_project_type but specifically for when
+        no version file exists yet. It checks for language/framework markers.
+
+        Args:
+            project_root: Root directory of the project
+
+        Returns:
+            Detected ProjectType (PYTHON, NODEJS, or UNKNOWN)
+        """
+        if isinstance(project_root, str):
+            project_root = Path(project_root)
+
+        # Check for Python project markers
+        python_markers = [
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "requirements.txt",
+            "Pipfile",
+            "poetry.lock",
+        ]
+        for marker in python_markers:
+            if (project_root / marker).exists():
+                return ProjectType.PYTHON
+
+        # Check for Python source structure
+        src_dir = project_root / "src"
+        if src_dir.exists():
+            # Check for Python packages
+            for item in src_dir.iterdir():
+                if item.is_dir() and (item / "__init__.py").exists():
+                    return ProjectType.PYTHON
+
+        # Check for Node.js project markers
+        nodejs_markers = [
+            "package.json",
+            "package-lock.json",
+            "yarn.lock",
+            "pnpm-lock.yaml",
+        ]
+        for marker in nodejs_markers:
+            if (project_root / marker).exists():
+                return ProjectType.NODEJS
+
+        # Check for node_modules directory
+        if (project_root / "node_modules").exists():
+            return ProjectType.NODEJS
 
         return ProjectType.UNKNOWN
 
@@ -868,6 +1028,92 @@ class VersionBumper:
         # Use detector for auto-detection
         return self._detector.get_version_file_path(project_root)
 
+    def initialize_version_system(
+        self,
+        project_root: Optional[Path] = None,
+        initial_version: str = "0.1.0"
+    ) -> Path:
+        """Initialize a new version system for the project.
+
+        Detects the project type and creates an appropriate version file
+        with the initial version. This is useful when a project doesn't
+        have a version file yet.
+
+        Args:
+            project_root: Root directory of the project (default: cwd)
+            initial_version: Initial version string (default: "0.1.0")
+
+        Returns:
+            Path to the created version file
+
+        Raises:
+            FileExistsError: If a version file already exists
+            ValueError: If the project type cannot be determined
+            PermissionError: If the file cannot be created
+        """
+        if project_root is None:
+            project_root = Path.cwd()
+
+        # Validate initial version
+        if not Version.validate(initial_version):
+            raise ValueError(f"Invalid initial version: {initial_version}")
+
+        # Check if version file already exists
+        existing_file = self.detect_version_file(project_root)
+        if existing_file:
+            raise FileExistsError(
+                f"Version file already exists: {existing_file}. "
+                "Cannot initialize version system."
+            )
+
+        # Detect project type from markers
+        project_type = self._detector.detect_project_type_without_version_file(project_root)
+
+        if project_type == ProjectType.UNKNOWN:
+            # Default to Python for new projects if no markers found
+            # Use pyproject.toml as the default
+            project_type = ProjectType.PYTHON
+
+        # Create the appropriate version file based on project type
+        logger.info(f"Initializing version system for {project_type.value} project "
+                   f"with version {initial_version}")
+
+        if project_type == ProjectType.NODEJS:
+            # Use JsonVersionHandler to create package.json
+            handler = self._get_handler_for_new_file(project_root, ".json")
+        elif project_type == ProjectType.PYTHON:
+            # Check if there's already a pyproject.toml without version
+            pyproject_path = project_root / "pyproject.toml"
+            if pyproject_path.exists():
+                # File exists but no version - we need to add version to it
+                handler = TomlVersionHandler()
+            else:
+                # Check for setup.py
+                setup_path = project_root / "setup.py"
+                if setup_path.exists():
+                    handler = SetupPyHandler()
+                else:
+                    # Create new pyproject.toml
+                    handler = TomlVersionHandler()
+        else:
+            # Default to pyproject.toml
+            handler = TomlVersionHandler()
+
+        # Create the version file
+        version_file = handler.create_version_file(project_root, initial_version)
+
+        logger.info(f"Created version file: {version_file}")
+        return version_file
+
+    def _get_handler_for_new_file(self, project_root: Path, suffix: str) -> VersionFileHandler:
+        """Get a handler for creating a new file with the given suffix."""
+        for handler in self._handlers:
+            # Check if handler can handle files with this suffix
+            dummy_path = project_root / f"dummy{suffix}"
+            if handler.can_handle(dummy_path):
+                return handler
+        raise ValueError(f"No handler found for file type: {suffix}")
+
     def detect_project_type(self, project_root: Optional[Path] = None) -> ProjectType:
         """Detect the project type.
 
@@ -1061,11 +1307,15 @@ class VersionBumper:
             logger.debug("No version backup to rollback")
             return
 
+        # Store values locally to help type checker
+        backup_path = self._backup_path
+        backup_version = self._backup_version
+
         try:
-            handler = self._get_handler(self._backup_path)
-            handler.write_version(self._backup_path, self._backup_version)
+            handler = self._get_handler(backup_path)
+            handler.write_version(backup_path, backup_version)
             logger.info(
-                f"Rolled back version: {self._backup_path} -> {self._backup_version}"
+                f"Rolled back version: {backup_path} -> {backup_version}"
             )
         except Exception as e:
             logger.error(f"Failed to rollback version: {e}")

@@ -89,11 +89,33 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
             if version_file:
                 # Get bump type from version_analyze step or fallback to task type
                 bump_type = _get_bump_type(step, flow, version_config)
-                
-                # Skip version bump for 'none' bump type
-                if bump_type is None:
-                    logger.info("Skipping version bump (bump_type: none)")
-                else:
+
+                # Save original version for potential rollback
+                original_version = version_bumper.read_version(version_file)
+
+                # Bump the version
+                new_version = version_bumper.bump_version(
+                    path=version_file,
+                    bump_type=bump_type
+                )
+                version_bumped = True
+                logger.info(f"Bumped version: {original_version} -> {new_version}")
+
+                # Stage the version file
+                _stage_file(project_root, version_file)
+            else:
+                # No version file exists - initialize version system
+                logger.info("No version file detected, initializing version system")
+                try:
+                    version_file = version_bumper.initialize_version_system(
+                        project_root=project_root,
+                        initial_version="0.1.0"
+                    )
+                    logger.info(f"Created version file: {version_file}")
+
+                    # Now get the bump type and bump the version
+                    bump_type = _get_bump_type(step, flow, version_config)
+
                     # Save original version for potential rollback
                     original_version = version_bumper.read_version(version_file)
 
@@ -105,10 +127,11 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
                     version_bumped = True
                     logger.info(f"Bumped version: {original_version} -> {new_version}")
 
-                # Stage the version file
-                _stage_file(project_root, version_file)
-            else:
-                logger.debug("No version file detected, skipping version bump")
+                    # Stage the new version file
+                    _stage_file(project_root, version_file)
+                except Exception as e:
+                    logger.error(f"Failed to initialize version system: {e}")
+                    raise
 
         # Generate commit message (including version if bumped)
         commit_message = _generate_commit_message(flow, step, new_version, version_config)
@@ -191,7 +214,7 @@ def _load_version_config(project_root: Path) -> VersionConfig:
     return load_cfg(project_root)
 
 
-def _get_bump_type(step: Step, flow: FlowInstance, version_config: VersionConfig) -> BumpType | None:
+def _get_bump_type(step: Step, flow: FlowInstance, version_config: VersionConfig) -> BumpType:
     """Determine bump type from version_analyze step or fallback to task type.
     
     First checks if version_analyze step provided a bump_type, then falls back
@@ -203,7 +226,7 @@ def _get_bump_type(step: Step, flow: FlowInstance, version_config: VersionConfig
         version_config: Version configuration with bump rules
 
     Returns:
-        BumpType enum value, or None if bump should be skipped
+        BumpType enum value - always returns a valid BumpType, never None
     """
     # First, try to get bump_type from version_analyze step input
     bump_type_str = step.inputs.get("bump_type")
@@ -229,30 +252,24 @@ def _get_bump_type(step: Step, flow: FlowInstance, version_config: VersionConfig
         
         if not need_confirmation:
             logger.info(f"Using version_analyze result: bump_type={bump_type_str}, confidence={confidence}")
-            if bump_type_str == "none":
-                return None
             try:
-                return BumpType(bump_type_str)
+                # Always return a valid BumpType - never None
+                return BumpType(bump_type_str) if bump_type_str != "none" else BumpType.PATCH
             except ValueError:
                 logger.warning(f"Invalid bump_type from version_analyze: {bump_type_str}, falling back")
         else:
             logger.info(f"Version analysis confidence ({confidence}) below threshold, may need confirmation")
-            # For now, we still use it but log the concern
-            # TODO: Implement human confirmation for version bump
-            if bump_type_str == "none":
-                return None
             try:
-                return BumpType(bump_type_str)
+                # Always return a valid BumpType - never None
+                return BumpType(bump_type_str) if bump_type_str != "none" else BumpType.PATCH
             except ValueError:
                 logger.warning(f"Invalid bump_type from version_analyze: {bump_type_str}, falling back")
     
     # Fallback to task type based bump rules
     task_type = flow.task_type or "feature"
     bump_type_str = version_config.bump_rules.get(task_type, "patch")
-    
-    if bump_type_str == "none":
-        return None
-    
+
+    # Always return a valid BumpType - never None or skip
     try:
         return BumpType(bump_type_str)
     except ValueError:
