@@ -55,7 +55,7 @@ class Step:
 
     step_type: StepType
     status: StepStatus = StepStatus.PENDING
-    step_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    step_id: str = ""  # Auto-generated in State.add_step if empty
 
     # Execution tracking
     started_at: Optional[datetime] = None
@@ -178,7 +178,15 @@ class State:
         return None
 
     def add_step(self, step: Step) -> None:
-        """Add a step to the state."""
+        """Add a step to the state.
+
+        Auto-generates step_id if not set, using format: NN_steptype_uuid8
+        (e.g., 01_analyze_844c2cf8) for human-readable, sortable history files.
+        """
+        if not step.step_id:
+            seq = len(self.step_history) + 1
+            uid = str(uuid.uuid4())[:8]
+            step.step_id = f"{seq:02d}_{step.step_type.value}_{uid}"
         self.steps[step.step_id] = step
         if step.step_id not in self.step_history:
             self.step_history.append(step.step_id)
@@ -332,7 +340,7 @@ class FlowInstance:
     This is the top-level container for a single run of the flow engine.
     """
 
-    flow_id: str = field(default_factory=lambda: str(uuid.uuid4())[:12])
+    flow_id: str = field(default_factory=lambda: datetime.now().strftime("%Y%m%d-%H%M%S") + "_" + str(uuid.uuid4())[:8])
     status: FlowStatus = FlowStatus.INIT
 
     # User input

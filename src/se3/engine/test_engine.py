@@ -32,8 +32,8 @@ class TestModels:
 
         assert step.step_type == StepType.ANALYZE
         assert step.status == StepStatus.PENDING
-        assert step.step_id is not None
-        assert len(step.step_id) == 8
+        # step_id is empty until added to State; verify it's a string
+        assert isinstance(step.step_id, str)
 
     def test_step_serialization(self):
         """Test step to/from dict."""
@@ -57,7 +57,9 @@ class TestModels:
         flow = FlowInstance(task_description="Test task")
 
         assert flow.flow_id is not None
-        assert len(flow.flow_id) == 12
+        # Format: YYYYMMDD-HHMMSS_uuid8 (24 chars)
+        assert "_" in flow.flow_id
+        assert flow.flow_id[:8].isdigit()  # date part
         assert flow.status == FlowStatus.INIT
         assert flow.task_description == "Test task"
 

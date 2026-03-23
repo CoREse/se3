@@ -223,7 +223,7 @@ class StructuredLogger:
         # Build context string
         context_parts = []
         if entry.flow_id:
-            context_parts.append(f"flow={entry.flow_id[:8]}")
+            context_parts.append(f"flow={entry.flow_id}")
         if entry.step_type:
             context_parts.append(f"step={entry.step_type}")
 

@@ -220,13 +220,13 @@ def default_cmd(
 
     for flow in flows:
         if archived:
-            flow_id = flow["flow_id"][:12]
+            flow_id = flow["flow_id"]
             status = flow["status"]
             desc = flow["task_description"][:50] + "..." if len(flow["task_description"]) > 50 else flow["task_description"]
             progress = "-"
             updated = format_datetime(flow["archived_at"])
         else:
-            flow_id = flow.get("flow_id", "unknown")[:12]
+            flow_id = flow.get("flow_id", "unknown")
             status = flow.get("status", "unknown")
             desc = flow.get("task_description", "No description")
             if len(desc) > 50:
@@ -286,13 +286,13 @@ def list_cmd(
 
     for flow in flows:
         if archived:
-            flow_id = flow["flow_id"][:12]
+            flow_id = flow["flow_id"]
             status = flow["status"]
             desc = flow["task_description"][:50] + "..." if len(flow["task_description"]) > 50 else flow["task_description"]
             progress = "-"
             updated = format_datetime(flow["archived_at"])
         else:
-            flow_id = flow.get("flow_id", "unknown")[:12]
+            flow_id = flow.get("flow_id", "unknown")
             status = flow.get("status", "unknown")
             desc = flow.get("task_description", "No description")
             if len(desc) > 50:
@@ -340,7 +340,7 @@ def show_cmd(
         elif len(matches) > 1:
             typer.echo(f"Multiple flows match '{flow_id}':")
             for m in matches:
-                typer.echo(f"  - {m.get('flow_id', 'unknown')[:12]}")
+                typer.echo(f"  - {m.get('flow_id', 'unknown')}")
             raise typer.Exit(1)
 
     if not detail:
@@ -399,7 +399,7 @@ def show_cmd(
             )
         console.print(steps_table)
 
-    console.print(f"\n[dim]Use 'se3 history restore {detail['flow_id'][:12]}' to resume this flow.[/dim]\n")
+    console.print(f"\n[dim]Use 'se3 history restore {detail['flow_id']}' to resume this flow.[/dim]\n")
 
 
 @app.command(name="restore")
@@ -427,7 +427,7 @@ def restore_cmd(
         elif len(matches) > 1:
             typer.echo(f"Multiple flows match '{flow_id}':")
             for m in matches:
-                typer.echo(f"  - {m.get('flow_id', 'unknown')[:12]}")
+                typer.echo(f"  - {m.get('flow_id', 'unknown')}")
             raise typer.Exit(1)
         else:
             typer.echo(f"Flow '{flow_id}' not found.", err=True)
@@ -471,7 +471,7 @@ def archived_cmd(
     table.add_column("Archived At", style="dim")
 
     for flow in archived:
-        flow_id = flow["flow_id"][:12]
+        flow_id = flow["flow_id"]
         status = flow["status"]
         desc = flow["task_description"]
         if len(desc) > 50:
