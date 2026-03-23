@@ -57,11 +57,18 @@ def _init_display() -> None:
     logger.debug("Display utilities initialized")
 
 
-def _read_multiline_input() -> Optional[str]:
+def _read_multiline_input(
+    prompt_title: str = "Input",
+    prompt_message: str = "Enter task description (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+) -> Optional[str]:
     """Read multiline input from stdin with proper Unicode support.
-    
+
     Uses prompt_toolkit for interactive mode to correctly handle
     wide characters (e.g., Chinese) and multiline input.
+
+    Args:
+        prompt_title: Title displayed above the input area.
+        prompt_message: Instruction text shown to the user.
     """
     # Check if stdin is a tty (interactive terminal)
     if not sys.stdin.isatty():
@@ -72,7 +79,7 @@ def _read_multiline_input() -> Optional[str]:
 
             # Show full content for all input (no truncation)
             if lines:
-                render_full("\n".join(lines), title="Input")
+                render_full("\n".join(lines), title=prompt_title)
 
             content = content.strip()
             return content if content else None
@@ -80,7 +87,7 @@ def _read_multiline_input() -> Optional[str]:
             return None
 
     # Interactive mode with prompt_toolkit for proper Unicode handling
-    render_text("Enter task description (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):", title="Input")
+    render_text(prompt_message, title=prompt_title)
 
     try:
         # Create custom key bindings to make Ctrl+D accept input
@@ -114,15 +121,15 @@ def _read_multiline_input() -> Optional[str]:
         if content:
             lines = content.split("\n")
             if len(lines) > 1:
-                render_full(content, title="Input Content")
+                render_full(content, title=f"{prompt_title} Content")
 
-        return content if content else None
+        return content
 
     except KeyboardInterrupt:
         render_text("\nCancelled.", title="Cancelled")
         return None
     except EOFError:
-        # Ctrl+D pressed with empty input
+        # Ctrl+D pressed with empty input — treat as cancel
         return None
 
 

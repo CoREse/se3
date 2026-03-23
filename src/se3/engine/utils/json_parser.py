@@ -138,13 +138,73 @@ def _extract_json_string(text: str) -> Optional[str]:
     start = text.find('{')
     end = text.rfind('}')
     if start != -1 and end != -1 and end > start:
-        return text[start:end+1].strip()
-    
+        candidate = text[start:end+1].strip()
+        try:
+            json.loads(candidate)
+            return candidate
+        except json.JSONDecodeError:
+            pass
+
+        # First-to-last failed (e.g. mixed text between multiple JSON objects).
+        # Try extracting the last complete JSON object from the end.
+        trailing = _extract_trailing_json_string(text)
+        if trailing is not None:
+            return trailing
+
+        # Fall back to raw first-to-last (repair will attempt to fix it)
+        return candidate
+
     # Handle truncated JSON: if we have an opening brace but no closing brace,
     # return from opening brace to end (will be repaired later)
     if start != -1 and end == -1:
         return text[start:].strip()
-    
+
+    return None
+
+
+def _extract_trailing_json_string(text: str) -> Optional[str]:
+    """Extract the last complete JSON object from the end of text.
+
+    Walks backwards from the final '}' to find its matching '{',
+    properly handling strings (so braces inside quotes are ignored).
+
+    Returns:
+        Raw JSON string if found and valid, else None.
+    """
+    text = text.rstrip()
+    if not text.endswith('}'):
+        return None
+
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i in range(len(text) - 1, -1, -1):
+        c = text[i]
+        if escape_next:
+            escape_next = False
+            continue
+        # When scanning backwards, a backslash before the current char
+        # means the *previous* char (at i+1) was escaped.  But since we
+        # already processed i+1, we check if the char at i is a backslash
+        # to mark that i-1 should skip.
+        if in_string and c == '\\':
+            escape_next = True
+            continue
+        if c == '"':
+            in_string = not in_string
+        if in_string:
+            continue
+        if c == '}':
+            depth += 1
+        elif c == '{':
+            depth -= 1
+            if depth == 0:
+                candidate = text[i:]
+                try:
+                    json.loads(candidate)
+                    return candidate
+                except json.JSONDecodeError:
+                    return None
     return None
 
 

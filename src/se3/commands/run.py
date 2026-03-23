@@ -43,6 +43,7 @@ try:
         format_output,
         render_full,
     )
+    from ..cli import _read_multiline_input
 except ImportError:
     # Direct import for development
     import sys
@@ -63,6 +64,7 @@ except ImportError:
         format_output,
         render_full,
     )
+    from cli import _read_multiline_input
 
 
 app = typer.Typer()
@@ -197,10 +199,11 @@ def _handle_confirm_pause(
 
     if not approved:
         # Get feedback from user
-        try:
-            print("\nPlease describe the changes you'd like:")
-            feedback = input("> ").strip()
-        except (KeyboardInterrupt, EOFError):
+        feedback = _read_multiline_input(
+            prompt_title="Feedback",
+            prompt_message="Describe the changes you'd like (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+        )
+        if feedback is None:
             persistence.save_flow(flow)
             return None
 
@@ -336,25 +339,12 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
     Returns:
         StepStatus to continue, or None to exit
     """
-    render_full(
-        "Interrupted. Enter additional instruction for this step\n"
-        "(empty to retry as-is, Ctrl+C again to exit):",
-        title="Pause"
+    user_input = _read_multiline_input(
+        prompt_title="Additional Instruction",
+        prompt_message="Enter additional instruction (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel, empty to retry as-is):",
     )
-    try:
-        user_input = input("   > ").strip()
-        if user_input:
-            set_extra_prompt(user_input)
-            render_full("Extra prompt set, retrying step...", title="Info")
-        else:
-            render_full("Retrying step as-is...", title="Info")
-        # Reset step to PENDING so it re-runs
-        current_step.status = StepStatus.PENDING
-        persistence.save_flow(flow)
-        # Return a special marker to indicate retry
-        return StepStatus.PENDING
-    except (KeyboardInterrupt, EOFError):
-        # Second Ctrl+C (or EOF): save and exit
+    if user_input is None:
+        # Cancelled (Ctrl+C): save and exit
         persistence.save_flow(flow)
         render_full(
             "Interrupted by user. Flow state saved.\n"
@@ -362,6 +352,16 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
             title="Exit"
         )
         return None
+    if user_input:
+        set_extra_prompt(user_input)
+        render_full("Extra prompt set, retrying step...", title="Info")
+    else:
+        render_full("Retrying step as-is...", title="Info")
+    # Reset step to PENDING so it re-runs
+    current_step.status = StepStatus.PENDING
+    persistence.save_flow(flow)
+    # Return a special marker to indicate retry
+    return StepStatus.PENDING
 
 
 def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: PersistenceManager) -> Optional[str]:
@@ -381,30 +381,13 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
         title="Discovery Pause"
     )
 
-    try:
-        # Get user input
-        user_input = input("\nYour response: ").strip()
+    user_input = _read_multiline_input(
+        prompt_title="Discovery Response",
+        prompt_message="Enter your response (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+    )
 
-        if not user_input:
-            # Empty input - check if we're resuming
-            if current_step.inputs.get("resumed"):
-                return "__RESUME__"
-            # Otherwise ask again
-            render_full("Please provide a response or press Ctrl+C to exit.", title="Input Required")
-            return _handle_discovery_pause(flow, current_step, persistence)
-
-        # Parse the response to check if user is confirming
-        from ..engine.steps.discovery import parse_user_response
-        parsed = parse_user_response(user_input)
-
-        # If user confirmed a synthesis, mark it
-        if parsed["confirmed"] and current_step.inputs.get("discovery_state", {}).get("mode") == "synthesis":
-            current_step.outputs["user_confirmed"] = True
-
-        return user_input
-
-    except (KeyboardInterrupt, EOFError):
-        # User wants to exit
+    if user_input is None:
+        # User cancelled
         persistence.save_flow(flow)
         render_full(
             "Discovery paused. Flow state saved.\n"
@@ -412,6 +395,24 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
             title="Paused"
         )
         return None
+
+    if not user_input:
+        # Empty input - check if we're resuming
+        if current_step.inputs.get("resumed"):
+            return "__RESUME__"
+        # Otherwise ask again
+        render_full("Please provide a response or press Ctrl+C to exit.", title="Input Required")
+        return _handle_discovery_pause(flow, current_step, persistence)
+
+    # Parse the response to check if user is confirming
+    from ..engine.steps.discovery import parse_user_response
+    parsed = parse_user_response(user_input)
+
+    # If user confirmed a synthesis, mark it
+    if parsed["confirmed"] and current_step.inputs.get("discovery_state", {}).get("mode") == "synthesis":
+        current_step.outputs["user_confirmed"] = True
+
+    return user_input
 
 
 def _display_step_output(current_step: Any) -> None:

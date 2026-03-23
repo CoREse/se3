@@ -469,20 +469,33 @@ class LLMCaller:
         on_output: Optional[Callable[[str], None]],
         json_schema_hint: Optional[str],
     ) -> str:
-        """Mode 3: TWO_PHASE - Natural generation + LLM extraction."""
+        """Mode 3: TWO_PHASE - Natural generation + LLM extraction.
+
+        If phase 1 output already contains valid JSON (detected by the
+        shared parse_json_response logic), skips phase 2.
+        """
         logger.info("Using two-phase JSON extraction")
 
-        # Phase 1: Generate without JSON constraints (clean prompt)
+        # Phase 1: Generate with clean prompt (JSON requirement is in the
+        # step's prompt template itself, not added by the caller)
         phase1_output = self._call_with_retry(
             prompt=prompt,
             timeout=timeout,
             context_files=context_files,
             on_output=on_output,
-            require_json=False,  # No JSON constraint in phase 1
+            require_json=False,  # No strict JSON constraint
             json_retry_count=0,
         )
 
-        # Phase 2: Extract JSON
+        # Check if phase 1 output already contains valid JSON (skip phase 2)
+        if self._contains_valid_json(phase1_output):
+            logger.info("Two-phase: phase 1 output contained valid JSON, skipping phase 2")
+            print("  [llm-caller] ✅ Phase 1 output contained valid JSON, phase 2 skipped")
+            from .utils.json_parser import parse_json_response
+            result = parse_json_response(phase1_output)
+            return json.dumps(result, ensure_ascii=False, indent=2)
+
+        # Phase 2: Extract JSON via LLM
         print("  [llm-caller] 🔍 Phase 2: Extracting JSON from output...")
 
         from .json_extractor import JSONExtractor
