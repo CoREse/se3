@@ -681,6 +681,9 @@ class StateMachine:
                 if current_step.retry_count < current_step.max_retries:
                     current_step.retry_count += 1
                     current_step.status = StepStatus.RETRYING
+                    # Inject retry metadata so step handlers can detect retry context
+                    current_step.inputs["is_retry"] = True
+                    current_step.inputs["retry_count"] = current_step.retry_count
                     logger.info(f"Retrying step {current_step.step_type.value} (attempt {current_step.retry_count})")
                     continue
                 else:

@@ -245,6 +245,7 @@ class LLMCaller:
         step_id: Optional[str] = None,
         step_type: Optional[str] = None,
         external_attempt: int = 0,
+        retry_mode: str = "continue",
     ):
         self.project_root = Path(project_root) if project_root else Path.cwd()
         self.max_retries = max_retries
@@ -253,6 +254,7 @@ class LLMCaller:
         self.step_id = step_id
         self.step_type = step_type or ""
         self.external_attempt = external_attempt  # Track external retry (e.g., from implement.py)
+        self.retry_mode = retry_mode  # 'continue' (resume from breakpoint) or 'retry' (restart)
         self._runner = ClaudeRunner(self.project_root)
 
     def call(
@@ -573,6 +575,7 @@ class LLMCaller:
             from .chat_history import format_history_for_retry
             return format_history_for_retry(
                 self.project_root, self.flow_id, self.step_id,
+                mode=self.retry_mode,
             )
         except Exception as e:
             logger.debug(f"Failed to get retry context: {e}")
@@ -606,7 +609,17 @@ class LLMCaller:
             if total_attempt > 0:
                 retry_context = self._get_retry_context()
                 if retry_context:
-                    effective_prompt = f"{retry_context}\n{original_prompt}"
+                    if self.retry_mode == "continue":
+                        # In continue mode, the original prompt is already in the history.
+                        # Append a short continuation instruction instead of re-prepending the full prompt.
+                        effective_prompt = (
+                            f"{retry_context}\n"
+                            "Continue the task from where you left off based on the conversation history above. "
+                            "Do NOT repeat work already completed."
+                        )
+                    else:
+                        # In retry mode, prepend history + original prompt (old behavior)
+                        effective_prompt = f"{retry_context}\n{original_prompt}"
                 else:
                     effective_prompt = original_prompt
             else:

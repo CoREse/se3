@@ -302,7 +302,8 @@ class TestFormatHistoryForRetry:
         assert "Previous conversation context" in context
         assert "Original prompt" in context
         assert "Bad response" in context
-        assert "failed" in context.lower()
+        # Default mode is 'continue' — check for continuation instruction
+        assert "continue from where" in context.lower()
 
     def test_format_no_history(self, tmp_project):
         context = format_history_for_retry(tmp_project, "flow1", "nonexistent")

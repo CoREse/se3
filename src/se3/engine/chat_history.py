@@ -500,12 +500,21 @@ def format_conversation_for_llm(messages: List[ConversationMessage]) -> str:
 
 
 def format_history_for_retry(
-    project_root: Path, flow_id: str, step_id: str
+    project_root: Path, flow_id: str, step_id: str, mode: str = "continue"
 ) -> Optional[str]:
     """Format previous conversation attempts for retry context injection.
 
     Extracts the full conversation from raw NDJSON to preserve tool calls
     and results structure, rather than using simplified text summaries.
+
+    Args:
+        project_root: Project root directory
+        flow_id: Flow instance ID
+        step_id: Step instance ID
+        mode: 'continue' (default) to resume from breakpoint, or 'retry' to restart.
+              In 'continue' mode: higher truncation limits (4000 chars for user prompts),
+              assistant responses with tool calls are not truncated, and a continuation
+              instruction is appended. In 'retry' mode: preserves original behavior.
 
     Returns a string to prepend to the retry prompt, or None if no history.
     """
@@ -521,6 +530,10 @@ def format_history_for_retry(
     if not attempts:
         return None
 
+    # Set truncation limits based on mode
+    user_prompt_limit = 4000 if mode == "continue" else 2000
+    assistant_fallback_limit = 4000 if mode == "continue" else 2000
+
     parts = ["[Previous conversation context for this step]:"]
 
     for attempt_num in sorted(attempts.keys()):
@@ -531,8 +544,8 @@ def format_history_for_retry(
             if msg.role == "user":
                 # Truncate very long prompts in context
                 content = msg.content
-                if len(content) > 2000:
-                    content = content[:2000] + "\n... [truncated]"
+                if len(content) > user_prompt_limit:
+                    content = content[:user_prompt_limit] + "\n... [truncated]"
                 parts.append(f"\n[User Prompt]:")
                 parts.append(content)
 
@@ -541,26 +554,39 @@ def format_history_for_retry(
                 if msg.raw_json:
                     conversation = extract_conversation_from_ndjson(msg.raw_json)
                     if conversation:
+                        # In 'continue' mode, check if conversation has tool calls
+                        has_tool_calls = mode == "continue" and any(
+                            m.tool_calls for m in conversation
+                        )
                         formatted = format_conversation_for_llm(conversation)
+                        # In 'continue' mode, preserve tool-call-containing responses untruncated
+                        if not has_tool_calls and len(formatted) > assistant_fallback_limit:
+                            formatted = formatted[:assistant_fallback_limit] + "\n... [truncated]"
                         parts.append(f"\n[Assistant Response]:")
                         parts.append(formatted)
                     else:
                         # Fallback to simplified content if parsing fails
                         content = msg.content
-                        if len(content) > 2000:
-                            content = content[:2000] + "\n... [truncated]"
+                        if len(content) > assistant_fallback_limit:
+                            content = content[:assistant_fallback_limit] + "\n... [truncated]"
                         parts.append(f"\n[Assistant Response]:")
                         parts.append(content)
                 else:
                     # No raw_json, use simplified content
                     content = msg.content
-                    if len(content) > 2000:
-                        content = content[:2000] + "\n... [truncated]"
+                    if len(content) > assistant_fallback_limit:
+                        content = content[:assistant_fallback_limit] + "\n... [truncated]"
                     parts.append(f"\n[Assistant Response]:")
                     parts.append(content)
 
     parts.append("\n" + "=" * 40)
-    parts.append("[The above attempt(s) failed. Please try again with the same task.]")
+    if mode == "continue":
+        parts.append(
+            "[Continue from where the previous attempt stopped. "
+            "Do NOT redo completed work — pick up from the breakpoint.]"
+        )
+    else:
+        parts.append("[The above attempt(s) failed. Please try again with the same task.]")
     parts.append("")
 
     return "\n".join(parts)
