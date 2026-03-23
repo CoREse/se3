@@ -64,6 +64,7 @@ Respond in JSON format:
 }}
 
 Guidelines:
+- You have full tool access — feel free to read spec files under `se3/specs/` and source code as needed to ask better questions
 - Start by understanding the current project context (see Project Context above)
 - Ask questions that help narrow down what fits within the existing architecture
 - Consider available specifications when exploring requirements
@@ -103,6 +104,7 @@ Respond in JSON format:
 }}
 
 Guidelines:
+- You have full tool access — feel free to read spec files under `se3/specs/` and source code as needed to ask better questions
 - Consider the existing project architecture when asking questions
 - Reference available specifications when relevant
 - If the user provides clear direction, acknowledge it and move toward synthesis
