@@ -14,19 +14,54 @@ from ..claude_runner import ClaudeRunner
 
 logger = logging.getLogger(__name__)
 
-# Module-level extra prompt state for Ctrl+C injection
+# Module-level extra prompt state for Ctrl+C injection (transient, consumed after one use)
 _extra_prompt: Optional[str] = None
+# Persistent extra prompt state for loop context injection (survives across LLM calls)
+_persistent_extra_prompt: Optional[str] = None
 
 
-def set_extra_prompt(prompt: Optional[str]) -> None:
-    """Set an extra prompt to inject into the next LLM call."""
-    global _extra_prompt
-    _extra_prompt = prompt
+def set_extra_prompt(prompt: Optional[str], persistent: bool = False) -> None:
+    """Set an extra prompt to inject into LLM calls.
+
+    Args:
+        prompt: The prompt text to inject, or None to clear.
+        persistent: If True, the prompt survives across multiple LLM calls
+                   (used for loop context injection). If False (default),
+                   the prompt is consumed after one LLM call (used for
+                   Ctrl+C interrupt injection).
+    """
+    if persistent:
+        global _persistent_extra_prompt
+        _persistent_extra_prompt = prompt
+    else:
+        global _extra_prompt
+        _extra_prompt = prompt
 
 
 def get_extra_prompt() -> Optional[str]:
-    """Get the current extra prompt (None if not set)."""
-    return _extra_prompt
+    """Get the current extra prompt (None if not set).
+
+    Returns the combined transient + persistent prompt without consuming either.
+    """
+    parts = []
+    if _persistent_extra_prompt:
+        parts.append(_persistent_extra_prompt)
+    if _extra_prompt:
+        parts.append(_extra_prompt)
+    return "\n\n".join(parts) if parts else None
+
+
+def clear_extra_prompt() -> None:
+    """Clear both transient and persistent extra prompts."""
+    global _extra_prompt, _persistent_extra_prompt
+    _extra_prompt = None
+    _persistent_extra_prompt = None
+
+
+def clear_persistent_extra_prompt() -> None:
+    """Clear only the persistent extra prompt (for cleanup between loop iterations)."""
+    global _persistent_extra_prompt
+    _persistent_extra_prompt = None
 
 
 def truncate_preview(text: str, max_length: int = 60, ellipsis_str: str = '...') -> str:
@@ -311,12 +346,18 @@ class LLMCaller:
         # Resolve JSON mode from various parameter combinations
         mode = self._resolve_json_mode(json_mode, require_json, two_phase_json)
 
-        # Inject extra prompt if set (from Ctrl+C user injection)
+        # Inject extra prompts if set (persistent for loop context, transient for Ctrl+C)
         global _extra_prompt
+        injected_parts = []
+        if _persistent_extra_prompt:
+            injected_parts.append(_persistent_extra_prompt)
+            logger.info(f"Injected persistent extra prompt: {_persistent_extra_prompt[:80]}")
         if _extra_prompt:
-            prompt = f"{prompt}\n\n[Additional user instruction]: {_extra_prompt}"
-            logger.info(f"Injected extra prompt: {_extra_prompt[:80]}")
-            _extra_prompt = None  # Consume after use
+            injected_parts.append(_extra_prompt)
+            logger.info(f"Injected transient extra prompt: {_extra_prompt[:80]}")
+            _extra_prompt = None  # Consume transient after use
+        if injected_parts:
+            prompt = f"{prompt}\n\n[Additional user instruction]: {chr(10).join(injected_parts)}"
 
         # Dispatch to appropriate handler based on mode
         if mode == "two_phase":

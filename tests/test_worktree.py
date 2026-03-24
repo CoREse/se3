@@ -8,12 +8,16 @@ from pathlib import Path
 import pytest
 
 from se3.engine.worktree import (
+    WorktreeContext,
     cleanup_loop,
     create_loop_branch,
     create_worktree,
     delete_branch,
+    exists_for_branch,
     get_current_branch,
+    get_diff_stat,
     has_new_commits,
+    list_loop_branches,
     merge_loop_branch,
     remove_worktree,
 )
@@ -333,3 +337,122 @@ class TestFlowInstanceWorktreeFields:
         assert flow.loop_worktree_path is None
         assert flow.loop_original_branch is None
         assert flow.loop_branch is None
+
+
+class TestWorktreeContext:
+    """Test WorktreeContext context manager."""
+
+    def test_creates_and_removes_worktree(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="ctx-test")
+
+        with WorktreeContext(tmp_path, branch_name) as wt_path:
+            assert wt_path.exists()
+            assert (wt_path / "README.md").exists()
+
+        # After exit, worktree should be removed
+        assert not wt_path.exists()
+
+    def test_cleanup_on_exception(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="exc-test")
+
+        wt_path_ref = None
+        with pytest.raises(RuntimeError):
+            with WorktreeContext(tmp_path, branch_name) as wt_path:
+                wt_path_ref = wt_path
+                assert wt_path.exists()
+                raise RuntimeError("simulated failure")
+
+        # Worktree should be cleaned up even after exception
+        assert not wt_path_ref.exists()
+
+        # Branch should be preserved for recovery
+        result = subprocess.run(
+            ["git", "-C", str(tmp_path), "branch", "--list", branch_name],
+            capture_output=True, text=True,
+        )
+        assert branch_name in result.stdout
+
+    def test_rejects_duplicate_worktree(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="dup-test")
+
+        # Create first worktree
+        wt_path = create_worktree(tmp_path, branch_name)
+        assert wt_path.exists()
+
+        try:
+            # Attempting to create via context should fail
+            with pytest.raises(RuntimeError, match="already exists"):
+                with WorktreeContext(tmp_path, branch_name):
+                    pass
+        finally:
+            remove_worktree(tmp_path, wt_path)
+
+
+class TestExistsForBranch:
+    def test_returns_false_when_no_worktree(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="exists-test")
+        assert not exists_for_branch(tmp_path, branch_name)
+
+    def test_returns_true_when_worktree_exists(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="exists-test2")
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        try:
+            assert exists_for_branch(tmp_path, branch_name)
+        finally:
+            remove_worktree(tmp_path, wt_path)
+
+
+class TestListLoopBranches:
+    def test_no_loop_branches(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        result = list_loop_branches(tmp_path)
+        assert result == []
+
+    def test_lists_loop_branches(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        branch1, _ = create_loop_branch(tmp_path, timestamp="20260324-100000")
+        branch2, _ = create_loop_branch(tmp_path, timestamp="20260324-110000")
+
+        result = list_loop_branches(tmp_path)
+        branch_names = [b["branch"] for b in result]
+        assert branch1 in branch_names
+        assert branch2 in branch_names
+
+    def test_includes_commit_count(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="count-test")
+        wt_path = create_worktree(tmp_path, branch_name)
+        _add_commit(wt_path, "new.txt", "content", "loop commit")
+        remove_worktree(tmp_path, wt_path)
+
+        result = list_loop_branches(tmp_path)
+        matching = [b for b in result if b["branch"] == branch_name]
+        assert len(matching) == 1
+        assert matching[0]["commit_count"] == 1
+
+
+class TestGetDiffStat:
+    def test_returns_diff_stat(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        original = get_current_branch(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="diff-test")
+        wt_path = create_worktree(tmp_path, branch_name)
+        _add_commit(wt_path, "new_file.txt", "hello world", "add file")
+        remove_worktree(tmp_path, wt_path)
+
+        stat = get_diff_stat(tmp_path, branch_name, original)
+        assert "new_file.txt" in stat
+
+    def test_empty_diff_stat(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        original = get_current_branch(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="empty-diff")
+
+        stat = get_diff_stat(tmp_path, branch_name, original)
+        assert stat == ""

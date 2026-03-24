@@ -52,6 +52,23 @@ se3 run --discover "I want to build..."
 - **THEN** the flow engine continuously finds and executes tasks
 - **AND** discovers tasks from backlog or TODOs
 
+#### Scenario: Loop mode with branch isolation
+- **WHEN** user executes `se3 run --loop` (without `--no-worktree`)
+- **THEN** creates a `se3-loop/{timestamp}` branch and git worktree
+- **AND** all tasks execute in the worktree
+- **AND** on completion, prompts user to merge/defer/discard
+
+#### Scenario: List loop branches
+- **WHEN** user executes `se3 run --list-loops`
+- **THEN** displays all unmerged loop branches with commit counts
+- **AND** shows instructions for merging or discarding
+
+#### Scenario: Merge loop branch with diff summary
+- **WHEN** user executes `se3 run --loop --merge <branch>`
+- **THEN** shows diff stat summary before merging
+- **AND** prompts for confirmation before proceeding
+- **AND** on conflict, displays conflicting file list with resolution instructions
+
 #### Scenario: Discovery mode execution
 - **WHEN** user executes `se3 run --discover "Idea"`
 - **THEN** the flow engine starts in discovery mode
@@ -118,6 +135,18 @@ se3 guardrails <spec-file> [--original <original-file>]
 | `se3 run` | Unified workflow entry point | **Required** |
 | `se3 init` | Initialize SE3 project structure | **Required** |
 | `se3 guardrails` | Check spec against guardrails | **Required** |
+
+### Requirement: Loop Mode CLI Options
+
+The system SHALL provide the following CLI options for loop mode:
+
+| Option | Description |
+|--------|-------------|
+| `--loop, -l` | Enable loop mode (continuous task execution) |
+| `--max-iterations, -n` | Maximum iterations for loop mode (default: 10) |
+| `--no-worktree` | Disable branch isolation in loop mode |
+| `--merge BRANCH` | Merge an existing loop branch (shows diff summary, prompts confirmation) |
+| `--list-loops` | List existing unmerged loop branches with commit counts |
 
 ## Error Codes
 

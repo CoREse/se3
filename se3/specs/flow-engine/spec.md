@@ -63,8 +63,25 @@ se3 run --discover "我想做一个用户管理功能"
 
 #### Scenario: 延迟合并
 - **WHEN** 用户执行 `se3 run --loop --merge se3-loop/20260324-120000`
-- **THEN** 将指定的 loop 分支合并到当前分支
-- **AND** 如果有冲突则报告错误，用户手动解决
+- **THEN** 显示 diff 摘要并确认后将指定的 loop 分支合并到当前分支
+- **AND** 如果有冲突，显示冲突文件列表并提供手动解决指引
+
+#### Scenario: 列出循环分支
+- **WHEN** 用户执行 `se3 run --list-loops`
+- **THEN** 显示所有未合并的 loop 分支及其 commit 数量
+- **AND** 如果没有 loop 分支则提示无分支
+
+#### Scenario: 循环模式外部包装架构
+- **WHEN** `se3 run --loop` 执行循环迭代
+- **THEN** 外层 `LoopController` 管理分支/worktree 生命周期、任务发现、迭代计数
+- **AND** 内层 `run_flow()` 执行标准 11 步流程，对循环模式无感知
+- **AND** 循环上下文仅通过 `set_extra_prompt(persistent=True)` 注入到 LLM 调用中
+- **AND** 持久化 prompt 在多次 LLM 调用间保持，迭代结束后清理
+
+#### Scenario: 循环模式任务重选避免
+- **WHEN** 循环迭代中某任务失败
+- **THEN** 该任务加入 `failed_tasks` 集合
+- **AND** 后续迭代的 `find_next_task()` 自动跳过已完成和已失败的任务
 
 ### Requirement: Discovery Workflow
 

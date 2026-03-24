@@ -31,8 +31,8 @@ claude_commands:
     priority: 10
   # - cmd: "kclaude"
   #   priority: 5
-  - cmd: "hclaude"
-    priority: 1
+  # - cmd: "hclaude"
+  #   priority: 1
 
 # Version Bumping Configuration
 # Automatically bump version on commit step based on task type

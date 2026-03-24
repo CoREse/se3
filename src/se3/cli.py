@@ -134,6 +134,28 @@ def _read_multiline_input(
         return ""
 
 
+def _handle_list_loops(project_root) -> None:
+    """Display existing unmerged loop branches."""
+    from .engine.worktree import list_loop_branches
+
+    branches = list_loop_branches(project_root)
+    if not branches:
+        render_text("No loop branches found.", title="Loop Branches")
+        return
+
+    lines = []
+    for b in branches:
+        commit_info = f"{b['commit_count']} commit(s) ahead of {b['base_branch']}"
+        lines.append(f"  {b['branch']}  —  {commit_info}")
+
+    render_full(
+        "Existing loop branches:\n\n" + "\n".join(lines) + "\n\n"
+        "To merge:  se3 run --loop --merge <branch>\n"
+        "To discard: git branch -D <branch>",
+        title="Loop Branches"
+    )
+
+
 @app.command(name="run")
 def run_cmd(
     task: Optional[str] = typer.Argument(None, help="Task description"),
@@ -146,6 +168,7 @@ def run_cmd(
     discover: bool = typer.Option(False, "--discover", "-d", help="Discovery mode - explore requirements with user before analyzing"),
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Disable branch isolation in loop mode"),
     merge: Optional[str] = typer.Option(None, "--merge", help="Merge an existing loop branch (e.g. se3-loop/20260324-120000)"),
+    list_loops: bool = typer.Option(False, "--list-loops", help="List existing unmerged loop branches"),
 ):
     """SE3 Run — Unified entry point for the flow engine.
 
@@ -173,6 +196,10 @@ def run_cmd(
     # Handle discovery mode - force task_type to "discovery"
     if discover:
         type = "discovery"
+
+    if list_loops:
+        _handle_list_loops(project_root)
+        raise typer.Exit(0)
 
     if loop or merge:
         exit_code = run_loop_mode(

@@ -835,6 +835,10 @@ def run_loop_mode(
 ) -> int:
     """Run in loop mode - continuously find and execute tasks.
 
+    Delegates to LoopController for all loop lifecycle management.
+    This function handles user interaction (display, prompts) while
+    the controller manages state, worktree, and task tracking.
+
     Args:
         project_root: Project root directory
         initial_task: Optional initial task to start with
@@ -847,120 +851,77 @@ def run_loop_mode(
     Returns:
         Exit code
     """
-    from ..engine.worktree import (
-        cleanup_loop,
-        create_loop_branch,
-        create_worktree,
-        get_current_branch,
-        has_new_commits,
-        merge_loop_branch,
-        remove_worktree,
+    from ..engine.loop_controller import LoopController
+    from ..engine.worktree import get_current_branch, get_diff_stat
+
+    controller = LoopController(
+        project_root=project_root,
+        max_iterations=max_iterations,
+        no_worktree=no_worktree,
+        prompt_history=prompt_history,
     )
 
     # --merge: merge an existing loop branch and exit
     if merge_branch:
-        render_full(f"Merging loop branch: {merge_branch}", title="Merge")
-        target = get_current_branch(project_root)
-        success = merge_loop_branch(project_root, merge_branch, target)
-        if success:
-            display_success(f"Successfully merged {merge_branch} into {target}")
-            return 0
-        else:
-            display_error(f"Merge failed (conflict?). Resolve manually and retry.")
-            return 1
+        return _handle_merge_existing(controller, project_root, merge_branch)
 
-    use_worktree = not no_worktree
-    loop_branch_name: Optional[str] = None
-    original_branch: Optional[str] = None
-    worktree_path: Optional[Path] = None
-
-    # Set up worktree-based isolation
-    if use_worktree:
-        try:
-            original_branch = get_current_branch(project_root)
-            loop_branch_name, original_branch = create_loop_branch(project_root)
-            worktree_path = create_worktree(project_root, loop_branch_name)
-            effective_root = worktree_path
-
+    # Start: create branch/worktree
+    setup_ok = controller.start()
+    if setup_ok and controller.use_worktree and controller.has_worktree:
+        render_full(
+            "SE3 Loop Mode (branch isolated)\n\n"
+            f"Branch: {controller.loop_branch}\n"
+            f"Worktree: {controller.worktree_path}\n"
+            f"Original: {controller.original_branch}\n\n"
+            "Tasks execute in the worktree. Changes merge back when done.",
+            title="Loop Mode"
+        )
+    elif not controller.use_worktree:
+        if no_worktree:
             render_full(
-                "SE3 Loop Mode (branch isolated)\n\n"
-                f"Branch: {loop_branch_name}\n"
-                f"Worktree: {worktree_path}\n"
-                f"Original: {original_branch}\n\n"
-                "Tasks execute in the worktree. Changes merge back when done.",
+                "SE3 Loop Mode (no isolation)\n\n"
+                "Tasks run directly on the current branch.",
                 title="Loop Mode"
             )
-        except Exception as e:
-            display_error(f"Failed to set up worktree isolation: {e}")
+        else:
             display_error("Falling back to non-isolated mode (--no-worktree)")
-            use_worktree = False
-            loop_branch_name = None
-            worktree_path = None
-            effective_root = project_root
-
             render_full(
                 "SE3 Loop Mode\n\n"
-                "Loop mode will automatically find and execute tasks.\n"
                 "WARNING: Running without branch isolation.",
                 title="Loop Mode"
             )
-    else:
-        effective_root = project_root
-        render_full(
-            "SE3 Loop Mode (no isolation)\n\n"
-            "Loop mode will automatically find and execute tasks.\n"
-            "Tasks run directly on the current branch.",
-            title="Loop Mode"
-        )
 
+    # Iteration loop
     current_task = initial_task
-
-    # Use range-based iteration with max_iterations
-    if max_iterations is not None and max_iterations > 0:
-        iteration_range = range(1, max_iterations + 1)
-    else:
-        # Unlimited iterations - use a large number and check for overflow
-        iteration_range = range(1, 2**31)
-
+    iter_limit = max_iterations if max_iterations and max_iterations > 0 else 2**31
     interrupted = False
 
     try:
-        for iteration in iteration_range:
+        for iteration in range(1, iter_limit + 1):
             render_full(f"Loop iteration #{iteration}", title="Iteration")
 
-            if not current_task:
-                # Find next task from ORIGINAL project root (not worktree)
-                current_task = find_next_task(project_root)
-
-                if not current_task:
-                    render_full("No more tasks found. Loop mode complete.", title="Done")
-                    break
-
-            render_full(f"Task: {current_task}", title="Current Task")
-
-            # Run the flow — in worktree if isolated, else original project root
-            exit_code = run_flow(
-                project_root=effective_root,
-                task_description=current_task,
+            result = controller.run_iteration(
+                run_flow_fn=run_flow,
+                task=current_task,
                 task_type=task_type,
-                is_loop_mode=True,
-                prompt_history=prompt_history,
             )
 
-            if exit_code != 0:
-                display_error(f"Task failed with exit code {exit_code}")
+            if result.task is None:
+                render_full("No more tasks found. Loop mode complete.", title="Done")
+                break
+
+            render_full(f"Task: {result.task}", title="Current Task")
+
+            if not result.success:
+                display_error(f"Task failed with exit code {result.exit_code}")
                 options = ["Continue to next task", "Exit loop mode"]
                 choice = prompt_user_choice("What would you like to do?", options)
-
                 if choice == 1:
                     break
 
-            # Clear for next iteration
             current_task = None
-
             render_full("Task complete. Looking for next task...", title="Progress")
 
-            # Check if max iterations reached
             if max_iterations is not None and iteration >= max_iterations:
                 display_success(
                     f"Loop mode completed: Reached maximum iterations ({max_iterations})"
@@ -971,134 +932,93 @@ def run_loop_mode(
         interrupted = True
         render_full("Loop interrupted by user.", title="Interrupted")
 
-    # Post-loop: handle worktree merge/cleanup
-    if use_worktree and loop_branch_name and worktree_path and original_branch:
-        if interrupted:
-            # On interrupt: preserve branch, clean up worktree
-            remove_worktree(project_root, worktree_path)
-            render_full(
-                f"Loop interrupted. Branch preserved: {loop_branch_name}\n\n"
-                f"To merge later:\n"
-                f"  se3 run --loop --merge {loop_branch_name}\n\n"
-                f"To discard:\n"
-                f"  git branch -D {loop_branch_name}",
-                title="Interrupted"
-            )
-        elif has_new_commits(project_root, loop_branch_name, original_branch):
-            # Prompt user for merge decision
-            options = [
-                f"Merge {loop_branch_name} into {original_branch} now",
-                "Merge later (keep branch, remove worktree)",
-                "Discard (delete branch and worktree)",
-            ]
-            choice = prompt_user_choice(
-                f"Loop complete. What to do with branch {loop_branch_name}?",
-                options,
-            )
+    # Post-loop: handle merge/cleanup
+    return _handle_loop_finish(controller, interrupted)
 
-            if choice == 0:
-                # Merge now
-                remove_worktree(project_root, worktree_path)
-                success = merge_loop_branch(project_root, loop_branch_name, original_branch)
-                if success:
-                    display_success(f"Merged {loop_branch_name} into {original_branch}")
-                    from ..engine.worktree import delete_branch
-                    delete_branch(project_root, loop_branch_name)
-                else:
-                    display_error(
-                        f"Merge conflict. Branch preserved: {loop_branch_name}\n"
-                        f"Resolve conflicts and merge manually."
-                    )
-            elif choice == 1:
-                # Merge later
-                remove_worktree(project_root, worktree_path)
-                render_full(
-                    f"Branch preserved: {loop_branch_name}\n\n"
-                    f"To merge later:\n"
-                    f"  se3 run --loop --merge {loop_branch_name}",
-                    title="Deferred"
-                )
-            else:
-                # Discard
-                cleanup_loop(project_root, loop_branch_name, worktree_path, delete_branch_flag=True)
-                display_success("Loop branch discarded.")
-        else:
-            # No new commits — just clean up
-            cleanup_loop(project_root, loop_branch_name, worktree_path, delete_branch_flag=True)
-            render_full("Loop ended with no changes. Branch cleaned up.", title="Done")
+
+def _handle_merge_existing(controller, project_root: Path, merge_branch: str) -> int:
+    """Handle --merge flag: show diff summary, confirm, then merge."""
+    from ..engine.worktree import get_current_branch, get_diff_stat
+
+    target = get_current_branch(project_root)
+    diff_stat = get_diff_stat(project_root, merge_branch, target)
+
+    render_full(f"Merging loop branch: {merge_branch}\n\n{diff_stat}", title="Merge")
+
+    options = [f"Merge {merge_branch} into {target}", "Cancel"]
+    choice = prompt_user_choice("Proceed with merge?", options)
+    if choice == 1:
+        render_full("Merge cancelled.", title="Cancelled")
+        return 0
+
+    success = controller.merge_existing(merge_branch)
+    if success:
+        display_success(f"Successfully merged {merge_branch} into {target}")
+        return 0
     else:
+        display_error("Merge failed (conflict?). Resolve manually and retry.")
+        return 1
+
+
+def _handle_loop_finish(controller, interrupted: bool) -> int:
+    """Handle post-loop merge/discard/defer decisions."""
+    from ..engine.worktree import delete_branch
+
+    finish_state = controller.finish(interrupted=interrupted)
+
+    if not finish_state["loop_branch"] or not finish_state["original_branch"]:
         render_full("Loop mode ended.", title="Done")
+        return 0
+
+    loop_branch = finish_state["loop_branch"]
+    original_branch = finish_state["original_branch"]
+
+    if interrupted:
+        render_full(
+            f"Loop interrupted. Branch preserved: {loop_branch}\n\n"
+            f"To merge later:\n"
+            f"  se3 run --loop --merge {loop_branch}\n\n"
+            f"To discard:\n"
+            f"  git branch -D {loop_branch}",
+            title="Interrupted"
+        )
+        return 0
+
+    if finish_state["has_commits"]:
+        options = [
+            f"Merge {loop_branch} into {original_branch} now",
+            "Merge later (keep branch)",
+            "Discard (delete branch)",
+        ]
+        choice = prompt_user_choice(
+            f"Loop complete. What to do with branch {loop_branch}?",
+            options,
+        )
+
+        if choice == 0:
+            success = controller.merge()
+            if success:
+                display_success(f"Merged {loop_branch} into {original_branch}")
+            else:
+                display_error(
+                    f"Merge conflict. Branch preserved: {loop_branch}\n"
+                    f"Resolve conflicts and merge manually."
+                )
+        elif choice == 1:
+            render_full(
+                f"Branch preserved: {loop_branch}\n\n"
+                f"To merge later:\n"
+                f"  se3 run --loop --merge {loop_branch}",
+                title="Deferred"
+            )
+        else:
+            controller.discard()
+            display_success("Loop branch discarded.")
+    else:
+        controller.discard()
+        render_full("Loop ended with no changes. Branch cleaned up.", title="Done")
 
     return 0
-
-
-def find_next_task(project_root: Path) -> Optional[str]:
-    """Find the next task from backlog or roadmap.
-
-    Args:
-        project_root: Project root directory
-
-    Returns:
-        Task description or None if no tasks found
-    """
-    # Check for backlog files
-    backlog_dir = project_root / "specs" / "_backlog"
-    if not backlog_dir.exists():
-        backlog_dir = project_root / "openspec" / "backlog"
-    if backlog_dir.exists():
-        for backlog_file in sorted(backlog_dir.glob("*.md")):
-            try:
-                content = backlog_file.read_text()
-                # Simple parsing: look for unchecked items
-                for line in content.split("\n"):
-                    line = line.strip()
-                    if line.startswith("- [ ]") or line.startswith("* [ ]"):
-                        # Extract task description
-                        task = line[5:].strip()
-                        if task and len(task) > 5:
-                            return f"[{backlog_file.stem}] {task}"
-            except IOError:
-                continue
-
-    # Check for roadmap.md
-    roadmap_file = project_root / "roadmap.md"
-    if roadmap_file.exists():
-        try:
-            content = roadmap_file.read_text()
-            # Look for current phase unchecked items
-            in_current_phase = False
-            for line in content.split("\n"):
-                if "Phase 1" in line or "Current" in line.lower():
-                    in_current_phase = True
-                elif line.startswith("## Phase") and in_current_phase:
-                    in_current_phase = False
-
-                if in_current_phase and (line.strip().startswith("- [ ]") or line.strip().startswith("* [ ]")):
-                    task = line.strip()[5:].strip()
-                    if task and len(task) > 5:
-                        return f"[roadmap] {task}"
-        except IOError:
-            pass
-
-    # Check for TODO comments in code
-    render_full("Scanning for TODOs in codebase...", title="Search")
-    try:
-        result = subprocess.run(
-            ["git", "grep", "-n", "TODO", "--", "*.py", "*.md"],
-            cwd=project_root,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            lines = result.stdout.strip().split("\n")
-            if lines:
-                first_todo = lines[0].split(":", 2)
-                if len(first_todo) >= 3:
-                    return f"[TODO] {first_todo[2].strip()}"
-    except Exception:
-        pass
-
-    return None
 
 
 ## CLI entry point is in cli.py (@app.command("run"))

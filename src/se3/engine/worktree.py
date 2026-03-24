@@ -10,6 +10,7 @@ import logging
 import subprocess
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -146,6 +147,9 @@ def remove_worktree(project_root: Path, worktree_path: Path) -> None:
 def merge_loop_branch(project_root: Path, loop_branch: str, target_branch: str) -> bool:
     """Merge a loop branch into the target branch.
 
+    On conflict: captures conflicting file list, displays with Rich formatting,
+    aborts the merge to leave repo clean, and returns False.
+
     Args:
         project_root: Project root directory
         loop_branch: Name of the loop branch to merge
@@ -169,6 +173,9 @@ def merge_loop_branch(project_root: Path, loop_branch: str, target_branch: str) 
     if result.returncode != 0:
         if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
             logger.error("Merge conflict merging %s into %s", loop_branch, target_branch)
+            # Capture conflicting files before aborting
+            conflict_files = get_conflicting_files(project_root)
+            _display_merge_conflict(loop_branch, target_branch, conflict_files)
             # Abort the merge to leave repo in clean state
             _run_git(project_root, "merge", "--abort", check=False)
             return False
@@ -179,6 +186,47 @@ def merge_loop_branch(project_root: Path, loop_branch: str, target_branch: str) 
 
     logger.info("Successfully merged %s into %s", loop_branch, target_branch)
     return True
+
+
+def _display_merge_conflict(loop_branch: str, target_branch: str, conflict_files: list[str]) -> None:
+    """Display merge conflict information with Rich formatting."""
+    try:
+        from rich.console import Console
+        from rich.panel import Panel
+        from rich.text import Text
+
+        console = Console()
+
+        lines = Text()
+        lines.append(f"Cannot merge ", style="bold red")
+        lines.append(f"{loop_branch}", style="bold cyan")
+        lines.append(f" into ", style="bold red")
+        lines.append(f"{target_branch}", style="bold cyan")
+        lines.append(f"\n\n", style="")
+
+        if conflict_files:
+            lines.append(f"Conflicting files ({len(conflict_files)}):\n", style="bold yellow")
+            for f in conflict_files:
+                lines.append(f"  • {f}\n", style="red")
+        else:
+            lines.append("Could not determine conflicting files.\n", style="dim")
+
+        lines.append(f"\nTo resolve manually:\n", style="bold")
+        lines.append(f"  git merge {loop_branch}\n", style="dim")
+        lines.append(f"  # resolve conflicts\n", style="dim")
+        lines.append(f"  git add . && git commit\n", style="dim")
+
+        console.print(Panel(lines, title="Merge Conflict", border_style="red"))
+    except ImportError:
+        # Fallback without Rich
+        print(f"\n--- Merge Conflict ---")
+        print(f"Cannot merge {loop_branch} into {target_branch}")
+        if conflict_files:
+            print(f"\nConflicting files ({len(conflict_files)}):")
+            for f in conflict_files:
+                print(f"  • {f}")
+        print(f"\nTo resolve: git merge {loop_branch}")
+        print(f"---\n")
 
 
 def delete_branch(project_root: Path, branch: str) -> None:
@@ -236,3 +284,143 @@ def has_new_commits(project_root: Path, branch: str, base_branch: str) -> bool:
         return False
     count = int(result.stdout.strip())
     return count > 0
+
+
+def exists_for_branch(project_root: Path, branch: str) -> bool:
+    """Check if a worktree already exists for the given branch.
+
+    Args:
+        project_root: Project root directory
+        branch: Branch name to check
+
+    Returns:
+        True if a worktree exists for this branch
+    """
+    result = _run_git(project_root, "worktree", "list", "--porcelain", check=False)
+    if result.returncode != 0:
+        return False
+
+    # Parse porcelain output: each worktree block has "branch refs/heads/<name>"
+    for line in result.stdout.splitlines():
+        if line.startswith("branch "):
+            wt_branch = line.split("refs/heads/", 1)[-1] if "refs/heads/" in line else ""
+            if wt_branch == branch:
+                return True
+    return False
+
+
+def get_conflicting_files(project_root: Path) -> list[str]:
+    """Get list of files with merge conflicts.
+
+    Args:
+        project_root: Project root directory
+
+    Returns:
+        List of conflicting file paths
+    """
+    result = _run_git(
+        project_root, "diff", "--name-only", "--diff-filter=U",
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    return [f.strip() for f in result.stdout.strip().splitlines() if f.strip()]
+
+
+def list_loop_branches(project_root: Path) -> list[dict[str, any]]:
+    """List existing unmerged loop branches with commit counts.
+
+    Args:
+        project_root: Project root directory
+
+    Returns:
+        List of dicts with 'branch', 'commit_count', and 'base_branch' keys
+    """
+    result = _run_git(
+        project_root, "branch", "--list", "se3-loop/*",
+        check=False,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+
+    branches = []
+    current_branch = get_current_branch(project_root)
+
+    for line in result.stdout.strip().splitlines():
+        branch_name = line.strip().lstrip("* ")
+        if not branch_name:
+            continue
+
+        # Count commits ahead of current branch
+        count_result = _run_git(
+            project_root, "rev-list", "--count",
+            f"{current_branch}..{branch_name}",
+            check=False,
+        )
+        commit_count = 0
+        if count_result.returncode == 0:
+            commit_count = int(count_result.stdout.strip())
+
+        branches.append({
+            "branch": branch_name,
+            "commit_count": commit_count,
+            "base_branch": current_branch,
+        })
+
+    return branches
+
+
+def get_diff_stat(project_root: Path, branch: str, base_branch: str) -> str:
+    """Get diff stat summary between two branches.
+
+    Args:
+        project_root: Project root directory
+        branch: Branch to compare
+        base_branch: Base branch
+
+    Returns:
+        Diff stat string
+    """
+    result = _run_git(
+        project_root, "diff", "--stat", f"{base_branch}..{branch}",
+        check=False,
+    )
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+class WorktreeContext:
+    """Context manager for exception-safe worktree lifecycle.
+
+    On enter: validates no existing worktree for the branch, then creates one.
+    On exit (including exceptions): removes the worktree but preserves the branch
+    for recovery.
+
+    Usage:
+        with WorktreeContext(project_root, branch) as worktree_path:
+            # work in worktree_path
+    """
+
+    def __init__(self, project_root: Path, branch: str) -> None:
+        self.project_root = project_root
+        self.branch = branch
+        self.worktree_path: Optional[Path] = None
+
+    def __enter__(self) -> Path:
+        if exists_for_branch(self.project_root, self.branch):
+            raise RuntimeError(
+                f"Worktree already exists for branch {self.branch}. "
+                f"Remove it first or use a different branch."
+            )
+        self.worktree_path = create_worktree(self.project_root, self.branch)
+        return self.worktree_path
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if self.worktree_path is not None:
+            remove_worktree(self.project_root, self.worktree_path)
+            logger.info(
+                "WorktreeContext: cleaned up worktree for %s (exception: %s)",
+                self.branch,
+                exc_type is not None,
+            )
