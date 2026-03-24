@@ -50,6 +50,22 @@ se3 run --discover "我想做一个用户管理功能"
 - **THEN** 流程引擎在完成一个任务后自动寻找下一个任务
 - **AND** 支持从 backlog、roadmap、TODO 中发现任务
 
+#### Scenario: 循环模式分支隔离
+- **WHEN** 用户执行 `se3 run --loop`（不带 `--no-worktree`）
+- **THEN** 创建 `se3-loop/{timestamp}` 分支从当前 HEAD
+- **AND** 在 `se3/worktrees/{branch_safe_name}` 创建 git worktree
+- **AND** 所有任务在 worktree 中执行（文件读写、commit 都在 worktree 内）
+- **AND** 循环结束后提示用户选择：merge / later / discard
+
+#### Scenario: 循环模式无隔离
+- **WHEN** 用户执行 `se3 run --loop --no-worktree`
+- **THEN** 所有任务直接在当前分支上执行（无分支隔离）
+
+#### Scenario: 延迟合并
+- **WHEN** 用户执行 `se3 run --loop --merge se3-loop/20260324-120000`
+- **THEN** 将指定的 loop 分支合并到当前分支
+- **AND** 如果有冲突则报告错误，用户手动解决
+
 ### Requirement: Discovery Workflow
 
 `discovery` 步骤 SHALL 实现多轮对话机制，帮助用户在需求不明确时探索并澄清需求。
@@ -586,6 +602,8 @@ Options:
   --change, -c NAME 关联到指定 change
   --discover, -d    Discovery 模式（需求探索）
   --flow-id ID      恢复指定流程 ID
+  --no-worktree     禁用循环模式的分支隔离
+  --merge BRANCH    合并已有的 loop 分支（如 se3-loop/20260324-120000）
 ```
 
 ### se3 status

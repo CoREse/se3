@@ -830,6 +830,8 @@ def run_loop_mode(
     task_type: str = "pending",
     max_iterations: Optional[int] = None,
     prompt_history: Any = None,
+    no_worktree: bool = False,
+    merge_branch: Optional[str] = None,
 ) -> int:
     """Run in loop mode - continuously find and execute tasks.
 
@@ -838,16 +840,78 @@ def run_loop_mode(
         initial_task: Optional initial task to start with
         task_type: Type of tasks to look for (default 'pending' for auto-detect)
         max_iterations: Maximum number of iterations (None for unlimited)
+        prompt_history: Prompt input history
+        no_worktree: If True, disable branch isolation (run on current branch)
+        merge_branch: If provided, merge this loop branch and exit
 
     Returns:
         Exit code
     """
-    render_full(
-        "SE3 Loop Mode\n\n"
-        "Loop mode will automatically find and execute tasks.\n"
-        "Each task runs in an isolated branch.",
-        title="Loop Mode"
+    from ..engine.worktree import (
+        cleanup_loop,
+        create_loop_branch,
+        create_worktree,
+        get_current_branch,
+        has_new_commits,
+        merge_loop_branch,
+        remove_worktree,
     )
+
+    # --merge: merge an existing loop branch and exit
+    if merge_branch:
+        render_full(f"Merging loop branch: {merge_branch}", title="Merge")
+        target = get_current_branch(project_root)
+        success = merge_loop_branch(project_root, merge_branch, target)
+        if success:
+            display_success(f"Successfully merged {merge_branch} into {target}")
+            return 0
+        else:
+            display_error(f"Merge failed (conflict?). Resolve manually and retry.")
+            return 1
+
+    use_worktree = not no_worktree
+    loop_branch_name: Optional[str] = None
+    original_branch: Optional[str] = None
+    worktree_path: Optional[Path] = None
+
+    # Set up worktree-based isolation
+    if use_worktree:
+        try:
+            original_branch = get_current_branch(project_root)
+            loop_branch_name, original_branch = create_loop_branch(project_root)
+            worktree_path = create_worktree(project_root, loop_branch_name)
+            effective_root = worktree_path
+
+            render_full(
+                "SE3 Loop Mode (branch isolated)\n\n"
+                f"Branch: {loop_branch_name}\n"
+                f"Worktree: {worktree_path}\n"
+                f"Original: {original_branch}\n\n"
+                "Tasks execute in the worktree. Changes merge back when done.",
+                title="Loop Mode"
+            )
+        except Exception as e:
+            display_error(f"Failed to set up worktree isolation: {e}")
+            display_error("Falling back to non-isolated mode (--no-worktree)")
+            use_worktree = False
+            loop_branch_name = None
+            worktree_path = None
+            effective_root = project_root
+
+            render_full(
+                "SE3 Loop Mode\n\n"
+                "Loop mode will automatically find and execute tasks.\n"
+                "WARNING: Running without branch isolation.",
+                title="Loop Mode"
+            )
+    else:
+        effective_root = project_root
+        render_full(
+            "SE3 Loop Mode (no isolation)\n\n"
+            "Loop mode will automatically find and execute tasks.\n"
+            "Tasks run directly on the current branch.",
+            title="Loop Mode"
+        )
 
     current_task = initial_task
 
@@ -858,49 +922,113 @@ def run_loop_mode(
         # Unlimited iterations - use a large number and check for overflow
         iteration_range = range(1, 2**31)
 
-    for iteration in iteration_range:
-        render_full(f"Loop iteration #{iteration}", title="Iteration")
+    interrupted = False
 
-        if not current_task:
-            # Find next task from backlog/roadmap
-            current_task = find_next_task(project_root)
+    try:
+        for iteration in iteration_range:
+            render_full(f"Loop iteration #{iteration}", title="Iteration")
 
             if not current_task:
-                render_full("No more tasks found. Loop mode complete.", title="Done")
-                break
+                # Find next task from ORIGINAL project root (not worktree)
+                current_task = find_next_task(project_root)
 
-        render_full(f"Task: {current_task}", title="Current Task")
+                if not current_task:
+                    render_full("No more tasks found. Loop mode complete.", title="Done")
+                    break
 
-        # Run the flow for this task
-        exit_code = run_flow(
-            project_root=project_root,
-            task_description=current_task,
-            task_type=task_type,
-            is_loop_mode=True,
-            prompt_history=prompt_history,
-        )
+            render_full(f"Task: {current_task}", title="Current Task")
 
-        if exit_code != 0:
-            display_error(f"Task failed with exit code {exit_code}")
-            options = ["Continue to next task", "Exit loop mode"]
-            choice = prompt_user_choice("What would you like to do?", options)
-
-            if choice == 1:
-                break
-
-        # Clear for next iteration
-        current_task = None
-
-        render_full("Task complete. Looking for next task...", title="Progress")
-
-        # Check if max iterations reached
-        if max_iterations is not None and iteration >= max_iterations:
-            display_success(
-                f"Loop mode completed: Reached maximum iterations ({max_iterations})"
+            # Run the flow — in worktree if isolated, else original project root
+            exit_code = run_flow(
+                project_root=effective_root,
+                task_description=current_task,
+                task_type=task_type,
+                is_loop_mode=True,
+                prompt_history=prompt_history,
             )
-            break
 
-    render_full("Loop mode ended.", title="Done")
+            if exit_code != 0:
+                display_error(f"Task failed with exit code {exit_code}")
+                options = ["Continue to next task", "Exit loop mode"]
+                choice = prompt_user_choice("What would you like to do?", options)
+
+                if choice == 1:
+                    break
+
+            # Clear for next iteration
+            current_task = None
+
+            render_full("Task complete. Looking for next task...", title="Progress")
+
+            # Check if max iterations reached
+            if max_iterations is not None and iteration >= max_iterations:
+                display_success(
+                    f"Loop mode completed: Reached maximum iterations ({max_iterations})"
+                )
+                break
+
+    except KeyboardInterrupt:
+        interrupted = True
+        render_full("Loop interrupted by user.", title="Interrupted")
+
+    # Post-loop: handle worktree merge/cleanup
+    if use_worktree and loop_branch_name and worktree_path and original_branch:
+        if interrupted:
+            # On interrupt: preserve branch, clean up worktree
+            remove_worktree(project_root, worktree_path)
+            render_full(
+                f"Loop interrupted. Branch preserved: {loop_branch_name}\n\n"
+                f"To merge later:\n"
+                f"  se3 run --loop --merge {loop_branch_name}\n\n"
+                f"To discard:\n"
+                f"  git branch -D {loop_branch_name}",
+                title="Interrupted"
+            )
+        elif has_new_commits(project_root, loop_branch_name, original_branch):
+            # Prompt user for merge decision
+            options = [
+                f"Merge {loop_branch_name} into {original_branch} now",
+                "Merge later (keep branch, remove worktree)",
+                "Discard (delete branch and worktree)",
+            ]
+            choice = prompt_user_choice(
+                f"Loop complete. What to do with branch {loop_branch_name}?",
+                options,
+            )
+
+            if choice == 0:
+                # Merge now
+                remove_worktree(project_root, worktree_path)
+                success = merge_loop_branch(project_root, loop_branch_name, original_branch)
+                if success:
+                    display_success(f"Merged {loop_branch_name} into {original_branch}")
+                    from ..engine.worktree import delete_branch
+                    delete_branch(project_root, loop_branch_name)
+                else:
+                    display_error(
+                        f"Merge conflict. Branch preserved: {loop_branch_name}\n"
+                        f"Resolve conflicts and merge manually."
+                    )
+            elif choice == 1:
+                # Merge later
+                remove_worktree(project_root, worktree_path)
+                render_full(
+                    f"Branch preserved: {loop_branch_name}\n\n"
+                    f"To merge later:\n"
+                    f"  se3 run --loop --merge {loop_branch_name}",
+                    title="Deferred"
+                )
+            else:
+                # Discard
+                cleanup_loop(project_root, loop_branch_name, worktree_path, delete_branch_flag=True)
+                display_success("Loop branch discarded.")
+        else:
+            # No new commits — just clean up
+            cleanup_loop(project_root, loop_branch_name, worktree_path, delete_branch_flag=True)
+            render_full("Loop ended with no changes. Branch cleaned up.", title="Done")
+    else:
+        render_full("Loop mode ended.", title="Done")
+
     return 0
 
 

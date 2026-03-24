@@ -144,6 +144,8 @@ def run_cmd(
     change: Optional[str] = typer.Option(None, "--change", "-c", help="Change name for this task"),
     flow_id: Optional[str] = typer.Option(None, "--flow-id", help="Specific flow ID to resume"),
     discover: bool = typer.Option(False, "--discover", "-d", help="Discovery mode - explore requirements with user before analyzing"),
+    no_worktree: bool = typer.Option(False, "--no-worktree", help="Disable branch isolation in loop mode"),
+    merge: Optional[str] = typer.Option(None, "--merge", help="Merge an existing loop branch (e.g. se3-loop/20260324-120000)"),
 ):
     """SE3 Run — Unified entry point for the flow engine.
 
@@ -172,13 +174,15 @@ def run_cmd(
     if discover:
         type = "discovery"
 
-    if loop:
+    if loop or merge:
         exit_code = run_loop_mode(
             project_root=project_root,
             initial_task=task,
             task_type=type,
             max_iterations=max_iterations,
             prompt_history=prompt_history,
+            no_worktree=no_worktree,
+            merge_branch=merge,
         )
         raise typer.Exit(exit_code)
 

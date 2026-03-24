@@ -195,6 +195,8 @@ The system SHALL support continuous task execution via `se3 run --loop`.
 **Loop Options:**
 - `--max-iterations N`: Limit iterations
 - `--type TYPE`: Filter task types
+- `--no-worktree`: Disable branch isolation (run on current branch)
+- `--merge BRANCH`: Merge an existing loop branch
 
 #### Scenario: Loop execution
 - **WHEN** `se3 run --loop` is executed
@@ -203,3 +205,48 @@ The system SHALL support continuous task execution via `se3 run --loop`.
 #### Scenario: Loop with task filter
 - **WHEN** `se3 run --loop --type=bugfix` is executed
 - **THEN** only bugfix tasks are executed
+
+### Requirement: Loop Mode Branch Isolation
+
+Loop mode SHALL use git worktree-based branch isolation by default.
+
+**Worktree Lifecycle:**
+1. Before loop: create `se3-loop/{timestamp}` branch from HEAD, create worktree at `se3/worktrees/{branch_safe_name}`
+2. During loop: all task flows execute in the worktree (worktree path passed as `project_root` to `run_flow()`)
+3. Task discovery (`find_next_task()`) uses the original project root
+4. After loop: prompt user — merge now / merge later / discard
+
+**FlowInstance Fields:**
+- `loop_branch`: The `se3-loop/{timestamp}` branch name
+- `loop_worktree_path`: Path to the active worktree directory
+- `loop_original_branch`: Branch to merge back to
+
+**Interrupt Behavior:**
+- On Ctrl-C during loop: remove worktree, preserve branch
+- Print instructions for deferred merge: `se3 run --loop --merge {branch}`
+- User can discard with `git branch -D {branch}`
+
+**Deferred Merge:**
+- `se3 run --loop --merge se3-loop/{timestamp}` merges the specified branch into current branch
+- On merge conflict: abort merge, report error, user resolves manually
+
+**Resume Semantics:**
+- On `se3 run --resume` with a loop flow, detect stale worktrees
+- If worktree path exists but is stale, clean up before resuming
+
+#### Scenario: Worktree isolation
+- **WHEN** `se3 run --loop` is executed without `--no-worktree`
+- **THEN** a `se3-loop/{timestamp}` branch is created
+- **AND** a git worktree is set up at `se3/worktrees/`
+- **AND** tasks execute in the isolated worktree
+
+#### Scenario: Loop interrupt cleanup
+- **WHEN** user presses Ctrl-C during loop mode
+- **THEN** worktree is removed
+- **AND** loop branch is preserved for later merge
+- **AND** instructions are printed for deferred merge
+
+#### Scenario: Deferred merge
+- **WHEN** `se3 run --loop --merge se3-loop/20260324-120000` is executed
+- **THEN** the specified branch is merged into current branch
+- **AND** success or conflict is reported
