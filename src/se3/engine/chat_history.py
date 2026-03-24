@@ -298,25 +298,34 @@ def extract_conversation_from_ndjson(raw_ndjson: Union[str, list[dict]]) -> List
     if not raw_ndjson:
         return []
 
-    # Handle list[dict] input (new format)
+    # Handle list[dict] input (new format) vs string input
     if isinstance(raw_ndjson, list):
-        # Process list of parsed JSON objects directly
-        json_lines = [json.dumps(item) for item in raw_ndjson]
+        parsed_items = raw_ndjson
     else:
-        # Original string format
+        # Original string format - parse each line
+        parsed_items = None
         json_lines = raw_ndjson.strip().split("\n")
 
     messages: List[ConversationMessage] = []
     pending_tool_calls: List[dict] = []
     pending_tool_results: List[dict] = []
 
-    for line in json_lines:
-        line = line.strip()
-        if not line or line.startswith("==="):
-            continue
+    # Iterate over either pre-parsed items or string lines
+    items = parsed_items if parsed_items is not None else json_lines
 
+    for item in items:
         try:
-            data = json.loads(line)
+            if isinstance(item, dict):
+                data = item
+            else:
+                line = item.strip()
+                if not line or line.startswith("==="):
+                    continue
+                data = json.loads(line)
+
+            if not isinstance(data, dict):
+                continue
+
             msg_type = data.get("type", "")
 
             if msg_type == "assistant":
@@ -397,7 +406,8 @@ def extract_conversation_from_ndjson(raw_ndjson: Union[str, list[dict]]) -> List
                         tool_results=current_tool_results
                     ))
 
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError, AttributeError, KeyError) as e:
+            logger.debug(f"Skipping malformed NDJSON entry: {e}")
             continue
 
     # Add any remaining tool results as a user message
@@ -552,7 +562,14 @@ def format_history_for_retry(
             elif msg.role == "assistant":
                 # Extract full conversation from raw_json
                 if msg.raw_json:
-                    conversation = extract_conversation_from_ndjson(msg.raw_json)
+                    try:
+                        conversation = extract_conversation_from_ndjson(msg.raw_json)
+                    except Exception as e:
+                        logger.warning(
+                            f"Failed to parse raw_json for attempt {attempt_num} "
+                            f"(falling back to simplified content): {e}"
+                        )
+                        conversation = None
                     if conversation:
                         # In 'continue' mode, check if conversation has tool calls
                         has_tool_calls = mode == "continue" and any(

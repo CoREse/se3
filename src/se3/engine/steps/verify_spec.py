@@ -131,7 +131,8 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     try:
         # Call LLM for verification (use EXTRACT mode to avoid retry on format issues)
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
-        caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value)
+        retry_count = step.inputs.get("retry_count", 0)
+        caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
         response = caller.call(
             prompt=prompt,
             json_mode="extract",

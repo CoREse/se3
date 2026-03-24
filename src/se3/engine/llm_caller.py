@@ -578,7 +578,7 @@ class LLMCaller:
                 mode=self.retry_mode,
             )
         except Exception as e:
-            logger.debug(f"Failed to get retry context: {e}")
+            logger.warning(f"Failed to get retry context (falling back to original prompt): {e}")
             return None
 
     def _call_with_retry(

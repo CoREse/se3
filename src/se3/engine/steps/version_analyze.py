@@ -165,11 +165,13 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Call LLM for version analysis using EXTRACT mode
         # This mode requests JSON but uses LLM extraction on parse failure (no retry)
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+        retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(
             project_root,
             flow_id=flow.flow_id,
             step_id=step.step_id,
-            step_type=step.step_type.value if isinstance(step.step_type, str) else step.step_type.value
+            step_type=step.step_type.value if isinstance(step.step_type, str) else step.step_type.value,
+            external_attempt=retry_count,
         )
         response = caller.call(
             prompt=prompt,

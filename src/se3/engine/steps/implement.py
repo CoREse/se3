@@ -150,12 +150,15 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             spec_summary=spec_summary,
         )
 
+    retry_count = step.inputs.get("retry_count", 0)
+
     try:
         caller = LLMCaller(
             project_root,
             flow_id=flow.flow_id,
             step_id=step.step_id,
             step_type=step.step_type.value,
+            external_attempt=retry_count,
         )
         response = caller.call(
             prompt=prompt,

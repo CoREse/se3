@@ -105,7 +105,8 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.info(f"LLM-based spec selection for: {flow.task_description[:60]}...")
 
         # Call LLM for spec selection
-        caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value)
+        retry_count = step.inputs.get("retry_count", 0)
+        caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
         response = caller.call(prompt=prompt, require_json=True)
 
         # Parse LLM response

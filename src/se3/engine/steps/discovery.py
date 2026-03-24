@@ -431,11 +431,13 @@ def _run_discovery_round(
     logger.info(f"Running discovery round {round_number}")
 
     # Call LLM
+    retry_count = step.inputs.get("retry_count", 0)
     caller = LLMCaller(
         project_root,
         flow_id=flow.flow_id,
         step_id=step.step_id,
         step_type=step.step_type.value,
+        external_attempt=retry_count,
     )
     response = caller.call(prompt=prompt, require_json=True)
 
