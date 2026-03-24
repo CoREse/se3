@@ -60,6 +60,7 @@ def _init_display() -> None:
 def _read_multiline_input(
     prompt_title: str = "Input",
     prompt_message: str = "Enter task description (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+    history: Optional[any] = None,
 ) -> Optional[str]:
     """Read multiline input from stdin with proper Unicode support.
 
@@ -105,11 +106,12 @@ def _read_multiline_input(
                 # Empty buffer — treat as cancel
                 event.app.exit(exception=EOFError)
 
-        # Create a prompt session with multiline support and custom key bindings
+        # Create a prompt session with multiline support, custom key bindings, and history
         session = PromptSession(
             multiline=True,
             message="> ",
             key_bindings=kb,
+            history=history,
         )
 
         with patch_stdout():
@@ -154,8 +156,12 @@ def run_cmd(
         se3 run --discover "I want to build something related to authentication"
     """
     from .commands.run import run_flow, run_loop_mode, get_project_root, handle_resume_interactive, SE3_DIR
+    from .engine.prompt_history import get_prompt_history
 
     project_root = get_project_root()
+
+    # Create shared prompt history for this run session
+    prompt_history = get_prompt_history(project_root)
 
     # Ensure se3 directory exists
     se3_dir = project_root / SE3_DIR
@@ -173,6 +179,7 @@ def run_cmd(
             initial_task=task,
             task_type=type,
             max_iterations=max_iterations,
+            prompt_history=prompt_history,
         )
         raise typer.Exit(exit_code)
 
@@ -186,12 +193,13 @@ def run_cmd(
             exit_code = run_flow(
                 project_root=project_root,
                 flow_id=target_flow_id,
+                prompt_history=prompt_history,
             )
             raise typer.Exit(exit_code)
         else:
             if not task:
                 # No task provided, enter interactive multiline input mode
-                task = _read_multiline_input()
+                task = _read_multiline_input(history=prompt_history)
                 if not task:
                     render_full(
                         "Error: Task description required for new flow\n\n"
@@ -205,7 +213,7 @@ def run_cmd(
     # New flow mode
     if not task:
         # Enter interactive multiline input mode
-        task = _read_multiline_input()
+        task = _read_multiline_input(history=prompt_history)
         if not task:
             render_full(
                 "Error: Task description required (or use --resume)\n\n"
@@ -222,6 +230,7 @@ def run_cmd(
         task_type=type,
         change_name=change,
         is_loop_mode=False,
+        prompt_history=prompt_history,
     )
     raise typer.Exit(exit_code)
 

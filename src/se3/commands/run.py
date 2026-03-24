@@ -165,6 +165,7 @@ def _handle_confirm_pause(
     current_step: Any,
     persistence: Any,
     project_root: Path,
+    prompt_history: Any = None,
 ) -> Optional[bool]:
     """Handle interactive confirmation when CONFIRM step is paused.
 
@@ -202,6 +203,7 @@ def _handle_confirm_pause(
         feedback = _read_multiline_input(
             prompt_title="Feedback",
             prompt_message="Describe the changes you'd like (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+            history=prompt_history,
         )
         if feedback is None:
             persistence.save_flow(flow)
@@ -333,7 +335,7 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
     return None
 
 
-def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: PersistenceManager) -> Optional[StepStatus]:
+def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: PersistenceManager, prompt_history: Any = None) -> Optional[StepStatus]:
     """Handle KeyboardInterrupt during step execution.
 
     Returns:
@@ -342,6 +344,7 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
     user_input = _read_multiline_input(
         prompt_title="Additional Instruction",
         prompt_message="Enter additional instruction (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel, empty to retry as-is):",
+        history=prompt_history,
     )
     if user_input is None:
         # Cancelled (Ctrl+C): save and exit
@@ -364,7 +367,7 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
     return StepStatus.PENDING
 
 
-def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: PersistenceManager) -> Optional[str]:
+def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: PersistenceManager, prompt_history: Any = None) -> Optional[str]:
     """Handle discovery step pause - get user response.
 
     Args:
@@ -384,6 +387,7 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
     user_input = _read_multiline_input(
         prompt_title="Discovery Response",
         prompt_message="Enter your response (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+        history=prompt_history,
     )
 
     if user_input is None:
@@ -402,7 +406,7 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
             return "__RESUME__"
         # Otherwise ask again
         render_full("Please provide a response or press Ctrl+C to exit.", title="Input Required")
-        return _handle_discovery_pause(flow, current_step, persistence)
+        return _handle_discovery_pause(flow, current_step, persistence, prompt_history)
 
     # Parse the response to check if user is confirming
     from ..engine.steps.discovery import parse_user_response
@@ -550,6 +554,7 @@ def run_flow(
     task_type: str = "pending",
     change_name: Optional[str] = None,
     is_loop_mode: bool = False,
+    prompt_history: Any = None,
 ) -> int:
     """Run a flow to completion.
 
@@ -576,7 +581,7 @@ def run_flow(
     try:
         return _run_flow_impl(
             project_root, flow_id, task_description, task_type, change_name,
-            is_loop_mode, persistence, state_machine
+            is_loop_mode, persistence, state_machine, prompt_history
         )
     finally:
         # Restore original signal handler
@@ -592,6 +597,7 @@ def _run_flow_impl(
     is_loop_mode: bool,
     persistence: PersistenceManager,
     state_machine: StateMachine,
+    prompt_history: Any = None,
 ) -> int:
     """Internal implementation of flow execution."""
     # Register all step handlers
@@ -698,7 +704,7 @@ def _run_flow_impl(
                 try:
                     result = state_machine.run_step(flow, current_step)
                 except KeyboardInterrupt:
-                    result = _handle_step_interrupt(flow, current_step, persistence)
+                    result = _handle_step_interrupt(flow, current_step, persistence, prompt_history)
                     if result is None:
                         return 130
                     continue
@@ -706,7 +712,7 @@ def _run_flow_impl(
             try:
                 result = state_machine.run_step(flow, current_step)
             except KeyboardInterrupt:
-                result = _handle_step_interrupt(flow, current_step, persistence)
+                result = _handle_step_interrupt(flow, current_step, persistence, prompt_history)
                 if result is None:
                     return 130
                 continue
@@ -717,7 +723,7 @@ def _run_flow_impl(
 
         # Handle CONFIRM step PAUSED state - prompt user for approval
         if current_step.step_type == StepType.CONFIRM and result == StepStatus.PAUSED:
-            confirm_result = _handle_confirm_pause(flow, current_step, persistence, project_root)
+            confirm_result = _handle_confirm_pause(flow, current_step, persistence, project_root, prompt_history)
             if confirm_result is None:
                 # User chose to exit
                 return 130
@@ -729,7 +735,7 @@ def _run_flow_impl(
         # Handle discovery step PAUSED state - need user input to continue
         if current_step.step_type == StepType.DISCOVERY and result == StepStatus.PAUSED:
             # Discovery is waiting for user response
-            user_response = _handle_discovery_pause(flow, current_step, persistence)
+            user_response = _handle_discovery_pause(flow, current_step, persistence, prompt_history)
 
             if user_response is None:
                 # User chose to exit
@@ -823,6 +829,7 @@ def run_loop_mode(
     initial_task: Optional[str] = None,
     task_type: str = "pending",
     max_iterations: Optional[int] = None,
+    prompt_history: Any = None,
 ) -> int:
     """Run in loop mode - continuously find and execute tasks.
 
@@ -870,6 +877,7 @@ def run_loop_mode(
             task_description=current_task,
             task_type=task_type,
             is_loop_mode=True,
+            prompt_history=prompt_history,
         )
 
         if exit_code != 0:
