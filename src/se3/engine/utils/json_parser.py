@@ -94,7 +94,27 @@ def _extract_and_parse_json(text: str, required_keys: Optional[list[str]] = None
             return data
     except json.JSONDecodeError:
         pass
-    
+
+    # Try repairing unescaped quotes inside string values
+    quote_repaired = _repair_unescaped_quotes(json_str)
+    if quote_repaired != json_str:
+        try:
+            data = json.loads(quote_repaired)
+            if _validate_keys(data, required_keys):
+                logger.debug("Successfully parsed JSON after unescaped quote repair")
+                return data
+        except json.JSONDecodeError:
+            pass
+        # Try combining both repairs
+        combined = _repair_json(quote_repaired)
+        try:
+            data = json.loads(combined)
+            if _validate_keys(data, required_keys):
+                logger.debug("Successfully parsed JSON after combined repair")
+                return data
+        except json.JSONDecodeError:
+            pass
+
     return None
 
 
@@ -206,6 +226,88 @@ def _extract_trailing_json_string(text: str) -> Optional[str]:
                 except json.JSONDecodeError:
                     return None
     return None
+
+
+def _count_unescaped_quotes(s: str) -> int:
+    """Count the number of unescaped double quotes in *s*."""
+    count = 0
+    i = 0
+    while i < len(s):
+        if s[i] == '\\':
+            i += 2
+            continue
+        if s[i] == '"':
+            count += 1
+        i += 1
+    return count
+
+
+def _repair_unescaped_quotes(json_str: str) -> str:
+    """Repair unescaped double quotes inside JSON string values.
+
+    LLMs sometimes produce JSON with unescaped ASCII double quotes inside
+    string values (e.g., Chinese-style quoting like 变为"继续").  This
+    function uses the error position reported by json.loads to iteratively
+    escape the offending quote and retry.
+
+    Args:
+        json_str: JSON string that may contain unescaped interior quotes.
+
+    Returns:
+        Repaired JSON string (may be unchanged if no repair was needed or
+        possible).
+    """
+    MAX_REPAIRS = 50  # safety limit
+    current = json_str
+    for _ in range(MAX_REPAIRS):
+        try:
+            json.loads(current)
+            return current  # valid now
+        except json.JSONDecodeError as e:
+            pos = e.pos
+            if pos is None or pos <= 0 or pos >= len(current):
+                return current
+
+            # Strategy 1: The error position is directly at an unescaped quote
+            quote_pos = None
+            if current[pos] == '"' and (pos == 0 or current[pos - 1] != '\\'):
+                quote_pos = pos
+            else:
+                # Strategy 2: "Expecting ',' delimiter" or similar — the parser
+                # saw a quote that prematurely closed a string, then hit an
+                # unexpected char.  Walk backwards to find the quote.
+                search_pos = pos - 1
+                while search_pos >= 0 and current[search_pos] in ' \t\r\n':
+                    search_pos -= 1
+                if search_pos >= 0 and current[search_pos] == '"' and \
+                   (search_pos == 0 or current[search_pos - 1] != '\\'):
+                    quote_pos = search_pos
+
+            if quote_pos is not None:
+                # Verify this quote is inside a string value by counting
+                # unescaped quotes before it — odd count means mid-string.
+                preceding = current[:quote_pos]
+                n_quotes = _count_unescaped_quotes(preceding)
+                if n_quotes % 2 == 1:
+                    # Inside a string — escape this quote
+                    current = current[:quote_pos] + '\\"' + current[quote_pos + 1:]
+                    continue
+
+                # Even count means this quote looks structural.  But if it
+                # is followed immediately by another quote (e.g., 继续""),
+                # the *previous* quote prematurely closed the string.
+                # Try escaping the quote one position earlier.
+                if quote_pos > 0 and current[quote_pos - 1] == '"' and \
+                   (quote_pos < 2 or current[quote_pos - 2] != '\\'):
+                    alt_pos = quote_pos - 1
+                    n_before_alt = _count_unescaped_quotes(current[:alt_pos])
+                    if n_before_alt % 2 == 1:
+                        current = current[:alt_pos] + '\\"' + current[alt_pos + 1:]
+                        continue
+
+            # Cannot repair at this position
+            return current
+    return current
 
 
 def _repair_json(json_str: str) -> str:
