@@ -995,6 +995,8 @@ class VersionBumper:
         self._backup_version: Optional[str] = None
         self._backup_path: Optional[Path] = None
         self._detector = VersionDetector()
+        self._use_script_mode: bool = False
+        self._script_runner: Optional[Any] = None
 
     def register_handler(self, handler: VersionFileHandler) -> None:
         """Register a custom version file handler.
@@ -1007,16 +1009,21 @@ class VersionBumper:
     def detect_version_file(self, project_root: Optional[Path] = None) -> Optional[Path]:
         """Auto-detect the version file in the project.
 
-        Checks for common version files in priority order.
+        Checks for version script first (priority), then common version files.
 
         Args:
             project_root: Root directory of the project (default: cwd)
 
         Returns:
-            Path to the version file, or None if not found
+            Path to the version file (or script), or None if not found
         """
         if project_root is None:
             project_root = Path.cwd()
+
+        # Check for version script first (highest priority)
+        script_path = self._find_and_init_script(project_root)
+        if script_path is not None:
+            return script_path
 
         # If explicit path is configured, use it
         if self.config.file_path:
@@ -1028,6 +1035,29 @@ class VersionBumper:
         # Use detector for auto-detection
         return self._detector.get_version_file_path(project_root)
 
+    def _find_and_init_script(self, project_root: Path) -> Optional[Path]:
+        """Find version script and initialize script mode if found.
+
+        Args:
+            project_root: Project root directory
+
+        Returns:
+            Script path if found, None otherwise
+        """
+        from .version_script_interface import find_version_script, VersionScriptRunner
+
+        # Get script_path from config if available (duck-typing for both config types)
+        config_script_path = getattr(self.config, 'script_path', None)
+        script_path = find_version_script(project_root, config_script_path)
+
+        if script_path is not None:
+            self._use_script_mode = True
+            self._script_runner = VersionScriptRunner(script_path, project_root)
+            logger.info(f"Using version script: {script_path}")
+            return script_path
+
+        return None
+
     def initialize_version_system(
         self,
         project_root: Optional[Path] = None,
@@ -1035,16 +1065,15 @@ class VersionBumper:
     ) -> Path:
         """Initialize a new version system for the project.
 
-        Detects the project type and creates an appropriate version file
-        with the initial version. This is useful when a project doesn't
-        have a version file yet.
+        When auto_generate_script is enabled, tries to generate a version script
+        via LLM first. Falls back to creating a version file directly.
 
         Args:
             project_root: Root directory of the project (default: cwd)
             initial_version: Initial version string (default: "0.1.0")
 
         Returns:
-            Path to the created version file
+            Path to the created version file or script
 
         Raises:
             FileExistsError: If a version file already exists
@@ -1065,6 +1094,28 @@ class VersionBumper:
                 f"Version file already exists: {existing_file}. "
                 "Cannot initialize version system."
             )
+
+        # Try to generate version script if auto_generate_script is enabled
+        auto_generate = getattr(self.config, 'auto_generate_script', True)
+        if auto_generate:
+            try:
+                from .version_script_interface import generate_version_script, VersionScriptRunner
+                config_script_path = getattr(self.config, 'script_path', None)
+                script_target = None
+                if config_script_path:
+                    script_target = Path(config_script_path)
+                    if not script_target.is_absolute():
+                        script_target = project_root / script_target
+
+                script_path = generate_version_script(project_root, script_target)
+                self._use_script_mode = True
+                self._script_runner = VersionScriptRunner(script_path, project_root)
+                logger.info(f"Generated version script: {script_path}")
+                return script_path
+            except Exception as e:
+                logger.warning(
+                    f"Failed to generate version script, falling back to file creation: {e}"
+                )
 
         # Detect project type from markers
         project_type = self._detector.detect_project_type_without_version_file(project_root)
@@ -1146,7 +1197,7 @@ class VersionBumper:
         raise ValueError(f"No handler available for file: {path}")
 
     def read_version(self, path: Optional[Path] = None) -> str:
-        """Read the current version from a file.
+        """Read the current version from a file or script.
 
         Args:
             path: Path to version file (None = auto-detect)
@@ -1158,6 +1209,11 @@ class VersionBumper:
             FileNotFoundError: If version file not found
             ValueError: If version cannot be read
         """
+        # Script mode: delegate to VersionScriptRunner
+        if self._use_script_mode and self._script_runner is not None:
+            version = self._script_runner.get_version()
+            return str(version)
+
         if path is None:
             path = self.detect_version_file()
             if path is None:
@@ -1229,7 +1285,7 @@ class VersionBumper:
         task_type: Optional[TaskType] = None,
         path: Optional[Path] = None,
     ) -> str:
-        """Bump the version in the specified file.
+        """Bump the version in the specified file or via script.
 
         Creates a backup before bumping to allow rollback on failure.
 
@@ -1255,6 +1311,17 @@ class VersionBumper:
                 raise ValueError("Either bump_type or task_type must be provided")
             bump_type = self.config.bump_rules.get(task_type, BumpType.PATCH)
 
+        # Script mode: delegate to VersionScriptRunner
+        if self._use_script_mode and self._script_runner is not None:
+            # Save backup for rollback
+            current_version = self._script_runner.get_version()
+            self._backup_version = str(current_version)
+            self._backup_path = self._script_runner.script_path
+
+            new_version = self._script_runner.bump_version(bump_type.value)
+            logger.info(f"Bumped version (script): {current_version} -> {new_version}")
+            return str(new_version)
+
         # Find version file
         if path is None:
             path = self.detect_version_file()
@@ -1263,16 +1330,16 @@ class VersionBumper:
 
         # Read current version and create backup
         handler = self._get_handler(path)
-        current_version = handler.read_version(path)
-        self._backup_version = current_version
+        current_version_str = handler.read_version(path)
+        self._backup_version = current_version_str
         self._backup_path = path
 
         # Calculate and write new version
-        new_version = self.bump_version_string(current_version, bump_type)
-        handler.write_version(path, new_version)
+        new_version_str = self.bump_version_string(current_version_str, bump_type)
+        handler.write_version(path, new_version_str)
 
-        logger.info(f"Bumped version: {current_version} -> {new_version}")
-        return new_version
+        logger.info(f"Bumped version: {current_version_str} -> {new_version_str}")
+        return new_version_str
 
     def save_original_version(self, path: Optional[Path] = None) -> str:
         """Save the current version for potential rollback.
@@ -1301,6 +1368,7 @@ class VersionBumper:
         """Rollback the last version bump operation.
 
         Restores the original version if a backup exists.
+        In script mode, uses the script's 'set' command.
         Safe to call even if no backup exists.
         """
         if self._backup_version is None or self._backup_path is None:
@@ -1312,11 +1380,17 @@ class VersionBumper:
         backup_version = self._backup_version
 
         try:
-            handler = self._get_handler(backup_path)
-            handler.write_version(backup_path, backup_version)
-            logger.info(
-                f"Rolled back version: {backup_path} -> {backup_version}"
-            )
+            if self._use_script_mode and self._script_runner is not None:
+                self._script_runner.set_version(backup_version)
+                logger.info(
+                    f"Rolled back version (script): -> {backup_version}"
+                )
+            else:
+                handler = self._get_handler(backup_path)
+                handler.write_version(backup_path, backup_version)
+                logger.info(
+                    f"Rolled back version: {backup_path} -> {backup_version}"
+                )
         except Exception as e:
             logger.error(f"Failed to rollback version: {e}")
             raise

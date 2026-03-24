@@ -61,9 +61,9 @@ version:
 # Language Configuration
 # Controls the language used in human-facing outputs and spec writing
 language:
-  language: null                        # Language for human-facing steps (summarize, discovery, confirmed steps)
+  language: zh-CN                        # Language for human-facing steps (summarize, discovery, confirmed steps)
                                         # e.g., "zh-CN", "en-US". null = no restriction (LLM decides)
-  spec_language: null                   # Language for spec writing (update_spec step)
+  spec_language: en-US                   # Language for spec writing (update_spec step)
                                         # e.g., "zh-CN", "en". null = no restriction (LLM decides)
 
 e2e:

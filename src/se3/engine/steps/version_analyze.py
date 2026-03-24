@@ -223,32 +223,35 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
 def _get_current_version(flow: FlowInstance) -> str:
     """Get the current version from the project.
-    
+
+    Uses VersionBumper to read the version, which supports both
+    script mode and built-in handler mode.
+
     Args:
         flow: The flow instance
-        
+
     Returns:
         Current version string or "unknown"
     """
     try:
         from ...config import load_version_config
-        from ..version_bumper import VersionDetector
-        
+        from ..version_bumper import VersionBumper
+
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         config = load_version_config(project_root)
-        
+
         if not config.enabled:
             return "unknown (version bumping disabled)"
-        
-        detector = VersionDetector()
-        version_file = detector.get_version_file_path(project_root)
-        
+
+        bumper = VersionBumper(config)
+        version_file = bumper.detect_version_file(project_root)
+
         if version_file:
-            version = detector.read_version(version_file)
+            version = bumper.read_version(version_file)
             return version
-        
+
         return "unknown (no version file found)"
-        
+
     except Exception as e:
         logger.debug(f"Could not detect current version: {e}")
         return "unknown"

@@ -79,6 +79,10 @@ class VersionConfig:
     
     # Whether to include version in commit message
     include_in_commit_message: bool = True
+
+    # Version script interface
+    script_path: Optional[str] = None  # Path to version script (None = default se3/scripts/version.py)
+    auto_generate_script: bool = True  # Auto-generate script via LLM if not found
     
     @property
     def file_path(self) -> Optional[str]:
@@ -119,6 +123,8 @@ class VersionConfig:
             versions_file=version_data.get("versions_file", "VERSIONS.md"),
             versions_header=version_data.get("versions_header", "# Version History\n\n"),
             include_in_commit_message=version_data.get("include_in_commit_message", True),
+            script_path=version_data.get("script_path"),
+            auto_generate_script=version_data.get("auto_generate_script", True),
         )
     
     @classmethod

@@ -20,14 +20,6 @@
 |---------|------|
 | `/se3:run` | 启动 SE3 流程引擎 |
 
-## Git Commit
-
-使用 `se3 commit` 代替 `git commit`：
-
-```bash
-se3 commit -m "描述" -f "file1.py file2.py"
-```
-
 ## 目录结构
 
 - `se3/` — SE3 运行时目录（gitignored）
@@ -39,7 +31,6 @@ se3 commit -m "描述" -f "file1.py file2.py"
   - `collab/` — 多智能体协作状态
 - `se3.yaml` — 项目配置（可选）
 - `.claude/` = 开发依赖的框架规范（只读）
-- `tools/` = 工具实现（可写）
 
 ## 确认步骤配置（可选）
 

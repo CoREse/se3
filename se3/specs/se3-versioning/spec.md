@@ -51,14 +51,94 @@ identifier ::= alphanumeric | digits
 - **WHEN** introducing incompatible API changes
 - **THEN** new version is `2.0.0`
 
+### Requirement: Single Version Source
+
+SE3 projects SHALL maintain a single authoritative source for the version number.
+
+**Rules:**
+- There MUST be exactly one canonical location where the version is defined
+- All other references to the version (badges, documentation, generated files) MUST derive from this single source
+- The version script interface (`se3/scripts/version.py`) serves as the unified access point to this source
+- Projects MUST NOT maintain independent version numbers in multiple files (e.g., both `pyproject.toml` and `__init__.py` with separate version values)
+
+**Rationale:** Multiple version sources lead to version drift, where different parts of the project report different versions. A single source of truth eliminates this class of errors.
+
+#### Scenario: Single Source Enforcement
+- **GIVEN** a project with version defined in `pyproject.toml`
+- **WHEN** the version script reads and writes versions
+- **THEN** it operates exclusively on `pyproject.toml` as the single source
+- **AND** any other version references are derived, not independently maintained
+
+### Requirement: Version Script Interface
+
+SE3 SHALL support a script-based interface for version management, providing a universal contract that works across any project type.
+
+**Script Contract:**
+
+The version script (`se3/scripts/version.py` or `.sh` by default) MUST support three subcommands:
+
+| Command | Input | Output (stdout) | Description |
+|---------|-------|-----------------|-------------|
+| `get` | (none) | Current version (e.g., `1.2.3`) | Read current version |
+| `bump --type <type>` | `major`, `minor`, or `patch` | New version after bump | Increment and write version |
+| `set --version <ver>` | Version string | The set version | Write explicit version |
+
+**Output Contract:**
+- Success: print version string to stdout (clean semver, e.g., `1.2.3`), exit code 0
+- Failure: print error message to stderr, exit code 1
+
+**Script Discovery Priority:**
+1. Configured `version.script_path` in `se3.yaml`
+2. `se3/scripts/version.py` (default)
+3. `se3/scripts/version.sh` (default)
+4. Fall back to built-in handler detection (pyproject.toml, package.json, etc.)
+
+**Auto-Generation:**
+When no version script exists and `version.auto_generate_script` is `true` (default), SE3 SHALL:
+1. Scan project structure to identify the version file type
+2. Use LLM to generate a project-specific script implementation
+3. Write the script to the default path (`se3/scripts/version.py`)
+4. Validate by running the `get` command
+5. Fall back to built-in handlers if generation fails
+
+**Customization:**
+Users MAY create or modify the version script at any time. The script can be implemented in any language (Python, Bash, etc.) as long as it follows the command contract above.
+
+**Configuration (se3.yaml):**
+```yaml
+version:
+  script_path: null          # Custom script path (null = default se3/scripts/version.py)
+  auto_generate_script: true # Auto-generate via LLM if script not found
+```
+
+#### Scenario: Script Mode Version Bump
+- **GIVEN** `se3/scripts/version.py` exists and implements the contract
+- **WHEN** commit step triggers a version bump
+- **THEN** SE3 calls the script's `bump --type minor` command
+- **AND** uses the stdout output as the new version
+
+#### Scenario: Script Auto-Generation
+- **GIVEN** no version script exists
+- **AND** `auto_generate_script: true`
+- **WHEN** version system is initialized
+- **THEN** LLM generates a script based on detected project structure
+- **AND** script is validated by running `get` command
+
+#### Scenario: Script Rollback
+- **GIVEN** version was bumped via script from `1.2.3` to `1.3.0`
+- **WHEN** git commit fails
+- **THEN** SE3 calls script's `set --version 1.2.3` to restore
+
 ### Requirement: Version File Detection
 
 SE3 SHALL automatically detect project type and locate the version file with the following priority:
 
-**Detection Priority:**
+**Detection Priority (when no version script exists):**
 1. `pyproject.toml` - Python project (PEP 518/621)
 2. `package.json` - Node.js project
 3. `se3.yaml` - Custom configuration for other project types
+
+Note: When a version script is present, it takes priority over file detection.
 
 **Version Storage Location:**
 
@@ -297,28 +377,39 @@ SE3 SHALL provide CLI commands for manual version management.
 ### Version Management Components
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    Version Management                        │
-├─────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │   Config    │  │   Bumper    │  │      Updater        │  │
-│  │   Loader    │→ │             │→ │                     │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-│         │                │                      │           │
-│         ▼                ▼                      ▼           │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │se3.yaml     │  │Version File │  │  README.md          │  │
-│  │bump_rules   │  │Read/Write   │  │  VERSIONS.md        │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                      Version Management                           │
+├──────────────────────────────────────────────────────────────────┤
+│  ┌─────────────┐  ┌─────────────────┐  ┌─────────────────────┐  │
+│  │   Config    │  │  VersionBumper   │  │      Updater        │  │
+│  │   Loader    │→ │                  │→ │                     │  │
+│  └─────────────┘  └────────┬────────┘  └─────────────────────┘  │
+│         │                  │                      │              │
+│         │          ┌───────┴───────┐              │              │
+│         │          │               │              │              │
+│         ▼          ▼               ▼              ▼              │
+│  ┌───────────┐ ┌────────────┐ ┌────────────┐ ┌────────────────┐ │
+│  │ se3.yaml  │ │  Script    │ │  Built-in  │ │  README.md     │ │
+│  │bump_rules │ │  Interface │ │  Handlers  │ │  VERSIONS.md   │ │
+│  │script_path│ │(subprocess)│ │ (fallback) │ │                │ │
+│  └───────────┘ └─────┬──────┘ └────────────┘ └────────────────┘ │
+│                      │                                           │
+│                      ▼                                           │
+│              ┌──────────────┐                                    │
+│              │ Version      │  ← Single Source of Truth          │
+│              │ Source File  │                                    │
+│              └──────────────┘                                    │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Integration Points
 
 1. **Commit Step**: Triggers version bump before git commit
 2. **Config System**: Loads version settings from se3.yaml
-3. **Engine**: Provides task type context for bump decisions
-4. **Git**: Stages version file changes with code changes
+3. **Version Script**: Script-based interface (priority over built-in handlers)
+4. **Built-in Handlers**: Fallback for pyproject.toml, package.json, etc.
+5. **Engine**: Provides task type context for bump decisions
+6. **Git**: Stages version file changes with code changes
 
 ## References
 
