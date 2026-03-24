@@ -4,12 +4,62 @@ Automatically gathers relevant context from specs, previous outputs,
 project state, and code for LLM calls.
 """
 
+from __future__ import annotations
+
 import logging
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..config import LanguageConfig
 
 logger = logging.getLogger(__name__)
+
+# Steps whose output is human-facing (always use general language setting)
+HUMAN_FACING_STEPS = {"summarize", "discovery"}
+
+# Steps that write specs (use spec_language setting)
+SPEC_STEPS = {"update_spec"}
+
+
+def get_step_language_instruction(step_type: str, project_root: Path) -> str:
+    """Get the language instruction for a step based on config.
+
+    Determines the appropriate language instruction by checking:
+    1. If the step is in HUMAN_FACING_STEPS -> use config.language
+    2. If the step is in SPEC_STEPS -> use config.spec_language
+    3. If the step is configured for human confirmation -> use config.language
+    4. Otherwise -> no language instruction
+
+    Args:
+        step_type: Current step type name (e.g., "summarize", "implement")
+        project_root: Project root directory for loading config
+
+    Returns:
+        Language instruction string to append to prompt, or empty string.
+    """
+    from ..config import load_language_config, get_language_instruction, load_confirmation_config
+
+    lang_config = load_language_config(project_root)
+
+    # Check spec steps first
+    if step_type in SPEC_STEPS:
+        return get_language_instruction(lang_config.spec_language, step_type)
+
+    # Check human-facing steps
+    if step_type in HUMAN_FACING_STEPS:
+        return get_language_instruction(lang_config.language, step_type)
+
+    # Check if this step has human confirmation configured
+    if lang_config.language:
+        confirm_config = load_confirmation_config(project_root)
+        if (confirm_config.get("enabled", False)
+                and confirm_config.get("reviewer") == "human"
+                and step_type in confirm_config.get("steps", [])):
+            return get_language_instruction(lang_config.language, step_type)
+
+    return ""
 
 
 class ContextBuilder:
@@ -68,7 +118,14 @@ class ContextBuilder:
             self._build_project_state_section(),
         ]
 
-        return "\n\n".join(filter(None, sections))
+        context = "\n\n".join(filter(None, sections))
+
+        # Append language instruction if applicable
+        lang_instruction = get_step_language_instruction(step_type, self.project_root)
+        if lang_instruction:
+            context += lang_instruction
+
+        return context
 
     def _build_header(self, step_type: str, task_description: str) -> str:
         """Build context header."""

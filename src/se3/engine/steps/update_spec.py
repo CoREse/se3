@@ -90,6 +90,13 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         spec_content=spec_text,
     )
 
+    # Append language instruction if configured
+    from ..context_builder import get_step_language_instruction
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    lang_instruction = get_step_language_instruction("update_spec", project_root)
+    if lang_instruction:
+        prompt += lang_instruction
+
     logger.info("Determining spec updates needed...")
 
     try:

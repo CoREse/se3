@@ -58,6 +58,14 @@ version:
 
 # E2E / Visual regression testing (optional)
 # Requires Puppeteer MCP or similar browser automation tool
+# Language Configuration
+# Controls the language used in human-facing outputs and spec writing
+language:
+  language: null                        # Language for human-facing steps (summarize, discovery, confirmed steps)
+                                        # e.g., "zh-CN", "en-US". null = no restriction (LLM decides)
+  spec_language: null                   # Language for spec writing (update_spec step)
+                                        # e.g., "zh-CN", "en". null = no restriction (LLM decides)
+
 e2e:
   baseline_dir: .e2e-baselines        # Where to store baseline screenshots
   diff_threshold: 0.1                 # Pixel difference threshold (0-1)

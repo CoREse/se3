@@ -122,6 +122,13 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         commit_info=commit_info,
     )
 
+    # Append language instruction if configured
+    from ..context_builder import get_step_language_instruction
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    lang_instruction = get_step_language_instruction("summarize", project_root)
+    if lang_instruction:
+        prompt += lang_instruction
+
     logger.info("Generating summary...")
 
     try:

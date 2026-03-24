@@ -23,6 +23,8 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - `confirmation.steps`: Steps after which to insert CONFIRM (default: [propose, design])
 - `confirmation.reviewer`: Who reviews — "human" or "llm" (default: "human")
 - `claude_commands`: List of `{cmd, priority}` for Claude CLI resolution
+- `language.language`: Language for human-facing steps (default: null)
+- `language.spec_language`: Language for spec writing (default: null)
 
 #### Scenario: Using default configuration
 - **WHEN** no se3.yaml file exists in the project
@@ -102,6 +104,60 @@ The interactive pathway writes the `.response` file automatically, so both pathw
 - **WHEN** a `.response` file is placed alongside it
 - **AND** user runs `se3 run --resume`
 - **THEN** the confirm step reads the response and continues
+
+### Requirement: Language Configuration
+
+The system SHALL support two-tier language configuration for controlling output language.
+
+**Language section options:**
+- `language.language`: Language for human-facing steps — summarize, discovery, and steps with human confirmation (default: null = no restriction)
+- `language.spec_language`: Language for spec writing in the update_spec step (default: null = no restriction)
+
+When a language is set, a language instruction is appended to the LLM prompt for applicable steps. When null (default), no language instruction is added and the LLM freely chooses language.
+
+**Affected steps by `language.language`:**
+- `summarize` — always affected
+- `discovery` — always affected
+- Steps configured in `confirmation.steps` when `confirmation.enabled: true` and `confirmation.reviewer: "human"` (e.g., `propose`, `design`)
+
+**Affected steps by `language.spec_language`:**
+- `update_spec` — always affected
+
+**Unaffected steps (LLM decides language):**
+- `analyze`, `read_spec`, `plan_tasks`, `implement`, `test`, `verify_spec`, `commit`
+
+**Example configuration:**
+```yaml
+language:
+  language: zh-CN        # Human-facing outputs in Chinese
+  spec_language: en      # Specs written in English
+```
+
+#### Scenario: Default language configuration (null)
+- **WHEN** no language section exists in se3.yaml, or both values are null
+- **THEN** no language instruction is added to any step
+- **AND** the LLM freely chooses language for all outputs
+
+#### Scenario: General language set
+- **GIVEN** `language.language: zh-CN` in se3.yaml
+- **WHEN** the summarize or discovery step runs
+- **THEN** the LLM prompt includes a language instruction to respond in zh-CN
+
+#### Scenario: Spec language set
+- **GIVEN** `language.spec_language: en` in se3.yaml
+- **WHEN** the update_spec step runs
+- **THEN** the LLM prompt includes a language instruction to respond in English
+
+#### Scenario: Confirmed steps use general language
+- **GIVEN** `language.language: zh-CN` and `confirmation.enabled: true` with `confirmation.reviewer: "human"` and `confirmation.steps: ["propose", "design"]`
+- **WHEN** the propose or design step runs
+- **THEN** the LLM prompt includes a language instruction to respond in zh-CN
+
+#### Scenario: Independent language settings
+- **GIVEN** `language.language: zh-CN` and `language.spec_language: en`
+- **WHEN** summarize step runs, it uses zh-CN
+- **AND** when update_spec step runs, it uses English
+- **AND** when implement step runs, no language instruction is added
 
 ### Requirement: Claude Commands Configuration
 

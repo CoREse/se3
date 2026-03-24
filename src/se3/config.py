@@ -454,6 +454,69 @@ def get_language_labels(language: str) -> dict[str, str]:
     return labels["en"]
 
 
+@dataclass
+class LanguageConfig:
+    """Language configuration for controlling output language.
+
+    Two-tier language settings:
+    - language: for human-facing steps (summarize, discovery, confirmed steps)
+    - spec_language: for spec writing (update_spec step)
+    Both default to None (no restriction).
+    """
+
+    language: Optional[str] = None
+    spec_language: Optional[str] = None
+
+    @classmethod
+    def load(cls, project_root: Path) -> "LanguageConfig":
+        """Load language configuration from se3.yaml."""
+        config_path = Path(project_root) / "se3.yaml"
+        if not config_path.exists():
+            return cls()
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            lang_section = data.get("language", {})
+            if not lang_section or not isinstance(lang_section, dict):
+                return cls()
+            return cls(
+                language=lang_section.get("language"),
+                spec_language=lang_section.get("spec_language"),
+            )
+        except Exception:
+            return cls()
+
+
+def load_language_config(project_root: Optional[Path] = None) -> "LanguageConfig":
+    """Load language configuration from project.
+
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+
+    Returns:
+        LanguageConfig instance with loaded or default settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    return LanguageConfig.load(project_root)
+
+
+def get_language_instruction(language: Optional[str], context: str = "") -> str:
+    """Get a language instruction string for LLM prompts.
+
+    Args:
+        language: Language code (e.g., 'zh-CN', 'en'). None means no restriction.
+        context: Optional context description for the instruction.
+
+    Returns:
+        Prompt instruction string when language is set, empty string when None.
+    """
+    if not language:
+        return ""
+    ctx = f" in the {context} step" if context else ""
+    return f"\n\nIMPORTANT: You MUST respond in {language}{ctx}."
+
+
 def is_chinese_language(language: str) -> bool:
     """Check if the language is Chinese.
 

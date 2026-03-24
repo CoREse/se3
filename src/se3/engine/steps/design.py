@@ -124,6 +124,13 @@ def design_handler(step: Step, flow: FlowInstance) -> StepStatus:
         revision_section=revision_section,
     )
 
+    # Append language instruction if configured (e.g., when human confirmation is enabled)
+    from ..context_builder import get_step_language_instruction
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    lang_instruction = get_step_language_instruction("design", project_root)
+    if lang_instruction:
+        prompt += lang_instruction
+
     logger.info("Generating design document...")
 
     try:

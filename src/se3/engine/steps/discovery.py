@@ -428,6 +428,12 @@ def _run_discovery_round(
         base_spec_content=base_spec_content,
     )
 
+    # Append language instruction if configured
+    from ..context_builder import get_step_language_instruction
+    lang_instruction = get_step_language_instruction("discovery", project_root)
+    if lang_instruction:
+        prompt += lang_instruction
+
     logger.info(f"Running discovery round {round_number}")
 
     # Call LLM
