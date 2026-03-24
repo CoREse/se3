@@ -718,7 +718,7 @@ def _run_flow_impl(
                 continue
 
         # Display step output with full content (skip for CONFIRM and DISCOVERY — handled by prompt)
-        if current_step.step_type not in (StepType.CONFIRM, StepType.DISCOVERY):
+        if current_step.step_type not in (StepType.CONFIRM, StepType.DISCOVERY, StepType.PLAN_TASKS):
             _display_step_output(current_step)
 
         # Handle CONFIRM step PAUSED state - prompt user for approval
