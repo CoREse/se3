@@ -341,7 +341,12 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         questions = result.get("questions", [])
 
-        if mode == "confirmation" and ready_to_proceed and refined_description and not questions:
+        # Check if there has been at least one user interaction in this discovery
+        has_user_interaction = any(
+            e.get("role") == "user" for e in conversation_history
+        )
+
+        if mode == "confirmation" and ready_to_proceed and refined_description and not questions and has_user_interaction:
             # Discovery complete - user has confirmed and no remaining questions
             step.outputs["refined_description"] = refined_description
             step.outputs["discovery_summary"] = _generate_summary(conversation_history)
@@ -358,8 +363,10 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
             return StepStatus.COMPLETED
 
-        elif mode == "synthesis" and refined_description and not questions:
-            # Have a refined description and no pending questions - ask for confirmation
+        elif (mode == "synthesis" and refined_description and not questions) or \
+             (mode == "confirmation" and refined_description and not has_user_interaction):
+            # Have a refined description - ask for user confirmation before proceeding.
+            # Also catches LLM prematurely returning "confirmation" before any user interaction.
             step.outputs["proposed_description"] = refined_description
             _display_discovery_message(content, refined_description, questions=None)
             return StepStatus.PAUSED

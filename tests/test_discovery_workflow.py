@@ -144,7 +144,10 @@ class TestDiscoveryHandler:
             step_type=StepType.DISCOVERY,
             inputs={
                 "task_description": "I want auth",
-                "discovery_state": {"round": 2, "history": []},
+                "discovery_state": {"round": 2, "history": [
+                    {"role": "assistant", "content": "What do you need?", "round": 0},
+                    {"role": "user", "content": "yes, proceed", "round": 1},
+                ]},
             },
         )
         flow = FlowInstance(task_description="I want auth")
