@@ -97,14 +97,12 @@ def _read_multiline_input(
 
         @kb.add(Keys.ControlD)
         def _(event):
-            """Pressing Ctrl+D accepts the input (like traditional EOF)."""
+            """Pressing Ctrl+D accepts the input (like traditional EOF).
+            Always accepts — even with empty buffer (returns empty string).
+            Ctrl+C is the only way to cancel (returns None).
+            """
             buf = event.app.current_buffer
-            if buf.text:
-                # Has content — accept it (same as Esc+Enter)
-                buf.validate_and_handle()
-            else:
-                # Empty buffer — treat as cancel
-                event.app.exit(exception=EOFError)
+            buf.validate_and_handle()
 
         # Create a prompt session with multiline support, custom key bindings, and history
         session = PromptSession(
@@ -131,8 +129,9 @@ def _read_multiline_input(
         render_text("\nCancelled.", title="Cancelled")
         return None
     except EOFError:
-        # Ctrl+D pressed with empty input — treat as cancel
-        return None
+        # Safety fallback — Ctrl+D should no longer raise EOFError,
+        # but if it does, treat as empty input (not cancel)
+        return ""
 
 
 @app.command(name="run")
