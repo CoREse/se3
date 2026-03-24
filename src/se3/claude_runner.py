@@ -473,6 +473,17 @@ class ClaudeRunner:
                     all_outputs.append(f"=== Command: {cmd_name} ===")
                     all_outputs.append(result.output)
 
+                    # Interrupted by Ctrl+C: return partial output immediately
+                    if result.interrupted:
+                        return MonitoredResult(
+                            returncode=result.returncode,
+                            output="\n".join(all_outputs),
+                            cmd_used=cmd_name,
+                            cmd_index=cmd_index,
+                            was_retry=cmd_index > 0,
+                            interrupted=True,
+                        )
+
                     if result.success:
                         print(
                             f"[claude-runner] Command '{cmd_name}' succeeded",
@@ -751,6 +762,29 @@ class ClaudeRunner:
                 should_retry=False,
             )
 
+        except KeyboardInterrupt:
+            # Ctrl+C: kill subprocess and return partial output so callers
+            # can persist it to history before re-raising the interrupt.
+            try:
+                proc.kill()
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            # Drain any remaining buffered output
+            try:
+                remaining = proc.stdout.read()
+                if remaining:
+                    output_buffer.append(remaining)
+            except Exception:
+                pass
+            return _SingleRunResult(
+                returncode=-2,
+                output="".join(output_buffer),
+                success=False,
+                should_retry=False,
+                interrupted=True,
+            )
+
         finally:
             if log_fh:
                 log_fh.close()
@@ -775,6 +809,7 @@ class MonitoredResult:
     cmd_used: str
     cmd_index: int
     was_retry: bool
+    interrupted: bool = False  # True if stopped by KeyboardInterrupt
 
     @property
     def success(self) -> bool:
@@ -789,3 +824,4 @@ class _SingleRunResult:
     output: str
     success: bool
     should_retry: bool
+    interrupted: bool = False  # True if stopped by KeyboardInterrupt

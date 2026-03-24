@@ -665,8 +665,13 @@ class LLMCaller:
                     if result.success:
                         stream_tracker.print_summary()
 
-                # Record the response (whether success or failure)
+                # Record the response (whether success, failure, or interrupted)
                 self._record_response(result.output or "", self.external_attempt)
+
+                # If interrupted by Ctrl+C, re-raise after saving partial output
+                if isinstance(getattr(result, 'interrupted', False), bool) and result.interrupted:
+                    logger.info("LLM call interrupted by user, partial output saved to history")
+                    raise KeyboardInterrupt
 
                 if result.success:
                     # Check if JSON is required but not received
