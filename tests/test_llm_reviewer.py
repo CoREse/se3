@@ -355,8 +355,68 @@ class TestLLMReviewErrorHandling:
 
         result = confirm_handler(self.confirm_step, self.flow)
 
-        # approved defaults to False when missing
+        # approved defaults to False when missing (parse_json_response
+        # requires 'approved' key, so returns None → not approved)
         assert result == StepStatus.REVISION_NEEDED
+
+    @patch("se3.engine.steps.confirm.LLMCaller")
+    def test_markdown_fenced_json_response(self, MockLLMCaller):
+        """When LLM wraps JSON in ```json code fences, it should be parsed correctly."""
+        from se3.engine.steps.confirm import confirm_handler
+
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = (
+            '```json\n'
+            '{\n'
+            '    "approved": true,\n'
+            '    "feedback": "Looks good"\n'
+            '}\n'
+            '```'
+        )
+        MockLLMCaller.return_value = mock_caller
+
+        result = confirm_handler(self.confirm_step, self.flow)
+
+        assert result == StepStatus.COMPLETED
+        review_result = self.confirm_step.outputs["review_result"]
+        assert review_result["approved"] is True
+        assert review_result["feedback"] == "Looks good"
+
+    @patch("se3.engine.steps.confirm.LLMCaller")
+    def test_json_with_surrounding_text(self, MockLLMCaller):
+        """When LLM adds extra text before/after JSON, it should be extracted correctly."""
+        from se3.engine.steps.confirm import confirm_handler
+
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = (
+            'Here is my review:\n\n'
+            '{"approved": true, "feedback": "Well structured proposal"}\n\n'
+            'Let me know if you need anything else.'
+        )
+        MockLLMCaller.return_value = mock_caller
+
+        result = confirm_handler(self.confirm_step, self.flow)
+
+        assert result == StepStatus.COMPLETED
+        review_result = self.confirm_step.outputs["review_result"]
+        assert review_result["approved"] is True
+        assert review_result["feedback"] == "Well structured proposal"
+
+    @patch("se3.engine.steps.confirm.LLMCaller")
+    def test_completely_unparseable_response(self, MockLLMCaller):
+        """When LLM returns garbage with no JSON at all, treat as not approved."""
+        from se3.engine.steps.confirm import confirm_handler
+
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = "I cannot provide a review in the requested format."
+        MockLLMCaller.return_value = mock_caller
+
+        result = confirm_handler(self.confirm_step, self.flow)
+
+        assert result == StepStatus.REVISION_NEEDED
+        review_result = self.confirm_step.outputs["review_result"]
+        assert review_result["approved"] is False
+        assert "could not be parsed" in review_result["feedback"]
 
 
 class TestLLMReviewerConfigPropagation:

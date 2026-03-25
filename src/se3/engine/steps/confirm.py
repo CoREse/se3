@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 from ..context_builder import build_llm_review_prompt
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, StepType
+from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
 
@@ -192,14 +193,16 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
         )
         response = caller.call(prompt=prompt, require_json=True)
 
-        # Parse response
-        response_data = json.loads(response)
-        approved = response_data.get('approved', False)
-        feedback = response_data.get('feedback', '')
-    except (json.JSONDecodeError, KeyError) as e:
-        logger.warning(f"LLM review returned malformed response, treating as not approved: {e}")
-        approved = False
-        feedback = f"LLM review response could not be parsed: {e}"
+        # Parse response using robust JSON parser that handles markdown
+        # code fences, NDJSON streams, and other common LLM output formats
+        response_data = parse_json_response(response, required_keys=['approved'])
+        if response_data is None:
+            logger.warning("LLM review returned malformed response, treating as not approved")
+            approved = False
+            feedback = "LLM review response could not be parsed"
+        else:
+            approved = response_data.get('approved', False)
+            feedback = response_data.get('feedback', '')
     except Exception as e:
         logger.error(f"LLM review call failed, auto-approving to avoid blocking: {e}")
         approved = True
