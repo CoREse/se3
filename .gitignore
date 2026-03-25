@@ -11,6 +11,7 @@ __pycache__/
 human-calls/
 issues.md
 prompts/
+e2e
 
 # SE3 runtime (gitignored)
 se3/state/
