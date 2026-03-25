@@ -219,3 +219,125 @@ class TestStateMachineRetryMetadata:
 
         assert "is_retry" not in step.inputs
         assert "retry_count" not in step.inputs
+
+
+class TestStateMachineLoadOrCreateFailedFlow:
+    """Tests for load_or_create_flow treating FAILED as resumable."""
+
+    def test_load_or_create_returns_resumed_for_failed_flow(self):
+        """load_or_create_flow should return (flow, True) for FAILED flows."""
+        from se3.engine.models import FlowInstance, FlowStatus
+        from se3.engine.state_machine import StateMachine
+        from unittest.mock import MagicMock
+
+        mock_persistence = MagicMock()
+        failed_flow = FlowInstance(
+            flow_id="failed-flow",
+            task_description="A failed task",
+            status=FlowStatus.FAILED,
+        )
+        mock_persistence.load_flow.return_value = failed_flow
+
+        sm = StateMachine(project_root=Path("/tmp"), persistence=mock_persistence)
+        result_flow, is_resumed = sm.load_or_create_flow("new task")
+
+        assert is_resumed is True
+        assert result_flow.flow_id == "failed-flow"
+
+    def test_load_or_create_creates_new_for_completed_flow(self):
+        """load_or_create_flow should create new flow for COMPLETED flows."""
+        from se3.engine.models import FlowInstance, FlowStatus
+        from se3.engine.state_machine import StateMachine
+        from unittest.mock import MagicMock
+
+        mock_persistence = MagicMock()
+        completed_flow = FlowInstance(
+            flow_id="completed-flow",
+            task_description="Done task",
+            status=FlowStatus.COMPLETED,
+        )
+        mock_persistence.load_flow.return_value = completed_flow
+
+        sm = StateMachine(project_root=Path("/tmp"), persistence=mock_persistence)
+        # Mock create_flow to return a new flow
+        new_flow = FlowInstance(
+            flow_id="new-flow",
+            task_description="new task",
+            status=FlowStatus.INIT,
+        )
+        sm.create_flow = MagicMock(return_value=new_flow)
+
+        result_flow, is_resumed = sm.load_or_create_flow("new task")
+
+        assert is_resumed is False
+        assert result_flow.flow_id == "new-flow"
+
+
+class TestStateMachineResumeFailedFlow:
+    """Tests for StateMachine.resume accepting FAILED flows."""
+
+    def test_resume_accepts_failed_flow(self):
+        """resume() should accept FAILED flows and set status to RUNNING."""
+        from se3.engine.models import FlowInstance, FlowStatus, Step, StepType, StepStatus
+        from se3.engine.state_machine import StateMachine
+        from unittest.mock import MagicMock, patch
+
+        mock_persistence = MagicMock()
+        sm = StateMachine(project_root=Path("/tmp"), persistence=mock_persistence)
+
+        failed_flow = FlowInstance(
+            flow_id="failed-flow",
+            task_description="A failed task",
+            status=FlowStatus.FAILED,
+        )
+
+        # Mock sm.run to just return the flow status
+        sm.run = MagicMock(return_value=FlowStatus.COMPLETED)
+
+        result = sm.resume(failed_flow)
+
+        # Flow status should have been set to RUNNING before run() was called
+        sm.run.assert_called_once_with(failed_flow)
+        assert result == FlowStatus.COMPLETED
+
+    def test_resume_still_works_for_paused_flow(self):
+        """resume() should still work for PAUSED flows (existing behavior)."""
+        from se3.engine.models import FlowInstance, FlowStatus
+        from se3.engine.state_machine import StateMachine
+        from unittest.mock import MagicMock
+
+        mock_persistence = MagicMock()
+        sm = StateMachine(project_root=Path("/tmp"), persistence=mock_persistence)
+
+        paused_flow = FlowInstance(
+            flow_id="paused-flow",
+            task_description="A paused task",
+            status=FlowStatus.PAUSED,
+        )
+
+        sm.run = MagicMock(return_value=FlowStatus.COMPLETED)
+        result = sm.resume(paused_flow)
+
+        sm.run.assert_called_once_with(paused_flow)
+        assert result == FlowStatus.COMPLETED
+
+    def test_resume_rejects_completed_flow(self):
+        """resume() should reject COMPLETED flows."""
+        from se3.engine.models import FlowInstance, FlowStatus
+        from se3.engine.state_machine import StateMachine
+        from unittest.mock import MagicMock
+
+        mock_persistence = MagicMock()
+        sm = StateMachine(project_root=Path("/tmp"), persistence=mock_persistence)
+
+        completed_flow = FlowInstance(
+            flow_id="completed-flow",
+            task_description="Done task",
+            status=FlowStatus.COMPLETED,
+        )
+
+        sm.run = MagicMock()
+        result = sm.resume(completed_flow)
+
+        sm.run.assert_not_called()
+        assert result == FlowStatus.COMPLETED

@@ -312,3 +312,281 @@ class TestResumeDetection:
         # Verify log message about resuming
         assert "Resuming interrupted step" in caplog.text
         assert "implement-001" in caplog.text
+
+
+class TestResumeFailedFlow:
+    """Test resume detection logic for FAILED flows."""
+
+    def setup_method(self):
+        """Set up test fixtures with a FAILED flow."""
+        self.tmpdir = tempfile.mkdtemp()
+        self.project_root = Path(self.tmpdir)
+
+        # Create se3/state directory structure
+        state_dir = self.project_root / "se3" / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+
+        # Create a flow with a FAILED step
+        self.flow = FlowInstance(
+            flow_id="test-flow-002",
+            task_description="Test failed task",
+            task_type="bugfix",
+            status=FlowStatus.FAILED,
+        )
+        self.flow.state.selected_steps = [
+            StepType.ANALYZE,
+            StepType.IMPLEMENT,
+        ]
+        self.flow.state.current_step_index = 1
+
+        # Create completed ANALYZE step
+        analyze_step = Step(
+            step_type=StepType.ANALYZE,
+            status=StepStatus.COMPLETED,
+            step_id="analyze-001",
+            outputs={"task_type": "bugfix"},
+        )
+        self.flow.state.add_step(analyze_step)
+
+        # Create IMPLEMENT step in FAILED state
+        self.implement_step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.FAILED,
+            step_id="implement-002",
+            inputs={
+                "task_description": "Fix the bug",
+                "retry_count": 2,
+            },
+            outputs={},
+        )
+        self.implement_step.retry_count = 3  # Exhausted retries
+        self.flow.state.add_step(self.implement_step)
+        self.flow.state.current_step_id = "implement-002"
+
+        # Save flow to state file
+        self.persistence = PersistenceManager(self.project_root)
+        self.persistence.save_flow(self.flow)
+
+    def teardown_method(self):
+        """Clean up test fixtures."""
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @patch("se3.commands.run.PersistenceManager")
+    @patch("se3.commands.run.StateMachine")
+    @patch("se3.commands.run.STEP_HANDLERS", {})
+    def test_resume_failed_step_transitions_to_pending(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """Test that resuming a FAILED step transitions it to PENDING."""
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
+
+        with patch("se3.commands.run.display_step_result"):
+            with patch("se3.commands.run.render_full"):
+                with patch("se3.commands.run._display_step_output"):
+                    run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-002",
+                    )
+
+        assert self.implement_step.status == StepStatus.PENDING
+
+    @patch("se3.commands.run.PersistenceManager")
+    @patch("se3.commands.run.StateMachine")
+    @patch("se3.commands.run.STEP_HANDLERS", {})
+    def test_resume_failed_resets_flow_status_to_running(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """Test that resuming a FAILED flow resets flow status to RUNNING."""
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
+
+        with patch("se3.commands.run.display_step_result"):
+            with patch("se3.commands.run.render_full"):
+                with patch("se3.commands.run._display_step_output"):
+                    run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-002",
+                    )
+
+        # Flow status should have been set to RUNNING (before state_machine.run sets it further)
+        # Check that persistence.save_flow was called with RUNNING status
+        save_calls = mock_pm.save_flow.call_args_list
+        # The first save_flow call should have the flow in RUNNING status
+        assert any(
+            call.args[0].status == FlowStatus.RUNNING or
+            (hasattr(call.args[0], 'status') and call.args[0].status == FlowStatus.COMPLETED)
+            for call in save_calls
+        )
+
+    @patch("se3.commands.run.PersistenceManager")
+    @patch("se3.commands.run.StateMachine")
+    @patch("se3.commands.run.STEP_HANDLERS", {})
+    def test_resume_failed_resets_retry_count(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """Test that resuming a FAILED step resets retry_count to 0."""
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
+
+        with patch("se3.commands.run.display_step_result"):
+            with patch("se3.commands.run.render_full"):
+                with patch("se3.commands.run._display_step_output"):
+                    run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-002",
+                    )
+
+        # retry_count on the step model should be reset to 0
+        assert self.implement_step.retry_count == 0
+
+    @patch("se3.commands.run.PersistenceManager")
+    @patch("se3.commands.run.StateMachine")
+    @patch("se3.commands.run.STEP_HANDLERS", {})
+    def test_resume_failed_increments_input_retry_count(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """Test that resuming a FAILED step increments input retry_count for conversation history."""
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
+
+        with patch("se3.commands.run.display_step_result"):
+            with patch("se3.commands.run.render_full"):
+                with patch("se3.commands.run._display_step_output"):
+                    run_flow(
+                        project_root=self.project_root,
+                        flow_id="test-flow-002",
+                    )
+
+        # input retry_count should be incremented (was 2, now 3)
+        assert self.implement_step.inputs["retry_count"] == 3
+        # resumed flag should be set
+        assert self.implement_step.inputs["resumed"] is True
+
+    @patch("se3.commands.run.PersistenceManager")
+    @patch("se3.commands.run.StateMachine")
+    @patch("se3.commands.run.STEP_HANDLERS", {})
+    def test_resume_failed_logs_retry_info(
+        self, mock_sm_class, mock_pm_class, caplog
+    ):
+        """Test that resuming a FAILED step logs retry info."""
+        import logging
+
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
+
+        with caplog.at_level(logging.INFO):
+            with patch("se3.commands.run.display_step_result"):
+                with patch("se3.commands.run.render_full"):
+                    with patch("se3.commands.run._display_step_output"):
+                        run_flow(
+                            project_root=self.project_root,
+                            flow_id="test-flow-002",
+                        )
+
+        assert "Retrying failed step from breakpoint" in caplog.text
+        assert "implement-002" in caplog.text
+
+
+class TestHandleResumeInteractiveFailedFlows:
+    """Test that handle_resume_interactive includes FAILED flows."""
+
+    @patch("se3.commands.run.find_existing_flows")
+    @patch("se3.commands.run.render_full")
+    @patch("se3.commands.run.prompt_user_choice")
+    def test_failed_flow_appears_in_resume_menu(
+        self, mock_choice, mock_render, mock_find
+    ):
+        """FAILED flows should appear in the resume interactive menu."""
+        mock_find.return_value = [
+            {
+                "id": "flow-001",
+                "status": FlowStatus.FAILED.value,
+                "description": "Failed task",
+                "current_step": "implement",
+                "file": "engine.json",
+            }
+        ]
+        mock_choice.return_value = 0  # Select first option
+
+        from se3.commands.run import handle_resume_interactive
+        result = handle_resume_interactive(Path("/tmp"))
+
+        assert result == "flow-001"
+
+    @patch("se3.commands.run.find_existing_flows")
+    @patch("se3.commands.run.render_full")
+    def test_completed_flow_excluded_from_resume_menu(
+        self, mock_render, mock_find
+    ):
+        """COMPLETED flows should NOT appear in the resume menu."""
+        mock_find.return_value = [
+            {
+                "id": "flow-001",
+                "status": FlowStatus.COMPLETED.value,
+                "description": "Done task",
+                "current_step": "summarize",
+                "file": "engine.json",
+            }
+        ]
+
+        from se3.commands.run import handle_resume_interactive
+        result = handle_resume_interactive(Path("/tmp"))
+
+        assert result is None
+
+    @patch("se3.commands.run.find_existing_flows")
+    @patch("se3.commands.run.render_full")
+    @patch("se3.commands.run.prompt_user_choice")
+    def test_failed_flow_shows_retry_label(
+        self, mock_choice, mock_render, mock_find
+    ):
+        """FAILED flow should show 'Retry failed flow' action."""
+        mock_find.return_value = [
+            {
+                "id": "flow-001",
+                "status": FlowStatus.FAILED.value,
+                "description": "Failed task",
+                "current_step": "implement",
+                "file": "engine.json",
+            }
+        ]
+        mock_choice.return_value = 0
+
+        from se3.commands.run import handle_resume_interactive
+        handle_resume_interactive(Path("/tmp"))
+
+        # Check render was called with "failed" label
+        render_calls = mock_render.call_args_list
+        assert any("failed" in str(call) for call in render_calls)

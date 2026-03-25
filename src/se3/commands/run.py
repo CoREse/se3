@@ -288,20 +288,22 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
         render_full("No existing flows found. Starting new flow.", title="Resume")
         return None
 
-    # Filter to active (non-terminal) flows
-    terminal_statuses = {FlowStatus.COMPLETED.value, FlowStatus.FAILED.value}
+    # Filter to resumable flows (exclude only COMPLETED)
+    terminal_statuses = {FlowStatus.COMPLETED.value}
     active_flows = [f for f in flows if f["status"] not in terminal_statuses]
 
     if not active_flows:
         render_full("No in-progress flows found.", title="Resume")
         if flows:
-            render_full(f"Found {len(flows)} completed/failed flows.", title="Info")
+            render_full(f"Found {len(flows)} completed flows.", title="Info")
         return None
 
     if len(active_flows) == 1:
         flow = active_flows[0]
+        is_failed = flow["status"] == FlowStatus.FAILED.value
+        label = "failed" if is_failed else "interrupted"
         content = [
-            "Found interrupted flow:",
+            f"Found {label} flow:",
             "",
             f"  ID: {flow['id']}",
             f"  Description: {flow['description']}",
@@ -309,7 +311,8 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
         ]
         render_full("\n".join(content), title="Resume Flow")
 
-        options = ["Resume this flow", "Start new flow"]
+        action = "Retry failed flow" if is_failed else "Resume this flow"
+        options = [action, "Start new flow"]
         choice = prompt_user_choice("What would you like to do?", options)
 
         if choice == 0:
@@ -317,10 +320,11 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
         return None
 
     # Multiple active flows
-    content = [f"Found {len(active_flows)} interrupted flows:", ""]
+    content = [f"Found {len(active_flows)} resumable flows:", ""]
     options = []
     for flow in active_flows:
-        options.append(f"{flow['description']} (step: {flow['current_step']})")
+        status_tag = " [FAILED]" if flow["status"] == FlowStatus.FAILED.value else ""
+        options.append(f"{flow['description']} (step: {flow['current_step']}){status_tag}")
     options.append("Start new flow")
 
     for i, opt in enumerate(options[:-1], 1):
@@ -611,13 +615,24 @@ def _run_flow_impl(
             display_error(f"Flow '{flow_id}' not found")
             return 1
 
-        # Detect and handle resume of a RUNNING step
+        # Detect and handle resume of a RUNNING or FAILED step
         current_step = flow.state.get_current_step()
         if current_step and current_step.status == StepStatus.RUNNING:
             # Step was interrupted - prepare for resumption
             current_step.status = StepStatus.PENDING
             current_step.inputs["resumed"] = True
             logger.info(f"Resuming interrupted step: {current_step.step_id} ({current_step.step_type.value})")
+            persistence.save_flow(flow)
+        elif current_step and current_step.status == StepStatus.FAILED:
+            # Step failed - prepare for retry from breakpoint
+            current_step.status = StepStatus.PENDING
+            current_step.inputs["resumed"] = True
+            # Increment retry_count so LLMCaller picks up conversation history (external_attempt)
+            current_step.inputs["retry_count"] = current_step.inputs.get("retry_count", 0) + 1
+            # Reset retry_count on the step model for fresh retry budget
+            current_step.retry_count = 0
+            flow.status = FlowStatus.RUNNING
+            logger.info(f"Retrying failed step from breakpoint: {current_step.step_id} ({current_step.step_type.value})")
             persistence.save_flow(flow)
 
         # Display flow info with full content

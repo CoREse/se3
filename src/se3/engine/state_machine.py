@@ -197,8 +197,8 @@ class StateMachine:
         """
         existing = self.persistence.load_flow()
 
-        if existing and existing.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED):
-            # Found active flow - offer to resume
+        if existing and existing.status not in (FlowStatus.COMPLETED,):
+            # Found active or failed flow - offer to resume
             return existing, True
 
         # No active flow - create new
@@ -732,11 +732,11 @@ class StateMachine:
         Returns:
             Final flow status
         """
-        if flow.status != FlowStatus.PAUSED:
+        if flow.status not in (FlowStatus.PAUSED, FlowStatus.FAILED):
             logger.warning(f"Cannot resume flow with status {flow.status.value}")
             return flow.status
 
-        logger.info(f"Resuming flow {flow.flow_id}")
+        logger.info(f"Resuming flow {flow.flow_id} (was {flow.status.value})")
         flow.status = FlowStatus.RUNNING
 
         return self.run(flow)

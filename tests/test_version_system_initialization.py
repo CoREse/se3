@@ -27,7 +27,9 @@ class TestInitializeVersionSystem:
     @pytest.fixture
     def version_config(self) -> VersionConfig:
         """Create a default version config for testing."""
-        return VersionConfig(enabled=True)
+        config = VersionConfig(enabled=True)
+        config.auto_generate_script = False
+        return config
 
     @pytest.fixture
     def temp_project_dir(self) -> Path:
