@@ -672,3 +672,76 @@ confirmation:
         review_result = confirm_step.outputs.get("review_result", {})
         assert review_result["approved"] is False
         assert review_result["feedback"] == "Please add more details"
+
+
+class TestLLMReviewerNoCallFile:
+    """Verify LLM reviewer path does NOT create call files and does NOT return PAUSED."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.project_root = Path(self.tmpdir)
+        calls_dir = self.project_root / "se3" / "calls"
+        calls_dir.mkdir(parents=True, exist_ok=True)
+
+        self.flow = FlowInstance(
+            task_description="Test task",
+            task_type="feature",
+            change_name="test-change",
+            change_path=self.project_root / "test-change",
+        )
+        self.flow.state.selected_steps = [StepType.PROPOSE, StepType.CONFIRM, StepType.DESIGN]
+
+        self.propose_step = Step(
+            step_type=StepType.PROPOSE,
+            status=StepStatus.COMPLETED,
+            step_id="propose-001",
+        )
+        self.propose_step.outputs["proposal"] = "Test proposal"
+        self.flow.state.add_step(self.propose_step)
+
+        self.confirm_step = Step(
+            step_type=StepType.CONFIRM,
+            status=StepStatus.PENDING,
+            step_id="confirm-001",
+            inputs={
+                "step_to_review_id": "propose-001",
+                "step_to_review_type": "propose",
+                "reviewer": "llm",
+                "llm_reviewer": {"model": None, "max_iterations": 3},
+            },
+        )
+        self.flow.state.add_step(self.confirm_step)
+        self.flow.state.current_step_id = "confirm-001"
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @patch("se3.engine.steps.confirm.LLMCaller")
+    def test_llm_reviewer_does_not_create_call_file(self, MockLLMCaller):
+        """LLM reviewer path must not create any call files."""
+        from se3.engine.steps.confirm import confirm_handler
+
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = '{"approved": true, "feedback": "Looks good"}'
+        MockLLMCaller.return_value = mock_caller
+
+        confirm_handler(self.confirm_step, self.flow)
+
+        calls_dir = self.project_root / "se3" / "calls"
+        call_files = list(calls_dir.glob("confirm_*.json"))
+        assert len(call_files) == 0, f"Expected no call files but found: {call_files}"
+
+    @patch("se3.engine.steps.confirm.LLMCaller")
+    def test_llm_reviewer_never_returns_paused(self, MockLLMCaller):
+        """LLM reviewer path must never return PAUSED."""
+        from se3.engine.steps.confirm import confirm_handler
+
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = '{"approved": true, "feedback": "OK"}'
+        MockLLMCaller.return_value = mock_caller
+
+        result = confirm_handler(self.confirm_step, self.flow)
+
+        assert result != StepStatus.PAUSED
+        assert result in (StepStatus.COMPLETED, StepStatus.REVISION_NEEDED)

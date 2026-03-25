@@ -1,11 +1,13 @@
-"""Confirm step handler for human review."""
+"""Confirm step handler for human and LLM review."""
 
 import json
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
+from ..context_builder import build_llm_review_prompt
+from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, StepType
 
 logger = logging.getLogger(__name__)
@@ -124,6 +126,104 @@ def _create_call_file(step: Step, flow: FlowInstance, project_root: Path) -> Pat
     return call_file
 
 
+def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, Any]]:
+    """Perform LLM-based review of a step's output.
+
+    Retrieves the reviewed step's output, builds a review prompt, calls the LLM,
+    and returns the appropriate status and review result.
+
+    Args:
+        step: The current CONFIRM step
+        flow: The flow instance
+
+    Returns:
+        Tuple of (StepStatus, review_result dict)
+    """
+    step_to_review_id = step.inputs.get('step_to_review_id')
+    step_to_review_type = step.inputs.get('step_to_review_type', 'unknown')
+    llm_config = step.inputs.get('llm_reviewer', {})
+    max_iterations = llm_config.get('max_iterations', 3)
+    model = llm_config.get('model')
+
+    # Track iteration count
+    review_iteration = step.inputs.get('_llm_review_iteration', 0)
+
+    # Check max iterations — auto-approve if exceeded
+    if review_iteration >= max_iterations:
+        logger.warning(
+            f"LLM review max iterations ({max_iterations}) reached for "
+            f"{step_to_review_type}, auto-approving"
+        )
+        review_result = {
+            'approved': True,
+            'feedback': f'Auto-approved: max review iterations ({max_iterations}) reached.',
+            'step_to_review_id': step_to_review_id,
+            'step_to_review_type': step_to_review_type,
+            'reviewer': 'llm',
+        }
+        return StepStatus.COMPLETED, review_result
+
+    # Get reviewed step output
+    reviewed_step = flow.state.steps.get(step_to_review_id) if step_to_review_id else None
+    step_output = reviewed_step.outputs if reviewed_step else {}
+
+    # Check for previous revision feedback
+    revision_feedback = None
+    if reviewed_step and reviewed_step.inputs.get('is_revision'):
+        revision_feedback = reviewed_step.inputs.get('revision_feedback')
+
+    # Build prompt
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    prompt = build_llm_review_prompt(
+        step_to_review_type=step_to_review_type,
+        step_output=step_output,
+        task_description=flow.task_description,
+        revision_feedback=revision_feedback,
+        project_root=project_root,
+    )
+
+    # Call LLM
+    try:
+        caller = LLMCaller(
+            project_root=project_root,
+            flow_id=flow.flow_id,
+            step_id=step.step_id,
+            step_type="confirm_llm_review",
+        )
+        response = caller.call(prompt=prompt, require_json=True)
+
+        # Parse response
+        response_data = json.loads(response)
+        approved = response_data.get('approved', False)
+        feedback = response_data.get('feedback', '')
+    except (json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"LLM review returned malformed response, treating as not approved: {e}")
+        approved = False
+        feedback = f"LLM review response could not be parsed: {e}"
+    except Exception as e:
+        logger.error(f"LLM review call failed, auto-approving to avoid blocking: {e}")
+        approved = True
+        feedback = f"Auto-approved due to LLM call failure: {e}"
+
+    # Increment iteration count for next cycle
+    step.inputs['_llm_review_iteration'] = review_iteration + 1
+
+    review_result = {
+        'approved': approved,
+        'feedback': feedback,
+        'step_to_review_id': step_to_review_id,
+        'step_to_review_type': step_to_review_type,
+        'reviewer': 'llm',
+    }
+
+    if approved:
+        logger.info(f"LLM reviewer approved {step_to_review_type}: {feedback[:100]}")
+        return StepStatus.COMPLETED, review_result
+    else:
+        logger.info(f"LLM reviewer requested revision of {step_to_review_type}: {feedback[:100]}")
+        return StepStatus.REVISION_NEEDED, review_result
+
+
 def confirm_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Handle CONFIRM step execution.
 
@@ -144,6 +244,14 @@ def confirm_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """
     logger.info(f"Executing CONFIRM step: {step.step_id}")
 
+    # LLM reviewer path — synchronous, no call file, no PAUSED
+    if step.inputs.get('reviewer') == 'llm':
+        status, review_result = _llm_review(step, flow)
+        step.outputs['review_result'] = review_result
+        step.outputs['revision_feedback'] = review_result.get('feedback', '')
+        return status
+
+    # Human reviewer path
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     calls_dir = project_root / "se3" / "calls"
 

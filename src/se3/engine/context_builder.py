@@ -58,6 +58,9 @@ def get_step_language_instruction(step_type: str, project_root: Path) -> str:
                 and confirm_config.get("reviewer") == "human"
                 and step_type in confirm_config.get("steps", [])):
             return get_language_instruction(lang_config.language, step_type)
+        # LLM review prompt uses the general language setting
+        if step_type == "confirm_llm_review":
+            return get_language_instruction(lang_config.language, step_type)
 
     return ""
 
@@ -420,3 +423,78 @@ Generate a summary of what was accomplished including:
         }
 
         return templates.get(step_type, f"Execute the {step_type} step.")
+
+
+def build_llm_review_prompt(
+    step_to_review_type: str,
+    step_output: Dict[str, Any],
+    task_description: str,
+    revision_feedback: Optional[str] = None,
+    project_root: Optional[Path] = None,
+) -> str:
+    """Build a structured prompt for LLM-based review of a step's output.
+
+    Args:
+        step_to_review_type: Type of the step being reviewed (e.g., "propose", "design")
+        step_output: The outputs from the reviewed step
+        task_description: Original task description from the flow
+        revision_feedback: Previous revision feedback if this is a re-review
+        project_root: Project root directory for language config
+
+    Returns:
+        Formatted prompt string for LLM reviewer
+    """
+    import json as _json
+
+    # Format step output for display
+    output_parts = []
+    for key, value in step_output.items():
+        if key.startswith("_"):
+            continue
+        if isinstance(value, (dict, list)):
+            output_parts.append(f"**{key}:**\n```json\n{_json.dumps(value, indent=2, default=str)}\n```")
+        elif value is not None:
+            output_parts.append(f"**{key}:**\n{value}")
+    step_output_text = "\n\n".join(output_parts) if output_parts else "(no output)"
+
+    revision_section = ""
+    if revision_feedback:
+        revision_section = f"""
+## Previous Revision Feedback
+The following feedback was given in a previous review. Check whether it has been addressed:
+{revision_feedback}
+"""
+
+    # Language instruction
+    lang_instruction = ""
+    if project_root:
+        lang_instruction = get_step_language_instruction("confirm_llm_review", project_root)
+
+    prompt = f"""You are reviewing the output of the **{step_to_review_type}** step in an SE3 development workflow.
+
+## Original Task
+{task_description}
+
+## Output of the {step_to_review_type.upper()} Step
+{step_output_text}
+{revision_section}
+## Evaluation Criteria
+Evaluate the output against these criteria:
+1. **Completeness**: Does the output fully address the task requirements?
+2. **Correctness**: Is the content accurate and free of errors?
+3. **Clarity**: Is the output well-structured and clear?
+4. **Feasibility**: Are the proposed approaches realistic and implementable?
+
+## Response Format
+You MUST respond with a JSON object in this exact format:
+```json
+{{
+    "approved": true or false,
+    "feedback": "Your detailed feedback here. If not approved, explain what needs to be changed."
+}}
+```
+
+If the output is acceptable, set "approved" to true. If changes are needed, set "approved" to false and provide specific, actionable feedback.
+{lang_instruction}"""
+
+    return prompt

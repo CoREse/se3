@@ -618,6 +618,13 @@ class StateMachine:
                 inputs["step_to_review_id"] = last_non_confirm_step.step_id
                 inputs["step_to_review_type"] = last_non_confirm_step.step_type.value
                 inputs["reviewer"] = config.get("reviewer", "human")
+                # Propagate llm_reviewer config when reviewer is 'llm'
+                if inputs["reviewer"] == "llm":
+                    llm_reviewer_config = config.get("llm_reviewer", {})
+                    inputs["llm_reviewer"] = {
+                        "model": llm_reviewer_config.get("model", None),
+                        "max_iterations": llm_reviewer_config.get("max_iterations", 3),
+                    }
 
         # Special handling for TEST step when in fix iteration
         if step_type == StepType.TEST:

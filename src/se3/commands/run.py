@@ -738,6 +738,15 @@ def _run_flow_impl(
 
         # Handle CONFIRM step PAUSED state - prompt user for approval
         if current_step.step_type == StepType.CONFIRM and result == StepStatus.PAUSED:
+            # Defensive guard: LLM reviewer should never return PAUSED
+            if current_step.inputs.get('reviewer') == 'llm':
+                logger.warning(
+                    "BUG: LLM reviewer returned PAUSED — this should not happen. "
+                    "Skipping interactive prompt."
+                )
+                current_step.status = StepStatus.PENDING
+                persistence.save_flow(flow)
+                continue
             confirm_result = _handle_confirm_pause(flow, current_step, persistence, project_root, prompt_history)
             if confirm_result is None:
                 # User chose to exit
