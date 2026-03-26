@@ -51,11 +51,10 @@ def get_step_language_instruction(step_type: str, project_root: Path) -> str:
     if step_type in HUMAN_FACING_STEPS:
         return get_language_instruction(lang_config.language, step_type)
 
-    # Check if this step has human confirmation configured
+    # Check if this step has confirmation configured (human or LLM reviewer)
     if lang_config.language:
         confirm_config = load_confirmation_config(project_root)
         if (confirm_config.get("enabled", False)
-                and confirm_config.get("reviewer") == "human"
                 and step_type in confirm_config.get("steps", [])):
             return get_language_instruction(lang_config.language, step_type)
         # LLM review prompt uses the general language setting

@@ -210,8 +210,8 @@ class TestGetStepLanguageInstruction:
         result = get_step_language_instruction("design", tmp_path)
         assert "zh-CN" in result
 
-    def test_confirmed_step_llm_reviewer_no_instruction(self, tmp_path):
-        """Steps with LLM confirmation don't use general language."""
+    def test_confirmed_step_llm_reviewer_uses_language(self, tmp_path):
+        """Steps with LLM confirmation also use general language."""
         self._write_config(
             tmp_path,
             language="zh-CN",
@@ -220,7 +220,7 @@ class TestGetStepLanguageInstruction:
             reviewer="llm",
         )
         result = get_step_language_instruction("propose", tmp_path)
-        assert result == ""
+        assert "zh-CN" in result
 
     def test_confirmed_step_disabled_no_instruction(self, tmp_path):
         """Steps with disabled confirmation don't use general language."""
