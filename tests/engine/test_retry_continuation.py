@@ -27,7 +27,7 @@ class TestLLMCallerRetryMode:
         assert caller.retry_mode == "retry"
 
     @patch("se3.engine.llm_caller.LLMCaller._get_retry_context")
-    @patch("se3.engine.llm_caller.ClaudeRunner")
+    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
     def test_continue_mode_uses_continuation_prompt(self, mock_runner_cls, mock_get_ctx):
         """In continue mode with retry context, should use continuation instruction, not original prompt."""
         mock_get_ctx.return_value = "[Previous conversation context]\nsome history"
@@ -65,7 +65,7 @@ class TestLLMCallerRetryMode:
         assert "Do NOT repeat work already completed" in effective_prompt
 
     @patch("se3.engine.llm_caller.LLMCaller._get_retry_context")
-    @patch("se3.engine.llm_caller.ClaudeRunner")
+    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
     def test_retry_mode_uses_original_prompt(self, mock_runner_cls, mock_get_ctx):
         """In retry mode with retry context, should prepend history + original prompt."""
         mock_get_ctx.return_value = "[Previous conversation context]\nsome history"
@@ -98,7 +98,7 @@ class TestLLMCallerRetryMode:
         assert "Original task prompt" in effective_prompt
 
     @patch("se3.engine.llm_caller.LLMCaller._get_retry_context")
-    @patch("se3.engine.llm_caller.ClaudeRunner")
+    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
     def test_first_attempt_unchanged(self, mock_runner_cls, mock_get_ctx):
         """On first attempt (external_attempt=0), behavior should be unchanged regardless of mode."""
         mock_runner = MagicMock()

@@ -174,7 +174,7 @@ class TestStepHandlers:
 class TestLLMCallerIntegration:
     """Tests for LLM caller integration with retry logic."""
 
-    @patch("se3.engine.llm_caller.ClaudeRunner")
+    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
     def test_llm_retry_success(self, MockRunner):
         """Test that retries eventually succeed."""
         from .llm_caller import LLMCaller
@@ -196,7 +196,7 @@ class TestLLMCallerIntegration:
         assert result == "success"
         assert mock_runner.run_with_monitor.call_count == 3
 
-    @patch("se3.engine.llm_caller.ClaudeRunner")
+    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
     def test_llm_retry_exhausted(self, MockRunner):
         """Test that retry exhaustion raises LLMCallError."""
         from .llm_caller import LLMCaller, LLMCallError

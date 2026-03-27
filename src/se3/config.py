@@ -353,32 +353,43 @@ def insert_confirmation_steps(
     return result
 
 
-def load_claude_commands(project_root: Optional[Path] = None) -> list[dict]:
-    """Load Claude CLI commands from project and global configuration.
-    
-    Loads commands from se3.yaml (project-level) and ~/.se3/config.yaml (global-level).
-    Commands are sorted by priority (higher first). String entries are normalized to dicts.
-    
+def load_agents(project_root: Optional[Path] = None) -> list[dict]:
+    """Load agent configurations from project and global configuration.
+
+    Supports two configuration formats:
+    1. New ``agents`` field (recommended): list of dicts with name, type, cmd, priority.
+    2. Legacy ``claude_commands`` field: auto-converted with type='claude-code'.
+
+    When both exist, ``agents`` takes priority.  Project config overrides global.
+
     Args:
         project_root: Project root directory. If None, uses global config only.
-        
+
     Returns:
-        List of command dictionaries with 'cmd' and 'priority' keys, sorted by priority.
+        List of agent config dicts ``{name, type, cmd, priority}`` sorted by
+        priority descending.
     """
-    commands = []
-    
-    # Load global config
+    agents: list[dict] = []
+
+    # --- Load global config ---
     global_config_path = Path.home() / ".se3" / "config.yaml"
+    global_data: dict = {}
     if global_config_path.exists():
         try:
             with open(global_config_path, "r", encoding="utf-8") as f:
                 global_data = yaml.safe_load(f) or {}
-            global_commands = global_data.get("claude_commands", [])
-            commands.extend(_normalize_commands(global_commands))
         except Exception:
             pass
-    
-    # Load project config (overrides global)
+
+    global_agents_raw = global_data.get("agents")
+    if global_agents_raw:
+        agents = _normalize_agents(global_agents_raw)
+    else:
+        global_commands = global_data.get("claude_commands", [])
+        if global_commands:
+            agents = _commands_to_agents(_normalize_commands(global_commands))
+
+    # --- Load project config (overrides global) ---
     if project_root is not None:
         project_root = Path(project_root)
         project_config_path = project_root / "se3.yaml"
@@ -386,29 +397,98 @@ def load_claude_commands(project_root: Optional[Path] = None) -> list[dict]:
             try:
                 with open(project_config_path, "r", encoding="utf-8") as f:
                     project_data = yaml.safe_load(f) or {}
+            except Exception:
+                project_data = {}
+
+            project_agents_raw = project_data.get("agents")
+            if project_agents_raw:
+                agents = _normalize_agents(project_agents_raw)
+            else:
                 project_commands = project_data.get("claude_commands", [])
                 if project_commands:
-                    # Project commands override global
-                    commands = _normalize_commands(project_commands)
-            except Exception:
-                pass
-    
-    # If no commands found, use default
-    if not commands:
-        commands = [{"cmd": "claude", "priority": 0}]
-    
+                    agents = _commands_to_agents(_normalize_commands(project_commands))
+
+    # Default: single claude agent
+    if not agents:
+        agents = [{"name": "claude", "type": "claude-code", "cmd": "claude", "priority": 0}]
+
     # Sort by priority (higher first)
-    commands.sort(key=lambda x: x.get("priority", 0), reverse=True)
-    
-    return commands
+    agents.sort(key=lambda x: x.get("priority", 0), reverse=True)
+
+    return agents
+
+
+def load_claude_commands(project_root: Optional[Path] = None) -> list[dict]:
+    """Load Claude CLI commands from project and global configuration.
+
+    .. deprecated::
+        Use :func:`load_agents` instead.  This function now delegates to
+        ``load_agents()`` and converts the result back to the legacy
+        ``{cmd, priority}`` format for backward compatibility.
+
+    Args:
+        project_root: Project root directory. If None, uses global config only.
+
+    Returns:
+        List of command dictionaries with 'cmd' and 'priority' keys, sorted by priority.
+    """
+    agents = load_agents(project_root)
+    return _agents_to_commands(agents)
+
+
+def _normalize_agents(agents_raw: list) -> list[dict]:
+    """Normalize agent entries from config to standard dicts.
+
+    Each entry can be a dict with keys ``name``, ``type``, ``cmd``, ``priority``.
+    Strings are treated as cmd values with defaults for everything else.
+    """
+    normalized = []
+    for i, entry in enumerate(agents_raw):
+        if isinstance(entry, str):
+            normalized.append({
+                "name": entry,
+                "type": "claude-code",
+                "cmd": entry,
+                "priority": 0,
+            })
+        elif isinstance(entry, dict):
+            cmd = entry.get("cmd", "claude")
+            normalized.append({
+                "name": entry.get("name", cmd),
+                "type": entry.get("type", "claude-code"),
+                "cmd": cmd,
+                "priority": entry.get("priority", 0),
+            })
+    return normalized
+
+
+def _commands_to_agents(commands: list[dict]) -> list[dict]:
+    """Convert legacy command dicts to agent dicts."""
+    return [
+        {
+            "name": cmd.get("cmd", "claude"),
+            "type": "claude-code",
+            "cmd": cmd.get("cmd", "claude"),
+            "priority": cmd.get("priority", 0),
+        }
+        for cmd in commands
+    ]
+
+
+def _agents_to_commands(agents: list[dict]) -> list[dict]:
+    """Convert agent dicts back to legacy command dicts."""
+    return [
+        {"cmd": a.get("cmd", "claude"), "priority": a.get("priority", 0)}
+        for a in agents
+    ]
 
 
 def _normalize_commands(commands: list) -> list[dict]:
     """Normalize command entries to dictionaries.
-    
+
     Args:
         commands: List of command entries (dicts or strings)
-        
+
     Returns:
         List of normalized command dictionaries
     """

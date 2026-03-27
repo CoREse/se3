@@ -1,8 +1,13 @@
-"""Claude Command Resolver with priority-based fallback.
+"""Claude Code CLI adapter (single-command runner).
 
-Provides a unified way to invoke Claude CLI across SE3 modules.
-Supports multiple configured commands with automatic fallback on
-usage limits or timeouts.
+Provides a unified way to invoke Claude Code CLI from SE3 modules.
+Each ClaudeCodeRunner instance wraps a single agent command.
+Agent selection/rotation is handled by LLMCaller.
+
+Historical note: This module was originally ``ClaudeRunner`` with built-in
+command list traversal.  The traversal logic has been moved to LLMCaller;
+this runner now only executes a single command.  The ``ClaudeRunner`` alias
+is kept for backward compatibility.
 """
 
 import os
@@ -11,10 +16,12 @@ import subprocess
 import sys
 import threading
 import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .agent_runner import AgentRunner, InfraErrorType
 from .config import load_claude_commands
 
 # Platform-specific imports for process resource monitoring
@@ -39,24 +46,45 @@ USAGE_LIMIT_KEYWORDS = [
 ]
 
 
-class ClaudeRunner:
-    """Runs Claude CLI commands with priority-based fallback.
+class ClaudeCodeRunner(AgentRunner):
+    """Pure Claude Code CLI adapter — executes a single command.
 
-    On usage limit or timeout, automatically retries with the next
-    configured command in priority order.
+    This runner wraps one specific Claude CLI command (e.g. ``claude`` or
+    ``kclaude``).  It does NOT traverse a list of commands or implement
+    fallback logic; that responsibility belongs to :class:`LLMCaller`.
+
+    For backward compatibility, the constructor also accepts the legacy
+    ``commands`` parameter (list of dicts); in that case, only the first
+    command is used.
     """
 
-    def __init__(self, project_root: Optional[Path] = None, commands: Optional[List[Dict[str, Any]]] = None):
-        """Initialize with command list.
+    def __init__(
+        self,
+        project_root: Optional[Path] = None,
+        commands: Optional[List[Dict[str, Any]]] = None,
+        command: Optional[Dict[str, Any]] = None,
+    ):
+        """Initialize with a single command.
 
         Args:
-            project_root: Project root for loading config. Ignored if commands is given.
-            commands: Explicit command list. If None, loaded from config.
+            project_root: Project root for loading config.
+            commands: Legacy parameter — list of command dicts.  If provided
+                and ``command`` is None, the first entry is used.
+            command: Single command dict ``{cmd, priority}``.  Preferred.
         """
+        if command is not None:
+            self.command = command
+        elif commands is not None:
+            self.command = commands[0] if commands else {"cmd": "claude", "priority": 0}
+        else:
+            all_commands = load_claude_commands(project_root)
+            self.command = all_commands[0] if all_commands else {"cmd": "claude", "priority": 0}
+
+        # Keep a commands list view for backward compatibility (popen, retry_with_next, helpers)
         if commands is not None:
             self.commands = commands
         else:
-            self.commands = load_claude_commands(project_root)
+            self.commands = [self.command]
 
     @staticmethod
     def _resolve_args(args: List[str], cwd: Optional[Path] = None) -> List[str]:
@@ -147,99 +175,50 @@ class ClaudeRunner:
         env: Optional[Dict[str, str]] = None,
         on_retry: Optional[Callable[[int, str], Optional[List[str]]]] = None,
     ) -> subprocess.CompletedProcess:
-        """Run Claude synchronously with fallback.
-
-        Tries each command in priority order. On usage limit or timeout,
-        switches to the next command. Handles @file syntax for prompt files.
+        """Run Claude synchronously (single command, no fallback).
 
         Args:
-            args: Arguments to pass after the claude command (e.g. ["-p", prompt] or ["@prompt.txt"]).
+            args: Arguments to pass after the claude command.
             timeout: Timeout in seconds.
             cwd: Working directory.
             env: Environment variables.
-            on_retry: Optional callback(cmd_index, failed_cmd) -> new_args or None.
-                      If it returns new args, those replace the original args.
-                      If None or returns None, original args are reused.
+            on_retry: Ignored (kept for interface compatibility).
 
         Returns:
-            subprocess.CompletedProcess from the successful (or last) attempt.
-
-        Raises:
-            AllCommandsExhausted: If all commands fail with usage limit/timeout.
+            subprocess.CompletedProcess from the attempt.
         """
-        last_result = None
+        cmd_name = self.command["cmd"]
         temp_files = []
 
         try:
-            for i, cmd_entry in enumerate(self.commands):
-                cmd_name = cmd_entry["cmd"]
-                current_args = args
+            # Resolve arguments (handle @file syntax)
+            resolved_args = self._resolve_args(args, cwd)
+            for arg in resolved_args:
+                if arg.startswith("@"):
+                    temp_files.append(Path(arg[1:]))
 
-                # If retrying (not first attempt), consult callback
-                if i > 0 and on_retry is not None:
-                    new_args = on_retry(i, self.commands[i - 1]["cmd"])
-                    if new_args is not None:
-                        current_args = new_args
+            full_cmd = [cmd_name, "--dangerously-skip-permissions"] + resolved_args
 
-                # Resolve arguments (handle @file syntax)
-                resolved_args = self._resolve_args(current_args, cwd)
-                # Collect temp files to clean up later
-                for arg in resolved_args:
-                    if arg.startswith("@"):
-                        temp_files.append(Path(arg[1:]))
+            run_env = env
+            if run_env is None:
+                run_env = dict(os.environ)
+            run_env.pop("CLAUDECODE", None)
 
-                full_cmd = [cmd_name, "--dangerously-skip-permissions"] + resolved_args
+            try:
+                result = subprocess.run(
+                    full_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                    cwd=cwd,
+                    env=run_env,
+                )
+                return result
 
-                # Ensure CLAUDECODE is removed to avoid nested session detection
-                # This is important when run() is called without explicit env
-                run_env = env
-                if run_env is None:
-                    run_env = dict(os.environ)
-                run_env.pop("CLAUDECODE", None)
-
-                try:
-                    result = subprocess.run(
-                        full_cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=timeout,
-                        cwd=cwd,
-                        env=run_env,
-                    )
-                    last_result = result
-
-                    # Check for usage limit
-                    if self.detect_usage_limit(result.returncode, result.stdout, result.stderr):
-                        print(
-                            f"[claude-runner] Usage limit hit with '{cmd_name}', "
-                            f"trying next command...",
-                            file=sys.stderr,
-                        )
-                        continue
-
-                    # Success or non-limit failure — return as-is
-                    return result
-
-                except subprocess.TimeoutExpired:
-                    print(
-                        f"[claude-runner] Timeout with '{cmd_name}', "
-                        f"trying next command...",
-                        file=sys.stderr,
-                    )
-                    # Create a synthetic CompletedProcess for the timeout case
-                    last_result = subprocess.CompletedProcess(
-                        args=full_cmd, returncode=124, stdout="", stderr="timeout"
-                    )
-                    continue
-
-            # All commands exhausted
-            if last_result is not None:
-                return last_result
-
-            # Should not reach here, but just in case
-            return subprocess.CompletedProcess(
-                args=[], returncode=1, stdout="", stderr="No claude commands configured"
-            )
+            except subprocess.TimeoutExpired:
+                return subprocess.CompletedProcess(
+                    args=full_cmd, returncode=124, stdout="", stderr="timeout"
+                )
         finally:
             for temp_file in temp_files:
                 try:
@@ -304,18 +283,18 @@ class ClaudeRunner:
     ) -> Optional[Tuple[subprocess.Popen, int]]:
         """Retry with the next command after the given index.
 
-        Args:
-            cmd_index: Index of the command that failed.
-            args: Arguments for the new process.
-            cwd: Working directory.
-            env: Environment variables.
-            stdout: stdout handling.
-            stderr: stderr handling.
-            **kwargs: Additional Popen arguments.
+        .. deprecated::
+            Agent rotation is now handled by LLMCaller.  This method is
+            kept for backward compatibility with collab modules.
 
         Returns:
             Tuple of (Popen process, new cmd_index) or None if exhausted.
         """
+        warnings.warn(
+            "retry_with_next is deprecated; agent rotation is handled by LLMCaller",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         next_index = cmd_index + 1
         if next_index >= len(self.commands):
             return None
@@ -393,6 +372,23 @@ class ClaudeRunner:
         """
         return returncode == 124
 
+    def detect_infra_error(
+        self,
+        returncode: int,
+        stdout: str,
+        stderr: str,
+    ) -> InfraErrorType:
+        """Detect infrastructure errors from execution results.
+
+        Combines usage-limit and timeout detection into a single
+        :class:`InfraErrorType` result for use by :class:`LLMCaller`.
+        """
+        if self.detect_usage_limit(returncode, stdout, stderr):
+            return InfraErrorType.USAGE_LIMIT
+        if self.detect_timeout(returncode):
+            return InfraErrorType.TIMEOUT
+        return InfraErrorType.NONE
+
     def run_with_monitor(
         self,
         args: List[str],
@@ -404,34 +400,30 @@ class ClaudeRunner:
         on_output: Optional[Callable[[str], None]] = None,
         on_activity: Optional[Callable[[], None]] = None,
     ) -> "MonitoredResult":
-        """Run Claude with activity-based monitoring and automatic command fallback.
+        """Run Claude with activity-based monitoring (single command, no fallback).
 
-        This method provides real-time monitoring of the Claude process:
+        Provides real-time monitoring of the Claude process:
         - Reads stdout/stderr continuously to detect "stuck" state
-        - Records last activity timestamp (any output)
-        - If no output for inactivity_timeout seconds, kills process and tries next command
-        - Optionally writes all output to log file in real-time
-        - Automatically switches to next configured command on usage limit / inactivity
-        - Handles @file syntax for prompt files
+        - Records last activity timestamp
+        - If no output for inactivity_timeout seconds, kills process
+        - Optionally writes output to log file in real-time
 
         Args:
-            args: Arguments to pass after the claude command (e.g. ["-p", prompt] or ["@prompt.txt"]).
-            log_file: Optional path to write all output (real-time).
-            wall_timeout: Maximum total runtime in seconds (None for no limit).
+            args: Arguments to pass after the claude command.
+            log_file: Optional path to write all output.
+            wall_timeout: Maximum total runtime in seconds.
             inactivity_timeout: Seconds without output before considering stuck.
             cwd: Working directory.
             env: Environment variables.
-            on_output: Optional callback for each line of output.
-            on_activity: Optional callback called whenever activity is detected (output received).
+            on_output: Callback for each line of output.
+            on_activity: Callback for activity detection.
 
         Returns:
             MonitoredResult with exit code, output, and metadata.
         """
         start_time = time.time()
-        all_outputs = []
+        cmd_name = self.command["cmd"]
 
-        # Ensure CLAUDECODE is removed to avoid nested session detection
-        # This is important when run_with_monitor() is called without explicit env
         run_env = env
         if run_env is None:
             run_env = dict(os.environ)
@@ -439,118 +431,70 @@ class ClaudeRunner:
 
         temp_files = []
         try:
-            for cmd_index, cmd_entry in enumerate(self.commands):
-                cmd_name = cmd_entry["cmd"]
+            # Resolve arguments (handle @file syntax)
+            resolved_args = self._resolve_args(args, cwd)
+            for arg in resolved_args:
+                if arg.startswith("@"):
+                    temp_files.append(Path(arg[1:]))
 
-                # Resolve arguments (handle @file syntax)
-                resolved_args = self._resolve_args(args, cwd)
-                # Collect temp files to clean up later
-                for arg in resolved_args:
-                    if arg.startswith("@"):
-                        temp_files.append(Path(arg[1:]))
+            full_cmd = [cmd_name, "--dangerously-skip-permissions"] + resolved_args
 
-                full_cmd = [cmd_name, "--dangerously-skip-permissions"] + resolved_args
+            print(
+                f"[claude-runner] Running command: '{cmd_name}'",
+                file=sys.stderr,
+            )
 
+            result = self._run_single_with_monitor(
+                full_cmd=full_cmd,
+                cmd_name=cmd_name,
+                cmd_index=0,
+                log_file=log_file,
+                wall_timeout=wall_timeout,
+                inactivity_timeout=inactivity_timeout,
+                cwd=cwd,
+                env=run_env,
+                on_output=on_output,
+                on_activity=on_activity,
+                start_time=start_time,
+            )
+
+            output = f"=== Command: {cmd_name} ===\n{result.output}"
+
+            if result.interrupted:
+                return MonitoredResult(
+                    returncode=result.returncode,
+                    output=output,
+                    cmd_used=cmd_name,
+                    cmd_index=0,
+                    was_retry=False,
+                    interrupted=True,
+                )
+
+            if result.success:
                 print(
-                    f"[claude-runner] Attempting command {cmd_index + 1}/{len(self.commands)}: '{cmd_name}'",
+                    f"[claude-runner] Command '{cmd_name}' succeeded",
                     file=sys.stderr,
                 )
-                try:
-                    result = self._run_single_with_monitor(
-                        full_cmd=full_cmd,
-                        cmd_name=cmd_name,
-                        cmd_index=cmd_index,
-                        log_file=log_file,
-                        wall_timeout=wall_timeout,
-                        inactivity_timeout=inactivity_timeout,
-                        cwd=cwd,
-                        env=run_env,
-                        on_output=on_output,
-                        on_activity=on_activity,
-                        start_time=start_time,
-                    )
 
-                    all_outputs.append(f"=== Command: {cmd_name} ===")
-                    all_outputs.append(result.output)
-
-                    # Interrupted by Ctrl+C: return partial output immediately
-                    if result.interrupted:
-                        return MonitoredResult(
-                            returncode=result.returncode,
-                            output="\n".join(all_outputs),
-                            cmd_used=cmd_name,
-                            cmd_index=cmd_index,
-                            was_retry=cmd_index > 0,
-                            interrupted=True,
-                        )
-
-                    if result.success:
-                        print(
-                            f"[claude-runner] Command '{cmd_name}' succeeded",
-                            file=sys.stderr,
-                        )
-                        return MonitoredResult(
-                            returncode=result.returncode,
-                            output="\n".join(all_outputs),
-                            cmd_used=cmd_name,
-                            cmd_index=cmd_index,
-                            was_retry=cmd_index > 0,
-                        )
-
-                    # Check if we should retry
-                    if result.should_retry and cmd_index < len(self.commands) - 1:
-                        print(
-                            f"[claude-runner] Command '{cmd_name}' failed (will retry next command): "
-                            f"Exit code {result.returncode}",
-                            file=sys.stderr,
-                        )
-                        # Add a small delay between retries to avoid rapid fire switching
-                        time.sleep(2)
-                        continue
-
-                    # Final command failed
-                    print(
-                        f"[claude-runner] Command '{cmd_name}' failed and no more commands to retry",
-                        file=sys.stderr,
-                    )
-                    return MonitoredResult(
-                        returncode=result.returncode,
-                        output="\n".join(all_outputs),
-                        cmd_used=cmd_name,
-                        cmd_index=cmd_index,
-                        was_retry=cmd_index > 0,
-                    )
-
-                except Exception as e:
-                    msg = f"[claude-runner] Error running command '{cmd_name}': {e}"
-                    print(msg, file=sys.stderr)
-                    all_outputs.append(f"=== Command: {cmd_name} ===")
-                    all_outputs.append(msg)
-
-                    if cmd_index < len(self.commands) - 1:
-                        print(
-                            f"[claude-runner] Will retry with next command...",
-                            file=sys.stderr,
-                        )
-                        time.sleep(2)
-                        continue
-                    else:
-                        return MonitoredResult(
-                            returncode=1,
-                            output="\n".join(all_outputs),
-                            cmd_used=cmd_name,
-                            cmd_index=cmd_index,
-                            was_retry=cmd_index > 0,
-                        )
-
-            # Should not reach here
             return MonitoredResult(
-                returncode=1,
-                output="\n".join(all_outputs),
-                cmd_used="none",
-                cmd_index=-1,
+                returncode=result.returncode,
+                output=output,
+                cmd_used=cmd_name,
+                cmd_index=0,
                 was_retry=False,
             )
+
+        except Exception as e:
+            msg = f"[claude-runner] Error running command '{cmd_name}': {e}"
+            print(msg, file=sys.stderr)
+            return MonitoredResult(
+                returncode=1,
+                output=msg,
+                cmd_used=cmd_name,
+                cmd_index=0,
+                was_retry=False,
+            )
+
         finally:
             for temp_file in temp_files:
                 try:
@@ -825,3 +769,7 @@ class _SingleRunResult:
     success: bool
     should_retry: bool
     interrupted: bool = False  # True if stopped by KeyboardInterrupt
+
+
+# Backward-compatibility alias
+ClaudeRunner = ClaudeCodeRunner

@@ -1,6 +1,7 @@
 """LLM caller for step execution.
 
 Handles subprocess calls to Claude CLI with retry and fallback logic.
+Manages agent selection and rotation on infrastructure errors.
 """
 
 import json
@@ -10,7 +11,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from ..claude_runner import ClaudeRunner
+from ..agent_runner import AgentRunner, InfraErrorType
+from ..claude_runner import ClaudeCodeRunner, ClaudeRunner
 
 logger = logging.getLogger(__name__)
 
@@ -267,8 +269,11 @@ class StreamJSONTracker:
 class LLMCaller:
     """Manages LLM calls within flow engine steps.
 
-    Wraps ClaudeRunner with flow-engine-specific retry and fallback logic.
-    Provides a simple interface for step handlers.
+    Wraps agent runners with flow-engine-specific retry, JSON handling,
+    chat history, and agent rotation logic.  Maintains a list of available
+    agents and rotates to the next one on infrastructure errors (usage
+    limit, timeout, hang).  Task-level failures are *not* rotated — those
+    are left for the State Machine layer to retry.
     """
 
     def __init__(
@@ -281,6 +286,7 @@ class LLMCaller:
         step_type: Optional[str] = None,
         external_attempt: int = 0,
         retry_mode: str = "continue",
+        agents: Optional[List[Dict[str, Any]]] = None,
     ):
         self.project_root = Path(project_root) if project_root else Path.cwd()
         self.max_retries = max_retries
@@ -290,7 +296,60 @@ class LLMCaller:
         self.step_type = step_type or ""
         self.external_attempt = external_attempt  # Track external retry (e.g., from implement.py)
         self.retry_mode = retry_mode  # 'continue' (resume from breakpoint) or 'retry' (restart)
-        self._runner = ClaudeRunner(self.project_root)
+
+        # Agent management
+        if agents is not None:
+            self._agents = agents
+        else:
+            from ..config import load_agents
+            self._agents = load_agents(self.project_root)
+        self._current_agent_index = 0
+        self._runner_cache: Dict[str, AgentRunner] = {}
+
+        # Legacy: expose a single _runner for backward compat (uses current agent)
+        self._runner = self._get_current_runner()
+
+    def _create_runner(self, agent_config: Dict[str, Any]) -> AgentRunner:
+        """Create a Runner instance for the given agent config.
+
+        Args:
+            agent_config: Agent dict with name, type, cmd, priority.
+
+        Returns:
+            An AgentRunner implementation.
+        """
+        agent_type = agent_config.get("type", "claude-code")
+        if agent_type == "claude-code":
+            return ClaudeCodeRunner(
+                command={"cmd": agent_config["cmd"], "priority": agent_config.get("priority", 0)},
+            )
+        # Future: add other agent types here
+        raise ValueError(f"Unknown agent type: {agent_type}")
+
+    def _get_current_runner(self) -> AgentRunner:
+        """Get (or create and cache) the Runner for the current agent."""
+        agent = self._agents[self._current_agent_index]
+        cache_key = agent.get("name", agent.get("cmd", str(self._current_agent_index)))
+        if cache_key not in self._runner_cache:
+            self._runner_cache[cache_key] = self._create_runner(agent)
+        return self._runner_cache[cache_key]
+
+    def _rotate_agent(self) -> bool:
+        """Rotate to the next agent in the list.
+
+        Returns:
+            True if rotation succeeded, False if all agents are exhausted.
+        """
+        if self._current_agent_index + 1 >= len(self._agents):
+            logger.warning("All agents exhausted — no more agents to rotate to")
+            return False
+        old_name = self._agents[self._current_agent_index].get("name", "?")
+        self._current_agent_index += 1
+        new_agent = self._agents[self._current_agent_index]
+        new_name = new_agent.get("name", "?")
+        logger.info(f"Rotating agent: '{old_name}' → '{new_name}' (index {self._current_agent_index})")
+        self._runner = self._get_current_runner()
+        return True
 
     def call(
         self,
@@ -632,7 +691,12 @@ class LLMCaller:
         json_retry_count: int,
         max_json_retries: int = 2,
     ) -> str:
-        """Internal method to call LLM with retry logic."""
+        """Internal method to call LLM with retry and agent rotation logic.
+
+        On infrastructure errors (usage limit, timeout, hang), rotates to the
+        next agent and retries.  On task-level failures, retries with the same
+        agent up to ``max_retries`` times before raising.
+        """
         original_prompt = prompt
 
         env = dict(os.environ)
@@ -645,7 +709,7 @@ class LLMCaller:
             # Combine external attempt (from caller) with internal attempt (network retries)
             # to determine if we should inject history context
             total_attempt = self.external_attempt * self.max_retries + internal_attempt
-            
+
             # On retry (either external or internal), inject previous conversation context
             if total_attempt > 0:
                 retry_context = self._get_retry_context()
@@ -677,10 +741,15 @@ class LLMCaller:
             self._record_prompt(effective_prompt, self.external_attempt)
 
             try:
-                logger.debug(f"LLM call internal_attempt {internal_attempt + 1}/{self.max_retries}, external_attempt {self.external_attempt}")
+                current_runner = self._get_current_runner()
+                current_agent_name = self._agents[self._current_agent_index].get("name", "?")
+                logger.debug(
+                    f"LLM call internal_attempt {internal_attempt + 1}/{self.max_retries}, "
+                    f"external_attempt {self.external_attempt}, agent '{current_agent_name}'"
+                )
 
                 if on_output:
-                    result = self._runner.run_with_monitor(
+                    result = current_runner.run_with_monitor(
                         args=args,
                         wall_timeout=None,  # No wall time limit, only inactivity timeout
                         inactivity_timeout=1800,  # 30 minutes
@@ -694,7 +763,7 @@ class LLMCaller:
                     def on_stream_output(line: str) -> None:
                         stream_tracker.process_line(line)
 
-                    result = self._runner.run_with_monitor(
+                    result = current_runner.run_with_monitor(
                         args=args,
                         wall_timeout=None,  # No wall time limit, only inactivity timeout
                         inactivity_timeout=1800,  # 30 minutes
@@ -740,6 +809,21 @@ class LLMCaller:
                     duration_s = time.time() - start_time
                     logger.debug(f"LLM call succeeded in {int(duration_s * 1000)}ms")
                     return result.output
+
+                # --- Failure path: check for infrastructure error → rotate agent ---
+                infra_error = current_runner.detect_infra_error(
+                    result.returncode, result.output or "", ""
+                )
+                if infra_error != InfraErrorType.NONE:
+                    logger.warning(
+                        f"Infrastructure error ({infra_error.value}) on agent '{current_agent_name}', "
+                        f"attempting agent rotation..."
+                    )
+                    if self._rotate_agent():
+                        # Rotation succeeded — retry immediately with the new agent
+                        # (don't count this as a regular internal_attempt)
+                        time.sleep(self.retry_delay)
+                        continue
 
                 last_error = f"Command '{result.cmd_used}' failed with exit code {result.returncode}"
                 logger.warning(f"LLM call failed: {last_error}, internal attempt {internal_attempt + 1}/{self.max_retries}")
