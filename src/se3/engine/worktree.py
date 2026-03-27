@@ -6,11 +6,13 @@ execution, merge results back, and clean up after loop completion.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -64,12 +66,36 @@ def get_current_branch(project_root: Path) -> str:
     return branch
 
 
-def create_loop_branch(project_root: Path, timestamp: str | None = None) -> tuple[str, str]:
+def _slugify_task_id(task: str) -> str:
+    """Convert a task description into a branch-name-safe slug.
+
+    Lowercases, replaces non-alphanumeric chars with hyphens, strips leading/
+    trailing hyphens, collapses consecutive hyphens, and truncates to 30 chars.
+    """
+    slug = task.lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    slug = slug.strip("-")
+    slug = re.sub(r"-{2,}", "-", slug)
+    return slug[:30].rstrip("-")
+
+
+def create_loop_branch(
+    project_root: Path,
+    timestamp: str | None = None,
+    task_id: str | None = None,
+    iteration: int | None = None,
+) -> tuple[str, str]:
     """Create a new loop branch from current HEAD.
+
+    When *task_id* and *iteration* are provided the branch is named
+    ``loop/{slugified_task_id}-{iteration}`` (new convention).  Otherwise
+    falls back to the legacy ``se3-loop/{timestamp}`` format.
 
     Args:
         project_root: Project root directory
-        timestamp: Optional timestamp string; defaults to now
+        timestamp: Optional timestamp string; defaults to now (legacy)
+        task_id: Task identifier for the new naming convention
+        iteration: Iteration number for the new naming convention
 
     Returns:
         Tuple of (loop_branch_name, original_branch_name)
@@ -79,10 +105,15 @@ def create_loop_branch(project_root: Path, timestamp: str | None = None) -> tupl
     """
     original_branch = get_current_branch(project_root)
 
-    if timestamp is None:
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-
-    branch_name = f"se3-loop/{timestamp}"
+    if task_id and iteration is not None:
+        slug = _slugify_task_id(task_id)
+        if not slug:
+            slug = "task"
+        branch_name = f"loop/{slug}-{iteration}"
+    else:
+        if timestamp is None:
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        branch_name = f"se3-loop/{timestamp}"
 
     _run_git(project_root, "branch", branch_name)
     logger.info("Created loop branch: %s (from %s)", branch_name, original_branch)
@@ -144,19 +175,26 @@ def remove_worktree(project_root: Path, worktree_path: Path) -> None:
         logger.info("Removed worktree: %s", worktree_path)
 
 
-def merge_loop_branch(project_root: Path, loop_branch: str, target_branch: str) -> bool:
+def merge_loop_branch(
+    project_root: Path,
+    loop_branch: str,
+    target_branch: str,
+    conflict_strategy: str = "human",
+) -> Union[bool, str]:
     """Merge a loop branch into the target branch.
-
-    On conflict: captures conflicting file list, displays with Rich formatting,
-    aborts the merge to leave repo clean, and returns False.
 
     Args:
         project_root: Project root directory
         loop_branch: Name of the loop branch to merge
         target_branch: Name of the branch to merge into
+        conflict_strategy: How to handle conflicts — ``'human'`` (preserve
+            conflict state + create call file) or ``'llm'`` (attempt
+            per-file LLM resolution, fallback to human).
 
     Returns:
-        True if merge succeeded, False if there were conflicts
+        ``True`` if merge succeeded, ``False`` if merge failed (non-conflict),
+        or ``'pending_human'`` when *conflict_strategy='human'* and conflicts
+        are detected.
     """
     # Ensure we're on the target branch
     current = get_current_branch(project_root)
@@ -171,21 +209,119 @@ def merge_loop_branch(project_root: Path, loop_branch: str, target_branch: str) 
     )
 
     if result.returncode != 0:
-        if "CONFLICT" in result.stdout or "CONFLICT" in result.stderr:
-            logger.error("Merge conflict merging %s into %s", loop_branch, target_branch)
-            # Capture conflicting files before aborting
-            conflict_files = get_conflicting_files(project_root)
-            _display_merge_conflict(loop_branch, target_branch, conflict_files)
-            # Abort the merge to leave repo in clean state
-            _run_git(project_root, "merge", "--abort", check=False)
-            return False
-        else:
+        is_conflict = "CONFLICT" in result.stdout or "CONFLICT" in result.stderr
+        if not is_conflict:
             logger.error("Merge failed: %s", result.stderr.strip())
             _run_git(project_root, "merge", "--abort", check=False)
             return False
 
+        logger.error("Merge conflict merging %s into %s", loop_branch, target_branch)
+        conflict_files = get_conflicting_files(project_root)
+
+        if conflict_strategy == "llm":
+            resolved = _resolve_conflicts_with_llm(project_root, conflict_files)
+            if resolved:
+                logger.info("LLM resolved all conflicts — completing merge")
+                return True
+            # LLM failed — fall through to human mode
+            logger.warning("LLM conflict resolution failed, falling back to human mode")
+
+        if conflict_strategy == "human" or conflict_strategy == "llm":
+            # For human mode: preserve conflict state and create call file
+            _display_merge_conflict(loop_branch, target_branch, conflict_files)
+            _create_merge_conflict_call(project_root, loop_branch, target_branch, conflict_files)
+            return "pending_human"
+
     logger.info("Successfully merged %s into %s", loop_branch, target_branch)
     return True
+
+
+def _resolve_conflicts_with_llm(project_root: Path, conflict_files: list[str]) -> bool:
+    """Attempt to resolve merge conflicts using LLM, one file at a time.
+
+    Returns True if all conflicts were resolved, False otherwise.
+    """
+    try:
+        from .llm_caller import LLMCaller
+    except ImportError:
+        logger.warning("LLMCaller not available for conflict resolution")
+        return False
+
+    for filepath in conflict_files:
+        full_path = project_root / filepath
+        if not full_path.exists():
+            logger.warning("Conflict file not found: %s", filepath)
+            return False
+
+        try:
+            content = full_path.read_text(encoding="utf-8")
+        except Exception:
+            logger.warning("Could not read conflict file: %s", filepath)
+            return False
+
+        prompt = (
+            "You are resolving a git merge conflict. Below is the file content "
+            "with conflict markers (<<<<<<< HEAD, =======, >>>>>>>). "
+            "Output ONLY the fully resolved file content with no conflict markers. "
+            "Do not add any explanation.\n\n"
+            f"File: {filepath}\n\n```\n{content}\n```"
+        )
+
+        try:
+            caller = LLMCaller(project_root, step_type="merge_conflict")
+            resolved_content = caller.call(prompt=prompt)
+        except Exception as e:
+            logger.warning("LLM conflict resolution failed for %s: %s", filepath, e)
+            return False
+
+        # Verify no conflict markers remain
+        if "<<<<<<<" in resolved_content or ">>>>>>>" in resolved_content:
+            logger.warning("LLM output still contains conflict markers for %s", filepath)
+            return False
+
+        # Write resolved content and stage
+        full_path.write_text(resolved_content, encoding="utf-8")
+        _run_git(project_root, "add", filepath)
+
+    # All files resolved — complete the merge
+    commit_result = _run_git(
+        project_root, "commit", "--no-edit", check=False,
+    )
+    if commit_result.returncode != 0:
+        logger.warning("Failed to complete merge commit: %s", commit_result.stderr.strip())
+        return False
+
+    return True
+
+
+def _create_merge_conflict_call(
+    project_root: Path,
+    loop_branch: str,
+    target_branch: str,
+    conflict_files: list[str],
+) -> None:
+    """Create a call file for human merge conflict resolution."""
+    calls_dir = project_root / "se3" / "calls"
+    calls_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    call_file = calls_dir / f"merge_conflict_{ts}.json"
+
+    call_data = {
+        "type": "merge_conflict",
+        "created_at": datetime.now().isoformat(),
+        "loop_branch": loop_branch,
+        "target_branch": target_branch,
+        "conflict_files": conflict_files,
+        "instructions": (
+            f"Merge conflict detected merging {loop_branch} into {target_branch}. "
+            f"Resolve the {len(conflict_files)} conflicting file(s), then run "
+            f"'git add' and 'git commit' to complete the merge."
+        ),
+    }
+
+    call_file.write_text(json.dumps(call_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    logger.info("Created merge conflict call file: %s", call_file)
 
 
 def _display_merge_conflict(loop_branch: str, target_branch: str, conflict_files: list[str]) -> None:
@@ -330,42 +466,54 @@ def get_conflicting_files(project_root: Path) -> list[str]:
 def list_loop_branches(project_root: Path) -> list[dict[str, any]]:
     """List existing unmerged loop branches with commit counts.
 
+    Matches both the new ``loop/*`` and legacy ``se3-loop/*`` patterns.
+    Legacy branches are flagged with ``is_legacy=True``.
+
     Args:
         project_root: Project root directory
 
     Returns:
-        List of dicts with 'branch', 'commit_count', and 'base_branch' keys
+        List of dicts with 'branch', 'commit_count', 'base_branch', and
+        'is_legacy' keys.
     """
-    result = _run_git(
-        project_root, "branch", "--list", "se3-loop/*",
-        check=False,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
-        return []
-
     branches = []
     current_branch = get_current_branch(project_root)
 
-    for line in result.stdout.strip().splitlines():
-        branch_name = line.strip().lstrip("* ")
-        if not branch_name:
-            continue
-
-        # Count commits ahead of current branch
-        count_result = _run_git(
-            project_root, "rev-list", "--count",
-            f"{current_branch}..{branch_name}",
+    for pattern, is_legacy in [("loop/*", False), ("se3-loop/*", True)]:
+        result = _run_git(
+            project_root, "branch", "--list", pattern,
             check=False,
         )
-        commit_count = 0
-        if count_result.returncode == 0:
-            commit_count = int(count_result.stdout.strip())
+        if result.returncode != 0 or not result.stdout.strip():
+            continue
 
-        branches.append({
-            "branch": branch_name,
-            "commit_count": commit_count,
-            "base_branch": current_branch,
-        })
+        for line in result.stdout.strip().splitlines():
+            branch_name = line.strip().lstrip("* ")
+            if not branch_name:
+                continue
+
+            if is_legacy:
+                logger.warning(
+                    "Legacy loop branch detected: %s — new format is loop/{task}-{iter}",
+                    branch_name,
+                )
+
+            # Count commits ahead of current branch
+            count_result = _run_git(
+                project_root, "rev-list", "--count",
+                f"{current_branch}..{branch_name}",
+                check=False,
+            )
+            commit_count = 0
+            if count_result.returncode == 0:
+                commit_count = int(count_result.stdout.strip())
+
+            branches.append({
+                "branch": branch_name,
+                "commit_count": commit_count,
+                "base_branch": current_branch,
+                "is_legacy": is_legacy,
+            })
 
     return branches
 

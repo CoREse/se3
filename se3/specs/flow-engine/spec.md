@@ -52,19 +52,20 @@ se3 run --discover "我想做一个用户管理功能"
 
 #### Scenario: 循环模式分支隔离
 - **WHEN** 用户执行 `se3 run --loop`（不带 `--no-worktree`）
-- **THEN** 创建 `se3-loop/{timestamp}` 分支从当前 HEAD
+- **THEN** 创建 `loop/{task_id}-{iteration}` 分支从当前 HEAD（task_id 由任务描述 slugify 后截断到 30 字符生成）
 - **AND** 在 `se3/worktrees/{branch_safe_name}` 创建 git worktree
 - **AND** 所有任务在 worktree 中执行（文件读写、commit 都在 worktree 内）
 - **AND** 循环结束后提示用户选择：merge / later / discard
+- **NOTE** 向后兼容：`list_loop_branches()` 同时匹配旧格式 `se3-loop/*`（标记为 `[legacy]`）和新格式 `loop/*`
 
 #### Scenario: 循环模式无隔离
 - **WHEN** 用户执行 `se3 run --loop --no-worktree`
 - **THEN** 所有任务直接在当前分支上执行（无分支隔离）
 
 #### Scenario: 延迟合并
-- **WHEN** 用户执行 `se3 run --loop --merge se3-loop/20260324-120000`
+- **WHEN** 用户执行 `se3 run --loop --merge loop/fix-auth-1`（或旧格式 `se3-loop/20260324-120000`）
 - **THEN** 显示 diff 摘要并确认后将指定的 loop 分支合并到当前分支
-- **AND** 如果有冲突，显示冲突文件列表并提供手动解决指引
+- **AND** 如果有冲突，根据 `conflict_resolver.strategy` 配置处理（见 se3-config spec）
 
 #### Scenario: 列出循环分支
 - **WHEN** 用户执行 `se3 run --list-loops`
@@ -647,7 +648,7 @@ Options:
   --discover, -d    Discovery 模式（需求探索）
   --flow-id ID      恢复指定流程 ID
   --no-worktree     禁用循环模式的分支隔离
-  --merge BRANCH    合并已有的 loop 分支（如 se3-loop/20260324-120000）
+  --merge BRANCH    合并已有的 loop 分支（如 loop/fix-auth-1 或旧格式 se3-loop/20260324-120000）
 ```
 
 ### se3 status

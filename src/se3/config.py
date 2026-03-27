@@ -616,6 +616,58 @@ def is_chinese_language(language: str) -> bool:
 
 
 @dataclass
+class ConflictResolverConfig:
+    """Conflict resolution configuration for loop branch merges.
+
+    Supports two strategies:
+    - 'human': Preserve conflict state, create call file, wait for human resolution.
+    - 'llm': Attempt LLM-based per-file resolution, fallback to human on failure.
+    """
+
+    strategy: str = "human"
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ConflictResolverConfig":
+        """Create ConflictResolverConfig from dictionary."""
+        if not data:
+            return cls()
+        strategy = data.get("strategy", "human")
+        if strategy not in ("human", "llm"):
+            strategy = "human"
+        return cls(strategy=strategy)
+
+    @classmethod
+    def load(cls, project_root: Path) -> "ConflictResolverConfig":
+        """Load conflict resolver configuration from se3.yaml."""
+        config_path = Path(project_root) / "se3.yaml"
+        if not config_path.exists():
+            return cls()
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            cr_data = data.get("conflict_resolver", {})
+            if not cr_data or not isinstance(cr_data, dict):
+                return cls()
+            return cls.from_dict(cr_data)
+        except Exception:
+            return cls()
+
+
+def load_conflict_resolver_config(project_root: Optional[Path] = None) -> ConflictResolverConfig:
+    """Load conflict resolver configuration from project.
+
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+
+    Returns:
+        ConflictResolverConfig instance with loaded or default settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    return ConflictResolverConfig.load(project_root)
+
+
+@dataclass
 class TestConfig:
     """Test step configuration loaded from se3.yaml test: section."""
 

@@ -857,6 +857,61 @@ def _run_flow_impl(
         return 0
 
 
+def _generate_iteration_summary(
+    controller,
+    result,
+    iteration: int,
+    project_root: Path,
+) -> str:
+    """Generate a structured iteration summary using LLM.
+
+    Falls back to a simple status string if LLM call fails.
+    """
+    fallback = f"{'success' if result.success else 'failed'}"
+
+    try:
+        import subprocess as _sp
+
+        # Collect git diff since iteration start
+        diff_text = ""
+        if controller.iteration_start_commit:
+            diff_result = _sp.run(
+                ["git", "-C", str(controller.effective_root),
+                 "diff", controller.iteration_start_commit, "HEAD"],
+                capture_output=True, text=True, timeout=30,
+            )
+            if diff_result.returncode == 0:
+                diff_text = diff_result.stdout[:3000]
+
+        # Collect test results from flow state if available
+        test_output = ""
+        # We don't have direct access to flow state here, so skip test output
+        # Test result is partially reflected in result.success
+
+        if not diff_text:
+            return fallback
+
+        from ..engine.llm_caller import LLMCaller
+
+        prompt = (
+            "Summarize this loop iteration in ≤200 words with three sections:\n"
+            "1. What was done\n"
+            "2. Test results\n"
+            "3. Remaining issues\n\n"
+            f"Task: {result.task}\n"
+            f"Outcome: {'success' if result.success else 'failed'}\n\n"
+            f"Git diff (truncated):\n```\n{diff_text}\n```"
+        )
+
+        caller = LLMCaller(project_root, step_type="iteration_summary")
+        summary = caller.call(prompt=prompt)
+        if summary and len(summary.strip()) > 10:
+            return summary.strip()
+        return fallback
+    except Exception:
+        return fallback
+
+
 def run_loop_mode(
     project_root: Path,
     initial_task: str,
@@ -898,7 +953,7 @@ def run_loop_mode(
         return _handle_merge_existing(controller, project_root, merge_branch)
 
     # Start: create branch/worktree
-    setup_ok = controller.start()
+    setup_ok = controller.start(task=initial_task)
     if setup_ok and controller.use_worktree and controller.has_worktree:
         render_full(
             "SE3 Loop Mode (branch isolated)\n\n"
@@ -943,8 +998,10 @@ def run_loop_mode(
                 display_error(f"Task failed with exit code {result.exit_code}")
 
             # Generate iteration summary for next round
-            summary = f"Iteration {iteration}: {'success' if result.success else 'failed'}"
-            controller.set_previous_summary(summary)
+            summary = _generate_iteration_summary(
+                controller, result, iteration, project_root,
+            )
+            controller.add_summary(summary)
             controller.iteration_summary = summary
 
             if max_iterations is not None and iteration >= max_iterations:

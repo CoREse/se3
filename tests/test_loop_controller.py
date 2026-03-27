@@ -137,11 +137,23 @@ class TestLoopControllerLifecycle:
     def test_start_creates_branch_and_worktree(self, tmp_path: Path):
         _init_repo(tmp_path)
         controller = LoopController(project_root=tmp_path)
+        assert controller.start(task="test task")
+        assert controller.has_worktree
+        assert controller.loop_branch is not None
+        # New naming: loop/{slug}-{iteration}
+        assert controller.loop_branch.startswith("loop/")
+        assert controller.effective_root != tmp_path
+        # Cleanup
+        controller.finish()
+
+    def test_start_without_task_uses_legacy_format(self, tmp_path: Path):
+        _init_repo(tmp_path)
+        controller = LoopController(project_root=tmp_path)
         assert controller.start()
         assert controller.has_worktree
         assert controller.loop_branch is not None
+        # Without task, falls back to legacy format
         assert controller.loop_branch.startswith("se3-loop/")
-        assert controller.effective_root != tmp_path
         # Cleanup
         controller.finish()
 
@@ -237,17 +249,35 @@ class TestLoopControllerLifecycle:
 class TestPreviousSummaryInjection:
     """Tests for cross-iteration summary injection."""
 
-    def test_set_previous_summary(self):
+    def test_add_summary(self):
         controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
-        controller.set_previous_summary("iteration 1 summary")
-        assert controller._previous_summary == "iteration 1 summary"
+        controller.add_summary("iteration 1 summary")
+        assert controller.accumulated_summaries == ["iteration 1 summary"]
 
-    def test_build_loop_context_includes_summary(self):
+    def test_accumulated_summaries_multiple(self):
+        controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
+        controller.add_summary("summary 1")
+        controller.add_summary("summary 2")
+        controller.add_summary("summary 3")
+        assert len(controller.accumulated_summaries) == 3
+        assert controller.accumulated_summaries[0] == "summary 1"
+        assert controller.accumulated_summaries[2] == "summary 3"
+
+    def test_summary_truncation(self):
+        controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
+        # Add long summaries to exceed 2000 char limit
+        for i in range(30):
+            controller.add_summary(f"Long summary {i}: " + "x" * 100)
+        total = sum(len(s) for s in controller.accumulated_summaries)
+        assert total <= 2100  # within limits (2000 + one placeholder)
+        assert controller.accumulated_summaries[0] == "[...earlier iterations omitted...]"
+
+    def test_build_loop_context_includes_summaries(self):
         controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
         controller.iteration_count = 2
-        controller.set_previous_summary("Did X and Y in iteration 1")
+        controller.add_summary("Did X and Y in iteration 1")
         context = controller._build_loop_context("my task")
-        assert "Previous Iteration Summary" in context
+        assert "Previous Iteration Summaries" in context
         assert "Did X and Y in iteration 1" in context
         assert "my task" in context
 
@@ -255,7 +285,7 @@ class TestPreviousSummaryInjection:
         controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
         controller.iteration_count = 1
         context = controller._build_loop_context("my task")
-        assert "Previous Iteration Summary" not in context
+        assert "Previous Iteration Summaries" not in context
         assert "my task" in context
 
     def test_build_loop_context_no_completed_tasks_list(self):
@@ -278,3 +308,7 @@ class TestPreviousSummaryInjection:
         controller.iteration_count = 3
         context = controller._build_loop_context("my task")
         assert "3 of 5" in context
+
+    def test_iteration_start_commit_initial(self):
+        controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
+        assert controller.iteration_start_commit == ""

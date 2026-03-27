@@ -186,7 +186,7 @@ class TestMergeLoopBranch:
         success = merge_loop_branch(tmp_path, branch_name, original)
         assert success
 
-    def test_merge_conflict_returns_false(self, tmp_path: Path) -> None:
+    def test_merge_conflict_human_returns_pending(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
         original = get_current_branch(tmp_path)
         branch_name, _ = create_loop_branch(tmp_path, timestamp="test")
@@ -201,15 +201,27 @@ class TestMergeLoopBranch:
         # Add conflicting commit on original branch
         _add_commit(tmp_path, "conflict.txt", "main version", "main change")
 
-        success = merge_loop_branch(tmp_path, branch_name, original)
-        assert not success
+        # Default conflict_strategy='human' returns 'pending_human'
+        result = merge_loop_branch(tmp_path, branch_name, original)
+        assert result == "pending_human"
 
-        # Repo should be clean (merge aborted)
-        result = subprocess.run(
+        # Conflict state is preserved (not aborted) — repo has unmerged files
+        status_result = subprocess.run(
             ["git", "-C", str(tmp_path), "status", "--porcelain"],
             capture_output=True, text=True, check=True,
         )
-        assert result.stdout.strip() == ""
+        assert "U" in status_result.stdout or "conflict.txt" in status_result.stdout
+
+        # Call file should be created
+        calls_dir = tmp_path / "se3" / "calls"
+        call_files = list(calls_dir.glob("merge_conflict_*.json"))
+        assert len(call_files) == 1
+
+        # Abort merge for cleanup
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "merge", "--abort"],
+            capture_output=True, check=False,
+        )
 
 
 class TestCleanupLoop:

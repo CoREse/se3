@@ -26,6 +26,7 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - `language.language`: Language for human-facing steps (default: null)
 - `language.spec_language`: Language for spec writing (default: null)
 - `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: ["verify_spec", "summarize"])
+- `conflict_resolver.strategy`: Merge conflict resolution strategy — `"human"` or `"llm"` (default: `"human"`)
 
 #### Scenario: Using default configuration
 - **WHEN** no se3.yaml file exists in the project
@@ -105,6 +106,26 @@ The interactive pathway writes the `.response` file automatically, so both pathw
 - **WHEN** a `.response` file is placed alongside it
 - **AND** user runs `se3 run --resume`
 - **THEN** the confirm step reads the response and continues
+
+### Requirement: Conflict Resolver Configuration
+
+The system SHALL support configuring merge conflict resolution strategy for loop branch merges.
+
+**Conflict resolver section options:**
+- `conflict_resolver.strategy`: Resolution strategy (default: `"human"`)
+  - `"human"`: Preserve conflict state in working tree, create a call file at `se3/calls/merge_conflict_{timestamp}.json` with conflict details, and return `pending_human` to the caller. The user resolves conflicts manually.
+  - `"llm"`: Attempt per-file LLM-based conflict resolution. Each conflicting file is sent to the LLM for resolution. If all files are resolved successfully, the merge completes automatically. If any file fails (LLM output still contains conflict markers), falls back to `"human"` mode.
+
+#### Scenario: Default conflict resolution
+- **WHEN** no `conflict_resolver` section exists in se3.yaml
+- **THEN** the framework uses `"human"` strategy (preserve conflicts, create call file)
+
+#### Scenario: LLM conflict resolution
+- **GIVEN** `conflict_resolver.strategy: "llm"` in se3.yaml
+- **WHEN** a merge conflict occurs during loop branch merge
+- **THEN** the framework attempts to resolve each conflicting file via LLM
+- **AND** if all files are resolved, the merge completes automatically
+- **AND** if any file fails, falls back to human mode
 
 ### Requirement: Language Configuration
 
