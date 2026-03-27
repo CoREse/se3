@@ -594,6 +594,12 @@ class StateMachine:
                     # Pass through review result for tracking
                     inputs["last_review_result"] = step.outputs.get("review_result")
 
+        # When discovery produced a refined_description, use it as the task_description
+        # for all downstream steps (preserving original for traceability)
+        if "refined_description" in inputs and inputs["refined_description"]:
+            inputs["original_task_description"] = inputs["task_description"]
+            inputs["task_description"] = inputs["refined_description"]
+
         # Special handling for CONFIRM step
         if step_type == StepType.CONFIRM:
             # Determine which step we're confirming
