@@ -178,7 +178,7 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
     prompt = build_llm_review_prompt(
         step_to_review_type=step_to_review_type,
         step_output=step_output,
-        task_description=flow.task_description,
+        task_description=step.inputs.get("task_description", flow.task_description),
         revision_feedback=revision_feedback,
         project_root=project_root,
     )

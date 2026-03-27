@@ -99,7 +99,7 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     Returns:
         StepStatus.COMPLETED on success, StepStatus.FAILED on error
     """
-    task_description = step.inputs.get("task_description", "")
+    task_description = step.inputs.get("task_description", flow.task_description)
     task_type = flow.task_type or "feature"
     changes_made = step.inputs.get("changes_made", {})
     test_results = step.inputs.get("test_results", {})
@@ -145,7 +145,7 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         summary_text = _extract_text_from_stream_json(response)
 
         if not summary_text:
-            summary_text = _create_basic_summary_text(flow, changes_made, test_results)
+            summary_text = _create_basic_summary_text(flow, changes_made, test_results, task_description)
 
         # Store output
         step.outputs["summary"] = summary_text
@@ -167,7 +167,7 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     except Exception as e:
         logger.exception("Summarize step failed")
         # Don't fail the flow - create a basic summary
-        summary_text = _create_basic_summary_text(flow, changes_made, test_results)
+        summary_text = _create_basic_summary_text(flow, changes_made, test_results, task_description)
         step.outputs["summary"] = summary_text
         return StepStatus.COMPLETED
 
@@ -229,6 +229,7 @@ def _create_basic_summary_text(
     flow: FlowInstance,
     changes_made: dict[str, Any],
     test_results: dict[str, Any],
+    task_description: str = "",
 ) -> str:
     """Create a basic summary if LLM generation fails.
 
@@ -236,10 +237,12 @@ def _create_basic_summary_text(
         flow: The flow instance
         changes_made: Changes made during implementation
         test_results: Test results
+        task_description: Resolved task description (refined or original)
 
     Returns:
         Basic summary text in Markdown format
     """
+    task_description = task_description or flow.task_description
     files_changed = changes_made.get("files_changed", [])
     file_list = []
     for f in files_changed:
@@ -252,7 +255,7 @@ def _create_basic_summary_text(
 
     lines = [
         f"## Work Summary\n",
-        f"Completed {flow.task_type or 'task'}: {flow.task_description[:100]}...\n",
+        f"Completed {flow.task_type or 'task'}: {task_description[:100]}...\n",
         f"### Key Changes",
         f"- Modified {len(file_list)} files\n",
         f"### Files Modified",

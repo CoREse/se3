@@ -17,7 +17,7 @@ session:
 confirmation:
   enabled: true                       # Enable confirmation steps
   steps: ["propose", "design"]        # Steps after which to insert confirmation
-  reviewer: "human"                   # Default reviewer: "human" or "llm"
+  reviewer: "llm"                   # Default reviewer: "human" or "llm"
   # LLM reviewer configuration (used when reviewer="llm")
   llm_reviewer:
     model: null                       # Model to use (null = default)

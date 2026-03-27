@@ -72,6 +72,7 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         StepStatus.COMPLETED on success, StepStatus.FAILED on error
     """
     task_type = step.inputs.get("task_type", "feature")
+    task_description = step.inputs.get("task_description", flow.task_description)
     scope = step.inputs.get("scope", "")
     project_summary = step.inputs.get("project_summary", "Not available")
 
@@ -96,13 +97,13 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Build prompt for LLM
         prompt = READ_SPEC_PROMPT.format(
             specs_dir=specs_dir,
-            task_description=flow.task_description,
+            task_description=task_description,
             task_type=task_type,
             scope=scope,
             project_summary=project_summary,
         )
 
-        logger.info(f"LLM-based spec selection for: {flow.task_description[:60]}...")
+        logger.info(f"LLM-based spec selection for: {task_description[:60]}...")
 
         # Call LLM for spec selection
         retry_count = step.inputs.get("retry_count", 0)

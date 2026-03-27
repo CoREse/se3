@@ -118,7 +118,7 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         StepStatus.COMPLETED on success, StepStatus.FAILED on error
     """
     task_type = flow.task_type or "feature"
-    task_description = flow.task_description or ""
+    task_description = step.inputs.get("task_description", flow.task_description) or ""
     
     # Get changes - implement step uses different output names
     changes_made = step.inputs.get("changes_made") or {}

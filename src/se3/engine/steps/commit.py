@@ -397,7 +397,7 @@ def _generate_commit_message(
         Commit message string
     """
     task_type = flow.task_type or "feature"
-    task_description = flow.task_description or ""
+    task_description = step.inputs.get("task_description", flow.task_description) or ""
 
     # Get inputs from previous steps
     changes_made = step.inputs.get("changes_made") or {}
