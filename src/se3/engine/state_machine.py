@@ -229,8 +229,9 @@ class StateMachine:
             step.error_message = f"No handler for step type {step.step_type.value}"
             return step.status
 
-        # Mark as running
+        # Mark as running (clear any previous error from failed attempts)
         step.status = StepStatus.RUNNING
+        step.error_message = None
         step.started_at = datetime.now()
         flow.status = FlowStatus.RUNNING
         self.persistence.save_flow(flow)
