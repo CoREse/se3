@@ -1,0 +1,11 @@
+id: '002'
+title: Autonomous Collaboration
+description: Enable recursive problem decomposition and multi-manager coordination.
+status: open
+priority: medium
+type: feature
+tags:
+- migrated-from-backlog
+- source:autonomous-collaboration
+created_at: '2026-03-27T17:36:33.975910'
+updated_at: '2026-03-27T17:36:33.975910'

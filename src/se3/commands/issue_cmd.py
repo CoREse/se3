@@ -14,13 +14,14 @@ Usage:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Optional
 
 import typer
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from ..engine.issue_manager import IssueManager, IssueStatus
+from ..engine.issue_manager import KNOWN_TYPES, IssueManager, IssueStatus
 
 app = typer.Typer(help="Manage SE3 issues")
 console = Console()
@@ -58,6 +59,17 @@ def _priority_color(priority: str) -> str:
     }.get(priority.lower(), "white")
 
 
+def _type_color(issue_type: str) -> str:
+    """Get color for issue type."""
+    return {
+        "bug": "red",
+        "feature": "green",
+        "enhancement": "cyan",
+        "idea": "magenta",
+        "task": "yellow",
+    }.get(issue_type.lower(), "white")
+
+
 def _format_datetime(dt) -> str:
     """Format datetime to human-readable string."""
     try:
@@ -71,17 +83,18 @@ def default_cmd(ctx: typer.Context):
     """List open issues (default command)."""
     if ctx.invoked_subcommand is not None:
         return
-    list_cmd(show_all=False)
+    list_cmd(show_all=False, type_filter=None)
 
 
 @app.command(name="list")
 def list_cmd(
     show_all: bool = typer.Option(False, "--all", "-a", help="Show all issues including closed"),
+    type_filter: Optional[str] = typer.Option(None, "--type", "-t", help="Filter by issue type"),
 ):
     """List issues."""
     project_root = get_project_root()
     mgr = IssueManager(project_root)
-    issues = mgr.list_issues(include_closed=show_all)
+    issues = mgr.list_issues(include_closed=show_all, type_filter=type_filter)
 
     if not issues:
         label = "open " if not show_all else ""
@@ -92,6 +105,7 @@ def list_cmd(
     table = Table(title=title)
     table.add_column("ID", style="cyan", no_wrap=True)
     table.add_column("Title", style="white")
+    table.add_column("Type")
     table.add_column("Status")
     table.add_column("Priority")
     table.add_column("Tags", style="dim")
@@ -100,6 +114,7 @@ def list_cmd(
     for issue in issues:
         sc = _status_color(issue.status)
         pc = _priority_color(issue.priority)
+        tc = _type_color(issue.type)
         tags_str = ", ".join(issue.tags) if issue.tags else ""
         title_str = issue.title
         if len(title_str) > 50:
@@ -108,6 +123,7 @@ def list_cmd(
         table.add_row(
             issue.id,
             title_str,
+            f"[{tc}]{issue.type}[/{tc}]",
             f"[{sc}]{issue.status.value}[/{sc}]",
             f"[{pc}]{issue.priority}[/{pc}]",
             tags_str,
@@ -132,10 +148,12 @@ def show_cmd(
 
     sc = _status_color(issue.status)
     pc = _priority_color(issue.priority)
+    tc = _type_color(issue.type)
     tags_str = ", ".join(issue.tags) if issue.tags else "none"
 
     content = (
         f"[bold]Title:[/bold] {issue.title}\n"
+        f"[bold]Type:[/bold] [{tc}]{issue.type}[/{tc}]\n"
         f"[bold]Status:[/bold] [{sc}]{issue.status.value}[/{sc}]\n"
         f"[bold]Priority:[/bold] [{pc}]{issue.priority}[/{pc}]\n"
         f"[bold]Tags:[/bold] {tags_str}\n"
@@ -156,12 +174,17 @@ def create_cmd():
 
     title = typer.prompt("Title")
     description = typer.prompt("Description")
+    issue_type = typer.prompt(
+        f"Type ({'/'.join(KNOWN_TYPES)})", default="bug"
+    )
     priority = typer.prompt("Priority (low/medium/high/critical)", default="medium")
     tags_input = typer.prompt("Tags (comma-separated, or empty)", default="")
 
     tags = [t.strip() for t in tags_input.split(",") if t.strip()] if tags_input else []
 
-    issue = mgr.create(title=title, description=description, priority=priority, tags=tags)
+    issue = mgr.create(
+        title=title, description=description, priority=priority, tags=tags, type=issue_type
+    )
     typer.echo(f"Created issue {issue.id}: {issue.title}")
 
 

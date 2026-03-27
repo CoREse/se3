@@ -14,7 +14,7 @@ from se3.engine.llm_caller import (
     get_extra_prompt,
     set_extra_prompt,
 )
-from se3.engine.loop_controller import LoopController, find_next_task
+from se3.engine.loop_controller import LoopController
 
 
 # ── Persistent extra prompt tests ──
@@ -100,69 +100,15 @@ class TestExtraPromptCoexistence:
         assert persist_pos < trans_pos
 
 
-# ── find_next_task tests ──
+# ── find_next_task removed tests ──
 
 
-class TestFindNextTask:
-    def test_finds_backlog_task(self, tmp_path: Path):
-        backlog = tmp_path / "specs" / "_backlog"
-        backlog.mkdir(parents=True)
-        (backlog / "tasks.md").write_text(
-            "# Tasks\n\n- [x] Done task\n- [ ] Implement feature X\n- [ ] Another task\n"
-        )
-        result = find_next_task(tmp_path)
-        assert result == "[tasks] Implement feature X"
+class TestFindNextTaskRemoved:
+    """Verify find_next_task function no longer exists."""
 
-    def test_skips_tasks_in_skip_set(self, tmp_path: Path):
-        backlog = tmp_path / "specs" / "_backlog"
-        backlog.mkdir(parents=True)
-        (backlog / "tasks.md").write_text(
-            "# Tasks\n\n- [ ] Implement feature X\n- [ ] Another task here\n"
-        )
-        result = find_next_task(tmp_path, skip_tasks={"[tasks] Implement feature X"})
-        assert result == "[tasks] Another task here"
-
-    def test_returns_none_when_all_skipped(self, tmp_path: Path):
-        backlog = tmp_path / "specs" / "_backlog"
-        backlog.mkdir(parents=True)
-        (backlog / "tasks.md").write_text("# Tasks\n\n- [ ] Implement feature X\n")
-        result = find_next_task(
-            tmp_path,
-            skip_tasks={"[tasks] Implement feature X"},
-        )
-        assert result is None
-
-    def test_returns_none_when_no_tasks(self, tmp_path: Path):
-        result = find_next_task(tmp_path)
-        assert result is None
-
-    def test_skips_short_tasks(self, tmp_path: Path):
-        backlog = tmp_path / "specs" / "_backlog"
-        backlog.mkdir(parents=True)
-        (backlog / "tasks.md").write_text("# Tasks\n\n- [ ] Hi\n- [ ] Do something useful\n")
-        result = find_next_task(tmp_path)
-        assert result == "[tasks] Do something useful"
-
-    def test_phase_priority_ordering(self, tmp_path: Path):
-        backlog = tmp_path / "specs" / "_backlog"
-        backlog.mkdir(parents=True)
-        # File with phase 2
-        (backlog / "a_phase2.md").write_text(
-            "# Phase 2 tasks\n\n- [ ] Second priority task\n"
-        )
-        # File with phase 1 (should come first despite filename)
-        (backlog / "b_phase1.md").write_text(
-            "# Phase 1 tasks\n\n- [ ] First priority task\n"
-        )
-        result = find_next_task(tmp_path)
-        assert result == "[b_phase1] First priority task"
-
-    def test_roadmap_task(self, tmp_path: Path):
-        (tmp_path / "roadmap.md").write_text(
-            "## Phase 1 - Current\n\n- [ ] Roadmap task here\n\n## Phase 2\n\n- [ ] Future task\n"
-        )
-        result = find_next_task(tmp_path)
-        assert result == "[roadmap] Roadmap task here"
+    def test_find_next_task_not_importable(self):
+        with pytest.raises(ImportError):
+            from se3.engine.loop_controller import find_next_task  # noqa: F401
 
 
 # ── LoopController tests ──
@@ -220,8 +166,14 @@ class TestLoopControllerLifecycle:
 
         assert result.success
         assert result.task == "Test task"
-        assert "Test task" in controller.completed_tasks
         mock_run_flow.assert_called_once()
+
+    def test_run_iteration_requires_task(self):
+        """task is a required parameter — calling without it raises TypeError."""
+        controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
+        mock_run_flow = MagicMock(return_value=0)
+        with pytest.raises(TypeError):
+            controller.run_iteration(run_flow_fn=mock_run_flow)
 
     def test_failed_task_tracked(self, tmp_path: Path):
         _init_repo(tmp_path)
@@ -235,8 +187,7 @@ class TestLoopControllerLifecycle:
         )
 
         assert not result.success
-        assert "Failing task" in controller.failed_tasks
-        assert "Failing task" not in controller.completed_tasks
+        assert result.exit_code == 1
 
     def test_iteration_count_increments(self, tmp_path: Path):
         _init_repo(tmp_path)
@@ -247,17 +198,6 @@ class TestLoopControllerLifecycle:
         controller.run_iteration(run_flow_fn=mock_run_flow, task="Task 1")
         controller.run_iteration(run_flow_fn=mock_run_flow, task="Task 2")
         assert controller.iteration_count == 2
-
-    def test_no_task_returns_none(self, tmp_path: Path):
-        """When no task provided and none found, result.task is None."""
-        _init_repo(tmp_path)
-        controller = LoopController(project_root=tmp_path, no_worktree=True)
-        controller.start()
-
-        mock_run_flow = MagicMock(return_value=0)
-        result = controller.run_iteration(run_flow_fn=mock_run_flow)
-        assert result.task is None
-        mock_run_flow.assert_not_called()
 
     def test_finish_with_worktree(self, tmp_path: Path):
         _init_repo(tmp_path)
@@ -292,3 +232,49 @@ class TestLoopControllerLifecycle:
             capture_output=True, text=True,
         )
         assert branch not in result.stdout
+
+
+class TestPreviousSummaryInjection:
+    """Tests for cross-iteration summary injection."""
+
+    def test_set_previous_summary(self):
+        controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
+        controller.set_previous_summary("iteration 1 summary")
+        assert controller._previous_summary == "iteration 1 summary"
+
+    def test_build_loop_context_includes_summary(self):
+        controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
+        controller.iteration_count = 2
+        controller.set_previous_summary("Did X and Y in iteration 1")
+        context = controller._build_loop_context("my task")
+        assert "Previous Iteration Summary" in context
+        assert "Did X and Y in iteration 1" in context
+        assert "my task" in context
+
+    def test_build_loop_context_no_summary(self):
+        controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
+        controller.iteration_count = 1
+        context = controller._build_loop_context("my task")
+        assert "Previous Iteration Summary" not in context
+        assert "my task" in context
+
+    def test_build_loop_context_no_completed_tasks_list(self):
+        """_build_loop_context should not contain completed tasks list."""
+        controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
+        controller.iteration_count = 3
+        context = controller._build_loop_context("my task")
+        assert "Previously completed" not in context
+
+    def test_iteration_summary_attribute(self):
+        controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
+        assert controller.iteration_summary is None
+        controller.iteration_summary = "test summary"
+        assert controller.iteration_summary == "test summary"
+
+    def test_build_loop_context_with_max_iterations(self):
+        controller = LoopController(
+            project_root=Path("/tmp"), no_worktree=True, max_iterations=5
+        )
+        controller.iteration_count = 3
+        context = controller._build_loop_context("my task")
+        assert "3 of 5" in context

@@ -1,0 +1,36 @@
+id: 008
+title: Recursive Workflows
+description: 'Enable a flow to spawn sub-flows for sub-problems, creating a hierarchical
+  tree of related work.
+
+  Complex problems often decompose naturally:
+
+  ```
+
+  Implement User Authentication
+
+  ├── Design Auth Schema
+
+  ├── Implement Password Hashing
+
+  ├── Create Login Endpoint
+
+  │   ├── Input Validation
+
+  │   ├── Rate Limiting
+
+  │   └── Session Management
+
+  └── Create Logout Endpoint
+
+  ```
+
+  Current linear flows don''t naturally express this hierarchy.'
+status: open
+priority: medium
+type: feature
+tags:
+- migrated-from-backlog
+- source:recursive-workflows
+created_at: '2026-03-27T17:36:33.981165'
+updated_at: '2026-03-27T17:36:33.981165'

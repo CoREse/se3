@@ -1,0 +1,17 @@
+id: '003'
+title: Cross-Project Learning
+description: 'Share learnings across projects (with privacy considerations):
+
+  - Common mistake patterns
+
+  - Successful refactoring patterns
+
+  - Spec anti-patterns to avoid'
+status: open
+priority: medium
+type: idea
+tags:
+- migrated-from-backlog
+- source:cross-project-learning
+created_at: '2026-03-27T17:36:33.976749'
+updated_at: '2026-03-27T17:36:33.976749'

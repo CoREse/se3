@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from se3.engine.issue_manager import Issue, IssueManager, IssueStatus, _make_slug
+from se3.engine.issue_manager import KNOWN_TYPES, Issue, IssueManager, IssueStatus, _make_slug
 
 
 class TestIssueModel:
@@ -329,3 +329,77 @@ class TestNextId:
         for i in range(5):
             mgr.create(f"Issue {i}", "d")
         assert mgr._next_id() == "006"
+
+
+class TestIssueType:
+    """Tests for Issue type field and filtering."""
+
+    def test_issue_type_default(self):
+        issue = Issue(id="001", title="Test", description="d")
+        assert issue.type == "bug"
+
+    def test_issue_type_custom(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        issue = mgr.create("Feature X", "desc", type="feature")
+        assert issue.type == "feature"
+        loaded = mgr.load(issue.id)
+        assert loaded.type == "feature"
+
+    def test_issue_load_legacy_yaml(self, tmp_path):
+        """Loading a YAML file without type field defaults to 'bug'."""
+        mgr = IssueManager(tmp_path)
+        mgr._ensure_dirs()
+        legacy_file = mgr.open_dir / "001_legacy.yaml"
+        legacy_file.write_text(
+            yaml.dump({"id": "001", "title": "Legacy", "status": "open"}),
+            encoding="utf-8",
+        )
+        loaded = mgr.load("001")
+        assert loaded is not None
+        assert loaded.type == "bug"
+
+    def test_list_issues_type_filter(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("Bug 1", "d", type="bug")
+        mgr.create("Feature 1", "d", type="feature")
+        mgr.create("Bug 2", "d", type="bug")
+        mgr.create("Idea 1", "d", type="idea")
+
+        bugs = mgr.list_issues(type_filter="bug")
+        assert len(bugs) == 2
+        assert all(i.type == "bug" for i in bugs)
+
+        features = mgr.list_issues(type_filter="feature")
+        assert len(features) == 1
+        assert features[0].type == "feature"
+
+        all_issues = mgr.list_issues()
+        assert len(all_issues) == 4
+
+    def test_known_types_constant(self):
+        assert len(KNOWN_TYPES) == 5
+        assert "bug" in KNOWN_TYPES
+        assert "feature" in KNOWN_TYPES
+        assert "enhancement" in KNOWN_TYPES
+        assert "idea" in KNOWN_TYPES
+        assert "task" in KNOWN_TYPES
+
+    def test_issue_yaml_roundtrip_with_type(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        created = mgr.create("Typed Issue", "desc", type="enhancement")
+        loaded = mgr.load(created.id)
+        assert loaded.type == "enhancement"
+        # Check YAML file has type field
+        files = list(mgr.open_dir.glob(f"{created.id}_*"))
+        data = yaml.safe_load(files[0].read_text(encoding="utf-8"))
+        assert data["type"] == "enhancement"
+
+    def test_to_dict_includes_type(self):
+        issue = Issue(id="001", title="Test", description="d", type="feature")
+        d = issue.to_dict()
+        assert d["type"] == "feature"
+
+    def test_from_dict_missing_type_defaults_bug(self):
+        data = {"id": "001", "title": "Test"}
+        issue = Issue.from_dict(data)
+        assert issue.type == "bug"

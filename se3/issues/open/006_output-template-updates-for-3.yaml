@@ -1,0 +1,14 @@
+id: '006'
+title: Output Template Updates for 3.0 Architecture
+description: 'Update output templates to align with the 3.0 flow engine architecture.
+
+  The flow engine (Phase 1) is largely complete, but output templates still reflect
+  the 2.x structure.'
+status: open
+priority: medium
+type: task
+tags:
+- migrated-from-backlog
+- source:output-templates-3.0
+created_at: '2026-03-27T17:36:33.979475'
+updated_at: '2026-03-27T17:36:33.979475'

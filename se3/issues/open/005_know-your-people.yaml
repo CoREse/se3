@@ -1,0 +1,25 @@
+id: '005'
+title: Know Your People (知人善任)
+description: 'Track granular capability profiles for different models, going beyond
+  simple "good/bad" scores to understand *what each model is good at*.
+
+  Current model selection is often binary (use Claude or not). But different models
+  may excel at different aspects of software development:
+
+  - Some models may be better at architecture/design
+
+  - Others may excel at implementation details
+
+  - Some may produce more testable code
+
+  - Others may be better at debugging
+
+  Understanding these differences enables "horses for courses" model selection.'
+status: open
+priority: medium
+type: idea
+tags:
+- migrated-from-backlog
+- source:know-your-people
+created_at: '2026-03-27T17:36:33.978393'
+updated_at: '2026-03-27T17:36:33.978393'

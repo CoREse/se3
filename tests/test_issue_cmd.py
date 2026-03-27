@@ -93,7 +93,7 @@ class TestCreateCommand:
             result = runner.invoke(
                 app,
                 ["create"],
-                input="New Bug\nThis is a bug description\nhigh\nsource:test,bug\n",
+                input="New Bug\nThis is a bug description\nbug\nhigh\nsource:test,bug\n",
             )
         assert result.exit_code == 0
         assert "Created issue 001" in result.output
@@ -111,7 +111,7 @@ class TestCreateCommand:
             result = runner.invoke(
                 app,
                 ["create"],
-                input="Simple Issue\nJust a simple issue\n\n\n",
+                input="Simple Issue\nJust a simple issue\n\n\n\n",
             )
         assert result.exit_code == 0
         assert "Created issue 001" in result.output

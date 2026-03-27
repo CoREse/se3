@@ -1,0 +1,21 @@
+id: 009
+title: se3 init Redesign
+description: 'Redesign `se3 init` to only initialize `se3/specs/` and `se3.yaml` —
+  no more `.claude/` SE3 spec installation.
+
+  The current `se3 init` copies SE3 framework specs into `.claude/`, coupling project
+  setup to framework internals. The new design should:
+
+  - Only create project-level configuration (`se3.yaml`)
+
+  - Only set up the spec directory structure (`se3/specs/`)
+
+  - Leave `.claude/` management to the user/framework'
+status: open
+priority: medium
+type: task
+tags:
+- migrated-from-backlog
+- source:se3-init-redesign
+created_at: '2026-03-27T17:36:33.982217'
+updated_at: '2026-03-27T17:36:33.982217'

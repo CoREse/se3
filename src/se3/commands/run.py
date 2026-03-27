@@ -859,22 +859,22 @@ def _run_flow_impl(
 
 def run_loop_mode(
     project_root: Path,
-    initial_task: Optional[str] = None,
+    initial_task: str,
     task_type: str = "pending",
     max_iterations: Optional[int] = None,
     prompt_history: Any = None,
     no_worktree: bool = False,
     merge_branch: Optional[str] = None,
 ) -> int:
-    """Run in loop mode - continuously find and execute tasks.
+    """Run in Ralph Loop mode - repeat a user prompt across iterations.
 
     Delegates to LoopController for all loop lifecycle management.
     This function handles user interaction (display, prompts) while
-    the controller manages state, worktree, and task tracking.
+    the controller manages state, worktree, and summary injection.
 
     Args:
         project_root: Project root directory
-        initial_task: Optional initial task to start with
+        initial_task: User prompt to execute each iteration (required)
         task_type: Type of tasks to look for (default 'pending' for auto-detect)
         max_iterations: Maximum number of iterations (None for unlimited)
         prompt_history: Prompt input history
@@ -885,7 +885,6 @@ def run_loop_mode(
         Exit code
     """
     from ..engine.loop_controller import LoopController
-    from ..engine.worktree import get_current_branch, get_diff_stat
 
     controller = LoopController(
         project_root=project_root,
@@ -925,7 +924,6 @@ def run_loop_mode(
             )
 
     # Iteration loop
-    current_task = initial_task
     iter_limit = max_iterations if max_iterations and max_iterations > 0 else 2**31
     interrupted = False
 
@@ -935,25 +933,19 @@ def run_loop_mode(
 
             result = controller.run_iteration(
                 run_flow_fn=run_flow,
-                task=current_task,
+                task=initial_task,
                 task_type=task_type,
             )
-
-            if result.task is None:
-                render_full("No more tasks found. Loop mode complete.", title="Done")
-                break
 
             render_full(f"Task: {result.task}", title="Current Task")
 
             if not result.success:
                 display_error(f"Task failed with exit code {result.exit_code}")
-                options = ["Continue to next task", "Exit loop mode"]
-                choice = prompt_user_choice("What would you like to do?", options)
-                if choice == 1:
-                    break
 
-            current_task = None
-            render_full("Task complete. Looking for next task...", title="Progress")
+            # Generate iteration summary for next round
+            summary = f"Iteration {iteration}: {'success' if result.success else 'failed'}"
+            controller.set_previous_summary(summary)
+            controller.iteration_summary = summary
 
             if max_iterations is not None and iteration >= max_iterations:
                 display_success(
@@ -965,7 +957,7 @@ def run_loop_mode(
         interrupted = True
         render_full("Loop interrupted by user.", title="Interrupted")
 
-    # Post-loop: handle merge/cleanup
+    # Post-loop: auto merge
     return _handle_loop_finish(controller, interrupted)
 
 
@@ -994,9 +986,7 @@ def _handle_merge_existing(controller, project_root: Path, merge_branch: str) ->
 
 
 def _handle_loop_finish(controller, interrupted: bool) -> int:
-    """Handle post-loop merge/discard/defer decisions."""
-    from ..engine.worktree import delete_branch
-
+    """Handle post-loop cleanup with automatic merge."""
     finish_state = controller.finish(interrupted=interrupted)
 
     if not finish_state["loop_branch"] or not finish_state["original_branch"]:
@@ -1018,35 +1008,14 @@ def _handle_loop_finish(controller, interrupted: bool) -> int:
         return 0
 
     if finish_state["has_commits"]:
-        options = [
-            f"Merge {loop_branch} into {original_branch} now",
-            "Merge later (keep branch)",
-            "Discard (delete branch)",
-        ]
-        choice = prompt_user_choice(
-            f"Loop complete. What to do with branch {loop_branch}?",
-            options,
-        )
-
-        if choice == 0:
-            success = controller.merge()
-            if success:
-                display_success(f"Merged {loop_branch} into {original_branch}")
-            else:
-                display_error(
-                    f"Merge conflict. Branch preserved: {loop_branch}\n"
-                    f"Resolve conflicts and merge manually."
-                )
-        elif choice == 1:
-            render_full(
-                f"Branch preserved: {loop_branch}\n\n"
-                f"To merge later:\n"
-                f"  se3 run --loop --merge {loop_branch}",
-                title="Deferred"
-            )
+        success = controller.merge()
+        if success:
+            display_success(f"Merged {loop_branch} into {original_branch}")
         else:
-            controller.discard()
-            display_success("Loop branch discarded.")
+            display_error(
+                f"Merge conflict. Branch preserved: {loop_branch}\n"
+                f"Resolve conflicts and merge manually."
+            )
     else:
         controller.discard()
         render_full("Loop ended with no changes. Branch cleaned up.", title="Done")

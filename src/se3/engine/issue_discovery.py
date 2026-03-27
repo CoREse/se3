@@ -151,6 +151,7 @@ class IssueDiscovery:
                 description=description,
                 priority="high",
                 tags=["auto-discovered", "source:fix-loop"],
+                type="bug",
             )
             self._created_titles.append(self._normalize_title(title))
             logger.info(f"Created fix-loop exhaustion issue: {issue.id}")
@@ -235,6 +236,7 @@ class IssueDiscovery:
                     description=description,
                     priority=priority,
                     tags=tags,
+                    type="bug",
                 )
                 self._created_titles.append(self._normalize_title(title))
                 created_issues.append(issue)

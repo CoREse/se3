@@ -19,6 +19,9 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+# Recommended issue types — not enforced, free-form strings allowed
+KNOWN_TYPES = ["bug", "feature", "enhancement", "idea", "task"]
+
 
 class IssueStatus(Enum):
     """Status of an issue."""
@@ -39,6 +42,7 @@ class Issue:
     description: str
     status: IssueStatus = IssueStatus.OPEN
     priority: str = "medium"
+    type: str = "bug"
     tags: List[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
@@ -51,6 +55,7 @@ class Issue:
             "description": self.description,
             "status": self.status.value,
             "priority": self.priority,
+            "type": self.type,
             "tags": self.tags,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
@@ -81,6 +86,7 @@ class Issue:
             description=data.get("description", ""),
             status=IssueStatus(data.get("status", "open")),
             priority=data.get("priority", "medium"),
+            type=data.get("type", "bug"),
             tags=data.get("tags", []),
             created_at=created_at,
             updated_at=updated_at,
@@ -161,6 +167,7 @@ class IssueManager:
         description: str,
         priority: str = "medium",
         tags: Optional[List[str]] = None,
+        type: str = "bug",
     ) -> Issue:
         """Create a new issue, write YAML to open/ directory."""
         self._ensure_dirs()
@@ -175,6 +182,7 @@ class IssueManager:
             description=description,
             status=IssueStatus.OPEN,
             priority=priority,
+            type=type,
             tags=tags or [],
             created_at=now,
             updated_at=now,
@@ -194,8 +202,15 @@ class IssueManager:
             return None
         return self._read_issue(filepath)
 
-    def list_issues(self, include_closed: bool = False) -> List[Issue]:
-        """List issues. By default only open/, with include_closed=True also closed/."""
+    def list_issues(
+        self, include_closed: bool = False, type_filter: Optional[str] = None
+    ) -> List[Issue]:
+        """List issues. By default only open/, with include_closed=True also closed/.
+
+        Args:
+            include_closed: Include closed/resolved/won't-fix issues.
+            type_filter: If provided, only return issues matching this type.
+        """
         issues = []
         dirs = [self.open_dir]
         if include_closed:
@@ -207,6 +222,8 @@ class IssueManager:
             for f in sorted(directory.glob("*.yaml")):
                 issue = self._read_issue(f)
                 if issue:
+                    if type_filter and issue.type != type_filter:
+                        continue
                     issues.append(issue)
 
         # Sort by ID
