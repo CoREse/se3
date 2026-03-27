@@ -374,7 +374,9 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
         else:
             # Still in question/synthesis mode with pending questions - continue discovery
             step.outputs["questions"] = questions
-            _display_discovery_message(content, refined_description if mode == "synthesis" else None, questions)
+            if refined_description:
+                step.outputs["proposed_description"] = refined_description
+            _display_discovery_message(content, refined_description, questions)
             return StepStatus.PAUSED
 
     except Exception as e:

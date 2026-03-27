@@ -443,7 +443,8 @@ def _display_step_output(current_step: Any) -> None:
     DEFERRED_KEYS = {"proposal", "proposal_data", "design", "design_doc",
                      "design_document", "analysis", "analysis_result"}
     LARGE_KEYS = {"spec_content", "spec_summary", "test_results",
-                  "project_summary"}
+                  "project_summary", "refined_description",
+                  "proposed_description", "discovery_summary"}
     HIDDEN_KEYS = {"result", "call_file"}
 
     if current_step.outputs:
