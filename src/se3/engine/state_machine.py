@@ -5,7 +5,9 @@ The StateMachine controls step transitions and execution flow.
 
 from __future__ import annotations
 
+import json
 import logging
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
@@ -20,8 +22,10 @@ from .models import (
     get_default_step_sequence,
     get_step_info,
 )
+from .chat_history import _history_dir
 from .persistence import PersistenceManager
 from ..config import insert_confirmation_steps, load_confirmation_config
+from .. import __version__ as se3_version
 
 logger = logging.getLogger(__name__)
 
@@ -613,7 +617,7 @@ class StateMachine:
                     for sid in flow.state.step_history:
                         s = flow.state.steps.get(sid)
                         if s and s.step_type == StepType.CONFIRM:
-                            if s.outputs.get("step_to_review_id") == step_id:
+                            if s.outputs.get("review_result", {}).get("step_to_review_id") == step_id:
                                 already_confirmed = True
                                 break
                     if not already_confirmed:
@@ -662,6 +666,37 @@ class StateMachine:
 
         return inputs
 
+    def _write_flow_meta(self, flow: FlowInstance) -> None:
+        """Write _meta.json to the flow's history directory.
+
+        Records SE3 version, Python version, and creation timestamp
+        for post-hoc debugging. Skips if file already exists (resume scenario).
+
+        Args:
+            flow: Current flow instance
+        """
+        history_dir = _history_dir(self.project_root, flow.flow_id)
+        meta_path = history_dir / "_meta.json"
+
+        if meta_path.exists():
+            logger.debug(f"_meta.json already exists for flow {flow.flow_id}, skipping")
+            return
+
+        history_dir.mkdir(parents=True, exist_ok=True)
+
+        meta = {
+            "se3_version": se3_version,
+            "python_version": sys.version,
+            "created_at": datetime.now().isoformat(),
+        }
+
+        try:
+            with open(meta_path, "w", encoding="utf-8") as f:
+                json.dump(meta, f, indent=2, ensure_ascii=False)
+            logger.debug(f"Wrote _meta.json for flow {flow.flow_id}")
+        except OSError as e:
+            logger.warning(f"Failed to write _meta.json: {e}")
+
     def run(self, flow: FlowInstance) -> FlowStatus:
         """Run the flow from current state to completion.
 
@@ -672,6 +707,8 @@ class StateMachine:
             Final flow status
         """
         logger.info(f"Starting flow {flow.flow_id}")
+
+        self._write_flow_meta(flow)
 
         max_iterations = 100  # Safety limit
         iterations = 0
@@ -710,13 +747,11 @@ class StateMachine:
                 break
 
             if step_status == StepStatus.REVISION_NEEDED:
-                # Special case: revision was triggered
-                # For CONFIRM steps, the handler already handled the transition
-                # For TEST/VERIFY_SPEC steps, we need to call transition_to_next to trigger fix loop
+                # REVISION_NEEDED: fall through to transition_to_next() which handles
+                # both CONFIRM revision (via _transition_to_revision) and
+                # TEST/VERIFY_SPEC fix loop (via _transition_to_fix)
                 if current_step.step_type == StepType.CONFIRM:
-                    logger.info("Revision triggered by CONFIRM, continuing flow")
-                    continue
-                # For TEST and VERIFY_SPEC, fall through to transition_to_next which will handle fix loop
+                    logger.info("Revision triggered by CONFIRM, proceeding to transition_to_next")
 
             # Transition to next step
             next_step = self.transition_to_next(flow)
