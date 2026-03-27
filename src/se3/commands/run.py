@@ -559,6 +559,7 @@ def run_flow(
     change_name: Optional[str] = None,
     is_loop_mode: bool = False,
     prompt_history: Any = None,
+    source_issue_id: Optional[str] = None,
 ) -> int:
     """Run a flow to completion.
 
@@ -569,6 +570,7 @@ def run_flow(
         task_type: Type of task (feature, bugfix, etc., or 'pending' to auto-detect)
         change_name: Optional change name
         is_loop_mode: Whether to run in loop mode
+        source_issue_id: Optional issue ID that triggered this flow
 
     Returns:
         Exit code (0 for success, non-zero for failure)
@@ -585,7 +587,8 @@ def run_flow(
     try:
         return _run_flow_impl(
             project_root, flow_id, task_description, task_type, change_name,
-            is_loop_mode, persistence, state_machine, prompt_history
+            is_loop_mode, persistence, state_machine, prompt_history,
+            source_issue_id=source_issue_id,
         )
     finally:
         # Restore original signal handler
@@ -602,6 +605,7 @@ def _run_flow_impl(
     persistence: PersistenceManager,
     state_machine: StateMachine,
     prompt_history: Any = None,
+    source_issue_id: Optional[str] = None,
 ) -> int:
     """Internal implementation of flow execution."""
     # Register all step handlers
@@ -653,6 +657,10 @@ def _run_flow_impl(
             change_name=change_name,
             is_loop_mode=is_loop_mode,
         )
+
+        # Set source issue ID if provided
+        if source_issue_id:
+            flow.source_issue_id = source_issue_id
 
         # Store explicit_type if user provided --type flag
         if task_type and task_type != "pending":

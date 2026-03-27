@@ -1,0 +1,295 @@
+"""SE3 Issue Manager — Manage project issues with YAML-based storage.
+
+Provides IssueManager for creating, loading, listing, and updating issues
+stored as YAML files in se3/issues/open/ and se3/issues/closed/ directories.
+"""
+
+from __future__ import annotations
+
+import logging
+import re
+import shutil
+from dataclasses import dataclass, field
+from datetime import datetime
+from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import yaml
+
+logger = logging.getLogger(__name__)
+
+
+class IssueStatus(Enum):
+    """Status of an issue."""
+
+    OPEN = "open"
+    IN_PROGRESS = "in-progress"
+    RESOLVED = "resolved"
+    WONT_FIX = "won't-fix"
+    CLOSED = "closed"
+
+
+@dataclass
+class Issue:
+    """A single issue record."""
+
+    id: str
+    title: str
+    description: str
+    status: IssueStatus = IssueStatus.OPEN
+    priority: str = "medium"
+    tags: List[str] = field(default_factory=list)
+    created_at: datetime = field(default_factory=datetime.now)
+    updated_at: datetime = field(default_factory=datetime.now)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Serialize issue to dictionary for YAML output."""
+        return {
+            "id": self.id,
+            "title": self.title,
+            "description": self.description,
+            "status": self.status.value,
+            "priority": self.priority,
+            "tags": self.tags,
+            "created_at": self.created_at.isoformat(),
+            "updated_at": self.updated_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> Issue:
+        """Deserialize issue from dictionary."""
+        created_at = data.get("created_at")
+        if isinstance(created_at, str):
+            created_at = datetime.fromisoformat(created_at)
+        elif isinstance(created_at, datetime):
+            pass
+        else:
+            created_at = datetime.now()
+
+        updated_at = data.get("updated_at")
+        if isinstance(updated_at, str):
+            updated_at = datetime.fromisoformat(updated_at)
+        elif isinstance(updated_at, datetime):
+            pass
+        else:
+            updated_at = datetime.now()
+
+        return cls(
+            id=str(data["id"]),
+            title=data["title"],
+            description=data.get("description", ""),
+            status=IssueStatus(data.get("status", "open")),
+            priority=data.get("priority", "medium"),
+            tags=data.get("tags", []),
+            created_at=created_at,
+            updated_at=updated_at,
+        )
+
+
+def _make_slug(title: str) -> str:
+    """Generate a URL-friendly slug from a title.
+
+    Takes first 30 chars, replaces spaces/non-alphanum with hyphens, lowercases.
+    """
+    slug = title[:30].strip().lower()
+    slug = re.sub(r"[^a-z0-9]+", "-", slug)
+    slug = slug.strip("-")
+    return slug or "untitled"
+
+
+# Valid state transitions
+_VALID_TRANSITIONS: Dict[IssueStatus, List[IssueStatus]] = {
+    IssueStatus.OPEN: [IssueStatus.IN_PROGRESS, IssueStatus.WONT_FIX, IssueStatus.CLOSED],
+    IssueStatus.IN_PROGRESS: [IssueStatus.OPEN, IssueStatus.RESOLVED, IssueStatus.WONT_FIX],
+    IssueStatus.RESOLVED: [IssueStatus.CLOSED, IssueStatus.OPEN],
+    IssueStatus.WONT_FIX: [IssueStatus.OPEN, IssueStatus.CLOSED],
+    IssueStatus.CLOSED: [IssueStatus.OPEN],
+}
+
+# Statuses that belong in the closed/ directory
+_CLOSED_DIR_STATUSES = {IssueStatus.RESOLVED, IssueStatus.WONT_FIX, IssueStatus.CLOSED}
+
+
+class IssueManager:
+    """Manages issue lifecycle: create, load, list, update status, file movement."""
+
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = project_root
+        self.issues_dir = project_root / "se3" / "issues"
+        self.open_dir = self.issues_dir / "open"
+        self.closed_dir = self.issues_dir / "closed"
+
+    def _ensure_dirs(self) -> None:
+        """Create issue directories if they don't exist."""
+        self.open_dir.mkdir(parents=True, exist_ok=True)
+        self.closed_dir.mkdir(parents=True, exist_ok=True)
+
+    def _next_id(self) -> str:
+        """Scan open/ and closed/ to determine the next sequential ID (zero-padded 3 digits)."""
+        max_id = 0
+        for directory in [self.open_dir, self.closed_dir]:
+            if not directory.exists():
+                continue
+            for f in directory.glob("*.yaml"):
+                match = re.match(r"^(\d+)_", f.name)
+                if match:
+                    num = int(match.group(1))
+                    if num > max_id:
+                        max_id = num
+        return f"{max_id + 1:03d}"
+
+    def _find_issue_file(self, issue_id: str) -> Optional[Path]:
+        """Find an issue file by ID across open/ and closed/ directories."""
+        # Normalize: strip leading zeros for matching, but also try exact
+        issue_id_stripped = issue_id.lstrip("0") or "0"
+        for directory in [self.open_dir, self.closed_dir]:
+            if not directory.exists():
+                continue
+            for f in directory.glob("*.yaml"):
+                match = re.match(r"^(\d+)_", f.name)
+                if match:
+                    file_id = match.group(1)
+                    file_id_stripped = file_id.lstrip("0") or "0"
+                    if file_id == issue_id or file_id_stripped == issue_id_stripped:
+                        return f
+        return None
+
+    def create(
+        self,
+        title: str,
+        description: str,
+        priority: str = "medium",
+        tags: Optional[List[str]] = None,
+    ) -> Issue:
+        """Create a new issue, write YAML to open/ directory."""
+        self._ensure_dirs()
+
+        issue_id = self._next_id()
+        slug = _make_slug(title)
+        now = datetime.now()
+
+        issue = Issue(
+            id=issue_id,
+            title=title,
+            description=description,
+            status=IssueStatus.OPEN,
+            priority=priority,
+            tags=tags or [],
+            created_at=now,
+            updated_at=now,
+        )
+
+        filename = f"{issue_id}_{slug}.yaml"
+        filepath = self.open_dir / filename
+        self._write_issue(filepath, issue)
+
+        logger.info(f"Created issue {issue_id}: {title}")
+        return issue
+
+    def load(self, issue_id: str) -> Optional[Issue]:
+        """Load an issue by ID from open/ or closed/ directory."""
+        filepath = self._find_issue_file(issue_id)
+        if not filepath:
+            return None
+        return self._read_issue(filepath)
+
+    def list_issues(self, include_closed: bool = False) -> List[Issue]:
+        """List issues. By default only open/, with include_closed=True also closed/."""
+        issues = []
+        dirs = [self.open_dir]
+        if include_closed:
+            dirs.append(self.closed_dir)
+
+        for directory in dirs:
+            if not directory.exists():
+                continue
+            for f in sorted(directory.glob("*.yaml")):
+                issue = self._read_issue(f)
+                if issue:
+                    issues.append(issue)
+
+        # Sort by ID
+        issues.sort(key=lambda i: i.id)
+        return issues
+
+    def update_status(self, issue_id: str, new_status: IssueStatus) -> Issue:
+        """Update issue status and move file between directories as needed.
+
+        Raises:
+            ValueError: If the issue is not found or the transition is invalid.
+        """
+        filepath = self._find_issue_file(issue_id)
+        if not filepath:
+            raise ValueError(f"Issue '{issue_id}' not found")
+
+        issue = self._read_issue(filepath)
+        if not issue:
+            raise ValueError(f"Issue '{issue_id}' could not be read")
+
+        # Validate transition
+        valid = _VALID_TRANSITIONS.get(issue.status, [])
+        if new_status not in valid:
+            raise ValueError(
+                f"Invalid status transition: {issue.status.value} -> {new_status.value}. "
+                f"Valid transitions: {[s.value for s in valid]}"
+            )
+
+        # Update fields
+        issue.status = new_status
+        issue.updated_at = datetime.now()
+
+        # Write updated YAML first (status correctness > file location)
+        self._write_issue(filepath, issue)
+
+        # Move file if needed
+        target_dir = self.closed_dir if new_status in _CLOSED_DIR_STATUSES else self.open_dir
+        if filepath.parent != target_dir:
+            target_path = target_dir / filepath.name
+            try:
+                self._ensure_dirs()
+                shutil.move(str(filepath), str(target_path))
+                logger.info(f"Moved issue {issue_id} to {target_dir.name}/")
+            except OSError as e:
+                logger.warning(f"Failed to move issue file {filepath} -> {target_path}: {e}")
+
+        return issue
+
+    def reset_to_open(self, issue_id: str) -> Issue:
+        """Reset an in-progress issue back to open.
+
+        Raises:
+            ValueError: If the issue is not found or not in-progress.
+        """
+        filepath = self._find_issue_file(issue_id)
+        if not filepath:
+            raise ValueError(f"Issue '{issue_id}' not found")
+
+        issue = self._read_issue(filepath)
+        if not issue:
+            raise ValueError(f"Issue '{issue_id}' could not be read")
+
+        if issue.status != IssueStatus.IN_PROGRESS:
+            raise ValueError(
+                f"Can only reset in-progress issues. Issue '{issue_id}' is '{issue.status.value}'"
+            )
+
+        return self.update_status(issue_id, IssueStatus.OPEN)
+
+    def _read_issue(self, filepath: Path) -> Optional[Issue]:
+        """Read and parse an issue YAML file."""
+        try:
+            content = filepath.read_text(encoding="utf-8")
+            data = yaml.safe_load(content)
+            if not data or not isinstance(data, dict):
+                return None
+            return Issue.from_dict(data)
+        except (yaml.YAMLError, KeyError, ValueError) as e:
+            logger.warning(f"Failed to read issue file {filepath}: {e}")
+            return None
+
+    def _write_issue(self, filepath: Path, issue: Issue) -> None:
+        """Write issue data to a YAML file."""
+        data = issue.to_dict()
+        content = yaml.dump(data, default_flow_style=False, allow_unicode=True, sort_keys=False)
+        filepath.write_text(content, encoding="utf-8")

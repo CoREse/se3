@@ -169,6 +169,7 @@ def run_cmd(
     no_worktree: bool = typer.Option(False, "--no-worktree", help="Disable branch isolation in loop mode"),
     merge: Optional[str] = typer.Option(None, "--merge", help="Merge an existing loop branch (e.g. se3-loop/20260324-120000)"),
     list_loops: bool = typer.Option(False, "--list-loops", help="List existing unmerged loop branches"),
+    from_issue: Optional[str] = typer.Option(None, "--from-issue", help="Run flow from an existing issue (ID or interactive selection)"),
 ):
     """SE3 Run — Unified entry point for the flow engine.
 
@@ -211,6 +212,67 @@ def run_cmd(
             no_worktree=no_worktree,
             merge_branch=merge,
         )
+        raise typer.Exit(exit_code)
+
+    # Handle --from-issue mode
+    if from_issue is not None:
+        from .engine.issue_manager import IssueManager, IssueStatus
+
+        issue_mgr = IssueManager(project_root)
+        issue_id = from_issue
+
+        # If --from-issue given without value (empty string), interactive selection
+        if not issue_id:
+            open_issues = issue_mgr.list_issues(include_closed=False)
+            if not open_issues:
+                render_text("No open issues found.", title="Issues")
+                raise typer.Exit(1)
+
+            render_text("Open issues:", title="Select Issue")
+            for iss in open_issues:
+                typer.echo(f"  [{iss.id}] {iss.title} ({iss.priority})")
+
+            issue_id = typer.prompt("Enter issue ID")
+
+        issue = issue_mgr.load(issue_id)
+        if not issue:
+            render_text(f"Issue '{issue_id}' not found.", title="Error")
+            raise typer.Exit(1)
+
+        if issue.status == IssueStatus.IN_PROGRESS:
+            render_text(
+                f"Issue '{issue_id}' is already in-progress. Use 'se3 issue reset {issue_id}' first.",
+                title="Error",
+            )
+            raise typer.Exit(1)
+
+        # Set issue to in-progress
+        try:
+            issue_mgr.update_status(issue.id, IssueStatus.IN_PROGRESS)
+        except ValueError as e:
+            render_text(f"Error: {e}", title="Error")
+            raise typer.Exit(1)
+
+        # Run flow with issue description
+        exit_code = run_flow(
+            project_root=project_root,
+            task_description=issue.description,
+            task_type=type,
+            change_name=change,
+            is_loop_mode=False,
+            prompt_history=prompt_history,
+            source_issue_id=issue.id,
+        )
+
+        # Update issue status based on result
+        try:
+            if exit_code == 0:
+                issue_mgr.update_status(issue.id, IssueStatus.RESOLVED)
+            else:
+                issue_mgr.update_status(issue.id, IssueStatus.OPEN)
+        except ValueError:
+            pass  # Best effort
+
         raise typer.Exit(exit_code)
 
     if resume or flow_id:
@@ -270,6 +332,9 @@ from .commands.init_cmd import init_cmd as init_command
 
 # Import history command
 from .commands.history_cmd import app as history_app
+
+# Import issue command
+from .commands.issue_cmd import app as issue_app
 
 
 @app.command(name="init")
@@ -361,6 +426,9 @@ def guardrails_cmd(
 
 # Register history command
 app.add_typer(history_app, name="history", help="View and manage session history")
+
+# Register issue command
+app.add_typer(issue_app, name="issue", help="Manage SE3 issues")
 
 
 if __name__ == "__main__":

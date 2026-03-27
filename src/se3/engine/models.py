@@ -359,6 +359,9 @@ class FlowInstance:
     change_name: Optional[str] = None
     change_path: Optional[Path] = None
 
+    # Issue tracking
+    source_issue_id: Optional[str] = None
+
     # Loop mode
     is_loop_mode: bool = False
     loop_branch: Optional[str] = None
@@ -378,6 +381,7 @@ class FlowInstance:
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "change_name": self.change_name,
             "change_path": str(self.change_path) if self.change_path else None,
+            "source_issue_id": self.source_issue_id,
             "is_loop_mode": self.is_loop_mode,
             "loop_branch": self.loop_branch,
             "loop_worktree_path": self.loop_worktree_path,
@@ -398,6 +402,7 @@ class FlowInstance:
             completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
             change_name=data.get("change_name"),
             change_path=Path(data["change_path"]) if data.get("change_path") else None,
+            source_issue_id=data.get("source_issue_id"),
             is_loop_mode=data.get("is_loop_mode", False),
             loop_branch=data.get("loop_branch"),
             loop_worktree_path=data.get("loop_worktree_path"),
