@@ -103,6 +103,12 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
             project_summary=project_summary,
         )
 
+        # Append issue discovery injection if applicable
+        from ..context_builder import get_issue_discovery_injection
+        injection = get_issue_discovery_injection("read_spec", project_root)
+        if injection:
+            prompt += injection
+
         logger.info(f"LLM-based spec selection for: {task_description[:60]}...")
 
         # Call LLM for spec selection

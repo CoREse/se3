@@ -175,11 +175,17 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
         revision_section=revision_section,
     )
 
+    # Append issue discovery injection if applicable
+    from ..context_builder import get_issue_discovery_injection
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    injection = get_issue_discovery_injection("plan_tasks", project_root)
+    if injection:
+        prompt += injection
+
     logger.info("Generating task list...")
 
     try:
         # Call LLM for task planning (use EXTRACT mode for deeply nested structures)
-        project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
         response = caller.call(

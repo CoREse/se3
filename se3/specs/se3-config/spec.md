@@ -25,6 +25,7 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - `claude_commands`: List of `{cmd, priority}` for Claude CLI resolution
 - `language.language`: Language for human-facing steps (default: null)
 - `language.spec_language`: Language for spec writing (default: null)
+- `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: ["verify_spec", "summarize"])
 
 #### Scenario: Using default configuration
 - **WHEN** no se3.yaml file exists in the project

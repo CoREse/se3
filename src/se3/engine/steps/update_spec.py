@@ -91,11 +91,16 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
 
     # Append language instruction if configured
-    from ..context_builder import get_step_language_instruction
+    from ..context_builder import get_step_language_instruction, get_issue_discovery_injection
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     lang_instruction = get_step_language_instruction("update_spec", project_root)
     if lang_instruction:
         prompt += lang_instruction
+
+    # Append issue discovery injection if applicable
+    injection = get_issue_discovery_injection("update_spec", project_root)
+    if injection:
+        prompt += injection
 
     logger.info("Determining spec updates needed...")
 

@@ -431,10 +431,15 @@ def _run_discovery_round(
     )
 
     # Append language instruction if configured
-    from ..context_builder import get_step_language_instruction
+    from ..context_builder import get_step_language_instruction, get_issue_discovery_injection
     lang_instruction = get_step_language_instruction("discovery", project_root)
     if lang_instruction:
         prompt += lang_instruction
+
+    # Append issue discovery injection if applicable
+    injection = get_issue_discovery_injection("discovery", project_root)
+    if injection:
+        prompt += injection
 
     logger.info(f"Running discovery round {round_number}")
 

@@ -150,6 +150,12 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             spec_summary=spec_summary,
         )
 
+    # Append issue discovery injection if applicable
+    from ..context_builder import get_issue_discovery_injection
+    injection = get_issue_discovery_injection("implement", project_root)
+    if injection:
+        prompt += injection
+
     retry_count = step.inputs.get("retry_count", 0)
 
     try:

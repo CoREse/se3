@@ -152,6 +152,12 @@ def generate_project_summary(
         specs_list=specs_list,
     )
 
+    # Append issue discovery injection if applicable
+    from ..context_builder import get_issue_discovery_injection
+    injection = get_issue_discovery_injection("project_summary", project_root)
+    if injection:
+        prompt += injection
+
     caller = LLMCaller(project_root, flow_id=flow_id, step_id=step_id, step_type=step_type)
     # No JSON needed - just return the LLM's natural language output
     response = caller.call(

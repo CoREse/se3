@@ -215,49 +215,142 @@ class TestLLMCallerIntegration:
 
 
 class TestContextBuilder:
-    """Tests for context builder."""
+    """Tests for context builder after dead code removal."""
 
-    def test_build_step_context(self):
-        """Test context building for a step."""
+    def test_dead_methods_removed(self):
+        """Verify dead methods are no longer available."""
         from .context_builder import ContextBuilder
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create a mock spec file
-            specs_dir = Path(tmpdir) / "specs" / "test-spec"
-            specs_dir.mkdir(parents=True)
-            spec_file = specs_dir / "spec.md"
-            spec_file.write_text("# Test Spec\n\n## Purpose\nTest purpose")
-
             builder = ContextBuilder(Path(tmpdir))
-            context = builder.build_step_context(
-                step_type="analyze",
-                task_description="Test task",
-            )
+            assert not hasattr(builder, "build_step_context")
+            assert not hasattr(builder, "_build_header")
+            assert not hasattr(builder, "get_step_prompt_template")
 
-            assert "Test task" in context
-            assert "analyze" in context.lower()
-
-    def test_context_includes_relevant_specs(self):
-        """Test that context includes relevant specs."""
+    def test_retained_methods_exist(self):
+        """Verify retained methods still work."""
         from .context_builder import ContextBuilder
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Create a spec
-            specs_dir = Path(tmpdir) / "specs" / "flow-engine"
-            specs_dir.mkdir(parents=True)
-            (specs_dir / "spec.md").write_text("# Flow Engine Spec\nDetails here")
-
             builder = ContextBuilder(Path(tmpdir))
+            assert hasattr(builder, "specs_dir")
+            assert hasattr(builder, "_load_spec_content")
 
-            context = builder.build_step_context(
-                step_type="implement",
-                task_description="Update flow engine",
-                previous_outputs={"analysis": {"task_type": "feature"}},
-                relevant_specs=["flow-engine"],
+
+class TestIssueDiscoveryInjection:
+    """Tests for get_issue_discovery_injection() function."""
+
+    def test_whitelisted_step_returns_prompt(self, tmp_path):
+        """Whitelisted step (summarize) returns non-empty prompt."""
+        from .context_builder import get_issue_discovery_injection
+
+        result = get_issue_discovery_injection("summarize", tmp_path)
+        assert result != ""
+        assert "discovered_issues" in result
+
+    def test_whitelisted_step_verify_spec(self, tmp_path):
+        """Whitelisted step (verify_spec) returns non-empty prompt."""
+        from .context_builder import get_issue_discovery_injection
+
+        result = get_issue_discovery_injection("verify_spec", tmp_path)
+        assert result != ""
+        assert "discovered_issues" in result
+
+    def test_non_whitelisted_step_returns_empty(self, tmp_path):
+        """Non-whitelisted step (propose) returns empty string."""
+        from .context_builder import get_issue_discovery_injection
+
+        result = get_issue_discovery_injection("propose", tmp_path)
+        assert result == ""
+
+    def test_forbidden_step_implement_returns_empty(self, tmp_path):
+        """Forbidden step (implement) returns empty string."""
+        from .context_builder import get_issue_discovery_injection
+
+        result = get_issue_discovery_injection("implement", tmp_path)
+        assert result == ""
+
+    def test_forbidden_step_test_returns_empty(self, tmp_path):
+        """Forbidden step (test) returns empty string."""
+        from .context_builder import get_issue_discovery_injection
+
+        result = get_issue_discovery_injection("test", tmp_path)
+        assert result == ""
+
+    def test_custom_whitelist_from_config(self, tmp_path):
+        """Custom se3.yaml whitelist is respected."""
+        from .context_builder import get_issue_discovery_injection
+
+        # Create se3.yaml with custom whitelist including 'design'
+        config_path = tmp_path / "se3.yaml"
+        config_path.write_text(
+            "issue_discovery:\n  steps:\n    - design\n    - summarize\n"
+        )
+
+        # 'design' should now return injection
+        result = get_issue_discovery_injection("design", tmp_path)
+        assert result != ""
+        assert "discovered_issues" in result
+
+        # 'verify_spec' is no longer in custom whitelist
+        result = get_issue_discovery_injection("verify_spec", tmp_path)
+        assert result == ""
+
+    def test_forbidden_step_overrides_config(self, tmp_path):
+        """Forbidden step returns empty even if config includes it."""
+        from .context_builder import get_issue_discovery_injection
+
+        # Create se3.yaml that tries to whitelist forbidden 'implement'
+        config_path = tmp_path / "se3.yaml"
+        config_path.write_text(
+            "issue_discovery:\n  steps:\n    - implement\n    - summarize\n"
+        )
+
+        result = get_issue_discovery_injection("implement", tmp_path)
+        assert result == ""
+
+    def test_missing_config_uses_defaults(self, tmp_path):
+        """Missing se3.yaml uses default whitelist."""
+        from .context_builder import get_issue_discovery_injection
+
+        # No se3.yaml exists in tmp_path
+        result = get_issue_discovery_injection("summarize", tmp_path)
+        assert result != ""
+        assert "discovered_issues" in result
+
+
+class TestSummarizeHandlerIssueDiscoveryIntegration:
+    """Integration test: verify summarize handler prompt includes issue discovery."""
+
+    @patch("se3.engine.steps.summarize.LLMCaller")
+    def test_summarize_prompt_contains_issue_discovery(self, MockLLMCaller):
+        """The actual prompt sent to LLM by summarize handler contains issue discovery text."""
+        mock_caller = MagicMock()
+        # Return valid NDJSON with summary text
+        mock_caller.call.return_value = '{"type": "assistant", "message": {"content": [{"type": "text", "text": "Summary here"}]}}'
+        MockLLMCaller.return_value = mock_caller
+
+        flow = FlowInstance(task_description="Test task")
+        # Set change_path to a temp dir so project_root resolves
+        with tempfile.TemporaryDirectory() as tmpdir:
+            flow.change_path = Path(tmpdir) / "dummy"
+            step = Step(step_type=StepType.SUMMARIZE)
+            step.inputs["task_description"] = "Test task"
+
+            from .steps.summarize import summarize_handler
+            summarize_handler(step, flow)
+
+            # Verify the prompt sent to LLM contains issue discovery text
+            assert mock_caller.call.called
+            call_kwargs = mock_caller.call.call_args
+            prompt = call_kwargs.kwargs.get("prompt") or call_kwargs[1].get("prompt") or call_kwargs[0][0] if call_kwargs[0] else ""
+            # The prompt keyword argument
+            if not prompt and call_kwargs.kwargs:
+                prompt = call_kwargs.kwargs.get("prompt", "")
+            assert "discovered_issues" in prompt, (
+                "Issue discovery injection was NOT found in the summarize handler prompt. "
+                "This means the injection is not reaching the LLM."
             )
-
-            assert "Flow Engine Spec" in context
-            assert "feature" in context
 
 
 if __name__ == "__main__":

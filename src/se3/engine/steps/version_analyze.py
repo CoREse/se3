@@ -159,12 +159,18 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         current_version=current_version,
     )
     
+    # Append issue discovery injection if applicable
+    from ..context_builder import get_issue_discovery_injection
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    injection = get_issue_discovery_injection("version_analyze", project_root)
+    if injection:
+        prompt += injection
+
     logger.info("Analyzing changes to determine version bump type...")
-    
+
     try:
         # Call LLM for version analysis using EXTRACT mode
         # This mode requests JSON but uses LLM extraction on parse failure (no retry)
-        project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(
             project_root,

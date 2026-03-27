@@ -422,6 +422,12 @@ def _generate_commit_message(
                 changes_text=changes_text
             )
             
+            # Append issue discovery injection if applicable
+            from ..context_builder import get_issue_discovery_injection
+            injection = get_issue_discovery_injection("commit", project_root)
+            if injection:
+                prompt += injection
+
             caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id="commit_summary")
             response = caller.call(prompt=prompt, require_json=False)
             

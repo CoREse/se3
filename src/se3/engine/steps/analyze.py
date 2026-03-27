@@ -81,11 +81,17 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         project_context=project_context,
     )
 
+    # Append issue discovery injection if applicable
+    from ..context_builder import get_issue_discovery_injection
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    injection = get_issue_discovery_injection("analyze", project_root)
+    if injection:
+        prompt += injection
+
     logger.info(f"Analyzing task: {task_description[:60]}...")
 
     try:
         # Call LLM for analysis
-        project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
         response = caller.call(prompt=prompt, require_json=True)

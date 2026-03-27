@@ -549,6 +549,33 @@ test:
 - **THEN** 检查 spec scenario 的测试覆盖
 - **AND** 未覆盖的 scenario 记为 warning
 
+#### Scenario: verify_spec 代码可达性验证
+- **WHEN** verify_spec 检查新增代码
+- **THEN** 验证新增的函数/方法从实际调用路径可达
+- **AND** 禁止将新逻辑放在从未被调用的函数中
+- **AND** 未被调用的新增代码记为 error 级别 issue
+
+#### Scenario: verify_spec 端到端集成验证
+- **WHEN** verify_spec 检查涉及多组件协作的功能
+- **THEN** 验证完整链路（注入→传递→消费）而非仅验证各组件独立正确
+- **AND** 缺少端到端验证的多组件功能记为 warning 级别 issue
+
+#### Scenario: verify_spec 死代码检查
+- **WHEN** verify_spec 检查新增代码
+- **THEN** 验证新增的函数/方法有调用者
+- **AND** 验证新增的参数被使用
+- **AND** 无调用者的新增代码记为 warning 级别 issue
+
+### Requirement: update_spec 支持创建新 spec
+
+`update_spec` 步骤 SHALL 在实现引入新的子系统或机制时，创建对应的新 spec 文件，而不仅仅是更新已有 spec。
+
+#### Scenario: 新子系统触发新 spec 创建
+- **WHEN** 实现引入了一个新的子系统（如 Issue Discovery）
+- **AND** 该子系统没有对应的 spec 文件
+- **THEN** update_spec 步骤在 `se3/specs/` 下创建新的 spec 目录和 `spec.md`
+- **AND** 新 spec 包含 Purpose、Requirements、Scenarios 等标准结构
+
 ## Architecture
 
 ### 核心组件

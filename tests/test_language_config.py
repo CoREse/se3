@@ -7,7 +7,6 @@ from pathlib import Path
 
 from se3.config import LanguageConfig, load_language_config, get_language_instruction
 from se3.engine.context_builder import (
-    ContextBuilder,
     get_step_language_instruction,
     HUMAN_FACING_STEPS,
     SPEC_STEPS,
@@ -243,45 +242,36 @@ class TestGetStepLanguageInstruction:
 
 
 class TestContextBuilderLanguageInjection:
-    """Tests for language injection through ContextBuilder.build_step_context."""
+    """Tests for language injection via get_step_language_instruction."""
 
-    def test_build_step_context_includes_language(self, tmp_path):
-        """build_step_context includes language instruction for human-facing steps."""
+    def test_language_instruction_includes_language(self, tmp_path):
+        """get_step_language_instruction returns language for human-facing steps."""
         (tmp_path / "se3.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: null\n"
         )
-        builder = ContextBuilder(tmp_path)
-        context = builder.build_step_context(
-            step_type="summarize",
-            task_description="Test task",
-        )
-        assert "zh-CN" in context
+        from se3.engine.context_builder import get_step_language_instruction
+        instruction = get_step_language_instruction("summarize", tmp_path)
+        assert "zh-CN" in instruction
 
-    def test_build_step_context_no_language_for_implement(self, tmp_path):
-        """build_step_context does NOT include language for implement step."""
+    def test_no_language_for_implement(self, tmp_path):
+        """get_step_language_instruction returns empty for implement step."""
         (tmp_path / "se3.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: en\n"
         )
-        builder = ContextBuilder(tmp_path)
-        context = builder.build_step_context(
-            step_type="implement",
-            task_description="Test task",
-        )
-        assert "MUST respond in" not in context
+        from se3.engine.context_builder import get_step_language_instruction
+        instruction = get_step_language_instruction("implement", tmp_path)
+        assert "MUST respond in" not in instruction
 
-    def test_build_step_context_spec_language_for_update_spec(self, tmp_path):
-        """build_step_context uses spec_language for update_spec step."""
+    def test_spec_language_for_update_spec(self, tmp_path):
+        """get_step_language_instruction uses spec_language for update_spec step."""
         (tmp_path / "se3.yaml").write_text(
             "language:\n  language: zh-CN\n  spec_language: en\n"
         )
-        builder = ContextBuilder(tmp_path)
-        context = builder.build_step_context(
-            step_type="update_spec",
-            task_description="Test task",
-        )
-        assert "en" in context
+        from se3.engine.context_builder import get_step_language_instruction
+        instruction = get_step_language_instruction("update_spec", tmp_path)
+        assert "en" in instruction
         # Should NOT contain zh-CN (that's for human-facing steps)
-        assert "zh-CN" not in context
+        assert "zh-CN" not in instruction
 
 
 # --- Constants tests ---
