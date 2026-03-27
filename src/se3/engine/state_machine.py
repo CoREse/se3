@@ -23,6 +23,8 @@ from .models import (
     get_step_info,
 )
 from .chat_history import _history_dir
+from .issue_discovery import IssueDiscovery
+from .issue_manager import IssueManager
 from .persistence import PersistenceManager
 from ..config import insert_confirmation_steps, load_confirmation_config
 from .. import __version__ as se3_version
@@ -71,6 +73,10 @@ class StateMachine:
         self.project_root = Path(project_root)
         self.persistence = persistence or PersistenceManager(project_root)
 
+        # Issue discovery support
+        self._issue_manager: Optional[IssueManager] = None
+        self._issue_discovery: Optional[IssueDiscovery] = None
+
         # Step handlers registry
         self._handlers: Dict[StepType, Callable[[Step, FlowInstance], Any]] = {}
 
@@ -78,6 +84,19 @@ class StateMachine:
         self._transitions: Dict[tuple[StepType, Optional[str]], StepType] = {}
 
         self._setup_default_transitions()
+
+    def _get_issue_discovery(self, flow: FlowInstance) -> Optional[IssueDiscovery]:
+        """Get or create the IssueDiscovery instance for the current flow."""
+        if self._issue_discovery is not None and self._issue_discovery.flow_id == flow.flow_id:
+            return self._issue_discovery
+        try:
+            if self._issue_manager is None:
+                self._issue_manager = IssueManager(self.project_root)
+            self._issue_discovery = IssueDiscovery(self._issue_manager, flow.flow_id)
+            return self._issue_discovery
+        except Exception as e:
+            logger.debug(f"Failed to initialize IssueDiscovery: {e}")
+            return None
 
     def _setup_default_transitions(self) -> None:
         """Set up default transition rules."""
@@ -266,6 +285,19 @@ class StateMachine:
 
         logger.info(f"Step {step.step_type.value} finished with status: {step.status.value}")
 
+        # B-class collection: collect discovered issues from whitelist steps
+        if step.status == StepStatus.COMPLETED and step.outputs.get("discovered_issues"):
+            try:
+                discovery = self._get_issue_discovery(flow)
+                if discovery:
+                    discovery.collect_issues_from_output(
+                        flow,
+                        step.step_type.value,
+                        step.outputs,
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to collect discovered issues: {e}")
+
         return step.status
 
     def transition_to_next(self, flow: FlowInstance) -> Optional[Step]:
@@ -305,6 +337,13 @@ class StateMachine:
                     f"Max fix iterations ({max_fix_iterations}) reached, continuing to next step"
                 )
                 print(f"\n⚠️  Max fix iterations ({max_fix_iterations}) reached, proceeding...\n")
+                # A-class trigger: create issue for fix loop exhaustion
+                try:
+                    discovery = self._get_issue_discovery(flow)
+                    if discovery:
+                        discovery.create_from_fix_loop_exhaustion(flow, current_step)
+                except Exception as e:
+                    logger.warning(f"Failed to create fix-loop exhaustion issue: {e}")
                 # Fall through to normal progression - will go to next step
             else:
                 fix_step = self._transition_to_fix(flow, current_step)

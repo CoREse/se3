@@ -151,6 +151,11 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["verified"] = verification.get("verified", False)
         step.outputs["issues"] = verification.get("issues", [])
 
+        # Transparently pass through discovered_issues for B-class collection
+        discovered_issues = verification.get("discovered_issues", [])
+        if discovered_issues:
+            step.outputs["discovered_issues"] = discovered_issues
+
         issues = verification.get("issues", [])
         error_count = sum(1 for i in issues if i.get("severity") == "error")
 

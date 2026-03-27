@@ -127,6 +127,12 @@ class ContextBuilder:
         if lang_instruction:
             context += lang_instruction
 
+        # Append issue discovery prompt for whitelist steps
+        from .issue_discovery import IssueDiscovery
+        injection = IssueDiscovery.get_injection_prompt(step_type)
+        if injection:
+            context += injection
+
         return context
 
     def _build_header(self, step_type: str, task_description: str) -> str:

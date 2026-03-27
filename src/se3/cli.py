@@ -431,5 +431,28 @@ app.add_typer(history_app, name="history", help="View and manage session history
 app.add_typer(issue_app, name="issue", help="Manage SE3 issues")
 
 
+@app.command(name="salvage")
+def salvage_cmd(
+    project_root: Optional[str] = typer.Option(None, "--project-root", "-p", help="Project root directory"),
+):
+    """Salvage work from an abnormally terminated session.
+
+    Performs best-effort recovery:
+    1. Reads session state (tolerant of corruption)
+    2. Evaluates git diff
+    3. Commits existing changes
+    4. Creates issues for unfinished work
+    5. Archives the session
+
+    Use this when a session crashed or was interrupted.
+    After salvage, use 'se3 run --from-issue' to continue work.
+    """
+    from .commands.salvage_cmd import salvage
+
+    root = Path(project_root) if project_root else None
+    exit_code = salvage(root)
+    raise typer.Exit(exit_code)
+
+
 if __name__ == "__main__":
     app()

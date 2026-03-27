@@ -150,6 +150,9 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Store output
         step.outputs["summary"] = summary_text
 
+        # Extract discovered_issues from LLM response for B-class collection
+        _extract_discovered_issues(response, step)
+
         # Print to terminal for user visibility
         print("\n" + "=" * 60)
         print("📋 WORK SUMMARY")
@@ -275,6 +278,52 @@ def _create_basic_summary_text(
     ])
 
     return "\n".join(lines)
+
+
+def _extract_discovered_issues(response: str, step: Step) -> None:
+    """Extract discovered_issues JSON from LLM natural language response.
+
+    Looks for a JSON block containing discovered_issues in the response text.
+    Stores found issues in step.outputs['discovered_issues'].
+
+    Args:
+        response: Raw LLM response (may be NDJSON stream or plain text)
+        step: Step to store discovered issues in
+    """
+    import json
+    import re
+
+    # Get the text content (handle both NDJSON and plain text)
+    text = _extract_text_from_stream_json(response)
+    if not text:
+        text = response or ""
+
+    # Look for JSON block containing discovered_issues
+    # Try to find ```json ... ``` blocks first
+    json_blocks = re.findall(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
+    for block in json_blocks:
+        try:
+            data = json.loads(block.strip())
+            if isinstance(data, dict) and "discovered_issues" in data:
+                issues = data["discovered_issues"]
+                if isinstance(issues, list) and issues:
+                    step.outputs["discovered_issues"] = issues
+                    return
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    # Try to find inline JSON with discovered_issues
+    pattern = r'\{[^{}]*"discovered_issues"\s*:\s*\[.*?\]\s*\}'
+    matches = re.findall(pattern, text, re.DOTALL)
+    for match in matches:
+        try:
+            data = json.loads(match)
+            issues = data.get("discovered_issues", [])
+            if isinstance(issues, list) and issues:
+                step.outputs["discovered_issues"] = issues
+                return
+        except (json.JSONDecodeError, ValueError):
+            continue
 
 
 def _save_summary(flow: FlowInstance, summary_text: str) -> None:

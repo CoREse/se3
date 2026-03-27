@@ -5,13 +5,16 @@ to prevent state corruption during interruptions.
 """
 
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from .models import FlowInstance, State, Step, StepStatus
+from .models import FlowInstance, FlowStatus, State, Step, StepStatus
 from .schema import build_context_from_flow
+
+logger = logging.getLogger(__name__)
 
 
 class PersistenceManager:
@@ -94,6 +97,164 @@ class PersistenceManager:
                 data = json.loads(content)
                 return FlowInstance.from_dict(data)
             return None
+
+    def load_flow_tolerant(self) -> Tuple[Optional[FlowInstance], List[str]]:
+        """Load flow instance with maximum tolerance for corruption.
+
+        Unlike load_flow(), this method:
+        - Attempts to repair truncated JSON
+        - Fills missing fields with defaults
+        - Falls back to .bak file
+        - Never raises exceptions
+
+        Returns:
+            Tuple of (FlowInstance or None, list of warning messages)
+        """
+        warnings: List[str] = []
+
+        # Try main file first, then backup
+        candidates = [self.state_file]
+        backup_file = self.state_file.with_suffix(self.BACKUP_EXTENSION)
+        if backup_file.exists():
+            candidates.append(backup_file)
+
+        for filepath in candidates:
+            if not filepath.exists():
+                continue
+
+            try:
+                content = filepath.read_text(encoding="utf-8")
+            except Exception as e:
+                warnings.append(f"Failed to read {filepath.name}: {e}")
+                continue
+
+            if not content.strip():
+                warnings.append(f"{filepath.name} is empty")
+                continue
+
+            # Try normal parsing first
+            try:
+                data = json.loads(content)
+                flow = FlowInstance.from_dict(data)
+                if filepath != self.state_file:
+                    warnings.append(f"Loaded from backup {filepath.name}")
+                return flow, warnings
+            except json.JSONDecodeError as e:
+                warnings.append(f"JSON parse error in {filepath.name}: {e}")
+                # Try to repair truncated JSON
+                repaired = self._try_repair_json(content)
+                if repaired is not None:
+                    try:
+                        flow = self._tolerant_from_dict(repaired, warnings)
+                        warnings.append(f"Recovered from truncated JSON in {filepath.name}")
+                        return flow, warnings
+                    except Exception as e2:
+                        warnings.append(f"Failed to deserialize repaired JSON: {e2}")
+            except (KeyError, ValueError, TypeError) as e:
+                warnings.append(f"Deserialization error in {filepath.name}: {e}")
+                # Try with tolerant deserialization
+                try:
+                    data = json.loads(content)
+                    flow = self._tolerant_from_dict(data, warnings)
+                    return flow, warnings
+                except Exception as e2:
+                    warnings.append(f"Tolerant deserialization also failed: {e2}")
+
+        if not any(f.exists() for f in candidates):
+            warnings.append("No state file found")
+
+        return None, warnings
+
+    @staticmethod
+    def _try_repair_json(content: str) -> Optional[dict]:
+        """Try to repair truncated JSON by closing open brackets.
+
+        Args:
+            content: Potentially truncated JSON string
+
+        Returns:
+            Parsed dict if repair successful, None otherwise
+        """
+        # Count open/close brackets
+        open_braces = content.count("{") - content.count("}")
+        open_brackets = content.count("[") - content.count("]")
+
+        if open_braces <= 0 and open_brackets <= 0:
+            return None  # Not a truncation issue
+
+        # Strip trailing incomplete values (partial strings, numbers, etc.)
+        repaired = content.rstrip()
+        # Remove trailing comma if present
+        repaired = repaired.rstrip(",")
+
+        # Close open brackets and braces
+        repaired += "]" * max(0, open_brackets)
+        repaired += "}" * max(0, open_braces)
+
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            # Try more aggressive repair: strip last partial key-value pair
+            # Find last complete value (ending with comma, }, or ])
+            import re
+            # Strip back to last clean boundary
+            match = re.search(r'(.*[}\]",\d])\s*[^}\]]*$', content, re.DOTALL)
+            if match:
+                repaired = match.group(1)
+                open_braces = repaired.count("{") - repaired.count("}")
+                open_brackets = repaired.count("[") - repaired.count("]")
+                repaired += "]" * max(0, open_brackets)
+                repaired += "}" * max(0, open_braces)
+                try:
+                    return json.loads(repaired)
+                except json.JSONDecodeError:
+                    pass
+
+        return None
+
+    @staticmethod
+    def _tolerant_from_dict(data: dict, warnings: List[str]) -> FlowInstance:
+        """Create FlowInstance from dict with tolerance for missing fields.
+
+        Args:
+            data: Possibly incomplete dict
+            warnings: List to append warnings to
+
+        Returns:
+            FlowInstance with defaults for missing fields
+        """
+        from datetime import datetime
+
+        # Ensure required fields exist with defaults
+        if "flow_id" not in data:
+            data["flow_id"] = f"recovered_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            warnings.append("Missing flow_id, generated recovery ID")
+
+        if "task_description" not in data:
+            data["task_description"] = "(unknown - recovered from corrupted state)"
+            warnings.append("Missing task_description")
+
+        if "status" not in data:
+            data["status"] = FlowStatus.FAILED.value
+            warnings.append("Missing status, defaulting to FAILED")
+
+        if "state" not in data or not isinstance(data.get("state"), dict):
+            data["state"] = {}
+            warnings.append("Missing or invalid state, using empty state")
+
+        # Ensure state has required fields
+        state_data = data["state"]
+        if "steps" not in state_data:
+            state_data["steps"] = {}
+            warnings.append("Missing steps in state")
+        if "step_history" not in state_data:
+            state_data["step_history"] = list(state_data.get("steps", {}).keys())
+        if "selected_steps" not in state_data:
+            state_data["selected_steps"] = []
+        if "context" not in state_data:
+            state_data["context"] = {}
+
+        return FlowInstance.from_dict(data)
 
     def create_backup(self) -> Optional[Path]:
         """Create a backup of the current state file.
