@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import typer
+from rich.rule import Rule
 
 # Add engine to path if needed
 try:
@@ -41,6 +42,7 @@ try:
         display_step_result,
         display_success,
         format_output,
+        get_console,
         render_full,
     )
     from ..cli import _read_multiline_input
@@ -62,6 +64,7 @@ except ImportError:
         display_step_result,
         display_success,
         format_output,
+        get_console,
         render_full,
     )
     from cli import _read_multiline_input
@@ -285,7 +288,7 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
     flows = find_existing_flows(project_root)
 
     if not flows:
-        render_full("No existing flows found. Starting new flow.", title="Resume")
+        get_console().print("[dim]No existing flows found. Starting new flow.[/dim]")
         return None
 
     # Filter to resumable flows (exclude only COMPLETED)
@@ -293,9 +296,9 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
     active_flows = [f for f in flows if f["status"] not in terminal_statuses]
 
     if not active_flows:
-        render_full("No in-progress flows found.", title="Resume")
+        get_console().print("[dim]No in-progress flows found.[/dim]")
         if flows:
-            render_full(f"Found {len(flows)} completed flows.", title="Info")
+            get_console().print(f"[dim]Found {len(flows)} completed flow(s).[/dim]")
         return None
 
     if len(active_flows) == 1:
@@ -361,9 +364,9 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
         return None
     if user_input:
         set_extra_prompt(user_input)
-        render_full("Extra prompt set, retrying step...", title="Info")
+        get_console().print("[dim]Extra prompt set, retrying step...[/dim]")
     else:
-        render_full("Retrying step as-is...", title="Info")
+        get_console().print("[dim]Retrying step as-is...[/dim]")
     # Reset step to PENDING so it re-runs
     current_step.status = StepStatus.PENDING
     persistence.save_flow(flow)
@@ -409,7 +412,7 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
         if current_step.inputs.get("resumed"):
             return "__RESUME__"
         # Otherwise ask again
-        render_full("Please provide a response or press Ctrl+C to exit.", title="Input Required")
+        get_console().print("[yellow]Please provide a response or press Ctrl+C to exit.[/yellow]")
         return _handle_discovery_pause(flow, current_step, persistence, prompt_history)
 
     # Parse the response to check if user is confirming
@@ -434,12 +437,16 @@ def _display_step_output(current_step: Any) -> None:
         current_step: The current step being executed
     """
     step_header = f"Step: {current_step.step_type.value}"
-    step_info = f"Status: {current_step.status.value}"
 
-    lines = [f"[bold]{step_info}[/bold]", ""]
+    lines = []
+
+    # Show status only when it's not the expected "completed"
+    if current_step.status.value != "completed":
+        lines.append(f"[bold]Status: {current_step.status.value}[/bold]")
+        lines.append("")
 
     # --- Outputs only (inputs are internal plumbing) ---
-    # Keys whose raw content is too large to display directly
+    # Deferred keys are rendered by dedicated renderers below, skip here
     DEFERRED_KEYS = {"proposal", "proposal_data", "design", "design_doc",
                      "design_document", "analysis", "analysis_result"}
     LARGE_KEYS = {"spec_content", "spec_summary", "test_results",
@@ -448,16 +455,11 @@ def _display_step_output(current_step: Any) -> None:
     HIDDEN_KEYS = {"result", "call_file"}
 
     if current_step.outputs:
-        lines.append("[bold green]Outputs:[/bold green]")
         for key, value in current_step.outputs.items():
-            if key in HIDDEN_KEYS:
+            if key in HIDDEN_KEYS or key in DEFERRED_KEYS:
                 continue
 
-            if key in DEFERRED_KEYS and isinstance(value, dict):
-                label = key.replace("_", " ").title()
-                lines.append(f"\n  [bold]{key}:[/bold] (see {label} display below)")
-            elif key in LARGE_KEYS:
-                # Show a short summary instead of the full blob
+            if key in LARGE_KEYS:
                 if isinstance(value, str):
                     preview = value[:120].replace("\n", " ")
                     lines.append(f"  [bold]{key}:[/bold] {preview}... ({len(value)} chars)")
@@ -469,13 +471,16 @@ def _display_step_output(current_step: Any) -> None:
             else:
                 formatted_value = format_output(value)
                 lines.append(f"  [bold]{key}:[/bold] {formatted_value}")
-        lines.append("")
 
     if current_step.error_message:
+        if lines:
+            lines.append("")
         lines.append(f"[bold red]Error:[/bold red] {current_step.error_message}")
 
-    content = "\n".join(lines)
-    render_full(content, title=step_header)
+    # Only show panel if there's actual content
+    if lines:
+        content = "\n".join(lines)
+        render_full(content, title=step_header)
 
     # Now display specific structured outputs with dedicated renderers
     outputs = current_step.outputs or {}
@@ -688,30 +693,24 @@ def _run_flow_impl(
     while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED):
         current_step = flow.state.get_current_step()
         if not current_step:
-            render_full("No current step, marking flow as complete", title="Info")
+            get_console().print("[dim]No current step — marking flow complete[/dim]")
             flow.status = FlowStatus.COMPLETED
             break
 
-        # Display step header with type information only when appropriate
-        # Skip header for CONFIRM steps — the prompt speaks for itself
+        # Display compact step header — skip for CONFIRM steps (the prompt speaks for itself)
         step_type_value = current_step.step_type.value
         if current_step.step_type != StepType.CONFIRM:
             show_type = _should_show_type(step_type_value, flow)
             display_type = _get_display_task_type(flow) if show_type else None
 
-            step_header_lines = [
-                f"Step: {step_type_value}",
-                f"Status: {current_step.status.value}",
-            ]
+            type_suffix = ""
             if display_type:
-                step_header_lines.append(f"Type: {display_type}")
+                type_suffix = f" [dim]({display_type})[/dim]"
             elif flow.state.is_type_pending():
-                step_header_lines.append("Type: pending")
+                type_suffix = " [dim](pending)[/dim]"
 
-            render_full(
-                "\n".join(step_header_lines),
-                title="Current Step"
-            )
+            console = get_console()
+            console.print(Rule(f"[bold]{step_type_value}[/bold]{type_suffix}", style="cyan"))
 
         step_start_time = datetime.now()
 
@@ -719,10 +718,7 @@ def _run_flow_impl(
         if current_step.step_type == StepType.CONFIRM and flow_id and current_step.status == StepStatus.PAUSED:
             existing_result = _check_confirm_response(flow, current_step, project_root)
             if existing_result:
-                render_full(
-                    f"Found existing confirmation response: {existing_result.value}",
-                    title="Confirmation"
-                )
+                get_console().print(f"[dim]Found existing confirmation response: {existing_result.value}[/dim]")
                 result = existing_result
             else:
                 try:
@@ -822,10 +818,7 @@ def _run_flow_impl(
 
         # Handle REVISION_NEEDED status from CONFIRM step
         if result == StepStatus.REVISION_NEEDED:
-            render_full(
-                "Revision requested - transitioning to previous step",
-                title="Revision"
-            )
+            get_console().print("[yellow]Revision requested — returning to previous step[/yellow]")
             # Mark the CONFIRM step as completed with revision info
             current_step.status = StepStatus.REVISION_NEEDED
             # Transition will handle going back to the previous step
@@ -834,10 +827,8 @@ def _run_flow_impl(
             continue
 
         step_duration = (datetime.now() - step_start_time).total_seconds()
-        render_full(
-            f"Step completed: {current_step.step_type.value} ({step_duration:.1f}s)",
-            title="Progress"
-        )
+        console = get_console()
+        console.print(f"  [green]✓[/green] [bold]{current_step.step_type.value}[/bold] completed [dim]({step_duration:.1f}s)[/dim]")
 
         # Transition to next step
         state_machine.transition_to_next(flow)
@@ -853,7 +844,7 @@ def _run_flow_impl(
         display_error(f"Flow failed: {error_msg}")
         return 1
     else:
-        render_full(f"Flow ended with status: {flow.status.value}", title="Status")
+        get_console().print(f"[dim]Flow ended with status: {flow.status.value}[/dim]")
         return 0
 
 
@@ -984,15 +975,13 @@ def run_loop_mode(
 
     try:
         for iteration in range(1, iter_limit + 1):
-            render_full(f"Loop iteration #{iteration}", title="Iteration")
+            get_console().print(Rule(f"[bold]Loop #{iteration}[/bold]", style="cyan"))
 
             result = controller.run_iteration(
                 run_flow_fn=run_flow,
                 task=initial_task,
                 task_type=task_type,
             )
-
-            render_full(f"Task: {result.task}", title="Current Task")
 
             if not result.success:
                 display_error(f"Task failed with exit code {result.exit_code}")
@@ -1012,7 +1001,7 @@ def run_loop_mode(
 
     except KeyboardInterrupt:
         interrupted = True
-        render_full("Loop interrupted by user.", title="Interrupted")
+        get_console().print("[yellow]Loop interrupted by user.[/yellow]")
 
     # Post-loop: auto merge
     return _handle_loop_finish(controller, interrupted)
@@ -1047,7 +1036,7 @@ def _handle_loop_finish(controller, interrupted: bool) -> int:
     finish_state = controller.finish(interrupted=interrupted)
 
     if not finish_state["loop_branch"] or not finish_state["original_branch"]:
-        render_full("Loop mode ended.", title="Done")
+        get_console().print("[dim]Loop mode ended.[/dim]")
         return 0
 
     loop_branch = finish_state["loop_branch"]
@@ -1075,7 +1064,7 @@ def _handle_loop_finish(controller, interrupted: bool) -> int:
             )
     else:
         controller.discard()
-        render_full("Loop ended with no changes. Branch cleaned up.", title="Done")
+        get_console().print("[dim]Loop ended with no changes. Branch cleaned up.[/dim]")
 
     return 0
 

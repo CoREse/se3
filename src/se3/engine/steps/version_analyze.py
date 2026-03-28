@@ -201,16 +201,17 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         )
         
         # Display to user
-        print(f"\n{'='*60}")
-        print("📊 VERSION ANALYSIS")
-        print(f"{'='*60}")
-        print(f"Current Version: {current_version}")
-        print(f"Suggested Version: {result['suggested_version']}")
-        print(f"Bump Type: {result['bump_type']}")
-        print(f"Confidence: {result['confidence']}")
-        print(f"\nReasoning:")
-        print(result['reasoning'])
-        print(f"{'='*60}\n")
+        from ..output import render_full
+        va_lines = [
+            f"[bold]Current Version:[/bold] {current_version}",
+            f"[bold]Suggested Version:[/bold] {result['suggested_version']}",
+            f"[bold]Bump Type:[/bold] {result['bump_type']}",
+            f"[bold]Confidence:[/bold] {result['confidence']}",
+            "",
+            f"[bold]Reasoning:[/bold]",
+            result['reasoning'],
+        ]
+        render_full("\n".join(va_lines), title="Version Analysis")
         
         return StepStatus.COMPLETED
         

@@ -173,11 +173,8 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         _extract_discovered_issues(response, step)
 
         # Print to terminal for user visibility
-        print("\n" + "=" * 60)
-        print("📋 WORK SUMMARY")
-        print("=" * 60)
-        print(summary_text)
-        print("=" * 60)
+        from ..output import render_full
+        render_full(summary_text, title="Work Summary")
 
         # Save to file
         _save_summary(flow, summary_text)

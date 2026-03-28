@@ -541,7 +541,6 @@ def _display_discovery_message(
         lines.extend([
             content,
             "",
-            "=" * 60,
             refined_description,
             "",
         ])
@@ -550,13 +549,10 @@ def _display_discovery_message(
         if content:
             lines.extend([content, ""])
         lines.extend([
-            "📋 PROPOSED TASK DESCRIPTION:",
-            "=" * 60,
+            "[bold cyan]Proposed Task Description:[/bold cyan]",
             refined_description,
             "",
-            "-" * 60,
-            "🤔 QUESTIONS FOR YOU:",
-            "-" * 60,
+            "[bold yellow]Questions:[/bold yellow]",
         ])
         for i, q in enumerate(questions, 1):
             lines.append(f"  {i}. {q}")
@@ -566,27 +562,21 @@ def _display_discovery_message(
         if content:
             lines.extend([content, ""])
         lines.extend([
-            "📋 PROPOSED TASK DESCRIPTION:",
-            "=" * 60,
+            "[bold cyan]Proposed Task Description:[/bold cyan]",
             refined_description,
             "",
-            "-" * 60,
             "Does this accurately capture what you want to build?",
             "",
             "Reply with:",
-            "  • 'yes' or 'ok' to proceed with this description",
-            "  • 'no' or provide corrections/clarifications",
+            "  [bold]yes[/bold] or [bold]ok[/bold] to proceed with this description",
+            "  [bold]no[/bold] or provide corrections/clarifications",
             "",
         ])
     elif questions:
         # Question mode - show the message and questions
         if content:
             lines.extend([content, ""])
-        lines.extend([
-            "-" * 60,
-            "🤔 QUESTIONS FOR YOU:",
-            "-" * 60,
-        ])
+        lines.append("[bold yellow]Questions:[/bold yellow]")
         for i, q in enumerate(questions, 1):
             lines.append(f"  {i}. {q}")
         lines.append("")
