@@ -286,7 +286,7 @@ class StateMachine:
         logger.info(f"Step {step.step_type.value} finished with status: {step.status.value}")
 
         # B-class collection: collect discovered issues from whitelist steps
-        if step.status == StepStatus.COMPLETED and step.outputs.get("discovered_issues"):
+        if step.status in (StepStatus.COMPLETED, StepStatus.PARTIAL) and step.outputs.get("discovered_issues"):
             try:
                 discovery = self._get_issue_discovery(flow)
                 if discovery:
@@ -317,7 +317,7 @@ class StateMachine:
             raise TransitionError("No current step")
 
         # Check if current step completed successfully
-        if current_step.status not in (StepStatus.COMPLETED, StepStatus.PAUSED, StepStatus.REVISION_NEEDED):
+        if current_step.status not in (StepStatus.COMPLETED, StepStatus.PARTIAL, StepStatus.PAUSED, StepStatus.REVISION_NEEDED):
             logger.warning(
                 f"Cannot transition from {current_step.status.value} step"
             )
@@ -593,7 +593,7 @@ class StateMachine:
         # Gather outputs from previous steps
         for step_id in flow.state.step_history:
             step = flow.state.steps.get(step_id)
-            if step and step.status == StepStatus.COMPLETED:
+            if step and step.status in (StepStatus.COMPLETED, StepStatus.PARTIAL):
                 # Add key outputs based on step type
                 if step.step_type == StepType.DISCOVERY:
                     inputs["refined_description"] = step.outputs.get("refined_description")
@@ -624,6 +624,13 @@ class StateMachine:
                     # Forward implement-test contract
                     inputs["tests_added"] = step.outputs.get("tests_added", [])
                     inputs["test_mapping"] = step.outputs.get("test_mapping", {})
+                    # Forward completion status and summary for downstream steps
+                    inputs["implement_summary"] = step.outputs.get("summary", "")
+                    inputs["completion_status"] = step.outputs.get("completion_status", "complete")
+                    inputs["incomplete_tasks"] = step.outputs.get("incomplete_tasks", [])
+                    # Forward restricted edits results for downstream visibility
+                    inputs["restricted_edits_applied"] = step.outputs.get("restricted_edits_applied", [])
+                    inputs["restricted_edits_failed"] = step.outputs.get("restricted_edits_failed", [])
                 elif step.step_type == StepType.TEST:
                     inputs["test_results"] = step.outputs.get("test_results")
                 elif step.step_type == StepType.VERIFY_SPEC:

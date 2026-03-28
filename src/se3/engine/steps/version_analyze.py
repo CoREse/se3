@@ -301,9 +301,15 @@ def _format_changes(changes_made: dict[str, Any]) -> str:
     if implemented_groups:
         lines.append("### Implementation Groups:")
         for group in implemented_groups:
-            group_name = group.get("name", "?")
-            group_desc = group.get("description", "")
-            lines.append(f"- {group_name}: {group_desc}")
+            if isinstance(group, str):
+                # Group-by-group execution stores just group IDs
+                lines.append(f"- {group}")
+            elif isinstance(group, dict):
+                group_name = group.get("name", "?")
+                group_desc = group.get("description", "")
+                lines.append(f"- {group_name}: {group_desc}")
+            else:
+                lines.append(f"- {group}")
         lines.append("")
     
     return "\n".join(lines) if lines else "Changes made but details unavailable."

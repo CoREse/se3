@@ -403,8 +403,14 @@ def _generate_commit_message(
     changes_made = step.inputs.get("changes_made") or {}
     proposal = step.inputs.get("proposal") or {}
 
-    # Use proposal summary if available
-    summary = proposal.get("summary", "")
+    # Get completion status from implement step (defaults for backward compatibility)
+    completion_status = step.inputs.get("completion_status", "complete")
+    incomplete_tasks = step.inputs.get("incomplete_tasks", [])
+    implement_summary = step.inputs.get("implement_summary", "")
+    restricted_edits_applied = step.inputs.get("restricted_edits_applied", [])
+
+    # Use proposal summary if available, then implement_summary as fallback
+    summary = proposal.get("summary", "") or implement_summary
     if summary:
         # Use first sentence or first 50 chars
         first_line = summary.split(".")[0]
@@ -416,6 +422,9 @@ def _generate_commit_message(
         project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         try:
             changes_text = _format_changes_for_prompt(changes_made)
+            if restricted_edits_applied:
+                edits_desc = [f"  - {e.get('file_path', '?')}" for e in restricted_edits_applied]
+                changes_text += "\n\nRestricted edits applied by engine:\n" + "\n".join(edits_desc)
             prompt = COMMIT_MESSAGE_PROMPT.format(
                 task_type=task_type,
                 task_description=task_description,
@@ -470,6 +479,19 @@ def _generate_commit_message(
             file_list += f" and {len(files_changed) - 3} more"
 
         message += f"\n\nFiles: {file_list}"
+
+    # Add incomplete tasks section when partial completion
+    if completion_status == "partial" and incomplete_tasks:
+        message += "\n\nIncomplete tasks (partial completion):"
+        for task in incomplete_tasks:
+            if isinstance(task, str):
+                message += f"\n- {task}"
+            elif isinstance(task, dict):
+                desc = task.get("description", task.get("task", str(task)))
+                reason = task.get("reason", "")
+                message += f"\n- {desc}"
+                if reason:
+                    message += f" ({reason})"
 
     # Add version information if bumping occurred and is configured to include
     include_version = (

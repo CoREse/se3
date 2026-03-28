@@ -48,9 +48,17 @@ When you are done, output a JSON summary of what you did:
     "files_changed": ["path/to/file1.py", "path/to/file2.py"],
     "tests_added": ["tests/test_new.py"],
     "test_mapping": {{}},
-    "summary": "Brief description of changes made"
+    "summary": "Brief description of changes made",
+    "completion_status": "complete",
+    "incomplete_tasks": [],
+    "restricted_edits": []
 }}
 ```
+
+### Response field notes:
+- **completion_status**: Set to "complete" if all tasks were done, "partial" if some tasks could not be completed (e.g., permission restrictions on sensitive files), or "failed" if no meaningful progress was made.
+- **incomplete_tasks**: An array of strings, each describing a task that could not be completed and why. Only populate when completion_status is "partial" or "failed".
+- **restricted_edits**: An array of edits you attempted but could NOT perform due to file permission/protection restrictions (e.g., files under `.claude/` directory). Each entry must be: {{"file_path": "path/to/file", "old_string": "text to replace", "new_string": "replacement text"}}. Always attempt edits normally first — only use this field for edits that were rejected by the permission system.
 """
 
 IMPLEMENT_GROUP_PROMPT = """You are an expert software engineer. Implement the tasks for this specific group by writing code.
@@ -85,9 +93,17 @@ When you are done, output a JSON summary of what you did:
     "files_changed": ["path/to/file1.py", "path/to/file2.py"],
     "tests_added": ["tests/test_new.py"],
     "test_mapping": {{}},
-    "summary": "Brief description of changes made"
+    "summary": "Brief description of changes made",
+    "completion_status": "complete",
+    "incomplete_tasks": [],
+    "restricted_edits": []
 }}
 ```
+
+### Response field notes:
+- **completion_status**: Set to "complete" if all tasks were done, "partial" if some tasks could not be completed (e.g., permission restrictions on sensitive files), or "failed" if no meaningful progress was made.
+- **incomplete_tasks**: An array of strings, each describing a task that could not be completed and why. Only populate when completion_status is "partial" or "failed".
+- **restricted_edits**: An array of edits you attempted but could NOT perform due to file permission/protection restrictions (e.g., files under `.claude/` directory). Each entry must be: {{"file_path": "path/to/file", "old_string": "text to replace", "new_string": "replacement text"}}. Always attempt edits normally first — only use this field for edits that were rejected by the permission system.
 """
 
 FIX_PROMPT = """You are an expert software engineer. Fix the issues found in the previous implementation.
@@ -116,9 +132,17 @@ When you are done, output a JSON summary of what you did:
     "files_changed": ["path/to/file1.py"],
     "tests_added": [],
     "test_mapping": {{}},
-    "summary": "Brief description of fix"
+    "summary": "Brief description of fix",
+    "completion_status": "complete",
+    "incomplete_tasks": [],
+    "restricted_edits": []
 }}
 ```
+
+### Response field notes:
+- **completion_status**: Set to "complete" if all issues were fixed, "partial" if some fixes could not be applied (e.g., permission restrictions on sensitive files), or "failed" if no meaningful progress was made.
+- **incomplete_tasks**: An array of strings, each describing a fix that could not be applied and why.
+- **restricted_edits**: An array of edits you attempted but could NOT perform due to file permission/protection restrictions (e.g., files under `.claude/` directory). Each entry must be: {{"file_path": "path/to/file", "old_string": "text to replace", "new_string": "replacement text"}}. Always attempt edits normally first — only use this field for edits that were rejected by the permission system.
 """
 
 
@@ -216,6 +240,10 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     merged_test_mapping = {}
     previous_results: list[dict] = []
     implemented_group_ids: list[str] = []
+    all_restricted_applied: list[dict] = []
+    all_restricted_failed: list[dict] = []
+    all_completion_statuses: list[str] = []
+    all_incomplete_tasks: list[str] = []
 
     # Check for resume state
     completed_groups = set()
@@ -269,7 +297,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             response = caller.call(
                 prompt=prompt,
                 json_mode="two_phase",
-                json_schema_hint='{"files_changed": [], "tests_added": [], "test_mapping": {}, "summary": "..."}',
+                json_schema_hint='{"files_changed": [], "tests_added": [], "test_mapping": {}, "summary": "...", "completion_status": "complete|partial|failed", "incomplete_tasks": [], "restricted_edits": [{"file_path": "...", "old_string": "...", "new_string": "..."}]}',
             )
             result = parse_json_response(response, required_keys=[])
         except LLMCallError as e:
@@ -285,6 +313,27 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         group_tests = result.get("tests_added", []) if result else []
         group_mapping = result.get("test_mapping", {}) if result else {}
         group_summary = result.get("summary", "") if result else ""
+
+        # Apply restricted edits for this group (Bug A)
+        restricted_edits = result.get("restricted_edits", []) if result else []
+        if restricted_edits:
+            applied, failed_edits = _apply_restricted_edits(restricted_edits, project_root)
+            all_restricted_applied.extend(applied)
+            all_restricted_failed.extend(failed_edits)
+            for edit in applied:
+                fp = edit.get("file_path", "")
+                if fp and fp not in group_files:
+                    group_files.append(fp)
+            if applied:
+                logger.info("Group %s: applied %d restricted edits", group_id, len(applied))
+            if failed_edits:
+                logger.warning("Group %s: failed %d restricted edits", group_id, len(failed_edits))
+
+        # Track per-group completion status (Bug B)
+        group_completion = result.get("completion_status", "complete") if result else "complete"
+        group_incomplete = result.get("incomplete_tasks", []) if result else []
+        all_completion_statuses.append(group_completion)
+        all_incomplete_tasks.extend(group_incomplete)
 
         all_files_changed.extend(group_files)
         all_tests_added.extend(group_tests)
@@ -308,6 +357,36 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     step.outputs["tests_added"] = all_tests_added
     step.outputs["test_mapping"] = merged_test_mapping
     step.outputs["implemented_groups"] = implemented_group_ids
+
+    # Restricted edits aggregation
+    if all_restricted_applied:
+        step.outputs["restricted_edits_applied"] = all_restricted_applied
+    if all_restricted_failed:
+        step.outputs["restricted_edits_failed"] = all_restricted_failed
+
+    # Compute overall completion status
+    if "failed" in all_completion_statuses:
+        overall_status = "failed"
+    elif "partial" in all_completion_statuses:
+        overall_status = "partial"
+    else:
+        overall_status = "complete"
+
+    step.outputs["completion_status"] = overall_status
+    step.outputs["incomplete_tasks"] = all_incomplete_tasks
+    step.outputs["summary"] = "; ".join(
+        r.get("summary", "") for r in previous_results if r.get("summary")
+    )
+
+    if overall_status == "failed":
+        step.error_message = "LLM reported implementation failed"
+        return StepStatus.FAILED
+    elif overall_status == "partial":
+        logger.warning(
+            "Implementation partially completed. Incomplete tasks: %s",
+            all_incomplete_tasks,
+        )
+        return StepStatus.PARTIAL
 
     return StepStatus.COMPLETED
 
@@ -341,16 +420,53 @@ def _run_single_llm_call(
         response = caller.call(
             prompt=prompt,
             json_mode="two_phase",
-            json_schema_hint='{"files_changed": [], "tests_added": [], "test_mapping": {}, "summary": "..."}',
+            json_schema_hint='{"files_changed": [], "tests_added": [], "test_mapping": {}, "summary": "...", "completion_status": "complete|partial|failed", "incomplete_tasks": [], "restricted_edits": [{"file_path": "...", "old_string": "...", "new_string": "..."}]}',
         )
 
         result = parse_json_response(response, required_keys=[])
 
         if result:
-            step.outputs["files_changed"] = result.get("files_changed", [])
+            files_changed = result.get("files_changed", [])
+
+            # Apply restricted edits (Bug A)
+            restricted_edits = result.get("restricted_edits", [])
+            if restricted_edits:
+                applied, failed_edits = _apply_restricted_edits(restricted_edits, project_root)
+                step.outputs["restricted_edits_applied"] = applied
+                step.outputs["restricted_edits_failed"] = failed_edits
+                # Add successfully edited files to files_changed
+                for edit in applied:
+                    fp = edit.get("file_path", "")
+                    if fp and fp not in files_changed:
+                        files_changed.append(fp)
+                if applied:
+                    logger.info("Applied %d restricted edits", len(applied))
+                if failed_edits:
+                    logger.warning("Failed %d restricted edits", len(failed_edits))
+
+            step.outputs["files_changed"] = files_changed
             step.outputs["tests_added"] = result.get("tests_added", [])
             step.outputs["test_mapping"] = result.get("test_mapping", {})
             step.outputs["implemented_groups"] = task_groups
+            step.outputs["summary"] = result.get("summary", "")
+
+            # Completion status detection (Bug B)
+            completion_status = result.get("completion_status", "complete")
+            incomplete_tasks = result.get("incomplete_tasks", [])
+            step.outputs["completion_status"] = completion_status
+            step.outputs["incomplete_tasks"] = incomplete_tasks
+
+            if completion_status == "failed":
+                step.error_message = "LLM reported implementation failed"
+                return StepStatus.FAILED
+            elif completion_status == "partial":
+                logger.warning(
+                    "Implementation partially completed. Incomplete tasks: %s",
+                    incomplete_tasks,
+                )
+                return StepStatus.PARTIAL
+
+            return StepStatus.COMPLETED
         else:
             logger.warning("Could not parse implement summary JSON, using defaults")
             step.outputs["files_changed"] = []
@@ -368,6 +484,60 @@ def _run_single_llm_call(
         logger.exception("Implement step failed")
         step.error_message = f"Implementation failed: {str(e)}"
         return StepStatus.FAILED
+
+
+def _apply_restricted_edits(
+    restricted_edits: list[dict], project_root: Path,
+) -> tuple[list[dict], list[dict]]:
+    """Apply edits that the LLM subprocess could not perform due to permission restrictions.
+
+    Args:
+        restricted_edits: List of {file_path, old_string, new_string} dicts.
+        project_root: Root directory of the project.
+
+    Returns:
+        Tuple of (successful_edits, failed_edits). Each failed edit includes an 'error' key.
+    """
+    successful = []
+    failed = []
+
+    for edit in restricted_edits:
+        file_path_str = edit.get("file_path", "")
+        old_string = edit.get("old_string", "")
+        new_string = edit.get("new_string", "")
+
+        if not file_path_str or not old_string:
+            failed.append({**edit, "error": "Missing file_path or old_string"})
+            continue
+
+        target = project_root / file_path_str
+        try:
+            if not target.is_file():
+                failed.append({**edit, "error": f"File not found: {file_path_str}"})
+                continue
+
+            content = target.read_text(encoding="utf-8")
+
+            if old_string not in content:
+                failed.append({**edit, "error": f"old_string not found in {file_path_str}"})
+                continue
+
+            new_content = content.replace(old_string, new_string, 1)
+            target.write_text(new_content, encoding="utf-8")
+
+            # Verify the edit
+            verify_content = target.read_text(encoding="utf-8")
+            if new_string not in verify_content:
+                failed.append({**edit, "error": f"Verification failed: new_string not found after write in {file_path_str}"})
+                continue
+
+            logger.info("Applied restricted edit to %s", file_path_str)
+            successful.append(edit)
+
+        except Exception as e:
+            failed.append({**edit, "error": f"Exception: {e}"})
+
+    return successful, failed
 
 
 def _format_spec_brief(spec_content: dict[str, str]) -> str:

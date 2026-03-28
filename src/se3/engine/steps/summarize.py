@@ -36,12 +36,12 @@ SUMMARIZE_PROMPT = """You are an expert software engineering assistant. Generate
 
 ## Commit
 {commit_info}
-
+{completion_section}
 ## Instructions
 Generate a comprehensive summary in Markdown format. Include:
 
 1. **What was accomplished** - Brief description of what was done
-2. **Key changes** - List of major changes made  
+2. **Key changes** - List of major changes made
 3. **Files modified** - List of files that were changed
 4. **Testing status** - Whether tests pass and any notes
 5. **Remaining work** - Any follow-up tasks or TODOs
@@ -106,11 +106,24 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     verification_result = step.inputs.get("verification_result", {})
     commit_hash = step.inputs.get("commit_hash", "")
 
+    # Get completion status from implement step (defaults for backward compatibility)
+    completion_status = step.inputs.get("completion_status", "complete")
+    incomplete_tasks = step.inputs.get("incomplete_tasks", [])
+    implement_summary = step.inputs.get("implement_summary", "")
+    restricted_edits_applied = step.inputs.get("restricted_edits_applied", [])
+    restricted_edits_failed = step.inputs.get("restricted_edits_failed", [])
+
     # Format inputs
     changes_text = _format_changes(changes_made)
     test_text = _format_test_results(test_results)
     verification_text = _format_verification(verification_result)
     commit_info = f"Commit: {commit_hash[:8] if commit_hash else 'N/A'}"
+
+    # Build completion section for the prompt
+    completion_section = _build_completion_section(
+        completion_status, incomplete_tasks, implement_summary,
+        restricted_edits_applied, restricted_edits_failed,
+    )
 
     # Build prompt
     prompt = SUMMARIZE_PROMPT.format(
@@ -120,6 +133,7 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         test_results=test_text,
         verification_result=verification_text,
         commit_info=commit_info,
+        completion_section=completion_section,
     )
 
     # Append language instruction if configured
@@ -150,7 +164,7 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         summary_text = _extract_text_from_stream_json(response)
 
         if not summary_text:
-            summary_text = _create_basic_summary_text(flow, changes_made, test_results, task_description)
+            summary_text = _create_basic_summary_text(flow, changes_made, test_results, task_description, incomplete_tasks, completion_status)
 
         # Store output
         step.outputs["summary"] = summary_text
@@ -175,7 +189,7 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     except Exception as e:
         logger.exception("Summarize step failed")
         # Don't fail the flow - create a basic summary
-        summary_text = _create_basic_summary_text(flow, changes_made, test_results, task_description)
+        summary_text = _create_basic_summary_text(flow, changes_made, test_results, task_description, incomplete_tasks, completion_status)
         step.outputs["summary"] = summary_text
         return StepStatus.COMPLETED
 
@@ -233,11 +247,70 @@ def _format_verification(verification_result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _build_completion_section(
+    completion_status: str,
+    incomplete_tasks: list,
+    implement_summary: str,
+    restricted_edits_applied: list,
+    restricted_edits_failed: list,
+) -> str:
+    """Build the completion status section for the summarize prompt.
+
+    Returns an empty string when status is 'complete' and there is nothing
+    extra to report, keeping the prompt unchanged for the common case.
+    """
+    if completion_status == "complete" and not restricted_edits_applied and not restricted_edits_failed:
+        return ""
+
+    lines: list[str] = ["\n## Completion Status"]
+    lines.append(f"Status: **{completion_status}**")
+
+    if implement_summary:
+        lines.append(f"\nImplementation summary: {implement_summary}")
+
+    if incomplete_tasks:
+        lines.append("\n### Incomplete Tasks")
+        lines.append("The following tasks were NOT completed — report them clearly:")
+        for task in incomplete_tasks:
+            if isinstance(task, str):
+                lines.append(f"- {task}")
+            elif isinstance(task, dict):
+                desc = task.get("description", task.get("task", str(task)))
+                reason = task.get("reason", "")
+                entry = f"- {desc}"
+                if reason:
+                    entry += f" — reason: {reason}"
+                lines.append(entry)
+
+    if restricted_edits_applied:
+        lines.append("\n### Restricted Edits Applied")
+        lines.append("These edits were applied by the engine (not the LLM subprocess):")
+        for edit in restricted_edits_applied:
+            fp = edit.get("file_path", "?") if isinstance(edit, dict) else str(edit)
+            lines.append(f"- {fp}")
+
+    if restricted_edits_failed:
+        lines.append("\n### Restricted Edits Failed")
+        lines.append("These restricted edits could NOT be applied:")
+        for edit in restricted_edits_failed:
+            if isinstance(edit, dict):
+                fp = edit.get("file_path", "?")
+                err = edit.get("error", "unknown error")
+                lines.append(f"- {fp}: {err}")
+            else:
+                lines.append(f"- {edit}")
+
+    lines.append("")  # trailing newline before next section
+    return "\n".join(lines)
+
+
 def _create_basic_summary_text(
     flow: FlowInstance,
     changes_made: dict[str, Any],
     test_results: dict[str, Any],
     task_description: str = "",
+    incomplete_tasks: list | None = None,
+    completion_status: str = "complete",
 ) -> str:
     """Create a basic summary if LLM generation fails.
 
@@ -261,9 +334,10 @@ def _create_basic_summary_text(
         else:
             file_list.append(str(f))
 
+    status_label = "Partially completed" if completion_status == "partial" else "Completed"
     lines = [
         f"## Work Summary\n",
-        f"Completed {flow.task_type or 'task'}: {task_description[:100]}...\n",
+        f"{status_label} {flow.task_type or 'task'}: {task_description[:100]}...\n",
         f"### Key Changes",
         f"- Modified {len(file_list)} files\n",
         f"### Files Modified",
@@ -272,7 +346,20 @@ def _create_basic_summary_text(
         lines.append(f"- {f}")
     if len(file_list) > 10:
         lines.append(f"- ... and {len(file_list) - 10} more")
-    
+
+    if incomplete_tasks:
+        lines.extend(["", "### Incomplete Tasks"])
+        for task in incomplete_tasks:
+            if isinstance(task, str):
+                lines.append(f"- {task}")
+            elif isinstance(task, dict):
+                desc = task.get("description", task.get("task", str(task)))
+                reason = task.get("reason", "")
+                entry = f"- {desc}"
+                if reason:
+                    entry += f" ({reason})"
+                lines.append(entry)
+
     lines.extend([
         "",
         f"### Testing Status",

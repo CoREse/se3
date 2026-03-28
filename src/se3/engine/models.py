@@ -39,6 +39,7 @@ class StepStatus(Enum):
     PENDING = "pending"  # Not started yet
     RUNNING = "running"  # Currently executing
     COMPLETED = "completed"  # Successfully finished
+    PARTIAL = "partial"  # Partial completion due to unrecoverable constraints (e.g., permission restrictions); distinct from FAILED which triggers retries
     FAILED = "failed"  # Failed after retries
     RETRYING = "retrying"  # Currently retrying
     PAUSED = "paused"  # Paused waiting for user input
