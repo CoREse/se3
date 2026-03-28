@@ -94,7 +94,7 @@ The system MAY track the source of tasks for analytics.
 **Source markers (optional):**
 - `direct` - Direct `se3 run "task"` command
 - `discovery` - Discovery mode refined description
-- `loop` - Loop mode auto-discovered task
+- `loop` - Loop mode task
 
 #### Scenario: Source tracking
 - **WHEN** a flow completes

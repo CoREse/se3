@@ -186,11 +186,7 @@ The system SHALL support continuous task execution via `se3 run --loop`.
 
 **Loop Mode Behavior:**
 1. Execute current task flow to completion
-2. Look for next task from:
-   - `se3/specs/_backlog/*.md`
-   - TODO comments in code
-3. If task found: create new flow and execute
-4. If no tasks: exit loop
+2. Continue with next iteration or exit when done
 
 **Loop Options:**
 - `--max-iterations N`: Limit iterations
@@ -200,11 +196,7 @@ The system SHALL support continuous task execution via `se3 run --loop`.
 
 #### Scenario: Loop execution
 - **WHEN** `se3 run --loop` is executed
-- **THEN** tasks are discovered and executed continuously
-
-#### Scenario: Loop with task filter
-- **WHEN** `se3 run --loop --type=bugfix` is executed
-- **THEN** only bugfix tasks are executed
+- **THEN** tasks are executed continuously until iterations are exhausted or no more work remains
 
 ### Requirement: Loop Mode Branch Isolation
 
@@ -213,8 +205,7 @@ Loop mode SHALL use git worktree-based branch isolation by default.
 **Worktree Lifecycle:**
 1. Before loop: create `se3-loop/{timestamp}` branch from HEAD, create worktree at `se3/worktrees/{branch_safe_name}`
 2. During loop: all task flows execute in the worktree (worktree path passed as `project_root` to `run_flow()`)
-3. Task discovery (`find_next_task()`) uses the original project root
-4. After loop: prompt user — merge now / merge later / discard
+3. After loop: prompt user — merge now / merge later / discard
 
 **FlowInstance Fields:**
 - `loop_branch`: The `se3-loop/{timestamp}` branch name

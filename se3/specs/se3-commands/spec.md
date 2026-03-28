@@ -49,8 +49,7 @@ se3 run --discover "I want to build..."
 
 #### Scenario: Loop mode execution
 - **WHEN** user executes `se3 run --loop`
-- **THEN** the flow engine continuously finds and executes tasks
-- **AND** discovers tasks from backlog or TODOs
+- **THEN** the flow engine continuously executes tasks
 
 #### Scenario: Loop mode with branch isolation
 - **WHEN** user executes `se3 run --loop` (without `--no-worktree`)

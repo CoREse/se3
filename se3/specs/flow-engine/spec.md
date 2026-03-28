@@ -18,7 +18,7 @@ se3 run "实现用户登录功能"
 # 恢复中断的任务
 se3 run --resume
 
-# 循环模式（自动寻找并执行任务）
+# 循环模式（持续执行任务）
 se3 run --loop
 
 # 指定任务类型
@@ -47,8 +47,7 @@ se3 run --discover "我想做一个用户管理功能"
 
 #### Scenario: 循环模式
 - **WHEN** 用户执行 `se3 run --loop`
-- **THEN** 流程引擎在完成一个任务后自动寻找下一个任务
-- **AND** 支持从 backlog、roadmap、TODO 中发现任务
+- **THEN** 流程引擎在完成一个任务后继续执行下一个任务
 
 #### Scenario: 循环模式分支隔离
 - **WHEN** 用户执行 `se3 run --loop`（不带 `--no-worktree`）
@@ -82,7 +81,7 @@ se3 run --discover "我想做一个用户管理功能"
 #### Scenario: 循环模式任务重选避免
 - **WHEN** 循环迭代中某任务失败
 - **THEN** 该任务加入 `failed_tasks` 集合
-- **AND** 后续迭代的 `find_next_task()` 自动跳过已完成和已失败的任务
+- **AND** 后续迭代自动跳过已完成和已失败的任务
 
 ### Requirement: Discovery Workflow
 
