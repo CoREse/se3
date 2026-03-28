@@ -20,7 +20,7 @@ from se3.engine.version_script_interface import (
     find_version_script,
     validate_script,
     generate_version_script,
-    _extract_script_content,
+    _validate_generated_script,
 )
 from se3.engine.version_bumper import Version, VersionBumper, VersionConfig, BumpType
 
@@ -286,26 +286,39 @@ class TestValidateScript:
 
 
 # ---------------------------------------------------------------------------
-# _extract_script_content tests
+# _validate_generated_script tests
 # ---------------------------------------------------------------------------
 
-class TestExtractScriptContent:
-    """Tests for _extract_script_content."""
+class TestValidateGeneratedScript:
+    """Tests for _validate_generated_script (post-write validation)."""
 
-    def test_plain_script(self):
-        content = "#!/usr/bin/env python3\ndef read_version(): pass"
-        result = _extract_script_content(content)
-        assert "def read_version" in result
+    def test_valid_script(self, tmp_path):
+        script = tmp_path / "version.py"
+        script.write_text("#!/usr/bin/env python3\ndef read_version(): pass\n")
+        _validate_generated_script(script)  # Should not raise
 
-    def test_with_markdown_fences(self):
-        content = "```python\n#!/usr/bin/env python3\ndef read_version(): pass\n```"
-        result = _extract_script_content(content)
-        assert "def read_version" in result
-        assert "```" not in result
+    def test_file_not_found(self, tmp_path):
+        script = tmp_path / "nonexistent.py"
+        with pytest.raises(RuntimeError, match="does not exist"):
+            _validate_generated_script(script)
 
-    def test_missing_read_version(self):
+    def test_empty_file(self, tmp_path):
+        script = tmp_path / "version.py"
+        script.write_text("")
+        with pytest.raises(RuntimeError, match="empty"):
+            _validate_generated_script(script)
+
+    def test_invalid_python_syntax(self, tmp_path):
+        script = tmp_path / "version.py"
+        script.write_text("def read_version(\n  this is not valid python")
+        with pytest.raises(RuntimeError, match="invalid Python syntax"):
+            _validate_generated_script(script)
+
+    def test_missing_read_version_function(self, tmp_path):
+        script = tmp_path / "version.py"
+        script.write_text("#!/usr/bin/env python3\ndef write_version(v): pass\n")
         with pytest.raises(RuntimeError, match="read_version"):
-            _extract_script_content("#!/usr/bin/env python3\nprint('hello')")
+            _validate_generated_script(script)
 
 
 # ---------------------------------------------------------------------------

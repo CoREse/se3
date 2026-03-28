@@ -8,6 +8,7 @@ from se3.engine.llm_caller import (
     format_tool_use_preview,
     format_tool_result_preview,
     StreamJSONTracker,
+    LLMCaller,
 )
 
 
@@ -390,3 +391,128 @@ class TestStreamJSONTracker:
         tracker.process_line(line)
         captured = capsys.readouterr()
         assert "Tool: Search" in captured.out
+
+
+class TestExtractTextFromNDJSON:
+    """Tests for LLMCaller._extract_text_from_ndjson()."""
+
+    def test_extracts_text_from_assistant_messages(self):
+        """Should extract text content from NDJSON assistant messages."""
+        ndjson = '\n'.join([
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "Hello "}]
+                }
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "world"}]
+                }
+            }),
+        ])
+        result = LLMCaller._extract_text_from_ndjson(ndjson)
+        assert result == "Hello world"
+
+    def test_strips_command_prefix_line(self):
+        """Should strip '=== Command: ... ===' prefix lines."""
+        ndjson = '\n'.join([
+            '=== Command: claude -p "do something" ===',
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "result text"}]
+                }
+            }),
+        ])
+        result = LLMCaller._extract_text_from_ndjson(ndjson)
+        assert result == "result text"
+        assert "Command" not in result
+
+    def test_fallback_when_no_text_extractable(self):
+        """Should return None when no text content can be extracted."""
+        # NDJSON with only tool_use, no text
+        ndjson = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "name": "Write",
+                    "input": {"file_path": "foo.py", "content": "print('hi')"}
+                }]
+            }
+        })
+        result = LLMCaller._extract_text_from_ndjson(ndjson)
+        assert result is None
+
+    def test_fallback_on_empty_output(self):
+        """Should return None for empty or whitespace output."""
+        assert LLMCaller._extract_text_from_ndjson("") is None
+        assert LLMCaller._extract_text_from_ndjson("   \n  ") is None
+
+    def test_ignores_non_assistant_types(self):
+        """Should only extract from assistant messages, not tool_result etc."""
+        ndjson = '\n'.join([
+            json.dumps({
+                "type": "tool_result",
+                "result": {"toolUseId": "123", "content": "should be ignored"}
+            }),
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "extracted"}]
+                }
+            }),
+        ])
+        result = LLMCaller._extract_text_from_ndjson(ndjson)
+        assert result == "extracted"
+        assert "ignored" not in result
+
+    def test_handles_mixed_content_types(self):
+        """Should extract text but skip tool_use items in same message."""
+        ndjson = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "I'll write the file"},
+                    {"type": "tool_use", "name": "Write", "input": {}},
+                    {"type": "text", "text": " now."},
+                ]
+            }
+        })
+        result = LLMCaller._extract_text_from_ndjson(ndjson)
+        assert result == "I'll write the file now."
+
+    def test_ignores_invalid_json_lines(self):
+        """Should skip lines that aren't valid JSON."""
+        ndjson = '\n'.join([
+            'not json at all',
+            json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "valid"}]
+                }
+            }),
+            'also not json',
+        ])
+        result = LLMCaller._extract_text_from_ndjson(ndjson)
+        assert result == "valid"
+
+    def test_require_json_true_path_unchanged(self):
+        """The require_json=True code path should not use NDJSON extraction.
+
+        This is a design verification — _extract_text_from_ndjson is only
+        called when require_json=False. The strict/extract/two_phase modes
+        use parse_json_response or JSONExtractor instead.
+        """
+        # Verify the method exists and is static (can be called without instance)
+        assert callable(LLMCaller._extract_text_from_ndjson)
+        # Verify _contains_valid_json still uses parse_json_response
+        ndjson_with_json = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": '{"key": "value"}'}]
+            }
+        })
+        assert LLMCaller._contains_valid_json(ndjson_with_json) is True

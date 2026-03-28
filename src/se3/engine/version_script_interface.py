@@ -213,8 +213,8 @@ def generate_version_script(
 ) -> Path:
     """Generate a version script using LLM based on project structure.
 
-    Scans the project to identify version file types, then uses LLM to
-    generate a project-specific version script implementation.
+    Instructs the LLM to write the script directly to disk via its Write tool,
+    then validates the result.
 
     Args:
         project_root: Project root directory
@@ -232,6 +232,9 @@ def generate_version_script(
     if script_path is None:
         script_path = project_root / "se3" / "scripts" / "version.py"
 
+    # Ensure parent directory exists so the LLM's Write tool can succeed
+    script_path.parent.mkdir(parents=True, exist_ok=True)
+
     # Scan project structure
     detector = VersionDetector()
     project_info = _scan_project_for_generation(project_root, detector)
@@ -239,30 +242,26 @@ def generate_version_script(
     # Load template
     template_content = _load_template()
 
-    # Build LLM prompt
-    prompt = _build_generation_prompt(project_info, template_content)
+    # Build LLM prompt (includes target file path for direct write)
+    prompt = _build_generation_prompt(project_info, template_content, str(script_path))
 
-    # Call LLM to generate the script
+    # Call LLM to generate and write the script directly
     logger.info("Generating version script via LLM...")
     caller = LLMCaller(project_root, step_id="version_script_gen")
-    response = caller.call(prompt=prompt, require_json=False)
+    caller.call(prompt=prompt, require_json=False)
 
-    # Extract Python code from response
-    script_content = _extract_script_content(response)
-
-    # Write the script
-    script_path.parent.mkdir(parents=True, exist_ok=True)
-    script_path.write_text(script_content, encoding="utf-8")
+    # Post-write validation: verify the LLM actually wrote the file correctly
+    _validate_generated_script(script_path)
 
     # Make executable
     script_path.chmod(script_path.stat().st_mode | stat.S_IEXEC)
 
     logger.info(f"Generated version script: {script_path}")
 
-    # Validate
+    # Validate by running the script
     is_valid, error = validate_script(script_path, project_root)
     if not is_valid:
-        # Include script content in error for debugging
+        script_content = script_path.read_text(encoding="utf-8")
         raise RuntimeError(
             f"Generated version script validation failed: {error}\n"
             f"Script path: {script_path}\n"
@@ -270,6 +269,48 @@ def generate_version_script(
         )
 
     return script_path
+
+
+def _validate_generated_script(script_path: Path) -> None:
+    """Validate that the LLM-generated script file exists and is valid Python.
+
+    Args:
+        script_path: Path where the script should have been written
+
+    Raises:
+        RuntimeError: If file doesn't exist, has invalid syntax, or missing required functions
+    """
+    # Check file exists
+    if not script_path.exists():
+        raise RuntimeError(
+            f"LLM did not write the version script to {script_path}. "
+            f"The file does not exist after LLM call."
+        )
+
+    # Read and check content
+    content = script_path.read_text(encoding="utf-8")
+    if not content.strip():
+        raise RuntimeError(
+            f"LLM wrote an empty file to {script_path}."
+        )
+
+    # Verify valid Python syntax
+    try:
+        compile(content, str(script_path), "exec")
+    except SyntaxError as e:
+        raise RuntimeError(
+            f"Generated version script has invalid Python syntax: {e}\n"
+            f"Script path: {script_path}\n"
+            f"Script content:\n{content[:500]}..."
+        )
+
+    # Verify required functions exist
+    if "def read_version" not in content:
+        raise RuntimeError(
+            f"Generated version script is missing required function 'read_version()'. "
+            f"Script path: {script_path}\n"
+            f"Script content:\n{content[:500]}..."
+        )
 
 
 def _scan_project_for_generation(project_root: Path, detector) -> dict:
@@ -339,8 +380,14 @@ def _load_template() -> str:
     return "(template not available)"
 
 
-def _build_generation_prompt(project_info: dict, template: str) -> str:
-    """Build the LLM prompt for script generation."""
+def _build_generation_prompt(project_info: dict, template: str, target_path: str) -> str:
+    """Build the LLM prompt for script generation.
+
+    Args:
+        project_info: Dict with project type, version files, current version
+        template: Template script content
+        target_path: Absolute path where the script should be written
+    """
     version_files_desc = ""
     if project_info["version_files"]:
         for vf in project_info["version_files"]:
@@ -363,6 +410,11 @@ Generate a complete Python script that implements the version management interfa
 The script must implement `read_version()` and `write_version(version)` functions
 that read from and write to the project's SINGLE authoritative version source.
 
+**IMPORTANT: You MUST use your Write tool to write the complete script to this exact file path:**
+{target_path}
+
+Do NOT output the script as text. Use the Write tool to write it directly to the file.
+
 ## Template Structure
 Follow this exact structure (argparse CLI, get/bump/set commands):
 
@@ -378,38 +430,5 @@ Follow this exact structure (argparse CLI, get/bump/set commands):
 5. Keep the argparse CLI and `bump_version()` logic from the template unchanged
 6. Handle the `v` prefix if present (strip on read, preserve on write if original had it)
 7. Do NOT add any external dependencies beyond Python stdlib
-
-## Output
-Output ONLY the complete Python script. No explanations, no markdown fences.
-Start with #!/usr/bin/env python3 and include the complete implementation.
+8. Start with #!/usr/bin/env python3 and include the complete implementation
 """
-
-
-def _extract_script_content(response: str) -> str:
-    """Extract Python script content from LLM response.
-
-    Handles cases where the response might include markdown code fences.
-    """
-    content = response.strip()
-
-    # Remove markdown code fences if present
-    if content.startswith("```"):
-        # Find the end of the first line (```python or ```)
-        first_newline = content.index("\n")
-        content = content[first_newline + 1:]
-
-        # Remove trailing fence
-        if content.rstrip().endswith("```"):
-            content = content.rstrip()
-            content = content[: content.rfind("```")]
-
-    content = content.strip()
-
-    # Basic sanity check
-    if "def read_version" not in content:
-        raise RuntimeError(
-            "Generated script does not contain read_version() function. "
-            "LLM output may be malformed."
-        )
-
-    return content

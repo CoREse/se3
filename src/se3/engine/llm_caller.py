@@ -784,6 +784,13 @@ class LLMCaller:
                     raise KeyboardInterrupt
 
                 if result.success:
+                    # When require_json=False, extract text content from NDJSON
+                    # so callers get usable text instead of raw stream-json output
+                    if not require_json and result.output:
+                        extracted = self._extract_text_from_ndjson(result.output)
+                        if extracted:
+                            result.output = extracted
+
                     # Check if JSON is required but not received
                     if require_json and json_retry_count < max_json_retries:
                         if not self._contains_valid_json(result.output):
@@ -836,6 +843,54 @@ class LLMCaller:
                 time.sleep(self.retry_delay)
 
         raise LLMCallError(f"LLM call failed after {self.max_retries} attempts: {last_error}")
+
+    @staticmethod
+    def _extract_text_from_ndjson(output: str) -> Optional[str]:
+        """Extract text content from NDJSON stream output.
+
+        Parses the raw NDJSON output from Claude CLI's stream-json format
+        and extracts text from assistant messages. Falls back to None if
+        no text content can be extracted (caller should use raw output).
+
+        Args:
+            output: Raw NDJSON output string from Claude CLI.
+
+        Returns:
+            Extracted text content, or None if no text could be extracted.
+        """
+        lines = output.strip().split('\n')
+        text_parts = []
+
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+
+            # Strip '=== Command: ... ===' prefix line
+            if line.startswith('=== Command:') and line.endswith('==='):
+                continue
+
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            if not isinstance(data, dict):
+                continue
+
+            if data.get('type') == 'assistant':
+                message = data.get('message', {})
+                content = message.get('content', [])
+                for item in content:
+                    if isinstance(item, dict) and item.get('type') == 'text':
+                        text = item.get('text', '')
+                        if text:
+                            text_parts.append(text)
+
+        if not text_parts:
+            return None
+
+        return ''.join(text_parts)
 
     @staticmethod
     def _contains_valid_json(output: str) -> bool:
