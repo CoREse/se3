@@ -123,10 +123,9 @@ class TestResumeDetection:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         # Call run_flow with resume (flow_id provided)
-        with patch("se3.commands.run.display_step_result"):
+        with patch("se3.commands.run.render_step_output"):
             with patch("se3.commands.run.render_full"):
-                with patch("se3.commands.run._display_step_output"):
-                    run_flow(
+                run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-001",
                     )
@@ -153,10 +152,9 @@ class TestResumeDetection:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         # Call run_flow with resume
-        with patch("se3.commands.run.display_step_result"):
+        with patch("se3.commands.run.render_step_output"):
             with patch("se3.commands.run.render_full"):
-                with patch("se3.commands.run._display_step_output"):
-                    run_flow(
+                run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-001",
                     )
@@ -191,10 +189,9 @@ class TestResumeDetection:
         mock_sm.persistence.save_flow = MagicMock()
 
         # Call run_flow without flow_id (new flow)
-        with patch("se3.commands.run.display_step_result"):
+        with patch("se3.commands.run.render_step_output"):
             with patch("se3.commands.run.render_full"):
-                with patch("se3.commands.run._display_step_output"):
-                    run_flow(
+                run_flow(
                         project_root=self.project_root,
                         task_description="New task",
                     )
@@ -228,10 +225,9 @@ class TestResumeDetection:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         # Call run_flow with resume
-        with patch("se3.commands.run.display_step_result"):
+        with patch("se3.commands.run.render_step_output"):
             with patch("se3.commands.run.render_full"):
-                with patch("se3.commands.run._display_step_output"):
-                    run_flow(
+                run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-001",
                     )
@@ -267,10 +263,9 @@ class TestResumeDetection:
         original_status = self.implement_step.status
 
         # Call run_flow with resume
-        with patch("se3.commands.run.display_step_result"):
+        with patch("se3.commands.run.render_step_output"):
             with patch("se3.commands.run.render_full"):
-                with patch("se3.commands.run._display_step_output"):
-                    run_flow(
+                run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-001",
                     )
@@ -301,10 +296,9 @@ class TestResumeDetection:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         with caplog.at_level(logging.INFO):
-            with patch("se3.commands.run.display_step_result"):
+            with patch("se3.commands.run.render_step_output"):
                 with patch("se3.commands.run.render_full"):
-                    with patch("se3.commands.run._display_step_output"):
-                        run_flow(
+                    run_flow(
                             project_root=self.project_root,
                             flow_id="test-flow-001",
                         )
@@ -388,10 +382,9 @@ class TestResumeFailedFlow:
         mock_sm.run_step.return_value = StepStatus.COMPLETED
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
-        with patch("se3.commands.run.display_step_result"):
+        with patch("se3.commands.run.render_step_output"):
             with patch("se3.commands.run.render_full"):
-                with patch("se3.commands.run._display_step_output"):
-                    run_flow(
+                run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-002",
                     )
@@ -414,10 +407,9 @@ class TestResumeFailedFlow:
         mock_sm.run_step.return_value = StepStatus.COMPLETED
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
-        with patch("se3.commands.run.display_step_result"):
+        with patch("se3.commands.run.render_step_output"):
             with patch("se3.commands.run.render_full"):
-                with patch("se3.commands.run._display_step_output"):
-                    run_flow(
+                run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-002",
                     )
@@ -448,10 +440,9 @@ class TestResumeFailedFlow:
         mock_sm.run_step.return_value = StepStatus.COMPLETED
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
-        with patch("se3.commands.run.display_step_result"):
+        with patch("se3.commands.run.render_step_output"):
             with patch("se3.commands.run.render_full"):
-                with patch("se3.commands.run._display_step_output"):
-                    run_flow(
+                run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-002",
                     )
@@ -475,10 +466,9 @@ class TestResumeFailedFlow:
         mock_sm.run_step.return_value = StepStatus.COMPLETED
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
-        with patch("se3.commands.run.display_step_result"):
+        with patch("se3.commands.run.render_step_output"):
             with patch("se3.commands.run.render_full"):
-                with patch("se3.commands.run._display_step_output"):
-                    run_flow(
+                run_flow(
                         project_root=self.project_root,
                         flow_id="test-flow-002",
                     )
@@ -507,10 +497,9 @@ class TestResumeFailedFlow:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         with caplog.at_level(logging.INFO):
-            with patch("se3.commands.run.display_step_result"):
+            with patch("se3.commands.run.render_step_output"):
                 with patch("se3.commands.run.render_full"):
-                    with patch("se3.commands.run._display_step_output"):
-                        run_flow(
+                    run_flow(
                             project_root=self.project_root,
                             flow_id="test-flow-002",
                         )

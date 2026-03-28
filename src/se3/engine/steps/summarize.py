@@ -172,10 +172,6 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Extract discovered_issues from LLM response for B-class collection
         _extract_discovered_issues(response, step)
 
-        # Print to terminal for user visibility
-        from ..output import render_full
-        render_full(summary_text, title="Work Summary")
-
         # Save to file
         _save_summary(flow, summary_text)
 

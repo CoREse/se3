@@ -192,27 +192,15 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["reasoning"] = result["reasoning"]
         step.outputs["confidence"] = result["confidence"]
         step.outputs["suggested_version"] = result["suggested_version"]
-        
+        step.outputs["current_version"] = current_version
+
         # Log the decision
         logger.info(
             f"Version analysis complete: bump_type={result['bump_type']}, "
             f"confidence={result['confidence']}, "
             f"version={current_version} -> {result['suggested_version']}"
         )
-        
-        # Display to user
-        from ..output import render_full
-        va_lines = [
-            f"[bold]Current Version:[/bold] {current_version}",
-            f"[bold]Suggested Version:[/bold] {result['suggested_version']}",
-            f"[bold]Bump Type:[/bold] {result['bump_type']}",
-            f"[bold]Confidence:[/bold] {result['confidence']}",
-            "",
-            f"[bold]Reasoning:[/bold]",
-            result['reasoning'],
-        ]
-        render_full("\n".join(va_lines), title="Version Analysis")
-        
+
         return StepStatus.COMPLETED
         
     except Exception as e:

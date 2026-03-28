@@ -35,16 +35,13 @@ try:
     from ..engine.steps import STEP_HANDLERS
     from ..engine.llm_caller import set_extra_prompt
     from ..engine.output import (
-        display_analysis,
-        display_design,
         display_error,
-        display_proposal,
-        display_step_result,
         display_success,
         format_output,
         get_console,
         render_full,
     )
+    from ..engine.step_renderers import render_step_output
     from ..cli import _read_multiline_input
 except ImportError:
     # Direct import for development
@@ -57,16 +54,13 @@ except ImportError:
     from engine.steps import STEP_HANDLERS
     from engine.llm_caller import set_extra_prompt
     from engine.output import (
-        display_analysis,
-        display_design,
         display_error,
-        display_proposal,
-        display_step_result,
         display_success,
         format_output,
         get_console,
         render_full,
     )
+    from engine.step_renderers import render_step_output
     from cli import _read_multiline_input
 
 
@@ -182,7 +176,7 @@ def _handle_confirm_pause(
     step_to_review_id = current_step.inputs.get("step_to_review_id")
     step_to_review_type = current_step.inputs.get("step_to_review_type", "unknown")
 
-    # The reviewed step's output was already displayed by _display_step_output
+    # The reviewed step's output was already displayed by render_step_output
     # in the previous iteration, so just prompt directly.
     options = ["Approve and continue", "Request changes", "Exit (pause flow)"]
     try:
@@ -426,87 +420,6 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
     return user_input
 
 
-def _display_step_output(current_step: Any) -> None:
-    """Display step output using full-content rendering.
-
-    Inputs are omitted — they are internal context passed between steps and
-    not useful for the user.  Large output fields (spec content, test results,
-    etc.) are summarised rather than dumped verbatim.
-
-    Args:
-        current_step: The current step being executed
-    """
-    step_header = f"Step: {current_step.step_type.value}"
-
-    lines = []
-
-    # Show status only when it's not the expected "completed"
-    if current_step.status.value != "completed":
-        lines.append(f"[bold]Status: {current_step.status.value}[/bold]")
-        lines.append("")
-
-    # --- Outputs only (inputs are internal plumbing) ---
-    # Deferred keys are rendered by dedicated renderers below, skip here
-    DEFERRED_KEYS = {"proposal", "proposal_data", "design", "design_doc",
-                     "design_document", "analysis", "analysis_result"}
-    LARGE_KEYS = {"spec_content", "spec_summary", "test_results",
-                  "project_summary", "refined_description",
-                  "proposed_description", "discovery_summary"}
-    HIDDEN_KEYS = {"result", "call_file"}
-
-    if current_step.outputs:
-        for key, value in current_step.outputs.items():
-            if key in HIDDEN_KEYS or key in DEFERRED_KEYS:
-                continue
-
-            if key in LARGE_KEYS:
-                if isinstance(value, str):
-                    preview = value[:120].replace("\n", " ")
-                    lines.append(f"  [bold]{key}:[/bold] {preview}... ({len(value)} chars)")
-                elif isinstance(value, dict):
-                    lines.append(f"  [bold]{key}:[/bold] ({len(value)} entries)")
-                else:
-                    formatted_value = format_output(value)
-                    lines.append(f"  [bold]{key}:[/bold] {formatted_value}")
-            else:
-                formatted_value = format_output(value)
-                lines.append(f"  [bold]{key}:[/bold] {formatted_value}")
-
-    if current_step.error_message:
-        if lines:
-            lines.append("")
-        lines.append(f"[bold red]Error:[/bold red] {current_step.error_message}")
-
-    # Only show panel if there's actual content
-    if lines:
-        content = "\n".join(lines)
-        render_full(content, title=step_header)
-
-    # Now display specific structured outputs with dedicated renderers
-    outputs = current_step.outputs or {}
-
-    # Display proposal if present
-    for key in ("proposal", "proposal_data"):
-        if key in outputs and isinstance(outputs[key], dict):
-            display_proposal(outputs[key])
-            break
-
-    # Display design if present
-    for key in ("design", "design_doc", "design_document"):
-        if key in outputs and isinstance(outputs[key], dict):
-            display_design(outputs[key])
-            break
-
-    # Display analysis if present
-    for key in ("analysis", "analysis_result", "result"):
-        if key in outputs and isinstance(outputs[key], dict):
-            # Check if it looks like an analysis result
-            value = outputs[key]
-            if any(k in value for k in ("summary", "findings", "insights", "recommendations")):
-                display_analysis(value)
-                break
-
-
 def _should_show_type(current_step_type: str, flow: FlowInstance) -> bool:
     """Check if task type should be displayed for the current step.
 
@@ -739,7 +652,7 @@ def _run_flow_impl(
 
         # Display step output with full content (skip for CONFIRM and DISCOVERY — handled by prompt)
         if current_step.step_type not in (StepType.CONFIRM, StepType.DISCOVERY, StepType.PLAN_TASKS):
-            _display_step_output(current_step)
+            render_step_output(current_step)
 
         # Handle CONFIRM step PAUSED state - prompt user for approval
         if current_step.step_type == StepType.CONFIRM and result == StepStatus.PAUSED:
