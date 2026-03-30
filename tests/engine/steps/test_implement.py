@@ -310,3 +310,99 @@ class TestImplementStatePersistence:
         assert isinstance(step.outputs["implemented_groups"], list)
         assert isinstance(step.outputs["total_files_changed"], int)
         assert all(isinstance(g, str) for g in step.outputs["implemented_groups"])
+
+
+class TestShouldUseDag:
+    """Test _should_use_dag() backward compatibility predicate."""
+
+    def test_single_group_returns_false(self):
+        """Single group should never use DAG path."""
+        from se3.engine.steps.implement import _should_use_dag
+
+        groups = [{"group_id": "G1", "tasks": ["t1"]}]
+        assert _should_use_dag(groups) is False
+
+    def test_single_group_with_depends_on_returns_false(self):
+        """Single group even with depends_on should not use DAG (len <= 1)."""
+        from se3.engine.steps.implement import _should_use_dag
+
+        groups = [{"group_id": "G1", "depends_on": ["G0"], "tasks": ["t1"]}]
+        assert _should_use_dag(groups) is False
+
+    def test_empty_groups_returns_false(self):
+        """Empty group list should not use DAG."""
+        from se3.engine.steps.implement import _should_use_dag
+
+        assert _should_use_dag([]) is False
+
+    def test_multiple_groups_no_depends_on_returns_false(self):
+        """Multiple groups without any depends_on should use sequential path."""
+        from se3.engine.steps.implement import _should_use_dag
+
+        groups = [
+            {"group_id": "G1", "tasks": ["t1"]},
+            {"group_id": "G2", "tasks": ["t2"]},
+            {"group_id": "G3", "tasks": ["t3"]},
+        ]
+        assert _should_use_dag(groups) is False
+
+    def test_multiple_groups_empty_depends_on_returns_false(self):
+        """Multiple groups with empty depends_on lists should use sequential path."""
+        from se3.engine.steps.implement import _should_use_dag
+
+        groups = [
+            {"group_id": "G1", "depends_on": [], "tasks": ["t1"]},
+            {"group_id": "G2", "depends_on": [], "tasks": ["t2"]},
+        ]
+        assert _should_use_dag(groups) is False
+
+    def test_multiple_groups_with_depends_on_returns_true(self):
+        """Multiple groups with at least one non-empty depends_on enables DAG."""
+        from se3.engine.steps.implement import _should_use_dag
+
+        groups = [
+            {"group_id": "G1", "tasks": ["t1"]},
+            {"group_id": "G2", "depends_on": ["G1"], "tasks": ["t2"]},
+        ]
+        assert _should_use_dag(groups) is True
+
+    def test_diamond_dependency_returns_true(self):
+        """Diamond dependency pattern enables DAG."""
+        from se3.engine.steps.implement import _should_use_dag
+
+        groups = [
+            {"group_id": "G1", "tasks": ["t1"]},
+            {"group_id": "G2", "depends_on": ["G1"], "tasks": ["t2"]},
+            {"group_id": "G3", "depends_on": ["G1"], "tasks": ["t3"]},
+            {"group_id": "G4", "depends_on": ["G2", "G3"], "tasks": ["t4"]},
+        ]
+        assert _should_use_dag(groups) is True
+
+    def test_fix_iteration_bypasses_dag(self):
+        """Fix iteration takes early return before DAG check in implement_handler."""
+        # This tests the control flow in implement_handler, not _should_use_dag itself.
+        # Fix iterations hit the is_fix_iteration branch which returns before
+        # _should_use_dag is ever called. We verify by checking the handler structure.
+        from se3.engine.steps.implement import implement_handler
+        import inspect
+
+        source = inspect.getsource(implement_handler)
+        # Fix iteration path returns before the DAG check
+        fix_idx = source.index("is_fix_iteration")
+        dag_idx = source.index("_should_use_dag")
+        assert fix_idx < dag_idx, (
+            "Fix iteration check must come before DAG check in implement_handler"
+        )
+
+    def test_single_group_path_bypasses_dag(self):
+        """Single group (len <= 1) takes early return before DAG check."""
+        from se3.engine.steps.implement import implement_handler
+        import inspect
+
+        source = inspect.getsource(implement_handler)
+        # len(groups) <= 1 check returns before _should_use_dag
+        single_idx = source.index("len(groups) <= 1")
+        dag_idx = source.index("_should_use_dag")
+        assert single_idx < dag_idx, (
+            "Single-group check must come before DAG check in implement_handler"
+        )

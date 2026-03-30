@@ -1,0 +1,14 @@
+id: '011'
+title: DAG max_workers is hardcoded
+description: In _run_dag_parallel (implement.py line 608), max_workers=4 is hardcoded.
+  The se3-config spec defines claude_commands for agent configuration but does not
+  yet define a parallel execution concurrency setting. A future config option like
+  'dag.max_workers' would be useful.
+status: open
+priority: low
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+created_at: '2026-03-30T09:45:47.550577'
+updated_at: '2026-03-30T09:45:47.550577'

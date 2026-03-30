@@ -9,12 +9,22 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+from ..dag_scheduler import DAGScheduler, GroupResult
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
 from ..utils.json_parser import parse_json_response
+from ..worktree import (
+    _run_git,
+    create_worktree,
+    delete_branch,
+    get_current_branch,
+    merge_loop_branch,
+    remove_worktree,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -232,6 +242,21 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             prompt, step, flow, project_root, task_groups, retry_count,
         )
 
+    # --- DAG parallel path (when dependency info is present) ---
+    if _should_use_dag(groups):
+        return _run_dag_parallel(
+            groups=groups,
+            step=step,
+            flow=flow,
+            project_root=project_root,
+            task_description=task_description,
+            task_type=task_type,
+            design_section=design_section,
+            spec_summary=spec_summary,
+            injection=injection,
+            retry_count=retry_count,
+        )
+
     # --- Group-by-group execution ---
     logger.info("Executing %d task groups sequentially", len(groups))
 
@@ -398,6 +423,332 @@ def _extract_sorted_groups(task_groups) -> list[dict]:
     groups = [g for g in task_groups if isinstance(g, dict)]
     groups.sort(key=lambda g: g.get("group_order", 0))
     return groups
+
+
+def _should_use_dag(groups: list[dict]) -> bool:
+    """Check whether to enable DAG parallel execution path.
+
+    Returns True when there are multiple groups AND at least one group
+    has a non-empty depends_on field, indicating dependency relationships
+    that the DAG scheduler should manage.
+    """
+    if len(groups) <= 1:
+        return False
+    return any(group.get("depends_on") for group in groups)
+
+
+def _make_execute_fn(
+    project_root: Path,
+    original_branch: str,
+    flow: FlowInstance,
+    step: Step,
+    task_description: str,
+    task_type: str,
+    design_section: str,
+    spec_summary: str,
+    injection: str | None,
+    retry_count: int,
+) -> Callable[[dict, dict[str, GroupResult]], GroupResult]:
+    """Build the execute_fn closure for DAG parallel execution.
+
+    The returned callable creates a worktree per group, pre-merges dependency
+    branches, runs the LLM agent, commits changes, and returns a GroupResult.
+    """
+    git_lock = threading.Lock()
+
+    def execute_fn(group: dict, deps_results: dict[str, GroupResult]) -> GroupResult:
+        group_id = group.get("group_id", group.get("name", "unknown"))
+        branch_name = f"impl/{flow.flow_id}/{group_id}"
+        worktree_path: Path | None = None
+
+        try:
+            # Step 1: Create branch from original_branch
+            with git_lock:
+                _run_git(project_root, "branch", branch_name, original_branch)
+                logger.info(
+                    "DAG: created branch %s from %s", branch_name, original_branch,
+                )
+
+            # Step 2: Pre-merge dependency branches (if any)
+            if deps_results:
+                with git_lock:
+                    _run_git(project_root, "checkout", branch_name)
+                    for dep_id, dep_result in deps_results.items():
+                        if dep_result.branch_name:
+                            logger.info(
+                                "DAG: merging dep branch %s into %s",
+                                dep_result.branch_name, branch_name,
+                            )
+                            _run_git(
+                                project_root, "merge",
+                                dep_result.branch_name, "--no-edit",
+                            )
+                    # Switch back to original_branch to not block others
+                    _run_git(project_root, "checkout", original_branch)
+
+            # Step 3: Create worktree (delayed creation)
+            with git_lock:
+                worktree_path = create_worktree(project_root, branch_name)
+            logger.info("DAG: created worktree at %s for group %s", worktree_path, group_id)
+
+            # Step 4: Build previous_results context from deps_results
+            if deps_results:
+                prev_results = [
+                    {
+                        "group_id": did,
+                        "files_changed": dr.files_changed,
+                        "summary": dr.summary,
+                    }
+                    for did, dr in deps_results.items()
+                ]
+                prev_ctx = json.dumps(prev_results, indent=2, ensure_ascii=False)
+            else:
+                prev_ctx = "No previous groups."
+
+            # Step 5: Format prompt
+            prompt = IMPLEMENT_GROUP_PROMPT.format(
+                task_description=task_description,
+                task_type=task_type,
+                design_section=design_section,
+                current_group=json.dumps(group, indent=2, ensure_ascii=False),
+                previous_results=prev_ctx,
+                spec_summary=spec_summary,
+            )
+            if injection:
+                prompt += injection
+
+            # Step 6: Run LLM in the worktree
+            caller = LLMCaller(
+                worktree_path,
+                flow_id=flow.flow_id,
+                step_id=step.step_id,
+                step_type=step.step_type.value,
+                external_attempt=retry_count,
+            )
+            response = caller.call(
+                prompt=prompt,
+                json_mode="two_phase",
+                json_schema_hint='{"files_changed": [], "tests_added": [], "test_mapping": {}, "summary": "...", "completion_status": "complete|partial|failed", "incomplete_tasks": [], "restricted_edits": [{"file_path": "...", "old_string": "...", "new_string": "..."}]}',
+            )
+            result = parse_json_response(response, required_keys=[])
+
+            # Step 7: Commit changes in the worktree
+            _run_git(worktree_path, "add", "-A", check=False)
+            commit_result = _run_git(
+                worktree_path, "commit",
+                "-m", f"impl: group {group_id}",
+                "--allow-empty",
+                check=False,
+            )
+            if commit_result.returncode != 0:
+                logger.debug(
+                    "DAG: commit in worktree for %s returned %d (may be empty)",
+                    group_id, commit_result.returncode,
+                )
+
+            # Step 8: Build GroupResult
+            files_changed = result.get("files_changed", []) if result else []
+            tests_added = result.get("tests_added", []) if result else []
+            test_mapping = result.get("test_mapping", {}) if result else {}
+            summary = result.get("summary", "") if result else ""
+            completion_status = result.get("completion_status", "complete") if result else "complete"
+            incomplete_tasks = result.get("incomplete_tasks", []) if result else []
+            restricted_edits = result.get("restricted_edits", []) if result else []
+
+            return GroupResult(
+                group_id=group_id,
+                status="completed",
+                files_changed=files_changed,
+                tests_added=tests_added,
+                test_mapping=test_mapping,
+                summary=summary,
+                branch_name=branch_name,
+                worktree_path=worktree_path,
+                completion_status=completion_status,
+                incomplete_tasks=incomplete_tasks,
+                restricted_edits=restricted_edits,
+            )
+
+        except (LLMCallError, Exception) as e:
+            logger.exception("DAG: group %s failed", group_id)
+            return GroupResult.failed(group_id, str(e))
+
+    return execute_fn
+
+
+def _run_dag_parallel(
+    groups: list[dict],
+    step: Step,
+    flow: FlowInstance,
+    project_root: Path,
+    task_description: str,
+    task_type: str,
+    design_section: str,
+    spec_summary: str,
+    injection: str | None,
+    retry_count: int,
+) -> StepStatus:
+    """DAG parallel execution path for implement step.
+
+    Creates a DAGScheduler from group dependencies, runs all groups in
+    parallel via worktree-isolated LLM agents, then merges results back
+    in topological order.
+    """
+    from ...config import load_conflict_resolver_config
+
+    original_branch = get_current_branch(project_root)
+    conflict_config = load_conflict_resolver_config(project_root)
+    conflict_strategy = conflict_config.strategy
+
+    logger.info(
+        "DAG parallel: executing %d groups (branch=%s)",
+        len(groups), original_branch,
+    )
+
+    scheduler = DAGScheduler(groups, max_workers=4)
+    execute_fn = _make_execute_fn(
+        project_root=project_root,
+        original_branch=original_branch,
+        flow=flow,
+        step=step,
+        task_description=task_description,
+        task_type=task_type,
+        design_section=design_section,
+        spec_summary=spec_summary,
+        injection=injection,
+        retry_count=retry_count,
+    )
+
+    results: list[GroupResult] = []
+    try:
+        results = scheduler.run(execute_fn)
+    finally:
+        # Always clean up worktrees
+        for r in results:
+            if r.worktree_path:
+                try:
+                    remove_worktree(project_root, r.worktree_path)
+                except Exception:
+                    logger.warning("DAG: failed to remove worktree %s", r.worktree_path)
+
+        # Ensure we're back on original_branch
+        try:
+            current = get_current_branch(project_root)
+            if current != original_branch:
+                _run_git(project_root, "checkout", original_branch)
+        except Exception:
+            logger.warning("DAG: failed to restore original branch %s", original_branch)
+
+    # Build results map for easy lookup
+    results_map: dict[str, GroupResult] = {r.group_id: r for r in results}
+
+    # Merge completed groups in topological order
+    merge_order = scheduler.topological_merge_order()
+    merge_failures: list[str] = []
+    for group_id in merge_order:
+        r = results_map.get(group_id)
+        if not r or r.status != "completed":
+            continue
+        if not r.branch_name:
+            continue
+
+        logger.info("DAG: merging %s back to %s", r.branch_name, original_branch)
+        merge_result = merge_loop_branch(
+            project_root, r.branch_name, original_branch, conflict_strategy,
+        )
+        if merge_result == "pending_human":
+            logger.warning("DAG: merge conflict for %s — pending human resolution", group_id)
+            merge_failures.append(group_id)
+        elif merge_result is False:
+            logger.error("DAG: merge failed for %s", group_id)
+            merge_failures.append(group_id)
+
+    # Delete impl branches
+    for r in results:
+        if r.branch_name:
+            try:
+                delete_branch(project_root, r.branch_name)
+            except Exception:
+                logger.debug("DAG: failed to delete branch %s", r.branch_name)
+
+    # Apply restricted edits on original_branch
+    all_restricted_applied: list[dict] = []
+    all_restricted_failed: list[dict] = []
+    for r in results:
+        if r.status == "completed" and r.restricted_edits:
+            applied, failed_edits = _apply_restricted_edits(r.restricted_edits, project_root)
+            all_restricted_applied.extend(applied)
+            all_restricted_failed.extend(failed_edits)
+
+    # Aggregate outputs
+    all_files_changed: list[str] = []
+    all_tests_added: list[str] = []
+    merged_test_mapping: dict = {}
+    all_completion_statuses: list[str] = []
+    all_incomplete_tasks: list[str] = []
+    implemented_group_ids: list[str] = []
+    summaries: list[str] = []
+
+    for r in results:
+        if r.status == "completed":
+            all_files_changed.extend(r.files_changed)
+            all_tests_added.extend(r.tests_added)
+            merged_test_mapping.update(r.test_mapping)
+            implemented_group_ids.append(r.group_id)
+            all_completion_statuses.append(r.completion_status)
+            all_incomplete_tasks.extend(r.incomplete_tasks)
+            if r.summary:
+                summaries.append(r.summary)
+        elif r.status == "failed":
+            all_completion_statuses.append("failed")
+            if r.error:
+                all_incomplete_tasks.append(f"Group {r.group_id}: {r.error}")
+        elif r.status == "skipped":
+            all_completion_statuses.append("failed")
+            all_incomplete_tasks.append(f"Group {r.group_id}: skipped (upstream dependency failed)")
+
+    # Add files from successful restricted edits
+    for edit in all_restricted_applied:
+        fp = edit.get("file_path", "")
+        if fp and fp not in all_files_changed:
+            all_files_changed.append(fp)
+
+    step.outputs["files_changed"] = all_files_changed
+    step.outputs["tests_added"] = all_tests_added
+    step.outputs["test_mapping"] = merged_test_mapping
+    step.outputs["implemented_groups"] = implemented_group_ids
+    step.outputs["summary"] = "; ".join(summaries)
+
+    if all_restricted_applied:
+        step.outputs["restricted_edits_applied"] = all_restricted_applied
+    if all_restricted_failed:
+        step.outputs["restricted_edits_failed"] = all_restricted_failed
+
+    # Compute overall completion status
+    if "failed" in all_completion_statuses:
+        overall_status = "failed"
+    elif "partial" in all_completion_statuses:
+        overall_status = "partial"
+    else:
+        overall_status = "complete"
+
+    step.outputs["completion_status"] = overall_status
+    step.outputs["incomplete_tasks"] = all_incomplete_tasks
+
+    if merge_failures:
+        step.outputs["merge_failures"] = merge_failures
+
+    if overall_status == "failed":
+        step.error_message = "DAG parallel: one or more groups failed"
+        return StepStatus.FAILED
+    elif overall_status == "partial":
+        logger.warning(
+            "DAG parallel: partially completed. Incomplete: %s",
+            all_incomplete_tasks,
+        )
+        return StepStatus.PARTIAL
+
+    return StepStatus.COMPLETED
 
 
 def _run_single_llm_call(

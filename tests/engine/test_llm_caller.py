@@ -516,3 +516,141 @@ class TestExtractTextFromNDJSON:
             }
         })
         assert LLMCaller._contains_valid_json(ndjson_with_json) is True
+
+
+class TestExtraPromptThreadSafety:
+    """Test thread safety of module-level extra prompt globals."""
+
+    def setup_method(self):
+        """Clear extra prompt state before each test."""
+        from se3.engine.llm_caller import clear_extra_prompt
+        clear_extra_prompt()
+
+    def teardown_method(self):
+        """Clear extra prompt state after each test."""
+        from se3.engine.llm_caller import clear_extra_prompt
+        clear_extra_prompt()
+
+    def test_concurrent_set_and_get(self):
+        """Multiple threads setting/getting extra prompt should not corrupt state."""
+        import threading
+        from se3.engine.llm_caller import set_extra_prompt, get_extra_prompt
+
+        errors = []
+        barrier = threading.Barrier(4)
+
+        def writer(value):
+            try:
+                barrier.wait(timeout=5)
+                for _ in range(100):
+                    set_extra_prompt(value)
+            except Exception as e:
+                errors.append(e)
+
+        def reader():
+            try:
+                barrier.wait(timeout=5)
+                for _ in range(100):
+                    result = get_extra_prompt()
+                    # Result should be None or a string — never a partial/corrupt value
+                    assert result is None or isinstance(result, str)
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=writer, args=("prompt_A",)),
+            threading.Thread(target=writer, args=("prompt_B",)),
+            threading.Thread(target=reader),
+            threading.Thread(target=reader),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"Thread safety errors: {errors}"
+
+    def test_concurrent_set_persistent_and_transient(self):
+        """Concurrent persistent and transient writes should not interfere."""
+        import threading
+        from se3.engine.llm_caller import set_extra_prompt, get_extra_prompt
+
+        errors = []
+        barrier = threading.Barrier(2)
+
+        def set_transient():
+            try:
+                barrier.wait(timeout=5)
+                for _ in range(100):
+                    set_extra_prompt("transient", persistent=False)
+            except Exception as e:
+                errors.append(e)
+
+        def set_persistent():
+            try:
+                barrier.wait(timeout=5)
+                for _ in range(100):
+                    set_extra_prompt("persistent", persistent=True)
+            except Exception as e:
+                errors.append(e)
+
+        t1 = threading.Thread(target=set_transient)
+        t2 = threading.Thread(target=set_persistent)
+        t1.start()
+        t2.start()
+        t1.join(timeout=10)
+        t2.join(timeout=10)
+
+        assert not errors
+        # After both threads complete, both should be set
+        result = get_extra_prompt()
+        assert result is not None
+        assert "persistent" in result
+        assert "transient" in result
+
+    def test_concurrent_clear_and_set(self):
+        """Concurrent clearing and setting should not raise exceptions."""
+        import threading
+        from se3.engine.llm_caller import (
+            set_extra_prompt, clear_extra_prompt, clear_persistent_extra_prompt
+        )
+
+        errors = []
+        barrier = threading.Barrier(3)
+
+        def setter():
+            try:
+                barrier.wait(timeout=5)
+                for _ in range(100):
+                    set_extra_prompt("value", persistent=True)
+                    set_extra_prompt("transient")
+            except Exception as e:
+                errors.append(e)
+
+        def clearer():
+            try:
+                barrier.wait(timeout=5)
+                for _ in range(100):
+                    clear_extra_prompt()
+            except Exception as e:
+                errors.append(e)
+
+        def partial_clearer():
+            try:
+                barrier.wait(timeout=5)
+                for _ in range(100):
+                    clear_persistent_extra_prompt()
+            except Exception as e:
+                errors.append(e)
+
+        threads = [
+            threading.Thread(target=setter),
+            threading.Thread(target=clearer),
+            threading.Thread(target=partial_clearer),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        assert not errors, f"Thread safety errors: {errors}"

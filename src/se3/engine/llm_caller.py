@@ -7,6 +7,7 @@ Manages agent selection and rotation on infrastructure errors.
 import json
 import logging
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -20,6 +21,8 @@ logger = logging.getLogger(__name__)
 _extra_prompt: Optional[str] = None
 # Persistent extra prompt state for loop context injection (survives across LLM calls)
 _persistent_extra_prompt: Optional[str] = None
+# Lock protecting _extra_prompt and _persistent_extra_prompt for thread safety
+_extra_prompt_lock = threading.Lock()
 
 
 def set_extra_prompt(prompt: Optional[str], persistent: bool = False) -> None:
@@ -32,12 +35,13 @@ def set_extra_prompt(prompt: Optional[str], persistent: bool = False) -> None:
                    the prompt is consumed after one LLM call (used for
                    Ctrl+C interrupt injection).
     """
-    if persistent:
-        global _persistent_extra_prompt
-        _persistent_extra_prompt = prompt
-    else:
-        global _extra_prompt
-        _extra_prompt = prompt
+    with _extra_prompt_lock:
+        if persistent:
+            global _persistent_extra_prompt
+            _persistent_extra_prompt = prompt
+        else:
+            global _extra_prompt
+            _extra_prompt = prompt
 
 
 def get_extra_prompt() -> Optional[str]:
@@ -45,25 +49,28 @@ def get_extra_prompt() -> Optional[str]:
 
     Returns the combined transient + persistent prompt without consuming either.
     """
-    parts = []
-    if _persistent_extra_prompt:
-        parts.append(_persistent_extra_prompt)
-    if _extra_prompt:
-        parts.append(_extra_prompt)
-    return "\n\n".join(parts) if parts else None
+    with _extra_prompt_lock:
+        parts = []
+        if _persistent_extra_prompt:
+            parts.append(_persistent_extra_prompt)
+        if _extra_prompt:
+            parts.append(_extra_prompt)
+        return "\n\n".join(parts) if parts else None
 
 
 def clear_extra_prompt() -> None:
     """Clear both transient and persistent extra prompts."""
-    global _extra_prompt, _persistent_extra_prompt
-    _extra_prompt = None
-    _persistent_extra_prompt = None
+    with _extra_prompt_lock:
+        global _extra_prompt, _persistent_extra_prompt
+        _extra_prompt = None
+        _persistent_extra_prompt = None
 
 
 def clear_persistent_extra_prompt() -> None:
     """Clear only the persistent extra prompt (for cleanup between loop iterations)."""
-    global _persistent_extra_prompt
-    _persistent_extra_prompt = None
+    with _extra_prompt_lock:
+        global _persistent_extra_prompt
+        _persistent_extra_prompt = None
 
 
 def truncate_preview(text: str, max_length: int = 60, ellipsis_str: str = '...') -> str:
@@ -406,15 +413,16 @@ class LLMCaller:
         mode = self._resolve_json_mode(json_mode, require_json, two_phase_json)
 
         # Inject extra prompts if set (persistent for loop context, transient for Ctrl+C)
-        global _extra_prompt
-        injected_parts = []
-        if _persistent_extra_prompt:
-            injected_parts.append(_persistent_extra_prompt)
-            logger.info(f"Injected persistent extra prompt: {_persistent_extra_prompt[:80]}")
-        if _extra_prompt:
-            injected_parts.append(_extra_prompt)
-            logger.info(f"Injected transient extra prompt: {_extra_prompt[:80]}")
-            _extra_prompt = None  # Consume transient after use
+        with _extra_prompt_lock:
+            global _extra_prompt
+            injected_parts = []
+            if _persistent_extra_prompt:
+                injected_parts.append(_persistent_extra_prompt)
+                logger.info(f"Injected persistent extra prompt: {_persistent_extra_prompt[:80]}")
+            if _extra_prompt:
+                injected_parts.append(_extra_prompt)
+                logger.info(f"Injected transient extra prompt: {_extra_prompt[:80]}")
+                _extra_prompt = None  # Consume transient after use
         if injected_parts:
             prompt = f"{prompt}\n\n[Additional user instruction]: {chr(10).join(injected_parts)}"
 

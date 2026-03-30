@@ -1,0 +1,15 @@
+id: '012'
+title: Pre-merge checkout on main repo during DAG execution
+description: In _make_execute_fn lines 474-487, dependency branch merges are performed
+  by checking out branches on the main repo (not in a worktree). While protected by
+  git_lock, this temporarily moves the main repo's HEAD to an impl branch. If the
+  process is killed during this window, the repo could be left on the wrong branch.
+  Moving this merge logic into the worktree after creation would eliminate this risk.
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+created_at: '2026-03-30T09:45:47.551664'
+updated_at: '2026-03-30T09:45:47.551664'
