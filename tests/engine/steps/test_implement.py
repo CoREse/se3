@@ -335,8 +335,8 @@ class TestShouldUseDag:
 
         assert _should_use_dag([]) is False
 
-    def test_multiple_groups_no_depends_on_returns_false(self):
-        """Multiple groups without any depends_on should use sequential path."""
+    def test_multiple_groups_no_depends_on_returns_true(self):
+        """Multiple independent groups should use DAG for parallel execution."""
         from se3.engine.steps.implement import _should_use_dag
 
         groups = [
@@ -344,17 +344,17 @@ class TestShouldUseDag:
             {"group_id": "G2", "tasks": ["t2"]},
             {"group_id": "G3", "tasks": ["t3"]},
         ]
-        assert _should_use_dag(groups) is False
+        assert _should_use_dag(groups) is True
 
-    def test_multiple_groups_empty_depends_on_returns_false(self):
-        """Multiple groups with empty depends_on lists should use sequential path."""
+    def test_multiple_groups_empty_depends_on_returns_true(self):
+        """Multiple groups with empty depends_on lists should use DAG for parallel execution."""
         from se3.engine.steps.implement import _should_use_dag
 
         groups = [
             {"group_id": "G1", "depends_on": [], "tasks": ["t1"]},
             {"group_id": "G2", "depends_on": [], "tasks": ["t2"]},
         ]
-        assert _should_use_dag(groups) is False
+        assert _should_use_dag(groups) is True
 
     def test_multiple_groups_with_depends_on_returns_true(self):
         """Multiple groups with at least one non-empty depends_on enables DAG."""

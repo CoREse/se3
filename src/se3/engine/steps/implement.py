@@ -428,13 +428,11 @@ def _extract_sorted_groups(task_groups) -> list[dict]:
 def _should_use_dag(groups: list[dict]) -> bool:
     """Check whether to enable DAG parallel execution path.
 
-    Returns True when there are multiple groups AND at least one group
-    has a non-empty depends_on field, indicating dependency relationships
-    that the DAG scheduler should manage.
+    Returns True when there are multiple groups.  Independent groups
+    (all depends_on empty) benefit *most* from parallel execution;
+    groups with dependencies are handled correctly by the DAG scheduler.
     """
-    if len(groups) <= 1:
-        return False
-    return any(group.get("depends_on") for group in groups)
+    return len(groups) > 1
 
 
 def _make_execute_fn(

@@ -7,7 +7,6 @@ global project awareness.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
@@ -48,40 +47,6 @@ Recent commits:
 
 Provide a concise natural language summary:
 """
-
-
-def _extract_text_from_stream_json(response: str) -> str:
-    """Extract text content from stream-json (NDJSON) response.
-    
-    Args:
-        response: Raw NDJSON response from LLM
-        
-    Returns:
-        Extracted text content
-    """
-    if not response:
-        return ""
-    
-    text_parts = []
-    for line in response.strip().split('\n'):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            data = json.loads(line)
-            if isinstance(data, dict) and data.get('type') == 'assistant':
-                message = data.get('message', {})
-                content = message.get('content', [])
-                for item in content:
-                    if isinstance(item, dict) and item.get('type') == 'text':
-                        text = item.get('text', '')
-                        if text:
-                            text_parts.append(text)
-        except json.JSONDecodeError:
-            # Not valid JSON, might be a partial line or plain text
-            continue
-    
-    return ''.join(text_parts).strip()
 
 
 def generate_project_summary(
@@ -165,8 +130,7 @@ def generate_project_summary(
         json_mode="off",
     )
 
-    # Extract text from stream-json response
-    return _extract_text_from_stream_json(response)
+    return response
 
 
 def project_summary_handler(step: Step, flow: FlowInstance) -> StepStatus:

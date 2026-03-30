@@ -11,7 +11,7 @@ import json
 import logging
 from typing import Any, Callable, Dict, Optional
 
-from .display import get_console, render_design, render_full, render_proposal
+from .display import get_console, render_design, render_full, render_markdown, render_proposal
 from .models import Step, StepStatus, StepType
 
 logger = logging.getLogger(__name__)
@@ -167,7 +167,39 @@ def _render_version_analyze(step: Step) -> None:
 def _render_summarize(step: Step) -> None:
     summary = (step.outputs or {}).get("summary", "")
     if summary:
-        render_full(summary, title="Work Summary")
+        render_markdown(summary, title="Work Summary")
+
+
+@register_renderer(StepType.TEST)
+def _render_test(step: Step) -> None:
+    outputs = step.outputs or {}
+    test_results = outputs.get("test_results")
+    if not test_results or not isinstance(test_results, dict):
+        _default_render(step, "Testing")
+        return
+
+    overall_passed = test_results.get("overall_passed", test_results.get("passed", False))
+    status = "[bold green]PASSED[/bold green]" if overall_passed else "[bold red]FAILED[/bold red]"
+
+    lines = [f"[bold]Status:[/bold] {status}"]
+
+    # Count passed/failed phases
+    phase_results = test_results.get("phases", [])
+    if phase_results:
+        passed_count = sum(1 for p in phase_results if p.get("passed", False))
+        failed_count = len(phase_results) - passed_count
+        lines.append(f"[bold]Phases:[/bold] {passed_count} passed, {failed_count} failed")
+        for phase in phase_results:
+            name = phase.get("name", "?")
+            p = phase.get("passed", False)
+            indicator = "[green]✓[/green]" if p else "[red]✗[/red]"
+            lines.append(f"  {indicator} {name}")
+
+    command = test_results.get("command", "")
+    if command:
+        lines.append(f"[bold]Command:[/bold] {command}")
+
+    render_full("\n".join(lines), title="Testing")
 
 
 @register_renderer(StepType.PROPOSE)

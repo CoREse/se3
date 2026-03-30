@@ -52,41 +52,6 @@ Format your response as clean Markdown with clear headings and bullet points.
 """
 
 
-def _extract_text_from_stream_json(response: str) -> str:
-    """Extract text content from stream-json (NDJSON) response.
-    
-    Args:
-        response: Raw NDJSON response from LLM
-        
-    Returns:
-        Extracted text content
-    """
-    if not response:
-        return ""
-    
-    import json
-    text_parts = []
-    
-    for line in response.strip().split('\n'):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            data = json.loads(line)
-            if isinstance(data, dict) and data.get('type') == 'assistant':
-                message = data.get('message', {})
-                content = message.get('content', [])
-                for item in content:
-                    if isinstance(item, dict) and item.get('type') == 'text':
-                        text = item.get('text', '')
-                        if text:
-                            text_parts.append(text)
-        except json.JSONDecodeError:
-            continue
-    
-    return ''.join(text_parts).strip()
-
-
 def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the summarize step.
 
@@ -160,8 +125,8 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
             json_mode="off",
         )
 
-        # Extract text from response
-        summary_text = _extract_text_from_stream_json(response)
+        # Use LLMCaller response directly (already extracted plain text)
+        summary_text = response
 
         if not summary_text:
             summary_text = _create_basic_summary_text(flow, changes_made, test_results, task_description, incomplete_tasks, completion_status)
@@ -378,10 +343,7 @@ def _extract_discovered_issues(response: str, step: Step) -> None:
     import json
     import re
 
-    # Get the text content (handle both NDJSON and plain text)
-    text = _extract_text_from_stream_json(response)
-    if not text:
-        text = response or ""
+    text = response or ""
 
     # Look for JSON block containing discovered_issues
     # Try to find ```json ... ``` blocks first
