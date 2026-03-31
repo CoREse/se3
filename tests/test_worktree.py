@@ -248,6 +248,24 @@ class TestRemoveWorktreeLocked:
 
         assert not exists_for_branch(tmp_path, branch_name)
 
+    def test_removes_locked_worktree_with_custom_reason(self, tmp_path: Path) -> None:
+        """Locked worktree with 'initializing' reason (the actual bug scenario)."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="lock-reason")
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        # Lock with the exact reason from the bug report
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "lock",
+             "--reason", "initializing", str(wt_path)],
+            check=True, capture_output=True,
+        )
+
+        remove_worktree(tmp_path, wt_path)
+
+        assert not wt_path.exists()
+        assert not exists_for_branch(tmp_path, branch_name)
+
 
 class TestForceCleanupWorktree:
     """Tests for force_cleanup_worktree."""
@@ -290,6 +308,28 @@ class TestForceCleanupWorktree:
 
         assert not exists_for_branch(tmp_path, branch_name)
 
+    def test_cleans_locked_with_missing_directory(self, tmp_path: Path) -> None:
+        """Handles combined state: locked worktree + directory already deleted."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="fc-lock-miss")
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        # Lock, then delete directory (simulating interrupted initialization)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "lock",
+             "--reason", "initializing", str(wt_path)],
+            check=True, capture_output=True,
+        )
+        shutil.rmtree(wt_path)
+
+        # Git still tracks it as locked
+        assert exists_for_branch(tmp_path, branch_name)
+
+        force_cleanup_worktree(tmp_path, branch_name)
+
+        assert not wt_path.exists()
+        assert not exists_for_branch(tmp_path, branch_name)
+
     def test_noop_when_no_worktree(self, tmp_path: Path) -> None:
         """Should not raise when there's nothing to clean up."""
         _init_repo(tmp_path)
@@ -298,6 +338,25 @@ class TestForceCleanupWorktree:
         # No worktree created — should not raise
         force_cleanup_worktree(tmp_path, branch_name)
 
+        assert not exists_for_branch(tmp_path, branch_name)
+
+    def test_idempotent_double_call(self, tmp_path: Path) -> None:
+        """Calling force_cleanup_worktree twice should not raise."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="fc-idem")
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        # Lock it for good measure
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "lock", str(wt_path)],
+            check=True, capture_output=True,
+        )
+
+        force_cleanup_worktree(tmp_path, branch_name)
+        assert not exists_for_branch(tmp_path, branch_name)
+
+        # Second call should be a no-op
+        force_cleanup_worktree(tmp_path, branch_name)
         assert not exists_for_branch(tmp_path, branch_name)
 
 
