@@ -87,6 +87,21 @@ class TestGetCurrentBranch:
         branch = get_current_branch(tmp_path)
         assert branch in ("master", "main")
 
+    def test_detached_head_raises(self, tmp_path: Path) -> None:
+        """get_current_branch should raise RuntimeError on detached HEAD."""
+        _init_repo(tmp_path)
+        # Detach HEAD by checking out a specific commit
+        head_sha = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", head_sha],
+            capture_output=True, check=True,
+        )
+        with pytest.raises(RuntimeError, match="Detached HEAD"):
+            get_current_branch(tmp_path)
+
     def test_empty_repo_custom_initial_branch(self, tmp_path: Path) -> None:
         """get_current_branch should work on empty repos with custom initial branch."""
         subprocess.run(
