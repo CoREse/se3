@@ -64,7 +64,8 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
 
     # Check if there are changes to commit
-    if not _has_changes(project_root):
+    baseline_commit = getattr(flow, "baseline_commit", None)
+    if not _has_changes(project_root, baseline_commit=baseline_commit):
         logger.info("No changes to commit")
         step.outputs["commit_hash"] = "no-changes"
         step.outputs["committed"] = False
@@ -372,15 +373,44 @@ def _rollback_version(
         raise
 
 
-def _has_changes(project_root: Path) -> bool:
-    """Check if there are uncommitted changes.
+def _has_changes(project_root: Path, baseline_commit: str | None = None) -> bool:
+    """Check if there are code changes to commit.
+
+    When a baseline_commit is provided, uses ``git diff`` to compare the
+    baseline against HEAD.  This correctly detects changes in multi-worktree
+    scenarios where commits have been merged but the working tree is clean.
+
+    Falls back to ``git status --porcelain`` when no baseline is available
+    (backward compatibility).
 
     Args:
         project_root: Project root directory
+        baseline_commit: Optional baseline commit hash to diff against HEAD
 
     Returns:
         True if there are changes to commit
     """
+    # When a baseline commit is available, compare it against HEAD.
+    if baseline_commit:
+        try:
+            result = subprocess.run(
+                ["git", "diff", baseline_commit, "HEAD", "--quiet"],
+                capture_output=True,
+                text=True,
+                cwd=project_root,
+            )
+            # --quiet: exit code 0 means no diff, 1 means there are diffs
+            if result.returncode == 1:
+                return True
+            if result.returncode == 0:
+                # No diff between baseline and HEAD; still check working tree
+                # in case there are unstaged/uncommitted changes on top.
+                pass
+            # returncode > 1 indicates an error (e.g. bad commit ref) — fall through
+        except Exception:
+            pass
+
+    # Fallback: check working tree for uncommitted changes
     try:
         result = subprocess.run(
             ["git", "status", "--porcelain"],
