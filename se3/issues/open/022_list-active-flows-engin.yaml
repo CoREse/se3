@@ -1,0 +1,12 @@
+id: '022'
+title: list_active_flows() 只读单个 engine.json，无法列出历史流程
+description: PersistenceManager.list_active_flows() (persistence.py:289) 只读取 se3/state/engine.json，返回最多
+  1 条记录。se3/state/ 下的 66 个 summary 文件完全被忽略，这是 history 命令只显示一条记录的根本原因。
+status: open
+priority: high
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-03-31T17:14:48.062541'
+updated_at: '2026-03-31T17:14:48.062541'

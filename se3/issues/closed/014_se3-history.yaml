@@ -1,9 +1,9 @@
 id: '014'
 title: se3 history显示不完整
 description: se3 history显示不完整，只能显示最近的一条，哪怕se3 history list也显示不出其它的
-status: in-progress
+status: resolved
 priority: medium
 type: bug
 tags: []
 created_at: '2026-03-31T10:50:18.087110'
-updated_at: '2026-03-31T16:52:04.124165'
+updated_at: '2026-03-31T17:14:48.110021'

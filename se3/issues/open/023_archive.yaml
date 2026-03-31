@@ -1,0 +1,12 @@
+id: '023'
+title: archive 目录不存在导致归档功能无效
+description: list_archived_flows_from_disk() 扫描 se3/state/archive/ 目录，但该目录不存在。归档命令
+  se3 history archived 永远返回空结果。
+status: open
+priority: high
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-03-31T17:14:48.063581'
+updated_at: '2026-03-31T17:14:48.063581'

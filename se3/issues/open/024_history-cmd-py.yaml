@@ -1,0 +1,11 @@
+id: '024'
+title: history_cmd.py 中存在重复的辅助函数定义
+description: _status_color() 和 _step_status_color() 在文件中各定义了两次（行 162-182 和 497-517），应移除重复定义。
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-03-31T17:14:48.064504'
+updated_at: '2026-03-31T17:14:48.064504'
