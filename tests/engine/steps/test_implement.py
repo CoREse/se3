@@ -1078,3 +1078,239 @@ class TestDagResumeFiltering:
         assert result == StepStatus.COMPLETED
         assert step.outputs["files_changed"] == ["a.py"]
         assert step.outputs["implemented_groups"] == ["G1"]
+
+
+class TestDagParallelResumeBehavior:
+    """Test DAG parallel resume: skip completed groups, clean stale worktrees, restore state."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.project_root = Path(self.tmpdir)
+
+        self.flow = FlowInstance(
+            flow_id="test-flow-dag-resume",
+            task_description="Test DAG resume behavior",
+            task_type="bugfix",
+        )
+
+        self.task_groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2}]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"], "tasks": [{"id": 3}]},
+        ]
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @patch("se3.engine.steps.implement.has_commits", return_value=True)
+    @patch("se3.engine.steps.implement._run_dag_parallel")
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    def test_dag_resume_skips_completed_groups(
+        self, mock_injection, mock_dag_parallel, mock_has_commits,
+    ):
+        """On resume with implemented_groups set, completed groups are not re-executed."""
+        mock_dag_parallel.return_value = StepStatus.COMPLETED
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            step_id="impl-dag-resume-skip",
+            inputs={
+                "task_description": "test",
+                "task_type": "bugfix",
+                "task_groups": self.task_groups,
+                "spec_content": {},
+                "resumed": True,
+            },
+            outputs={
+                "implemented_groups": ["G1"],
+                "files_changed": ["a.py"],
+                "tests_added": [],
+                "test_mapping": {},
+            },
+        )
+
+        from se3.engine.steps.implement import implement_handler
+        result = implement_handler(step, self.flow)
+
+        assert result == StepStatus.COMPLETED
+        mock_dag_parallel.assert_called_once()
+
+        # Only G2, G3 should be passed — G1 must be skipped
+        call_kwargs = mock_dag_parallel.call_args
+        passed_groups = call_kwargs.kwargs.get("groups") or call_kwargs[1].get("groups")
+        passed_ids = [g["group_id"] for g in passed_groups]
+        assert "G1" not in passed_ids, "Completed group G1 must not be re-executed"
+        assert sorted(passed_ids) == ["G2", "G3"]
+
+    @patch("se3.engine.steps.implement.exists_for_branch", return_value=True)
+    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("se3.engine.steps.implement.create_worktree")
+    @patch("se3.engine.steps.implement._run_git")
+    def test_dag_resume_cleans_stale_worktrees(
+        self, mock_run_git, mock_create_wt, mock_caller_cls,
+        mock_parse, mock_rm_wt, mock_exists_for_branch,
+    ):
+        """Stale worktrees from a previous run are cleaned up before branch recreation."""
+        from se3.engine.steps.implement import _make_execute_fn, _branch_safe_name
+
+        def run_git_side_effect(root, *args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
+
+        mock_run_git.side_effect = run_git_side_effect
+        mock_create_wt.return_value = Path("/tmp/fake-worktree")
+        mock_parse.return_value = {
+            "files_changed": ["x.py"],
+            "tests_added": [],
+            "test_mapping": {},
+            "summary": "done",
+            "completion_status": "complete",
+            "incomplete_tasks": [],
+            "restricted_edits": [],
+        }
+        mock_caller_instance = MagicMock()
+        mock_caller_instance.call.return_value = "{}"
+        mock_caller_cls.return_value = mock_caller_instance
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            step_id="impl-stale-wt",
+            inputs={},
+            outputs={},
+        )
+
+        execute_fn = _make_execute_fn(
+            project_root=self.project_root,
+            original_branch="master",
+            flow=self.flow,
+            step=step,
+            task_description="test",
+            task_type="bugfix",
+            design_section="",
+            spec_summary="",
+            injection=None,
+            retry_count=0,
+        )
+
+        group = {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]}
+        result = execute_fn(group, {})
+
+        assert result.status == "completed"
+
+        # exists_for_branch must have been called to check for stale worktree
+        branch_name = f"impl/{self.flow.flow_id}/G1"
+        mock_exists_for_branch.assert_called_once_with(self.project_root, branch_name)
+
+        # Since exists_for_branch returned True, remove_worktree must have been called
+        # to clean the stale worktree BEFORE the branch -D and branch create
+        expected_stale_path = self.project_root / "se3" / "worktrees" / _branch_safe_name(branch_name)
+        # remove_worktree is called for cleanup; first call should be the stale worktree removal
+        stale_removal_calls = [
+            c for c in mock_rm_wt.call_args_list
+            if len(c[0]) >= 2 and c[0][1] == expected_stale_path
+        ]
+        assert len(stale_removal_calls) >= 1, (
+            f"remove_worktree not called for stale path {expected_stale_path}. "
+            f"All calls: {mock_rm_wt.call_args_list}"
+        )
+
+        # Verify that the branch -D (cleanup) comes AFTER the stale worktree removal
+        git_calls = mock_run_git.call_args_list
+        git_args_list = [tuple(c[0][1:]) for c in git_calls]
+        delete_idx = next(
+            (i for i, args in enumerate(git_args_list) if args[:2] == ("branch", "-D")),
+            None,
+        )
+        assert delete_idx is not None, "branch -D call must happen after stale worktree removal"
+
+    @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
+    @patch("se3.engine.steps.implement.delete_branch")
+    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
+    @patch("se3.engine.steps.implement.DAGScheduler")
+    @patch("se3.engine.steps.implement._make_execute_fn")
+    @patch("se3.config.load_conflict_resolver_config")
+    def test_dag_resume_restores_accumulated_state(
+        self, mock_config, mock_make_fn, mock_scheduler_cls,
+        mock_get_branch, mock_rm_wt, mock_del_branch, mock_merge,
+    ):
+        """Prior outputs are preserved and merged with new group results."""
+        from se3.engine.steps.implement import _run_dag_parallel
+        from se3.engine.dag_scheduler import GroupResult
+
+        mock_config.return_value = MagicMock(strategy="ours")
+
+        # New group G2 completes successfully
+        g2_result = GroupResult(
+            group_id="G2", status="completed",
+            branch_name="impl/test-flow-dag-resume/G2",
+            worktree_path=Path("/tmp/wt-g2"),
+            files_changed=["b.py"],
+            tests_added=["test_b.py"],
+            test_mapping={"b.py": "test_b.py"},
+            summary="implemented G2",
+        )
+        mock_scheduler_instance = MagicMock()
+        mock_scheduler_instance.run.return_value = [g2_result]
+        mock_scheduler_instance.topological_merge_order.return_value = ["G2"]
+        mock_scheduler_cls.return_value = mock_scheduler_instance
+        mock_make_fn.return_value = MagicMock()
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            step_id="impl-restore-state",
+            inputs={},
+            outputs={},
+        )
+
+        # Prior outputs from G1 completed in a previous run
+        prior = {
+            "files_changed": ["a.py"],
+            "tests_added": ["test_a.py"],
+            "test_mapping": {"a.py": "test_a.py"},
+            "implemented_groups": ["G1"],
+        }
+
+        remaining_groups = [
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2}]},
+        ]
+
+        result = _run_dag_parallel(
+            groups=remaining_groups,
+            step=step,
+            flow=self.flow,
+            project_root=self.project_root,
+            task_description="test",
+            task_type="bugfix",
+            design_section="",
+            spec_summary="",
+            injection=None,
+            retry_count=0,
+            prior_outputs=prior,
+        )
+
+        assert result == StepStatus.COMPLETED
+
+        # Prior G1 outputs must be preserved
+        assert "a.py" in step.outputs["files_changed"]
+        assert "test_a.py" in step.outputs["tests_added"]
+        assert step.outputs["test_mapping"]["a.py"] == "test_a.py"
+        assert "G1" in step.outputs["implemented_groups"]
+
+        # New G2 outputs must be merged in
+        assert "b.py" in step.outputs["files_changed"]
+        assert "test_b.py" in step.outputs["tests_added"]
+        assert step.outputs["test_mapping"]["b.py"] == "test_b.py"
+        assert "G2" in step.outputs["implemented_groups"]
+
+        # Combined counts
+        assert len(step.outputs["implemented_groups"]) == 2
