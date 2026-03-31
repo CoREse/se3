@@ -19,9 +19,11 @@ from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
 from ..utils.json_parser import parse_json_response
 from ..worktree import (
+    _branch_safe_name,
     _run_git,
     create_worktree,
     delete_branch,
+    exists_for_branch,
     get_current_branch,
     has_commits,
     merge_loop_branch,
@@ -470,6 +472,15 @@ def _make_execute_fn(
         try:
             # Step 1: Create branch from original_branch
             with git_lock:
+                # Remove stale worktree from a previous interrupted run (if any)
+                if exists_for_branch(project_root, branch_name):
+                    stale_wt = project_root / "se3" / "worktrees" / _branch_safe_name(branch_name)
+                    logger.debug(
+                        "DAG: removing stale worktree for %s at %s",
+                        branch_name, stale_wt,
+                    )
+                    remove_worktree(project_root, stale_wt)
+
                 # Delete stale branch from a previous failed run (if any)
                 stale = _run_git(
                     project_root, "branch", "-D", branch_name, check=False,
