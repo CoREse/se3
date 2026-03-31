@@ -90,8 +90,20 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 # Get bump type from version_analyze step or fallback to task type
                 bump_type = _get_bump_type(step, flow, version_config)
 
-                # Save original version for potential rollback
-                original_version = version_bumper.read_version(version_file)
+                try:
+                    # Save original version for potential rollback
+                    original_version = version_bumper.read_version(version_file)
+                except (ValueError, KeyError):
+                    # File exists but has no version variable — initialize it
+                    logger.warning(
+                        f"Version file {version_file} exists but has no readable version. "
+                        "Initializing version system."
+                    )
+                    version_file = version_bumper.initialize_version_system(
+                        project_root=project_root,
+                        initial_version="0.1.0"
+                    )
+                    original_version = version_bumper.read_version(version_file)
 
                 # Bump the version
                 new_version = version_bumper.bump_version(

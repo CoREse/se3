@@ -364,6 +364,17 @@ class VersionFileHandler(abc.ABC):
         """
         pass
 
+    def ensure_version(self, path: Path, version: str = "0.1.0") -> None:
+        """Ensure the file at path contains a version field, adding one if missing.
+
+        This is idempotent: if the file already has a readable version, does nothing.
+
+        Args:
+            path: Path to the existing file
+            version: Version string to insert if missing (default: "0.1.0")
+        """
+        raise NotImplementedError(f"{self.__class__.__name__} does not support ensure_version")
+
     def create_version_file(self, project_root: Path, initial_version: str = "0.1.0") -> Path:
         """Create a new version file with the initial version.
 
@@ -483,6 +494,30 @@ class TomlVersionHandler(VersionFileHandler):
 
         raise ValueError(f"Could not find version field to update in {path}")
 
+    def ensure_version(self, path: Path, version: str = "0.1.0") -> None:
+        """Add version field to an existing TOML file if missing."""
+        try:
+            self.read_version(path)
+            return  # Already has a version, nothing to do
+        except (ValueError, KeyError):
+            pass
+
+        content = path.read_text(encoding="utf-8")
+
+        # Check if [project] section exists
+        if re.search(r'^\[project\]', content, re.MULTILINE):
+            # Add version under [project] section
+            content = re.sub(
+                r'(\[project\]\s*\n)',
+                rf'\1version = "{version}"\n',
+                content,
+            )
+        else:
+            # Add [project] section with version at the end
+            content = content.rstrip() + f'\n\n[project]\nversion = "{version}"\n'
+
+        path.write_text(content, encoding="utf-8")
+
     def create_version_file(self, project_root: Path, initial_version: str = "0.1.0") -> Path:
         """Create a pyproject.toml file with the initial version."""
         path = project_root / "pyproject.toml"
@@ -557,6 +592,23 @@ class PythonVersionHandler(VersionFileHandler):
             return
 
         raise ValueError(f"Could not find version variable to update in {path}")
+
+    def ensure_version(self, path: Path, version: str = "0.1.0") -> None:
+        """Add __version__ to an existing Python file if missing."""
+        try:
+            self.read_version(path)
+            return  # Already has a version, nothing to do
+        except (ValueError, KeyError):
+            pass
+
+        content = path.read_text(encoding="utf-8")
+        version_line = f'__version__ = "{version}"\n'
+
+        if content:
+            # Prepend to existing content
+            path.write_text(version_line + content, encoding="utf-8")
+        else:
+            path.write_text(version_line, encoding="utf-8")
 
     def create_version_file(self, project_root: Path, initial_version: str = "0.1.0") -> Path:
         """Create a version.py file with the initial version."""
@@ -1155,10 +1207,35 @@ class VersionBumper:
             # Default to pyproject.toml
             handler = TomlVersionHandler()
 
-        # Create the version file
-        version_file = handler.create_version_file(project_root, initial_version)
+        # Create or update the version file
+        try:
+            version_file = handler.create_version_file(project_root, initial_version)
+            logger.info(f"Created version file: {version_file}")
+        except FileExistsError:
+            # File exists but has no version — add version to existing file
+            # Determine the target path the handler would have used
+            if isinstance(handler, TomlVersionHandler):
+                version_file = project_root / "pyproject.toml"
+            elif isinstance(handler, JsonVersionHandler):
+                version_file = project_root / "package.json"
+            elif isinstance(handler, PythonVersionHandler):
+                # Find the __init__.py the handler would target
+                src_dir = project_root / "src"
+                if src_dir.exists() and src_dir.is_dir():
+                    for item in src_dir.iterdir():
+                        if item.is_dir() and (item / "__init__.py").exists():
+                            version_file = item / "__init__.py"
+                            break
+                    else:
+                        version_file = project_root / "version.py"
+                else:
+                    version_file = project_root / "version.py"
+            else:
+                raise
 
-        logger.info(f"Created version file: {version_file}")
+            logger.info(f"File exists without version, adding version to: {version_file}")
+            handler.ensure_version(version_file, initial_version)
+
         return version_file
 
     def _get_handler_for_new_file(self, project_root: Path, suffix: str) -> VersionFileHandler:
