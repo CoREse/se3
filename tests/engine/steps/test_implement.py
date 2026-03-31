@@ -541,6 +541,7 @@ class TestStaleBranchHandling:
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
+    @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.remove_worktree")
     @patch("se3.engine.steps.implement.parse_json_response")
     @patch("se3.engine.steps.implement.LLMCaller")
@@ -548,6 +549,7 @@ class TestStaleBranchHandling:
     @patch("se3.engine.steps.implement._run_git")
     def test_execute_fn_deletes_stale_branch_before_creation(
         self, mock_run_git, mock_create_wt, mock_caller_cls, mock_parse, mock_rm_wt,
+        mock_force_cleanup,
     ):
         """execute_fn must call 'branch -D' before 'branch <name> <base>' to clean stale branches."""
         from se3.engine.steps.implement import _make_execute_fn
@@ -621,6 +623,7 @@ class TestStaleBranchHandling:
             f"Stale branch delete (idx={delete_idx}) must come before branch create (idx={create_idx})"
         )
 
+    @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.remove_worktree")
     @patch("se3.engine.steps.implement.parse_json_response")
     @patch("se3.engine.steps.implement.LLMCaller")
@@ -628,6 +631,7 @@ class TestStaleBranchHandling:
     @patch("se3.engine.steps.implement._run_git")
     def test_execute_fn_succeeds_when_no_stale_branch(
         self, mock_run_git, mock_create_wt, mock_caller_cls, mock_parse, mock_rm_wt,
+        mock_force_cleanup,
     ):
         """Normal execution works when there is no stale branch (delete returns non-zero)."""
         from se3.engine.steps.implement import _make_execute_fn
@@ -1144,18 +1148,17 @@ class TestDagParallelResumeBehavior:
         assert "G1" not in passed_ids, "Completed group G1 must not be re-executed"
         assert sorted(passed_ids) == ["G2", "G3"]
 
-    @patch("se3.engine.steps.implement.exists_for_branch", return_value=True)
-    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.parse_json_response")
     @patch("se3.engine.steps.implement.LLMCaller")
     @patch("se3.engine.steps.implement.create_worktree")
     @patch("se3.engine.steps.implement._run_git")
     def test_dag_resume_cleans_stale_worktrees(
         self, mock_run_git, mock_create_wt, mock_caller_cls,
-        mock_parse, mock_rm_wt, mock_exists_for_branch,
+        mock_parse, mock_force_cleanup,
     ):
-        """Stale worktrees from a previous run are cleaned up before branch recreation."""
-        from se3.engine.steps.implement import _make_execute_fn, _branch_safe_name
+        """Stale worktrees from a previous run are cleaned up via force_cleanup_worktree before branch recreation."""
+        from se3.engine.steps.implement import _make_execute_fn
 
         def run_git_side_effect(root, *args, **kwargs):
             result = MagicMock()
@@ -1205,31 +1208,19 @@ class TestDagParallelResumeBehavior:
 
         assert result.status == "completed"
 
-        # exists_for_branch must have been called to check for stale worktree
+        # force_cleanup_worktree must have been called to clean stale worktree
         branch_name = f"impl/{self.flow.flow_id}/G1"
-        mock_exists_for_branch.assert_called_once_with(self.project_root, branch_name)
+        mock_force_cleanup.assert_called_once_with(self.project_root, branch_name)
 
-        # Since exists_for_branch returned True, remove_worktree must have been called
-        # to clean the stale worktree BEFORE the branch -D and branch create
-        expected_stale_path = self.project_root / "se3" / "worktrees" / _branch_safe_name(branch_name)
-        # remove_worktree is called for cleanup; first call should be the stale worktree removal
-        stale_removal_calls = [
-            c for c in mock_rm_wt.call_args_list
-            if len(c[0]) >= 2 and c[0][1] == expected_stale_path
-        ]
-        assert len(stale_removal_calls) >= 1, (
-            f"remove_worktree not called for stale path {expected_stale_path}. "
-            f"All calls: {mock_rm_wt.call_args_list}"
-        )
-
-        # Verify that the branch -D (cleanup) comes AFTER the stale worktree removal
+        # Verify that the branch -D (cleanup) comes AFTER force_cleanup_worktree
+        # force_cleanup_worktree is called before any _run_git calls in the lock block
         git_calls = mock_run_git.call_args_list
         git_args_list = [tuple(c[0][1:]) for c in git_calls]
         delete_idx = next(
             (i for i, args in enumerate(git_args_list) if args[:2] == ("branch", "-D")),
             None,
         )
-        assert delete_idx is not None, "branch -D call must happen after stale worktree removal"
+        assert delete_idx is not None, "branch -D call must happen after force_cleanup_worktree"
 
     @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
