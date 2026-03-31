@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -639,6 +640,11 @@ class StateMachine:
                     inputs["fix_context"] = step.outputs.get("fix_context")
                 elif step.step_type == StepType.UPDATE_SPEC:
                     inputs["updated_specs"] = step.outputs.get("updated_specs")
+                elif step.step_type == StepType.VERSION_ANALYZE:
+                    inputs["bump_type"] = step.outputs.get("bump_type")
+                    inputs["reasoning"] = step.outputs.get("reasoning")
+                    inputs["confidence"] = step.outputs.get("confidence")
+                    inputs["suggested_version"] = step.outputs.get("suggested_version")
                 elif step.step_type == StepType.COMMIT:
                     inputs["commit_hash"] = step.outputs.get("commit_hash")
                 elif step.step_type == StepType.CONFIRM:
@@ -744,6 +750,39 @@ class StateMachine:
         except OSError as e:
             logger.warning(f"Failed to write _meta.json: {e}")
 
+    def _record_baseline_commit(self, flow: FlowInstance) -> None:
+        """Record the current HEAD commit hash as the baseline for change detection.
+
+        The baseline commit is used by the commit step to detect changes via
+        ``git diff <baseline> HEAD`` instead of relying on ``git status --porcelain``,
+        which fails in multi-worktree scenarios where changes are merged and the
+        working tree is clean.
+
+        Does nothing if a baseline commit is already recorded (e.g., on flow resume).
+
+        Args:
+            flow: Current flow instance
+        """
+        if flow.baseline_commit:
+            logger.debug(f"Baseline commit already set: {flow.baseline_commit[:8]}")
+            return
+
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True,
+                text=True,
+                cwd=self.project_root,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                flow.baseline_commit = result.stdout.strip()
+                self.persistence.save_flow(flow)
+                logger.info(f"Recorded baseline commit: {flow.baseline_commit[:8]}")
+            else:
+                logger.warning("Failed to get HEAD commit hash for baseline")
+        except Exception as e:
+            logger.warning(f"Failed to record baseline commit: {e}")
+
     def run(self, flow: FlowInstance) -> FlowStatus:
         """Run the flow from current state to completion.
 
@@ -756,6 +795,7 @@ class StateMachine:
         logger.info(f"Starting flow {flow.flow_id}")
 
         self._write_flow_meta(flow)
+        self._record_baseline_commit(flow)
 
         max_iterations = 100  # Safety limit
         iterations = 0
