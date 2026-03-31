@@ -837,10 +837,15 @@ class VersionDetector:
         for filename, _ in self.VERSION_FILES:
             path = project_root / filename
             if path.exists():
-                # Verify a handler can read this file
+                # Verify a handler can read this file AND extract a version
                 for handler in self._handlers:
                     if handler.can_handle(path):
-                        return path
+                        try:
+                            handler.read_version(path)
+                            return path
+                        except (ValueError, KeyError):
+                            # File matches handler but has no readable version
+                            break
 
         return None
 
