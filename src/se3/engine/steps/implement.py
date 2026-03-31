@@ -691,13 +691,13 @@ def _run_dag_parallel(
     try:
         results = scheduler.run(execute_fn)
     finally:
-        # Always clean up worktrees
+        # Always clean up worktrees (force-remove to handle locked state)
         for r in results:
-            if r.worktree_path:
+            if r.branch_name:
                 try:
-                    remove_worktree(project_root, r.worktree_path)
+                    force_cleanup_worktree(project_root, r.branch_name)
                 except Exception:
-                    logger.warning("DAG: failed to remove worktree %s", r.worktree_path)
+                    logger.warning("DAG: failed to force-cleanup worktree for branch %s", r.branch_name)
 
         # Always clean up impl branches for all groups
         for g in groups:
