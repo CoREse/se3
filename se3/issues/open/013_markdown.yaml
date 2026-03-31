@@ -1,0 +1,12 @@
+id: '013'
+title: 其他步骤可能存在相同的 Markdown 渲染问题
+description: project_summary 等其他使用 LLM 生成 Markdown 内容的步骤，其 renderer 可能同样使用 render_full()
+  而非 render_markdown()，导致 Markdown 语法未被正确渲染。建议排查所有 renderer 的渲染方法。
+status: open
+priority: low
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-03-30T13:11:29.824432'
+updated_at: '2026-03-30T13:11:29.824432'
