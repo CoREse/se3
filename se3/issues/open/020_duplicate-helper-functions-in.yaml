@@ -1,0 +1,13 @@
+id: '020'
+title: Duplicate helper functions in history_cmd.py
+description: '`_status_color` and `_step_status_color` are defined twice in history_cmd.py
+  (lines 162-182 and lines 497-517). The second definitions shadow the first but are
+  identical.'
+status: open
+priority: low
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+created_at: '2026-03-31T17:12:56.612025'
+updated_at: '2026-03-31T17:12:56.612025'
