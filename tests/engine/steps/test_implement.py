@@ -517,3 +517,292 @@ class TestDagEmptyRepoFallback:
 
         assert result == StepStatus.COMPLETED
         mock_dag_parallel.assert_called_once()
+
+
+class TestStaleBranchHandling:
+    """Test that stale branches from failed runs are cleaned up properly."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.project_root = Path(self.tmpdir)
+
+        self.flow = FlowInstance(
+            flow_id="test-flow-stale",
+            task_description="Test stale branch cleanup",
+            task_type="bugfix",
+        )
+
+        self.task_groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2}]},
+        ]
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("se3.engine.steps.implement.create_worktree")
+    @patch("se3.engine.steps.implement._run_git")
+    def test_execute_fn_deletes_stale_branch_before_creation(
+        self, mock_run_git, mock_create_wt, mock_caller_cls, mock_parse, mock_rm_wt,
+    ):
+        """execute_fn must call 'branch -D' before 'branch <name> <base>' to clean stale branches."""
+        from se3.engine.steps.implement import _make_execute_fn
+        from se3.engine.dag_scheduler import GroupResult
+
+        # Simulate: stale branch exists (delete returns 0)
+        def run_git_side_effect(root, *args, **kwargs):
+            result = MagicMock()
+            result.returncode = 0
+            result.stdout = ""
+            result.stderr = ""
+            return result
+
+        mock_run_git.side_effect = run_git_side_effect
+        mock_create_wt.return_value = Path("/tmp/fake-worktree")
+        mock_parse.return_value = {
+            "files_changed": ["a.py"],
+            "tests_added": [],
+            "test_mapping": {},
+            "summary": "done",
+            "completion_status": "complete",
+            "incomplete_tasks": [],
+            "restricted_edits": [],
+        }
+        mock_caller_instance = MagicMock()
+        mock_caller_instance.call.return_value = "{}"
+        mock_caller_cls.return_value = mock_caller_instance
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            step_id="impl-stale",
+            inputs={},
+            outputs={},
+        )
+
+        execute_fn = _make_execute_fn(
+            project_root=self.project_root,
+            original_branch="master",
+            flow=self.flow,
+            step=step,
+            task_description="test",
+            task_type="bugfix",
+            design_section="",
+            spec_summary="",
+            injection=None,
+            retry_count=0,
+        )
+
+        group = {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]}
+        result = execute_fn(group, {})
+
+        assert result.status == "completed"
+
+        # Verify the call sequence: branch -D must come before branch create
+        git_calls = mock_run_git.call_args_list
+        git_args_list = [tuple(c[0][1:]) for c in git_calls]  # extract git args
+
+        # Find the defensive delete and the branch create calls
+        delete_idx = None
+        create_idx = None
+        for i, args in enumerate(git_args_list):
+            if args[:2] == ("branch", "-D") and "impl/" in str(args):
+                delete_idx = i
+            if len(args) == 3 and args[0] == "branch" and args[1].startswith("impl/") and args[2] == "master":
+                create_idx = i
+
+        assert delete_idx is not None, f"No stale branch delete call found. Calls: {git_args_list}"
+        assert create_idx is not None, f"No branch create call found. Calls: {git_args_list}"
+        assert delete_idx < create_idx, (
+            f"Stale branch delete (idx={delete_idx}) must come before branch create (idx={create_idx})"
+        )
+
+    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("se3.engine.steps.implement.create_worktree")
+    @patch("se3.engine.steps.implement._run_git")
+    def test_execute_fn_succeeds_when_no_stale_branch(
+        self, mock_run_git, mock_create_wt, mock_caller_cls, mock_parse, mock_rm_wt,
+    ):
+        """Normal execution works when there is no stale branch (delete returns non-zero)."""
+        from se3.engine.steps.implement import _make_execute_fn
+
+        def run_git_side_effect(root, *args, **kwargs):
+            result = MagicMock()
+            # branch -D fails (no stale branch exists) — this is the normal case
+            if args[:2] == ("branch", "-D"):
+                result.returncode = 1
+                result.stderr = "error: branch not found"
+            else:
+                result.returncode = 0
+                result.stderr = ""
+            result.stdout = ""
+            return result
+
+        mock_run_git.side_effect = run_git_side_effect
+        mock_create_wt.return_value = Path("/tmp/fake-worktree")
+        mock_parse.return_value = {
+            "files_changed": ["b.py"],
+            "tests_added": [],
+            "test_mapping": {},
+            "summary": "ok",
+            "completion_status": "complete",
+            "incomplete_tasks": [],
+            "restricted_edits": [],
+        }
+        mock_caller_instance = MagicMock()
+        mock_caller_instance.call.return_value = "{}"
+        mock_caller_cls.return_value = mock_caller_instance
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            step_id="impl-normal",
+            inputs={},
+            outputs={},
+        )
+
+        execute_fn = _make_execute_fn(
+            project_root=self.project_root,
+            original_branch="master",
+            flow=self.flow,
+            step=step,
+            task_description="test",
+            task_type="bugfix",
+            design_section="",
+            spec_summary="",
+            injection=None,
+            retry_count=0,
+        )
+
+        group = {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]}
+        result = execute_fn(group, {})
+
+        # Should complete successfully even though branch -D failed
+        assert result.status == "completed"
+        assert result.files_changed == ["b.py"]
+
+    @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
+    @patch("se3.engine.steps.implement.delete_branch")
+    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
+    @patch("se3.engine.steps.implement.DAGScheduler")
+    @patch("se3.engine.steps.implement._make_execute_fn")
+    @patch("se3.config.load_conflict_resolver_config")
+    def test_finally_cleans_up_branches_for_all_groups(
+        self, mock_config, mock_make_fn, mock_scheduler_cls,
+        mock_get_branch, mock_rm_wt, mock_del_branch, mock_merge,
+    ):
+        """The finally block in _run_dag_parallel deletes impl branches for ALL groups."""
+        from se3.engine.steps.implement import _run_dag_parallel
+        from se3.engine.dag_scheduler import GroupResult
+
+        mock_config.return_value = MagicMock(strategy="ours")
+
+        # Scheduler raises an exception during run
+        mock_scheduler_instance = MagicMock()
+        mock_scheduler_instance.run.side_effect = RuntimeError("scheduler boom")
+        mock_scheduler_cls.return_value = mock_scheduler_instance
+
+        mock_make_fn.return_value = MagicMock()
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            step_id="impl-cleanup",
+            inputs={},
+            outputs={},
+        )
+
+        with pytest.raises(RuntimeError, match="scheduler boom"):
+            _run_dag_parallel(
+                groups=self.task_groups,
+                step=step,
+                flow=self.flow,
+                project_root=self.project_root,
+                task_description="test",
+                task_type="bugfix",
+                design_section="",
+                spec_summary="",
+                injection=None,
+                retry_count=0,
+            )
+
+        # Even though scheduler raised, delete_branch should be called for ALL groups
+        deleted_branches = [c[0][1] for c in mock_del_branch.call_args_list]
+        expected_branches = [
+            f"impl/{self.flow.flow_id}/G1",
+            f"impl/{self.flow.flow_id}/G2",
+        ]
+        for expected in expected_branches:
+            assert expected in deleted_branches, (
+                f"Branch {expected} was not cleaned up. Deleted: {deleted_branches}"
+            )
+
+    @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
+    @patch("se3.engine.steps.implement.delete_branch")
+    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
+    @patch("se3.engine.steps.implement.DAGScheduler")
+    @patch("se3.engine.steps.implement._make_execute_fn")
+    @patch("se3.config.load_conflict_resolver_config")
+    def test_finally_cleans_up_branches_on_normal_completion(
+        self, mock_config, mock_make_fn, mock_scheduler_cls,
+        mock_get_branch, mock_rm_wt, mock_del_branch, mock_merge,
+    ):
+        """Branches are cleaned up even on successful completion (idempotent cleanup)."""
+        from se3.engine.steps.implement import _run_dag_parallel
+        from se3.engine.dag_scheduler import GroupResult
+
+        mock_config.return_value = MagicMock(strategy="ours")
+
+        # Scheduler returns successful results
+        g1_result = GroupResult(
+            group_id="G1", status="completed", branch_name="impl/test-flow-stale/G1",
+            worktree_path=Path("/tmp/wt-g1"),
+        )
+        g2_result = GroupResult(
+            group_id="G2", status="completed", branch_name="impl/test-flow-stale/G2",
+            worktree_path=Path("/tmp/wt-g2"),
+        )
+        mock_scheduler_instance = MagicMock()
+        mock_scheduler_instance.run.return_value = [g1_result, g2_result]
+        mock_scheduler_instance.topological_merge_order.return_value = ["G1", "G2"]
+        mock_scheduler_cls.return_value = mock_scheduler_instance
+        mock_make_fn.return_value = MagicMock()
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            step_id="impl-normal-cleanup",
+            inputs={},
+            outputs={},
+        )
+
+        result = _run_dag_parallel(
+            groups=self.task_groups,
+            step=step,
+            flow=self.flow,
+            project_root=self.project_root,
+            task_description="test",
+            task_type="bugfix",
+            design_section="",
+            spec_summary="",
+            injection=None,
+            retry_count=0,
+        )
+
+        assert result == StepStatus.COMPLETED
+
+        # delete_branch should be called for all groups (in finally AND post-merge cleanup)
+        deleted_branches = [c[0][1] for c in mock_del_branch.call_args_list]
+        for gid in ["G1", "G2"]:
+            branch = f"impl/{self.flow.flow_id}/{gid}"
+            assert branch in deleted_branches, (
+                f"Branch {branch} not cleaned up. Deleted: {deleted_branches}"
+            )
