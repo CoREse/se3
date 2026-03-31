@@ -93,16 +93,25 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 try:
                     # Save original version for potential rollback
                     original_version = version_bumper.read_version(version_file)
-                except (ValueError, KeyError):
-                    # File exists but has no version variable — initialize it
+                except (ValueError, KeyError, RuntimeError):
+                    # File exists but has no readable version — auto-repair
                     logger.warning(
                         f"Version file {version_file} exists but has no readable version. "
-                        "Initializing version system."
+                        "Attempting auto-repair."
                     )
-                    version_file = version_bumper.initialize_version_system(
-                        project_root=project_root,
-                        initial_version="0.1.0"
-                    )
+                    if version_bumper._use_script_mode and version_bumper._script_runner:
+                        # Script mode: regenerate version script
+                        logger.info("Script mode detected, regenerating version script.")
+                        from ..version_script_interface import generate_version_script
+                        generate_version_script(project_root)
+                    else:
+                        # File mode: reinitialize version system
+                        logger.info("File mode detected, reinitializing version system.")
+                        version_file = version_bumper.initialize_version_system(
+                            project_root=project_root,
+                            initial_version="0.1.0"
+                        )
+                    # Retry — let any exception propagate normally
                     original_version = version_bumper.read_version(version_file)
 
                 # Bump the version
@@ -129,7 +138,25 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
                     bump_type = _get_bump_type(step, flow, version_config)
 
                     # Save original version for potential rollback
-                    original_version = version_bumper.read_version(version_file)
+                    try:
+                        original_version = version_bumper.read_version(version_file)
+                    except (ValueError, KeyError, RuntimeError):
+                        logger.warning(
+                            f"Freshly created version file {version_file} is not readable. "
+                            "Attempting auto-repair."
+                        )
+                        if version_bumper._use_script_mode and version_bumper._script_runner:
+                            logger.info("Script mode detected, regenerating version script.")
+                            from ..version_script_interface import generate_version_script
+                            generate_version_script(project_root)
+                        else:
+                            logger.info("File mode detected, reinitializing version system.")
+                            version_file = version_bumper.initialize_version_system(
+                                project_root=project_root,
+                                initial_version="0.1.0"
+                            )
+                        # Retry — let any exception propagate normally
+                        original_version = version_bumper.read_version(version_file)
 
                     # Bump the version
                     new_version = version_bumper.bump_version(
