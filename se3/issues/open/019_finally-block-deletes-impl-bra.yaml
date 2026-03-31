@@ -1,0 +1,17 @@
+id: 019
+title: finally block deletes impl branches before merge step (issue 018)
+description: In `_run_dag_parallel` (implement.py lines 705-712), the `finally` block
+  deletes all `impl/{flow_id}/{group_id}` branches. However, the merge step at lines
+  728-744 runs AFTER the finally block, attempting to merge branches that no longer
+  exist. This means `merge_loop_branch()` would fail for all completed groups, effectively
+  losing all DAG parallel work. The duplicate `delete_branch` at lines 747-752 confirms
+  the intent was to delete after merge, suggesting the finally-block deletion is a
+  bug. This is already tracked as issue 018 but is confirmed as a real critical bug.
+status: open
+priority: high
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+created_at: '2026-03-31T15:24:48.816489'
+updated_at: '2026-03-31T15:24:48.816489'

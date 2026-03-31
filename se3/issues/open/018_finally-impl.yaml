@@ -1,0 +1,11 @@
+id: 018
+title: finally 块过早删除 impl 分支导致合并丢失
+description: _run_dag_parallel 的 finally 块在合并步骤执行之前删除了所有 impl/ 分支，成功完成的 group 的代码变更可能在合并前被丢失。清理逻辑应移至合并完成之后。
+status: open
+priority: high
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-03-31T15:01:56.595882'
+updated_at: '2026-03-31T15:01:56.595882'
