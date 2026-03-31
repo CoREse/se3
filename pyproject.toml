@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "se3"
-version = "3.49.6"
+version = "3.49.7"
 description = "SE 3.0 framework - Pure CLI flow engine"
 requires-python = ">=3.8"
 dependencies = [
