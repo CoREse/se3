@@ -693,14 +693,14 @@ class TestStaleBranchHandling:
 
     @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
-    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
     @patch("se3.engine.steps.implement.DAGScheduler")
     @patch("se3.engine.steps.implement._make_execute_fn")
     @patch("se3.config.load_conflict_resolver_config")
     def test_finally_cleans_up_branches_for_all_groups(
         self, mock_config, mock_make_fn, mock_scheduler_cls,
-        mock_get_branch, mock_rm_wt, mock_del_branch, mock_merge,
+        mock_get_branch, mock_force_cleanup, mock_del_branch, mock_merge,
     ):
         """The finally block in _run_dag_parallel deletes impl branches for ALL groups."""
         from se3.engine.steps.implement import _run_dag_parallel
@@ -750,14 +750,14 @@ class TestStaleBranchHandling:
 
     @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
-    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
     @patch("se3.engine.steps.implement.DAGScheduler")
     @patch("se3.engine.steps.implement._make_execute_fn")
     @patch("se3.config.load_conflict_resolver_config")
     def test_finally_cleans_up_branches_on_normal_completion(
         self, mock_config, mock_make_fn, mock_scheduler_cls,
-        mock_get_branch, mock_rm_wt, mock_del_branch, mock_merge,
+        mock_get_branch, mock_force_cleanup, mock_del_branch, mock_merge,
     ):
         """Branches are cleaned up even on successful completion (idempotent cleanup)."""
         from se3.engine.steps.implement import _run_dag_parallel
@@ -949,14 +949,14 @@ class TestDagResumeFiltering:
 
     @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
-    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
     @patch("se3.engine.steps.implement.DAGScheduler")
     @patch("se3.engine.steps.implement._make_execute_fn")
     @patch("se3.config.load_conflict_resolver_config")
     def test_prior_outputs_merged_in_run_dag_parallel(
         self, mock_config, mock_make_fn, mock_scheduler_cls,
-        mock_get_branch, mock_rm_wt, mock_del_branch, mock_merge,
+        mock_get_branch, mock_force_cleanup, mock_del_branch, mock_merge,
     ):
         """_run_dag_parallel merges prior_outputs into aggregated results."""
         from se3.engine.steps.implement import _run_dag_parallel
@@ -1028,14 +1028,14 @@ class TestDagResumeFiltering:
 
     @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
-    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
     @patch("se3.engine.steps.implement.DAGScheduler")
     @patch("se3.engine.steps.implement._make_execute_fn")
     @patch("se3.config.load_conflict_resolver_config")
     def test_no_prior_outputs_preserves_default_behavior(
         self, mock_config, mock_make_fn, mock_scheduler_cls,
-        mock_get_branch, mock_rm_wt, mock_del_branch, mock_merge,
+        mock_get_branch, mock_force_cleanup, mock_del_branch, mock_merge,
     ):
         """_run_dag_parallel without prior_outputs behaves as before."""
         from se3.engine.steps.implement import _run_dag_parallel
@@ -1224,14 +1224,14 @@ class TestDagParallelResumeBehavior:
 
     @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
-    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
     @patch("se3.engine.steps.implement.DAGScheduler")
     @patch("se3.engine.steps.implement._make_execute_fn")
     @patch("se3.config.load_conflict_resolver_config")
     def test_dag_resume_restores_accumulated_state(
         self, mock_config, mock_make_fn, mock_scheduler_cls,
-        mock_get_branch, mock_rm_wt, mock_del_branch, mock_merge,
+        mock_get_branch, mock_force_cleanup, mock_del_branch, mock_merge,
     ):
         """Prior outputs are preserved and merged with new group results."""
         from se3.engine.steps.implement import _run_dag_parallel
