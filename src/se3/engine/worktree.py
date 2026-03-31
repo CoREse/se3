@@ -41,6 +41,7 @@ def _run_git(project_root: Path, *args: str, check: bool = True, timeout: int = 
         text=True,
         timeout=timeout,
         check=check,
+        stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0 and not check:
         logger.debug("Git command returned %d: %s", result.returncode, result.stderr.strip())
@@ -170,10 +171,13 @@ def create_worktree(project_root: Path, branch: str) -> Path:
     safe_name = _branch_safe_name(branch)
     worktree_path = project_root / "se3" / "worktrees" / safe_name
 
+    # Prune stale worktree entries to avoid lock contention
+    _run_git(project_root, "worktree", "prune", check=False)
+
     # Ensure parent directory exists
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
-    _run_git(project_root, "worktree", "add", str(worktree_path), branch)
+    _run_git(project_root, "worktree", "add", str(worktree_path), branch, timeout=120)
     logger.info("Created worktree at: %s (branch: %s)", worktree_path, branch)
 
     return worktree_path
