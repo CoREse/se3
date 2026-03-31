@@ -1,0 +1,11 @@
+id: '015'
+title: se3 history 显示不完整
+description: se3 history 只能显示最近一条记录，se3 history list 也无法显示其他记录。已记录为 issue 014。
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-03-31T11:10:56.886171'
+updated_at: '2026-03-31T11:10:56.886171'
