@@ -220,7 +220,8 @@ def create_worktree(project_root: Path, branch: str) -> Path:
 def remove_worktree(project_root: Path, worktree_path: Path) -> None:
     """Remove a git worktree.
 
-    Handles the case where the worktree directory has already been removed.
+    Handles the case where the worktree directory has already been removed
+    (pruning stale git metadata) and locked worktrees (using double-force).
 
     Args:
         project_root: Project root directory
@@ -229,16 +230,91 @@ def remove_worktree(project_root: Path, worktree_path: Path) -> None:
     if not worktree_path.exists():
         # Worktree directory already gone; prune stale entries
         _run_git(project_root, "worktree", "prune", check=False)
+        # After pruning, check if git metadata still references this path.
+        # If so, force-remove the stale entry.
+        _force_remove_if_still_registered(project_root, worktree_path)
         logger.info("Worktree directory already removed: %s", worktree_path)
         return
 
     result = _run_git(project_root, "worktree", "remove", str(worktree_path), "--force", check=False)
     if result.returncode != 0:
-        logger.warning("Failed to remove worktree %s: %s", worktree_path, result.stderr.strip())
-        # Try prune as fallback
+        stderr = result.stderr.strip()
+        if "locked" in stderr.lower():
+            # Locked worktree requires double-force to override
+            logger.info("Worktree is locked, retrying with double-force: %s", worktree_path)
+            retry = _run_git(
+                project_root, "worktree", "remove", "-f", "-f", str(worktree_path), check=False,
+            )
+            if retry.returncode == 0:
+                logger.info("Removed locked worktree: %s", worktree_path)
+                return
+            logger.warning(
+                "Failed to remove locked worktree %s even with double-force: %s",
+                worktree_path, retry.stderr.strip(),
+            )
+        else:
+            logger.warning("Failed to remove worktree %s: %s", worktree_path, stderr)
+        # Fallback: prune stale entries
         _run_git(project_root, "worktree", "prune", check=False)
     else:
         logger.info("Removed worktree: %s", worktree_path)
+
+
+def _force_remove_if_still_registered(project_root: Path, worktree_path: Path) -> None:
+    """Force-remove a worktree entry if git still tracks it after pruning.
+
+    This handles the case where the worktree directory is gone but git
+    metadata (e.g. a lock file) prevents pruning from cleaning it up.
+    """
+    result = _run_git(project_root, "worktree", "list", "--porcelain", check=False)
+    if result.returncode != 0:
+        return
+
+    wt_str = str(worktree_path)
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree ") and line.split(" ", 1)[1] == wt_str:
+            logger.info("Stale git metadata found for %s, force-removing", worktree_path)
+            _run_git(
+                project_root, "worktree", "remove", "-f", "-f", str(worktree_path), check=False,
+            )
+            return
+
+
+def force_cleanup_worktree(project_root: Path, branch_name: str) -> None:
+    """Forcefully clean up a worktree for the given branch regardless of state.
+
+    Combines unlock, directory removal, pruning, and verification to ensure
+    the worktree is fully removed. Suitable for resume scenarios where the
+    worktree may be in an inconsistent state (locked, partially created, etc.).
+
+    Args:
+        project_root: Project root directory
+        branch_name: The branch whose worktree should be cleaned up
+    """
+    safe_name = _branch_safe_name(branch_name)
+    worktree_path = project_root / "se3" / "worktrees" / safe_name
+
+    # Step 1: Unlock the worktree if locked (ignore errors if not locked)
+    _run_git(project_root, "worktree", "unlock", str(worktree_path), check=False)
+
+    # Step 2: Try git worktree remove with double-force
+    _run_git(project_root, "worktree", "remove", "-f", "-f", str(worktree_path), check=False)
+
+    # Step 3: Remove the directory if it still exists
+    if worktree_path.exists():
+        shutil.rmtree(worktree_path, ignore_errors=True)
+        logger.info("Removed worktree directory: %s", worktree_path)
+
+    # Step 4: Prune stale worktree entries
+    _run_git(project_root, "worktree", "prune", check=False)
+
+    # Step 5: Verify cleanup
+    if exists_for_branch(project_root, branch_name):
+        logger.warning(
+            "Worktree for branch %s still registered after force cleanup", branch_name,
+        )
+    else:
+        logger.info("Force cleanup complete for branch %s", branch_name)
 
 
 def merge_loop_branch(

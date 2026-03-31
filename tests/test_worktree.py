@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 from unittest.mock import call, patch
@@ -15,6 +16,7 @@ from se3.engine.worktree import (
     create_worktree,
     delete_branch,
     exists_for_branch,
+    force_cleanup_worktree,
     get_current_branch,
     get_diff_stat,
     has_commits,
@@ -205,6 +207,98 @@ class TestRemoveWorktree:
         # Try removing a non-existent worktree path — should not raise
         fake_path = tmp_path / "se3" / "worktrees" / "nonexistent"
         remove_worktree(tmp_path, fake_path)  # Should not raise
+
+
+class TestRemoveWorktreeLocked:
+    """Tests for remove_worktree handling locked worktrees."""
+
+    def test_removes_locked_worktree_with_double_force(self, tmp_path: Path) -> None:
+        """Locked worktree should be removed via double-force retry."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="lock-test")
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        # Lock the worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "lock", str(wt_path)],
+            check=True, capture_output=True,
+        )
+
+        # remove_worktree should handle the lock transparently
+        remove_worktree(tmp_path, wt_path)
+
+        assert not wt_path.exists()
+        assert not exists_for_branch(tmp_path, branch_name)
+
+    def test_cleans_stale_metadata_when_dir_gone(self, tmp_path: Path) -> None:
+        """When worktree dir is manually deleted, metadata should still be cleaned."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="stale-test")
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        # Manually delete the worktree directory (simulating crash)
+        shutil.rmtree(wt_path)
+        assert not wt_path.exists()
+
+        # Git still tracks it
+        assert exists_for_branch(tmp_path, branch_name)
+
+        # remove_worktree should clean up the metadata
+        remove_worktree(tmp_path, wt_path)
+
+        assert not exists_for_branch(tmp_path, branch_name)
+
+
+class TestForceCleanupWorktree:
+    """Tests for force_cleanup_worktree."""
+
+    def test_cleans_normal_worktree(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="fc-normal")
+        create_worktree(tmp_path, branch_name)
+
+        force_cleanup_worktree(tmp_path, branch_name)
+
+        assert not exists_for_branch(tmp_path, branch_name)
+
+    def test_cleans_locked_worktree(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="fc-locked")
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        # Lock the worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "lock", str(wt_path)],
+            check=True, capture_output=True,
+        )
+
+        force_cleanup_worktree(tmp_path, branch_name)
+
+        assert not wt_path.exists()
+        assert not exists_for_branch(tmp_path, branch_name)
+
+    def test_cleans_missing_directory(self, tmp_path: Path) -> None:
+        """Handles case where directory was already deleted but metadata remains."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="fc-missing")
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        # Manually remove directory
+        shutil.rmtree(wt_path)
+
+        force_cleanup_worktree(tmp_path, branch_name)
+
+        assert not exists_for_branch(tmp_path, branch_name)
+
+    def test_noop_when_no_worktree(self, tmp_path: Path) -> None:
+        """Should not raise when there's nothing to clean up."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="fc-noop")
+
+        # No worktree created — should not raise
+        force_cleanup_worktree(tmp_path, branch_name)
+
+        assert not exists_for_branch(tmp_path, branch_name)
 
 
 class TestMergeLoopBranch:
