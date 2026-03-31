@@ -510,11 +510,13 @@ def _generate_commit_message(
 def _get_commit_hash(project_root: Path) -> str:
     """Get the current commit hash.
 
+    Returns ``'unknown'`` on repos with no commits or on any git failure.
+
     Args:
         project_root: Project root directory
 
     Returns:
-        Commit hash string
+        Commit hash string, or ``'unknown'`` if unavailable
     """
     try:
         result = subprocess.run(
@@ -523,6 +525,8 @@ def _get_commit_hash(project_root: Path) -> str:
             text=True,
             cwd=project_root,
         )
-        return result.stdout.strip()
+        if result.returncode != 0:
+            return "unknown"
+        return result.stdout.strip() or "unknown"
     except Exception:
         return "unknown"

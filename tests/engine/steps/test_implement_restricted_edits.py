@@ -404,9 +404,10 @@ class TestCompletionStatusGroupByGroup:
         )
 
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("se3.engine.steps.implement._should_use_dag", return_value=False)
     @patch("se3.engine.steps.implement.LLMCaller")
     @patch("se3.engine.steps.implement.parse_json_response")
-    def test_all_groups_complete(self, mock_parse, mock_caller_cls, mock_inj):
+    def test_all_groups_complete(self, mock_parse, mock_caller_cls, mock_dag, mock_inj):
         """All groups completing returns COMPLETED."""
         groups = [
             {"group_id": "G1", "group_order": 1, "tasks": ["t1"]},
@@ -425,9 +426,10 @@ class TestCompletionStatusGroupByGroup:
         assert step.outputs["completion_status"] == "complete"
 
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("se3.engine.steps.implement._should_use_dag", return_value=False)
     @patch("se3.engine.steps.implement.LLMCaller")
     @patch("se3.engine.steps.implement.parse_json_response")
-    def test_one_group_partial_returns_partial(self, mock_parse, mock_caller_cls, mock_inj):
+    def test_one_group_partial_returns_partial(self, mock_parse, mock_caller_cls, mock_dag, mock_inj):
         """One group being partial makes overall status PARTIAL."""
         groups = [
             {"group_id": "G1", "group_order": 1, "tasks": ["t1"]},
@@ -452,9 +454,10 @@ class TestCompletionStatusGroupByGroup:
         assert len(step.outputs["incomplete_tasks"]) == 1
 
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("se3.engine.steps.implement._should_use_dag", return_value=False)
     @patch("se3.engine.steps.implement.LLMCaller")
     @patch("se3.engine.steps.implement.parse_json_response")
-    def test_failed_group_overrides_partial(self, mock_parse, mock_caller_cls, mock_inj):
+    def test_failed_group_overrides_partial(self, mock_parse, mock_caller_cls, mock_dag, mock_inj):
         """A failed group makes overall status FAILED even if others are partial."""
         groups = [
             {"group_id": "G1", "group_order": 1, "tasks": ["t1"]},
@@ -474,9 +477,10 @@ class TestCompletionStatusGroupByGroup:
         assert len(step.outputs["incomplete_tasks"]) == 2
 
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("se3.engine.steps.implement._should_use_dag", return_value=False)
     @patch("se3.engine.steps.implement.LLMCaller")
     @patch("se3.engine.steps.implement.parse_json_response")
-    def test_missing_status_defaults_complete(self, mock_parse, mock_caller_cls, mock_inj):
+    def test_missing_status_defaults_complete(self, mock_parse, mock_caller_cls, mock_dag, mock_inj):
         """Missing completion_status in group responses defaults to complete."""
         groups = [
             {"group_id": "G1", "group_order": 1, "tasks": ["t1"]},
@@ -495,9 +499,10 @@ class TestCompletionStatusGroupByGroup:
         assert step.outputs["completion_status"] == "complete"
 
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("se3.engine.steps.implement._should_use_dag", return_value=False)
     @patch("se3.engine.steps.implement.LLMCaller")
     @patch("se3.engine.steps.implement.parse_json_response")
-    def test_group_restricted_edits_aggregated(self, mock_parse, mock_caller_cls, mock_inj):
+    def test_group_restricted_edits_aggregated(self, mock_parse, mock_caller_cls, mock_dag, mock_inj):
         """Restricted edits from multiple groups are aggregated."""
         # Create files for edits
         f1 = self.project_root / "a.txt"
@@ -536,9 +541,10 @@ class TestCompletionStatusGroupByGroup:
         assert "b.txt" in step.outputs["files_changed"]
 
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    @patch("se3.engine.steps.implement._should_use_dag", return_value=False)
     @patch("se3.engine.steps.implement.LLMCaller")
     @patch("se3.engine.steps.implement.parse_json_response")
-    def test_summary_aggregated_across_groups(self, mock_parse, mock_caller_cls, mock_inj):
+    def test_summary_aggregated_across_groups(self, mock_parse, mock_caller_cls, mock_dag, mock_inj):
         """Summary is concatenated from all groups."""
         groups = [
             {"group_id": "G1", "group_order": 1, "tasks": ["t1"]},

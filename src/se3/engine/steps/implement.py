@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import threading
 from pathlib import Path
 from typing import Any, Callable
@@ -595,6 +596,19 @@ def _run_dag_parallel(
     from ...config import load_conflict_resolver_config
 
     original_branch = get_current_branch(project_root)
+
+    # DAG parallel mode requires at least one commit (for branch/worktree creation)
+    head_check = subprocess.run(
+        ["git", "-C", str(project_root), "rev-parse", "HEAD"],
+        capture_output=True, text=True,
+    )
+    if head_check.returncode != 0:
+        raise RuntimeError(
+            "DAG parallel execution requires at least one commit in the repository. "
+            "Please create an initial commit before running the implement step with "
+            "multiple task groups."
+        )
+
     conflict_config = load_conflict_resolver_config(project_root)
     conflict_strategy = conflict_config.strategy
 

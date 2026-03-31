@@ -53,6 +53,19 @@ def _add_commit(path: Path, filename: str, content: str, message: str) -> None:
     )
 
 
+def _init_empty_repo(path: Path) -> None:
+    """Initialize a git repo with NO commits (empty repo)."""
+    subprocess.run(["git", "init", str(path)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.email", "test@test.com"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "config", "user.name", "Test"],
+        check=True, capture_output=True,
+    )
+
+
 class TestGetCurrentBranch:
     def test_returns_branch_name(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
@@ -67,6 +80,25 @@ class TestGetCurrentBranch:
             check=True, capture_output=True,
         )
         assert get_current_branch(tmp_path) == "dev"
+
+    def test_empty_repo_returns_branch(self, tmp_path: Path) -> None:
+        """get_current_branch should work on repos with no commits."""
+        _init_empty_repo(tmp_path)
+        branch = get_current_branch(tmp_path)
+        assert branch in ("master", "main")
+
+    def test_empty_repo_custom_initial_branch(self, tmp_path: Path) -> None:
+        """get_current_branch should work on empty repos with custom initial branch."""
+        subprocess.run(
+            ["git", "init", "--initial-branch=develop", str(tmp_path)],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.email", "test@test.com"],
+            check=True, capture_output=True,
+        )
+        branch = get_current_branch(tmp_path)
+        assert branch == "develop"
 
 
 class TestCreateLoopBranch:

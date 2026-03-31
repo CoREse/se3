@@ -50,6 +50,9 @@ def _run_git(project_root: Path, *args: str, check: bool = True, timeout: int = 
 def get_current_branch(project_root: Path) -> str:
     """Get the current branch name.
 
+    Works on both normal repos and empty repos (git init with no commits)
+    by trying ``git symbolic-ref`` first, then falling back to ``rev-parse``.
+
     Args:
         project_root: Project root directory
 
@@ -57,13 +60,25 @@ def get_current_branch(project_root: Path) -> str:
         Current branch name
 
     Raises:
-        subprocess.CalledProcessError: If not in a git repo or detached HEAD
+        RuntimeError: If in detached HEAD state or no branch can be determined
     """
-    result = _run_git(project_root, "rev-parse", "--abbrev-ref", "HEAD")
-    branch = result.stdout.strip()
-    if branch == "HEAD":
-        raise RuntimeError("Detached HEAD state — cannot create loop branch")
-    return branch
+    # symbolic-ref works even on repos with no commits (orphan branch)
+    sym_result = _run_git(project_root, "symbolic-ref", "--short", "HEAD", check=False)
+    if sym_result.returncode == 0:
+        branch = sym_result.stdout.strip()
+        if branch:
+            return branch
+
+    # Fallback: rev-parse works on repos with commits
+    rp_result = _run_git(project_root, "rev-parse", "--abbrev-ref", "HEAD", check=False)
+    if rp_result.returncode == 0:
+        branch = rp_result.stdout.strip()
+        if branch == "HEAD":
+            raise RuntimeError("Detached HEAD state — cannot determine branch")
+        if branch:
+            return branch
+
+    raise RuntimeError("Cannot determine current branch")
 
 
 def _slugify_task_id(task: str) -> str:
