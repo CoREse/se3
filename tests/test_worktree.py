@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from unittest.mock import call, patch
 
 import pytest
 
@@ -516,6 +517,130 @@ class TestGetDiffStat:
 
         stat = get_diff_stat(tmp_path, branch_name, original)
         assert stat == ""
+
+
+class TestCreateWorktreeRetry:
+    """Tests for retry logic on TimeoutExpired in create_worktree."""
+
+    def test_succeeds_on_second_attempt(self, tmp_path: Path) -> None:
+        """TimeoutExpired on first attempt should retry and succeed."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="retry-ok")
+
+        original_run_git = __import__(
+            "se3.engine.worktree", fromlist=["_run_git"]
+        )._run_git
+
+        call_count = 0
+
+        def mock_run_git(project_root, *args, **kwargs):
+            nonlocal call_count
+            if args[:2] == ("worktree", "add"):
+                call_count += 1
+                if call_count == 1:
+                    raise subprocess.TimeoutExpired(
+                        cmd=["git", "worktree", "add"],
+                        timeout=120,
+                    )
+            return original_run_git(project_root, *args, **kwargs)
+
+        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+            wt_path = create_worktree(tmp_path, branch_name)
+
+        assert wt_path.exists()
+        assert call_count == 2  # first failed, second succeeded
+        # Clean up
+        remove_worktree(tmp_path, wt_path)
+
+    def test_raises_after_all_retries_exhausted(self, tmp_path: Path) -> None:
+        """Should re-raise TimeoutExpired after max retries."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="retry-fail")
+
+        original_run_git = __import__(
+            "se3.engine.worktree", fromlist=["_run_git"]
+        )._run_git
+
+        call_count = 0
+
+        def mock_run_git(project_root, *args, **kwargs):
+            nonlocal call_count
+            if args[:2] == ("worktree", "add"):
+                call_count += 1
+                raise subprocess.TimeoutExpired(
+                    cmd=["git", "worktree", "add"],
+                    timeout=kwargs.get("timeout", 120),
+                )
+            return original_run_git(project_root, *args, **kwargs)
+
+        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+            with pytest.raises(subprocess.TimeoutExpired):
+                create_worktree(tmp_path, branch_name)
+
+        # 1 initial + 2 retries = 3 total attempts
+        assert call_count == 3
+
+    def test_timeout_doubles_on_each_retry(self, tmp_path: Path) -> None:
+        """Timeout should double on each retry attempt."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="retry-double")
+
+        timeouts_seen = []
+
+        def mock_run_git(project_root, *args, **kwargs):
+            if args[:2] == ("worktree", "add"):
+                timeouts_seen.append(kwargs.get("timeout", 30))
+                raise subprocess.TimeoutExpired(
+                    cmd=["git", "worktree", "add"],
+                    timeout=kwargs.get("timeout", 30),
+                )
+            # Allow prune calls through without error
+            return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+            with pytest.raises(subprocess.TimeoutExpired):
+                create_worktree(tmp_path, branch_name)
+
+        assert timeouts_seen == [120, 240, 480]
+
+    def test_partial_worktree_dir_cleaned_on_retry(self, tmp_path: Path) -> None:
+        """Partial worktree directory should be removed before retry."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="retry-clean")
+
+        safe_name = branch_name.replace("/", "-")
+        worktree_path = tmp_path / "se3" / "worktrees" / safe_name
+
+        original_run_git = __import__(
+            "se3.engine.worktree", fromlist=["_run_git"]
+        )._run_git
+
+        call_count = 0
+
+        def mock_run_git(project_root, *args, **kwargs):
+            nonlocal call_count
+            if args[:2] == ("worktree", "add"):
+                call_count += 1
+                if call_count == 1:
+                    # Simulate partial directory creation before timeout
+                    worktree_path.mkdir(parents=True, exist_ok=True)
+                    (worktree_path / "partial_file").write_text("partial")
+                    raise subprocess.TimeoutExpired(
+                        cmd=["git", "worktree", "add"],
+                        timeout=120,
+                    )
+            return original_run_git(project_root, *args, **kwargs)
+
+        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+            wt_path = create_worktree(tmp_path, branch_name)
+
+        # The partial file should not exist (directory was cleaned)
+        assert not (wt_path / "partial_file").exists()
+        # But the worktree should be properly created
+        assert wt_path.exists()
+        assert (wt_path / "README.md").exists()
+        # Clean up
+        remove_worktree(tmp_path, wt_path)
 
 
 class TestHasCommits:

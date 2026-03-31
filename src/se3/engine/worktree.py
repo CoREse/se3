@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -177,10 +178,43 @@ def create_worktree(project_root: Path, branch: str) -> Path:
     # Ensure parent directory exists
     worktree_path.parent.mkdir(parents=True, exist_ok=True)
 
-    _run_git(project_root, "worktree", "add", str(worktree_path), branch, timeout=120)
-    logger.info("Created worktree at: %s (branch: %s)", worktree_path, branch)
+    max_retries = 2
+    timeout = 120
+    last_error: subprocess.TimeoutExpired | None = None
 
-    return worktree_path
+    for attempt in range(max_retries + 1):
+        try:
+            _run_git(project_root, "worktree", "add", str(worktree_path), branch, timeout=timeout)
+            logger.info("Created worktree at: %s (branch: %s)", worktree_path, branch)
+            return worktree_path
+        except subprocess.TimeoutExpired as e:
+            last_error = e
+            if attempt < max_retries:
+                logger.warning(
+                    "Worktree creation timed out after %ds (attempt %d/%d). "
+                    "Pruning stale worktrees and retrying with %ds timeout...",
+                    timeout, attempt + 1, max_retries + 1, timeout * 2,
+                )
+                # Clean up partial worktree directory
+                if worktree_path.exists():
+                    shutil.rmtree(worktree_path, ignore_errors=True)
+                # Prune stale worktrees that may cause lock contention
+                _run_git(project_root, "worktree", "prune", check=False)
+                # Double timeout for next attempt
+                timeout *= 2
+            else:
+                logger.error(
+                    "Worktree creation failed after %d attempts for branch '%s' at '%s'",
+                    max_retries + 1, branch, worktree_path,
+                )
+
+    # All retries exhausted — re-raise with context
+    raise subprocess.TimeoutExpired(
+        last_error.cmd,
+        last_error.timeout,
+        output=last_error.output,
+        stderr=last_error.stderr,
+    )
 
 
 def remove_worktree(project_root: Path, worktree_path: Path) -> None:

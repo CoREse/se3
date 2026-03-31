@@ -575,6 +575,17 @@ def _make_execute_fn(
                 restricted_edits=restricted_edits,
             )
 
+        except subprocess.TimeoutExpired as e:
+            wt_display = str(worktree_path) if worktree_path else "<not yet created>"
+            msg = (
+                f"Git worktree creation timed out for group {group_id} "
+                f"(branch: {branch_name}, worktree: {wt_display}, repo: {project_root}). "
+                f"Possible causes: git lock files in the repo, very large repository, "
+                f"or a git process waiting for interactive input. "
+                f"Check for stale .git/worktrees/*/locked files or index.lock."
+            )
+            logger.error(msg)
+            return GroupResult.failed(group_id, f"{msg} Original error: {e}")
         except (LLMCallError, Exception) as e:
             logger.exception("DAG: group %s failed", group_id)
             return GroupResult.failed(group_id, str(e))
