@@ -47,6 +47,19 @@ def _run_git(project_root: Path, *args: str, check: bool = True, timeout: int = 
     return result
 
 
+def has_commits(project_root: Path) -> bool:
+    """Check whether the repository has at least one commit.
+
+    Args:
+        project_root: Project root directory
+
+    Returns:
+        True if the repo has at least one commit, False otherwise
+    """
+    result = _run_git(project_root, "rev-parse", "HEAD", check=False)
+    return result.returncode == 0
+
+
 def get_current_branch(project_root: Path) -> str:
     """Get the current branch name.
 

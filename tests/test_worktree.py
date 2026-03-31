@@ -16,6 +16,7 @@ from se3.engine.worktree import (
     exists_for_branch,
     get_current_branch,
     get_diff_stat,
+    has_commits,
     has_new_commits,
     list_loop_branches,
     merge_loop_branch,
@@ -515,3 +516,25 @@ class TestGetDiffStat:
 
         stat = get_diff_stat(tmp_path, branch_name, original)
         assert stat == ""
+
+
+class TestHasCommits:
+    def test_repo_with_commits_returns_true(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        assert has_commits(tmp_path) is True
+
+    def test_empty_repo_returns_false(self, tmp_path: Path) -> None:
+        _init_empty_repo(tmp_path)
+        assert has_commits(tmp_path) is False
+
+    def test_after_adding_commit_returns_true(self, tmp_path: Path) -> None:
+        _init_empty_repo(tmp_path)
+        assert has_commits(tmp_path) is False
+        # Add a commit
+        (tmp_path / "file.txt").write_text("content")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "first"],
+            check=True, capture_output=True,
+        )
+        assert has_commits(tmp_path) is True

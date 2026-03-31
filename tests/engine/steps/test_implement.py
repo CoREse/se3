@@ -406,3 +406,114 @@ class TestShouldUseDag:
         assert single_idx < dag_idx, (
             "Single-group check must come before DAG check in implement_handler"
         )
+
+    def test_no_commits_falls_back_to_sequential(self):
+        """When has_commits() returns False, DAG path is skipped."""
+        from se3.engine.steps.implement import implement_handler
+        import inspect
+
+        source = inspect.getsource(implement_handler)
+        # has_commits check must appear inside the _should_use_dag block
+        dag_idx = source.index("_should_use_dag")
+        has_commits_idx = source.index("has_commits(project_root)")
+        assert has_commits_idx > dag_idx, (
+            "has_commits check must be inside the DAG decision block"
+        )
+        # _run_dag_parallel should only be called when has_commits is True
+        assert "not has_commits(project_root)" in source, (
+            "implement_handler must check has_commits before calling _run_dag_parallel"
+        )
+
+
+class TestDagEmptyRepoFallback:
+    """Test that DAG parallel path falls back to sequential in empty repos."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.project_root = Path(self.tmpdir)
+
+        self.flow = FlowInstance(
+            flow_id="test-flow-empty",
+            task_description="Test empty repo",
+            task_type="feature",
+        )
+
+        self.task_groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2}]},
+        ]
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @patch("se3.engine.steps.implement.has_commits", return_value=False)
+    @patch("se3.engine.steps.implement._should_use_dag", return_value=True)
+    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("se3.engine.steps.implement.parse_json_response")
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    def test_empty_repo_skips_dag_uses_sequential(
+        self, mock_injection, mock_parse, mock_caller, mock_dag, mock_has_commits,
+    ):
+        """When repo has no commits, multiple groups execute sequentially."""
+        mock_parse.return_value = {
+            "files_changed": ["a.py"],
+            "tests_added": [],
+            "test_mapping": {},
+            "summary": "done",
+            "completion_status": "complete",
+            "incomplete_tasks": [],
+            "restricted_edits": [],
+        }
+        mock_caller_instance = MagicMock()
+        mock_caller_instance.call.return_value = "{}"
+        mock_caller.return_value = mock_caller_instance
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.PENDING,
+            step_id="impl-empty",
+            inputs={
+                "task_description": "test",
+                "task_type": "feature",
+                "task_groups": self.task_groups,
+                "spec_content": {},
+            },
+            outputs={},
+        )
+
+        from se3.engine.steps.implement import implement_handler
+        result = implement_handler(step, self.flow)
+
+        # Should NOT have called _run_dag_parallel (we'd see an error if it did)
+        assert result == StepStatus.COMPLETED
+        # LLMCaller should have been called once per group (sequential)
+        assert mock_caller.call_count == 2
+
+    @patch("se3.engine.steps.implement.has_commits", return_value=True)
+    @patch("se3.engine.steps.implement._run_dag_parallel")
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    def test_repo_with_commits_uses_dag(
+        self, mock_injection, mock_dag_parallel, mock_has_commits,
+    ):
+        """When repo has commits, DAG parallel path is used."""
+        mock_dag_parallel.return_value = StepStatus.COMPLETED
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.PENDING,
+            step_id="impl-dag",
+            inputs={
+                "task_description": "test",
+                "task_type": "feature",
+                "task_groups": self.task_groups,
+                "spec_content": {},
+            },
+            outputs={},
+        )
+
+        from se3.engine.steps.implement import implement_handler
+        result = implement_handler(step, self.flow)
+
+        assert result == StepStatus.COMPLETED
+        mock_dag_parallel.assert_called_once()

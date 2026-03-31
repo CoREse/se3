@@ -181,9 +181,9 @@ class LoopController:
             import subprocess
             head_result = subprocess.run(
                 ["git", "-C", str(self._effective_root), "rev-parse", "HEAD"],
-                capture_output=True, text=True, check=True,
+                capture_output=True, text=True, check=False,
             )
-            self.iteration_start_commit = head_result.stdout.strip()
+            self.iteration_start_commit = head_result.stdout.strip() if head_result.returncode == 0 else ""
         except Exception:
             self.iteration_start_commit = ""
 

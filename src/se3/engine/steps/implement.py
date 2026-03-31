@@ -23,6 +23,7 @@ from ..worktree import (
     create_worktree,
     delete_branch,
     get_current_branch,
+    has_commits,
     merge_loop_branch,
     remove_worktree,
 )
@@ -245,18 +246,24 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     # --- DAG parallel path (when dependency info is present) ---
     if _should_use_dag(groups):
-        return _run_dag_parallel(
-            groups=groups,
-            step=step,
-            flow=flow,
-            project_root=project_root,
-            task_description=task_description,
-            task_type=task_type,
-            design_section=design_section,
-            spec_summary=spec_summary,
-            injection=injection,
-            retry_count=retry_count,
-        )
+        if not has_commits(project_root):
+            logger.warning(
+                "Repository has no commits — falling back to sequential "
+                "group-by-group execution instead of DAG parallel"
+            )
+        else:
+            return _run_dag_parallel(
+                groups=groups,
+                step=step,
+                flow=flow,
+                project_root=project_root,
+                task_description=task_description,
+                task_type=task_type,
+                design_section=design_section,
+                spec_summary=spec_summary,
+                injection=injection,
+                retry_count=retry_count,
+            )
 
     # --- Group-by-group execution ---
     logger.info("Executing %d task groups sequentially", len(groups))
@@ -596,18 +603,6 @@ def _run_dag_parallel(
     from ...config import load_conflict_resolver_config
 
     original_branch = get_current_branch(project_root)
-
-    # DAG parallel mode requires at least one commit (for branch/worktree creation)
-    head_check = subprocess.run(
-        ["git", "-C", str(project_root), "rev-parse", "HEAD"],
-        capture_output=True, text=True,
-    )
-    if head_check.returncode != 0:
-        raise RuntimeError(
-            "DAG parallel execution requires at least one commit in the repository. "
-            "Please create an initial commit before running the implement step with "
-            "multiple task groups."
-        )
 
     conflict_config = load_conflict_resolver_config(project_root)
     conflict_strategy = conflict_config.strategy
