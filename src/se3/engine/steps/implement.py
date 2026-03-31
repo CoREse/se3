@@ -254,8 +254,34 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 "group-by-group execution instead of DAG parallel"
             )
         else:
+            # Resume filtering for DAG parallel path
+            prior_outputs: dict[str, Any] | None = None
+            dag_groups = groups
+            if step.inputs.get("resumed") and step.outputs.get("implemented_groups"):
+                completed_groups_dag = set(
+                    g if isinstance(g, str) else g.get("group_id", "")
+                    for g in step.outputs["implemented_groups"]
+                )
+                dag_groups = [
+                    g for g in groups
+                    if g.get("group_id", g.get("name", "unknown")) not in completed_groups_dag
+                ]
+                if not dag_groups:
+                    logger.info("DAG parallel: all groups already completed on resume")
+                    return StepStatus.COMPLETED
+                prior_outputs = {
+                    "files_changed": list(step.outputs.get("files_changed", [])),
+                    "tests_added": list(step.outputs.get("tests_added", [])),
+                    "test_mapping": dict(step.outputs.get("test_mapping", {})),
+                    "implemented_groups": list(step.outputs.get("implemented_groups", [])),
+                }
+                logger.info(
+                    "DAG parallel resume: skipping %d completed groups, running %d remaining",
+                    len(completed_groups_dag), len(dag_groups),
+                )
+
             return _run_dag_parallel(
-                groups=groups,
+                groups=dag_groups,
                 step=step,
                 flow=flow,
                 project_root=project_root,
@@ -265,6 +291,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 spec_summary=spec_summary,
                 injection=injection,
                 retry_count=retry_count,
+                prior_outputs=prior_outputs,
             )
 
     # --- Group-by-group execution ---
@@ -624,12 +651,18 @@ def _run_dag_parallel(
     spec_summary: str,
     injection: str | None,
     retry_count: int,
+    prior_outputs: dict[str, Any] | None = None,
 ) -> StepStatus:
     """DAG parallel execution path for implement step.
 
     Creates a DAGScheduler from group dependencies, runs all groups in
     parallel via worktree-isolated LLM agents, then merges results back
     in topological order.
+
+    Args:
+        prior_outputs: Optional dict with keys files_changed, tests_added,
+            test_mapping, implemented_groups from a previous (resumed) run.
+            These are merged into the final aggregated outputs.
     """
     from ...config import load_conflict_resolver_config
 
@@ -727,13 +760,13 @@ def _run_dag_parallel(
             all_restricted_applied.extend(applied)
             all_restricted_failed.extend(failed_edits)
 
-    # Aggregate outputs
-    all_files_changed: list[str] = []
-    all_tests_added: list[str] = []
-    merged_test_mapping: dict = {}
+    # Aggregate outputs — seed from prior_outputs (resume) if available
+    all_files_changed: list[str] = list(prior_outputs.get("files_changed", [])) if prior_outputs else []
+    all_tests_added: list[str] = list(prior_outputs.get("tests_added", [])) if prior_outputs else []
+    merged_test_mapping: dict = dict(prior_outputs.get("test_mapping", {})) if prior_outputs else {}
     all_completion_statuses: list[str] = []
     all_incomplete_tasks: list[str] = []
-    implemented_group_ids: list[str] = []
+    implemented_group_ids: list[str] = list(prior_outputs.get("implemented_groups", [])) if prior_outputs else []
     summaries: list[str] = []
 
     for r in results:

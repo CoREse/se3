@@ -806,3 +806,275 @@ class TestStaleBranchHandling:
             assert branch in deleted_branches, (
                 f"Branch {branch} not cleaned up. Deleted: {deleted_branches}"
             )
+
+
+class TestDagResumeFiltering:
+    """Test that DAG parallel path correctly skips completed groups on resume."""
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.project_root = Path(self.tmpdir)
+
+        self.flow = FlowInstance(
+            flow_id="test-flow-resume-dag",
+            task_description="Test DAG resume",
+            task_type="bugfix",
+        )
+
+        self.task_groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2}]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"], "tasks": [{"id": 3}]},
+            {"group_id": "G4", "group_order": 4, "depends_on": ["G2", "G3"], "tasks": [{"id": 4}]},
+        ]
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @patch("se3.engine.steps.implement.has_commits", return_value=True)
+    @patch("se3.engine.steps.implement._run_dag_parallel")
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    def test_resume_filters_completed_groups_from_dag(
+        self, mock_injection, mock_dag_parallel, mock_has_commits,
+    ):
+        """On resume, completed groups should be filtered out before calling _run_dag_parallel."""
+        mock_dag_parallel.return_value = StepStatus.COMPLETED
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            step_id="impl-resume-dag",
+            inputs={
+                "task_description": "test",
+                "task_type": "bugfix",
+                "task_groups": self.task_groups,
+                "spec_content": {},
+                "resumed": True,
+            },
+            outputs={
+                "implemented_groups": ["G1"],
+                "files_changed": ["a.py"],
+                "tests_added": ["test_a.py"],
+                "test_mapping": {"a.py": "test_a.py"},
+            },
+        )
+
+        from se3.engine.steps.implement import implement_handler
+        result = implement_handler(step, self.flow)
+
+        assert result == StepStatus.COMPLETED
+        mock_dag_parallel.assert_called_once()
+
+        # Check that only remaining groups (G2, G3, G4) were passed
+        call_kwargs = mock_dag_parallel.call_args
+        passed_groups = call_kwargs.kwargs.get("groups") or call_kwargs[1].get("groups")
+        passed_group_ids = [g["group_id"] for g in passed_groups]
+        assert "G1" not in passed_group_ids
+        assert set(passed_group_ids) == {"G2", "G3", "G4"}
+
+        # Check that prior_outputs was passed
+        prior = call_kwargs.kwargs.get("prior_outputs") or call_kwargs[1].get("prior_outputs")
+        assert prior is not None
+        assert prior["files_changed"] == ["a.py"]
+        assert prior["tests_added"] == ["test_a.py"]
+        assert prior["test_mapping"] == {"a.py": "test_a.py"}
+        assert prior["implemented_groups"] == ["G1"]
+
+    @patch("se3.engine.steps.implement.has_commits", return_value=True)
+    @patch("se3.engine.steps.implement._run_dag_parallel")
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    def test_resume_all_completed_returns_early(
+        self, mock_injection, mock_dag_parallel, mock_has_commits,
+    ):
+        """If all groups are already completed on resume, return COMPLETED without calling DAG."""
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            step_id="impl-resume-all-done",
+            inputs={
+                "task_description": "test",
+                "task_type": "bugfix",
+                "task_groups": self.task_groups,
+                "spec_content": {},
+                "resumed": True,
+            },
+            outputs={
+                "implemented_groups": ["G1", "G2", "G3", "G4"],
+                "files_changed": ["a.py", "b.py"],
+                "tests_added": [],
+                "test_mapping": {},
+            },
+        )
+
+        from se3.engine.steps.implement import implement_handler
+        result = implement_handler(step, self.flow)
+
+        assert result == StepStatus.COMPLETED
+        mock_dag_parallel.assert_not_called()
+
+    @patch("se3.engine.steps.implement.has_commits", return_value=True)
+    @patch("se3.engine.steps.implement._run_dag_parallel")
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
+    def test_fresh_start_passes_no_prior_outputs(
+        self, mock_injection, mock_dag_parallel, mock_has_commits,
+    ):
+        """Fresh start (no resume) should pass prior_outputs=None."""
+        mock_dag_parallel.return_value = StepStatus.COMPLETED
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.PENDING,
+            step_id="impl-fresh-dag",
+            inputs={
+                "task_description": "test",
+                "task_type": "feature",
+                "task_groups": self.task_groups,
+                "spec_content": {},
+            },
+            outputs={},
+        )
+
+        from se3.engine.steps.implement import implement_handler
+        result = implement_handler(step, self.flow)
+
+        assert result == StepStatus.COMPLETED
+        call_kwargs = mock_dag_parallel.call_args
+        prior = call_kwargs.kwargs.get("prior_outputs") or call_kwargs[1].get("prior_outputs")
+        assert prior is None
+
+    @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
+    @patch("se3.engine.steps.implement.delete_branch")
+    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
+    @patch("se3.engine.steps.implement.DAGScheduler")
+    @patch("se3.engine.steps.implement._make_execute_fn")
+    @patch("se3.config.load_conflict_resolver_config")
+    def test_prior_outputs_merged_in_run_dag_parallel(
+        self, mock_config, mock_make_fn, mock_scheduler_cls,
+        mock_get_branch, mock_rm_wt, mock_del_branch, mock_merge,
+    ):
+        """_run_dag_parallel merges prior_outputs into aggregated results."""
+        from se3.engine.steps.implement import _run_dag_parallel
+        from se3.engine.dag_scheduler import GroupResult
+
+        mock_config.return_value = MagicMock(strategy="ours")
+
+        g3_result = GroupResult(
+            group_id="G3", status="completed",
+            branch_name="impl/test-flow-resume-dag/G3",
+            worktree_path=Path("/tmp/wt-g3"),
+            files_changed=["c.py"],
+            tests_added=["test_c.py"],
+            test_mapping={"c.py": "test_c.py"},
+            summary="implemented G3",
+        )
+        mock_scheduler_instance = MagicMock()
+        mock_scheduler_instance.run.return_value = [g3_result]
+        mock_scheduler_instance.topological_merge_order.return_value = ["G3"]
+        mock_scheduler_cls.return_value = mock_scheduler_instance
+        mock_make_fn.return_value = MagicMock()
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            step_id="impl-merge-prior",
+            inputs={},
+            outputs={},
+        )
+
+        prior = {
+            "files_changed": ["a.py", "b.py"],
+            "tests_added": ["test_a.py"],
+            "test_mapping": {"a.py": "test_a.py"},
+            "implemented_groups": ["G1", "G2"],
+        }
+
+        remaining_groups = [
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"], "tasks": [{"id": 3}]},
+        ]
+
+        result = _run_dag_parallel(
+            groups=remaining_groups,
+            step=step,
+            flow=self.flow,
+            project_root=self.project_root,
+            task_description="test",
+            task_type="bugfix",
+            design_section="",
+            spec_summary="",
+            injection=None,
+            retry_count=0,
+            prior_outputs=prior,
+        )
+
+        assert result == StepStatus.COMPLETED
+
+        # Verify merged outputs
+        assert "a.py" in step.outputs["files_changed"]
+        assert "b.py" in step.outputs["files_changed"]
+        assert "c.py" in step.outputs["files_changed"]
+        assert "test_a.py" in step.outputs["tests_added"]
+        assert "test_c.py" in step.outputs["tests_added"]
+        assert step.outputs["test_mapping"]["a.py"] == "test_a.py"
+        assert step.outputs["test_mapping"]["c.py"] == "test_c.py"
+        assert "G1" in step.outputs["implemented_groups"]
+        assert "G2" in step.outputs["implemented_groups"]
+        assert "G3" in step.outputs["implemented_groups"]
+
+    @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
+    @patch("se3.engine.steps.implement.delete_branch")
+    @patch("se3.engine.steps.implement.remove_worktree")
+    @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
+    @patch("se3.engine.steps.implement.DAGScheduler")
+    @patch("se3.engine.steps.implement._make_execute_fn")
+    @patch("se3.config.load_conflict_resolver_config")
+    def test_no_prior_outputs_preserves_default_behavior(
+        self, mock_config, mock_make_fn, mock_scheduler_cls,
+        mock_get_branch, mock_rm_wt, mock_del_branch, mock_merge,
+    ):
+        """_run_dag_parallel without prior_outputs behaves as before."""
+        from se3.engine.steps.implement import _run_dag_parallel
+        from se3.engine.dag_scheduler import GroupResult
+
+        mock_config.return_value = MagicMock(strategy="ours")
+
+        g1_result = GroupResult(
+            group_id="G1", status="completed",
+            branch_name="impl/test-flow-resume-dag/G1",
+            worktree_path=Path("/tmp/wt-g1"),
+            files_changed=["a.py"],
+            tests_added=[],
+            test_mapping={},
+            summary="done G1",
+        )
+        mock_scheduler_instance = MagicMock()
+        mock_scheduler_instance.run.return_value = [g1_result]
+        mock_scheduler_instance.topological_merge_order.return_value = ["G1"]
+        mock_scheduler_cls.return_value = mock_scheduler_instance
+        mock_make_fn.return_value = MagicMock()
+
+        step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            step_id="impl-no-prior",
+            inputs={},
+            outputs={},
+        )
+
+        result = _run_dag_parallel(
+            groups=[{"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]}],
+            step=step,
+            flow=self.flow,
+            project_root=self.project_root,
+            task_description="test",
+            task_type="bugfix",
+            design_section="",
+            spec_summary="",
+            injection=None,
+            retry_count=0,
+        )
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["files_changed"] == ["a.py"]
+        assert step.outputs["implemented_groups"] == ["G1"]
