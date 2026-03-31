@@ -470,6 +470,15 @@ def _make_execute_fn(
         try:
             # Step 1: Create branch from original_branch
             with git_lock:
+                # Delete stale branch from a previous failed run (if any)
+                stale = _run_git(
+                    project_root, "branch", "-D", branch_name, check=False,
+                )
+                if stale.returncode == 0:
+                    logger.debug(
+                        "DAG: cleaned up stale branch %s before recreation",
+                        branch_name,
+                    )
                 _run_git(project_root, "branch", branch_name, original_branch)
                 logger.info(
                     "DAG: created branch %s from %s", branch_name, original_branch,
@@ -648,6 +657,15 @@ def _run_dag_parallel(
                     remove_worktree(project_root, r.worktree_path)
                 except Exception:
                     logger.warning("DAG: failed to remove worktree %s", r.worktree_path)
+
+        # Always clean up impl branches for all groups
+        for g in groups:
+            gid = g.get("group_id", g.get("name", "unknown"))
+            branch = f"impl/{flow.flow_id}/{gid}"
+            try:
+                delete_branch(project_root, branch)
+            except Exception:
+                logger.debug("DAG: failed to delete branch %s in finally cleanup", branch)
 
         # Ensure we're back on original_branch
         try:
