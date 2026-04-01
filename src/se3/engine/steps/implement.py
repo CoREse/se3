@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from ..dag_scheduler import DAGScheduler, GroupResult
+from ..dag_scheduler import DAGScheduler, GroupResult, RelayContext, RelayPlan
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
 from ..utils.json_parser import parse_json_response
@@ -23,6 +23,7 @@ from ..worktree import (
     create_worktree,
     delete_branch,
     force_cleanup_worktree,
+    fork_worktree,
     get_conflicting_files,
     get_current_branch,
     has_commits,
@@ -572,116 +573,124 @@ def _make_execute_fn(
     spec_summary: str,
     injection: str | None,
     retry_count: int,
-) -> Callable[[dict, dict[str, GroupResult]], GroupResult]:
-    """Build the execute_fn closure for DAG parallel execution.
+) -> Callable[[dict, dict[str, GroupResult], RelayContext], GroupResult]:
+    """Build the execute_fn closure for relay-based DAG parallel execution.
 
-    The returned callable creates a worktree per group, pre-merges dependency
-    branches, runs the LLM agent, commits changes, and returns a GroupResult.
+    The returned callable acquires a worktree via the relay strategy
+    (reuse predecessor / fork / create new), handles convergence merges,
+    runs the LLM agent, commits changes, and returns a GroupResult.
     """
     git_lock = threading.Lock()
 
-    def execute_fn(group: dict, deps_results: dict[str, GroupResult]) -> GroupResult:
+    def execute_fn(
+        group: dict,
+        deps_results: dict[str, GroupResult],
+        relay_context: RelayContext,
+    ) -> GroupResult:
         group_id = group.get("group_id", group.get("name", "unknown"))
         branch_name = f"impl/{flow.flow_id}/{group_id}"
         worktree_path: Path | None = None
 
         try:
-            # Step 1: Create branch from original_branch
-            with git_lock:
-                # Clean up stale worktree from a previous interrupted run (if any).
-                # Must remove worktree BEFORE deleting the branch, because git
-                # refuses to delete a branch that is checked out in a worktree.
-                force_cleanup_worktree(project_root, branch_name)
-
-                # Delete stale branch from a previous failed run (if any)
-                stale = _run_git(
-                    project_root, "branch", "-D", branch_name, check=False,
-                )
-                if stale.returncode == 0:
-                    logger.debug(
-                        "DAG: cleaned up stale branch %s before recreation",
-                        branch_name,
-                    )
-                _run_git(project_root, "branch", branch_name, original_branch)
+            # Step 1: Acquire worktree based on relay_context
+            if relay_context.worktree_path is not None:
+                # Relay: reuse predecessor's worktree and branch directly
+                worktree_path = relay_context.worktree_path
+                branch_name = relay_context.branch_name or branch_name
                 logger.info(
-                    "DAG: created branch %s from %s", branch_name, original_branch,
+                    "DAG relay: group %s reusing worktree %s (branch %s)",
+                    group_id, worktree_path, branch_name,
+                )
+            elif relay_context.is_fork and relay_context.fork_source_branch:
+                # Fork: create new branch from predecessor's branch + new worktree
+                with git_lock:
+                    force_cleanup_worktree(project_root, branch_name)
+                    _run_git(project_root, "branch", "-D", branch_name, check=False)
+                    worktree_path = fork_worktree(
+                        project_root, relay_context.fork_source_branch, branch_name,
+                    )
+                logger.info(
+                    "DAG fork: group %s forked from %s to %s (worktree %s)",
+                    group_id, relay_context.fork_source_branch,
+                    branch_name, worktree_path,
+                )
+            else:
+                # Root node (or no relay_plan): create new branch + worktree
+                with git_lock:
+                    force_cleanup_worktree(project_root, branch_name)
+                    _run_git(project_root, "branch", "-D", branch_name, check=False)
+                    _run_git(project_root, "branch", branch_name, original_branch)
+                    logger.info(
+                        "DAG root: created branch %s from %s",
+                        branch_name, original_branch,
+                    )
+                    worktree_path = create_worktree(project_root, branch_name)
+                logger.info(
+                    "DAG root: group %s created worktree %s",
+                    group_id, worktree_path,
                 )
 
-            # Step 2: Pre-merge dependency branches (if any)
-            if deps_results:
+            # Step 2: Convergence merge — merge secondary predecessor branches
+            if relay_context.convergence_merges:
                 with git_lock:
-                    _run_git(project_root, "checkout", branch_name)
-                    for dep_id, dep_result in deps_results.items():
-                        if dep_result.branch_name:
-                            logger.info(
-                                "DAG: merging dep branch %s into %s",
-                                dep_result.branch_name, branch_name,
+                    for sec_branch in relay_context.convergence_merges:
+                        logger.info(
+                            "DAG convergence: merging %s into worktree at %s",
+                            sec_branch, worktree_path,
+                        )
+                        merge_result = _run_git(
+                            worktree_path, "merge", sec_branch, "--no-edit",
+                            check=False,
+                        )
+                        if merge_result.returncode != 0:
+                            stderr = merge_result.stderr.strip()
+                            is_conflict = "CONFLICT" in (
+                                merge_result.stdout + merge_result.stderr
                             )
-                            merge_result = _run_git(
-                                project_root, "merge",
-                                dep_result.branch_name, "--no-edit",
-                                check=False,
-                            )
-                            if merge_result.returncode != 0:
-                                # Merge conflict — try auto-resolve, abort if can't
-                                stderr = merge_result.stderr.strip()
-                                is_conflict = "CONFLICT" in (merge_result.stdout + merge_result.stderr)
-                                if is_conflict:
-                                    logger.warning(
-                                        "DAG: conflict merging dep %s into %s, attempting auto-resolve",
-                                        dep_result.branch_name, branch_name,
+                            if is_conflict:
+                                logger.warning(
+                                    "DAG convergence: conflict merging %s, "
+                                    "attempting LLM resolution",
+                                    sec_branch,
+                                )
+                                conflict_files = get_conflicting_files(worktree_path)
+                                if conflict_files:
+                                    resolved = _resolve_convergence_conflicts(
+                                        worktree_path, conflict_files,
+                                        task_description, deps_results,
                                     )
-                                    # Accept all changes from the dep branch for conflicting files
-                                    # (dep branch is the "theirs" side when merging into our branch)
-                                    conflict_files = _run_git(
-                                        project_root, "diff", "--name-only", "--diff-filter=U",
-                                        check=False,
-                                    )
-                                    if conflict_files.returncode == 0 and conflict_files.stdout.strip():
-                                        for cf in conflict_files.stdout.strip().splitlines():
-                                            _run_git(
-                                                project_root, "checkout", "--theirs", cf.strip(),
-                                                check=False,
-                                            )
-                                            _run_git(project_root, "add", cf.strip(), check=False)
-                                        commit_result = _run_git(
-                                            project_root, "commit", "--no-edit", check=False,
+                                    if not resolved:
+                                        _run_git(
+                                            worktree_path, "merge", "--abort",
+                                            check=False,
                                         )
-                                        if commit_result.returncode == 0:
-                                            logger.info(
-                                                "DAG: auto-resolved conflict for dep %s (accepted theirs)",
-                                                dep_id,
-                                            )
-                                        else:
-                                            _run_git(project_root, "merge", "--abort", check=False)
-                                            _run_git(project_root, "checkout", original_branch)
-                                            return GroupResult.failed(
-                                                group_id,
-                                                f"Merge conflict with dep {dep_id} could not be auto-resolved",
-                                            )
-                                    else:
-                                        _run_git(project_root, "merge", "--abort", check=False)
-                                        _run_git(project_root, "checkout", original_branch)
                                         return GroupResult.failed(
                                             group_id,
-                                            f"Merge conflict with dep {dep_id}: {stderr}",
+                                            f"Convergence merge conflict with "
+                                            f"{sec_branch} could not be resolved",
                                         )
                                 else:
-                                    _run_git(project_root, "merge", "--abort", check=False)
-                                    _run_git(project_root, "checkout", original_branch)
+                                    _run_git(
+                                        worktree_path, "merge", "--abort",
+                                        check=False,
+                                    )
                                     return GroupResult.failed(
                                         group_id,
-                                        f"Failed to merge dep {dep_id}: {stderr}",
+                                        f"Convergence merge failed: {sec_branch}: "
+                                        f"{stderr}",
                                     )
-                    # Switch back to original_branch to not block others
-                    _run_git(project_root, "checkout", original_branch)
+                            else:
+                                _run_git(
+                                    worktree_path, "merge", "--abort",
+                                    check=False,
+                                )
+                                return GroupResult.failed(
+                                    group_id,
+                                    f"Convergence merge failed: {sec_branch}: "
+                                    f"{stderr}",
+                                )
 
-            # Step 3: Create worktree (delayed creation)
-            with git_lock:
-                worktree_path = create_worktree(project_root, branch_name)
-            logger.info("DAG: created worktree at %s for group %s", worktree_path, group_id)
-
-            # Step 4: Build previous_results context from deps_results
+            # Step 3: Build previous_results context from deps_results
             if deps_results:
                 prev_results = [
                     {
@@ -695,7 +704,7 @@ def _make_execute_fn(
             else:
                 prev_ctx = "No previous groups."
 
-            # Step 5: Format prompt
+            # Step 4: Format prompt
             prompt = IMPLEMENT_GROUP_PROMPT.format(
                 task_description=task_description,
                 task_type=task_type,
@@ -713,7 +722,7 @@ def _make_execute_fn(
             if runtime_ctx:
                 prompt += runtime_ctx
 
-            # Step 6: Run LLM in the worktree
+            # Step 5: Run LLM in the worktree
             caller = LLMCaller(
                 worktree_path,
                 flow_id=flow.flow_id,
@@ -728,7 +737,7 @@ def _make_execute_fn(
             )
             result = parse_json_response(response, required_keys=[])
 
-            # Step 7: Commit changes in the worktree (only if there are changes)
+            # Step 6: Commit changes in the worktree (only if there are changes)
             _run_git(worktree_path, "add", "-A", check=False)
             status_result = _run_git(worktree_path, "status", "--porcelain", check=False)
             has_changes = bool(status_result.stdout.strip())
@@ -747,7 +756,7 @@ def _make_execute_fn(
             else:
                 logger.info("DAG: no changes in worktree for group %s, skipping commit", group_id)
 
-            # Step 8: Build GroupResult
+            # Step 7: Build GroupResult
             files_changed = result.get("files_changed", []) if result else []
             tests_added = result.get("tests_added", []) if result else []
             test_mapping = result.get("test_mapping", {}) if result else {}
@@ -756,6 +765,15 @@ def _make_execute_fn(
             incomplete_tasks = result.get("incomplete_tasks", []) if result else []
             restricted_edits = result.get("restricted_edits", []) if result else []
 
+            # For relay/fork nodes, always preserve the branch name so downstream
+            # groups and leaf merge can locate the accumulated commits.
+            if has_changes:
+                effective_branch = branch_name
+            elif relay_context.worktree_path is not None or relay_context.is_fork:
+                effective_branch = branch_name
+            else:
+                effective_branch = ""
+
             return GroupResult(
                 group_id=group_id,
                 status="completed",
@@ -763,7 +781,7 @@ def _make_execute_fn(
                 tests_added=tests_added,
                 test_mapping=test_mapping,
                 summary=summary,
-                branch_name=branch_name if has_changes else "",
+                branch_name=effective_branch,
                 worktree_path=worktree_path,
                 completion_status=completion_status,
                 incomplete_tasks=incomplete_tasks,
@@ -790,6 +808,99 @@ def _make_execute_fn(
             return result
 
     return execute_fn
+
+
+def _resolve_convergence_conflicts(
+    worktree_path: Path,
+    conflict_files: list[str],
+    task_description: str,
+    deps_results: dict[str, GroupResult],
+) -> bool:
+    """Resolve merge conflicts at a convergence point using LLM.
+
+    Reads each conflicting file, sends it to the LLM with context about
+    the converging groups, and writes back the resolved content.
+
+    Args:
+        worktree_path: Path to the worktree where the merge is happening
+        conflict_files: List of conflicting file paths
+        task_description: Overall task description for context
+        deps_results: Results from predecessor groups for context
+
+    Returns:
+        True if all conflicts resolved and merge committed, False otherwise
+    """
+    try:
+        from ..llm_caller import LLMCaller
+    except ImportError:
+        logger.warning("LLMCaller not available for convergence conflict resolution")
+        return False
+
+    # Build context about what each predecessor did
+    group_context_parts: list[str] = []
+    for gid, result in deps_results.items():
+        group_context_parts.append(
+            f"- Group {gid}: {result.summary} (files: {', '.join(result.files_changed)})"
+        )
+    group_context = "\n".join(group_context_parts) if group_context_parts else "No group context."
+
+    for filepath in conflict_files:
+        full_path = worktree_path / filepath
+        if not full_path.exists():
+            logger.warning("Convergence conflict file not found: %s", filepath)
+            return False
+
+        try:
+            content = full_path.read_text(encoding="utf-8")
+        except Exception:
+            logger.warning("Could not read convergence conflict file: %s", filepath)
+            return False
+
+        prompt = (
+            "You are resolving a git merge conflict at a convergence point where "
+            "multiple parallel implementation groups are being merged together.\n\n"
+            f"## Task Description\n{task_description}\n\n"
+            f"## Group Summaries\n{group_context}\n\n"
+            f"## Conflicting File: {filepath}\n\n"
+            f"```\n{content}\n```\n\n"
+            "Output ONLY the fully resolved file content with no conflict markers "
+            "(no <<<<<<< / ======= / >>>>>>>). Do not add any explanation."
+        )
+
+        try:
+            caller = LLMCaller(worktree_path, step_type="convergence_conflict")
+            resolved_content = caller.call(prompt=prompt)
+        except Exception as e:
+            logger.warning(
+                "LLM convergence conflict resolution failed for %s: %s", filepath, e,
+            )
+            return False
+
+        # Verify no conflict markers remain
+        if "<<<<<<<" in resolved_content or ">>>>>>>" in resolved_content:
+            logger.warning(
+                "LLM output still contains conflict markers for %s", filepath,
+            )
+            return False
+
+        # Write resolved content
+        try:
+            full_path.write_text(resolved_content, encoding="utf-8")
+            _run_git(worktree_path, "add", filepath, check=False)
+        except Exception as e:
+            logger.warning("Failed to write resolved content for %s: %s", filepath, e)
+            return False
+
+    # Complete the merge commit
+    commit_result = _run_git(worktree_path, "commit", "--no-edit", check=False)
+    if commit_result.returncode != 0:
+        logger.warning(
+            "Convergence merge commit failed: %s", commit_result.stderr.strip(),
+        )
+        return False
+
+    logger.info("Convergence merge conflicts resolved successfully")
+    return True
 
 
 def _run_dag_parallel(
