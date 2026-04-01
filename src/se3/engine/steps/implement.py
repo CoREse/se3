@@ -782,10 +782,16 @@ def _make_execute_fn(
                 prompt += runtime_ctx
 
             # Step 5: Run LLM in the worktree
+            # Use group-specific step_id so each group has its own history file
+            group_step_id = f"{step.step_id}_{group_id}"
+
+            # Restore history from main repo so retry context injection works
+            _restore_history_to_worktree(project_root, worktree_path, flow.flow_id)
+
             caller = LLMCaller(
                 worktree_path,
                 flow_id=flow.flow_id,
-                step_id=step.step_id,
+                step_id=group_step_id,
                 step_type=step.step_type.value,
                 external_attempt=retry_count,
             )
@@ -1481,6 +1487,39 @@ def _salvage_history_from_worktree(worktree_path: Path, main_repo_root: Path) ->
 
     if copied:
         logger.info("Salvaged %d history file(s) from worktree %s", copied, worktree_path)
+
+
+def _restore_history_to_worktree(main_repo_root: Path, worktree_path: Path, flow_id: str) -> None:
+    """Copy history files from main repo into a worktree.
+
+    This enables LLMCaller retry context injection in worktrees,
+    which look for history at their own project_root/se3/history/.
+    Only copies history for the given flow_id.
+
+    Args:
+        main_repo_root: Main repository root
+        worktree_path: Worktree directory
+        flow_id: Flow ID to copy history for
+    """
+    import shutil
+
+    main_flow_dir = main_repo_root / "se3" / "history" / flow_id
+    if not main_flow_dir.exists():
+        return
+
+    wt_flow_dir = worktree_path / "se3" / "history" / flow_id
+    wt_flow_dir.mkdir(parents=True, exist_ok=True)
+
+    copied = 0
+    for history_file in main_flow_dir.iterdir():
+        if not history_file.is_file():
+            continue
+        target = wt_flow_dir / history_file.name
+        shutil.copy2(history_file, target)
+        copied += 1
+
+    if copied:
+        logger.debug("Restored %d history file(s) to worktree %s", copied, worktree_path)
 
 
 def _get_head_hash(project_root: Path) -> str | None:

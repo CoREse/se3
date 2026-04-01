@@ -713,8 +713,10 @@ def _run_flow_impl(
             choice = prompt_user_choice("What would you like to do?", options)
 
             if choice == 0:
-                # Reset step status and retry
+                # Reset step status and retry from where it left off
                 current_step.status = StepStatus.PENDING
+                current_step.inputs["resumed"] = True
+                current_step.inputs["retry_count"] = current_step.inputs.get("retry_count", 0) + 1
                 current_step.retry_count += 1
                 persistence.save_flow(flow)
                 continue
