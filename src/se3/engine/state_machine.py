@@ -24,6 +24,7 @@ from .models import (
     get_step_info,
 )
 from .chat_history import _history_dir
+from .llm_caller import clear_phase1_cache
 from .issue_discovery import IssueDiscovery
 from .issue_manager import IssueManager
 from .persistence import PersistenceManager
@@ -435,6 +436,9 @@ class StateMachine:
 
         logger.info(f"Transitioning to revision of {step_to_review.step_type.value} (iteration {iteration})")
 
+        # Clear any Phase 1 cache — revision means a full fresh LLM call
+        clear_phase1_cache(self.project_root, flow.flow_id, step_to_review_id)
+
         # Reset the step for re-execution
         step_to_review.status = StepStatus.PENDING
         step_to_review.inputs["revision_feedback"] = feedback
@@ -525,6 +529,9 @@ class StateMachine:
         logger.info(
             f"Transitioning to fix iteration {iteration} for {implement_step.step_type.value}"
         )
+
+        # Clear any Phase 1 cache — fix loop means a full fresh LLM call
+        clear_phase1_cache(self.project_root, flow.flow_id, implement_step.step_id)
 
         # Update the existing implement step for the fix iteration
         implement_step.status = StepStatus.PENDING

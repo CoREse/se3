@@ -73,6 +73,28 @@ def clear_persistent_extra_prompt() -> None:
         _persistent_extra_prompt = None
 
 
+def clear_phase1_cache(project_root: Path, flow_id: str, step_id: str) -> None:
+    """Clear the Phase 1 cache file for a step.
+
+    Called when a step is being restarted from scratch (revision or fix loop),
+    so the next run performs a fresh Phase 1 LLM call instead of reusing a
+    cached output from a previous attempt.
+
+    Args:
+        project_root: Project root directory
+        flow_id: Flow instance ID
+        step_id: Step instance ID
+    """
+    from .chat_history import _history_dir
+    cache_path = _history_dir(project_root, flow_id) / f"{step_id}_phase1.txt"
+    if cache_path.exists():
+        try:
+            cache_path.unlink()
+            logger.info(f"Cleared Phase 1 cache for step {step_id}")
+        except OSError as e:
+            logger.warning(f"Failed to clear Phase 1 cache for {step_id}: {e}")
+
+
 def truncate_preview(text: str, max_length: int = 60, ellipsis_str: str = '...') -> str:
     """Truncate text to a preview with ellipsis if too long.
 
@@ -571,6 +593,13 @@ class LLMCaller:
         print("  [llm-caller] ✅ JSON extraction complete")
         return json_str
 
+    def _get_phase1_cache_path(self) -> Optional[Path]:
+        """Return the Phase 1 cache file path for this step, or None if no context."""
+        if not self.flow_id or not self.step_id:
+            return None
+        from .chat_history import _history_dir
+        return _history_dir(self.project_root, self.flow_id) / f"{self.step_id}_phase1.txt"
+
     def _call_two_phase(
         self,
         prompt: str,
@@ -583,24 +612,59 @@ class LLMCaller:
 
         If phase 1 output already contains valid JSON (detected by the
         shared parse_json_response logic), skips phase 2.
+
+        Phase 1 output is cached to disk so that if Phase 2 fails and the
+        step is retried (external_attempt > 0), Phase 1 is skipped entirely
+        and we go straight to Phase 2 extraction. Cache is cleared when a
+        step is restarted from scratch (revision / fix-loop).
         """
         logger.info("Using two-phase JSON extraction")
 
-        # Phase 1: Generate with clean prompt (JSON requirement is in the
-        # step's prompt template itself, not added by the caller)
-        phase1_output = self._call_with_retry(
-            prompt=prompt,
-            timeout=timeout,
-            context_files=context_files,
-            on_output=on_output,
-            require_json=False,  # No strict JSON constraint
-            json_retry_count=0,
-        )
+        cache_path = self._get_phase1_cache_path()
+
+        # On retry: check if Phase 1 was already completed in a previous attempt
+        if self.external_attempt > 0 and cache_path and cache_path.exists():
+            try:
+                phase1_output = cache_path.read_text(encoding="utf-8")
+                print("  [llm-caller] ⏩ Phase 1 skipped (cached from previous attempt)")
+                logger.info(f"Using cached Phase 1 output ({len(phase1_output)} chars)")
+            except OSError as e:
+                logger.warning(f"Failed to read Phase 1 cache, re-running Phase 1: {e}")
+                phase1_output = None
+        else:
+            phase1_output = None
+
+        if phase1_output is None:
+            # Phase 1: Generate with clean prompt (JSON requirement is in the
+            # step's prompt template itself, not added by the caller)
+            phase1_output = self._call_with_retry(
+                prompt=prompt,
+                timeout=timeout,
+                context_files=context_files,
+                on_output=on_output,
+                require_json=False,  # No strict JSON constraint
+                json_retry_count=0,
+            )
+
+            # Persist Phase 1 output so retries can skip it
+            if cache_path:
+                try:
+                    cache_path.parent.mkdir(parents=True, exist_ok=True)
+                    cache_path.write_text(phase1_output, encoding="utf-8")
+                    logger.info(f"Cached Phase 1 output ({len(phase1_output)} chars)")
+                except OSError as e:
+                    logger.warning(f"Failed to cache Phase 1 output: {e}")
 
         # Check if phase 1 output already contains valid JSON (skip phase 2)
         if self._contains_valid_json(phase1_output):
             logger.info("Two-phase: phase 1 output contained valid JSON, skipping phase 2")
             print("  [llm-caller] ✅ Phase 1 output contained valid JSON, phase 2 skipped")
+            # Step fully done — delete cache
+            if cache_path and cache_path.exists():
+                try:
+                    cache_path.unlink()
+                except OSError as e:
+                    logger.warning(f"Failed to delete Phase 1 cache: {e}")
             from .utils.json_parser import parse_json_response
             result = parse_json_response(phase1_output)
             return json.dumps(result, ensure_ascii=False, indent=2)
@@ -624,6 +688,13 @@ class LLMCaller:
             raise LLMCallError(
                 "Two-phase JSON extraction failed: Could not extract valid JSON from output"
             )
+
+        # Phase 2 succeeded — delete the Phase 1 cache (step is fully done)
+        if cache_path and cache_path.exists():
+            try:
+                cache_path.unlink()
+            except OSError as e:
+                logger.warning(f"Failed to delete Phase 1 cache after success: {e}")
 
         # Return as JSON string (parse_json_response will handle it)
         json_str = json.dumps(result, ensure_ascii=False, indent=2)

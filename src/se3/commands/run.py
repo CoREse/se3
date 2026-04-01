@@ -368,6 +368,41 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
     return StepStatus.PENDING
 
 
+def _restore_discovery_display(current_step: Any) -> None:
+    """Re-display the last AI message from a PAUSED discovery step on resume.
+
+    When a DISCOVERY step is PAUSED and we are resuming (rather than running
+    for the first time), the LLM already asked its question — we must NOT
+    call the LLM again.  This function re-prints the last assistant message
+    stored in ``discovery_state`` so the user can see what was asked before
+    they type their reply.
+
+    Args:
+        current_step: The discovery step with status PAUSED
+    """
+    from ..engine.steps.discovery import _display_discovery_message
+
+    discovery_state = current_step.inputs.get("discovery_state", {})
+    history = discovery_state.get("history", [])
+
+    # Find the last assistant entry in the conversation history
+    last_assistant = None
+    for entry in reversed(history):
+        if entry.get("role") == "assistant":
+            last_assistant = entry
+            break
+
+    if last_assistant:
+        content = last_assistant.get("content", "")
+        # Re-display proposed_description if it was set
+        proposed = current_step.outputs.get("proposed_description", "")
+        questions = current_step.outputs.get("questions", [])
+        _display_discovery_message(content, proposed or None, questions or None)
+    else:
+        # No history yet — show generic resume notice
+        get_console().print("[dim]Resuming discovery — please respond to continue.[/dim]")
+
+
 def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: PersistenceManager, prompt_history: Any = None) -> Optional[str]:
     """Handle discovery step pause - get user response.
 
@@ -377,7 +412,7 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
         persistence: Persistence manager
 
     Returns:
-        User response string, "__RESUME__" if resuming, or None to exit
+        User response string, or None to exit
     """
     render_full(
         "Discovery mode is exploring your requirements.\n"
@@ -402,10 +437,7 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
         return None
 
     if not user_input:
-        # Empty input - check if we're resuming
-        if current_step.inputs.get("resumed"):
-            return "__RESUME__"
-        # Otherwise ask again
+        # Empty input — ask again
         get_console().print("[yellow]Please provide a response or press Ctrl+C to exit.[/yellow]")
         return _handle_discovery_pause(flow, current_step, persistence, prompt_history)
 
@@ -610,6 +642,34 @@ def _run_flow_impl(
             flow.status = FlowStatus.COMPLETED
             break
 
+        # If the current step already finished (process crashed after the step
+        # handler returned but before transition_to_next was saved), advance
+        # without re-running the step.
+        if current_step.status in (StepStatus.COMPLETED, StepStatus.PARTIAL):
+            logger.info(
+                f"Step {current_step.step_type.value} already {current_step.status.value}, "
+                "advancing to next step without re-running"
+            )
+            state_machine.transition_to_next(flow)
+            persistence.save_flow(flow)
+            continue
+
+        # REVISION_NEEDED saved but transition not yet applied: call transition_to_next
+        # which routes to _transition_to_fix (TEST/VERIFY_SPEC) or _transition_to_revision
+        # (CONFIRM), without re-running the step and without double-incrementing counters.
+        if current_step.status == StepStatus.REVISION_NEEDED:
+            logger.info(
+                f"Step {current_step.step_type.value} already REVISION_NEEDED, "
+                "applying transition without re-running"
+            )
+            get_console().print(
+                f"[yellow]Resuming: revision was already requested from "
+                f"{current_step.step_type.value}[/yellow]"
+            )
+            state_machine.transition_to_next(flow)
+            persistence.save_flow(flow)
+            continue
+
         # Display compact step header — skip for CONFIRM steps (the prompt speaks for itself)
         step_type_value = current_step.step_type.value
         if current_step.step_type != StepType.CONFIRM:
@@ -641,6 +701,13 @@ def _run_flow_impl(
                     if result is None:
                         return 130
                     continue
+
+        # Special handling for DISCOVERY steps on resume - restore last AI message without
+        # re-calling the LLM (the question was already asked; just wait for user input again)
+        elif current_step.step_type == StepType.DISCOVERY and current_step.status == StepStatus.PAUSED:
+            _restore_discovery_display(current_step)
+            result = StepStatus.PAUSED
+
         else:
             try:
                 result = state_machine.run_step(flow, current_step)
@@ -682,10 +749,6 @@ def _run_flow_impl(
             if user_response is None:
                 # User chose to exit
                 return 130
-
-            if user_response == "__RESUME__":
-                # User is resuming from a saved state, re-run the step
-                continue
 
             # Store user response and re-run discovery step
             current_step.inputs["user_response"] = user_response
