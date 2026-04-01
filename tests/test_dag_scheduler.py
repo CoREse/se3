@@ -8,7 +8,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from se3.engine.dag_scheduler import DAGScheduler, GroupResult
+from se3.engine.dag_scheduler import (
+    ConvergenceInfo,
+    DAGScheduler,
+    GroupResult,
+    RelayContext,
+    RelayPlan,
+    classify_chains,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -605,3 +612,268 @@ class TestResultsOrdering:
         """Empty group list returns empty results."""
         results = DAGScheduler([]).run(lambda g, d: _make_result(g["group_id"]))
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# Relay dataclass tests
+# ---------------------------------------------------------------------------
+
+
+class TestRelayDataclasses:
+    def test_convergence_info(self):
+        ci = ConvergenceInfo(primary_predecessor="G2", secondary_predecessors=["G3"])
+        assert ci.primary_predecessor == "G2"
+        assert ci.secondary_predecessors == ["G3"]
+
+    def test_relay_context_defaults(self):
+        rc = RelayContext()
+        assert rc.worktree_path is None
+        assert rc.branch_name is None
+        assert rc.is_fork is False
+        assert rc.fork_source_branch is None
+        assert rc.convergence_merges == []
+
+    def test_relay_context_mutable_defaults_not_shared(self):
+        rc1 = RelayContext()
+        rc2 = RelayContext()
+        rc1.convergence_merges.append("branch-X")
+        assert rc2.convergence_merges == []
+
+    def test_relay_plan_fields(self):
+        plan = RelayPlan(
+            relay_map={"G1": None},
+            fork_from={},
+            leaf_nodes={"G1"},
+            convergence_points={},
+            root_nodes={"G1"},
+        )
+        assert plan.relay_map == {"G1": None}
+        assert plan.leaf_nodes == {"G1"}
+        assert plan.root_nodes == {"G1"}
+
+
+# ---------------------------------------------------------------------------
+# classify_chains tests
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyChains:
+    """Tests for classify_chains() relay execution planner."""
+
+    def test_empty_groups(self):
+        """Empty input returns empty plan."""
+        plan = classify_chains([])
+        assert plan.relay_map == {}
+        assert plan.fork_from == {}
+        assert plan.leaf_nodes == set()
+        assert plan.convergence_points == {}
+        assert plan.root_nodes == set()
+
+    def test_single_group(self):
+        """Single group is both root and leaf."""
+        groups = [{"group_id": "G1", "group_order": 1, "depends_on": []}]
+        plan = classify_chains(groups)
+
+        assert plan.relay_map == {"G1": None}
+        assert plan.fork_from == {}
+        assert plan.leaf_nodes == {"G1"}
+        assert plan.root_nodes == {"G1"}
+        assert plan.convergence_points == {}
+
+    def test_linear_chain(self):
+        """G1 → G2 → G3: all relay, only G3 is leaf."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G2"]},
+        ]
+        plan = classify_chains(groups)
+
+        assert plan.relay_map == {"G1": None, "G2": "G1", "G3": "G2"}
+        assert plan.fork_from == {}
+        assert plan.leaf_nodes == {"G3"}
+        assert plan.root_nodes == {"G1"}
+        assert plan.convergence_points == {}
+
+    def test_fork(self):
+        """G1 → {G2, G3}: G2 relays (smaller order), G3 forks. Both are leaves."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"]},
+        ]
+        plan = classify_chains(groups)
+
+        # G2 relays from G1 (smaller group_order), G3 forks
+        assert plan.relay_map["G1"] is None
+        assert plan.relay_map["G2"] == "G1"
+        assert plan.relay_map["G3"] is None
+        assert plan.fork_from == {"G3": "G1"}
+        assert plan.leaf_nodes == {"G2", "G3"}
+        assert plan.root_nodes == {"G1"}
+        assert plan.convergence_points == {}
+
+    def test_diamond(self):
+        """G1 → {G2, G3} → G4: G4 is convergence point with primary=G2."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"]},
+            {"group_id": "G4", "group_order": 4, "depends_on": ["G2", "G3"]},
+        ]
+        plan = classify_chains(groups)
+
+        # G1: root
+        assert plan.root_nodes == {"G1"}
+        # G4: only leaf
+        assert plan.leaf_nodes == {"G4"}
+
+        # Relay: G1→G2 (relay), G3 forks from G1, G4 relays from G2
+        assert plan.relay_map["G1"] is None
+        assert plan.relay_map["G2"] == "G1"
+        assert plan.relay_map["G3"] is None
+        assert plan.relay_map["G4"] == "G2"
+
+        # G3 forks from G1
+        assert plan.fork_from == {"G3": "G1"}
+
+        # G4 convergence: primary=G2, secondary=[G3]
+        assert "G4" in plan.convergence_points
+        ci = plan.convergence_points["G4"]
+        assert ci.primary_predecessor == "G2"
+        assert ci.secondary_predecessors == ["G3"]
+
+    def test_two_independent_groups(self):
+        """G1, G2 independent: two roots, two leaves, no relay/fork."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": []},
+        ]
+        plan = classify_chains(groups)
+
+        assert plan.relay_map == {"G1": None, "G2": None}
+        assert plan.fork_from == {}
+        assert plan.leaf_nodes == {"G1", "G2"}
+        assert plan.root_nodes == {"G1", "G2"}
+        assert plan.convergence_points == {}
+
+    def test_fork_three_children(self):
+        """G1 → {G2, G3, G4}: G2 relays, G3 and G4 fork."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"]},
+            {"group_id": "G4", "group_order": 4, "depends_on": ["G1"]},
+        ]
+        plan = classify_chains(groups)
+
+        assert plan.relay_map["G2"] == "G1"  # heir relays
+        assert plan.relay_map["G3"] is None
+        assert plan.relay_map["G4"] is None
+        assert "G3" in plan.fork_from
+        assert "G4" in plan.fork_from
+        assert plan.fork_from["G3"] == "G1"
+        assert plan.fork_from["G4"] == "G1"
+        assert plan.leaf_nodes == {"G2", "G3", "G4"}
+
+    def test_complex_mixed_dag(self):
+        """Complex DAG: G1→G2, G1→G3, G2→G4, G3→G4, G4→G5.
+
+        After structure:
+        - G1: root
+        - G2: relays from G1 (heir)
+        - G3: forks from G1
+        - G4: convergence (G2 primary, G3 secondary), relays from G2
+        - G5: relays from G4, leaf
+        """
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"]},
+            {"group_id": "G4", "group_order": 4, "depends_on": ["G2", "G3"]},
+            {"group_id": "G5", "group_order": 5, "depends_on": ["G4"]},
+        ]
+        plan = classify_chains(groups)
+
+        assert plan.root_nodes == {"G1"}
+        assert plan.leaf_nodes == {"G5"}
+
+        assert plan.relay_map["G1"] is None
+        assert plan.relay_map["G2"] == "G1"
+        assert plan.relay_map["G3"] is None
+        assert plan.relay_map["G4"] == "G2"
+        assert plan.relay_map["G5"] == "G4"
+
+        assert plan.fork_from == {"G3": "G1"}
+
+        assert "G4" in plan.convergence_points
+        ci = plan.convergence_points["G4"]
+        assert ci.primary_predecessor == "G2"
+        assert ci.secondary_predecessors == ["G3"]
+
+    def test_group_order_determines_heir(self):
+        """When group_order is reversed, the heir changes.
+
+        G1 → {G2(order=3), G3(order=2)}: G3 relays (smaller order), G2 forks.
+        """
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 3, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 2, "depends_on": ["G1"]},
+        ]
+        plan = classify_chains(groups)
+
+        assert plan.relay_map["G3"] == "G1"  # G3 has smaller order → relays
+        assert plan.relay_map["G2"] is None  # G2 forks
+        assert plan.fork_from == {"G2": "G1"}
+
+    def test_missing_group_order_defaults(self):
+        """Groups without group_order field default to 0 for ordering."""
+        groups = [
+            {"group_id": "G1", "depends_on": []},
+            {"group_id": "G2", "depends_on": ["G1"]},
+        ]
+        plan = classify_chains(groups)
+
+        # Should still work — both default to order 0
+        assert plan.relay_map["G1"] is None
+        assert plan.relay_map["G2"] == "G1"
+
+    def test_convergence_primary_selected_by_group_order(self):
+        """Convergence point picks the predecessor with smallest group_order as primary.
+
+        G1(order=1) → G3, G2(order=2) → G3: primary=G1.
+        """
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": []},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1", "G2"]},
+        ]
+        plan = classify_chains(groups)
+
+        assert plan.root_nodes == {"G1", "G2"}
+        assert plan.leaf_nodes == {"G3"}
+
+        # G3 has predecessors G1 and G2; both have G3 as their only child (heir)
+        # Both are relaying predecessors; primary = G1 (smaller order)
+        assert "G3" in plan.convergence_points
+        ci = plan.convergence_points["G3"]
+        assert ci.primary_predecessor == "G1"
+        assert ci.secondary_predecessors == ["G2"]
+        assert plan.relay_map["G3"] == "G1"
+
+    def test_parallel_chains(self):
+        """Two independent chains: G1→G2 and G3→G4."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": []},
+            {"group_id": "G4", "group_order": 4, "depends_on": ["G3"]},
+        ]
+        plan = classify_chains(groups)
+
+        assert plan.root_nodes == {"G1", "G3"}
+        assert plan.leaf_nodes == {"G2", "G4"}
+        assert plan.relay_map == {"G1": None, "G2": "G1", "G3": None, "G4": "G3"}
+        assert plan.fork_from == {}
+        assert plan.convergence_points == {}
