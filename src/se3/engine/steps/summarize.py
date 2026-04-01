@@ -117,9 +117,8 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     try:
         # Call LLM for summary (natural language output, no JSON required)
-        project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         retry_count = step.inputs.get("retry_count", 0)
-        caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type if isinstance(step.step_type, str) else step.step_type.value, external_attempt=retry_count)
+        caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
         response = caller.call(
             prompt=prompt,
             json_mode="off",
@@ -389,7 +388,6 @@ def _save_summary(flow: FlowInstance, summary_text: str) -> None:
     summary_file = summary_dir / f"summary-{flow.flow_id}.md"
 
     try:
-        import json
         content = f"""# Work Summary
 
 **Flow ID:** {flow.flow_id}
