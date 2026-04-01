@@ -70,15 +70,12 @@ env/
 *~
 .DS_Store
 
-# SE3 runtime (do not commit runtime state)
-se3/state/
-se3/cache/
-se3/logs/
-se3/calls/
-se3/collab/
-
-# Keep specs directory (contains project requirements)
-!se3/specs/
+# SE3: ignore runtime directory, whitelist tracked content
+/se3/
+!/se3/specs/
+!/se3/specs/**
+!/se3/issues/
+!/se3/issues/**
 """
 
 
