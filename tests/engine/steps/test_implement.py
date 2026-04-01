@@ -894,12 +894,12 @@ class TestDagResumeFiltering:
         assert prior["implemented_groups"] == ["G1"]
 
     @patch("se3.engine.steps.implement.has_commits", return_value=True)
-    @patch("se3.engine.steps.implement._run_dag_parallel")
+    @patch("se3.engine.steps.implement._run_dag_parallel", return_value=StepStatus.COMPLETED)
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
     def test_resume_all_completed_returns_early(
         self, mock_injection, mock_dag_parallel, mock_has_commits,
     ):
-        """If all groups are already completed on resume, return COMPLETED without calling DAG."""
+        """If all groups are already completed on resume, DAG is called with empty groups."""
         step = Step(
             step_type=StepType.IMPLEMENT,
             status=StepStatus.RUNNING,
@@ -923,7 +923,10 @@ class TestDagResumeFiltering:
         result = implement_handler(step, self.flow)
 
         assert result == StepStatus.COMPLETED
-        mock_dag_parallel.assert_not_called()
+        # DAG is called with empty groups list to handle merge of recovered branches
+        mock_dag_parallel.assert_called_once()
+        call_kwargs = mock_dag_parallel.call_args
+        assert call_kwargs[1]["groups"] == [] or call_kwargs[0][0] == []
 
     @patch("se3.engine.steps.implement.has_commits", return_value=True)
     @patch("se3.engine.steps.implement._run_dag_parallel")
