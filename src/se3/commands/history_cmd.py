@@ -78,6 +78,12 @@ def list_active_flows(project_root: Path) -> List[Dict[str, Any]]:
     return persistence.list_active_flows()
 
 
+def list_all_flows(project_root: Path) -> List[Dict[str, Any]]:
+    """List all flows from all data sources."""
+    persistence = PersistenceManager(project_root)
+    return persistence.list_all_flows()
+
+
 def list_archived_flows_from_disk(project_root: Path) -> List[Dict[str, Any]]:
     """List all archived flows from the archive directory."""
     archive_dir = project_root / "se3" / "state" / "archive"
@@ -182,26 +188,73 @@ def _step_status_color(status: str) -> str:
     }.get(status.lower(), "white")
 
 
+def _render_flows_table(flows: List[Dict[str, Any]], title: str) -> None:
+    """Render a list of flows as a Rich table."""
+    table = Table(title=title)
+    table.add_column("Flow ID", style="cyan", no_wrap=True)
+    table.add_column("Status")
+    table.add_column("Task Description", style="white")
+    table.add_column("Progress", justify="right")
+    table.add_column("Updated", style="dim")
+    table.add_column("Source", style="dim")
+
+    status_colors = {
+        "completed": "green",
+        "failed": "red",
+        "running": "yellow",
+        "init": "blue",
+        "paused": "magenta",
+        "history": "dim",
+    }
+
+    for flow in flows:
+        flow_id = flow.get("flow_id", "unknown")
+        status = flow.get("status", "unknown")
+        desc = flow.get("task_description", "No description")
+        if len(desc) > 50:
+            desc = desc[:50] + "..."
+        progress = flow.get("progress", "-")
+        updated = format_datetime(flow.get("updated_at", ""))
+        source = flow.get("source", "")
+
+        color = status_colors.get(status.lower(), "white")
+        table.add_row(
+            flow_id,
+            f"[{color}]{status}[/{color}]",
+            desc,
+            progress,
+            updated,
+            source,
+        )
+
+    console.print(table)
+    typer.echo("\nUse 'se3 history show <flow_id>' to view details of a specific flow.")
+
+
 # Default command - list flows
 @app.callback(invoke_without_command=True)
 def default_cmd(
     ctx: typer.Context,
-    archived: bool = typer.Option(False, "--archived", "-a", help="Show archived flows"),
+    active_only: bool = typer.Option(False, "--active-only", help="Show only the active flow"),
+    archived_only: bool = typer.Option(False, "--archived-only", "-a", help="Show only archived flows"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
 ):
-    """List all flows (active or archived)."""
+    """List all flows (active, archived, and history)."""
     # If a subcommand is being invoked, skip this
     if ctx.invoked_subcommand is not None:
         return
 
     project_root = get_project_root()
+    flows = list_all_flows(project_root)
 
-    if archived:
-        flows = list_archived_flows_from_disk(project_root)
+    if active_only:
+        flows = [f for f in flows if f.get("source") == "active"]
+        title = "Active Flows"
+    elif archived_only:
+        flows = [f for f in flows if f.get("source") == "archived"]
         title = "Archived Flows"
     else:
-        flows = list_active_flows(project_root)
-        title = "Active Flows"
+        title = "All Flows"
 
     if json_output:
         typer.echo(json.dumps(flows, indent=2, default=str))
@@ -211,63 +264,27 @@ def default_cmd(
         typer.echo(f"No {title.lower()} found.")
         return
 
-    table = Table(title=title)
-    table.add_column("Flow ID", style="cyan", no_wrap=True)
-    table.add_column("Status", style="green")
-    table.add_column("Task Description", style="white")
-    table.add_column("Progress", justify="right")
-    table.add_column("Updated", style="dim")
-
-    for flow in flows:
-        if archived:
-            flow_id = flow["flow_id"]
-            status = flow["status"]
-            desc = flow["task_description"][:50] + "..." if len(flow["task_description"]) > 50 else flow["task_description"]
-            progress = "-"
-            updated = format_datetime(flow["archived_at"])
-        else:
-            flow_id = flow.get("flow_id", "unknown")
-            status = flow.get("status", "unknown")
-            desc = flow.get("task_description", "No description")
-            if len(desc) > 50:
-                desc = desc[:50] + "..."
-            progress = flow.get("progress", "-")
-            updated = format_datetime(flow.get("updated_at", ""))
-
-        status_style = {
-            "completed": "green",
-            "failed": "red",
-            "running": "yellow",
-            "init": "blue",
-            "paused": "magenta",
-        }.get(status.lower(), "white")
-
-        table.add_row(
-            flow_id,
-            f"[{status_style}]{status}[/{status_style}]",
-            desc,
-            progress,
-            updated,
-        )
-
-    console.print(table)
-    typer.echo(f"\nUse 'se3 history show <flow_id>' to view details of a specific flow.")
+    _render_flows_table(flows, title)
 
 
 @app.command(name="list")
 def list_cmd(
-    archived: bool = typer.Option(False, "--archived", "-a", help="Show archived flows"),
+    active_only: bool = typer.Option(False, "--active-only", help="Show only the active flow"),
+    archived_only: bool = typer.Option(False, "--archived-only", "-a", help="Show only archived flows"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
 ):
-    """List all flows (active or archived)."""
+    """List all flows (active, archived, and history)."""
     project_root = get_project_root()
+    flows = list_all_flows(project_root)
 
-    if archived:
-        flows = list_archived_flows_from_disk(project_root)
+    if active_only:
+        flows = [f for f in flows if f.get("source") == "active"]
+        title = "Active Flows"
+    elif archived_only:
+        flows = [f for f in flows if f.get("source") == "archived"]
         title = "Archived Flows"
     else:
-        flows = list_active_flows(project_root)
-        title = "Active Flows"
+        title = "All Flows"
 
     if json_output:
         typer.echo(json.dumps(flows, indent=2, default=str))
@@ -277,47 +294,7 @@ def list_cmd(
         typer.echo(f"No {title.lower()} found.")
         return
 
-    table = Table(title=title)
-    table.add_column("Flow ID", style="cyan", no_wrap=True)
-    table.add_column("Status", style="green")
-    table.add_column("Task Description", style="white")
-    table.add_column("Progress", justify="right")
-    table.add_column("Updated", style="dim")
-
-    for flow in flows:
-        if archived:
-            flow_id = flow["flow_id"]
-            status = flow["status"]
-            desc = flow["task_description"][:50] + "..." if len(flow["task_description"]) > 50 else flow["task_description"]
-            progress = "-"
-            updated = format_datetime(flow["archived_at"])
-        else:
-            flow_id = flow.get("flow_id", "unknown")
-            status = flow.get("status", "unknown")
-            desc = flow.get("task_description", "No description")
-            if len(desc) > 50:
-                desc = desc[:50] + "..."
-            progress = flow.get("progress", "-")
-            updated = format_datetime(flow.get("updated_at", ""))
-
-        status_style = {
-            "completed": "green",
-            "failed": "red",
-            "running": "yellow",
-            "init": "blue",
-            "paused": "magenta",
-        }.get(status.lower(), "white")
-
-        table.add_row(
-            flow_id,
-            f"[{status_style}]{status}[/{status_style}]",
-            desc,
-            progress,
-            updated,
-        )
-
-    console.print(table)
-    typer.echo(f"\nUse 'se3 history show <flow_id>' to view details of a specific flow.")
+    _render_flows_table(flows, title)
 
 
 @app.command(name="show")

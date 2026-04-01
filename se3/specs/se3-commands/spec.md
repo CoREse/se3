@@ -127,6 +127,49 @@ se3 guardrails <spec-file> [--original <original-file>]
 - **WHEN** user runs `se3 guardrails <spec-file>`
 - **THEN** the command reports success
 
+### Requirement: `se3 history` Command
+
+The `se3 history` command SHALL list and inspect all flow executions across three data sources: the active engine state, the archive, and chat-history-only directories.
+
+**Interface:**
+```bash
+se3 history                          # List all flows (default)
+se3 history list                     # List all flows
+se3 history list --active-only       # Show only the active flow
+se3 history list --archived-only     # Show only archived flows
+se3 history list --json              # Output as JSON
+se3 history show <flow_id>           # Show detailed info for a flow
+se3 history restore <flow_id>        # Resume a flow (delegates to se3 run --resume)
+se3 history archived                 # List only archived flows
+```
+
+**Data Sources (aggregated by `list` / default command):**
+| Source | Path | Label |
+|--------|------|-------|
+| Active | `se3/state/engine.json` | `active` |
+| Archived | `se3/state/archive/engine_*.json` | `archived` |
+| History-only | `se3/history/{flow_id}/` | `history` |
+
+Results are de-duplicated by `flow_id` and sorted by `updated_at` descending.
+
+#### Scenario: List all flows
+- **WHEN** user runs `se3 history` or `se3 history list`
+- **THEN** all flows from all three sources are displayed in a table
+- **AND** each row includes flow_id, status, task description, progress, updated time, and source
+
+#### Scenario: Filter active or archived flows
+- **WHEN** user adds `--active-only` or `--archived-only`
+- **THEN** only flows matching that source are displayed
+
+#### Scenario: Show flow details
+- **GIVEN** a valid flow_id (or unambiguous prefix)
+- **WHEN** user runs `se3 history show <flow_id>`
+- **THEN** displays detailed step-by-step breakdown of the flow
+
+#### Scenario: Restore a flow
+- **WHEN** user runs `se3 history restore <flow_id>`
+- **THEN** delegates to `se3 run --resume --flow-id <flow_id>`
+
 ## Command Summary
 
 | Command | Purpose | Status |
@@ -134,6 +177,7 @@ se3 guardrails <spec-file> [--original <original-file>]
 | `se3 run` | Unified workflow entry point | **Required** |
 | `se3 init` | Initialize SE3 project structure | **Required** |
 | `se3 guardrails` | Check spec against guardrails | **Required** |
+| `se3 history` | View and manage flow history | **Required** |
 
 ### Requirement: Loop Mode CLI Options
 

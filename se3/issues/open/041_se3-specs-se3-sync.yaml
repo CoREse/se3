@@ -1,0 +1,9 @@
+id: '041'
+title: se3检查specs的功能（比如se3 sync）
+description: se3检查specs的功能（比如se3 sync）。会检查specs和已实现代码有无冲突，如果specs比代码多，那是有还未实现的内容，算是正常。如果代码比specs多，如果没有冲突则根据代码更新specs。如果有冲突，在默认情况下由llm决定如何处理冲突，无法决定的让人类介入；严格模式下有冲突让让用户决定如何处理冲突；在快速模式下，完全由llm自动处理冲突。这个旨在让用户能够让spec和代码同步，或者把一个非se3项目se3化。每次sync完之后会显示摘要，sync了哪些内容，毕竟llm的sync不一定完整，很多时候用户会通过多次sync直到没有任何更新为止，来保证同步的完整性。
+status: open
+priority: medium
+type: feature
+tags: []
+created_at: '2026-04-01T22:33:42.969515'
+updated_at: '2026-04-01T22:33:42.969515'

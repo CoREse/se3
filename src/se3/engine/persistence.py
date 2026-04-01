@@ -309,6 +309,135 @@ class PersistenceManager:
                 pass
         return flows
 
+    def list_all_flows(self) -> List[Dict[str, Any]]:
+        """List all flows from all data sources: active, archived, and history-only.
+
+        Combines se3/state/engine.json, se3/state/archive/engine_*.json,
+        and se3/history/{flow_id}/ directories. De-duplicates by flow_id
+        and sorts by updated_at descending.
+
+        Returns:
+            List of flow metadata dicts with keys:
+              flow_id, status, task_description, progress, updated_at, source
+        """
+        import re
+        from datetime import datetime
+
+        seen: set = set()
+        flows: List[Dict[str, Any]] = []
+
+        # 1. Active flow from engine.json
+        if self.state_file.exists():
+            try:
+                flow = self.load_flow()
+                if flow:
+                    completed, total = flow.get_progress()
+                    desc = flow.task_description
+                    flows.append({
+                        "flow_id": flow.flow_id,
+                        "status": flow.status.value,
+                        "task_description": desc[:100] + "..." if len(desc) > 100 else desc,
+                        "progress": f"{completed}/{total}",
+                        "updated_at": flow.updated_at.isoformat(),
+                        "source": "active",
+                    })
+                    seen.add(flow.flow_id)
+            except Exception:
+                pass
+
+        # 2. Archived flows from se3/state/archive/
+        archive_dir = self.state_dir / "archive"
+        if archive_dir.exists():
+            for archive_file in archive_dir.glob("engine_*.json"):
+                try:
+                    data = json.loads(archive_file.read_text(encoding="utf-8"))
+                    flow_id = data.get("flow_id", "unknown")
+                    if flow_id in seen:
+                        continue
+                    seen.add(flow_id)
+                    desc = data.get("task_description", "No description")
+                    updated = data.get("updated_at") or datetime.fromtimestamp(
+                        archive_file.stat().st_mtime
+                    ).isoformat()
+                    flows.append({
+                        "flow_id": flow_id,
+                        "status": data.get("status", "unknown"),
+                        "task_description": desc[:100] + "..." if len(desc) > 100 else desc,
+                        "progress": "-",
+                        "updated_at": updated,
+                        "source": "archived",
+                    })
+                except Exception:
+                    continue
+
+        # 3. History-only flows from se3/history/{flow_id}/
+        history_dir = self.project_root / "se3" / "history"
+        if history_dir.exists():
+            for flow_dir in history_dir.iterdir():
+                if not flow_dir.is_dir():
+                    continue
+                flow_id = flow_dir.name
+                if flow_id in seen:
+                    continue
+                seen.add(flow_id)
+
+                # updated_at = mtime of most recent file in the directory
+                try:
+                    latest_mtime = max(
+                        (f.stat().st_mtime for f in flow_dir.iterdir() if f.is_file()),
+                        default=0,
+                    )
+                    updated_at = datetime.fromtimestamp(latest_mtime).isoformat() if latest_mtime else ""
+                except Exception:
+                    updated_at = ""
+
+                task_description = self._extract_history_summary(flow_dir)
+                flows.append({
+                    "flow_id": flow_id,
+                    "status": "history",
+                    "task_description": task_description,
+                    "progress": "-",
+                    "updated_at": updated_at,
+                    "source": "history",
+                })
+
+        # Sort by updated_at descending (empty strings sort to end)
+        flows.sort(key=lambda f: f.get("updated_at", ""), reverse=True)
+        return flows
+
+    @staticmethod
+    def _extract_history_summary(flow_dir: "Path") -> str:
+        """Extract a short task description from the first JSONL file in a history dir."""
+        import re
+
+        jsonl_files = sorted(flow_dir.glob("*.jsonl"))
+        if not jsonl_files:
+            return "(no history data)"
+        try:
+            first_line = jsonl_files[0].read_text(encoding="utf-8").split("\n")[0]
+            data = json.loads(first_line)
+            content = data.get("content", "")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "text":
+                        content = block.get("text", "")
+                        break
+                else:
+                    content = str(content)
+            # Extract embedded task description if present
+            match = re.search(
+                r"Task description:\s*-+\s*(.*?)\s*-+",
+                content,
+                re.DOTALL,
+            )
+            if match:
+                desc = match.group(1).strip()
+                return desc[:100] + "..." if len(desc) > 100 else desc
+            # Fallback: truncated raw content
+            return content[:100] + "..." if len(content) > 100 else content
+        except Exception:
+            return "(no state data)"
+
     def save_context(self, context: Dict[str, Any]) -> Path:
         """Save AI context export for handoff/resumption.
 

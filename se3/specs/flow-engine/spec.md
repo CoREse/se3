@@ -277,8 +277,14 @@ se3 run --discover "我想做一个用户管理功能"
 - **AND** 格式为 `[Previous conversation context for this step]: ... [The above attempt(s) failed.]`
 
 #### Scenario: 人类浏览聊天记录
-- **WHEN** 用户执行 `se3 history`
-- **THEN** 展示所有 flow 的对话概要
+- **WHEN** 用户执行 `se3 history` 或 `se3 history list`
+- **THEN** 展示所有 flow 的列表，聚合来自三个数据源：
+  - `se3/state/engine.json` — 当前活跃 flow（source: active）
+  - `se3/state/archive/engine_*.json` — 已归档的 flow（source: archived）
+  - `se3/history/{flow_id}/` — 仅有聊天记录的历史 flow（source: history）
+- **AND** 按 updated_at 降序排列，并展示 Source 列
+- **AND** 支持 `--active-only` 和 `--archived-only` 过滤
+- **AND** 支持 `--json` 输出 JSON 格式
 - **AND** 支持按 flow_id 和 step_type 筛选查看
 - **AND** 区分通讯 JSON（解析渲染）和 LLM 输出 JSON（原样展示）
 
