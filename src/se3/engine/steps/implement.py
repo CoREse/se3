@@ -176,7 +176,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """
     task_description = step.inputs.get("task_description", "")
     task_type = step.inputs.get("task_type", "feature")
-    task_groups = step.inputs.get("task_groups") or step.inputs.get("task_list", [])
+    task_groups = step.inputs.get("task_groups", [])
     design_doc = step.inputs.get("design_doc", {})
     spec_content = step.inputs.get("spec_content", {})
     fix_context = step.inputs.get("fix_context")

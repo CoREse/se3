@@ -30,6 +30,8 @@ PLAN_TASKS_PROMPT = """You are an expert software engineering assistant. Break d
 ## Proposal
 {proposal}
 
+{spec_section}
+
 {revision_section}
 
 ## Instructions
@@ -122,6 +124,7 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
     task_description = step.inputs.get("task_description", "")
     design_doc = step.inputs.get("design_doc", {})
     proposal = step.inputs.get("proposal", {})
+    spec_content = step.inputs.get("spec_content", {})
     revision_feedback = step.inputs.get("revision_feedback", "")
     is_revision = step.inputs.get("is_revision", False)
 
@@ -157,9 +160,21 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 "architecture_decisions": [],
             }
 
+    # Track whether we're on the no-design path (bugfix/directive)
+    had_design = bool(step.inputs.get("design_doc"))
+
     # Format inputs for prompt
     design_text = _format_design_doc(design_doc)
     proposal_text = _format_proposal(proposal)
+
+    # Inject spec content when design step was skipped (bugfix/directive),
+    # since spec info wasn't digested through propose → design pipeline
+    spec_section = ""
+    if not had_design and spec_content:
+        spec_parts = []
+        for name, content in spec_content.items():
+            spec_parts.append(f"### {name}\n{content}")
+        spec_section = "## Relevant Specifications\n\n" + "\n\n".join(spec_parts)
 
     # Build revision section if this is a revision
     if is_revision and revision_feedback:
@@ -172,6 +187,7 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
         task_description=task_description,
         design_doc=design_text,
         proposal=proposal_text,
+        spec_section=spec_section,
         revision_section=revision_section,
     )
 
@@ -207,15 +223,8 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["total_complexity"] = task_plan.get("total_complexity", "medium")
         step.outputs["estimated_effort"] = task_plan.get("estimated_effort", "")
 
-        # Also flatten tasks for backward compatibility
-        all_tasks = []
-        for group in task_groups:
-            all_tasks.extend(group.get("tasks", []))
-        step.outputs["task_list"] = all_tasks
-
-        logger.info(f"Task groups generated: {len(task_groups)} groups, {len(all_tasks)} total tasks")
-        for task in all_tasks:
-            logger.debug(f"  - [{task.get('complexity', '?')}] {task.get('description', '')[:50]}...")
+        total_tasks = sum(len(g.get("tasks", [])) for g in task_groups)
+        logger.info(f"Task groups generated: {len(task_groups)} groups, {total_tasks} total tasks")
 
         # Display formatted task plan using TaskFormatter
         try:
