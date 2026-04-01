@@ -114,7 +114,7 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Call LLM for spec selection
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
-        response = caller.call(prompt=prompt, require_json=True)
+        response = caller.call(prompt=prompt, json_mode="two_phase")
 
         # Parse LLM response
         result = parse_json_response(response, required_keys=["selected_specs"])

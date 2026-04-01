@@ -181,10 +181,10 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         )
         response = caller.call(
             prompt=prompt,
-            json_mode="extract",  # Request JSON, use LLM extraction on failure
+            json_mode="two_phase",
         )
         
-        # Parse the response (should be valid JSON due to json_mode="extract")
+        # Parse the response
         result = _parse_response(response)
         
         # Store outputs
@@ -404,11 +404,10 @@ def _format_verification(verification_result: dict[str, Any]) -> str:
 def _parse_response(response: str) -> dict[str, Any]:
     """Parse the LLM response to extract version analysis.
     
-    With json_mode="extract", the LLM caller already extracts valid JSON.
-    This function mainly validates the result.
-    
+    Parses and validates the LLM response.
+
     Args:
-        response: Raw LLM response (should be valid JSON when using json_mode="extract")
+        response: Raw LLM response
         
     Returns:
         Parsed result dictionary
@@ -416,7 +415,7 @@ def _parse_response(response: str) -> dict[str, Any]:
     if not response or not response.strip():
         raise ValueError("Empty response from LLM")
     
-    # json_mode="extract" should already provide valid JSON
+    # two_phase mode should provide valid JSON via extraction
     # Use the shared json_parser for consistency
     from ..utils.json_parser import parse_json_response
     

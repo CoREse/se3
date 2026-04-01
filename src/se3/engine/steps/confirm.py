@@ -191,7 +191,7 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
             step_id=step.step_id,
             step_type="confirm_llm_review",
         )
-        response = caller.call(prompt=prompt, require_json=True)
+        response = caller.call(prompt=prompt, json_mode="two_phase")
 
         # Parse response using robust JSON parser that handles markdown
         # code fences, NDJSON streams, and other common LLM output formats

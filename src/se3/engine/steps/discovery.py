@@ -437,7 +437,7 @@ def _run_discovery_round(
         step_type=step.step_type.value,
         external_attempt=retry_count,
     )
-    response = caller.call(prompt=prompt, require_json=True)
+    response = caller.call(prompt=prompt, json_mode="two_phase")
 
     # Parse JSON response
     result = parse_json_response(response)

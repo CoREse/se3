@@ -206,7 +206,7 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
         response = caller.call(
             prompt=prompt,
-            json_mode="extract",
+            json_mode="two_phase",
             json_schema_hint='{"task_groups": [{"group_id": "G1", "name": "...", "tasks": [{"id": 1, "description": "...", "complexity": "..."}]}], "total_complexity": "..."}',
         )
 

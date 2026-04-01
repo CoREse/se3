@@ -143,7 +143,7 @@ def design_handler(step: Step, flow: FlowInstance) -> StepStatus:
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
         response = caller.call(
             prompt=prompt,
-            json_mode="extract",
+            json_mode="two_phase",
             json_schema_hint='{"overview": "...", "architecture_decisions": [{"decision": "...", "rationale": "..."}], "components": [{"name": "...", "responsibilities": "..."}], "data_flow": "...", "implementation_plan": [], "testing_strategy": "..."}',
         )
 
