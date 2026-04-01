@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from ..llm_caller import LLMCaller, LLMCallError
+from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
 from ..utils.json_parser import parse_json_response
 
