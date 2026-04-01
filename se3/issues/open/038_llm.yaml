@@ -1,0 +1,11 @@
+id: 038
+title: LLM 冲突解决重试次数硬编码
+description: 末端合并的 LLM 冲突解决最多重试 3 次，此值硬编码在代码中，未通过 se3.yaml 暴露为可配置项。对于复杂冲突场景可能需要调整。
+status: open
+priority: low
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-01T20:40:18.122159'
+updated_at: '2026-04-01T20:40:18.122159'

@@ -1,0 +1,11 @@
+id: 039
+title: fork_worktree 并发安全性待验证
+description: 分叉点同时 fork 多个 worktree 时，如果 git 操作并发执行，可能需要确认 git worktree add 的并发安全性。
+status: open
+priority: low
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-01T20:40:18.123270'
+updated_at: '2026-04-01T20:40:18.123270'

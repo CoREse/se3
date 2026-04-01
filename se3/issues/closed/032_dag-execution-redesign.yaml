@@ -17,7 +17,7 @@ description: "当前 DAG 并行执行存在根本性问题：\n- 每组从 origi
   - 任务描述\n- 每个 group 做了什么（summary + files_changed）\n- 冲突文件内容（含 conflict markers）\n\
   - spec 内容\n\nLLM 必须解决，不 fallback 到 --theirs，不 pending_human。\n\n## 配置\n\nse3.yaml\
   \ 新增：\n```yaml\nimplement:\n  group_loc_threshold: 300  # 总 LOC 阈值\n```\n"
-status: in-progress
+status: resolved
 priority: high
 type: refactor
 tags:
@@ -26,4 +26,4 @@ tags:
 - worktree
 - architecture
 created_at: '2026-04-01T00:00:00'
-updated_at: '2026-04-01T17:28:06.676886'
+updated_at: '2026-04-01T20:40:18.205602'
