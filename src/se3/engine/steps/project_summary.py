@@ -160,9 +160,6 @@ def project_summary_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         step.outputs["project_summary"] = summary
 
-        # Also store in flow context for easy access by later steps
-        flow.state.context["project_summary"] = summary
-
         logger.info(f"Project summary generated ({len(summary)} chars)")
 
         return StepStatus.COMPLETED
