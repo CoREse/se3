@@ -23,8 +23,10 @@ from ..worktree import (
     create_worktree,
     delete_branch,
     force_cleanup_worktree,
+    get_conflicting_files,
     get_current_branch,
     has_commits,
+    has_new_commits,
     merge_loop_branch,
 )
 
@@ -310,7 +312,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                             )
                             return StepStatus.FAILED
 
-                    from ..worktree import has_new_commits
+
                     for gid in unaccounted:
                         branch = f"impl/{flow.flow_id}/{gid}"
                         try:
@@ -615,10 +617,62 @@ def _make_execute_fn(
                                 "DAG: merging dep branch %s into %s",
                                 dep_result.branch_name, branch_name,
                             )
-                            _run_git(
+                            merge_result = _run_git(
                                 project_root, "merge",
                                 dep_result.branch_name, "--no-edit",
+                                check=False,
                             )
+                            if merge_result.returncode != 0:
+                                # Merge conflict — try auto-resolve, abort if can't
+                                stderr = merge_result.stderr.strip()
+                                is_conflict = "CONFLICT" in (merge_result.stdout + merge_result.stderr)
+                                if is_conflict:
+                                    logger.warning(
+                                        "DAG: conflict merging dep %s into %s, attempting auto-resolve",
+                                        dep_result.branch_name, branch_name,
+                                    )
+                                    # Accept all changes from the dep branch for conflicting files
+                                    # (dep branch is the "theirs" side when merging into our branch)
+                                    conflict_files = _run_git(
+                                        project_root, "diff", "--name-only", "--diff-filter=U",
+                                        check=False,
+                                    )
+                                    if conflict_files.returncode == 0 and conflict_files.stdout.strip():
+                                        for cf in conflict_files.stdout.strip().splitlines():
+                                            _run_git(
+                                                project_root, "checkout", "--theirs", cf.strip(),
+                                                check=False,
+                                            )
+                                            _run_git(project_root, "add", cf.strip(), check=False)
+                                        commit_result = _run_git(
+                                            project_root, "commit", "--no-edit", check=False,
+                                        )
+                                        if commit_result.returncode == 0:
+                                            logger.info(
+                                                "DAG: auto-resolved conflict for dep %s (accepted theirs)",
+                                                dep_id,
+                                            )
+                                        else:
+                                            _run_git(project_root, "merge", "--abort", check=False)
+                                            _run_git(project_root, "checkout", original_branch)
+                                            return GroupResult.failed(
+                                                group_id,
+                                                f"Merge conflict with dep {dep_id} could not be auto-resolved",
+                                            )
+                                    else:
+                                        _run_git(project_root, "merge", "--abort", check=False)
+                                        _run_git(project_root, "checkout", original_branch)
+                                        return GroupResult.failed(
+                                            group_id,
+                                            f"Merge conflict with dep {dep_id}: {stderr}",
+                                        )
+                                else:
+                                    _run_git(project_root, "merge", "--abort", check=False)
+                                    _run_git(project_root, "checkout", original_branch)
+                                    return GroupResult.failed(
+                                        group_id,
+                                        f"Failed to merge dep {dep_id}: {stderr}",
+                                    )
                     # Switch back to original_branch to not block others
                     _run_git(project_root, "checkout", original_branch)
 
@@ -789,12 +843,19 @@ def _run_dag_parallel(
                 if has_new_commits(project_root, branch, original_branch):
                     logger.info("DAG resume: pre-merging recovered branch %s", branch)
                     merge_result = merge_loop_branch(
-                        project_root, branch, original_branch, conflict_strategy,
+                        project_root, branch, original_branch, "llm",
                     )
                     if merge_result is True:
                         delete_branch(project_root, branch)
                     elif merge_result == "pending_human":
-                        logger.warning("DAG resume: merge conflict for recovered %s", gid)
+                        # LLM failed — force-resolve with --theirs
+                        logger.warning("DAG resume: LLM conflict resolution failed for %s, using --theirs", gid)
+                        cfiles = get_conflicting_files(project_root)
+                        if _force_resolve_conflicts_theirs(project_root, cfiles):
+                            delete_branch(project_root, branch)
+                        else:
+                            _run_git(project_root, "merge", "--abort", check=False)
+                            logger.error("DAG resume: merge failed for recovered %s", gid)
                     else:
                         logger.error("DAG resume: merge failed for recovered %s", gid)
                 else:
@@ -877,12 +938,21 @@ def _run_dag_parallel(
             continue
 
         logger.info("DAG: merging %s back to %s", r.branch_name, original_branch)
+        # Force LLM conflict resolution for DAG merge-back (never pending_human)
         merge_result = merge_loop_branch(
-            project_root, r.branch_name, original_branch, conflict_strategy,
+            project_root, r.branch_name, original_branch, "llm",
         )
-        if merge_result == "pending_human":
-            logger.warning("DAG: merge conflict for %s — pending human resolution", group_id)
-            merge_failures.append(group_id)
+        if merge_result is True:
+            pass  # Success
+        elif merge_result == "pending_human":
+            # LLM failed to resolve — force-resolve with --theirs and complete
+            logger.warning("DAG: LLM conflict resolution failed for %s, using --theirs", group_id)
+            conflict_files = get_conflicting_files(project_root)
+            resolved = _force_resolve_conflicts_theirs(project_root, conflict_files)
+            if not resolved:
+                logger.error("DAG: --theirs resolution also failed for %s, aborting", group_id)
+                _run_git(project_root, "merge", "--abort", check=False)
+                merge_failures.append(group_id)
         elif merge_result is False:
             logger.error("DAG: merge failed for %s", group_id)
             merge_failures.append(group_id)
@@ -1221,6 +1291,34 @@ def _resolve_files_changed(step: Step, project_root: Path, baseline_hash: str | 
     except Exception as e:
         logger.debug("Failed to resolve files_changed from git: %s", e)
         # Keep LLM-reported files_changed as fallback
+
+
+def _force_resolve_conflicts_theirs(project_root: Path, conflict_files: list[str]) -> bool:
+    """Force-resolve merge conflicts by accepting the incoming branch's version.
+
+    Used as last resort when LLM conflict resolution fails in DAG merge-back.
+
+    Args:
+        project_root: Project root directory
+        conflict_files: List of conflicting file paths
+
+    Returns:
+        True if all conflicts resolved and committed, False otherwise
+    """
+    if not conflict_files:
+        return False
+
+    for cf in conflict_files:
+        _run_git(project_root, "checkout", "--theirs", cf.strip(), check=False)
+        _run_git(project_root, "add", cf.strip(), check=False)
+
+    result = _run_git(project_root, "commit", "--no-edit", check=False)
+    if result.returncode == 0:
+        logger.info("Force-resolved %d conflicting files with --theirs", len(conflict_files))
+        return True
+
+    logger.warning("Failed to commit after --theirs resolution: %s", result.stderr.strip())
+    return False
 
 
 def _format_spec_brief(spec_content: dict[str, str]) -> str:
