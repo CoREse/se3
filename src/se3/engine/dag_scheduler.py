@@ -19,6 +19,171 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Relay execution planning data structures
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ConvergenceInfo:
+    """Merge information for a convergence point (node with multiple predecessors).
+
+    At a convergence point, the group inherits the primary predecessor's
+    worktree and merges the secondary predecessors' branches into it.
+    """
+
+    primary_predecessor: str  # group_id whose worktree is inherited
+    secondary_predecessors: list[str]  # group_ids whose branches are merged in
+
+
+@dataclass
+class RelayContext:
+    """Runtime context passed to execute_fn for relay-based execution.
+
+    Tells the executor how to obtain its worktree: reuse from predecessor,
+    fork a new one, or create fresh.
+    """
+
+    worktree_path: Optional[Path] = None  # predecessor's worktree to reuse (None → create new)
+    branch_name: Optional[str] = None  # predecessor's branch name
+    is_fork: bool = False  # whether to fork a new branch from predecessor
+    fork_source_branch: Optional[str] = None  # branch to fork from (when is_fork=True)
+    convergence_merges: list[str] = field(default_factory=list)  # secondary predecessor branches to merge
+
+
+@dataclass
+class RelayPlan:
+    """Execution plan for relay-based DAG execution.
+
+    Produced by ``classify_chains()`` and consumed by ``DAGScheduler`` and
+    the per-group execute function to determine worktree reuse, forking, and
+    leaf merge strategies.
+    """
+
+    relay_map: dict[str, Optional[str]]  # group_id → predecessor group_id (reuse worktree) or None (new)
+    fork_from: dict[str, str]  # group_id → predecessor group_id to fork from
+    leaf_nodes: set[str]  # groups with no downstream — merge back to original_branch
+    convergence_points: dict[str, ConvergenceInfo]  # convergence nodes and their merge info
+    root_nodes: set[str]  # groups with no predecessors — need new worktree
+
+
+# ---------------------------------------------------------------------------
+# classify_chains — relay execution planner
+# ---------------------------------------------------------------------------
+
+
+def classify_chains(groups: list[dict]) -> RelayPlan:
+    """Analyze DAG topology and produce a relay execution plan.
+
+    For each group, determines whether it should:
+    - Create a new worktree (root nodes, fork targets)
+    - Reuse a predecessor's worktree (relay)
+    - Merge secondary predecessor branches (convergence points)
+
+    Args:
+        groups: List of group dicts with ``group_id``, ``depends_on``, and
+                ``group_order`` fields.
+
+    Returns:
+        A ``RelayPlan`` describing the execution strategy for each group.
+    """
+    if not groups:
+        return RelayPlan(
+            relay_map={},
+            fork_from={},
+            leaf_nodes=set(),
+            convergence_points={},
+            root_nodes=set(),
+        )
+
+    # Build lookup tables
+    group_map: dict[str, dict] = {}
+    for g in groups:
+        gid = g.get("group_id", g.get("name", ""))
+        group_map[gid] = g
+
+    all_ids = set(group_map.keys())
+
+    # Build forward adjacency (P → downstream children) and reverse (G → predecessors)
+    forward: dict[str, list[str]] = {gid: [] for gid in all_ids}
+    reverse: dict[str, list[str]] = {gid: [] for gid in all_ids}
+
+    for gid, g in group_map.items():
+        deps = g.get("depends_on") or []
+        for dep in deps:
+            if dep in all_ids:
+                forward[dep].append(gid)
+                reverse[gid].append(dep)
+
+    def _group_order(gid: str) -> int:
+        """Return group_order for sorting; fall back to 0."""
+        return group_map[gid].get("group_order", 0)
+
+    # Identify root and leaf nodes
+    root_nodes = {gid for gid in all_ids if not reverse[gid]}
+    leaf_nodes = {gid for gid in all_ids if not forward[gid]}
+
+    # For each predecessor, determine its heir (primary child = smallest group_order)
+    heir: dict[str, Optional[str]] = {}
+    for gid in all_ids:
+        children = forward[gid]
+        if children:
+            heir[gid] = min(children, key=_group_order)
+        else:
+            heir[gid] = None
+
+    # Build relay_map, fork_from, convergence_points
+    relay_map: dict[str, Optional[str]] = {}
+    fork_from: dict[str, str] = {}
+    convergence_points: dict[str, ConvergenceInfo] = {}
+
+    for gid in all_ids:
+        if gid in root_nodes:
+            relay_map[gid] = None
+            continue
+
+        predecessors = reverse[gid]
+
+        if len(predecessors) == 1:
+            p = predecessors[0]
+            if heir[p] == gid:
+                # G is P's primary child → relay
+                relay_map[gid] = p
+            else:
+                # G is not P's primary child → fork
+                relay_map[gid] = None
+                fork_from[gid] = p
+        else:
+            # Convergence point: multiple predecessors
+            # Find predecessors where G is their heir (can relay)
+            relaying_preds = [p for p in predecessors if heir[p] == gid]
+            non_relaying_preds = [p for p in predecessors if heir[p] != gid]
+
+            if relaying_preds:
+                # Pick the relaying predecessor with smallest group_order as primary
+                primary = min(relaying_preds, key=_group_order)
+                relay_map[gid] = primary
+            else:
+                # No predecessor can relay → fork from the one with smallest group_order
+                primary = min(predecessors, key=_group_order)
+                relay_map[gid] = None
+                fork_from[gid] = primary
+
+            secondary = [p for p in predecessors if p != primary]
+            convergence_points[gid] = ConvergenceInfo(
+                primary_predecessor=primary,
+                secondary_predecessors=sorted(secondary, key=_group_order),
+            )
+
+    return RelayPlan(
+        relay_map=relay_map,
+        fork_from=fork_from,
+        leaf_nodes=leaf_nodes,
+        convergence_points=convergence_points,
+        root_nodes=root_nodes,
+    )
+
+
 @dataclass
 class GroupResult:
     """Result of executing a single task group."""

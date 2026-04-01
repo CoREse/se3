@@ -217,6 +217,32 @@ def create_worktree(project_root: Path, branch: str) -> Path:
     )
 
 
+def fork_worktree(
+    project_root: Path,
+    source_branch: str,
+    new_branch: str,
+) -> Path:
+    """Create a new branch from source_branch and set up a worktree for it.
+
+    Used by the relay strategy when a fork point's non-primary downstream
+    needs its own worktree starting from the fork point's state.
+
+    Args:
+        project_root: Project root directory
+        source_branch: Existing branch to fork from
+        new_branch: Name for the new branch
+
+    Returns:
+        Path to the newly created worktree directory
+
+    Raises:
+        subprocess.CalledProcessError: If branch creation or worktree setup fails
+    """
+    _run_git(project_root, "branch", new_branch, source_branch)
+    logger.info("Created branch '%s' from '%s'", new_branch, source_branch)
+    return create_worktree(project_root, new_branch)
+
+
 def remove_worktree(project_root: Path, worktree_path: Path) -> None:
     """Remove a git worktree.
 
