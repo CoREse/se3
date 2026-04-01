@@ -30,6 +30,7 @@ from ..worktree import (
     has_commits,
     has_new_commits,
     merge_loop_branch,
+    resolve_merge_conflicts_with_context,
 )
 
 logger = logging.getLogger(__name__)
@@ -291,7 +292,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         return result
 
     # --- DAG parallel path (when dependency info is present) ---
-    if _should_use_dag(groups):
+    if _should_use_dag(groups, total_loc, impl_config.group_loc_threshold):
         if not has_commits(project_root):
             logger.warning(
                 "Repository has no commits — falling back to sequential "
@@ -585,23 +586,39 @@ def _extract_sorted_groups(task_groups) -> list[dict]:
 
 
 def _compute_total_loc(groups: list[dict]) -> int:
-    """Sum estimated_loc across all tasks in all groups."""
+    """Sum estimated_loc across all tasks in all groups.
+
+    Tasks missing the ``estimated_loc`` field default to 50 LOC each,
+    providing a sensible fallback for plans generated before the field
+    was introduced.
+    """
     total = 0
     for g in groups:
         for task in g.get("tasks", []):
             if isinstance(task, dict):
-                total += task.get("estimated_loc", 0)
+                total += task.get("estimated_loc", 50)
     return total
 
 
-def _should_use_dag(groups: list[dict]) -> bool:
+def _should_use_dag(groups: list[dict], total_loc: int = 0, loc_threshold: int = 300) -> bool:
     """Check whether to enable DAG parallel execution path.
 
-    Returns True when there are multiple groups.  Independent groups
-    (all depends_on empty) benefit *most* from parallel execution;
-    groups with dependencies are handled correctly by the DAG scheduler.
+    Returns True when there are multiple groups AND the total estimated
+    LOC exceeds the configured threshold.  Small multi-group tasks are
+    better served by a single LLM call (the LOC-merge path in
+    ``implement_handler``).
+
+    Args:
+        groups: Sorted group dicts.
+        total_loc: Pre-computed total estimated LOC across all groups.
+        loc_threshold: Configured LOC threshold from ImplementConfig.
     """
-    return len(groups) > 1
+    if len(groups) <= 1:
+        return False
+    # When total_loc is available and below threshold, prefer single call
+    if total_loc > 0 and total_loc <= loc_threshold:
+        return False
+    return True
 
 
 def _make_execute_fn(
@@ -956,7 +973,7 @@ def _merge_leaf_branch(
     """Merge a leaf branch back to original_branch with enhanced conflict resolution.
 
     Unlike the old approach that fell back to ``--theirs`` on conflict, this
-    function uses :func:`_resolve_leaf_merge_conflicts` which provides the LLM
+    function uses :func:`resolve_merge_conflicts_with_context` which provides the LLM
     with full task context.  If the LLM cannot resolve after 3 retries the merge
     is aborted and ``False`` is returned — no silent data loss.
 
@@ -1000,7 +1017,7 @@ def _merge_leaf_branch(
         _run_git(project_root, "merge", "--abort", check=False)
         return False
 
-    resolved = _resolve_leaf_merge_conflicts(
+    resolved = resolve_merge_conflicts_with_context(
         project_root, conflict_files, task_description, group_summaries, spec_content,
     )
     if resolved:
@@ -1011,130 +1028,6 @@ def _merge_leaf_branch(
         "Leaf merge conflict resolution failed after retries: %s", branch,
     )
     _run_git(project_root, "merge", "--abort", check=False)
-    return False
-
-
-def _resolve_leaf_merge_conflicts(
-    project_root: Path,
-    conflict_files: list[str],
-    task_description: str,
-    group_summaries: list[dict],
-    spec_content: str,
-    max_retries: int = 3,
-) -> bool:
-    """Resolve leaf merge conflicts using LLM with full context.
-
-    For each conflicting file, sends the file content (with conflict markers)
-    to the LLM along with task description, group summaries, and spec context.
-    Verifies the output contains no conflict markers before writing.
-
-    Retries up to *max_retries* times.  Does NOT fall back to ``--theirs``.
-
-    Args:
-        project_root: Project root directory
-        conflict_files: List of conflicting file paths
-        task_description: Overall task description
-        group_summaries: ``[{group_id, summary, files_changed}, ...]``
-        spec_content: Spec summary text
-        max_retries: Maximum resolution attempts
-
-    Returns:
-        True if all conflicts resolved and merge committed, False otherwise
-    """
-    summaries_text = "\n".join(
-        f"- Group {gs['group_id']}: {gs.get('summary', '')} "
-        f"(files: {', '.join(gs.get('files_changed', []))})"
-        for gs in group_summaries
-    ) if group_summaries else "No group context available."
-
-    for attempt in range(1, max_retries + 1):
-        resolved_contents: dict[str, str] = {}
-        all_ok = True
-
-        for filepath in conflict_files:
-            full_path = project_root / filepath
-            if not full_path.exists():
-                logger.warning("Conflict file not found: %s", filepath)
-                all_ok = False
-                break
-
-            try:
-                content = full_path.read_text(encoding="utf-8")
-            except Exception:
-                logger.warning("Could not read conflict file: %s", filepath)
-                all_ok = False
-                break
-
-            if "<<<<<<<" not in content:
-                continue  # Already resolved or not a text conflict
-
-            prompt = (
-                "You are resolving a git merge conflict. The conflict occurred "
-                "while merging parallel implementation branches back to the "
-                "main branch.\n\n"
-                f"## Task Description\n{task_description}\n\n"
-                f"## What Each Group Did\n{summaries_text}\n\n"
-                f"## Project Conventions\n{spec_content[:2000]}\n\n"
-                f"## Conflicting File: {filepath}\n\n"
-                f"```\n{content}\n```\n\n"
-                "Output ONLY the fully resolved file content. "
-                "Do NOT include any conflict markers (<<<<<<< / ======= / >>>>>>>). "
-                "Do NOT add any explanation or code fences."
-            )
-
-            try:
-                caller = LLMCaller(project_root, step_type="leaf_merge_conflict")
-                resolved = caller.call(prompt=prompt)
-            except Exception as e:
-                logger.warning(
-                    "LLM conflict resolution failed for %s (attempt %d/%d): %s",
-                    filepath, attempt, max_retries, e,
-                )
-                all_ok = False
-                break
-
-            if "<<<<<<<" in resolved or ">>>>>>>" in resolved:
-                logger.warning(
-                    "LLM output still has conflict markers for %s (attempt %d/%d)",
-                    filepath, attempt, max_retries,
-                )
-                all_ok = False
-                break
-
-            resolved_contents[filepath] = resolved
-
-        if all_ok:
-            # Write all resolved files and complete the merge
-            for filepath, content in resolved_contents.items():
-                (project_root / filepath).write_text(content, encoding="utf-8")
-                _run_git(project_root, "add", filepath)
-
-            commit_result = _run_git(
-                project_root, "commit", "--no-edit", check=False,
-            )
-            if commit_result.returncode == 0:
-                logger.info(
-                    "Leaf merge conflicts resolved on attempt %d/%d",
-                    attempt, max_retries,
-                )
-                return True
-            logger.warning(
-                "Merge commit failed (attempt %d/%d): %s",
-                attempt, max_retries, commit_result.stderr.strip(),
-            )
-
-        # Reset conflict state for retry
-        if attempt < max_retries:
-            for filepath in resolved_contents:
-                _run_git(
-                    project_root, "checkout", "--merge", "--", filepath,
-                    check=False,
-                )
-            logger.info(
-                "Retrying conflict resolution (attempt %d/%d)",
-                attempt + 1, max_retries,
-            )
-
     return False
 
 

@@ -15,8 +15,8 @@ from se3.engine.dag_scheduler import GroupResult, RelayContext, RelayPlan
 from se3.engine.steps.implement import (
     _compute_total_loc,
     _merge_leaf_branch,
-    _resolve_leaf_merge_conflicts,
 )
+from se3.engine.worktree import resolve_merge_conflicts_with_context
 
 
 # ---------------------------------------------------------------------------
@@ -29,11 +29,12 @@ class TestComputeTotalLoc:
         assert _compute_total_loc([]) == 0
 
     def test_groups_without_estimated_loc(self):
+        """Tasks missing estimated_loc default to 50 each."""
         groups = [
             {"group_id": "G1", "tasks": [{"id": 1}]},
             {"group_id": "G2", "tasks": [{"id": 2}]},
         ]
-        assert _compute_total_loc(groups) == 0
+        assert _compute_total_loc(groups) == 100  # 2 tasks × 50 default
 
     def test_groups_with_estimated_loc(self):
         groups = [
@@ -46,13 +47,14 @@ class TestComputeTotalLoc:
         assert _compute_total_loc(groups) == 225
 
     def test_mixed_tasks_some_without_loc(self):
+        """Tasks without estimated_loc default to 50."""
         groups = [
             {"group_id": "G1", "tasks": [
                 {"id": 1, "estimated_loc": 50},
-                {"id": 2},  # no estimated_loc
+                {"id": 2},  # no estimated_loc → defaults to 50
             ]},
         ]
-        assert _compute_total_loc(groups) == 50
+        assert _compute_total_loc(groups) == 100  # 50 + 50 default
 
     def test_string_tasks_ignored(self):
         """Tasks that are plain strings (legacy format) should be skipped."""
@@ -159,28 +161,25 @@ class TestLocThresholdRouting:
         mock_dag.assert_called_once()
 
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)
-    @patch("se3.engine.steps.implement._should_use_dag", return_value=True)
-    @patch("se3.engine.steps.implement.LLMCaller")
-    @patch("se3.engine.steps.implement.parse_json_response")
-    def test_no_estimated_loc_falls_through(
-        self, mock_parse, mock_caller, mock_dag, mock_inj, tmp_path,
+    @patch("se3.engine.steps.implement._run_single_llm_call")
+    @patch("se3.engine.steps.implement._run_dag_parallel")
+    @patch("se3.engine.steps.implement.has_commits", return_value=True)
+    def test_no_estimated_loc_defaults_to_50(
+        self, mock_has_commits, mock_dag, mock_single, mock_inj, tmp_path,
     ):
-        """Groups without estimated_loc skip LOC check entirely."""
+        """Tasks without estimated_loc default to 50 LOC each, routing via threshold."""
         from se3.engine.models import FlowInstance, Step, StepStatus, StepType
         from se3.engine.steps.implement import implement_handler
 
-        mock_parse.return_value = {
-            "files_changed": [], "summary": "ok",
-            "completion_status": "complete", "restricted_edits": [],
-        }
-        mock_caller.return_value.call.return_value = "{}"
+        mock_single.return_value = StepStatus.COMPLETED
 
         groups = [
             {"group_id": "G1", "group_order": 1, "depends_on": [],
-             "tasks": [{"id": 1}]},  # no estimated_loc
+             "tasks": [{"id": 1}]},  # no estimated_loc → defaults to 50
             {"group_id": "G2", "group_order": 2, "depends_on": ["G1"],
-             "tasks": [{"id": 2}]},
+             "tasks": [{"id": 2}]},  # no estimated_loc → defaults to 50
         ]
+        # total_loc = 100 (2 tasks × 50 default) ≤ 300 threshold → single call
         step = Step(
             step_type=StepType.IMPLEMENT,
             step_id="test-loc",
@@ -196,13 +195,11 @@ class TestLocThresholdRouting:
             change_path=tmp_path / "se3",
         )
 
-        # Should fall through LOC check and reach sequential path
-        # (because _should_use_dag returns True but has_commits not mocked → may error)
-        # We only care that _run_single_llm_call is NOT called from LOC path
-        # Let it reach the sequential path
         result = implement_handler(step, flow)
-        # If it reaches sequential path, LLMCaller is called per-group
-        assert mock_caller.call_count == 2
+
+        assert result == StepStatus.COMPLETED
+        mock_single.assert_called_once()
+        mock_dag.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +211,7 @@ class TestMergeLeafBranch:
     """Tests for _merge_leaf_branch function."""
 
     @patch("se3.engine.steps.implement.get_conflicting_files")
-    @patch("se3.engine.steps.implement._resolve_leaf_merge_conflicts")
+    @patch("se3.engine.steps.implement.resolve_merge_conflicts_with_context")
     @patch("se3.engine.steps.implement._run_git")
     @patch("se3.engine.steps.implement.get_current_branch")
     def test_clean_merge(self, mock_branch, mock_git, mock_resolve, mock_conflict):
@@ -231,7 +228,7 @@ class TestMergeLeafBranch:
         mock_resolve.assert_not_called()
 
     @patch("se3.engine.steps.implement.get_conflicting_files")
-    @patch("se3.engine.steps.implement._resolve_leaf_merge_conflicts")
+    @patch("se3.engine.steps.implement.resolve_merge_conflicts_with_context")
     @patch("se3.engine.steps.implement._run_git")
     @patch("se3.engine.steps.implement.get_current_branch")
     def test_conflict_resolved_by_llm(self, mock_branch, mock_git, mock_resolve, mock_conflict):
@@ -253,7 +250,7 @@ class TestMergeLeafBranch:
         mock_resolve.assert_called_once()
 
     @patch("se3.engine.steps.implement.get_conflicting_files")
-    @patch("se3.engine.steps.implement._resolve_leaf_merge_conflicts")
+    @patch("se3.engine.steps.implement.resolve_merge_conflicts_with_context")
     @patch("se3.engine.steps.implement._run_git")
     @patch("se3.engine.steps.implement.get_current_branch")
     def test_conflict_unresolved_aborts(self, mock_branch, mock_git, mock_resolve, mock_conflict):
@@ -311,15 +308,15 @@ class TestMergeLeafBranch:
 
 
 # ---------------------------------------------------------------------------
-# _resolve_leaf_merge_conflicts
+# resolve_merge_conflicts_with_context
 # ---------------------------------------------------------------------------
 
 
 class TestResolveLeafMergeConflicts:
-    """Tests for _resolve_leaf_merge_conflicts function."""
+    """Tests for resolve_merge_conflicts_with_context function (worktree.py)."""
 
-    @patch("se3.engine.steps.implement._run_git")
-    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("se3.engine.worktree._run_git")
+    @patch("se3.engine.llm_caller.LLMCaller")
     def test_successful_resolution(self, mock_caller_cls, mock_git, tmp_path):
         """LLM resolves all conflicts on first attempt."""
         conflict_file = tmp_path / "conflict.py"
@@ -331,7 +328,7 @@ class TestResolveLeafMergeConflicts:
 
         mock_git.return_value = MagicMock(returncode=0)
 
-        result = _resolve_leaf_merge_conflicts(
+        result = resolve_merge_conflicts_with_context(
             tmp_path, ["conflict.py"],
             "task desc",
             [{"group_id": "G1", "summary": "did stuff", "files_changed": ["a.py"]}],
@@ -341,8 +338,8 @@ class TestResolveLeafMergeConflicts:
         assert result is True
         assert conflict_file.read_text() == "resolved content"
 
-    @patch("se3.engine.steps.implement._run_git")
-    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("se3.engine.worktree._run_git")
+    @patch("se3.engine.llm_caller.LLMCaller")
     def test_markers_in_output_triggers_retry(self, mock_caller_cls, mock_git, tmp_path):
         """LLM output with markers triggers retry."""
         conflict_file = tmp_path / "conflict.py"
@@ -359,7 +356,7 @@ class TestResolveLeafMergeConflicts:
 
         mock_git.return_value = MagicMock(returncode=0)
 
-        result = _resolve_leaf_merge_conflicts(
+        result = resolve_merge_conflicts_with_context(
             tmp_path, ["conflict.py"],
             "task desc", [], "spec",
             max_retries=2,
@@ -368,8 +365,8 @@ class TestResolveLeafMergeConflicts:
         assert result is True
         assert mock_caller.call.call_count == 2
 
-    @patch("se3.engine.steps.implement._run_git")
-    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("se3.engine.worktree._run_git")
+    @patch("se3.engine.llm_caller.LLMCaller")
     def test_all_retries_fail_returns_false(self, mock_caller_cls, mock_git, tmp_path):
         """All retries failing returns False (no --theirs fallback)."""
         conflict_file = tmp_path / "conflict.py"
@@ -381,7 +378,7 @@ class TestResolveLeafMergeConflicts:
 
         mock_git.return_value = MagicMock(returncode=0)
 
-        result = _resolve_leaf_merge_conflicts(
+        result = resolve_merge_conflicts_with_context(
             tmp_path, ["conflict.py"],
             "task desc", [], "spec",
             max_retries=3,
@@ -391,8 +388,8 @@ class TestResolveLeafMergeConflicts:
         # Should have tried 3 times
         assert mock_caller.call.call_count == 3
 
-    @patch("se3.engine.steps.implement._run_git")
-    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("se3.engine.worktree._run_git")
+    @patch("se3.engine.llm_caller.LLMCaller")
     def test_llm_exception_triggers_retry(self, mock_caller_cls, mock_git, tmp_path):
         """LLM exception triggers retry."""
         conflict_file = tmp_path / "conflict.py"
@@ -407,7 +404,7 @@ class TestResolveLeafMergeConflicts:
 
         mock_git.return_value = MagicMock(returncode=0)
 
-        result = _resolve_leaf_merge_conflicts(
+        result = resolve_merge_conflicts_with_context(
             tmp_path, ["conflict.py"],
             "task desc", [], "spec",
             max_retries=2,
@@ -415,18 +412,18 @@ class TestResolveLeafMergeConflicts:
 
         assert result is True
 
-    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("se3.engine.llm_caller.LLMCaller")
     def test_missing_file_returns_false(self, mock_caller_cls, tmp_path):
         """Missing conflict file returns False."""
-        result = _resolve_leaf_merge_conflicts(
+        result = resolve_merge_conflicts_with_context(
             tmp_path, ["nonexistent.py"],
             "task desc", [], "spec",
         )
 
         assert result is False
 
-    @patch("se3.engine.steps.implement._run_git")
-    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("se3.engine.worktree._run_git")
+    @patch("se3.engine.llm_caller.LLMCaller")
     def test_already_resolved_file_skipped(self, mock_caller_cls, mock_git, tmp_path):
         """Files without conflict markers are skipped."""
         clean_file = tmp_path / "clean.py"
@@ -434,7 +431,7 @@ class TestResolveLeafMergeConflicts:
 
         mock_git.return_value = MagicMock(returncode=0)
 
-        result = _resolve_leaf_merge_conflicts(
+        result = resolve_merge_conflicts_with_context(
             tmp_path, ["clean.py"],
             "task desc", [], "spec",
         )
@@ -443,8 +440,8 @@ class TestResolveLeafMergeConflicts:
         # LLM should not be called for already-resolved files
         mock_caller_cls.assert_not_called()
 
-    @patch("se3.engine.steps.implement._run_git")
-    @patch("se3.engine.steps.implement.LLMCaller")
+    @patch("se3.engine.worktree._run_git")
+    @patch("se3.engine.llm_caller.LLMCaller")
     def test_rich_context_in_prompt(self, mock_caller_cls, mock_git, tmp_path):
         """Verify the LLM prompt includes task description and group summaries."""
         conflict_file = tmp_path / "file.py"
@@ -456,7 +453,7 @@ class TestResolveLeafMergeConflicts:
 
         mock_git.return_value = MagicMock(returncode=0)
 
-        _resolve_leaf_merge_conflicts(
+        resolve_merge_conflicts_with_context(
             tmp_path, ["file.py"],
             "Implement user auth",
             [

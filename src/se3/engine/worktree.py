@@ -724,6 +724,136 @@ def get_diff_stat(project_root: Path, branch: str, base_branch: str) -> str:
     return result.stdout.strip()
 
 
+def resolve_merge_conflicts_with_context(
+    project_root: Path,
+    conflict_files: list[str],
+    task_description: str,
+    group_summaries: list[dict],
+    spec_content: str,
+    max_retries: int = 3,
+) -> bool:
+    """Resolve merge conflicts using LLM with full task context.
+
+    For each conflicting file, sends the file content (with conflict markers)
+    to the LLM along with task description, group summaries, and spec context.
+    Verifies the output contains no conflict markers before writing.
+
+    Retries up to *max_retries* times.  Does NOT fall back to ``--theirs``.
+
+    Args:
+        project_root: Project root directory (where the merge is happening)
+        conflict_files: List of conflicting file paths (relative to project_root)
+        task_description: Overall task description for LLM context
+        group_summaries: ``[{group_id, summary, files_changed}, ...]``
+        spec_content: Spec summary text for LLM context
+        max_retries: Maximum resolution attempts
+
+    Returns:
+        True if all conflicts resolved and merge committed, False otherwise.
+    """
+    try:
+        from .llm_caller import LLMCaller
+    except ImportError:
+        logger.warning("LLMCaller not available for conflict resolution")
+        return False
+
+    summaries_text = "\n".join(
+        f"- Group {gs['group_id']}: {gs.get('summary', '')} "
+        f"(files: {', '.join(gs.get('files_changed', []))})"
+        for gs in group_summaries
+    ) if group_summaries else "No group context available."
+
+    for attempt in range(1, max_retries + 1):
+        resolved_contents: dict[str, str] = {}
+        all_ok = True
+
+        for filepath in conflict_files:
+            full_path = project_root / filepath
+            if not full_path.exists():
+                logger.warning("Conflict file not found: %s", filepath)
+                all_ok = False
+                break
+
+            try:
+                content = full_path.read_text(encoding="utf-8")
+            except Exception:
+                logger.warning("Could not read conflict file: %s", filepath)
+                all_ok = False
+                break
+
+            if "<<<<<<<" not in content:
+                continue  # Already resolved or not a text conflict
+
+            prompt = (
+                "You are resolving a git merge conflict. The conflict occurred "
+                "while merging parallel implementation branches back to the "
+                "main branch.\n\n"
+                f"## Task Description\n{task_description}\n\n"
+                f"## What Each Group Did\n{summaries_text}\n\n"
+                f"## Project Conventions\n{spec_content[:2000]}\n\n"
+                f"## Conflicting File: {filepath}\n\n"
+                f"```\n{content}\n```\n\n"
+                "Output ONLY the fully resolved file content. "
+                "Do NOT include any conflict markers (<<<<<<< / ======= / >>>>>>>). "
+                "Do NOT add any explanation or code fences."
+            )
+
+            try:
+                caller = LLMCaller(project_root, step_type="leaf_merge_conflict")
+                resolved = caller.call(prompt=prompt)
+            except Exception as e:
+                logger.warning(
+                    "LLM conflict resolution failed for %s (attempt %d/%d): %s",
+                    filepath, attempt, max_retries, e,
+                )
+                all_ok = False
+                break
+
+            if "<<<<<<<" in resolved or ">>>>>>>" in resolved:
+                logger.warning(
+                    "LLM output still has conflict markers for %s (attempt %d/%d)",
+                    filepath, attempt, max_retries,
+                )
+                all_ok = False
+                break
+
+            resolved_contents[filepath] = resolved
+
+        if all_ok:
+            # Write all resolved files and complete the merge
+            for filepath, content in resolved_contents.items():
+                (project_root / filepath).write_text(content, encoding="utf-8")
+                _run_git(project_root, "add", filepath)
+
+            commit_result = _run_git(
+                project_root, "commit", "--no-edit", check=False,
+            )
+            if commit_result.returncode == 0:
+                logger.info(
+                    "Merge conflicts resolved on attempt %d/%d",
+                    attempt, max_retries,
+                )
+                return True
+            logger.warning(
+                "Merge commit failed (attempt %d/%d): %s",
+                attempt, max_retries, commit_result.stderr.strip(),
+            )
+
+        # Reset conflict state for retry
+        if attempt < max_retries:
+            for filepath in resolved_contents:
+                _run_git(
+                    project_root, "checkout", "--merge", "--", filepath,
+                    check=False,
+                )
+            logger.info(
+                "Retrying conflict resolution (attempt %d/%d)",
+                attempt + 1, max_retries,
+            )
+
+    return False
+
+
 class WorktreeContext:
     """Context manager for exception-safe worktree lifecycle.
 
