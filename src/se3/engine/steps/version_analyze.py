@@ -176,7 +176,7 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
             project_root,
             flow_id=flow.flow_id,
             step_id=step.step_id,
-            step_type=step.step_type.value if isinstance(step.step_type, str) else step.step_type.value,
+            step_type=step.step_type.value,
             external_attempt=retry_count,
         )
         response = caller.call(
@@ -330,14 +330,17 @@ def _format_spec_changes(spec_changes: dict[str, Any]) -> str:
     if updated_specs:
         lines.append("### Spec Files Updated:")
         for spec in updated_specs:
-            spec_path = spec.get("path", "?")
+            spec_name = spec.get("spec_name", spec.get("path", "?"))
+            change_desc = spec.get("change_description", "")
+            lines.append(f"- {spec_name}")
+            if change_desc:
+                lines.append(f"  {change_desc}")
+            # Legacy format support
             changes = spec.get("changes", [])
-            lines.append(f"- {spec_path}")
-            if changes:
-                for change in changes:
-                    change_type = change.get("type", "?")  # e.g., "added", "modified", "removed"
-                    description = change.get("description", "")
-                    lines.append(f"  - [{change_type}] {description}")
+            for change in changes:
+                change_type = change.get("type", "?")
+                description = change.get("description", "")
+                lines.append(f"  - [{change_type}] {description}")
         lines.append("")
     
     # Format API changes summary
