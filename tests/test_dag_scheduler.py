@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -151,7 +152,11 @@ class TestDAGBuild:
 # Scheduling behavior tests
 # ---------------------------------------------------------------------------
 
-def _make_result(group_id: str, delay: float = 0) -> GroupResult:
+def _make_result(
+    group_id: str, delay: float = 0,
+    worktree_path: Path | None = None,
+    branch_name: str | None = None,
+) -> GroupResult:
     """Helper: create a completed GroupResult, optionally sleeping."""
     if delay:
         time.sleep(delay)
@@ -159,7 +164,8 @@ def _make_result(group_id: str, delay: float = 0) -> GroupResult:
         group_id=group_id,
         status="completed",
         summary=f"done-{group_id}",
-        branch_name=f"branch-{group_id}",
+        branch_name=branch_name if branch_name is not None else f"branch-{group_id}",
+        worktree_path=worktree_path,
     )
 
 
@@ -175,7 +181,7 @@ class TestDAGRun:
         start_times: dict[str, float] = {}
         barrier = threading.Barrier(3, timeout=5)
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             thread_ids[gid] = threading.current_thread().ident
             start_times[gid] = time.monotonic()
@@ -200,7 +206,7 @@ class TestDAGRun:
         call_order: list[str] = []
         lock = threading.Lock()
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             with lock:
                 call_order.append(gid)
@@ -223,7 +229,7 @@ class TestDAGRun:
         completion_times: dict[str, float] = {}
         start_times: dict[str, float] = {}
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             start_times[gid] = time.monotonic()
             time.sleep(0.05)
@@ -250,7 +256,7 @@ class TestDAGRun:
         ]
 
         # A finishes fast, B finishes slow
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             if gid == "B":
                 time.sleep(0.3)
@@ -261,7 +267,7 @@ class TestDAGRun:
         start_times: dict[str, float] = {}
         orig_execute = execute
 
-        def tracking_execute(group, deps_results):
+        def tracking_execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             start_times[gid] = time.monotonic()
             return orig_execute(group, deps_results)
@@ -288,7 +294,7 @@ class TestExecuteFnParams:
         groups = [{"group_id": "A"}]
         received_deps = {}
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             received_deps[group["group_id"]] = deps_results
             return _make_result(group["group_id"])
 
@@ -304,7 +310,7 @@ class TestExecuteFnParams:
         ]
         received_deps: dict[str, dict] = {}
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             received_deps[gid] = dict(deps_results)
             return _make_result(gid)
@@ -324,7 +330,7 @@ class TestExecuteFnParams:
         ]
         received_deps: dict[str, set] = {}
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             received_deps[gid] = set(deps_results.keys())
             return _make_result(gid)
@@ -350,7 +356,7 @@ class TestFailurePropagation:
         ]
         executed: list[str] = []
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             executed.append(gid)
             if gid == "A":
@@ -377,7 +383,7 @@ class TestFailurePropagation:
         ]
         executed: list[str] = []
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             executed.append(gid)
             if gid == "A":
@@ -401,7 +407,7 @@ class TestFailurePropagation:
             {"group_id": "B", "depends_on": ["A"]},
         ]
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             if gid == "A":
                 return GroupResult.failed(gid, "internal error")
@@ -421,7 +427,7 @@ class TestFailurePropagation:
             {"group_id": "D", "depends_on": ["B", "C"]},
         ]
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             if gid == "B":
                 raise RuntimeError("B failed")
@@ -490,7 +496,7 @@ class TestTopologicalMergeOrder:
             {"group_id": "D"},
         ]
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             if gid == "A":
                 raise RuntimeError("fail")
@@ -527,7 +533,7 @@ class TestResultsOrdering:
             {"group_id": "C", "depends_on": ["B"]},
         ]
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             return _make_result(group["group_id"])
 
         results = DAGScheduler(groups).run(execute)
@@ -541,7 +547,7 @@ class TestResultsOrdering:
             {"group_id": "C", "depends_on": ["B"]},
         ]
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             if group["group_id"] == "A":
                 raise RuntimeError("fail")
             return _make_result(group["group_id"])
@@ -569,7 +575,7 @@ class TestResultsOrdering:
             {"group_id": "F"},
         ]
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             gid = group["group_id"]
             if gid == "B":
                 raise RuntimeError("B exploded")
@@ -600,7 +606,7 @@ class TestResultsOrdering:
         """Single group with no deps runs and returns one result."""
         groups = [{"group_id": "X"}]
 
-        def execute(group, deps_results):
+        def execute(group, deps_results, relay_context=None):
             return _make_result(group["group_id"])
 
         results = DAGScheduler(groups).run(execute)
@@ -610,7 +616,7 @@ class TestResultsOrdering:
 
     def test_empty_groups_run(self):
         """Empty group list returns empty results."""
-        results = DAGScheduler([]).run(lambda g, d: _make_result(g["group_id"]))
+        results = DAGScheduler([]).run(lambda g, d, rc=None: _make_result(g["group_id"]))
         assert results == []
 
 
@@ -877,3 +883,349 @@ class TestClassifyChains:
         assert plan.relay_map == {"G1": None, "G2": "G1", "G3": None, "G4": "G3"}
         assert plan.fork_from == {}
         assert plan.convergence_points == {}
+
+
+# ---------------------------------------------------------------------------
+# DAGScheduler relay_plan integration tests
+# ---------------------------------------------------------------------------
+
+
+class TestDAGSchedulerRelayPlan:
+    """Tests for DAGScheduler with relay_plan integration."""
+
+    def test_relay_plan_none_gives_default_context(self):
+        """When relay_plan is None, execute_fn receives a default RelayContext."""
+        groups = [{"group_id": "A"}]
+        received_contexts: dict[str, RelayContext] = {}
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            received_contexts[gid] = relay_context
+            return _make_result(gid)
+
+        DAGScheduler(groups, relay_plan=None).run(execute)
+
+        ctx = received_contexts["A"]
+        assert ctx.worktree_path is None
+        assert ctx.branch_name is None
+        assert ctx.is_fork is False
+        assert ctx.fork_source_branch is None
+        assert ctx.convergence_merges == []
+
+    def test_root_node_gets_empty_relay_context(self):
+        """Root node with relay_plan gets worktree_path=None (must create new)."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+        ]
+        plan = classify_chains(groups)
+        received: dict[str, RelayContext] = {}
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            received[gid] = relay_context
+            return _make_result(gid, worktree_path=Path(f"/wt/{gid}"), branch_name=f"br-{gid}")
+
+        DAGScheduler(groups, relay_plan=plan).run(execute)
+
+        # G1 is root → no predecessor worktree
+        assert received["G1"].worktree_path is None
+        assert received["G1"].is_fork is False
+
+    def test_relay_node_gets_predecessor_worktree(self):
+        """Relay node receives predecessor's worktree_path and branch_name."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+        ]
+        plan = classify_chains(groups)
+        received: dict[str, RelayContext] = {}
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            received[gid] = relay_context
+            return _make_result(gid, worktree_path=Path("/wt/G1"), branch_name="br-G1")
+
+        DAGScheduler(groups, relay_plan=plan).run(execute)
+
+        # G2 relays from G1 → gets G1's worktree
+        assert received["G2"].worktree_path == Path("/wt/G1")
+        assert received["G2"].branch_name == "br-G1"
+        assert received["G2"].is_fork is False
+
+    def test_fork_node_gets_fork_context(self):
+        """Fork node gets is_fork=True with fork_source_branch from predecessor."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"]},
+        ]
+        plan = classify_chains(groups)
+        received: dict[str, RelayContext] = {}
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            received[gid] = relay_context
+            return _make_result(gid, worktree_path=Path(f"/wt/{gid}"), branch_name="br-G1")
+
+        DAGScheduler(groups, relay_plan=plan).run(execute)
+
+        # G2 relays (heir), G3 forks
+        assert received["G2"].worktree_path == Path("/wt/G1")
+        assert received["G2"].is_fork is False
+
+        assert received["G3"].is_fork is True
+        assert received["G3"].fork_source_branch == "br-G1"
+        assert received["G3"].worktree_path is None
+
+    def test_convergence_node_gets_merge_list(self):
+        """Convergence node receives secondary predecessor branches in convergence_merges."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"]},
+            {"group_id": "G4", "group_order": 4, "depends_on": ["G2", "G3"]},
+        ]
+        plan = classify_chains(groups)
+        received: dict[str, RelayContext] = {}
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            received[gid] = relay_context
+            return _make_result(gid, worktree_path=Path(f"/wt/{gid}"), branch_name=f"br-{gid}")
+
+        DAGScheduler(groups, relay_plan=plan).run(execute)
+
+        # G4 is convergence: primary=G2, secondary=[G3]
+        ctx = received["G4"]
+        assert ctx.worktree_path == Path("/wt/G2")
+        assert ctx.branch_name == "br-G2"
+        assert ctx.convergence_merges == ["br-G3"]
+        assert ctx.is_fork is False
+
+    def test_linear_chain_relay_propagation(self):
+        """G1→G2→G3: relay context propagates through the chain."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G2"]},
+        ]
+        plan = classify_chains(groups)
+        received: dict[str, RelayContext] = {}
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            received[gid] = relay_context
+            # All groups share the same worktree/branch in a linear relay
+            return _make_result(gid, worktree_path=Path("/wt/shared"), branch_name="br-shared")
+
+        DAGScheduler(groups, relay_plan=plan).run(execute)
+
+        assert received["G1"].worktree_path is None  # root
+        assert received["G2"].worktree_path == Path("/wt/shared")
+        assert received["G2"].branch_name == "br-shared"
+        assert received["G3"].worktree_path == Path("/wt/shared")
+        assert received["G3"].branch_name == "br-shared"
+
+    def test_backward_compatible_without_relay_plan(self):
+        """DAGScheduler without relay_plan still works with 3-arg execute_fn."""
+        groups = [
+            {"group_id": "A", "depends_on": []},
+            {"group_id": "B", "depends_on": ["A"]},
+        ]
+        call_order: list[str] = []
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            call_order.append(gid)
+            assert relay_context.worktree_path is None  # default context
+            return _make_result(gid)
+
+        results = DAGScheduler(groups).run(execute)
+        assert call_order == ["A", "B"]
+        assert all(r.status == "completed" for r in results)
+
+
+# ---------------------------------------------------------------------------
+# get_fallback_leaves tests
+# ---------------------------------------------------------------------------
+
+
+class TestGetFallbackLeaves:
+    """Tests for DAGScheduler.get_fallback_leaves()."""
+
+    def test_all_succeed_no_fallback(self):
+        """When all groups complete, no fallback leaves are needed."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G2"]},
+        ]
+        plan = classify_chains(groups)
+
+        def execute(group, deps_results, relay_context):
+            return _make_result(group["group_id"])
+
+        s = DAGScheduler(groups, relay_plan=plan)
+        s.run(execute)
+        assert s.get_fallback_leaves() == []
+
+    def test_midchain_failure_creates_fallback_leaf(self):
+        """G1→G2→G3, G2 fails: G1 becomes a fallback leaf."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G2"]},
+        ]
+        plan = classify_chains(groups)
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            if gid == "G2":
+                raise RuntimeError("G2 failed")
+            return _make_result(gid)
+
+        s = DAGScheduler(groups, relay_plan=plan)
+        s.run(execute)
+
+        fallback = s.get_fallback_leaves()
+        assert fallback == ["G1"]
+
+    def test_leaf_failure_no_fallback(self):
+        """G1→G2, G2 (leaf) fails: G1 becomes fallback leaf."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+        ]
+        plan = classify_chains(groups)
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            if gid == "G2":
+                raise RuntimeError("G2 failed")
+            return _make_result(gid)
+
+        s = DAGScheduler(groups, relay_plan=plan)
+        s.run(execute)
+
+        # G2 is the leaf but it failed; G1 completed but all downstream failed
+        fallback = s.get_fallback_leaves()
+        assert fallback == ["G1"]
+
+    def test_fork_partial_failure(self):
+        """G1→{G2,G3}, G2 completes, G3 fails: no fallback (G2 is leaf, carries G1's work)."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"]},
+        ]
+        plan = classify_chains(groups)
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            if gid == "G3":
+                raise RuntimeError("G3 failed")
+            return _make_result(gid)
+
+        s = DAGScheduler(groups, relay_plan=plan)
+        s.run(execute)
+
+        # G2 is a leaf that completed, G3 is a leaf that failed
+        # G1 has G2 as completed downstream → NOT a fallback leaf
+        assert s.get_fallback_leaves() == []
+
+    def test_fork_all_downstream_fail(self):
+        """G1→{G2,G3}, both G2 and G3 fail: G1 becomes fallback leaf."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"]},
+        ]
+        plan = classify_chains(groups)
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            if gid in ("G2", "G3"):
+                raise RuntimeError(f"{gid} failed")
+            return _make_result(gid)
+
+        s = DAGScheduler(groups, relay_plan=plan)
+        s.run(execute)
+
+        assert s.get_fallback_leaves() == ["G1"]
+
+    def test_diamond_convergence_failure(self):
+        """G1→{G2,G3}→G4: G4 fails but G2 and G3 completed.
+
+        G2 is not a normal leaf (G4 is). G3 is not a normal leaf either.
+        Both G2 and G3 have G4 as their only downstream and G4 failed,
+        so both become fallback leaves.
+        """
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"]},
+            {"group_id": "G4", "group_order": 4, "depends_on": ["G2", "G3"]},
+        ]
+        plan = classify_chains(groups)
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            if gid == "G4":
+                raise RuntimeError("G4 failed")
+            return _make_result(gid)
+
+        s = DAGScheduler(groups, relay_plan=plan)
+        s.run(execute)
+
+        fallback = s.get_fallback_leaves()
+        # G2 and G3 are not leaf_nodes (G4 is), and their only downstream (G4) failed
+        assert sorted(fallback) == ["G2", "G3"]
+
+    def test_furthest_completed_is_fallback(self):
+        """G1→G2→G3, G3 fails: G2 is fallback leaf (not G1, because G1 has G2 as completed downstream)."""
+        groups = [
+            {"group_id": "G1", "group_order": 1, "depends_on": []},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G2"]},
+        ]
+        plan = classify_chains(groups)
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            if gid == "G3":
+                raise RuntimeError("G3 failed")
+            return _make_result(gid)
+
+        s = DAGScheduler(groups, relay_plan=plan)
+        s.run(execute)
+
+        # G1 has completed downstream G2, so G1 is NOT a fallback leaf
+        # G2 has all downstream (G3) failed, and is NOT a normal leaf → fallback leaf
+        assert s.get_fallback_leaves() == ["G2"]
+
+    def test_no_relay_plan_fallback_leaves(self):
+        """Without relay_plan, get_fallback_leaves still works (all nodes are potential fallbacks)."""
+        groups = [
+            {"group_id": "A", "depends_on": []},
+            {"group_id": "B", "depends_on": ["A"]},
+        ]
+
+        def execute(group, deps_results, relay_context):
+            gid = group["group_id"]
+            if gid == "B":
+                raise RuntimeError("B failed")
+            return _make_result(gid)
+
+        s = DAGScheduler(groups)
+        s.run(execute)
+
+        # A completed, B failed; no relay_plan → leaf_nodes is empty set
+        # A has downstream B which failed → fallback leaf
+        assert s.get_fallback_leaves() == ["A"]
+
+    def test_before_run_returns_empty(self):
+        """get_fallback_leaves before run() returns empty."""
+        groups = [{"group_id": "A"}]
+        s = DAGScheduler(groups)
+        assert s.get_fallback_leaves() == []

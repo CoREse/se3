@@ -230,15 +230,26 @@ class DAGScheduler:
     Groups with no dependencies start immediately; each completed group
     triggers an immediate scan for newly-unblocked downstream groups.
 
+    When a ``relay_plan`` is provided, the scheduler builds a
+    :class:`RelayContext` for each group before submitting it, enabling
+    relay-based worktree reuse, forking, and convergence merging.
+
     Args:
         groups: List of group dicts, each containing at least 'group_id'
                 and optionally 'depends_on' (list of group_id strings).
         max_workers: Maximum number of concurrent group executions.
+        relay_plan: Optional relay execution plan from ``classify_chains()``.
     """
 
-    def __init__(self, groups: list[dict], max_workers: int = 4) -> None:
+    def __init__(
+        self,
+        groups: list[dict],
+        max_workers: int = 4,
+        relay_plan: Optional[RelayPlan] = None,
+    ) -> None:
         self._groups = groups
         self._max_workers = max_workers
+        self._relay_plan = relay_plan
 
         # Maps group_id → group dict
         self._group_map: dict[str, dict] = {}
@@ -250,6 +261,8 @@ class DAGScheduler:
         self._in_degree: dict[str, int] = {}
         # Topological order (computed during cycle detection)
         self._topo_order: list[str] = []
+        # Populated by run() — needed for get_fallback_leaves()
+        self._run_results: dict[str, GroupResult] = {}
 
         self._build_dag()
 
@@ -313,16 +326,63 @@ class DAGScheduler:
 
         return order
 
+    def _build_relay_context(
+        self, group_id: str, completed: dict[str, GroupResult],
+    ) -> RelayContext:
+        """Build a RelayContext for a group from the relay plan and completed results.
+
+        Called with the condition lock held before submitting a group for execution.
+        When no relay_plan is set, returns a default (all-None) context.
+        """
+        if not self._relay_plan:
+            return RelayContext()
+
+        plan = self._relay_plan
+        predecessor_id = plan.relay_map.get(group_id)
+        is_fork = group_id in plan.fork_from
+        fork_source_branch: str | None = None
+        worktree_path: Path | None = None
+        branch_name: str | None = None
+        convergence_merges: list[str] = []
+
+        if predecessor_id is not None and predecessor_id in completed:
+            # Relay: reuse predecessor's worktree and branch
+            pred_result = completed[predecessor_id]
+            worktree_path = pred_result.worktree_path
+            branch_name = pred_result.branch_name or None
+        elif is_fork:
+            # Fork: need a new worktree from predecessor's branch
+            fork_pred_id = plan.fork_from[group_id]
+            if fork_pred_id in completed and completed[fork_pred_id].branch_name:
+                fork_source_branch = completed[fork_pred_id].branch_name
+
+        # Convergence merges: collect secondary predecessor branches
+        if group_id in plan.convergence_points:
+            conv = plan.convergence_points[group_id]
+            for sec_pred_id in conv.secondary_predecessors:
+                if sec_pred_id in completed and completed[sec_pred_id].branch_name:
+                    convergence_merges.append(completed[sec_pred_id].branch_name)
+
+        return RelayContext(
+            worktree_path=worktree_path,
+            branch_name=branch_name,
+            is_fork=is_fork,
+            fork_source_branch=fork_source_branch,
+            convergence_merges=convergence_merges,
+        )
+
     def run(
         self,
-        execute_fn: Callable[[dict, dict[str, GroupResult]], GroupResult],
+        execute_fn: Callable[..., GroupResult],
     ) -> list[GroupResult]:
         """Execute all groups respecting dependency order.
 
         Args:
-            execute_fn: Callable receiving (group_dict, deps_results) and
-                returning a GroupResult. deps_results contains only the
-                results of the group's direct dependencies.
+            execute_fn: Callable receiving ``(group_dict, deps_results,
+                relay_context)`` and returning a :class:`GroupResult`.
+                ``deps_results`` contains only the results of the group's
+                direct dependencies.  ``relay_context`` describes how the
+                group should acquire its worktree (relay, fork, or new).
 
         Returns:
             List of all GroupResults in topological order.
@@ -373,8 +433,11 @@ class DAGScheduler:
                 pending.discard(gid)
                 running.add(gid)
                 deps_results = _get_deps_results(gid)
+                relay_context = self._build_relay_context(gid, completed)
                 group_dict = self._group_map[gid]
-                future = executor.submit(execute_fn, group_dict, deps_results)
+                future = executor.submit(
+                    execute_fn, group_dict, deps_results, relay_context,
+                )
                 future.add_done_callback(
                     lambda f, g=gid: _on_complete(g, f, executor)
                 )
@@ -433,6 +496,9 @@ class DAGScheduler:
                 while pending or running:
                     condition.wait(timeout=1.0)
 
+        # Store results for get_fallback_leaves()
+        self._run_results = {**completed, **skipped}
+
         # Build results in topological order
         results: list[GroupResult] = []
         for gid in self._topo_order:
@@ -445,6 +511,46 @@ class DAGScheduler:
                 results.append(GroupResult.failed(gid, "Unknown state"))
 
         return results
+
+    def get_fallback_leaves(self) -> list[str]:
+        """Return group_ids of completed groups that should be merged as fallback leaves.
+
+        After a partial failure, some completed groups may have no completed
+        downstream (all their downstream groups failed or were skipped).
+        These groups' branches contain valid work that should be preserved
+        by merging back to the original branch.
+
+        Normal leaf nodes (from relay_plan.leaf_nodes) are excluded since
+        they are already handled by the standard leaf merge path.
+
+        Must be called after :meth:`run`.
+        """
+        if not self._run_results:
+            return []
+
+        completed_ids = {
+            gid for gid, r in self._run_results.items()
+            if r.status == "completed"
+        }
+
+        # Exclude normal leaf nodes — they get merged via the standard path
+        leaf_nodes = self._relay_plan.leaf_nodes if self._relay_plan else set()
+
+        fallback: list[str] = []
+        for gid in completed_ids:
+            if gid in leaf_nodes:
+                continue
+            downstream = self._adjacency.get(gid, [])
+            if not downstream:
+                # No downstream and not in leaf_nodes — shouldn't happen,
+                # but treat as fallback leaf to be safe
+                fallback.append(gid)
+                continue
+            # All direct downstream are non-completed → this group is a fallback leaf
+            if all(d not in completed_ids for d in downstream):
+                fallback.append(gid)
+
+        return sorted(fallback)
 
     def topological_merge_order(self) -> list[str]:
         """Return group_ids in topological order, filtered to completed only.

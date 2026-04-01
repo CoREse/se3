@@ -15,6 +15,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
+from se3.engine.dag_scheduler import RelayContext
 from se3.engine.models import (
     FlowInstance,
     FlowStatus,
@@ -599,7 +600,7 @@ class TestStaleBranchHandling:
         )
 
         group = {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]}
-        result = execute_fn(group, {})
+        result = execute_fn(group, {}, RelayContext())
 
         assert result.status == "completed"
 
@@ -683,7 +684,7 @@ class TestStaleBranchHandling:
         )
 
         group = {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]}
-        result = execute_fn(group, {})
+        result = execute_fn(group, {}, RelayContext())
 
         # Should complete successfully even though branch -D failed
         assert result.status == "completed"
@@ -1215,7 +1216,7 @@ class TestDagParallelResumeBehavior:
         )
 
         group = {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]}
-        result = execute_fn(group, {})
+        result = execute_fn(group, {}, RelayContext())
 
         assert result.status == "completed"
 
