@@ -440,6 +440,12 @@ class StateMachine:
         step_to_review.inputs["revision_feedback"] = feedback
         step_to_review.inputs["is_revision"] = True
         step_to_review.inputs["revision_iteration"] = iteration
+        # Pass previous output so the LLM knows what to revise
+        previous_output = {
+            k: v for k, v in step_to_review.outputs.items()
+            if not k.startswith("_")
+        }
+        step_to_review.inputs["previous_output"] = previous_output
         step_to_review.error_message = None
         step_to_review.error_details = None
         # Keep the outputs for reference, but mark that they may be outdated

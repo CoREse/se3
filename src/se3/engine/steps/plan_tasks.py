@@ -99,12 +99,13 @@ Important:
 """
 
 REVISION_SECTION = """
-## Previous Task Plan Feedback
-The previous task plan was reviewed and requires changes:
+## Previous Task Plan (to revise)
+{previous_output}
 
+## Reviewer Feedback
 {revision_feedback}
 
-Please revise the task plan addressing the feedback above.
+Revise the task plan above to address the feedback. Keep what was good, fix what was flagged.
 """
 
 
@@ -178,7 +179,13 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     # Build revision section if this is a revision
     if is_revision and revision_feedback:
-        revision_section = REVISION_SECTION.format(revision_feedback=revision_feedback)
+        import json as _json
+        previous_output = step.inputs.get("previous_output", {})
+        prev_text = _json.dumps(previous_output, indent=2, ensure_ascii=False) if previous_output else "(not available)"
+        revision_section = REVISION_SECTION.format(
+            revision_feedback=revision_feedback,
+            previous_output=prev_text,
+        )
     else:
         revision_section = ""
 
