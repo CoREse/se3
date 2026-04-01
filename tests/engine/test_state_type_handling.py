@@ -216,33 +216,33 @@ class TestTypeConflictWarning:
         assert "conflict" not in caplog.text.lower()
         assert "differs" not in caplog.text.lower()
 
-    def test_warning_when_explicit_differs_from_analyzed(self, caplog):
-        """Warning logged when explicit --type differs from analyzed."""
+    def test_explicit_type_overrides_analyzed(self, caplog):
+        """Explicit --type should override LLM analysis and log info."""
         from se3.engine.steps.analyze import _handle_type_conflict
 
-        with caplog.at_level("WARNING"):
+        with caplog.at_level("INFO"):
             # Explicit is "feature", analyzed is "bugfix"
-            _handle_type_conflict(self.flow, "bugfix")
+            result = _handle_type_conflict(self.flow, "bugfix")
 
-        # Should have warning with both types mentioned
-        assert "conflict" in caplog.text.lower()
+        # Explicit type wins
+        assert result == "feature"
+        assert "overrides" in caplog.text.lower()
         assert "feature" in caplog.text
         assert "bugfix" in caplog.text
-        assert "differs" in caplog.text.lower() or "overrides" in caplog.text.lower()
 
-    def test_warning_contains_explicit_and_resolved_types(self, caplog):
-        """Warning message should contain both explicit and resolved types."""
+    def test_override_returns_explicit_type(self, caplog):
+        """Return value should be the explicit type, not the analyzed one."""
         from se3.engine.steps.analyze import _handle_type_conflict
 
-        with caplog.at_level("WARNING"):
-            _handle_type_conflict(self.flow, "small")
+        with caplog.at_level("INFO"):
+            result = _handle_type_conflict(self.flow, "small")
 
-        # Verify both type names appear in warning
-        assert "--type='feature'" in caplog.text or "explicit --type='feature'" in caplog.text
-        assert "'small'" in caplog.text
+        assert result == "feature"
+        assert "feature" in caplog.text
+        assert "small" in caplog.text
 
-    def test_no_warning_without_explicit_type(self, caplog):
-        """No warning when no explicit type was provided."""
+    def test_no_override_without_explicit_type(self, caplog):
+        """Without explicit --type, analyzed type is used as-is."""
         from se3.engine.steps.analyze import _handle_type_conflict
 
         # Create flow without explicit_type
@@ -250,13 +250,12 @@ class TestTypeConflictWarning:
             task_description="Test task",
             task_type="pending",
         )
-        # No explicit_type in context
 
-        with caplog.at_level("WARNING"):
-            _handle_type_conflict(flow_no_explicit, "feature")
+        with caplog.at_level("INFO"):
+            result = _handle_type_conflict(flow_no_explicit, "feature")
 
-        # Should not have conflict warning
-        assert "conflict" not in caplog.text.lower()
+        assert result == "feature"
+        assert "overrides" not in caplog.text.lower()
 
 
 class TestContextDisplayType:

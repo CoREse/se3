@@ -66,7 +66,8 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     Returns:
         StepStatus.COMPLETED on success, StepStatus.FAILED on error
     """
-    task_description = step.inputs.get("task_description", "")
+    # Prefer refined_description from discovery step over raw task_description
+    task_description = step.inputs.get("refined_description") or step.inputs.get("task_description", "")
 
     if not task_description:
         step.error_message = "No task description provided"
@@ -113,8 +114,8 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Extract task_type from analyze result (discovery only valid with --discover flag)
         resolved_task_type = _extract_task_type(result, flow)
 
-        # Check for conflict with explicit --type flag
-        _handle_type_conflict(flow, resolved_task_type)
+        # Explicit --type flag overrides LLM analysis
+        resolved_task_type = _handle_type_conflict(flow, resolved_task_type)
 
         # Update state with resolved task type
         flow.state.update_task_type(resolved_task_type)
@@ -169,21 +170,29 @@ def _extract_task_type(analyze_output: dict, flow: FlowInstance) -> str:
     return task_type
 
 
-def _handle_type_conflict(flow: FlowInstance, resolved_type: str) -> None:
-    """Detect and warn when analyze type differs from explicit --type.
+def _handle_type_conflict(flow: FlowInstance, resolved_type: str) -> str:
+    """Check if explicit --type flag should override LLM analysis.
+
+    When user explicitly specifies --type, that takes precedence over
+    whatever the LLM classified the task as.
 
     Args:
         flow: The flow instance containing context
         resolved_type: The task type determined by analyze step
+
+    Returns:
+        The final task type to use (explicit overrides analyzed)
     """
     explicit_type = flow.state.context.get("explicit_type")
 
     if explicit_type and explicit_type != resolved_type:
-        logger.warning(
-            f"Task type conflict: explicit --type='{explicit_type}' "
-            f"differs from analyzed type='{resolved_type}'. "
-            f"Using analyzed type."
+        logger.info(
+            f"Explicit --type='{explicit_type}' overrides "
+            f"analyzed type='{resolved_type}'"
         )
+        return explicit_type
+
+    return resolved_type
 
 
 def _gather_project_context(flow: FlowInstance) -> str:
