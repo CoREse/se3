@@ -702,7 +702,13 @@ class TestStaleBranchHandling:
         self, mock_config, mock_make_fn, mock_scheduler_cls,
         mock_get_branch, mock_force_cleanup, mock_del_branch, mock_merge,
     ):
-        """The finally block in _run_dag_parallel deletes impl branches for ALL groups."""
+        """On scheduler exception, finally cleans worktrees but leaves branches.
+
+        Branches are NOT deleted in the finally block — they are only deleted
+        post-merge. When the scheduler throws, merge never runs, so branches
+        remain as orphans (stale branch cleanup at the start of execute_fn
+        handles these on the next run).
+        """
         from se3.engine.steps.implement import _run_dag_parallel
         from se3.engine.dag_scheduler import GroupResult
 
@@ -737,16 +743,16 @@ class TestStaleBranchHandling:
                 retry_count=0,
             )
 
-        # Even though scheduler raised, delete_branch should be called for ALL groups
-        deleted_branches = [c[0][1] for c in mock_del_branch.call_args_list]
-        expected_branches = [
-            f"impl/{self.flow.flow_id}/G1",
-            f"impl/{self.flow.flow_id}/G2",
-        ]
-        for expected in expected_branches:
-            assert expected in deleted_branches, (
-                f"Branch {expected} was not cleaned up. Deleted: {deleted_branches}"
-            )
+        # Worktrees should still be cleaned up in finally
+        # (force_cleanup_worktree is called for results, but results is empty
+        # when scheduler throws, so no cleanup calls expected)
+
+        # Branches should NOT be deleted in the finally block — they are
+        # only deleted post-merge, which never runs on exception
+        assert mock_del_branch.call_count == 0, (
+            f"Branches should not be deleted on scheduler exception; "
+            f"delete_branch was called {mock_del_branch.call_count} times"
+        )
 
     @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
@@ -803,13 +809,17 @@ class TestStaleBranchHandling:
 
         assert result == StepStatus.COMPLETED
 
-        # delete_branch should be called for all groups (in finally AND post-merge cleanup)
+        # delete_branch should be called once per group (post-merge only, NOT in finally)
         deleted_branches = [c[0][1] for c in mock_del_branch.call_args_list]
         for gid in ["G1", "G2"]:
             branch = f"impl/{self.flow.flow_id}/{gid}"
             assert branch in deleted_branches, (
                 f"Branch {branch} not cleaned up. Deleted: {deleted_branches}"
             )
+        # Exactly one deletion per group (post-merge), not double-deleted
+        assert len(deleted_branches) == 2, (
+            f"Expected 2 branch deletions (one per group), got {len(deleted_branches)}"
+        )
 
 
 class TestDagResumeFiltering:

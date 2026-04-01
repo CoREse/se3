@@ -114,6 +114,107 @@ def get_issue_discovery_injection(step_type: str, project_root: Path) -> str:
     return ISSUE_DISCOVERY_PROMPT
 
 
+def get_runtime_context_injection(project_root: Path, main_repo_root: Path | None = None) -> str:
+    """Get runtime directory structure context for LLM.
+
+    When running in a worktree, gitignored runtime directories (state/, history/,
+    issues/open/, etc.) are absent. This function detects worktree isolation and
+    injects context from the main repository so the LLM knows what's available.
+
+    Args:
+        project_root: Current working directory (may be a worktree)
+        main_repo_root: Main repository root. If None, tries to detect from
+            git worktree metadata.
+
+    Returns:
+        Context string describing the main repo's runtime state, or empty string
+        if not in a worktree or main repo has no additional context.
+    """
+    # Determine main repo root (if not explicitly provided, detect it)
+    if main_repo_root is None:
+        main_repo_root = _detect_main_repo_root(project_root)
+
+    # Not in a worktree, or same as project_root — no injection needed
+    if main_repo_root is None or main_repo_root.resolve() == project_root.resolve():
+        return ""
+
+    main_se3 = main_repo_root / "se3"
+    if not main_se3.exists():
+        return ""
+
+    # Collect context from gitignored runtime directories that are
+    # absent in the worktree but present in the main repository
+    context_parts: list[str] = []
+
+    # Open issues (useful for understanding known problems)
+    issues_dir = main_se3 / "issues" / "open"
+    if issues_dir.exists():
+        issue_files = sorted(f.name for f in issues_dir.iterdir() if f.is_file() and f.suffix in (".yaml", ".yml"))
+        if issue_files:
+            context_parts.append(f"### Open Issues ({len(issue_files)})")
+            for name in issue_files[:10]:
+                context_parts.append(f"- `se3/issues/open/{name}`")
+
+    # Active flow state
+    state_dir = main_se3 / "state"
+    if state_dir.exists():
+        state_files = sorted(f.name for f in state_dir.iterdir() if f.is_file())
+        if state_files:
+            context_parts.append(f"\n### Flow State")
+            for name in state_files[:5]:
+                context_parts.append(f"- `se3/state/{name}`")
+
+    # History summary
+    history_dir = main_se3 / "history"
+    if history_dir.exists():
+        flow_dirs = sorted(d.name for d in history_dir.iterdir() if d.is_dir())
+        if flow_dirs:
+            context_parts.append(f"\n### History: {len(flow_dirs)} flow(s)")
+
+    # If no runtime context was collected, skip injection
+    if not context_parts:
+        return ""
+
+    # Build full injection
+    parts = ["\n\n## Runtime Context (from main repository)"]
+    parts.append("You are running in an isolated worktree. The following runtime "
+                 "state exists in the main repository:\n")
+    parts.extend(context_parts)
+    parts.append("")
+
+    return "\n".join(parts)
+
+
+def _detect_main_repo_root(worktree_path: Path) -> Path | None:
+    """Detect the main repository root from a worktree path.
+
+    Uses git to find the common directory (main repo .git dir).
+
+    Args:
+        worktree_path: Path that may be a worktree
+
+    Returns:
+        Main repo root path, or None if detection fails
+    """
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            common_dir = Path(result.stdout.strip())
+            if not common_dir.is_absolute():
+                common_dir = (worktree_path / common_dir).resolve()
+            # common_dir is the .git directory of the main repo
+            main_root = common_dir.parent
+            if main_root != worktree_path and (main_root / "se3").exists():
+                return main_root
+    except Exception:
+        pass
+    return None
+
+
 class ContextBuilder:
     """Provides spec directory resolution and spec content loading.
 

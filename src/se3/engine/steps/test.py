@@ -97,6 +97,9 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     }
     step.outputs["tests_passed"] = overall_passed
 
+    # Record test results in history
+    _record_test_history(project_root, flow, step, phase_results, overall_passed)
+
     if overall_passed:
         logger.info("All tests passed")
     else:
@@ -326,3 +329,73 @@ def _detect_test_command(project_root: Path) -> list[str]:
         return ["go", "test", "./..."]
 
     return ["python", "-m", "pytest", "-v"]
+
+
+def _record_test_history(
+    project_root: Path,
+    flow: FlowInstance,
+    step: Step,
+    phase_results: list[dict],
+    overall_passed: bool,
+) -> None:
+    """Record test execution results in the chat history system.
+
+    This ensures test step results are preserved in se3/history/
+    alongside LLM step histories, enabling continuity across
+    worktree isolation and fix loop iterations.
+
+    Args:
+        project_root: Project root directory
+        flow: Current flow instance
+        step: Current step instance
+        phase_results: List of phase result dicts
+        overall_passed: Whether all tests passed
+    """
+    try:
+        from ..chat_history import record_prompt, record_response
+        import json as _json
+
+        fix_iteration = step.inputs.get("fix_iteration", 0)
+
+        # Record a synthetic "prompt" summarizing what was tested
+        commands_run = [p.get("command", p.get("name", "?")) for p in phase_results]
+        prompt_summary = f"Test execution (fix iteration {fix_iteration}): {', '.join(commands_run)}"
+        record_prompt(
+            project_root,
+            flow_id=flow.flow_id,
+            step_id=step.step_id,
+            step_type=step.step_type.value,
+            prompt=prompt_summary,
+            attempt=fix_iteration,
+        )
+
+        # Record test results as synthetic "response"
+        result_summary = {
+            "overall_passed": overall_passed,
+            "phases": [
+                {
+                    "name": p.get("name", "?"),
+                    "passed": p.get("passed", False),
+                    "returncode": p.get("returncode", -1),
+                }
+                for p in phase_results
+            ],
+        }
+        # Include failure output for failed phases (truncated)
+        for i, p in enumerate(phase_results):
+            if not p.get("passed", False):
+                stdout_tail = (p.get("stdout", "") or "")[-500:]
+                stderr_tail = (p.get("stderr", "") or "")[-300:]
+                result_summary["phases"][i]["stdout_tail"] = stdout_tail
+                result_summary["phases"][i]["stderr_tail"] = stderr_tail
+
+        record_response(
+            project_root,
+            flow_id=flow.flow_id,
+            step_id=step.step_id,
+            step_type=step.step_type.value,
+            raw_ndjson=_json.dumps(result_summary, ensure_ascii=False),
+            attempt=fix_iteration,
+        )
+    except Exception as e:
+        logger.debug(f"Failed to record test history: {e}")

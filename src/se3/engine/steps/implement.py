@@ -567,6 +567,12 @@ def _make_execute_fn(
             if injection:
                 prompt += injection
 
+            # Inject runtime context for worktree isolation
+            from ..context_builder import get_runtime_context_injection
+            runtime_ctx = get_runtime_context_injection(worktree_path, project_root)
+            if runtime_ctx:
+                prompt += runtime_ctx
+
             # Step 6: Run LLM in the worktree
             caller = LLMCaller(
                 worktree_path,
@@ -629,10 +635,14 @@ def _make_execute_fn(
                 f"Check for stale .git/worktrees/*/locked files or index.lock."
             )
             logger.error(msg)
-            return GroupResult.failed(group_id, f"{msg} Original error: {e}")
+            result = GroupResult.failed(group_id, f"{msg} Original error: {e}")
+            result.worktree_path = worktree_path  # preserve for history salvaging
+            return result
         except (LLMCallError, Exception) as e:
             logger.exception("DAG: group %s failed", group_id)
-            return GroupResult.failed(group_id, str(e))
+            result = GroupResult.failed(group_id, str(e))
+            result.worktree_path = worktree_path  # preserve for history salvaging
+            return result
 
     return execute_fn
 
@@ -691,22 +701,23 @@ def _run_dag_parallel(
     try:
         results = scheduler.run(execute_fn)
     finally:
+        # Salvage history files from worktrees before cleanup
+        for r in results:
+            if r.worktree_path:
+                try:
+                    _salvage_history_from_worktree(r.worktree_path, project_root)
+                except Exception:
+                    logger.warning("DAG: failed to salvage history from worktree %s", r.worktree_path)
+
         # Always clean up worktrees (force-remove to handle locked state)
+        # NOTE: Only remove worktree directories here, NOT branches.
+        # Branches must survive until after merge-back completes.
         for r in results:
             if r.branch_name:
                 try:
                     force_cleanup_worktree(project_root, r.branch_name)
                 except Exception:
                     logger.warning("DAG: failed to force-cleanup worktree for branch %s", r.branch_name)
-
-        # Always clean up impl branches for all groups
-        for g in groups:
-            gid = g.get("group_id", g.get("name", "unknown"))
-            branch = f"impl/{flow.flow_id}/{gid}"
-            try:
-                delete_branch(project_root, branch)
-            except Exception:
-                logger.debug("DAG: failed to delete branch %s in finally cleanup", branch)
 
         # Ensure we're back on original_branch
         try:
@@ -740,13 +751,14 @@ def _run_dag_parallel(
             logger.error("DAG: merge failed for %s", group_id)
             merge_failures.append(group_id)
 
-    # Delete impl branches
-    for r in results:
-        if r.branch_name:
-            try:
-                delete_branch(project_root, r.branch_name)
-            except Exception:
-                logger.debug("DAG: failed to delete branch %s", r.branch_name)
+    # Delete impl branches (all groups, not just results — covers failed/skipped)
+    for g in groups:
+        gid = g.get("group_id", g.get("name", "unknown"))
+        branch = f"impl/{flow.flow_id}/{gid}"
+        try:
+            delete_branch(project_root, branch)
+        except Exception:
+            logger.debug("DAG: failed to delete branch %s", branch)
 
     # Apply restricted edits on original_branch
     all_restricted_applied: list[dict] = []
@@ -966,6 +978,49 @@ def _apply_restricted_edits(
             failed.append({**edit, "error": f"Exception: {e}"})
 
     return successful, failed
+
+
+def _salvage_history_from_worktree(worktree_path: Path, main_repo_root: Path) -> None:
+    """Copy history files from a worktree back to the main repository.
+
+    When LLM runs in a worktree, chat history is recorded under the worktree's
+    se3/history/ directory. This function copies those files to the main repo
+    before the worktree is cleaned up, preventing history loss.
+
+    Args:
+        worktree_path: Path to the worktree directory
+        main_repo_root: Path to the main repository root
+    """
+    import shutil
+
+    wt_history = worktree_path / "se3" / "history"
+    if not wt_history.exists():
+        return
+
+    main_history = main_repo_root / "se3" / "history"
+    main_history.mkdir(parents=True, exist_ok=True)
+
+    copied = 0
+    for flow_dir in wt_history.iterdir():
+        if not flow_dir.is_dir():
+            continue
+        target_flow_dir = main_history / flow_dir.name
+        target_flow_dir.mkdir(parents=True, exist_ok=True)
+
+        for history_file in flow_dir.iterdir():
+            if not history_file.is_file():
+                continue
+            target_file = target_flow_dir / history_file.name
+            if target_file.exists():
+                # Append content (NDJSON is line-based, safe to concatenate)
+                with open(target_file, "a", encoding="utf-8") as dst:
+                    dst.write(history_file.read_text(encoding="utf-8"))
+            else:
+                shutil.copy2(history_file, target_file)
+            copied += 1
+
+    if copied:
+        logger.info("Salvaged %d history file(s) from worktree %s", copied, worktree_path)
 
 
 def _format_spec_brief(spec_content: dict[str, str]) -> str:
