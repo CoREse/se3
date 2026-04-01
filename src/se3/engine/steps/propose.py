@@ -124,7 +124,6 @@ def propose_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     # Append language instruction if configured (e.g., when human confirmation is enabled)
     from ..context_builder import get_step_language_instruction, get_issue_discovery_injection
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     lang_instruction = get_step_language_instruction("propose", project_root)
     if lang_instruction:
         prompt += lang_instruction
@@ -137,8 +136,6 @@ def propose_handler(step: Step, flow: FlowInstance) -> StepStatus:
     logger.info(f"Generating proposal for: {task_description[:60]}...")
 
     try:
-        # Call LLM for proposal (use EXTRACT mode for reliability without retry cost)
-        project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
         response = caller.call(
@@ -156,9 +153,6 @@ def propose_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         # Store outputs
         step.outputs["proposal"] = proposal
-        step.outputs["summary"] = proposal.get("summary", "")
-        step.outputs["files_to_modify"] = proposal.get("files_to_modify", [])
-        step.outputs["files_to_create"] = proposal.get("files_to_create", [])
 
         logger.info(f"Proposal generated: {proposal.get('summary', '')[:80]}...")
         logger.debug(f"Files to modify: {proposal.get('files_to_modify', [])}")
@@ -187,9 +181,6 @@ def _format_spec_content(spec_content: dict[str, str]) -> str:
     parts = []
     for name, content in spec_content.items():
         parts.append(f"### {name}")
-        # Truncate very long specs
-        if len(content) > 3000:
-            content = content[:3000] + "\n... [truncated for brevity]"
         parts.append(content)
         parts.append("")
 
