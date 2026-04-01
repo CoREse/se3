@@ -132,18 +132,41 @@ class IssueManager:
         self.closed_dir.mkdir(parents=True, exist_ok=True)
 
     def _next_id(self) -> str:
-        """Scan open/ and closed/ to determine the next sequential ID (zero-padded 3 digits)."""
-        max_id = 0
-        for directory in [self.open_dir, self.closed_dir]:
-            if not directory.exists():
-                continue
-            for f in directory.glob("*.yaml"):
-                match = re.match(r"^(\d+)_", f.name)
-                if match:
-                    num = int(match.group(1))
-                    if num > max_id:
-                        max_id = num
-        return f"{max_id + 1:03d}"
+        """Return the next sequential issue ID (zero-padded 3 digits).
+
+        Uses a counter file (se3/issues/.next_id) for monotonic IDs.
+        Falls back to scanning existing files if the counter file doesn't
+        exist yet (first run or migration).
+        """
+        counter_file = self.issues_dir / ".next_id"
+
+        # Read current counter
+        next_val = None
+        if counter_file.exists():
+            try:
+                next_val = int(counter_file.read_text().strip())
+            except (ValueError, OSError):
+                pass
+
+        if next_val is None:
+            # Bootstrap: scan existing files to find the max
+            max_id = 0
+            for directory in [self.open_dir, self.closed_dir]:
+                if not directory.exists():
+                    continue
+                for f in directory.glob("*.yaml"):
+                    match = re.match(r"^(\d+)_", f.name)
+                    if match:
+                        num = int(match.group(1))
+                        if num > max_id:
+                            max_id = num
+            next_val = max_id + 1
+
+        # Atomically write the incremented counter
+        self._ensure_dirs()
+        counter_file.write_text(str(next_val + 1))
+
+        return f"{next_val:03d}"
 
     def _find_issue_file(self, issue_id: str) -> Optional[Path]:
         """Find an issue file by ID across open/ and closed/ directories."""
