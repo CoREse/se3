@@ -53,6 +53,7 @@ IMPLEMENT_PROMPT = """You are an expert software engineer. Implement the followi
 3. Follow the project's coding conventions.
 4. Write tests if the task requires them.
 5. Do NOT commit — only write/edit files.
+6. If you need to install dependencies or generate build artifacts, FIRST add the output directory to .gitignore (e.g., `node_modules/`, `.pixi/`, `venv/`, `dist/`) before running the install command.
 
 When you are done, output a JSON summary of what you did:
 ```json
@@ -98,6 +99,7 @@ IMPLEMENT_GROUP_PROMPT = """You are an expert software engineer. Implement the t
 3. Follow the project's coding conventions.
 4. Write tests if the task requires them.
 5. Do NOT commit — only write/edit files.
+6. If you need to install dependencies or generate build artifacts, FIRST add the output directory to .gitignore (e.g., `node_modules/`, `.pixi/`, `venv/`, `dist/`) before running the install command.
 
 When you are done, output a JSON summary of what you did:
 ```json
@@ -137,6 +139,7 @@ This is fix iteration {fix_iteration}.
 2. Fix the root cause — do not just suppress errors.
 3. Run the relevant tests mentally to verify your fix.
 4. Do NOT commit — only write/edit files.
+5. If you need to install dependencies, FIRST add the output directory to .gitignore before running the install command.
 
 When you are done, output a JSON summary of what you did:
 ```json

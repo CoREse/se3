@@ -343,6 +343,10 @@ def merge_loop_branch(
     if current != target_branch:
         _run_git(project_root, "checkout", target_branch)
 
+    # Stash uncommitted changes before merging (they would block git merge)
+    stash_result = _run_git(project_root, "stash", "--include-untracked", check=False)
+    stashed = stash_result.returncode == 0 and "No local changes" not in stash_result.stdout
+
     result = _run_git(
         project_root, "merge", loop_branch,
         "--no-edit",
@@ -355,6 +359,8 @@ def merge_loop_branch(
         if not is_conflict:
             logger.error("Merge failed: %s", result.stderr.strip())
             _run_git(project_root, "merge", "--abort", check=False)
+            if stashed:
+                _run_git(project_root, "stash", "pop", check=False)
             return False
 
         logger.error("Merge conflict merging %s into %s", loop_branch, target_branch)
@@ -364,15 +370,27 @@ def merge_loop_branch(
             resolved = _resolve_conflicts_with_llm(project_root, conflict_files)
             if resolved:
                 logger.info("LLM resolved all conflicts — completing merge")
+                if stashed:
+                    _run_git(project_root, "stash", "pop", check=False)
                 return True
             # LLM failed — fall through to human mode
             logger.warning("LLM conflict resolution failed, falling back to human mode")
 
         if conflict_strategy == "human" or conflict_strategy == "llm":
             # For human mode: preserve conflict state and create call file
+            # Note: stash is NOT popped here — human needs clean state to resolve conflicts
+            # Stash will be available via `git stash pop` after conflict resolution
+            if stashed:
+                logger.info("Uncommitted changes stashed — run 'git stash pop' after resolving conflicts")
             _display_merge_conflict(loop_branch, target_branch, conflict_files)
             _create_merge_conflict_call(project_root, loop_branch, target_branch, conflict_files)
             return "pending_human"
+
+    # Merge succeeded — restore stashed changes
+    if stashed:
+        pop_result = _run_git(project_root, "stash", "pop", check=False)
+        if pop_result.returncode != 0:
+            logger.warning("Stash pop had conflicts after merge — resolve manually with 'git stash pop'")
 
     logger.info("Successfully merged %s into %s", loop_branch, target_branch)
     return True
