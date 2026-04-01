@@ -512,7 +512,7 @@ class StateMachine:
                 "trigger_step_id": trigger_step.step_id,
                 "trigger_step_type": trigger_step_type,
                 "implement_step_id": implement_step.step_id,
-                "reason": "test_failure" if fix_context.get("test_failed") else "spec_compliance",
+                "reason": fix_context.get("reason", "test_failure" if fix_context.get("test_failed") else "spec_compliance"),
             }
         )
 

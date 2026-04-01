@@ -231,26 +231,28 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
             # Return REVISION_NEEDED to trigger fix loop for spec compliance issues
             logger.info(f"Returning REVISION_NEEDED for spec compliance fix (iteration {fix_iteration + 1})")
 
-            step.outputs["fix_needed"] = True
-            step.outputs["fix_iteration"] = fix_iteration
-            step.outputs["max_fix_iterations"] = max_iterations
-            step.outputs["fix_context"] = {
-                "test_results": test_results,
-                "test_analysis": test_analysis,
-                "fix_instructions": fix_instructions or "Spec verification failed. Fix the implementation to match the specifications.",
-                "issues": issues,
-                "iteration": fix_iteration + 1,
-            }
+            # Build fix instructions if LLM didn't provide them
             if not fix_instructions:
-                # Build fix instructions from spec verification issues
                 issue_details = "\n".join(
                     f"- [{i.get('severity', 'error')}] {i.get('message', '')}"
                     for i in issues if i.get("severity") == "error"
                 )
-                step.outputs["fix_instructions"] = (
+                fix_instructions = (
                     f"Spec verification failed with {error_count} error(s):\n{issue_details}\n\n"
                     "Fix the implementation to match the specifications."
                 )
+
+            step.outputs["fix_needed"] = True
+            step.outputs["fix_iteration"] = fix_iteration
+            step.outputs["max_fix_iterations"] = max_iterations
+            step.outputs["fix_instructions"] = fix_instructions
+            step.outputs["fix_context"] = {
+                "spec_issues": issues,
+                "test_results": test_results,
+                "test_analysis": test_analysis,
+                "reason": "spec_compliance",
+                "iteration": fix_iteration + 1,
+            }
 
             return StepStatus.REVISION_NEEDED
 

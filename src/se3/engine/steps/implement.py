@@ -19,16 +19,13 @@ from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
 from ..utils.json_parser import parse_json_response
 from ..worktree import (
-    _branch_safe_name,
     _run_git,
     create_worktree,
     delete_branch,
-    exists_for_branch,
     force_cleanup_worktree,
     get_current_branch,
     has_commits,
     merge_loop_branch,
-    remove_worktree,
 )
 
 logger = logging.getLogger(__name__)

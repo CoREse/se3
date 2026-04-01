@@ -542,13 +542,12 @@ class TestStaleBranchHandling:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement.remove_worktree")
     @patch("se3.engine.steps.implement.parse_json_response")
     @patch("se3.engine.steps.implement.LLMCaller")
     @patch("se3.engine.steps.implement.create_worktree")
     @patch("se3.engine.steps.implement._run_git")
     def test_execute_fn_deletes_stale_branch_before_creation(
-        self, mock_run_git, mock_create_wt, mock_caller_cls, mock_parse, mock_rm_wt,
+        self, mock_run_git, mock_create_wt, mock_caller_cls, mock_parse,
         mock_force_cleanup,
     ):
         """execute_fn must call 'branch -D' before 'branch <name> <base>' to clean stale branches."""
@@ -624,13 +623,12 @@ class TestStaleBranchHandling:
         )
 
     @patch("se3.engine.steps.implement.force_cleanup_worktree")
-    @patch("se3.engine.steps.implement.remove_worktree")
     @patch("se3.engine.steps.implement.parse_json_response")
     @patch("se3.engine.steps.implement.LLMCaller")
     @patch("se3.engine.steps.implement.create_worktree")
     @patch("se3.engine.steps.implement._run_git")
     def test_execute_fn_succeeds_when_no_stale_branch(
-        self, mock_run_git, mock_create_wt, mock_caller_cls, mock_parse, mock_rm_wt,
+        self, mock_run_git, mock_create_wt, mock_caller_cls, mock_parse,
         mock_force_cleanup,
     ):
         """Normal execution works when there is no stale branch (delete returns non-zero)."""
