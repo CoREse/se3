@@ -50,10 +50,12 @@ Each task should:
 - Include specific acceptance criteria
 - Have estimated complexity (small/medium/large)
 
-Guidelines for complexity:
-- small: < 30 minutes, < 50 lines of code
-- medium: 30-90 minutes, 50-200 lines of code
-- large: > 90 minutes, > 200 lines of code (should be broken down further if possible)
+Guidelines for complexity and LOC estimation:
+- small: < 30 minutes, typically < 50 LOC changed/added
+- medium: 30-90 minutes, typically 50-200 LOC changed/added
+- large: > 90 minutes, typically > 200 LOC changed/added (should be broken down further if possible)
+
+Each task MUST include an `estimated_loc` field (integer) — the estimated number of lines of code that will be added or modified. This is an objective, quantitative measure used to decide execution strategy.
 
 Respond in JSON format:
 ```json
@@ -70,6 +72,7 @@ Respond in JSON format:
                     "id": 1,
                     "description": "Clear task description",
                     "complexity": "small|medium|large",
+                    "estimated_loc": 30,
                     "acceptance_criteria": ["criterion 1", "criterion 2"],
                     "files": ["file1.py", "file2.py"],
                     "depends_on": []
