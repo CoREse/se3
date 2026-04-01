@@ -585,19 +585,24 @@ def _make_execute_fn(
             )
             result = parse_json_response(response, required_keys=[])
 
-            # Step 7: Commit changes in the worktree
+            # Step 7: Commit changes in the worktree (only if there are changes)
             _run_git(worktree_path, "add", "-A", check=False)
-            commit_result = _run_git(
-                worktree_path, "commit",
-                "-m", f"impl: group {group_id}",
-                "--allow-empty",
-                check=False,
-            )
-            if commit_result.returncode != 0:
-                logger.debug(
-                    "DAG: commit in worktree for %s returned %d (may be empty)",
-                    group_id, commit_result.returncode,
+            status_result = _run_git(worktree_path, "status", "--porcelain", check=False)
+            has_changes = bool(status_result.stdout.strip())
+
+            if has_changes:
+                commit_result = _run_git(
+                    worktree_path, "commit",
+                    "-m", f"impl: group {group_id}",
+                    check=False,
                 )
+                if commit_result.returncode != 0:
+                    logger.warning(
+                        "DAG: commit failed for %s: %s",
+                        group_id, commit_result.stderr.strip(),
+                    )
+            else:
+                logger.info("DAG: no changes in worktree for group %s, skipping commit", group_id)
 
             # Step 8: Build GroupResult
             files_changed = result.get("files_changed", []) if result else []
@@ -615,7 +620,7 @@ def _make_execute_fn(
                 tests_added=tests_added,
                 test_mapping=test_mapping,
                 summary=summary,
-                branch_name=branch_name,
+                branch_name=branch_name if has_changes else "",
                 worktree_path=worktree_path,
                 completion_status=completion_status,
                 incomplete_tasks=incomplete_tasks,
