@@ -1,0 +1,14 @@
+id: '032'
+title: clear_state() archive path is never used in normal flow completion
+description: PersistenceManager.clear_state() moves engine.json to se3/state/archive/,
+  but it is only called from salvage_cmd.py. Normal flow completion overwrites engine.json
+  with the next flow, losing the previous state. The archive mechanism is effectively
+  dead code for normal workflows.
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+created_at: '2026-04-01T16:47:22.598530'
+updated_at: '2026-04-01T16:47:22.598530'

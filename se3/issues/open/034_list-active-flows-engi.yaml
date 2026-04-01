@@ -1,0 +1,12 @@
+id: '034'
+title: list_active_flows() 仅读取单个 engine.json
+description: PersistenceManager.list_active_flows()（persistence.py:289-310）只读取 se3/state/engine.json
+  中的当前活跃流程，完全忽略 se3/history/ 目录下的 132 个历史流程。需要扫描历史目录或调用 list_chat_flows() 来获取完整列表。
+status: open
+priority: high
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-01T16:48:27.343465'
+updated_at: '2026-04-01T16:48:27.343465'

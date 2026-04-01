@@ -1,67 +1,23 @@
 id: '032'
 title: DAG 执行架构重设计：阈值分组 + 分支接力 + 依赖归约
-description: |
-  当前 DAG 并行执行存在根本性问题：
-  - 每组从 original_branch 创建分支 + pre-merge 依赖 → conflict 频发
-  - merge-back 时冲突处理不可靠（--theirs 丢数据，LLM 缺上下文）
-  - 小任务被不必要地拆组，增加 LLM 调用次数和 worktree 开销
-  - 并行结果不等价于串行（信息隔离导致不一致）
-
-  ## 改动 1: 基于 LOC 的智能阈值
-
-  plan_tasks 每个 task 增加 `estimated_loc` 字段（客观定量标准）。
-  implement 根据总 estimated_loc 决定是否拆组执行：
-  - 总 LOC ≤ 300（可配置 se3.yaml）→ 合并为单次 LLM 调用
-  - 总 LOC > 300 → 按 group 分开执行
-
-  保留 complexity 字段不变，estimated_loc 是额外项。
-  plan_tasks 分组原则不变（高内聚低耦合），但 implement 决定是否真的拆开。
-
-  ## 改动 2: 依赖传递归约（transitive reduction）
-
-  在 implement 执行前对 groups 的 depends_on 做传递归约：
-  - 原始：G2 on [G1], G3 on [G1, G2]
-  - 归约：G2 on [G1], G3 on [G2]
-
-  标准图论算法。减少不必要的 pre-merge 和等待。
-
-  ## 改动 3: 分支接力策略（替代当前 branch+merge）
-
-  废弃"每组从 original_branch 创建分支 + pre-merge + merge-back"。
-  改为分支接力：
-
-  线性链（G1 → G2 → G3）：
-  - G1 在 worktree 执行
-  - G2 直接复用 G1 的 worktree/branch 继续执行
-  - G3 直接复用 G2 的
-  - 全链只在末端 merge 一次回 original_branch
-
-  分叉（G1 → G2, G1 → G3）：
-  - G1 执行完后
-  - G2 直接复用 G1 的 worktree
-  - G3 fork G1 的 branch 到新 worktree
-  - G2 和 G3 并行执行
-  - 末端 merge G2 和 G3 回 original_branch
-
-  ## 改动 4: 末端合并 — 带完整上下文的 LLM 解决
-
-  只有 leaf 分支需要 merge 回 original_branch。
-  冲突时调用 LLM，上下文包括：
-  - 任务描述
-  - 每个 group 做了什么（summary + files_changed）
-  - 冲突文件内容（含 conflict markers）
-  - spec 内容
-
-  LLM 必须解决，不 fallback 到 --theirs，不 pending_human。
-
-  ## 配置
-
-  se3.yaml 新增：
-  ```yaml
-  implement:
-    group_loc_threshold: 300  # 总 LOC 阈值
-  ```
-status: open
+description: "当前 DAG 并行执行存在根本性问题：\n- 每组从 original_branch 创建分支 + pre-merge 依赖 → conflict\
+  \ 频发\n- merge-back 时冲突处理不可靠（--theirs 丢数据，LLM 缺上下文）\n- 小任务被不必要地拆组，增加 LLM 调用次数和 worktree\
+  \ 开销\n- 并行结果不等价于串行（信息隔离导致不一致）\n\n## 改动 1: 基于 LOC 的智能阈值\n\nplan_tasks 每个 task 增加\
+  \ `estimated_loc` 字段（客观定量标准）。\nimplement 根据总 estimated_loc 决定是否拆组执行：\n- 总 LOC ≤\
+  \ 300（可配置 se3.yaml）→ 合并为单次 LLM 调用\n- 总 LOC > 300 → 按 group 分开执行\n\n保留 complexity\
+  \ 字段不变，estimated_loc 是额外项。\nplan_tasks 分组原则不变（高内聚低耦合），但 implement 决定是否真的拆开。\n\n\
+  ## 改动 2: 依赖传递归约（transitive reduction）\n\n在 implement 执行前对 groups 的 depends_on 做传递归约：\n\
+  - 原始：G2 on [G1], G3 on [G1, G2]\n- 归约：G2 on [G1], G3 on [G2]\n\n标准图论算法。减少不必要的 pre-merge\
+  \ 和等待。\n\n## 改动 3: 分支接力策略（替代当前 branch+merge）\n\n废弃\"每组从 original_branch 创建分支 + pre-merge\
+  \ + merge-back\"。\n改为分支接力：\n\n线性链（G1 → G2 → G3）：\n- G1 在 worktree 执行\n- G2 直接复用\
+  \ G1 的 worktree/branch 继续执行\n- G3 直接复用 G2 的\n- 全链只在末端 merge 一次回 original_branch\n\
+  \n分叉（G1 → G2, G1 → G3）：\n- G1 执行完后\n- G2 直接复用 G1 的 worktree\n- G3 fork G1 的 branch\
+  \ 到新 worktree\n- G2 和 G3 并行执行\n- 末端 merge G2 和 G3 回 original_branch\n\n## 改动 4:\
+  \ 末端合并 — 带完整上下文的 LLM 解决\n\n只有 leaf 分支需要 merge 回 original_branch。\n冲突时调用 LLM，上下文包括：\n\
+  - 任务描述\n- 每个 group 做了什么（summary + files_changed）\n- 冲突文件内容（含 conflict markers）\n\
+  - spec 内容\n\nLLM 必须解决，不 fallback 到 --theirs，不 pending_human。\n\n## 配置\n\nse3.yaml\
+  \ 新增：\n```yaml\nimplement:\n  group_loc_threshold: 300  # 总 LOC 阈值\n```\n"
+status: in-progress
 priority: high
 type: refactor
 tags:
@@ -69,5 +25,5 @@ tags:
 - implement
 - worktree
 - architecture
-created_at: '2026-04-01'
-updated_at: '2026-04-01'
+created_at: '2026-04-01T00:00:00'
+updated_at: '2026-04-01T17:28:06.676886'

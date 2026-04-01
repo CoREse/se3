@@ -1,0 +1,12 @@
+id: '035'
+title: list_chat_flows 已导入但未调用
+description: history_cmd.py 第29行导入了 list_chat_flows，但 default_cmd() 和 list_cmd() 都调用
+  list_active_flows() 而非 list_chat_flows()。这是导致问题未修复的直接原因。
+status: open
+priority: high
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-01T16:48:27.344538'
+updated_at: '2026-04-01T16:48:27.344538'

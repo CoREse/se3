@@ -69,10 +69,13 @@ The feature workflow SHALL follow these steps:
 **5. PLAN_TASKS**
    - Break implementation into concrete tasks (max 5 per group)
    - Estimate complexity for each task
+   - Estimate lines of code (`estimated_loc`) for each task
    - Define verification criteria
 
 **6. IMPLEMENT**
    - Write code following the design
+   - If total estimated LOC ≤ threshold (default 300), collapse all groups into a single LLM call
+   - If total estimated LOC > threshold, execute groups via DAG parallel with branch relay strategy
    - Include tests where applicable
    - Follow project conventions
 

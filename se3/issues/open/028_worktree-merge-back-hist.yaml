@@ -1,0 +1,12 @@
+id: 028
+title: worktree merge-back 流程未保留 history 文件
+description: implement.py 的 worktree 清理和 merge-back 过程中，se3/ 目录下的 history 文件会丢失，因为
+  worktree 隔离了主仓库的运行时状态。
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-03-31T17:54:35.404804'
+updated_at: '2026-03-31T17:54:35.404804'

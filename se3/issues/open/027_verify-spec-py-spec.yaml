@@ -1,0 +1,12 @@
+id: '027'
+title: verify_spec.py 的 spec 验证失败不触发修复循环
+description: 当 LLM 验证返回 verified=False 且存在 error 级别 issue 时（第 222-228 行），代码仍返回 COMPLETED。这意味着
+  spec 不一致的代码可以通过验证步骤，只要测试通过即可。
+status: open
+priority: high
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-03-31T17:54:35.403873'
+updated_at: '2026-03-31T17:54:35.403873'

@@ -1,0 +1,12 @@
+id: '036'
+title: get_flow_detail 和 restore_cmd 只能操作当前流程
+description: get_flow_detail()（第117-118行）和 restore_cmd()（第418-420行）通过 load_flow()
+  加载后只比对当前 flow_id，无法查看或恢复历史流程。
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-01T16:48:27.345500'
+updated_at: '2026-04-01T16:48:27.345500'

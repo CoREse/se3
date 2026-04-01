@@ -27,6 +27,7 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - `language.spec_language`: Language for spec writing (default: null)
 - `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: ["verify_spec", "summarize"])
 - `conflict_resolver.strategy`: Merge conflict resolution strategy — `"human"` or `"llm"` (default: `"human"`)
+- `implement.group_loc_threshold`: LOC threshold for collapsing task groups into a single LLM call (default: 300)
 
 #### Scenario: Using default configuration
 - **WHEN** no se3.yaml file exists in the project
@@ -126,6 +127,28 @@ The system SHALL support configuring merge conflict resolution strategy for loop
 - **THEN** the framework attempts to resolve each conflicting file via LLM
 - **AND** if all files are resolved, the merge completes automatically
 - **AND** if any file fails, falls back to human mode
+
+### Requirement: Implement Configuration
+
+The system SHALL support configuration for the implement step's execution strategy.
+
+**Implement section options:**
+- `implement.group_loc_threshold`: Total estimated LOC threshold below which all task groups are collapsed into a single LLM call (default: 300). When the sum of `estimated_loc` across all tasks in all groups is at or below this threshold, the implement step merges all groups into one call instead of executing them as separate DAG-parallel groups.
+
+**Example configuration:**
+```yaml
+implement:
+  group_loc_threshold: 300  # Collapse groups when total LOC ≤ 300
+```
+
+#### Scenario: Default implement configuration
+- **WHEN** no `implement` section exists in se3.yaml
+- **THEN** the framework uses a default `group_loc_threshold` of 300
+
+#### Scenario: Custom LOC threshold
+- **GIVEN** `implement.group_loc_threshold: 500` in se3.yaml
+- **WHEN** `plan_tasks` produces groups with total estimated_loc = 400
+- **THEN** the implement step collapses all groups into a single LLM call
 
 ### Requirement: Language Configuration
 

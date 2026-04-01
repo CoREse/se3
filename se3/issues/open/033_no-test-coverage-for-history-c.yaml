@@ -1,0 +1,13 @@
+id: '033'
+title: No test coverage for history command
+description: There are no tests for the history_cmd module (list_active_flows, list_all_flows,
+  default_cmd, list_cmd, show_cmd, etc.). The 'tests passed' result is vacuously true
+  for the affected functionality.
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+created_at: '2026-04-01T16:47:22.599655'
+updated_at: '2026-04-01T16:47:22.599655'

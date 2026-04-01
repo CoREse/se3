@@ -1,0 +1,12 @@
+id: '026'
+title: 提交 3f9afab 标注 bugfix 但未包含源码修改
+description: commit message 声称修复了 context_builder.py 等文件，但 git show --stat 显示实际仅修改了
+  pyproject.toml 和 issue YAML 文件，源代码未变更。这可能导致版本号与实际功能不匹配。
+status: open
+priority: high
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-03-31T17:54:35.402750'
+updated_at: '2026-03-31T17:54:35.402750'

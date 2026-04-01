@@ -158,7 +158,7 @@ se3 run --discover "我想做一个用户管理功能"
 | `read_spec` | 读取相关 spec 文件 | 否（程序自动） | - | scope | relevant_specs, spec_content |
 | `propose` | 生成变更提案 | 是 | EXTRACT | spec_content, task_description | proposal, files_to_modify, files_to_create |
 | `design` | 设计方案和架构决策 | 是 | EXTRACT | proposal, spec_content | design_doc, decisions, components |
-| `plan_tasks` | 分解为具体可执行任务 | 是 | EXTRACT | design_doc | task_list |
+| `plan_tasks` | 分解为具体可执行任务 | 是 | EXTRACT | design_doc | task_list (includes estimated_loc per task) |
 | `implement` | 编写代码实现 | 是 | TWO_PHASE | design_doc, task_list | implementation, files_changed |
 | `test` | 运行测试验证 | 否（程序执行） | - | - | test_results, tests_passed |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | implementation, spec_content | verification_result, issues |
@@ -451,6 +451,100 @@ version:
 - **WHEN** 用户选择跳过失败步骤
 - **THEN** 将步骤标记为完成
 - **AND** 继续执行后续步骤
+
+### Requirement: plan_tasks estimated_loc Output
+
+The `plan_tasks` step SHALL include an `estimated_loc` field (integer) in each task, representing the estimated number of lines of code to be added or modified. This field is used by the `implement` step to decide execution strategy.
+
+**Task output fields (in addition to existing fields):**
+- `estimated_loc`: Integer — estimated lines of code. Used as an objective, quantitative measure.
+
+The `complexity` field is preserved unchanged. `estimated_loc` is additive and does not replace any existing field.
+
+#### Scenario: Task includes estimated_loc
+- **WHEN** `plan_tasks` produces a task list
+- **THEN** each task includes an `estimated_loc` integer field
+- **AND** the `complexity` field remains unchanged
+
+### Requirement: Implement Step DAG Execution Strategy
+
+The `implement` step SHALL use an intelligent execution strategy that adapts based on total estimated lines of code and DAG topology.
+
+**LOC-Based Threshold:**
+- The implement step computes total `estimated_loc` across all tasks in all groups (tasks missing the field default to 50 LOC each).
+- If total LOC ≤ `implement.group_loc_threshold` (default: 300, configurable in `se3.yaml`), all groups are merged into a single LLM call regardless of grouping.
+- If total LOC > threshold, groups are executed according to the DAG parallel strategy.
+- The `plan_tasks` grouping principles (high cohesion, low coupling) are preserved — the implement step only decides whether to collapse groups at execution time.
+
+#### Scenario: Small implementation collapses groups
+- **GIVEN** `plan_tasks` produced 3 groups with total estimated_loc = 180
+- **AND** `implement.group_loc_threshold` is 300
+- **WHEN** the implement step executes
+- **THEN** all groups are merged into a single LLM call
+
+#### Scenario: Large implementation uses DAG parallel
+- **GIVEN** `plan_tasks` produced 4 groups with total estimated_loc = 500
+- **WHEN** the implement step executes
+- **THEN** groups are executed via DAG parallel strategy with relay branching
+
+**Transitive Reduction:**
+- Before DAG parallel execution, the implement step performs transitive reduction on group `depends_on` edges.
+- An edge u→v is redundant if there is a longer path from u to v through intermediate nodes (standard graph theory algorithm using BFS).
+- Example: G2 depends on [G1], G3 depends on [G1, G2] → after reduction: G3 depends on [G2] only (G1 is reachable through G2).
+- This reduces unnecessary pre-merge operations and wait times.
+
+#### Scenario: Transitive reduction removes redundant edges
+- **GIVEN** G2 depends on [G1] and G3 depends on [G1, G2]
+- **WHEN** transitive reduction is applied
+- **THEN** G3's depends_on becomes [G2] only
+
+**Branch Relay Strategy:**
+- The implement step uses a branch relay strategy instead of per-group branch creation with pre-merge and merge-back.
+- For linear chains (G1 → G2 → G3): G1 creates a worktree; G2 reuses G1's worktree/branch; G3 reuses G2's. Only the chain endpoint merges back.
+- For forks (G1 → G2, G1 → G3): G1 executes; G2 (primary heir, lowest group_order) reuses G1's worktree; G3 forks G1's branch into a new worktree. G2 and G3 execute in parallel.
+- For convergence points (G2, G3 → G4): G4 inherits the primary predecessor's worktree and merges secondary predecessor branches before executing.
+- The relay plan is produced by `classify_chains()` which computes `RelayPlan` containing: relay_map, fork_from, leaf_nodes, convergence_points, and root_nodes.
+
+#### Scenario: Linear chain relay
+- **GIVEN** groups form a linear chain G1 → G2 → G3
+- **WHEN** DAG parallel executes
+- **THEN** G1 creates a new worktree
+- **AND** G2 reuses G1's worktree and branch
+- **AND** G3 reuses G2's worktree and branch
+- **AND** only G3 (leaf) merges back to the original branch
+
+#### Scenario: Fork relay
+- **GIVEN** G1 has two dependents G2 and G3 (G2 has lower group_order)
+- **WHEN** DAG parallel executes
+- **THEN** G2 reuses G1's worktree (primary heir)
+- **AND** G3 forks G1's branch into a new worktree
+- **AND** G2 and G3 execute in parallel
+
+#### Scenario: Convergence point
+- **GIVEN** G4 depends on both G2 and G3
+- **WHEN** G4 is about to execute
+- **THEN** G4 inherits the primary predecessor's worktree
+- **AND** merges secondary predecessor branches into it before executing
+
+**Leaf-Only Merge with LLM Conflict Resolution:**
+- Only leaf nodes (groups with no downstream dependents) merge back to the original branch.
+- Merge conflicts are resolved by LLM with full context including: task descriptions, per-group summaries and files_changed, conflicting file content with conflict markers, and spec content.
+- The LLM resolver retries up to 3 times on failure.
+- There is no fallback to `--theirs` or `pending_human` — the LLM must resolve all conflicts.
+
+#### Scenario: Leaf merge succeeds
+- **GIVEN** a leaf group completed its work
+- **WHEN** merging back to the original branch
+- **THEN** a standard git merge is attempted
+- **AND** if no conflicts, the merge completes normally
+
+#### Scenario: Leaf merge with LLM conflict resolution
+- **GIVEN** a leaf group's merge produces conflicts
+- **WHEN** the merge conflict handler runs
+- **THEN** the LLM receives full context (task descriptions, group summaries, conflict markers, specs)
+- **AND** the LLM resolves all conflicting files
+- **AND** the resolver retries up to 3 times if needed
+- **AND** there is no fallback to `--theirs` or `pending_human`
 
 ### Requirement: Implement-Test 契约
 
