@@ -1,0 +1,28 @@
+id: '030'
+title: 用 STEP_POOL 声明式驱动步骤间数据流，替代 _build_step_inputs 的 if/elif 链
+description: |
+  当前状态：
+  - STEP_POOL 定义了每个步骤的 inputs/outputs 元数据，但完全是死代码
+  - get_step_info() 没有任何调用者
+  - _build_step_inputs() 用手写 if/elif 链收集上游输出传给下游
+  - 新增步骤需要改两个地方（handler + state_machine），容易遗漏
+
+  目标：
+  - 让 _build_step_inputs 根据 STEP_POOL 声明自动收集上游输出
+  - 新增步骤只需在 STEP_POOL 声明 inputs/outputs，无需改 state_machine
+  - STEP_POOL 成为步骤间数据流的唯一真相来源
+
+  注意事项：
+  - STEP_POOL 当前的 inputs/outputs 定义已过时，需要先和实际 handler 对齐
+  - 某些步骤有特殊的输出包装逻辑（如 implement 的 changes_made 由
+    state_machine 从 files_changed + implemented_groups 构造）
+  - 需要考虑 fix loop 中的特殊输入注入
+status: open
+priority: medium
+type: refactor
+tags:
+- state-machine
+- data-flow
+- step-pool
+created_at: '2026-04-01'
+updated_at: '2026-04-01'
