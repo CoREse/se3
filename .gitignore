@@ -13,14 +13,11 @@ issues.md
 prompts/
 e2e
 
-# SE3: ignore runtime directory, whitelist tracked content
-/se3/
+# SE3: ignore runtime content, whitelist specs/issues/scripts
+/se3/*
 !/se3/specs/
-!/se3/specs/**
 !/se3/issues/
-!/se3/issues/**
 !/se3/scripts/
-!/se3/scripts/**
 tmp*.prompt
 
 # SE3 session file

@@ -130,7 +130,7 @@ class TestRunInit:
         gitignore = tmp_path / ".gitignore"
         assert gitignore.exists()
         content = gitignore.read_text()
-        assert "/se3/" in content
+        assert "/se3/*" in content
         assert "!/se3/specs/" in content
         assert "!/se3/issues/" in content
         assert "__pycache__/" in content
@@ -145,7 +145,7 @@ class TestRunInit:
 
         assert result["gitignore_created"] is True
         content = gitignore.read_text()
-        assert "/se3/" in content
+        assert "/se3/*" in content
         assert "!/se3/specs/" in content
         assert "# Custom content" not in content
 

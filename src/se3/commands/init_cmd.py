@@ -70,14 +70,11 @@ env/
 *~
 .DS_Store
 
-# SE3: ignore runtime directory, whitelist tracked content
-/se3/
+# SE3: ignore runtime content, whitelist specs/issues/scripts
+/se3/*
 !/se3/specs/
-!/se3/specs/**
 !/se3/issues/
-!/se3/issues/**
 !/se3/scripts/
-!/se3/scripts/**
 """
 
 
