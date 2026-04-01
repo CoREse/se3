@@ -731,6 +731,8 @@ def resolve_merge_conflicts_with_context(
     group_summaries: list[dict],
     spec_content: str,
     max_retries: int = 3,
+    flow_id: str | None = None,
+    step_id: str | None = None,
 ) -> bool:
     """Resolve merge conflicts using LLM with full task context.
 
@@ -747,6 +749,8 @@ def resolve_merge_conflicts_with_context(
         group_summaries: ``[{group_id, summary, files_changed}, ...]``
         spec_content: Spec summary text for LLM context
         max_retries: Maximum resolution attempts
+        flow_id: Optional flow ID for history recording
+        step_id: Optional step ID for history recording
 
     Returns:
         True if all conflicts resolved and merge committed, False otherwise.
@@ -790,7 +794,7 @@ def resolve_merge_conflicts_with_context(
                 "main branch.\n\n"
                 f"## Task Description\n{task_description}\n\n"
                 f"## What Each Group Did\n{summaries_text}\n\n"
-                f"## Project Conventions\n{spec_content[:2000]}\n\n"
+                f"## Project Conventions\n{spec_content}\n\n"
                 f"## Conflicting File: {filepath}\n\n"
                 f"```\n{content}\n```\n\n"
                 "Output ONLY the fully resolved file content. "
@@ -799,7 +803,13 @@ def resolve_merge_conflicts_with_context(
             )
 
             try:
-                caller = LLMCaller(project_root, step_type="leaf_merge_conflict")
+                caller = LLMCaller(
+                    project_root,
+                    flow_id=flow_id,
+                    step_id=step_id,
+                    step_type="merge_conflict",
+                    external_attempt=attempt - 1,
+                )
                 resolved = caller.call(prompt=prompt)
             except Exception as e:
                 logger.warning(

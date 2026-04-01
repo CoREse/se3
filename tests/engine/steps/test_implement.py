@@ -690,7 +690,7 @@ class TestStaleBranchHandling:
         assert result.status == "completed"
         assert result.files_changed == ["b.py"]
 
-    @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
+    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
     @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
@@ -753,7 +753,7 @@ class TestStaleBranchHandling:
             f"delete_branch was called {mock_del_branch.call_count} times"
         )
 
-    @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
+    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
     @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
@@ -959,7 +959,7 @@ class TestDagResumeFiltering:
         prior = call_kwargs.kwargs.get("prior_outputs") or call_kwargs[1].get("prior_outputs")
         assert prior is None
 
-    @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
+    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
     @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
@@ -1038,7 +1038,7 @@ class TestDagResumeFiltering:
         assert "G2" in step.outputs["implemented_groups"]
         assert "G3" in step.outputs["implemented_groups"]
 
-    @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
+    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
     @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.get_current_branch", return_value="master")
@@ -1234,7 +1234,7 @@ class TestDagParallelResumeBehavior:
         )
         assert delete_idx is not None, "branch -D call must happen after force_cleanup_worktree"
 
-    @patch("se3.engine.steps.implement.merge_loop_branch", return_value=True)
+    @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
     @patch("se3.engine.steps.implement.force_cleanup_worktree")
     @patch("se3.engine.steps.implement.get_current_branch", return_value="master")

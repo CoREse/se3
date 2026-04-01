@@ -29,7 +29,6 @@ from ..worktree import (
     get_current_branch,
     has_commits,
     has_new_commits,
-    merge_loop_branch,
     resolve_merge_conflicts_with_context,
 )
 
@@ -975,6 +974,8 @@ def _merge_leaf_branch(
     task_description: str,
     group_summaries: list[dict],
     spec_content: str,
+    flow_id: str | None = None,
+    merge_step_id: str | None = None,
 ) -> bool:
     """Merge a leaf branch back to original_branch with enhanced conflict resolution.
 
@@ -1025,6 +1026,7 @@ def _merge_leaf_branch(
 
     resolved = resolve_merge_conflicts_with_context(
         project_root, conflict_files, task_description, group_summaries, spec_content,
+        flow_id=flow_id, step_id=merge_step_id,
     )
     if resolved:
         logger.info("Leaf merge conflicts resolved: %s -> %s", branch, original_branch)
@@ -1082,19 +1084,14 @@ def _run_dag_parallel(
             try:
                 if has_new_commits(project_root, branch, original_branch):
                     logger.info("DAG resume: pre-merging recovered branch %s", branch)
-                    merge_result = merge_loop_branch(
-                        project_root, branch, original_branch, "llm",
+                    merge_step_id = f"{step.step_id}_recover_{gid}"
+                    success = _merge_leaf_branch(
+                        project_root, branch, original_branch,
+                        task_description, [], spec_summary,
+                        flow_id=flow.flow_id, merge_step_id=merge_step_id,
                     )
-                    if merge_result is True:
+                    if success:
                         delete_branch(project_root, branch)
-                    elif merge_result == "pending_human":
-                        # LLM failed — abort merge (no --theirs fallback)
-                        logger.warning(
-                            "DAG resume: LLM conflict resolution failed for %s, "
-                            "aborting merge — manual resolution needed",
-                            gid,
-                        )
-                        _run_git(project_root, "merge", "--abort", check=False)
                     else:
                         logger.error("DAG resume: merge failed for recovered %s", gid)
                 else:
@@ -1201,11 +1198,13 @@ def _run_dag_parallel(
     ]
 
     merge_failures: list[str] = []
-    for gid, branch in branches_to_merge:
+    for merge_idx, (gid, branch) in enumerate(branches_to_merge):
         logger.info("DAG: merging leaf branch %s back to %s", branch, original_branch)
+        merge_step_id = f"{step.step_id}_merge_{merge_idx}"
         success = _merge_leaf_branch(
             project_root, branch, original_branch,
             task_description, group_summaries, spec_summary,
+            flow_id=flow.flow_id, merge_step_id=merge_step_id,
         )
         if not success:
             logger.error("DAG: leaf merge failed for %s (branch %s)", gid, branch)
