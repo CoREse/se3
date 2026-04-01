@@ -76,6 +76,8 @@ env/
 !/se3/specs/**
 !/se3/issues/
 !/se3/issues/**
+!/se3/scripts/
+!/se3/scripts/**
 """
 
 

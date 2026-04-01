@@ -19,6 +19,8 @@ e2e
 !/se3/specs/**
 !/se3/issues/
 !/se3/issues/**
+!/se3/scripts/
+!/se3/scripts/**
 tmp*.prompt
 
 # SE3 session file
