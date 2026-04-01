@@ -163,29 +163,9 @@ class TestDiscoveryHandler:
         assert "mode" not in step.outputs
         assert "round" not in step.outputs
 
-    def test_discovery_max_rounds_fallback(self):
-        """Should complete with fallback after max rounds."""
-        step = Step(
-            step_type=StepType.DISCOVERY,
-            inputs={
-                "task_description": "Initial idea",
-                "discovery_state": {"round": 10, "history": [
-                    {"role": "user", "content": "I want a feature"},
-                    {"role": "assistant", "content": "What kind?"},
-                ]},
-            },
-        )
-        flow = FlowInstance(task_description="Initial idea")
-
-        result = discovery_handler(step, flow)
-
-        assert result == StepStatus.COMPLETED
-        assert "refined_description" in step.outputs
-        assert "Additional context from discovery" in step.outputs["refined_description"]
-
     @patch("se3.engine.steps.discovery.LLMCaller")
-    def test_discovery_max_rounds_with_user_confirmation(self, mock_caller_class):
-        """Should allow user confirmation even at max rounds."""
+    def test_discovery_high_round_with_user_confirmation(self, mock_caller_class):
+        """Should allow confirmation at any round number (no max rounds limit)."""
         mock_caller = Mock()
         mock_caller_class.return_value = mock_caller
         mock_caller.call.return_value = json.dumps({

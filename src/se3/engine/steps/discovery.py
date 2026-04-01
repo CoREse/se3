@@ -23,10 +23,6 @@ from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
 
-# Maximum number of discovery rounds before forcing a conclusion
-MAX_DISCOVERY_ROUNDS = 10
-
-
 # Prompt for initial discovery analysis
 INITIAL_DISCOVERY_PROMPT = """You are an expert software engineering assistant in DISCOVERY mode.
 
@@ -250,17 +246,6 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Check if we're resuming from a PAUSED state with user response
     resumed = step.inputs.get("resumed", False)
     user_response = step.inputs.get("user_response", "")
-
-    # Check for max rounds to prevent infinite loops
-    # But allow one more round if user has provided a response (to process confirmation)
-    if round_number >= MAX_DISCOVERY_ROUNDS and not (resumed and user_response):
-        logger.warning(f"Discovery reached max rounds ({MAX_DISCOVERY_ROUNDS}), forcing completion")
-        # Generate a best-effort refined description from conversation
-        refined = _generate_fallback_description(initial_description, conversation_history)
-        step.outputs["refined_description"] = refined
-        step.outputs["discovery_summary"] = _generate_summary(conversation_history)
-        step.outputs["requirements_clarified"] = True
-        return StepStatus.COMPLETED
 
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
 
@@ -497,25 +482,6 @@ def _generate_summary(history: List[Dict[str, str]]) -> str:
     user_inputs = len([e for e in history if e.get("role") == "user"])
 
     return f"Discovery completed in {rounds} rounds with {user_inputs} user inputs"
-
-
-def _generate_fallback_description(initial: str, history: List[Dict[str, str]]) -> str:
-    """Generate a fallback description when max rounds reached.
-
-    Args:
-        initial: Initial description
-        history: Conversation history
-
-    Returns:
-        Best-effort refined description
-    """
-    # Combine all user inputs as the refined description
-    user_inputs = [e.get("content", "") for e in history if e.get("role") == "user"]
-
-    if user_inputs:
-        return f"{initial}\n\nAdditional context from discovery:\n" + "\n".join(f"- {u}" for u in user_inputs)
-
-    return initial
 
 
 def _display_discovery_message(
