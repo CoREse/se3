@@ -129,13 +129,6 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         else:
             logger.warning("Failed to parse LLM spec selection response, using empty list")
 
-        # Merge with analyze step's required_specs
-        if flow.state.context.get("required_specs"):
-            additional_specs = flow.state.context["required_specs"]
-            for spec in additional_specs:
-                if spec not in relevant_specs:
-                    relevant_specs.append(spec)
-
         logger.info(f"Final spec selection: {len(relevant_specs)} specs: {relevant_specs}")
 
         # Load spec content for non-base specs (base already loaded)
@@ -154,10 +147,6 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["spec_content"] = spec_contents
         step.outputs["spec_count"] = len(spec_contents)
 
-        # Build summary
-        summary = _build_spec_summary(spec_contents, task_type)
-        step.outputs["spec_summary"] = summary
-
         logger.info(f"Read spec step complete: {len(spec_contents)} specs loaded")
 
         return StepStatus.COMPLETED
@@ -168,33 +157,3 @@ def read_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         return StepStatus.FAILED
 
 
-def _build_spec_summary(spec_contents: dict[str, str], task_type: str) -> str:
-    """Build a summary of specifications for context.
-
-    Args:
-        spec_contents: Dictionary of spec name -> content
-        task_type: Type of task
-
-    Returns:
-        Formatted summary string
-    """
-    if not spec_contents:
-        return "No relevant specifications found."
-
-    lines = [f"## Relevant Specifications for {task_type} task", ""]
-
-    for spec_name, content in spec_contents.items():
-        lines.append(f"### {spec_name}")
-        lines.append("")
-
-        # Extract key sections (first 500 chars or first section)
-        lines_preview = content.split("\n")[:30]  # First 30 lines
-        preview = "\n".join(lines_preview)
-
-        if len(preview) > 2000:
-            preview = preview[:2000] + "\n... [truncated]"
-
-        lines.append(preview)
-        lines.append("")
-
-    return "\n".join(lines)
