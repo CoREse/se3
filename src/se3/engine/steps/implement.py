@@ -436,6 +436,10 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         all_files_changed = list(step.outputs.get("files_changed", []))
         all_tests_added = list(step.outputs.get("tests_added", []))
         merged_test_mapping = dict(step.outputs.get("test_mapping", {}))
+        # Carry forward previously-completed group IDs so they survive
+        # across multiple retries (Bug fix: was starting empty, losing
+        # completed groups on subsequent retries)
+        implemented_group_ids = list(completed_groups)
 
     for group in groups:
         group_id = group.get("group_id", group.get("name", "unknown"))
@@ -468,10 +472,13 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             prompt += injection
 
         try:
+            # Use group-specific step_id so each group has its own history
+            # file, preventing mixed conversations on retry
+            group_step_id = f"{step.step_id}_{group_id}"
             caller = LLMCaller(
                 project_root,
                 flow_id=flow.flow_id,
-                step_id=step.step_id,
+                step_id=group_step_id,
                 step_type=step.step_type.value,
                 external_attempt=retry_count,
             )
@@ -1072,6 +1079,14 @@ def _run_dag_parallel(
         from ..worktree import has_new_commits
         for gid in recovered_groups:
             branch = f"impl/{flow.flow_id}/{gid}"
+            # Salvage history from stale worktree before cleanup
+            safe_name = branch.replace("/", "-")
+            stale_wt = project_root / "se3" / "worktrees" / safe_name
+            if stale_wt.exists():
+                try:
+                    _salvage_history_from_worktree(stale_wt, project_root)
+                except Exception:
+                    logger.debug("DAG resume: failed to salvage history from %s", stale_wt)
             # Clean up stale worktree from crashed run (if any)
             try:
                 force_cleanup_worktree(project_root, branch)
