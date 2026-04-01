@@ -611,7 +611,6 @@ class StateMachine:
                     inputs["proposal"] = step.outputs.get("proposal")
                 elif step.step_type == StepType.DESIGN:
                     inputs["design_doc"] = step.outputs.get("design_doc")
-                    inputs["decisions"] = step.outputs.get("decisions")
                 elif step.step_type == StepType.PLAN_TASKS:
                     inputs["task_groups"] = step.outputs.get("task_groups")
                     # Keep task_list for backward compatibility
