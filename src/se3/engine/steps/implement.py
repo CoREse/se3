@@ -14,7 +14,8 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from ..dag_scheduler import DAGScheduler, GroupResult, RelayContext, RelayPlan
+from ..dag_scheduler import DAGScheduler, GroupResult, RelayContext, RelayPlan, classify_chains
+from ..transitive_reduction import transitive_reduce
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
 from ..utils.json_parser import parse_json_response
@@ -237,6 +238,37 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     if len(groups) <= 1:
         # Fallback: single LLM call for empty or single group
+        if isinstance(task_groups, list):
+            task_groups_text = json.dumps(task_groups, indent=2, ensure_ascii=False)
+        else:
+            task_groups_text = str(task_groups)
+
+        prompt = IMPLEMENT_PROMPT.format(
+            task_description=task_description,
+            task_type=task_type,
+            design_section=design_section,
+            task_groups=task_groups_text,
+            spec_summary=spec_summary,
+        )
+        if injection:
+            prompt += injection
+
+        result = _run_single_llm_call(
+            prompt, step, flow, project_root, task_groups, retry_count,
+        )
+        _resolve_files_changed(step, project_root, baseline_hash)
+        return result
+
+    # LOC threshold: merge small multi-group tasks into single LLM call
+    from ...config import ImplementConfig
+    impl_config = ImplementConfig.load(project_root)
+    total_loc = _compute_total_loc(groups)
+
+    if total_loc > 0 and total_loc <= impl_config.group_loc_threshold:
+        logger.info(
+            "Total LOC %d <= threshold %d, merging %d groups into single LLM call",
+            total_loc, impl_config.group_loc_threshold, len(groups),
+        )
         if isinstance(task_groups, list):
             task_groups_text = json.dumps(task_groups, indent=2, ensure_ascii=False)
         else:
@@ -550,6 +582,16 @@ def _extract_sorted_groups(task_groups) -> list[dict]:
     groups = [g for g in task_groups if isinstance(g, dict)]
     groups.sort(key=lambda g: g.get("group_order", 0))
     return groups
+
+
+def _compute_total_loc(groups: list[dict]) -> int:
+    """Sum estimated_loc across all tasks in all groups."""
+    total = 0
+    for g in groups:
+        for task in g.get("tasks", []):
+            if isinstance(task, dict):
+                total += task.get("estimated_loc", 0)
+    return total
 
 
 def _should_use_dag(groups: list[dict]) -> bool:
@@ -903,6 +945,199 @@ def _resolve_convergence_conflicts(
     return True
 
 
+def _merge_leaf_branch(
+    project_root: Path,
+    branch: str,
+    original_branch: str,
+    task_description: str,
+    group_summaries: list[dict],
+    spec_content: str,
+) -> bool:
+    """Merge a leaf branch back to original_branch with enhanced conflict resolution.
+
+    Unlike the old approach that fell back to ``--theirs`` on conflict, this
+    function uses :func:`_resolve_leaf_merge_conflicts` which provides the LLM
+    with full task context.  If the LLM cannot resolve after 3 retries the merge
+    is aborted and ``False`` is returned — no silent data loss.
+
+    Args:
+        project_root: Project root directory
+        branch: Branch to merge
+        original_branch: Target branch
+        task_description: Overall task description for LLM context
+        group_summaries: List of ``{group_id, summary, files_changed}`` dicts
+        spec_content: Spec summary for LLM context
+
+    Returns:
+        True on successful merge, False on failure
+    """
+    current = get_current_branch(project_root)
+    if current != original_branch:
+        _run_git(project_root, "checkout", original_branch)
+
+    result = _run_git(
+        project_root, "merge", branch, "--no-edit",
+        "-m", f"Merge leaf branch {branch}",
+        check=False,
+    )
+
+    if result.returncode == 0:
+        logger.info("Leaf merge succeeded: %s -> %s", branch, original_branch)
+        return True
+
+    is_conflict = "CONFLICT" in (result.stdout + result.stderr)
+    if not is_conflict:
+        logger.error(
+            "Leaf merge failed (non-conflict): %s: %s",
+            branch, result.stderr.strip(),
+        )
+        _run_git(project_root, "merge", "--abort", check=False)
+        return False
+
+    logger.warning("Leaf merge conflict: %s, attempting LLM resolution", branch)
+    conflict_files = get_conflicting_files(project_root)
+    if not conflict_files:
+        _run_git(project_root, "merge", "--abort", check=False)
+        return False
+
+    resolved = _resolve_leaf_merge_conflicts(
+        project_root, conflict_files, task_description, group_summaries, spec_content,
+    )
+    if resolved:
+        logger.info("Leaf merge conflicts resolved: %s -> %s", branch, original_branch)
+        return True
+
+    logger.error(
+        "Leaf merge conflict resolution failed after retries: %s", branch,
+    )
+    _run_git(project_root, "merge", "--abort", check=False)
+    return False
+
+
+def _resolve_leaf_merge_conflicts(
+    project_root: Path,
+    conflict_files: list[str],
+    task_description: str,
+    group_summaries: list[dict],
+    spec_content: str,
+    max_retries: int = 3,
+) -> bool:
+    """Resolve leaf merge conflicts using LLM with full context.
+
+    For each conflicting file, sends the file content (with conflict markers)
+    to the LLM along with task description, group summaries, and spec context.
+    Verifies the output contains no conflict markers before writing.
+
+    Retries up to *max_retries* times.  Does NOT fall back to ``--theirs``.
+
+    Args:
+        project_root: Project root directory
+        conflict_files: List of conflicting file paths
+        task_description: Overall task description
+        group_summaries: ``[{group_id, summary, files_changed}, ...]``
+        spec_content: Spec summary text
+        max_retries: Maximum resolution attempts
+
+    Returns:
+        True if all conflicts resolved and merge committed, False otherwise
+    """
+    summaries_text = "\n".join(
+        f"- Group {gs['group_id']}: {gs.get('summary', '')} "
+        f"(files: {', '.join(gs.get('files_changed', []))})"
+        for gs in group_summaries
+    ) if group_summaries else "No group context available."
+
+    for attempt in range(1, max_retries + 1):
+        resolved_contents: dict[str, str] = {}
+        all_ok = True
+
+        for filepath in conflict_files:
+            full_path = project_root / filepath
+            if not full_path.exists():
+                logger.warning("Conflict file not found: %s", filepath)
+                all_ok = False
+                break
+
+            try:
+                content = full_path.read_text(encoding="utf-8")
+            except Exception:
+                logger.warning("Could not read conflict file: %s", filepath)
+                all_ok = False
+                break
+
+            if "<<<<<<<" not in content:
+                continue  # Already resolved or not a text conflict
+
+            prompt = (
+                "You are resolving a git merge conflict. The conflict occurred "
+                "while merging parallel implementation branches back to the "
+                "main branch.\n\n"
+                f"## Task Description\n{task_description}\n\n"
+                f"## What Each Group Did\n{summaries_text}\n\n"
+                f"## Project Conventions\n{spec_content[:2000]}\n\n"
+                f"## Conflicting File: {filepath}\n\n"
+                f"```\n{content}\n```\n\n"
+                "Output ONLY the fully resolved file content. "
+                "Do NOT include any conflict markers (<<<<<<< / ======= / >>>>>>>). "
+                "Do NOT add any explanation or code fences."
+            )
+
+            try:
+                caller = LLMCaller(project_root, step_type="leaf_merge_conflict")
+                resolved = caller.call(prompt=prompt)
+            except Exception as e:
+                logger.warning(
+                    "LLM conflict resolution failed for %s (attempt %d/%d): %s",
+                    filepath, attempt, max_retries, e,
+                )
+                all_ok = False
+                break
+
+            if "<<<<<<<" in resolved or ">>>>>>>" in resolved:
+                logger.warning(
+                    "LLM output still has conflict markers for %s (attempt %d/%d)",
+                    filepath, attempt, max_retries,
+                )
+                all_ok = False
+                break
+
+            resolved_contents[filepath] = resolved
+
+        if all_ok:
+            # Write all resolved files and complete the merge
+            for filepath, content in resolved_contents.items():
+                (project_root / filepath).write_text(content, encoding="utf-8")
+                _run_git(project_root, "add", filepath)
+
+            commit_result = _run_git(
+                project_root, "commit", "--no-edit", check=False,
+            )
+            if commit_result.returncode == 0:
+                logger.info(
+                    "Leaf merge conflicts resolved on attempt %d/%d",
+                    attempt, max_retries,
+                )
+                return True
+            logger.warning(
+                "Merge commit failed (attempt %d/%d): %s",
+                attempt, max_retries, commit_result.stderr.strip(),
+            )
+
+        # Reset conflict state for retry
+        if attempt < max_retries:
+            for filepath in resolved_contents:
+                _run_git(
+                    project_root, "checkout", "--merge", "--", filepath,
+                    check=False,
+                )
+            logger.info(
+                "Retrying conflict resolution (attempt %d/%d)",
+                attempt + 1, max_retries,
+            )
+
+    return False
+
+
 def _run_dag_parallel(
     groups: list[dict],
     step: Step,
@@ -927,12 +1162,7 @@ def _run_dag_parallel(
             test_mapping, implemented_groups from a previous (resumed) run.
             These are merged into the final aggregated outputs.
     """
-    from ...config import load_conflict_resolver_config
-
     original_branch = get_current_branch(project_root)
-
-    conflict_config = load_conflict_resolver_config(project_root)
-    conflict_strategy = conflict_config.strategy
 
     # Disaster recovery: merge surviving branches from prior_outputs
     # before running new groups (so new groups see recovered code)
@@ -959,14 +1189,13 @@ def _run_dag_parallel(
                     if merge_result is True:
                         delete_branch(project_root, branch)
                     elif merge_result == "pending_human":
-                        # LLM failed — force-resolve with --theirs
-                        logger.warning("DAG resume: LLM conflict resolution failed for %s, using --theirs", gid)
-                        cfiles = get_conflicting_files(project_root)
-                        if _force_resolve_conflicts_theirs(project_root, cfiles):
-                            delete_branch(project_root, branch)
-                        else:
-                            _run_git(project_root, "merge", "--abort", check=False)
-                            logger.error("DAG resume: merge failed for recovered %s", gid)
+                        # LLM failed — abort merge (no --theirs fallback)
+                        logger.warning(
+                            "DAG resume: LLM conflict resolution failed for %s, "
+                            "aborting merge — manual resolution needed",
+                            gid,
+                        )
+                        _run_git(project_root, "merge", "--abort", check=False)
                     else:
                         logger.error("DAG resume: merge failed for recovered %s", gid)
                 else:
@@ -991,7 +1220,18 @@ def _run_dag_parallel(
         step.outputs["incomplete_tasks"] = []
         return StepStatus.COMPLETED
 
-    scheduler = DAGScheduler(groups, max_workers=4)
+    # Transitive reduction: remove redundant dependency edges
+    reduced_groups = transitive_reduce(groups)
+
+    # Generate relay execution plan
+    relay_plan = classify_chains(reduced_groups)
+    logger.info(
+        "DAG relay plan: %d root(s), %d leaf(ves), %d convergence point(s)",
+        len(relay_plan.root_nodes), len(relay_plan.leaf_nodes),
+        len(relay_plan.convergence_points),
+    )
+
+    scheduler = DAGScheduler(reduced_groups, max_workers=4, relay_plan=relay_plan)
     execute_fn = _make_execute_fn(
         project_root=project_root,
         original_branch=original_branch,
@@ -1017,11 +1257,13 @@ def _run_dag_parallel(
                 except Exception:
                     logger.warning("DAG: failed to salvage history from worktree %s", r.worktree_path)
 
-        # Always clean up worktrees (force-remove to handle locked state)
+        # Clean up worktrees (deduplicated for relay chains sharing worktrees).
         # NOTE: Only remove worktree directories here, NOT branches.
         # Branches must survive until after merge-back completes.
+        cleaned_branches: set[str] = set()
         for r in results:
-            if r.branch_name:
+            if r.branch_name and r.branch_name not in cleaned_branches:
+                cleaned_branches.add(r.branch_name)
                 try:
                     force_cleanup_worktree(project_root, r.branch_name)
                 except Exception:
@@ -1038,35 +1280,37 @@ def _run_dag_parallel(
     # Build results map for easy lookup
     results_map: dict[str, GroupResult] = {r.group_id: r for r in results}
 
-    # Merge completed groups in topological order
-    merge_order = scheduler.topological_merge_order()
-    merge_failures: list[str] = []
-    for group_id in merge_order:
-        r = results_map.get(group_id)
-        if not r or r.status != "completed":
-            continue
-        if not r.branch_name:
-            continue
+    # Merge only leaf nodes + fallback leaves (not all completed groups).
+    # With relay strategy, intermediate groups' commits are already on the
+    # leaf branch — only the leaf needs to merge back to original_branch.
+    fallback_leaf_ids = set(scheduler.get_fallback_leaves())
+    merge_group_ids = relay_plan.leaf_nodes | fallback_leaf_ids
 
-        logger.info("DAG: merging %s back to %s", r.branch_name, original_branch)
-        # Force LLM conflict resolution for DAG merge-back (never pending_human)
-        merge_result = merge_loop_branch(
-            project_root, r.branch_name, original_branch, "llm",
+    # Collect unique branches to merge (relay chains share the same branch)
+    branches_to_merge: list[tuple[str, str]] = []
+    seen_branches: set[str] = set()
+    for gid in merge_group_ids:
+        r = results_map.get(gid)
+        if r and r.status == "completed" and r.branch_name and r.branch_name not in seen_branches:
+            seen_branches.add(r.branch_name)
+            branches_to_merge.append((gid, r.branch_name))
+
+    # Build group summaries for LLM conflict resolution context
+    group_summaries = [
+        {"group_id": r.group_id, "summary": r.summary, "files_changed": r.files_changed}
+        for r in results if r.status == "completed"
+    ]
+
+    merge_failures: list[str] = []
+    for gid, branch in branches_to_merge:
+        logger.info("DAG: merging leaf branch %s back to %s", branch, original_branch)
+        success = _merge_leaf_branch(
+            project_root, branch, original_branch,
+            task_description, group_summaries, spec_summary,
         )
-        if merge_result is True:
-            pass  # Success
-        elif merge_result == "pending_human":
-            # LLM failed to resolve — force-resolve with --theirs and complete
-            logger.warning("DAG: LLM conflict resolution failed for %s, using --theirs", group_id)
-            conflict_files = get_conflicting_files(project_root)
-            resolved = _force_resolve_conflicts_theirs(project_root, conflict_files)
-            if not resolved:
-                logger.error("DAG: --theirs resolution also failed for %s, aborting", group_id)
-                _run_git(project_root, "merge", "--abort", check=False)
-                merge_failures.append(group_id)
-        elif merge_result is False:
-            logger.error("DAG: merge failed for %s", group_id)
-            merge_failures.append(group_id)
+        if not success:
+            logger.error("DAG: leaf merge failed for %s (branch %s)", gid, branch)
+            merge_failures.append(gid)
 
     # Delete impl branches (all groups including recovered — covers failed/skipped)
     all_gids = [g.get("group_id", g.get("name", "unknown")) for g in groups]
@@ -1131,9 +1375,14 @@ def _run_dag_parallel(
     if all_restricted_failed:
         step.outputs["restricted_edits_failed"] = all_restricted_failed
 
-    # Compute overall completion status
+    # Compute overall completion status.
+    # When fallback leaves were successfully merged, some work is preserved
+    # even though downstream groups failed — report "partial" not "failed".
     if "failed" in all_completion_statuses:
-        overall_status = "failed"
+        if fallback_leaf_ids and not merge_failures:
+            overall_status = "partial"
+        else:
+            overall_status = "failed"
     elif "partial" in all_completion_statuses:
         overall_status = "partial"
     else:
@@ -1402,34 +1651,6 @@ def _resolve_files_changed(step: Step, project_root: Path, baseline_hash: str | 
     except Exception as e:
         logger.debug("Failed to resolve files_changed from git: %s", e)
         # Keep LLM-reported files_changed as fallback
-
-
-def _force_resolve_conflicts_theirs(project_root: Path, conflict_files: list[str]) -> bool:
-    """Force-resolve merge conflicts by accepting the incoming branch's version.
-
-    Used as last resort when LLM conflict resolution fails in DAG merge-back.
-
-    Args:
-        project_root: Project root directory
-        conflict_files: List of conflicting file paths
-
-    Returns:
-        True if all conflicts resolved and committed, False otherwise
-    """
-    if not conflict_files:
-        return False
-
-    for cf in conflict_files:
-        _run_git(project_root, "checkout", "--theirs", cf.strip(), check=False)
-        _run_git(project_root, "add", cf.strip(), check=False)
-
-    result = _run_git(project_root, "commit", "--no-edit", check=False)
-    if result.returncode == 0:
-        logger.info("Force-resolved %d conflicting files with --theirs", len(conflict_files))
-        return True
-
-    logger.warning("Failed to commit after --theirs resolution: %s", result.stderr.strip())
-    return False
 
 
 def _format_spec_brief(spec_content: dict[str, str]) -> str:

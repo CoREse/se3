@@ -440,8 +440,8 @@ class TestDagEmptyRepoFallback:
         )
 
         self.task_groups = [
-            {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]},
-            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2}]},
+            {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1, "estimated_loc": 200}]},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2, "estimated_loc": 200}]},
         ]
 
     def teardown_method(self):
@@ -534,8 +534,8 @@ class TestStaleBranchHandling:
         )
 
         self.task_groups = [
-            {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]},
-            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2}]},
+            {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1, "estimated_loc": 200}]},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2, "estimated_loc": 200}]},
         ]
 
     def teardown_method(self):
@@ -835,10 +835,10 @@ class TestDagResumeFiltering:
         )
 
         self.task_groups = [
-            {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]},
-            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2}]},
-            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"], "tasks": [{"id": 3}]},
-            {"group_id": "G4", "group_order": 4, "depends_on": ["G2", "G3"], "tasks": [{"id": 4}]},
+            {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1, "estimated_loc": 200}]},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2, "estimated_loc": 200}]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"], "tasks": [{"id": 3, "estimated_loc": 200}]},
+            {"group_id": "G4", "group_order": 4, "depends_on": ["G2", "G3"], "tasks": [{"id": 4, "estimated_loc": 200}]},
         ]
 
     def teardown_method(self):
@@ -1110,9 +1110,9 @@ class TestDagParallelResumeBehavior:
         )
 
         self.task_groups = [
-            {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1}]},
-            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2}]},
-            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"], "tasks": [{"id": 3}]},
+            {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1, "estimated_loc": 200}]},
+            {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2, "estimated_loc": 200}]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"], "tasks": [{"id": 3, "estimated_loc": 200}]},
         ]
 
     def teardown_method(self):

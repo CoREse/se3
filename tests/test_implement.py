@@ -35,13 +35,13 @@ TWO_GROUPS = [
         "group_id": "G1",
         "group_order": 1,
         "depends_on": [],
-        "tasks": [{"id": 1, "description": "Task 1"}],
+        "tasks": [{"id": 1, "description": "Task 1", "estimated_loc": 200}],
     },
     {
         "group_id": "G2",
         "group_order": 2,
         "depends_on": ["G1"],
-        "tasks": [{"id": 2, "description": "Task 2"}],
+        "tasks": [{"id": 2, "description": "Task 2", "estimated_loc": 200}],
     },
 ]
 
