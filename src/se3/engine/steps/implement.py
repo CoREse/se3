@@ -186,6 +186,10 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
 
+    # Record baseline commit hash before any implementation.
+    # Used after all paths to get ground-truth files_changed via git diff.
+    baseline_hash = _get_head_hash(project_root)
+
     # Format design section (shared across paths)
     design_section = ""
     if design_doc:
@@ -216,9 +220,11 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if injection:
             prompt += injection
 
-        return _run_single_llm_call(
+        result = _run_single_llm_call(
             prompt, step, flow, project_root, task_groups, retry_count,
         )
+        _resolve_files_changed(step, project_root, baseline_hash)
+        return result
 
     # Determine if we should use group-by-group execution
     groups = _extract_sorted_groups(task_groups)
@@ -240,9 +246,11 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if injection:
             prompt += injection
 
-        return _run_single_llm_call(
+        result = _run_single_llm_call(
             prompt, step, flow, project_root, task_groups, retry_count,
         )
+        _resolve_files_changed(step, project_root, baseline_hash)
+        return result
 
     # --- DAG parallel path (when dependency info is present) ---
     if _should_use_dag(groups):
@@ -320,7 +328,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                     if not dag_groups:
                         logger.info("DAG parallel: all groups already completed on resume")
                         # Merge surviving branches before returning
-                        return _run_dag_parallel(
+                        result = _run_dag_parallel(
                             groups=[],
                             step=step,
                             flow=flow,
@@ -338,6 +346,8 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                                 "implemented_groups": list(completed_groups_dag),
                             },
                         )
+                        _resolve_files_changed(step, project_root, baseline_hash)
+                        return result
                     prior_outputs = {
                         "files_changed": list(step.outputs.get("files_changed", [])),
                         "tests_added": list(step.outputs.get("tests_added", [])),
@@ -349,7 +359,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                         len(completed_groups_dag), len(dag_groups),
                     )
 
-            return _run_dag_parallel(
+            result = _run_dag_parallel(
                 groups=dag_groups,
                 step=step,
                 flow=flow,
@@ -362,6 +372,8 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 retry_count=retry_count,
                 prior_outputs=prior_outputs,
             )
+            _resolve_files_changed(step, project_root, baseline_hash)
+            return result
 
     # --- Group-by-group execution ---
     logger.info("Executing %d task groups sequentially", len(groups))
@@ -508,6 +520,9 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     step.outputs["summary"] = "; ".join(
         r.get("summary", "") for r in previous_results if r.get("summary")
     )
+
+    # Resolve files_changed from git diff (ground truth)
+    _resolve_files_changed(step, project_root, baseline_hash)
 
     if overall_status == "failed":
         step.error_message = "LLM reported implementation failed"
@@ -1140,6 +1155,69 @@ def _salvage_history_from_worktree(worktree_path: Path, main_repo_root: Path) ->
 
     if copied:
         logger.info("Salvaged %d history file(s) from worktree %s", copied, worktree_path)
+
+
+def _get_head_hash(project_root: Path) -> str | None:
+    """Get current HEAD commit hash, or None for empty repos."""
+    result = _run_git(project_root, "rev-parse", "HEAD", check=False)
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return None
+
+
+def _resolve_files_changed(step: Step, project_root: Path, baseline_hash: str | None) -> None:
+    """Replace LLM-reported files_changed with git diff ground truth.
+
+    Compares the current HEAD (after implementation) against the baseline
+    hash (before implementation) to get the definitive list of changed files.
+    Also includes any uncommitted changes in the working tree.
+
+    Args:
+        step: Step whose outputs["files_changed"] will be overwritten
+        project_root: Project root directory
+        baseline_hash: Commit hash from before implementation, or None
+    """
+    try:
+        changed: set[str] = set()
+
+        # Committed changes since baseline
+        if baseline_hash:
+            result = _run_git(
+                project_root, "diff", "--name-only", baseline_hash, "HEAD",
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                changed.update(result.stdout.strip().splitlines())
+
+        # Uncommitted changes (staged + unstaged)
+        result = _run_git(
+            project_root, "diff", "--name-only", "HEAD", check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            changed.update(result.stdout.strip().splitlines())
+
+        # Staged but not committed
+        result = _run_git(
+            project_root, "diff", "--name-only", "--cached", check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            changed.update(result.stdout.strip().splitlines())
+
+        # Untracked files (new files created by LLM)
+        result = _run_git(
+            project_root, "ls-files", "--others", "--exclude-standard", check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            changed.update(result.stdout.strip().splitlines())
+
+        if changed:
+            step.outputs["files_changed"] = sorted(changed)
+            logger.info("Resolved files_changed from git: %d files", len(changed))
+        # If git diff found nothing but LLM reported files, keep LLM report as fallback
+
+    except Exception as e:
+        logger.debug("Failed to resolve files_changed from git: %s", e)
+        # Keep LLM-reported files_changed as fallback
 
 
 def _format_spec_brief(spec_content: dict[str, str]) -> str:
