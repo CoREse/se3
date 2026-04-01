@@ -211,11 +211,11 @@ class TestFormatSpecContent:
         assert "Content 1" in result
         assert "Content 2" in result
 
-    def test_truncation(self):
+    def test_long_content_not_truncated(self):
         long_content = "x" * 4000
         content = {"long.md": long_content}
         result = _format_spec_content(content)
-        assert "... [truncated]" in result
+        assert long_content in result
 
 
 class TestFormatChanges:

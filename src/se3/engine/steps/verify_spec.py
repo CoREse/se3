@@ -137,7 +137,6 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     try:
         # Call LLM for verification (use EXTRACT mode to avoid retry on format issues)
-        project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
         response = caller.call(
@@ -319,9 +318,6 @@ def _format_spec_content(spec_content: dict[str, str]) -> str:
     parts = []
     for name, content in spec_content.items():
         parts.append(f"### {name}")
-        # Truncate very long specs
-        if len(content) > 3000:
-            content = content[:3000] + "\n... [truncated]"
         parts.append(content)
         parts.append("")
 
