@@ -707,6 +707,38 @@ class TestConfig:
         return [p for p in self.phases if p.get("in_fix_loop", True)]
 
 
+@dataclass
+class ImplementConfig:
+    """Implement step configuration loaded from se3.yaml implement: section."""
+
+    group_loc_threshold: int = 300
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ImplementConfig":
+        """Create ImplementConfig from dictionary."""
+        if not data:
+            return cls()
+        return cls(
+            group_loc_threshold=int(data.get("group_loc_threshold", 300)),
+        )
+
+    @classmethod
+    def load(cls, project_root: Path) -> "ImplementConfig":
+        """Load implement configuration from se3.yaml."""
+        config_path = Path(project_root) / "se3.yaml"
+        if not config_path.exists():
+            return cls()
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            impl_data = data.get("implement", {})
+            if not impl_data or not isinstance(impl_data, dict):
+                return cls()
+            return cls.from_dict(impl_data)
+        except Exception:
+            return cls()
+
+
 def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
     """Get the maximum number of fix iterations for the test-verify-fix loop.
 
