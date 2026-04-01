@@ -271,39 +271,13 @@ def _get_bump_type(step: Step, flow: FlowInstance, version_config: VersionConfig
     # First, try to get bump_type from version_analyze step input
     bump_type_str = step.inputs.get("bump_type")
     confidence = step.inputs.get("confidence", "low")
-    
-    # Check if we should use the LLM analysis result
-    # Use it if confidence is sufficient or if auto_confirm is enabled
+
     if bump_type_str:
-        # Get configuration for confirmation behavior
-        auto_confirm = getattr(version_config, 'auto_bump', True)
-        confidence_threshold = getattr(version_config, 'confidence_threshold', None)
-        
-        # Determine if we need human confirmation
-        need_confirmation = False
-        if not auto_confirm:
-            need_confirmation = True
-        elif confidence_threshold:
-            confidence_levels = {"high": 3, "medium": 2, "low": 1}
-            threshold_level = confidence_levels.get(confidence_threshold, 0)
-            current_level = confidence_levels.get(confidence, 0)
-            if current_level < threshold_level:
-                need_confirmation = True
-        
-        if not need_confirmation:
-            logger.info(f"Using version_analyze result: bump_type={bump_type_str}, confidence={confidence}")
-            try:
-                # Always return a valid BumpType - never None
-                return BumpType(bump_type_str) if bump_type_str != "none" else BumpType.PATCH
-            except ValueError:
-                logger.warning(f"Invalid bump_type from version_analyze: {bump_type_str}, falling back")
-        else:
-            logger.info(f"Version analysis confidence ({confidence}) below threshold, may need confirmation")
-            try:
-                # Always return a valid BumpType - never None
-                return BumpType(bump_type_str) if bump_type_str != "none" else BumpType.PATCH
-            except ValueError:
-                logger.warning(f"Invalid bump_type from version_analyze: {bump_type_str}, falling back")
+        logger.info(f"Using version_analyze result: bump_type={bump_type_str}, confidence={confidence}")
+        try:
+            return BumpType(bump_type_str) if bump_type_str != "none" else BumpType.PATCH
+        except ValueError:
+            logger.warning(f"Invalid bump_type from version_analyze: {bump_type_str}, falling back")
     
     # Fallback to task type based bump rules
     task_type = flow.task_type or "feature"
@@ -428,20 +402,21 @@ def _format_changes_for_prompt(changes_made: dict) -> str:
     files_changed = changes_made.get("files_changed", [])
     if not files_changed:
         return "No files changed"
-    
+
     lines = []
     for f in files_changed[:10]:  # Limit to 10 files
-        path = f.get("path", "")
-        action = f.get("action", "modified")
-        explanation = f.get("explanation", "")
-        if explanation:
-            lines.append(f"- {path} ({action}): {explanation}")
-        else:
+        if isinstance(f, str):
+            lines.append(f"- {f}")
+        elif isinstance(f, dict):
+            path = f.get("path", "?")
+            action = f.get("action", "modified")
             lines.append(f"- {path} ({action})")
-    
+        else:
+            lines.append(f"- {f}")
+
     if len(files_changed) > 10:
         lines.append(f"- ... and {len(files_changed) - 10} more files")
-    
+
     return "\n".join(lines)
 
 
