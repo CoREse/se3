@@ -18,8 +18,6 @@ import logging
 import re
 import shlex
 import subprocess
-import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +38,8 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         flow: The flow instance containing context
 
     Returns:
-        StepStatus.COMPLETED always (let verify_spec decide on failures)
+        StepStatus.COMPLETED on success,
+        StepStatus.REVISION_NEEDED when tests fail (triggers fix loop)
     """
     from ...config import TestConfig
 
@@ -174,10 +173,11 @@ def _run_command(
             env=env,
         )
 
-        # Show dot progress while waiting
+        # Show dot progress while waiting, enforce timeout
         print(f"Running tests: {cmd_str}", end="", flush=True)
         dots = 0
-        max_dots = 60  # Limit dots to avoid infinite horizontal scrolling
+        max_dots = 60
+        elapsed = 0
 
         try:
             while True:
@@ -185,11 +185,26 @@ def _run_command(
                     stdout, stderr = process.communicate(timeout=1.0)
                     break
                 except subprocess.TimeoutExpired:
+                    elapsed += 1
                     print(".", end="", flush=True)
                     dots += 1
                     if dots >= max_dots:
                         print("\n  ... still running ...", flush=True)
                         dots = 0
+                    # Enforce overall timeout
+                    if elapsed >= timeout:
+                        process.kill()
+                        stdout, stderr = process.communicate()
+                        print(flush=True)
+                        logger.error(f"Test timed out after {timeout}s: {cmd_str}")
+                        print(f"[timeout after {timeout}s]", flush=True)
+                        return {
+                            "command": cmd_str,
+                            "returncode": -1,
+                            "stdout": stdout or "",
+                            "stderr": (stderr or "") + f"\nTimeout after {timeout}s",
+                            "passed": False,
+                        }
                     continue
 
             # Newline after progress dots
@@ -210,17 +225,6 @@ def _run_command(
             except subprocess.TimeoutExpired:
                 process.kill()
             raise
-
-    except subprocess.TimeoutExpired:
-        logger.error(f"Test timed out after {timeout}s: {cmd_str}")
-        print(f"\n[timeout after {timeout}s]", flush=True)
-        return {
-            "command": cmd_str,
-            "returncode": -1,
-            "stdout": "",
-            "stderr": f"Timeout after {timeout}s",
-            "passed": False,
-        }
     except Exception as e:
         logger.exception(f"Test execution failed: {command}")
         print(f"\n[error: {e}]", flush=True)
