@@ -314,6 +314,12 @@ se3 run --discover "我想做一个用户管理功能"
 - **THEN** 将指令注入到当前步骤的 LLM prompt 中
 - **AND** 重新执行当前步骤
 
+#### Scenario: Step outputs JSON serializability
+- **WHEN** a step handler stores a result in `step.outputs`
+- **THEN** the value MUST be a JSON-serializable primitive (string, number, bool, dict, list, or null)
+- **AND** enum values (e.g. `StepStatus`) MUST be converted to their string `.value` before storing
+- **AND** `json.dumps` calls that serialize step outputs SHOULD use `default=str` as a defensive fallback, consistent with `persistence.py`
+
 ### Requirement: 步骤间输入传递
 
 流程引擎 SHALL 自动构建步骤输入，将前序步骤的输出传递给后续步骤。
@@ -639,6 +645,12 @@ test:
 - **AND** 流程直接进入 fix loop 返回 implement 步骤
 - **AND** 跳过 verify_spec 步骤（因为问题已通过测试发现）
 
+#### Scenario: Revision flow previous_output serialization
+- **WHEN** the state machine transitions to a revision (confirm review loop or fix loop)
+- **AND** the revised step's `previous_output` is serialized to JSON for the LLM prompt
+- **THEN** `json.dumps` MUST use `default=str` as a defensive fallback
+- **AND** step handlers that store `StepStatus` in `step.outputs["result"]` MUST convert it to its string `.value` before storing (root cause prevention)
+
 #### Scenario: test 通过后进行 spec 验证
 - **WHEN** test 步骤执行完成且 `overall_passed` 为 true
 - **THEN** test 步骤返回 `COMPLETED` 状态
@@ -722,7 +734,7 @@ test:
 - step_type: 步骤类型（12 种之一，包括 discovery）
 - status: 步骤状态 (PENDING, RUNNING, COMPLETED, FAILED, RETRYING, PAUSED)
 - inputs: 输入字典
-- outputs: 输出字典
+- outputs: 输出字典（所有值必须是 JSON 可序列化的原始类型；枚举值存入前须转换为字符串 `.value`）
 - retry_count: 重试次数
 
 **Discovery 步骤特殊字段：**

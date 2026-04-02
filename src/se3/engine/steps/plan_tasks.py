@@ -184,7 +184,7 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
     if is_revision and revision_feedback:
         import json as _json
         previous_output = step.inputs.get("previous_output", {})
-        prev_text = _json.dumps(previous_output, indent=2, ensure_ascii=False) if previous_output else "(not available)"
+        prev_text = _json.dumps(previous_output, indent=2, ensure_ascii=False, default=str) if previous_output else "(not available)"
         revision_section = REVISION_SECTION.format(
             revision_feedback=revision_feedback,
             previous_output=prev_text,

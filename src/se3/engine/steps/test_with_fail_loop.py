@@ -62,7 +62,7 @@ def test_handler_with_fail_loop(step: Step, flow: FlowInstance) -> StepStatus:
             "stdout": result.stdout,
             "stderr": result.stderr,
         }
-        step.outputs["result"] = StepStatus.COMPLETED
+        step.outputs["result"] = StepStatus.COMPLETED.value
         
         if tests_passed:
             logger.info("All tests passed")

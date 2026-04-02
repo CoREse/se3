@@ -273,7 +273,7 @@ class StateMachine:
 
             # Only store result if handler didn't already set outputs
             if "result" not in step.outputs:
-                step.outputs["result"] = result
+                step.outputs["result"] = result.value if isinstance(result, StepStatus) else result
 
         except Exception as e:
             logger.exception(f"Step {step.step_type.value} failed")
