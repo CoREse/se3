@@ -292,7 +292,7 @@ def load_confirmation_config(project_root: Optional[Path] = None) -> dict:
         confirmation = data.get("confirmation", {})
         return {
             "enabled": confirmation.get("enabled", True),
-            "steps": confirmation.get("steps", ["propose", "design"]),
+            "steps": confirmation.get("steps", ["plan"]),
             "reviewer": confirmation.get("reviewer", "human"),
             "llm_reviewer": confirmation.get("llm_reviewer", {}),
         }
@@ -321,7 +321,7 @@ def insert_confirmation_steps(
     if not config.get("enabled", True):
         return steps
     
-    steps_requiring_confirm = config.get("steps", ["propose", "design"])
+    steps_requiring_confirm = config.get("steps", ["plan"])
     
     # Handle both StepType enum and string step types
     # Get step type values for comparison

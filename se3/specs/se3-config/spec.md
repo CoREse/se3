@@ -20,7 +20,7 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - `version.bump_rules`: Map task types to bump types
 - `version.auto_bump`: Auto-apply version bump without confirmation (default: true)
 - `confirmation.enabled`: Enable CONFIRM steps (default: false)
-- `confirmation.steps`: Steps after which to insert CONFIRM (default: [propose, design])
+- `confirmation.steps`: Steps after which to insert CONFIRM (default: [plan])
 - `confirmation.reviewer`: Who reviews — "human" or "llm" (default: "human")
 - `claude_commands`: List of `{cmd, priority}` for Claude CLI resolution
 - `language.language`: Language for human-facing steps (default: null)
@@ -77,7 +77,7 @@ The system SHALL support confirmation step configuration.
 
 **Confirmation section options:**
 - `enabled`: Whether to insert CONFIRM steps (default: false)
-- `steps`: List of steps after which to insert CONFIRM (default: [propose, design])
+- `steps`: List of steps after which to insert CONFIRM (default: [plan])
 - `reviewer`: Who performs the review — "human" or "llm" (default: "human")
 - `llm_reviewer.model`: LLM model for review (default: null = default model)
 - `llm_reviewer.max_iterations`: Max review-modify cycles (default: 3)
@@ -147,7 +147,7 @@ implement:
 
 #### Scenario: Custom LOC threshold
 - **GIVEN** `implement.group_loc_threshold: 500` in se3.yaml
-- **WHEN** `plan_tasks` produces groups with total estimated_loc = 400
+- **WHEN** `plan` produces groups with total estimated_loc = 400
 - **THEN** the implement step collapses all groups into a single LLM call
 
 ### Requirement: Language Configuration
@@ -163,13 +163,13 @@ When a language is set, a language instruction is appended to the LLM prompt for
 **Affected steps by `language.language`:**
 - `summarize` — always affected
 - `discovery` — always affected
-- Steps configured in `confirmation.steps` when `confirmation.enabled: true` and `confirmation.reviewer: "human"` (e.g., `propose`, `design`)
+- Steps configured in `confirmation.steps` when `confirmation.enabled: true` and `confirmation.reviewer: "human"` (e.g., `plan`)
 
 **Affected steps by `language.spec_language`:**
 - `update_spec` — always affected
 
 **Unaffected steps (LLM decides language):**
-- `analyze`, `read_spec`, `plan_tasks`, `implement`, `test`, `verify_spec`, `commit`
+- `analyze`, `read_spec`, `plan`, `implement`, `test`, `verify_spec`, `commit`
 
 **Example configuration:**
 ```yaml
@@ -194,8 +194,8 @@ language:
 - **THEN** the LLM prompt includes a language instruction to respond in English
 
 #### Scenario: Confirmed steps use general language
-- **GIVEN** `language.language: zh-CN` and `confirmation.enabled: true` with `confirmation.reviewer: "human"` and `confirmation.steps: ["propose", "design"]`
-- **WHEN** the propose or design step runs
+- **GIVEN** `language.language: zh-CN` and `confirmation.enabled: true` with `confirmation.reviewer: "human"` and `confirmation.steps: ["plan"]`
+- **WHEN** the plan step runs
 - **THEN** the LLM prompt includes a language instruction to respond in zh-CN
 
 #### Scenario: Independent language settings

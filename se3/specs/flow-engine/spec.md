@@ -157,7 +157,7 @@ se3 run --discover "我想做一个用户管理功能"
 | `analyze` | 分析任务类型和范围 | 是 | STRICT | task_description | task_type, scope, complexity, reasoning |
 | `read_spec` | 读取相关 spec 文件 | 否（程序自动） | - | scope | relevant_specs, spec_content |
 | `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | spec_content, task_description, task_type | plan{proposal,design}, task_groups |
-| `implement` | 编写代码实现 | 是 | TWO_PHASE | design_doc, task_list | implementation, files_changed |
+| `implement` | 编写代码实现 | 是 | TWO_PHASE | design_doc, task_groups | implementation, files_changed |
 | `test` | 运行测试验证 | 否（程序执行） | - | - | test_results, tests_passed |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | implementation, spec_content | verification_result, issues |
 | `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | changes_made | updated_specs |

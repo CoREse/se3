@@ -1,0 +1,17 @@
+id: '044'
+title: Deprecated step handlers not registered - old persisted flows will fail on
+  resume
+description: propose_handler and design_handler are deleted, but STEP_HANDLERS no
+  longer has entries for StepType.PROPOSE and StepType.DESIGN. If a user has a persisted
+  flow from before this refactoring that was mid-execution at a propose or design
+  step, resuming it with 'se3 run --resume' will fail because no handler exists for
+  those step types. Consider adding a migration path or a stub handler that auto-skips
+  deprecated steps.
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+created_at: '2026-04-02T22:36:59.728045'
+updated_at: '2026-04-02T22:36:59.728045'

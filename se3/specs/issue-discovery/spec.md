@@ -50,8 +50,8 @@ The `get_issue_discovery_injection(step_type, project_root)` function encapsulat
 - **THEN** only `verify_spec` and `summarize` receive injection
 
 #### Scenario: Custom whitelist
-- **WHEN** `issue_discovery.steps: ["design", "summarize"]` is configured
-- **THEN** `design` and `summarize` receive injection
+- **WHEN** `issue_discovery.steps: ["plan", "summarize"]` is configured
+- **THEN** `plan` and `summarize` receive injection
 - **AND** `verify_spec` does NOT receive injection (removed from whitelist)
 
 #### Scenario: Forbidden step override

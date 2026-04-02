@@ -68,7 +68,7 @@ class TestModels:
         flow = FlowInstance()
         flow.state.selected_steps = [
             StepType.ANALYZE,
-                StepType.PROPOSE,
+                StepType.PLAN,
             StepType.IMPLEMENT,
         ]
 

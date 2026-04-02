@@ -24,7 +24,7 @@ version:
 # Confirmation steps (optional)
 # confirmation:
 #   enabled: true
-#   steps: [propose, design]
+#   steps: [plan]
 
 # Claude CLI command resolution
 # claude_commands:

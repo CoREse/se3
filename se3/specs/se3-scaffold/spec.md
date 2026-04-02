@@ -77,7 +77,7 @@ The system SHALL support configuring framework behavior via `se3.yaml`.
 - `version.enabled`: Enable automatic version bumping (default: true)
 - `version.bump_rules`: Map task types to bump types (feature→minor, bugfix→patch, etc.)
 - `confirmation.enabled`: Enable confirmation steps (default: false)
-- `confirmation.steps`: Steps after which to insert CONFIRM (default: [propose, design])
+- `confirmation.steps`: Steps after which to insert CONFIRM (default: [plan])
 - `claude_commands`: List of Claude CLI commands with priorities
 
 #### Scenario: Using default configuration

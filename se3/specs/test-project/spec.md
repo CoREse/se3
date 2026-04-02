@@ -31,7 +31,7 @@
 | 模式 | 测试文件 | 描述 |
 |------|----------|------|
 | `feature` | `tests/prompts/feature.md` | 完整 11 步功能开发流程 |
-| `bugfix` | `tests/prompts/bugfix.md` | Bug 修复流程（跳过 design） |
+| `bugfix` | `tests/prompts/bugfix.md` | Bug 修复流程（跳过 update_spec） |
 | `review` | `tests/prompts/review.md` | 代码审查流程（4 步） |
 | `small` | `tests/prompts/small.md` | 小型变更流程（5 步） |
 | `directive` | `tests/prompts/directive.md` | 指令执行流程 |
@@ -46,7 +46,7 @@
 #### Scenario: Run bugfix mode test
 - **GIVEN** 代码中存在已知 bug
 - **WHEN** 执行 `se3 run "修复 bug" --type=bugfix`
-- **THEN** 执行 10 步流程（无 design）
+- **THEN** 执行 10 步流程（无 update_spec）
 - **AND** 版本 bump 到 0.1.1
 
 #### Scenario: Run review mode test

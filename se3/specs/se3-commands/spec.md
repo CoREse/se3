@@ -32,10 +32,10 @@ se3 run --discover "I want to build..."
 | Type | Description | Steps |
 |------|-------------|-------|
 | `feature` | New functionality | Full 11-step workflow |
-| `bugfix` | Fixing a bug | Skip design step |
+| `bugfix` | Fixing a bug | Skip update_spec step |
 | `review` | Code review/analysis | analyze → read_spec → verify_spec → summarize |
 | `small` | Minor fix/typo | analyze → implement → test → commit → summarize |
-| `directive` | Following specific instructions | analyze → read_spec → plan_tasks → implement → test → verify_spec → commit → summarize |
+| `directive` | Following specific instructions | analyze → read_spec → plan → implement → commit → summarize |
 
 #### Scenario: New task execution
 - **WHEN** user executes `se3 run "Implement user authentication"`

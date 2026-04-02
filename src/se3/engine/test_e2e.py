@@ -32,7 +32,7 @@ def create_mock_llm_responses():
             "complexity": "simple",
             "suggested_steps": ["analyze", "implement", "commit"],
         }),
-        StepType.PROPOSE: json.dumps({
+        StepType.PLAN: json.dumps({
             "title": "Add README",
             "description": "Create project README file",
         }),
@@ -226,7 +226,7 @@ class TestErrorRecovery:
             sm.register_handler(StepType.ANALYZE, flaky_handler)
 
             # Register success handlers for other steps
-            for step_type in [StepType.PROPOSE, StepType.IMPLEMENT, StepType.COMMIT]:
+            for step_type in [StepType.PLAN, StepType.IMPLEMENT, StepType.COMMIT]:
                 sm.register_handler(step_type, lambda s, f: StepStatus.COMPLETED)
 
             flow = sm.create_flow("Test recovery")

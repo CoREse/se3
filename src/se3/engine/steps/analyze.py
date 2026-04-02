@@ -257,7 +257,7 @@ def _update_flow_steps(
     selected_steps = get_default_step_sequence(task_type)
     
     # Insert confirmation steps based on config
-    # This ensures CONFIRM steps are added after propose/design as configured
+    # This ensures CONFIRM steps are added after plan as configured
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     flow.state.selected_steps = insert_confirmation_steps(selected_steps, project_root)
     
