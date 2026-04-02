@@ -504,11 +504,19 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - An edge u→v is redundant if there is a longer path from u to v through intermediate nodes (standard graph theory algorithm using BFS).
 - Example: G2 depends on [G1], G3 depends on [G1, G2] → after reduction: G3 depends on [G2] only (G1 is reachable through G2).
 - This reduces unnecessary pre-merge operations and wait times.
+- After reduction, the step logs which redundant edges were removed per group (group ID and sorted list of removed deps), or logs that no redundant edges were found.
 
 #### Scenario: Transitive reduction removes redundant edges
 - **GIVEN** G2 depends on [G1] and G3 depends on [G1, G2]
 - **WHEN** transitive reduction is applied
 - **THEN** G3's depends_on becomes [G2] only
+- **AND** a log entry reports that G3 removed redundant dep [G1]
+
+#### Scenario: Transitive reduction finds no redundant edges
+- **GIVEN** all `depends_on` edges are minimal (no transitive shortcuts)
+- **WHEN** transitive reduction is applied
+- **THEN** no edges are removed
+- **AND** a log entry reports that no redundant edges were found
 
 **Branch Relay Strategy:**
 - The implement step uses a branch relay strategy instead of per-group branch creation with pre-merge and merge-back.

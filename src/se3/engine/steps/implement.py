@@ -1134,6 +1134,18 @@ def _run_dag_parallel(
     # Transitive reduction: remove redundant dependency edges
     reduced_groups = transitive_reduce(groups)
 
+    # Log which redundant edges were removed
+    orig_deps = {g['group_id']: set(g.get('depends_on', [])) for g in groups}
+    any_removed = False
+    for rg in reduced_groups:
+        gid = rg['group_id']
+        removed = orig_deps.get(gid, set()) - set(rg.get('depends_on', []))
+        if removed:
+            any_removed = True
+            logger.info("Transitive reduction: %s removed redundant deps %s", gid, sorted(removed))
+    if not any_removed:
+        logger.info("Transitive reduction: no redundant edges found")
+
     # Generate relay execution plan
     relay_plan = classify_chains(reduced_groups)
     logger.info(
