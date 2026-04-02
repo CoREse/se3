@@ -50,7 +50,7 @@ class TestResumeDetection:
         )
         self.flow.state.selected_steps = [
             StepType.ANALYZE,
-            StepType.PLAN_TASKS,
+            StepType.PLAN,
             StepType.IMPLEMENT,
         ]
         self.flow.state.current_step_index = 2
@@ -64,16 +64,17 @@ class TestResumeDetection:
         )
         self.flow.state.add_step(analyze_step)
 
-        # Create completed PLAN_TASKS step
+        # Create completed PLAN step
         plan_step = Step(
-            step_type=StepType.PLAN_TASKS,
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
             step_id="plan-001",
             outputs={
+                "plan": {"proposal": {"summary": "Test"}, "design": {"overview": "Test"}},
                 "task_groups": [
                     {"group_id": "G1", "description": "Group 1"},
                     {"group_id": "G2", "description": "Group 2"},
-                ]
+                ],
             },
         )
         self.flow.state.add_step(plan_step)

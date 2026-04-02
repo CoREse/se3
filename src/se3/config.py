@@ -283,7 +283,7 @@ def load_confirmation_config(project_root: Optional[Path] = None) -> dict:
     config_path = project_root / "se3.yaml"
     
     if not config_path.exists():
-        return {"enabled": True, "steps": ["propose", "design"]}
+        return {"enabled": True, "steps": ["plan"]}
     
     try:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -297,7 +297,7 @@ def load_confirmation_config(project_root: Optional[Path] = None) -> dict:
             "llm_reviewer": confirmation.get("llm_reviewer", {}),
         }
     except Exception:
-        return {"enabled": True, "steps": ["propose", "design"]}
+        return {"enabled": True, "steps": ["plan"]}
 
 
 def insert_confirmation_steps(

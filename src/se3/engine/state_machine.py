@@ -620,6 +620,12 @@ class StateMachine:
                 elif step.step_type == StepType.READ_SPEC:
                     inputs["relevant_specs"] = step.outputs.get("relevant_specs")
                     inputs["spec_content"] = step.outputs.get("spec_content")
+                elif step.step_type == StepType.PLAN:
+                    plan = step.outputs.get("plan", {})
+                    inputs["proposal"] = plan.get("proposal", {})
+                    inputs["design_doc"] = plan.get("design", {})
+                    inputs["task_groups"] = step.outputs.get("task_groups")
+                # Deprecated step types (backward compat for persisted flows)
                 elif step.step_type == StepType.PROPOSE:
                     inputs["proposal"] = step.outputs.get("proposal")
                 elif step.step_type == StepType.DESIGN:

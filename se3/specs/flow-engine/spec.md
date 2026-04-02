@@ -156,9 +156,7 @@ se3 run --discover "我想做一个用户管理功能"
 | `discovery` | 需求探索（多轮对话） | 是 | STRICT | initial_description | refined_description, discovery_summary |
 | `analyze` | 分析任务类型和范围 | 是 | STRICT | task_description | task_type, scope, complexity, reasoning |
 | `read_spec` | 读取相关 spec 文件 | 否（程序自动） | - | scope | relevant_specs, spec_content |
-| `propose` | 生成变更提案 | 是 | EXTRACT | spec_content, task_description | proposal, files_to_modify, files_to_create |
-| `design` | 设计方案和架构决策 | 是 | EXTRACT | proposal, spec_content | design_doc, decisions, components |
-| `plan_tasks` | 分解为具体可执行任务 | 是 | EXTRACT | design_doc | task_list (includes estimated_loc per task) |
+| `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | spec_content, task_description, task_type | plan{proposal,design}, task_groups |
 | `implement` | 编写代码实现 | 是 | TWO_PHASE | design_doc, task_list | implementation, files_changed |
 | `test` | 运行测试验证 | 否（程序执行） | - | - | test_results, tests_passed |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | implementation, spec_content | verification_result, issues |
@@ -169,20 +167,20 @@ se3 run --discover "我想做一个用户管理功能"
 | `project_summary` | 生成项目上下文摘要 | 是 | 文本 | 项目状态 | 摘要字符串 |
 
 **不同任务类型的步骤序列：**
-- `discovery`: discovery → analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
-- `feature`: analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
-- `bugfix`: analyze → read_spec → propose → plan_tasks → implement → test → verify_spec → **version_analyze** → commit → summarize
+- `discovery`: discovery → analyze → read_spec → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
+- `feature`: analyze → read_spec → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
+- `bugfix`: analyze → read_spec → plan → implement → test → verify_spec → **version_analyze** → commit → summarize
 - `review`: analyze → read_spec → verify_spec → summarize
 - `small`: analyze → implement → test → **version_analyze** → commit → summarize
-- `directive`: analyze → read_spec → plan_tasks → implement → **version_analyze** → commit → summarize
+- `directive`: analyze → read_spec → plan → implement → **version_analyze** → commit → summarize
 
 #### Scenario: Feature 任务完整流程
 - **WHEN** 任务类型为 `feature`
-- **THEN** 执行完整的 11 步流程
+- **THEN** 执行完整的 9 步流程（plan 使用 full 深度）
 
 #### Scenario: Small 任务简化流程
 - **WHEN** 任务类型为 `small`
-- **THEN** 跳过 propose、design、plan_tasks 步骤
+- **THEN** 跳过 plan 步骤
 
 ### Requirement: 步骤内 LLM 调用
 
@@ -212,8 +210,8 @@ se3 run --discover "我想做一个用户管理功能"
 | 模式 | 描述 | 适用场景 |
 |------|------|----------|
 | **STRICT** | 强制 JSON 格式，失败重试 | 简单输出（analyze, read_spec） |
-| **EXTRACT** | 要求 JSON 格式，失败时用 LLM 提取 | 中等复杂度（propose, design, plan_tasks, verify_spec, update_spec） |
-| **TWO_PHASE** | 自然生成 + LLM 提取 | 复杂/大输出（implement） |
+| **EXTRACT** | 要求 JSON 格式，失败时用 LLM 提取 | 中等复杂度（verify_spec, update_spec） |
+| **TWO_PHASE** | 自然生成 + LLM 提取 | 复杂/大输出（plan, implement） |
 
 **模式选择原则：**
 - 简单输出（<1K tokens）：STRICT（成本低，可靠性高）
@@ -226,7 +224,7 @@ se3 run --discover "我想做一个用户管理功能"
 - **AND** 如果输出非 JSON，重试整个调用
 
 #### Scenario: EXTRACT 模式
-- **WHEN** design 步骤生成嵌套的设计文档
+- **WHEN** verify_spec 步骤生成验证结果
 - **THEN** 使用 EXTRACT 模式：prompt 要求 JSON 格式
 - **AND** 如果输出非 JSON，使用轻量级 LLM 调用来提取 JSON
 - **AND** 不重试主调用，节省 token
@@ -327,10 +325,8 @@ se3 run --discover "我想做一个用户管理功能"
 **输入构建规则：**
 - 所有步骤接收 `task_description` 和 `flow_id`
 - `read_spec` 接收 analyze 的 `scope`
-- `propose` 接收 `relevant_specs` 和 `spec_content`
-- `design` 接收 `proposal`
-- `plan_tasks` 接收 `design_doc`
-- `implement` 接收 `design_doc` 和 `task_list`
+- `plan` 接收 `spec_content`、`task_type`、`scope`，输出 `plan`（含 proposal + design）和 `task_groups`
+- `implement` 接收 `design_doc`（从 plan.design 映射）和 `task_groups`
 - `verify_spec` 接收 `implementation`
 - `commit` 接收 `changes_made`
 - `summarize` 接收所有前序输出
@@ -464,9 +460,9 @@ version:
 - **THEN** 将步骤标记为完成
 - **AND** 继续执行后续步骤
 
-### Requirement: plan_tasks estimated_loc Output
+### Requirement: plan estimated_loc Output
 
-The `plan_tasks` step SHALL include an `estimated_loc` field (integer) in each task, representing the estimated number of lines of code to be added or modified. This field is used by the `implement` step to decide execution strategy.
+The `plan` step SHALL include an `estimated_loc` field (integer) in each task within task_groups, representing the estimated number of lines of code to be added or modified. This field is used by the `implement` step to decide execution strategy.
 
 **Task output fields (in addition to existing fields):**
 - `estimated_loc`: Integer — estimated lines of code. Used as an objective, quantitative measure.
@@ -474,7 +470,7 @@ The `plan_tasks` step SHALL include an `estimated_loc` field (integer) in each t
 The `complexity` field is preserved unchanged. `estimated_loc` is additive and does not replace any existing field.
 
 #### Scenario: Task includes estimated_loc
-- **WHEN** `plan_tasks` produces a task list
+- **WHEN** `plan` produces task_groups
 - **THEN** each task includes an `estimated_loc` integer field
 - **AND** the `complexity` field remains unchanged
 
@@ -486,16 +482,16 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - The implement step computes total `estimated_loc` across all tasks in all groups (tasks missing the field default to 50 LOC each).
 - If total LOC ≤ `implement.group_loc_threshold` (default: 300, configurable in `se3.yaml`), all groups are merged into a single LLM call regardless of grouping.
 - If total LOC > threshold, groups are executed according to the DAG parallel strategy.
-- The `plan_tasks` grouping principles (high cohesion, low coupling) are preserved — the implement step only decides whether to collapse groups at execution time.
+- The `plan` step grouping principles (high cohesion, low coupling) are preserved — the implement step only decides whether to collapse groups at execution time.
 
 #### Scenario: Small implementation collapses groups
-- **GIVEN** `plan_tasks` produced 3 groups with total estimated_loc = 180
+- **GIVEN** `plan` produced 3 groups with total estimated_loc = 180
 - **AND** `implement.group_loc_threshold` is 300
 - **WHEN** the implement step executes
 - **THEN** all groups are merged into a single LLM call
 
 #### Scenario: Large implementation uses DAG parallel
-- **GIVEN** `plan_tasks` produced 4 groups with total estimated_loc = 500
+- **GIVEN** `plan` produced 4 groups with total estimated_loc = 500
 - **WHEN** the implement step executes
 - **THEN** groups are executed via DAG parallel strategy with relay branching
 

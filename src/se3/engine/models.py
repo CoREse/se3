@@ -20,9 +20,10 @@ class StepType(Enum):
     ANALYZE = "analyze"  # Analyze input, determine task type and scope
     PROJECT_SUMMARY = "project_summary"  # Generate project context summary
     READ_SPEC = "read_spec"  # Read relevant OpenSpec specs (LLM-driven)
-    PROPOSE = "propose"  # Generate change proposal
-    DESIGN = "design"  # Design solution and architecture decisions
-    PLAN_TASKS = "plan_tasks"  # Break down into concrete tasks
+    PLAN = "plan"  # Unified planning: proposal + design + task breakdown
+    PROPOSE = "propose"  # Generate change proposal (deprecated: use PLAN)
+    DESIGN = "design"  # Design solution and architecture decisions (deprecated: use PLAN)
+    PLAN_TASKS = "plan_tasks"  # Break down into concrete tasks (deprecated: use PLAN)
     CONFIRM = "confirm"  # Review and confirm previous step output
     IMPLEMENT = "implement"  # Write code (most critical step)
     TEST = "test"  # Run tests (program execution, not LLM)
@@ -456,23 +457,31 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "inputs": ["task_type", "scope", "project_summary"],
         "outputs": ["relevant_specs", "spec_content"],
     },
+    StepType.PLAN: {
+        "name": "plan",
+        "description": "Unified planning: proposal + design + task breakdown in one LLM call",
+        "uses_llm": True,
+        "inputs": ["task_description", "spec_content", "project_summary", "task_type", "scope"],
+        "outputs": ["plan", "task_groups", "total_complexity", "estimated_effort"],
+    },
+    # Deprecated step types (kept for backward compatibility with persisted state)
     StepType.PROPOSE: {
         "name": "propose",
-        "description": "Generate change proposal",
+        "description": "Generate change proposal (deprecated: use plan)",
         "uses_llm": True,
         "inputs": ["task_description", "spec_content"],
         "outputs": ["proposal"],
     },
     StepType.DESIGN: {
         "name": "design",
-        "description": "Design solution and architecture decisions",
+        "description": "Design solution and architecture decisions (deprecated: use plan)",
         "uses_llm": True,
         "inputs": ["proposal", "spec_content"],
         "outputs": ["design_doc", "decisions"],
     },
     StepType.PLAN_TASKS: {
         "name": "plan_tasks",
-        "description": "Break down into logical task groups",
+        "description": "Break down into logical task groups (deprecated: use plan)",
         "uses_llm": True,
         "inputs": ["design_doc"],
         "outputs": ["task_groups", "task_list"],
@@ -551,9 +560,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.ANALYZE,
             StepType.PROJECT_SUMMARY,
             StepType.READ_SPEC,
-            StepType.PROPOSE,
-            StepType.DESIGN,
-            StepType.PLAN_TASKS,
+            StepType.PLAN,
             StepType.IMPLEMENT,
             StepType.TEST,
             StepType.VERIFY_SPEC,
@@ -566,7 +573,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.ANALYZE,
             StepType.PROJECT_SUMMARY,
             StepType.READ_SPEC,
-            StepType.PLAN_TASKS,
+            StepType.PLAN,
             StepType.IMPLEMENT,
             StepType.TEST,
             StepType.VERIFY_SPEC,
@@ -593,7 +600,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.ANALYZE,
             StepType.PROJECT_SUMMARY,
             StepType.READ_SPEC,
-            StepType.PLAN_TASKS,
+            StepType.PLAN,
             StepType.IMPLEMENT,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
@@ -604,9 +611,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.ANALYZE,
             StepType.PROJECT_SUMMARY,
             StepType.READ_SPEC,
-            StepType.PROPOSE,
-            StepType.DESIGN,
-            StepType.PLAN_TASKS,
+            StepType.PLAN,
             StepType.IMPLEMENT,
             StepType.TEST,
             StepType.VERIFY_SPEC,

@@ -43,23 +43,23 @@ class TestLLMReviewApproval:
             change_name="test-change",
             change_path=self.project_root / "test-change",
         )
-        self.flow.state.selected_steps = [StepType.PROPOSE, StepType.CONFIRM]
+        self.flow.state.selected_steps = [StepType.PLAN, StepType.CONFIRM]
 
-        self.propose_step = Step(
-            step_type=StepType.PROPOSE,
+        self.plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
+            step_id="plan-001",
         )
-        self.propose_step.outputs["proposal"] = "Add login page with OAuth"
-        self.flow.state.add_step(self.propose_step)
+        self.plan_step.outputs["plan"] = {"proposal": {"summary": "Add login page with OAuth"}, "design": {}}
+        self.flow.state.add_step(self.plan_step)
 
         self.confirm_step = Step(
             step_type=StepType.CONFIRM,
             status=StepStatus.PENDING,
             step_id="confirm-001",
             inputs={
-                "step_to_review_id": "propose-001",
-                "step_to_review_type": "propose",
+                "step_to_review_id": "plan-001",
+                "step_to_review_type": "plan",
                 "reviewer": "llm",
                 "llm_reviewer": {"model": None, "max_iterations": 3},
             },
@@ -103,8 +103,8 @@ class TestLLMReviewApproval:
         review_result = self.confirm_step.outputs["review_result"]
         assert review_result["approved"] is True
         assert review_result["feedback"] == "Looks good"
-        assert review_result["step_to_review_id"] == "propose-001"
-        assert review_result["step_to_review_type"] == "propose"
+        assert review_result["step_to_review_id"] == "plan-001"
+        assert review_result["step_to_review_type"] == "plan"
         assert review_result["reviewer"] == "llm"
 
     @patch("se3.engine.steps.confirm.LLMCaller")
@@ -139,7 +139,7 @@ class TestLLMReviewRevision:
         )
 
         self.design_step = Step(
-            step_type=StepType.DESIGN,
+            step_type=StepType.IMPLEMENT,
             status=StepStatus.COMPLETED,
             step_id="design-001",
         )
@@ -152,7 +152,7 @@ class TestLLMReviewRevision:
             step_id="confirm-002",
             inputs={
                 "step_to_review_id": "design-001",
-                "step_to_review_type": "design",
+                "step_to_review_type": "implement",
                 "reviewer": "llm",
                 "llm_reviewer": {"model": None, "max_iterations": 3},
             },
@@ -213,13 +213,13 @@ class TestLLMReviewMaxIterations:
             change_path=self.project_root / "test-change",
         )
 
-        self.propose_step = Step(
-            step_type=StepType.PROPOSE,
+        self.plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
+            step_id="plan-001",
         )
-        self.propose_step.outputs["proposal"] = "Some proposal"
-        self.flow.state.add_step(self.propose_step)
+        self.plan_step.outputs["proposal"] = "Some proposal"
+        self.flow.state.add_step(self.plan_step)
 
     def teardown_method(self):
         import shutil
@@ -234,8 +234,8 @@ class TestLLMReviewMaxIterations:
             status=StepStatus.PENDING,
             step_id="confirm-max",
             inputs={
-                "step_to_review_id": "propose-001",
-                "step_to_review_type": "propose",
+                "step_to_review_id": "plan-001",
+                "step_to_review_type": "plan",
                 "reviewer": "llm",
                 "llm_reviewer": {"model": None, "max_iterations": 2},
                 "_llm_review_iteration": 2,
@@ -259,8 +259,8 @@ class TestLLMReviewMaxIterations:
             status=StepStatus.PENDING,
             step_id="confirm-edge",
             inputs={
-                "step_to_review_id": "propose-001",
-                "step_to_review_type": "propose",
+                "step_to_review_id": "plan-001",
+                "step_to_review_type": "plan",
                 "reviewer": "llm",
                 "llm_reviewer": {"model": None, "max_iterations": 3},
                 "_llm_review_iteration": 3,
@@ -288,21 +288,21 @@ class TestLLMReviewErrorHandling:
             change_path=self.project_root / "test-change",
         )
 
-        self.propose_step = Step(
-            step_type=StepType.PROPOSE,
+        self.plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
+            step_id="plan-001",
         )
-        self.propose_step.outputs["proposal"] = "Test proposal"
-        self.flow.state.add_step(self.propose_step)
+        self.plan_step.outputs["proposal"] = "Test proposal"
+        self.flow.state.add_step(self.plan_step)
 
         self.confirm_step = Step(
             step_type=StepType.CONFIRM,
             status=StepStatus.PENDING,
             step_id="confirm-err",
             inputs={
-                "step_to_review_id": "propose-001",
-                "step_to_review_type": "propose",
+                "step_to_review_id": "plan-001",
+                "step_to_review_type": "plan",
                 "reviewer": "llm",
                 "llm_reviewer": {"model": None, "max_iterations": 3},
             },
@@ -458,17 +458,17 @@ class TestLLMReviewerConfigPropagation:
             change_name="test-cfg",
             change_path=self.project_root / "test-cfg",
         )
-        flow.state.selected_steps = [StepType.PROPOSE, StepType.CONFIRM]
+        flow.state.selected_steps = [StepType.PLAN, StepType.CONFIRM]
 
         # Create a completed PROPOSE step
         propose_step = Step(
-            step_type=StepType.PROPOSE,
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
+            step_id="plan-001",
         )
         propose_step.outputs["proposal"] = "Test"
         flow.state.add_step(propose_step)
-        flow.state.current_step_id = "propose-001"
+        flow.state.current_step_id = "plan-001"
         flow.state.current_step_index = 0
 
         # Transition to CONFIRM step
@@ -505,16 +505,16 @@ class TestLLMReviewerConfigPropagation:
             change_name="test-default",
             change_path=self.project_root / "test-default",
         )
-        flow.state.selected_steps = [StepType.PROPOSE, StepType.CONFIRM]
+        flow.state.selected_steps = [StepType.PLAN, StepType.CONFIRM]
 
         propose_step = Step(
-            step_type=StepType.PROPOSE,
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
+            step_id="plan-001",
         )
         propose_step.outputs["proposal"] = "Test"
         flow.state.add_step(propose_step)
-        flow.state.current_step_id = "propose-001"
+        flow.state.current_step_id = "plan-001"
         flow.state.current_step_index = 0
 
         next_step = sm.transition_to_next(flow)
@@ -531,12 +531,12 @@ class TestLLMReviewPrompt:
         from se3.engine.context_builder import build_llm_review_prompt
 
         prompt = build_llm_review_prompt(
-            step_to_review_type="propose",
+            step_to_review_type="plan",
             step_output={"proposal": "Add OAuth login"},
             task_description="Implement user login",
         )
 
-        assert "propose" in prompt.lower()
+        assert "plan" in prompt.lower()
         assert "Add OAuth login" in prompt
         assert "Implement user login" in prompt
         assert '"approved"' in prompt
@@ -547,7 +547,7 @@ class TestLLMReviewPrompt:
         from se3.engine.context_builder import build_llm_review_prompt
 
         prompt = build_llm_review_prompt(
-            step_to_review_type="design",
+            step_to_review_type="implement",
             step_output={"design_doc": "Some design"},
             task_description="Test task",
             revision_feedback="Missing error handling section",
@@ -561,7 +561,7 @@ class TestLLMReviewPrompt:
         from se3.engine.context_builder import build_llm_review_prompt
 
         prompt = build_llm_review_prompt(
-            step_to_review_type="propose",
+            step_to_review_type="plan",
             step_output={"proposal": "Test"},
             task_description="Test task",
         )
@@ -573,7 +573,7 @@ class TestLLMReviewPrompt:
         from se3.engine.context_builder import build_llm_review_prompt
 
         prompt = build_llm_review_prompt(
-            step_to_review_type="propose",
+            step_to_review_type="plan",
             step_output={"proposal": "Test"},
             task_description="Test task",
         )

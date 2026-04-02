@@ -12,24 +12,22 @@ The system SHALL support five workflow types, mapped to different step sequences
 
 | Type | Steps | When Used |
 |------|-------|-----------|
-| `feature` | analyze → read_spec → propose → design → plan_tasks → implement → test → verify_spec → update_spec → commit → summarize | New functionality or significant enhancement |
-| `bugfix` | analyze → read_spec → propose → plan_tasks → implement → test → verify_spec → update_spec → commit → summarize | Bug reports (skip design for faster iteration) |
+| `feature` | analyze → read_spec → plan → implement → test → verify_spec → update_spec → commit → summarize | New functionality or significant enhancement |
+| `bugfix` | analyze → read_spec → plan → implement → test → verify_spec → commit → summarize | Bug reports (plan uses medium depth) |
 | `review` | analyze → read_spec → verify_spec → summarize | Code review, audit, or analysis |
 | `small` | analyze → implement → test → commit → summarize | Minor fixes, typos, simple changes |
-| `directive` | analyze → read_spec → plan_tasks → implement → test → verify_spec → commit → summarize | Following specific instructions |
+| `directive` | analyze → read_spec → plan → implement → commit → summarize | Following specific instructions (plan uses shallow depth) |
 
-**Step Pool (11 steps):**
+**Step Pool (9 steps):**
 1. **analyze** - Analyze task type and scope
 2. **read_spec** - Read relevant specifications
-3. **propose** - Generate change proposal
-4. **design** - Design solution and architecture
-5. **plan_tasks** - Break down into concrete tasks
-6. **implement** - Write code implementation
-7. **test** - Run tests to verify
-8. **verify_spec** - Check implementation vs spec
-9. **update_spec** - Update spec records
-10. **commit** - Commit changes
-11. **summarize** - Generate summary and handoff
+3. **plan** - Unified planning: proposal + design + task breakdown (adapts depth by task_type)
+4. **implement** - Write code implementation
+5. **test** - Run tests to verify
+6. **verify_spec** - Check implementation vs spec
+7. **update_spec** - Update spec records
+8. **commit** - Commit changes
+9. **summarize** - Generate summary and handoff
 
 #### Scenario: Feature workflow selection
 - **WHEN** input is classified as "feature-request"
@@ -37,7 +35,7 @@ The system SHALL support five workflow types, mapped to different step sequences
 
 #### Scenario: Bug fix workflow selection
 - **WHEN** input is classified as "bug-report"
-- **THEN** the system uses the bugfix workflow (skips design step)
+- **THEN** the system uses the bugfix workflow (plan uses medium depth)
 
 #### Scenario: Small workflow selection
 - **WHEN** the change is simple (no spec changes needed, ≤3 tasks)
@@ -56,67 +54,61 @@ The feature workflow SHALL follow these steps:
    - Automatically discover relevant specs based on scope
    - Load spec content into context
 
-**3. PROPOSE**
-   - Generate change proposal
-   - Identify files to modify/create
-   - Define acceptance criteria
+**3. PLAN** (unified planning step, adapts depth by task_type)
+   - Generate change proposal (summary, motivation, files, risks)
+   - Create design document (architecture decisions, components, data flow)
+   - Break implementation into concrete task groups
+   - Estimate complexity and lines of code (`estimated_loc`) for each task
+   - All produced in a single LLM call with adaptive prompt depth:
+     - feature/discovery: full depth (proposal + design + tasks)
+     - bugfix: medium depth (proposal + lightweight design + tasks)
+     - directive/small: shallow depth (tasks only)
 
-**4. DESIGN**
-   - Create design document for complex changes
-   - Define architecture decisions
-   - Design component interfaces
-
-**5. PLAN_TASKS**
-   - Break implementation into concrete tasks (max 5 per group)
-   - Estimate complexity for each task
-   - Estimate lines of code (`estimated_loc`) for each task
-   - Define verification criteria
-
-**6. IMPLEMENT**
-   - Write code following the design
+**4. IMPLEMENT**
+   - Write code following the plan
    - If total estimated LOC ≤ threshold (default 300), collapse all groups into a single LLM call
    - If total estimated LOC > threshold, execute groups via DAG parallel with branch relay strategy
    - Include tests where applicable
    - Follow project conventions
 
-**7. TEST**
+**5. TEST**
    - Run test suite automatically
    - Report test results
    - If tests fail, trigger fix loop to return to implement step
    - If tests pass, continue to verify_spec for spec compliance check
 
-**8. VERIFY_SPEC**
+**6. VERIFY_SPEC**
    - Check implementation against specifications
    - Verify all scenarios are covered
    - Identify any discrepancies
 
-**9. UPDATE_SPEC**
+**7. UPDATE_SPEC**
    - Update specs to reflect changes made
    - Add new capabilities documentation
    - Mark scenarios as implemented
 
-**10. COMMIT**
+**8. COMMIT**
    - Stage and commit all changes
    - Generate meaningful commit message
    - Update version according to bump rules
 
-**11. SUMMARIZE**
+**9. SUMMARIZE**
    - Generate session summary
    - Document changes made
    - Provide handoff context for future sessions
 
 #### Scenario: Large feature
 - **WHEN** a feature is complex with multiple components
-- **THEN** go through all 11 steps including full design
-- **AND** create formal specs and design documents
+- **THEN** go through all 9 steps with full-depth plan
+- **AND** the plan includes formal proposal, design, and task groups
 
 #### Scenario: Medium feature
 - **WHEN** a feature is moderately complex
-- **THEN** create proposal and specs but may skip design if simple
+- **THEN** the plan step adapts depth automatically
 
 ### Requirement: Bug Fix Workflow
 
-The bugfix workflow SHALL follow these steps (skipping design):
+The bugfix workflow SHALL follow these steps (plan uses medium depth):
 
 **1. ANALYZE**
    - Reproduce the bug
@@ -126,37 +118,31 @@ The bugfix workflow SHALL follow these steps (skipping design):
 **2. READ_SPEC**
    - Read relevant specs for context
 
-**3. PROPOSE**
+**3. PLAN** (medium depth: proposal + lightweight design + tasks)
    - Generate fix proposal
    - Identify files to modify
+   - Break complex fixes into task groups
 
-**4. PLAN_TASKS** (if needed)
-   - Break complex fixes into tasks
-   - Skip for simple one-line fixes
-
-**5. IMPLEMENT**
+**4. IMPLEMENT**
    - Fix the bug
    - Add regression tests
 
-**6. TEST**
+**5. TEST**
    - Run tests to verify fix
    - Run regression tests
 
-**7. VERIFY_SPEC**
+**6. VERIFY_SPEC**
    - Verify fix meets requirements
 
-**8. UPDATE_SPEC**
-   - Update specs if behavior changed
-
-**9. COMMIT**
+**7. COMMIT**
    - Commit the fix
 
-**10. SUMMARIZE**
+**8. SUMMARIZE**
    - Document the bug and fix
 
 #### Scenario: Complex bug fix
 - **WHEN** a bug requires significant changes
-- **THEN** follow full bugfix workflow with plan_tasks
+- **THEN** follow full bugfix workflow with plan step
 
 #### Scenario: Simple bug fix
 - **WHEN** a bug is small and easily fixed
@@ -199,7 +185,7 @@ The small workflow SHALL be used for simple changes:
 #### Scenario: Documentation update
 - **WHEN** updating README or comments
 - **THEN** use small workflow
-- **AND** skip formal proposal/design
+- **AND** skip the plan step entirely
 
 #### Scenario: Quick fix
 - **WHEN** a one-line fix is needed
@@ -209,9 +195,9 @@ The small workflow SHALL be used for simple changes:
 
 The system SHALL automatically determine formality based on change contents:
 
-- **Large**: Has proposal + design + multiple tasks
-- **Medium**: Has proposal + tasks (no design)
-- **Small**: No proposal/design, ≤3 tasks
+- **Large**: Full-depth plan with proposal + design + multiple task groups
+- **Medium**: Medium-depth plan with proposal + tasks
+- **Small**: No plan step, ≤3 tasks
 
 The analyze step SHALL determine the appropriate level and select steps accordingly.
 
@@ -274,7 +260,7 @@ The analyze step SHALL auto-detect task type if not specified, but explicit type
 - **GIVEN** user wants to run a specific workflow type
 - **WHEN** user executes `se3 run "task" --type=bugfix`
 - **THEN** the system uses the bugfix workflow
-- **AND** skips the design step
+- **AND** uses the bugfix workflow with medium-depth plan
 
 #### Scenario: Entry with auto-detection
 - **GIVEN** user provides a task description

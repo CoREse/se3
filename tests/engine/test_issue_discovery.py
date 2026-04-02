@@ -157,7 +157,7 @@ class TestGetInjectionPrompt:
             assert result is None
 
     def test_other_steps_return_none(self):
-        for step_type in ["analyze", "design", "propose", "plan_tasks", "commit"]:
+        for step_type in ["analyze", "plan", "commit"]:
             result = IssueDiscovery.get_injection_prompt(step_type)
             assert result is None
 

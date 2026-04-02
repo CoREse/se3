@@ -23,8 +23,7 @@ class SpecInfo:
     capabilities: List[str] = field(default_factory=list)
     keywords: List[str] = field(default_factory=list)
     complexity: str = "medium"  # simple, medium, complex
-    requires_design: bool = True
-    requires_proposal: bool = True
+    requires_plan: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -33,8 +32,7 @@ class SpecInfo:
             "capabilities": self.capabilities,
             "keywords": self.keywords,
             "complexity": self.complexity,
-            "requires_design": self.requires_design,
-            "requires_proposal": self.requires_proposal,
+            "requires_plan": self.requires_plan,
         }
 
     @classmethod
@@ -45,8 +43,8 @@ class SpecInfo:
             capabilities=data.get("capabilities", []),
             keywords=data.get("keywords", []),
             complexity=data.get("complexity", "medium"),
-            requires_design=data.get("requires_design", True),
-            requires_proposal=data.get("requires_proposal", True),
+            # Support both new and legacy serialized keys
+            requires_plan=data.get("requires_plan", data.get("requires_design", True)),
         )
 
 
@@ -139,9 +137,8 @@ class SpecIndex:
         else:
             complexity = "complex"
 
-        # Determine required artifacts based on complexity
-        requires_design = complexity in ("medium", "complex")
-        requires_proposal = True
+        # Determine if full planning is needed based on complexity
+        requires_plan = complexity in ("medium", "complex")
 
         # Extract keywords from content
         keywords = set()
@@ -165,8 +162,7 @@ class SpecIndex:
             capabilities=list(set(capabilities)),
             keywords=list(keywords) + kw_keywords[:5],
             complexity=complexity,
-            requires_design=requires_design,
-            requires_proposal=requires_proposal,
+            requires_plan=requires_plan,
         )
 
     def save(self) -> None:
@@ -321,27 +317,19 @@ def assess_change_size(task_description: str, relevant_specs: List[SpecInfo]) ->
     else:
         size = "small"
 
-    # Determine required artifacts
-    requires_proposal = True
-    requires_design = any(s.requires_design for s in relevant_specs) or size in ("medium", "large")
-    requires_tasks = size in ("medium", "large")
+    # Determine if planning step is needed
+    requires_plan = any(s.requires_plan for s in relevant_specs) or size in ("medium", "large")
 
     # Estimate step count
     estimated_steps = 3  # analyze, implement, commit
-    if requires_proposal:
-        estimated_steps += 1
-    if requires_design:
-        estimated_steps += 1
-    if requires_tasks:
-        estimated_steps += 1
+    if requires_plan:
+        estimated_steps += 1  # plan step
 
     return {
         "size": size,
         "simple_specs": simple_count,
         "medium_specs": medium_count,
         "complex_specs": complex_count,
-        "requires_proposal": requires_proposal,
-        "requires_design": requires_design,
-        "requires_tasks": requires_tasks,
+        "requires_plan": requires_plan,
         "estimated_steps": estimated_steps,
     }

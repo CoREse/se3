@@ -52,19 +52,19 @@ class TestBugB_ConfirmRevisionNoInfiniteLoop:
         )
         flow.state.selected_steps = [
             StepType.ANALYZE,
-            StepType.PROPOSE,
+            StepType.PLAN,
             StepType.CONFIRM,
-            StepType.DESIGN,
+            StepType.IMPLEMENT,
         ]
 
         # Add completed PROPOSE step
-        propose_step = Step(
-            step_type=StepType.PROPOSE,
+        plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
-            outputs={"proposal": "Test proposal"},
+            step_id="plan-001",
+            outputs={"plan": {"proposal": {"summary": "Test plan"}, "design": {}}, "task_groups": []},
         )
-        flow.state.add_step(propose_step)
+        flow.state.add_step(plan_step)
 
         # Add CONFIRM step that returns REVISION_NEEDED
         confirm_step = Step(
@@ -72,8 +72,8 @@ class TestBugB_ConfirmRevisionNoInfiniteLoop:
             status=StepStatus.PENDING,
             step_id="confirm-001",
             inputs={
-                "step_to_review_id": "propose-001",
-                "step_to_review_type": "propose",
+                "step_to_review_id": "plan-001",
+                "step_to_review_type": "plan",
                 "reviewer": "human",
             },
         )
@@ -91,8 +91,8 @@ class TestBugB_ConfirmRevisionNoInfiniteLoop:
                 step.outputs["review_result"] = {
                     "approved": False,
                     "feedback": "Please revise",
-                    "step_to_review_id": "propose-001",
-                    "step_to_review_type": "propose",
+                    "step_to_review_id": "plan-001",
+                    "step_to_review_type": "plan",
                 }
                 step.outputs["revision_feedback"] = "Please revise"
                 return StepStatus.REVISION_NEEDED
@@ -100,24 +100,24 @@ class TestBugB_ConfirmRevisionNoInfiniteLoop:
                 step.outputs["review_result"] = {
                     "approved": True,
                     "feedback": "Looks good now",
-                    "step_to_review_id": "propose-001",
-                    "step_to_review_type": "propose",
+                    "step_to_review_id": "plan-001",
+                    "step_to_review_type": "plan",
                 }
                 return StepStatus.COMPLETED
 
         # Mock the propose handler for when it gets re-executed
         propose_call_count = 0
 
-        def mock_propose_handler(step, fl):
+        def mock_plan_handler(step, fl):
             nonlocal propose_call_count
             propose_call_count += 1
-            step.outputs["proposal"] = "Revised proposal"
+            step.outputs["plan"] = {"proposal": {"summary": "Revised plan"}, "design": {}}
             return StepStatus.COMPLETED
 
         self.sm.register_handler(StepType.CONFIRM, mock_confirm_handler)
-        self.sm.register_handler(StepType.PROPOSE, mock_propose_handler)
+        self.sm.register_handler(StepType.PLAN, mock_plan_handler)
         # Register a design handler so the flow can complete
-        self.sm.register_handler(StepType.DESIGN, lambda s, f: StepStatus.COMPLETED)
+        self.sm.register_handler(StepType.IMPLEMENT, lambda s, f: StepStatus.COMPLETED)
 
         flow.status = FlowStatus.RUNNING
 
@@ -138,17 +138,17 @@ class TestBugB_ConfirmRevisionNoInfiniteLoop:
             task_type="feature",
         )
         flow.state.selected_steps = [
-            StepType.PROPOSE,
+            StepType.PLAN,
             StepType.CONFIRM,
-            StepType.DESIGN,
+            StepType.IMPLEMENT,
         ]
 
-        propose_step = Step(
-            step_type=StepType.PROPOSE,
+        plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
+            step_id="plan-001",
         )
-        flow.state.add_step(propose_step)
+        flow.state.add_step(plan_step)
 
         confirm_step = Step(
             step_type=StepType.CONFIRM,
@@ -158,8 +158,8 @@ class TestBugB_ConfirmRevisionNoInfiniteLoop:
                 "review_result": {
                     "approved": False,
                     "feedback": "Revise",
-                    "step_to_review_id": "propose-001",
-                    "step_to_review_type": "propose",
+                    "step_to_review_id": "plan-001",
+                    "step_to_review_type": "plan",
                 },
                 "revision_feedback": "Revise",
             },
@@ -173,7 +173,7 @@ class TestBugB_ConfirmRevisionNoInfiniteLoop:
 
         # Should transition back to propose step for revision
         assert result is not None
-        assert result.step_id == "propose-001"
+        assert result.step_id == "plan-001"
         assert result.status == StepStatus.PENDING
 
 
@@ -199,20 +199,20 @@ class TestBugC_AlreadyConfirmedDetection:
             task_type="feature",
         )
         flow.state.selected_steps = [
-            StepType.PROPOSE,
+            StepType.PLAN,
             StepType.CONFIRM,
-            StepType.DESIGN,
+            StepType.IMPLEMENT,
             StepType.CONFIRM,
         ]
 
         # Add completed PROPOSE step
-        propose_step = Step(
-            step_type=StepType.PROPOSE,
+        plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
-            outputs={"proposal": "Test proposal"},
+            step_id="plan-001",
+            outputs={"plan": {"proposal": {"summary": "Test plan"}, "design": {}}, "task_groups": []},
         )
-        flow.state.add_step(propose_step)
+        flow.state.add_step(plan_step)
 
         # Add completed CONFIRM step with nested review_result
         # (this is the actual structure written by confirm_handler)
@@ -224,29 +224,29 @@ class TestBugC_AlreadyConfirmedDetection:
                 "review_result": {
                     "approved": True,
                     "feedback": "Looks good",
-                    "step_to_review_id": "propose-001",
-                    "step_to_review_type": "propose",
+                    "step_to_review_id": "plan-001",
+                    "step_to_review_type": "plan",
                 },
             },
         )
         flow.state.add_step(confirm_step)
 
-        # Add completed DESIGN step
-        design_step = Step(
-            step_type=StepType.DESIGN,
+        # Add completed IMPLEMENT step
+        implement_step = Step(
+            step_type=StepType.IMPLEMENT,
             status=StepStatus.COMPLETED,
-            step_id="design-001",
-            outputs={"design_doc": "Test design"},
+            step_id="implement-001",
+            outputs={"files_changed": ["test.py"]},
         )
-        flow.state.add_step(design_step)
+        flow.state.add_step(implement_step)
 
         # Build inputs for the second CONFIRM step
         inputs = self.sm._build_step_inputs(flow, StepType.CONFIRM)
 
-        # The second CONFIRM should review DESIGN, not PROPOSE
-        # (because PROPOSE is already confirmed)
-        assert inputs.get("step_to_review_id") == "design-001"
-        assert inputs.get("step_to_review_type") == "design"
+        # The second CONFIRM should review IMPLEMENT, not PLAN
+        # (because PLAN is already confirmed)
+        assert inputs.get("step_to_review_id") == "implement-001"
+        assert inputs.get("step_to_review_type") == "implement"
 
     def test_not_yet_confirmed_step_is_found(self):
         """A step that has NOT been confirmed should be selected for review."""
@@ -255,22 +255,22 @@ class TestBugC_AlreadyConfirmedDetection:
             task_type="feature",
         )
         flow.state.selected_steps = [
-            StepType.PROPOSE,
+            StepType.PLAN,
             StepType.CONFIRM,
         ]
 
         # Add completed PROPOSE step (no prior CONFIRM for it)
-        propose_step = Step(
-            step_type=StepType.PROPOSE,
+        plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
-            outputs={"proposal": "Test proposal"},
+            step_id="plan-001",
+            outputs={"plan": {"proposal": {"summary": "Test plan"}, "design": {}}, "task_groups": []},
         )
-        flow.state.add_step(propose_step)
+        flow.state.add_step(plan_step)
 
         inputs = self.sm._build_step_inputs(flow, StepType.CONFIRM)
 
-        assert inputs.get("step_to_review_id") == "propose-001"
+        assert inputs.get("step_to_review_id") == "plan-001"
 
 
 class TestWriteFlowMeta:

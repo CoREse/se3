@@ -49,16 +49,16 @@ class TestConfirmStepHandler:
             change_name="test-change",
             change_path=self.project_root / "test-change",
         )
-        self.flow.state.selected_steps = [StepType.PROPOSE, StepType.CONFIRM, StepType.DESIGN]
+        self.flow.state.selected_steps = [StepType.PLAN, StepType.CONFIRM, StepType.IMPLEMENT]
 
         # Create the step being reviewed (e.g., PROPOSE)
-        self.propose_step = Step(
-            step_type=StepType.PROPOSE,
+        self.plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
+            step_id="plan-001",
         )
-        self.propose_step.outputs["proposal"] = "Test proposal"
-        self.flow.state.add_step(self.propose_step)
+        self.plan_step.outputs["plan"] = {"proposal": {"summary": "Test plan"}, "design": {"overview": "Test design"}}
+        self.flow.state.add_step(self.plan_step)
 
         # Create the CONFIRM step
         self.confirm_step = Step(
@@ -66,8 +66,8 @@ class TestConfirmStepHandler:
             status=StepStatus.PENDING,
             step_id="confirm-001",
             inputs={
-                "step_to_review_id": "propose-001",
-                "step_to_review_type": "propose",
+                "step_to_review_id": "plan-001",
+                "step_to_review_type": "plan",
                 "reviewer": "human",
             },
         )
@@ -265,7 +265,7 @@ class TestStateMachineConfirmTransitions:
             "approved": True,
             "feedback": "Approved",
             "step_to_review_id": "some-step-id",
-            "step_to_review_type": "propose",
+            "step_to_review_type": "plan",
         }
 
         # Transition should go to next step
@@ -279,12 +279,12 @@ class TestStateMachineConfirmTransitions:
     def test_transition_to_next_after_confirm_revision(self):
         """Test that flow goes back when confirmation requests changes."""
         # Create a step that needs review (e.g., PROPOSE)
-        propose_step = Step(
-            step_type=StepType.PROPOSE,
+        plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
+            step_id="plan-001",
         )
-        self.flow.state.add_step(propose_step)
+        self.flow.state.add_step(plan_step)
 
         # Create a CONFIRM step after it
         confirm_step = Step(
@@ -292,15 +292,15 @@ class TestStateMachineConfirmTransitions:
             status=StepStatus.COMPLETED,
             step_id="confirm-001",
             inputs={
-                "step_to_review_id": "propose-001",
-                "step_to_review_type": "propose",
+                "step_to_review_id": "plan-001",
+                "step_to_review_type": "plan",
             },
             outputs={
                 "review_result": {
                     "approved": False,
                     "feedback": "Please revise",
-                    "step_to_review_id": "propose-001",
-                    "step_to_review_type": "propose",
+                    "step_to_review_id": "plan-001",
+                    "step_to_review_type": "plan",
                 },
             },
         )
@@ -310,9 +310,9 @@ class TestStateMachineConfirmTransitions:
         # Update selected steps to include both
         self.flow.state.selected_steps = [
             StepType.ANALYZE,
-            StepType.PROPOSE,
+            StepType.PLAN,
             StepType.CONFIRM,
-            StepType.DESIGN,
+            StepType.IMPLEMENT,
         ]
         self.flow.state.current_step_index = 2  # At CONFIRM
 
@@ -321,7 +321,7 @@ class TestStateMachineConfirmTransitions:
 
         # Should have transitioned to the step being reviewed
         assert next_step is not None
-        assert next_step.step_id == "propose-001"
+        assert next_step.step_id == "plan-001"
         assert next_step.status == StepStatus.PENDING  # Reset for revision
 
 
@@ -345,18 +345,18 @@ class TestRunCommandConfirmHandling:
         )
         self.flow.state.selected_steps = [
             StepType.ANALYZE,
-            StepType.PROPOSE,
+            StepType.PLAN,
             StepType.CONFIRM,
-            StepType.DESIGN,
+            StepType.IMPLEMENT,
         ]
 
         # Create PROPOSE step
-        propose_step = Step(
-            step_type=StepType.PROPOSE,
+        plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
+            step_id="plan-001",
         )
-        self.flow.state.add_step(propose_step)
+        self.flow.state.add_step(plan_step)
 
         # Create CONFIRM step
         self.confirm_step = Step(
@@ -364,8 +364,8 @@ class TestRunCommandConfirmHandling:
             status=StepStatus.PAUSED,
             step_id="confirm-001",
             inputs={
-                "step_to_review_id": "propose-001",
-                "step_to_review_type": "propose",
+                "step_to_review_id": "plan-001",
+                "step_to_review_type": "plan",
             },
         )
         self.flow.state.add_step(self.confirm_step)
@@ -453,7 +453,7 @@ class TestConfirmationStepInsertion:
         se3_yaml.write_text("""
 confirmation:
   enabled: true
-  steps: ["propose", "design"]
+  steps: ["plan"]
   reviewer: "human"
 """)
 
@@ -465,7 +465,7 @@ confirmation:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_confirm_steps_inserted_after_configured_steps(self):
-        """Test that CONFIRM steps are inserted after propose and design."""
+        """Test that CONFIRM step is inserted after plan."""
         flow = self.state_machine.create_flow(
             task_description="Test task",
             task_type="feature",
@@ -473,32 +473,21 @@ confirmation:
 
         selected_steps = flow.state.selected_steps
 
-        # Find positions of propose, confirm, design
-        propose_idx = None
-        confirm_after_propose_idx = None
-        design_idx = None
-        confirm_after_design_idx = None
+        # Find positions of plan and confirm
+        plan_idx = None
+        confirm_after_plan_idx = None
 
         for i, step in enumerate(selected_steps):
-            if step == StepType.PROPOSE:
-                propose_idx = i
-            elif step == StepType.DESIGN:
-                design_idx = i
-            elif step == StepType.CONFIRM:
-                if propose_idx is not None and design_idx is None:
-                    # First CONFIRM (after propose)
-                    confirm_after_propose_idx = i
-                elif design_idx is not None:
-                    # Second CONFIRM (after design)
-                    confirm_after_design_idx = i
+            if step == StepType.PLAN:
+                plan_idx = i
+            elif step == StepType.CONFIRM and plan_idx is not None:
+                confirm_after_plan_idx = i
+                break
 
-        # Should have CONFIRM after PROPOSE
-        assert confirm_after_propose_idx is not None
-        assert confirm_after_propose_idx == propose_idx + 1
-
-        # Should have CONFIRM after DESIGN
-        assert confirm_after_design_idx is not None
-        assert confirm_after_design_idx == design_idx + 1
+        # Should have CONFIRM after PLAN
+        assert plan_idx is not None
+        assert confirm_after_plan_idx is not None
+        assert confirm_after_plan_idx == plan_idx + 1
 
     def test_confirm_steps_not_inserted_when_disabled(self):
         """Test that CONFIRM steps are not inserted when disabled in config."""
@@ -507,7 +496,7 @@ confirmation:
         se3_yaml.write_text("""
 confirmation:
   enabled: false
-  steps: ["propose", "design"]
+  steps: ["plan"]
 """)
 
         flow = self.state_machine.create_flow(
@@ -537,7 +526,7 @@ class TestEndToEndConfirmationFlow:
         se3_yaml.write_text("""
 confirmation:
   enabled: true
-  steps: ["propose", "design"]
+  steps: ["plan"]
   reviewer: "human"
 """)
 
@@ -562,13 +551,13 @@ confirmation:
         )
 
         # Add PROPOSE step
-        propose_step = Step(
-            step_type=StepType.PROPOSE,
+        plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
-            outputs={"proposal": "Test proposal content"},
+            step_id="plan-001",
+            outputs={"plan": {"proposal": {"summary": "Test plan"}, "design": {"overview": "Test design"}}, "task_groups": []},
         )
-        flow.state.add_step(propose_step)
+        flow.state.add_step(plan_step)
 
         # Add CONFIRM step
         confirm_step = Step(
@@ -576,8 +565,8 @@ confirmation:
             status=StepStatus.PENDING,
             step_id="confirm-001",
             inputs={
-                "step_to_review_id": "propose-001",
-                "step_to_review_type": "propose",
+                "step_to_review_id": "plan-001",
+                "step_to_review_type": "plan",
                 "reviewer": "human",
             },
         )
@@ -626,13 +615,13 @@ confirmation:
         )
 
         # Add PROPOSE step
-        propose_step = Step(
-            step_type=StepType.PROPOSE,
+        plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
-            outputs={"proposal": "Test proposal content"},
+            step_id="plan-001",
+            outputs={"plan": {"proposal": {"summary": "Test plan"}, "design": {"overview": "Test design"}}, "task_groups": []},
         )
-        flow.state.add_step(propose_step)
+        flow.state.add_step(plan_step)
 
         # Add CONFIRM step
         confirm_step = Step(
@@ -640,8 +629,8 @@ confirmation:
             status=StepStatus.PENDING,
             step_id="confirm-001",
             inputs={
-                "step_to_review_id": "propose-001",
-                "step_to_review_type": "propose",
+                "step_to_review_id": "plan-001",
+                "step_to_review_type": "plan",
                 "reviewer": "human",
             },
         )
@@ -689,23 +678,23 @@ class TestLLMReviewerNoCallFile:
             change_name="test-change",
             change_path=self.project_root / "test-change",
         )
-        self.flow.state.selected_steps = [StepType.PROPOSE, StepType.CONFIRM, StepType.DESIGN]
+        self.flow.state.selected_steps = [StepType.PLAN, StepType.CONFIRM, StepType.IMPLEMENT]
 
-        self.propose_step = Step(
-            step_type=StepType.PROPOSE,
+        self.plan_step = Step(
+            step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
-            step_id="propose-001",
+            step_id="plan-001",
         )
-        self.propose_step.outputs["proposal"] = "Test proposal"
-        self.flow.state.add_step(self.propose_step)
+        self.plan_step.outputs["plan"] = {"proposal": {"summary": "Test plan"}, "design": {"overview": "Test design"}}
+        self.flow.state.add_step(self.plan_step)
 
         self.confirm_step = Step(
             step_type=StepType.CONFIRM,
             status=StepStatus.PENDING,
             step_id="confirm-001",
             inputs={
-                "step_to_review_id": "propose-001",
-                "step_to_review_type": "propose",
+                "step_to_review_id": "plan-001",
+                "step_to_review_type": "plan",
                 "reviewer": "llm",
                 "llm_reviewer": {"model": None, "max_iterations": 3},
             },

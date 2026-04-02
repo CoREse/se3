@@ -201,12 +201,10 @@ class TestGetStepLanguageInstruction:
             tmp_path,
             language="zh-CN",
             confirmation_enabled=True,
-            confirmation_steps=["propose", "design"],
+            confirmation_steps=["plan"],
             reviewer="human",
         )
-        result = get_step_language_instruction("propose", tmp_path)
-        assert "zh-CN" in result
-        result = get_step_language_instruction("design", tmp_path)
+        result = get_step_language_instruction("plan", tmp_path)
         assert "zh-CN" in result
 
     def test_confirmed_step_llm_reviewer_uses_language(self, tmp_path):
@@ -215,10 +213,10 @@ class TestGetStepLanguageInstruction:
             tmp_path,
             language="zh-CN",
             confirmation_enabled=True,
-            confirmation_steps=["propose"],
+            confirmation_steps=["plan"],
             reviewer="llm",
         )
-        result = get_step_language_instruction("propose", tmp_path)
+        result = get_step_language_instruction("plan", tmp_path)
         assert "zh-CN" in result
 
     def test_confirmed_step_disabled_no_instruction(self, tmp_path):
@@ -227,9 +225,9 @@ class TestGetStepLanguageInstruction:
             tmp_path,
             language="zh-CN",
             confirmation_enabled=False,
-            confirmation_steps=["propose"],
+            confirmation_steps=["plan"],
         )
-        result = get_step_language_instruction("propose", tmp_path)
+        result = get_step_language_instruction("plan", tmp_path)
         assert result == ""
 
     def test_no_yaml_file(self, tmp_path):
