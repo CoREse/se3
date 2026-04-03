@@ -2,13 +2,13 @@
 
 ## Purpose
 
-Define the standard workflows for SE3 development using the Flow Engine's 11-step state machine. These workflows govern how different types of work are processed from intake to completion through the unified `se3 run` entry point.
+Define the standard workflows for SE3 development using the Flow Engine's 12-step state machine. These workflows govern how different types of work are processed from intake to completion through the unified `se3 run` entry point.
 
 ## Requirements
 
 ### Requirement: Workflow Types
 
-The system SHALL support five workflow types, mapped to different step sequences from the 11-step pool:
+The system SHALL support five workflow types, mapped to different step sequences from the 12-step pool:
 
 | Type | Steps | When Used |
 |------|-------|-----------|
@@ -31,7 +31,7 @@ The system SHALL support five workflow types, mapped to different step sequences
 
 #### Scenario: Feature workflow selection
 - **WHEN** input is classified as "feature-request"
-- **THEN** the system uses the feature workflow with full 11 steps
+- **THEN** the system uses the feature workflow with full 9 steps
 
 #### Scenario: Bug fix workflow selection
 - **WHEN** input is classified as "bug-report"

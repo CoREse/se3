@@ -28,6 +28,7 @@ STEP_DISPLAY_TITLES: Dict[StepType, str] = {
     StepType.READ_SPEC: "Spec Reading",
     StepType.PROPOSE: "Proposal",
     StepType.DESIGN: "Design",
+    StepType.PLAN: "Planning",
     StepType.PLAN_TASKS: "Task Planning",
     StepType.CONFIRM: "Confirmation",
     StepType.IMPLEMENT: "Implementation",
@@ -238,6 +239,65 @@ def _render_design(step: Step) -> None:
     # Render remaining outputs that aren't the design dict or its extracted sub-keys
     _DESIGN_DEFERRED = {design_key, "decisions", "components", "implementation_plan"}
     _render_remaining(step, "Design", _DESIGN_DEFERRED)
+
+
+@register_renderer(StepType.PLAN)
+def _render_plan(step: Step) -> None:
+    outputs = step.outputs or {}
+
+    # The PLAN step outputs: {plan: {proposal: {...}, design: {...}}, task_groups: [...], ...}
+    plan_data = outputs.get("plan", {})
+    proposal = plan_data.get("proposal") if isinstance(plan_data, dict) else None
+    design = plan_data.get("design") if isinstance(plan_data, dict) else None
+    task_groups = outputs.get("task_groups", [])
+
+    rendered_any = False
+
+    # Section 1: Proposal
+    if isinstance(proposal, dict):
+        render_proposal(proposal)
+        rendered_any = True
+    elif isinstance(proposal, str) and proposal:
+        render_full(f"[bold]Proposal:[/bold] {proposal}", title="Planning — Proposal")
+        rendered_any = True
+
+    # Section 2: Design
+    if isinstance(design, dict):
+        render_design(design)
+        rendered_any = True
+    elif isinstance(design, str) and design:
+        render_full(f"[bold]Design:[/bold] {design}", title="Planning — Design")
+        rendered_any = True
+
+    # Section 3: Task Groups
+    if task_groups and isinstance(task_groups, list):
+        lines: list[str] = []
+        for group in task_groups:
+            if not isinstance(group, dict):
+                continue
+            gid = group.get("group_id", "?")
+            name = group.get("name", "")
+            tasks = group.get("tasks", [])
+            task_count = len(tasks) if isinstance(tasks, list) else 0
+            total_loc = sum(
+                t.get("estimated_loc", 0) for t in tasks if isinstance(t, dict)
+            ) if isinstance(tasks, list) else 0
+            deps = group.get("depends_on", [])
+            dep_str = ", ".join(str(d) for d in deps) if deps else "none"
+            lines.append(
+                f"  [bold]{gid}[/bold] {name}  "
+                f"— {task_count} tasks, ~{total_loc} LOC, depends: {dep_str}"
+            )
+        if lines:
+            render_full("\n".join(lines), title="Planning — Task Groups")
+            rendered_any = True
+
+    if not rendered_any:
+        _default_render(step, "Planning")
+        return
+
+    # Render any remaining keys not already covered
+    _render_remaining(step, "Planning", {"plan", "task_groups", "total_complexity", "estimated_effort"})
 
 
 @register_renderer(StepType.ANALYZE)

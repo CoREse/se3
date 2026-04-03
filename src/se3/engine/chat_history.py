@@ -128,7 +128,7 @@ class ChatMessage:
     content: str  # Parsed text content
     raw_json: list[dict]  # Parsed JSON messages from NDJSON stream (assistant only)
     timestamp: str  # ISO format
-    step_type: str  # e.g. "analyze", "propose"
+    step_type: str  # e.g. "analyze", "plan"
     attempt: int  # 0-based attempt number
 
     def to_dict(self) -> dict:

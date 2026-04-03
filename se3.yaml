@@ -13,10 +13,10 @@ session:
   max_progress_entries: 20
 
 # Confirmation (Review) Configuration
-# Controls the confirmation steps that review propose/design/plan_tasks outputs
+# Controls the confirmation step that reviews plan outputs
 confirmation:
   enabled: true                       # Enable confirmation steps
-  steps: ["propose", "design"]        # Steps after which to insert confirmation
+  steps: ["plan"]                     # Steps after which to insert confirmation
   reviewer: "llm"                   # Default reviewer: "human" or "llm"
   # LLM reviewer configuration (used when reviewer="llm")
   llm_reviewer:

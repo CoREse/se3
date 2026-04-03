@@ -30,7 +30,7 @@ class TestAnalyzeStep:
             "task_type": "feature",
             "scope": "backend",
             "complexity": "medium",
-            "required_steps": ["analyze", "design", "implement", "test"],
+            "required_steps": ["analyze", "plan", "implement", "test"],
         })
         MockLLMCaller.return_value = mock_caller
 

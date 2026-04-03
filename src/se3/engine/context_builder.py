@@ -280,7 +280,7 @@ def build_llm_review_prompt(
     """Build a structured prompt for LLM-based review of a step's output.
 
     Args:
-        step_to_review_type: Type of the step being reviewed (e.g., "propose", "design")
+        step_to_review_type: Type of the step being reviewed (e.g., "plan")
         step_output: The outputs from the reviewed step
         task_description: Original task description from the flow
         revision_feedback: Previous revision feedback if this is a re-review

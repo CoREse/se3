@@ -1,0 +1,11 @@
+id: '046'
+title: schema.py 缺少 PLAN 步骤类型定义
+description: schema.py 中尚未添加新的 PLAN 步骤类型，可能影响 schema 验证的完整性。
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-02T22:40:18.673769'
+updated_at: '2026-04-02T22:40:18.673769'

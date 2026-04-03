@@ -30,7 +30,7 @@
 
 | 模式 | 测试文件 | 描述 |
 |------|----------|------|
-| `feature` | `tests/prompts/feature.md` | 完整 11 步功能开发流程 |
+| `feature` | `tests/prompts/feature.md` | 完整 10 步功能开发流程 |
 | `bugfix` | `tests/prompts/bugfix.md` | Bug 修复流程（跳过 update_spec） |
 | `review` | `tests/prompts/review.md` | 代码审查流程（4 步） |
 | `small` | `tests/prompts/small.md` | 小型变更流程（5 步） |
@@ -40,7 +40,7 @@
 #### Scenario: Run feature mode test
 - **GIVEN** 测试项目已初始化
 - **WHEN** 执行 `se3 run "实现搜索功能" --type=feature`
-- **THEN** 执行完整的 11 步流程
+- **THEN** 执行完整的 10 步流程
 - **AND** 版本 bump 到 0.2.0
 
 #### Scenario: Run bugfix mode test

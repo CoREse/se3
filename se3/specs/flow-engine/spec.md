@@ -74,7 +74,7 @@ se3 run --discover "我想做一个用户管理功能"
 #### Scenario: 循环模式外部包装架构
 - **WHEN** `se3 run --loop` 执行循环迭代
 - **THEN** 外层 `LoopController` 管理分支/worktree 生命周期、任务发现、迭代计数
-- **AND** 内层 `run_flow()` 执行标准 11 步流程，对循环模式无感知
+- **AND** 内层 `run_flow()` 执行标准 10 步流程，对循环模式无感知
 - **AND** 循环上下文仅通过 `set_extra_prompt(persistent=True)` 注入到 LLM 调用中
 - **AND** 持久化 prompt 在多次 LLM 调用间保持，迭代结束后清理
 
@@ -176,11 +176,34 @@ se3 run --discover "我想做一个用户管理功能"
 
 #### Scenario: Feature 任务完整流程
 - **WHEN** 任务类型为 `feature`
-- **THEN** 执行完整的 9 步流程（plan 使用 full 深度）
+- **THEN** 执行完整的 10 步流程（plan 使用 full 深度）
 
 #### Scenario: Small 任务简化流程
 - **WHEN** 任务类型为 `small`
 - **THEN** 跳过 plan 步骤
+
+### Requirement: Deprecated Step Type Backward Compatibility
+
+The step type enum SHALL retain deprecated values `PROPOSE`, `DESIGN`, and `PLAN_TASKS` with stub handlers that forward to `plan_handler`. This ensures persisted flows created before the plan unification can resume without crashing.
+
+**Retained entries:**
+- `StepTypeValue.PROPOSE` — deprecated, forwards to plan_handler
+- `StepTypeValue.DESIGN` — deprecated, forwards to plan_handler
+- `StepTypeValue.PLAN_TASKS` — deprecated, forwards to plan_handler
+
+**Behavior:**
+- Stub handlers log a deprecation warning with the flow ID and step ID
+- The plan_handler executes normally regardless of which step type triggered it
+- Display titles and renderers for deprecated types are retained so history/status views render correctly
+
+#### Scenario: Resuming a persisted flow with old step types
+- **WHEN** a flow persisted with `PROPOSE`, `DESIGN`, or `PLAN_TASKS` step types is resumed
+- **THEN** the stub handler forwards execution to plan_handler
+- **AND** a deprecation warning is logged
+
+#### Scenario: New flows use unified PLAN step
+- **WHEN** a new flow is created
+- **THEN** the step sequence contains only `PLAN`, never `PROPOSE`, `DESIGN`, or `PLAN_TASKS`
 
 ### Requirement: 步骤内 LLM 调用
 

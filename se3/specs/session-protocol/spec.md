@@ -73,7 +73,7 @@ The system SHALL classify user input in the analyze step to determine the approp
 **Task Types:**
 | Task Type | Description | Steps Used |
 |-----------|-------------|------------|
-| `feature` | New functionality or significant enhancement | Full 11-step workflow |
+| `feature` | New functionality or significant enhancement | Full 10-step workflow |
 | `bugfix` | Fixing a bug or issue | analyze → read_spec → plan → implement → test → verify_spec → update_spec → commit → summarize |
 | `review` | Code review, audit, or analysis | analyze → read_spec → verify_spec → summarize |
 | `small` | Minor fix, typo, or simple change | analyze → implement → test → commit → summarize |

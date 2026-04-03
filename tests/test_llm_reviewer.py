@@ -442,7 +442,7 @@ class TestLLMReviewerConfigPropagation:
         config_path.write_text(
             "confirmation:\n"
             "  enabled: true\n"
-            "  steps: [propose]\n"
+            "  steps: [plan]\n"
             "  reviewer: llm\n"
             "  llm_reviewer:\n"
             "    model: claude-sonnet\n"
@@ -460,14 +460,14 @@ class TestLLMReviewerConfigPropagation:
         )
         flow.state.selected_steps = [StepType.PLAN, StepType.CONFIRM]
 
-        # Create a completed PROPOSE step
-        propose_step = Step(
+        # Create a completed PLAN step
+        plan_step = Step(
             step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
             step_id="plan-001",
         )
-        propose_step.outputs["proposal"] = "Test"
-        flow.state.add_step(propose_step)
+        plan_step.outputs["proposal"] = "Test"
+        flow.state.add_step(plan_step)
         flow.state.current_step_id = "plan-001"
         flow.state.current_step_index = 0
 
@@ -492,7 +492,7 @@ class TestLLMReviewerConfigPropagation:
         config_path.write_text(
             "confirmation:\n"
             "  enabled: true\n"
-            "  steps: [propose]\n"
+            "  steps: [plan]\n"
             "  reviewer: llm\n"
         )
 
@@ -507,13 +507,13 @@ class TestLLMReviewerConfigPropagation:
         )
         flow.state.selected_steps = [StepType.PLAN, StepType.CONFIRM]
 
-        propose_step = Step(
+        plan_step = Step(
             step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
             step_id="plan-001",
         )
-        propose_step.outputs["proposal"] = "Test"
-        flow.state.add_step(propose_step)
+        plan_step.outputs["proposal"] = "Test"
+        flow.state.add_step(plan_step)
         flow.state.current_step_id = "plan-001"
         flow.state.current_step_index = 0
 

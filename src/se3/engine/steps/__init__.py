@@ -4,6 +4,8 @@ Each step type has a handler function that executes the step's logic.
 Handlers are registered with the state machine and called during flow execution.
 """
 
+import logging
+
 from ..models import StepType
 from .analyze import analyze_handler
 from .commit import commit_handler
@@ -20,6 +22,33 @@ from .update_spec import update_spec_handler
 from .verify_spec import verify_spec_handler
 from .version_analyze import version_analyze_handler
 
+logger = logging.getLogger(__name__)
+
+
+def propose_stub_handler(step, flow):
+    """Stub handler for deprecated PROPOSE step type.
+
+    Forwards to plan_handler so old persisted flows can resume without crashing.
+    """
+    logger.warning(
+        "Step type PROPOSE is deprecated. Forwarding to unified plan_handler. "
+        "Flow %s, step %s", flow.flow_id, step.step_id
+    )
+    return plan_handler(step, flow)
+
+
+def design_stub_handler(step, flow):
+    """Stub handler for deprecated DESIGN step type.
+
+    Forwards to plan_handler so old persisted flows can resume without crashing.
+    """
+    logger.warning(
+        "Step type DESIGN is deprecated. Forwarding to unified plan_handler. "
+        "Flow %s, step %s", flow.flow_id, step.step_id
+    )
+    return plan_handler(step, flow)
+
+
 # Registry of all step handlers for the state machine
 STEP_HANDLERS = {
     StepType.DISCOVERY: discovery_handler,
@@ -27,6 +56,8 @@ STEP_HANDLERS = {
     StepType.PROJECT_SUMMARY: project_summary_handler,
     StepType.READ_SPEC: read_spec_handler,
     StepType.PLAN: plan_handler,
+    StepType.PROPOSE: propose_stub_handler,  # Backward compat for persisted flows
+    StepType.DESIGN: design_stub_handler,  # Backward compat for persisted flows
     StepType.PLAN_TASKS: plan_tasks_handler,  # Backward compat for persisted flows
     StepType.CONFIRM: confirm_handler,
     StepType.IMPLEMENT: implement_handler,
@@ -44,6 +75,8 @@ __all__ = [
     "project_summary_handler",
     "read_spec_handler",
     "plan_handler",
+    "propose_stub_handler",
+    "design_stub_handler",
     "plan_tasks_handler",
     "implement_handler",
     "test_handler",

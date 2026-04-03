@@ -33,9 +33,10 @@ class StepTypeValue(str, Enum):
 
     ANALYZE = "analyze"
     READ_SPEC = "read_spec"
-    PROPOSE = "propose"
-    DESIGN = "design"
-    PLAN_TASKS = "plan_tasks"
+    PLAN = "plan"
+    PROPOSE = "propose"  # deprecated: use PLAN
+    DESIGN = "design"  # deprecated: use PLAN
+    PLAN_TASKS = "plan_tasks"  # deprecated: use PLAN
     IMPLEMENT = "implement"
     TEST = "test"
     VERIFY_SPEC = "verify_spec"
@@ -377,6 +378,7 @@ def _summarize_outputs(outputs: Dict[str, Any], step_type: str) -> Dict[str, Any
     key_fields = {
         "analyze": ["task_type", "scope", "required_steps"],
         "read_spec": ["relevant_specs"],
+        "plan": ["plan", "task_groups", "total_complexity"],
         "propose": ["proposal_summary"],
         "design": ["design_summary", "decisions"],
         "plan_tasks": ["task_count", "tasks"],
@@ -407,6 +409,7 @@ def _extract_key_outputs(outputs: Dict[str, Any], step_type: str) -> Dict[str, A
     key_map = {
         "analyze": ["task_type", "scope", "complexity"],
         "read_spec": ["relevant_specs", "spec_summary"],
+        "plan": ["plan", "task_groups", "total_complexity", "estimated_effort"],
         "propose": ["proposal", "acceptance_criteria"],
         "design": ["design_doc", "decisions", "architecture"],
         "plan_tasks": ["task_list"],

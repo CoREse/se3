@@ -1,0 +1,11 @@
+id: '045'
+title: spec 文件中残留 plan_tasks 引用
+description: 验证报告指出 4 个 spec 文件仍包含旧的 plan_tasks 步骤名引用，虽不影响运行时功能，但应保持文档与代码一致。
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-02T22:40:18.672822'
+updated_at: '2026-04-02T22:40:18.672822'

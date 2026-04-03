@@ -64,7 +64,7 @@ The system SHALL classify tasks into types during the analyze step.
 - **GIVEN** task description "Add user authentication system"
 - **WHEN** analyze step executes
 - **THEN** task type is classified as `feature`
-- **AND** full 11-step workflow is selected
+- **AND** full 10-step workflow is selected
 
 #### Scenario: Small change classification
 - **GIVEN** task description "Fix typo in README"

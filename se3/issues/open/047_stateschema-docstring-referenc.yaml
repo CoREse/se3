@@ -1,0 +1,15 @@
+id: '047'
+title: StateSchema docstring references deprecated step name
+description: 'In schema.py:108, the StateSchema example shows `"selected_steps": ["analyze",
+  "read_spec", "propose", ...]` which references the deprecated ''propose'' step instead
+  of the new ''plan'' step. This is purely a documentation issue — it doesn''t affect
+  runtime behavior since it''s only in a docstring — but it could confuse developers
+  reading the schema definition.'
+status: open
+priority: low
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+created_at: '2026-04-03T10:05:24.381858'
+updated_at: '2026-04-03T10:05:24.381858'

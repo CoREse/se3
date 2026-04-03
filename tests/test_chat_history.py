@@ -51,7 +51,7 @@ class TestChatMessage:
             "content": "Response text",
             "raw_json": {"type": "assistant"},
             "timestamp": "2026-01-01T00:00:00",
-            "step_type": "propose",
+            "step_type": "plan",
             "attempt": 1,
         }
         msg = ChatMessage.from_dict(d)
@@ -65,7 +65,7 @@ class TestChatMessage:
             content="Test prompt",
             raw_json=[],
             timestamp="2026-02-27T12:00:00",
-            step_type="design",
+            step_type="plan",
             attempt=0,
         )
         d = msg.to_dict()
@@ -268,7 +268,7 @@ class TestRecordAndRetrieve:
 class TestFlowHistory:
     def test_get_flow_history(self, tmp_project):
         record_prompt(tmp_project, "flow1", "step_a", "analyze", "P1", 0)
-        record_prompt(tmp_project, "flow1", "step_b", "propose", "P2", 0)
+        record_prompt(tmp_project, "flow1", "step_b", "plan", "P2", 0)
 
         sessions = get_flow_history(tmp_project, "flow1")
         assert len(sessions) == 2

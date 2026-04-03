@@ -31,7 +31,7 @@ se3 run --discover "I want to build..."
 **Task Types:**
 | Type | Description | Steps |
 |------|-------------|-------|
-| `feature` | New functionality | Full 11-step workflow |
+| `feature` | New functionality | Full 10-step workflow |
 | `bugfix` | Fixing a bug | Skip update_spec step |
 | `review` | Code review/analysis | analyze → read_spec → verify_spec → summarize |
 | `small` | Minor fix/typo | analyze → implement → test → commit → summarize |
