@@ -523,7 +523,7 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "description": "Check implementation vs spec consistency",
         "uses_llm": True,
         "read_only": True,
-        "inputs": ["changes_made", "spec_content", "test_results", "fix_iteration"],
+        "inputs": ["changes_made", "spec_content", "test_results", "fix_iteration", "spec_changes"],
         "outputs": ["verification_result", "verified", "issues", "fix_needed", "fix_instructions", "fix_context"],
     },
     StepType.UPDATE_SPEC: {
@@ -531,7 +531,7 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "description": "Update spec to record changes",
         "uses_llm": True,
         "read_only": False,
-        "inputs": ["changes_made", "verification_result"],
+        "inputs": ["changes_made", "verification_result", "spec_changes", "design_doc"],
         "outputs": ["updated_specs"],
     },
     StepType.VERSION_ANALYZE: {

@@ -625,6 +625,7 @@ class StateMachine:
                     inputs["proposal"] = plan.get("proposal", {})
                     inputs["design_doc"] = plan.get("design", {})
                     inputs["task_groups"] = step.outputs.get("task_groups")
+                    inputs["spec_changes"] = step.outputs.get("spec_changes", [])
                 # Deprecated step types (backward compat for persisted flows)
                 elif step.step_type == StepType.PROPOSE:
                     inputs["proposal"] = step.outputs.get("proposal")
