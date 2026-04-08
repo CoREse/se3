@@ -661,6 +661,72 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - **AND** the resolver retries up to 3 times if needed
 - **AND** there is no fallback to `--theirs` or `pending_human`
 
+### Requirement: Worktree Cleanup Resilience
+
+The worktree cleanup subsystem SHALL be resilient to cascading failures. `force_cleanup_worktree` executes a multi-step cleanup pipeline where each step is independently fault-tolerant — a single step timing out or raising an exception MUST NOT prevent subsequent steps from executing.
+
+**Cleanup Pipeline (6 steps):**
+1. Unlock the worktree (ignore errors if not locked)
+2. `git worktree remove -f -f` (double-force removal)
+3. Remove the worktree directory via `shutil.rmtree`
+4. `git worktree prune` (prune stale entries)
+5. Direct `.git/worktrees/<safe_name>` metadata removal as last resort
+6. Verification — check whether the worktree is still registered
+
+**Fault Tolerance:**
+- Steps 1, 2, and 4 (git commands) each catch `TimeoutExpired` and general `Exception` independently
+- Steps 3, 5, and 6 each catch `Exception` independently
+- A failure in any step is logged at WARNING level but does not abort the pipeline
+
+**Timeout:**
+- All `_run_git` calls within `force_cleanup_worktree` SHALL use a 60-second timeout (overriding the default 30s), to accommodate slow filesystem or lock-release operations
+
+**Git Worktree Metadata Cleanup:**
+- `_cleanup_git_worktree_metadata` directly removes the `.git/worktrees/<safe_name>` directory using `shutil.rmtree`
+- This bypasses standard git commands and is used only as a last resort after Steps 1–4
+- If the metadata directory does not exist, it is a no-op
+- Removal failures are logged at WARNING level but do not raise
+
+**Branch Deletion Worktree Verification:**
+- `delete_branch` SHALL check whether a worktree is still registered for the target branch before attempting deletion
+- If a worktree is detected, `force_cleanup_worktree` is invoked first
+- After cleanup, a re-check verifies the worktree is gone; if it persists, a warning is logged
+- Branch deletion proceeds regardless of worktree cleanup outcome
+
+#### Scenario: Force cleanup with Step 1 timeout
+- **GIVEN** a worktree exists for a branch
+- **WHEN** `force_cleanup_worktree` runs and Step 1 (unlock) times out
+- **THEN** Steps 2–6 still execute
+- **AND** the worktree is cleaned up by subsequent steps
+
+#### Scenario: Force cleanup with Step 2 exception
+- **GIVEN** a worktree exists for a branch
+- **WHEN** `force_cleanup_worktree` runs and Step 2 (remove) raises an exception
+- **THEN** Steps 3–6 still execute
+- **AND** the directory is removed by Step 3 and metadata by Step 5
+
+#### Scenario: Git worktree metadata cleanup removes stale metadata
+- **GIVEN** `.git/worktrees/<safe_name>` exists but standard git commands failed to remove it
+- **WHEN** Step 5 (metadata cleanup) runs
+- **THEN** the metadata directory is deleted via `shutil.rmtree`
+
+#### Scenario: Git worktree metadata absent
+- **GIVEN** `.git/worktrees/<safe_name>` does not exist
+- **WHEN** `_cleanup_git_worktree_metadata` is called
+- **THEN** it returns immediately with no side effects
+
+#### Scenario: Branch deletion with lingering worktree
+- **GIVEN** a worktree is still registered for a branch
+- **WHEN** `delete_branch` is called
+- **THEN** `force_cleanup_worktree` runs before the `git branch -D` command
+- **AND** the worktree registration is re-checked after cleanup
+- **AND** the branch is deleted regardless of worktree cleanup outcome
+
+#### Scenario: Branch deletion without worktree
+- **GIVEN** no worktree is registered for a branch
+- **WHEN** `delete_branch` is called
+- **THEN** the branch is deleted directly without invoking `force_cleanup_worktree`
+
 ### Requirement: Implement-Test 契约
 
 implement 步骤 SHALL 在输出中声明 `tests_added` 和 `test_mapping`，形成与 test 步骤的显式契约。

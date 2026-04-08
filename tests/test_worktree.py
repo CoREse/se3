@@ -11,6 +11,8 @@ import pytest
 
 from se3.engine.worktree import (
     WorktreeContext,
+    _branch_safe_name,
+    _cleanup_git_worktree_metadata,
     cleanup_loop,
     create_loop_branch,
     create_worktree,
@@ -816,3 +818,233 @@ class TestHasCommits:
             check=True, capture_output=True,
         )
         assert has_commits(tmp_path) is True
+
+
+class TestForceCleanupWorktreeFaultTolerance:
+    """Tests for independent fault tolerance of each step in force_cleanup_worktree."""
+
+    def test_unlock_timeout_does_not_block_subsequent_steps(self, tmp_path: Path) -> None:
+        """Step 1 (unlock) timing out should not prevent Steps 2-6 from running."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="ft-unlock")
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        original_run_git = __import__(
+            "se3.engine.worktree", fromlist=["_run_git"]
+        )._run_git
+
+        steps_called = []
+
+        def mock_run_git(project_root, *args, **kwargs):
+            if args[:2] == ("worktree", "unlock"):
+                steps_called.append("unlock")
+                raise subprocess.TimeoutExpired(
+                    cmd=["git", "worktree", "unlock"], timeout=60,
+                )
+            if args[:2] == ("worktree", "remove"):
+                steps_called.append("remove")
+            if args[:2] == ("worktree", "prune"):
+                steps_called.append("prune")
+            if args[:2] == ("worktree", "list"):
+                steps_called.append("list")
+            return original_run_git(project_root, *args, **kwargs)
+
+        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+            force_cleanup_worktree(tmp_path, branch_name)
+
+        assert "unlock" in steps_called
+        assert "remove" in steps_called
+        assert "prune" in steps_called
+
+    def test_remove_exception_does_not_block_subsequent_steps(self, tmp_path: Path) -> None:
+        """Step 2 (remove) failing should not prevent Steps 3-6 from running."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="ft-remove")
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        original_run_git = __import__(
+            "se3.engine.worktree", fromlist=["_run_git"]
+        )._run_git
+
+        steps_called = []
+
+        def mock_run_git(project_root, *args, **kwargs):
+            if args[:2] == ("worktree", "unlock"):
+                steps_called.append("unlock")
+                return original_run_git(project_root, *args, **kwargs)
+            if args[:2] == ("worktree", "remove"):
+                steps_called.append("remove")
+                raise RuntimeError("Simulated remove failure")
+            if args[:2] == ("worktree", "prune"):
+                steps_called.append("prune")
+                return original_run_git(project_root, *args, **kwargs)
+            if args[:2] == ("worktree", "list"):
+                steps_called.append("list")
+                return original_run_git(project_root, *args, **kwargs)
+            return original_run_git(project_root, *args, **kwargs)
+
+        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+            force_cleanup_worktree(tmp_path, branch_name)
+
+        assert "unlock" in steps_called
+        assert "remove" in steps_called
+        assert "prune" in steps_called
+        # list is called by exists_for_branch in Step 6 (verify)
+        assert "list" in steps_called
+
+    def test_run_git_calls_use_timeout_60(self, tmp_path: Path) -> None:
+        """All _run_git calls in force_cleanup_worktree should use timeout=60."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="ft-timeout")
+
+        original_run_git = __import__(
+            "se3.engine.worktree", fromlist=["_run_git"]
+        )._run_git
+
+        timeouts_seen = []
+
+        def mock_run_git(project_root, *args, **kwargs):
+            timeout = kwargs.get("timeout", 30)
+            # Only track cleanup-related calls (not exists_for_branch which
+            # uses the default timeout)
+            if args[:2] in (
+                ("worktree", "unlock"),
+                ("worktree", "remove"),
+                ("worktree", "prune"),
+            ):
+                timeouts_seen.append(timeout)
+            return original_run_git(project_root, *args, **kwargs)
+
+        with patch("se3.engine.worktree._run_git", side_effect=mock_run_git):
+            force_cleanup_worktree(tmp_path, branch_name)
+
+        # All cleanup _run_git calls should use timeout=60
+        assert all(t == 60 for t in timeouts_seen), f"Expected all timeouts=60, got {timeouts_seen}"
+        assert len(timeouts_seen) == 3  # unlock, remove, prune
+
+    def test_metadata_cleanup_called(self, tmp_path: Path) -> None:
+        """Step 5 (_cleanup_git_worktree_metadata) should be called."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="ft-meta")
+
+        with patch(
+            "se3.engine.worktree._cleanup_git_worktree_metadata"
+        ) as mock_meta:
+            force_cleanup_worktree(tmp_path, branch_name)
+
+        mock_meta.assert_called_once_with(tmp_path, branch_name)
+
+
+class TestCleanupGitWorktreeMetadata:
+    """Tests for _cleanup_git_worktree_metadata."""
+
+    def test_removes_existing_metadata_directory(self, tmp_path: Path) -> None:
+        """Should remove .git/worktrees/<safe_name> when it exists."""
+        _init_repo(tmp_path)
+        branch_name = "se3-loop/meta-exists"
+        safe_name = _branch_safe_name(branch_name)
+        metadata_path = tmp_path / ".git" / "worktrees" / safe_name
+        metadata_path.mkdir(parents=True)
+        (metadata_path / "HEAD").write_text("ref: refs/heads/" + branch_name)
+
+        _cleanup_git_worktree_metadata(tmp_path, branch_name)
+
+        assert not metadata_path.exists()
+
+    def test_noop_when_metadata_absent(self, tmp_path: Path) -> None:
+        """Should do nothing when metadata directory doesn't exist."""
+        _init_repo(tmp_path)
+        branch_name = "se3-loop/meta-absent"
+        safe_name = _branch_safe_name(branch_name)
+        metadata_path = tmp_path / ".git" / "worktrees" / safe_name
+
+        assert not metadata_path.exists()
+
+        # Should not raise
+        _cleanup_git_worktree_metadata(tmp_path, branch_name)
+
+    def test_logs_warning_on_rmtree_failure(self, tmp_path: Path) -> None:
+        """Should log warning but not raise when shutil.rmtree fails."""
+        _init_repo(tmp_path)
+        branch_name = "se3-loop/meta-fail"
+        safe_name = _branch_safe_name(branch_name)
+        metadata_path = tmp_path / ".git" / "worktrees" / safe_name
+        metadata_path.mkdir(parents=True)
+
+        with patch("se3.engine.worktree.shutil.rmtree", side_effect=OSError("permission denied")):
+            # Should not raise
+            _cleanup_git_worktree_metadata(tmp_path, branch_name)
+
+        # Directory still exists because rmtree was mocked to fail
+        assert metadata_path.exists()
+
+
+class TestDeleteBranchWorktreeVerification:
+    """Tests for delete_branch's worktree verification and retry logic."""
+
+    def test_no_worktree_deletes_directly(self, tmp_path: Path) -> None:
+        """When no worktree exists, branch is deleted directly without cleanup."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="db-direct")
+
+        with patch("se3.engine.worktree.force_cleanup_worktree") as mock_cleanup:
+            delete_branch(tmp_path, branch_name)
+
+        mock_cleanup.assert_not_called()
+
+        # Branch should be deleted
+        result = subprocess.run(
+            ["git", "-C", str(tmp_path), "branch", "--list", branch_name],
+            capture_output=True, text=True,
+        )
+        assert branch_name not in result.stdout
+
+    def test_worktree_exists_triggers_cleanup_then_deletes(self, tmp_path: Path) -> None:
+        """When worktree exists, force_cleanup_worktree is called before delete."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="db-cleanup")
+        wt_path = create_worktree(tmp_path, branch_name)
+
+        # delete_branch should detect the worktree and clean it up
+        delete_branch(tmp_path, branch_name)
+
+        # Worktree should be gone
+        assert not exists_for_branch(tmp_path, branch_name)
+        # Branch should be deleted
+        result = subprocess.run(
+            ["git", "-C", str(tmp_path), "branch", "--list", branch_name],
+            capture_output=True, text=True,
+        )
+        assert branch_name not in result.stdout
+
+    def test_cleanup_fails_still_attempts_branch_delete(self, tmp_path: Path) -> None:
+        """When cleanup fails and worktree persists, branch delete is still attempted."""
+        _init_repo(tmp_path)
+        branch_name, _ = create_loop_branch(tmp_path, timestamp="db-fail")
+
+        original_exists = __import__(
+            "se3.engine.worktree", fromlist=["exists_for_branch"]
+        ).exists_for_branch
+
+        call_count = {"exists": 0}
+
+        def mock_exists(project_root, branch):
+            call_count["exists"] += 1
+            if call_count["exists"] <= 2:
+                # First two calls: worktree "exists" (pre-check + post-cleanup check)
+                return True
+            return original_exists(project_root, branch)
+
+        with patch("se3.engine.worktree.exists_for_branch", side_effect=mock_exists), \
+             patch("se3.engine.worktree.force_cleanup_worktree") as mock_cleanup:
+            delete_branch(tmp_path, branch_name)
+
+        # force_cleanup_worktree should have been called
+        mock_cleanup.assert_called_once_with(tmp_path, branch_name)
+
+        # Branch should still be deleted despite worktree "persisting"
+        result = subprocess.run(
+            ["git", "-C", str(tmp_path), "branch", "--list", branch_name],
+            capture_output=True, text=True,
+        )
+        assert branch_name not in result.stdout

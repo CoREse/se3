@@ -306,12 +306,43 @@ def _force_remove_if_still_registered(project_root: Path, worktree_path: Path) -
             return
 
 
+def _cleanup_git_worktree_metadata(project_root: Path, branch_name: str) -> None:
+    """Directly delete .git/worktrees/<safe_name> metadata directory as a last resort.
+
+    This bypasses standard git commands and removes the internal metadata
+    that git uses to track a worktree. Only use after all standard cleanup
+    methods have failed.
+
+    Args:
+        project_root: Project root directory
+        branch_name: The branch whose worktree metadata should be removed
+    """
+    safe_name = _branch_safe_name(branch_name)
+    metadata_path = project_root / ".git" / "worktrees" / safe_name
+    if not metadata_path.exists():
+        return
+    try:
+        shutil.rmtree(metadata_path)
+        logger.info(
+            "Removed .git/worktrees metadata directory: %s", metadata_path,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to remove .git/worktrees metadata %s: %s",
+            metadata_path, exc,
+        )
+
+
 def force_cleanup_worktree(project_root: Path, branch_name: str) -> None:
     """Forcefully clean up a worktree for the given branch regardless of state.
 
-    Combines unlock, directory removal, pruning, and verification to ensure
-    the worktree is fully removed. Suitable for resume scenarios where the
-    worktree may be in an inconsistent state (locked, partially created, etc.).
+    Combines unlock, directory removal, pruning, metadata cleanup, and
+    verification to ensure the worktree is fully removed. Each step is
+    independently fault-tolerant — a single step timing out or failing will
+    not block subsequent cleanup steps.
+
+    Suitable for resume scenarios where the worktree may be in an
+    inconsistent state (locked, partially created, etc.).
 
     Args:
         project_root: Project root directory
@@ -321,26 +352,70 @@ def force_cleanup_worktree(project_root: Path, branch_name: str) -> None:
     worktree_path = project_root / "se3" / "worktrees" / safe_name
 
     # Step 1: Unlock the worktree if locked (ignore errors if not locked)
-    _run_git(project_root, "worktree", "unlock", str(worktree_path), check=False)
+    try:
+        _run_git(
+            project_root, "worktree", "unlock", str(worktree_path),
+            check=False, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("Step 1 (unlock) timed out for branch %s", branch_name)
+    except Exception as exc:
+        logger.warning("Step 1 (unlock) failed for branch %s: %s", branch_name, exc)
 
     # Step 2: Try git worktree remove with double-force
-    _run_git(project_root, "worktree", "remove", "-f", "-f", str(worktree_path), check=False)
+    try:
+        _run_git(
+            project_root, "worktree", "remove", "-f", "-f", str(worktree_path),
+            check=False, timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("Step 2 (remove) timed out for branch %s", branch_name)
+    except Exception as exc:
+        logger.warning("Step 2 (remove) failed for branch %s: %s", branch_name, exc)
 
     # Step 3: Remove the directory if it still exists
-    if worktree_path.exists():
-        shutil.rmtree(worktree_path, ignore_errors=True)
-        logger.info("Removed worktree directory: %s", worktree_path)
+    try:
+        if worktree_path.exists():
+            shutil.rmtree(worktree_path, ignore_errors=True)
+            logger.info("Removed worktree directory: %s", worktree_path)
+    except Exception as exc:
+        logger.warning(
+            "Step 3 (rmtree) failed for branch %s: %s", branch_name, exc,
+        )
 
     # Step 4: Prune stale worktree entries
-    _run_git(project_root, "worktree", "prune", check=False)
-
-    # Step 5: Verify cleanup
-    if exists_for_branch(project_root, branch_name):
-        logger.warning(
-            "Worktree for branch %s still registered after force cleanup", branch_name,
+    try:
+        _run_git(
+            project_root, "worktree", "prune",
+            check=False, timeout=60,
         )
-    else:
-        logger.info("Force cleanup complete for branch %s", branch_name)
+    except subprocess.TimeoutExpired:
+        logger.warning("Step 4 (prune) timed out for branch %s", branch_name)
+    except Exception as exc:
+        logger.warning("Step 4 (prune) failed for branch %s: %s", branch_name, exc)
+
+    # Step 5: Clean up .git/worktrees metadata as last resort
+    try:
+        _cleanup_git_worktree_metadata(project_root, branch_name)
+    except Exception as exc:
+        logger.warning(
+            "Step 5 (metadata cleanup) failed for branch %s: %s",
+            branch_name, exc,
+        )
+
+    # Step 6: Verify cleanup
+    try:
+        if exists_for_branch(project_root, branch_name):
+            logger.warning(
+                "Worktree for branch %s still registered after force cleanup",
+                branch_name,
+            )
+        else:
+            logger.info("Force cleanup complete for branch %s", branch_name)
+    except Exception as exc:
+        logger.warning(
+            "Step 6 (verify) failed for branch %s: %s", branch_name, exc,
+        )
 
 
 def merge_loop_branch(
@@ -554,10 +629,30 @@ def _display_merge_conflict(loop_branch: str, target_branch: str, conflict_files
 def delete_branch(project_root: Path, branch: str) -> None:
     """Delete a local branch.
 
+    Before deleting, checks whether a worktree is still registered for the
+    branch. If so, runs ``force_cleanup_worktree`` to remove it first, then
+    re-checks. If the worktree persists after cleanup, logs a warning but
+    still attempts the branch deletion.
+
     Args:
         project_root: Project root directory
         branch: Branch name to delete
     """
+    # Pre-delete: ensure no worktree is registered for this branch
+    if exists_for_branch(project_root, branch):
+        logger.info(
+            "Worktree still registered for branch %s — running force cleanup before delete",
+            branch,
+        )
+        force_cleanup_worktree(project_root, branch)
+
+        if exists_for_branch(project_root, branch):
+            logger.warning(
+                "Worktree for branch %s still registered after retry cleanup; "
+                "proceeding with branch deletion anyway",
+                branch,
+            )
+
     result = _run_git(project_root, "branch", "-D", branch, check=False)
     if result.returncode != 0:
         logger.warning("Failed to delete branch %s: %s", branch, result.stderr.strip())
