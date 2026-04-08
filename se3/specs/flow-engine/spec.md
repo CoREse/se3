@@ -185,7 +185,7 @@ se3 run --discover "我想做一个用户管理功能"
 | `analyze` | 分析任务类型和范围 | 是 | STRICT | task_description | task_type, scope, complexity, reasoning |
 | `read_spec` | 读取相关 spec 文件 | 否（程序自动） | - | scope | relevant_specs, spec_content |
 | `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | spec_content, task_description, task_type | plan{proposal,design}, task_groups |
-| `implement` | 编写代码实现 | 是 | TWO_PHASE | design_doc, task_groups | implementation, files_changed |
+| `implement` | 编写代码实现 | 是 | TWO_PHASE | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed |
 | `test` | 运行测试验证 | 否（程序执行） | - | - | test_results, tests_passed |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | implementation, spec_content | verification_result, issues |
 | `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | changes_made | updated_specs |
@@ -641,6 +641,36 @@ implement 步骤 SHALL 在输出中声明 `tests_added` 和 `test_mapping`，形
 - **WHEN** implement 步骤完成但未新增测试文件
 - **THEN** `tests_added` 为空列表
 - **AND** `test_mapping` 为空字典
+
+### Requirement: Implement Step Output Rendering
+
+The `implement` step SHALL use a custom renderer that presents structured, human-readable output instead of raw JSON key-value listing.
+
+**Status Bar:**
+- A top-line status bar shows completion status with visual icons: `✓` (complete/green), `◐` (partial/yellow), `✗` (failed/red).
+- The status bar includes counters for groups, files changed, and tests added.
+
+**Sections (displayed in order when data is present):**
+1. **Summary** — semicolon-delimited per-group breakdown, each part prefixed with its group ID (e.g. `G1.`, `G2.`).
+2. **Files Changed** — files grouped by top-level directory (e.g. `src/`, `tests/`), with per-directory counts. Files without a directory component are grouped under `./` (sorted last).
+3. **Tests Added** — list of new test file paths.
+4. **Incomplete Tasks** — tasks that were not completed, showing task ID and reason/error.
+5. **Restricted Edits** — counts of applied restricted edits, and details of any that failed.
+6. **Error** — step-level error message if present.
+
+**Output keys consumed by the renderer:**
+- `completion_status`, `files_changed`, `tests_added`, `implemented_groups`, `summary`, `incomplete_tasks`, `restricted_edits_applied`, `restricted_edits_failed`
+
+#### Scenario: Successful implementation rendering
+- **WHEN** the implement step completes with `completion_status: "complete"`
+- **THEN** the renderer displays a green `✓ Complete` status bar
+- **AND** files are grouped by directory under "Files Changed"
+- **AND** tests are listed under "Tests Added" if any exist
+
+#### Scenario: Partial implementation rendering
+- **WHEN** the implement step completes with `completion_status: "partial"`
+- **THEN** the renderer displays a yellow `◐ Partial` status bar
+- **AND** incomplete tasks are listed with their task IDs and reasons
 
 ### Requirement: Test 步骤配置与多阶段执行
 

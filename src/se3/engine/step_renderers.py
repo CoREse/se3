@@ -300,6 +300,141 @@ def _render_plan(step: Step) -> None:
     _render_remaining(step, "Planning", {"plan", "task_groups", "total_complexity", "estimated_effort"})
 
 
+def _group_files_by_directory(files: list[str]) -> dict[str, list[str]]:
+    """Group file paths by their top-level directory.
+
+    Returns an OrderedDict mapping directory prefixes (e.g. ``src/``, ``tests/``)
+    to sorted lists of file paths.  Files without a directory component are
+    placed under ``./``, which is sorted last.
+    """
+    from collections import OrderedDict
+
+    groups: dict[str, list[str]] = {}
+    for filepath in files:
+        parts = filepath.replace("\\", "/").split("/")
+        if len(parts) > 1:
+            dir_prefix = parts[0] + "/"
+        else:
+            dir_prefix = "./"
+        groups.setdefault(dir_prefix, []).append(filepath)
+
+    sorted_groups: dict[str, list[str]] = OrderedDict()
+    for key in sorted(groups.keys(), key=lambda k: (k == "./", k)):
+        sorted_groups[key] = sorted(groups[key])
+    return sorted_groups
+
+
+@register_renderer(StepType.IMPLEMENT)
+def _render_implement(step: Step) -> None:
+    outputs = step.outputs or {}
+
+    completion_status = outputs.get("completion_status", "unknown")
+    files_changed = outputs.get("files_changed", [])
+    tests_added = outputs.get("tests_added", [])
+    implemented_groups = outputs.get("implemented_groups", [])
+    summary = outputs.get("summary", "")
+    incomplete_tasks = outputs.get("incomplete_tasks", [])
+    restricted_applied = outputs.get("restricted_edits_applied", [])
+    restricted_failed = outputs.get("restricted_edits_failed", [])
+
+    lines: list[str] = []
+
+    # ── Top status summary bar ──────────────────────────────────────
+    status_icons = {
+        "complete": "[bold green]✓[/bold green]",
+        "partial": "[bold yellow]◐[/bold yellow]",
+        "failed": "[bold red]✗[/bold red]",
+    }
+    status_labels = {
+        "complete": "[green]Complete[/green]",
+        "partial": "[yellow]Partial[/yellow]",
+        "failed": "[red]Failed[/red]",
+    }
+    icon = status_icons.get(completion_status, "●")
+    label = status_labels.get(completion_status, completion_status)
+
+    groups_count = len(implemented_groups) if implemented_groups else 0
+    files_count = len(files_changed) if files_changed else 0
+    tests_count = len(tests_added) if tests_added else 0
+
+    stats = [f"{icon} {label}"]
+    if groups_count:
+        stats.append(f"[bold]{groups_count}[/bold] groups")
+    stats.append(f"[bold]{files_count}[/bold] files")
+    if tests_count:
+        stats.append(f"[bold]{tests_count}[/bold] tests")
+    lines.append("  │  ".join(stats))
+
+    # ── Summary ─────────────────────────────────────────────────────
+    if summary:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append("[bold cyan]Summary[/bold cyan]")
+        parts = [s.strip() for s in summary.split(";") if s.strip()]
+        if len(parts) == 1:
+            lines.append(f"  {parts[0]}")
+        else:
+            for i, part in enumerate(parts, 1):
+                gid = f"G{i}" if implemented_groups else str(i)
+                lines.append(f"  [dim]{gid}.[/dim] {part}")
+
+    # ── Files Changed ───────────────────────────────────────────────
+    if files_changed:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append(f"[bold yellow]Files Changed[/bold yellow]  [dim]({files_count})[/dim]")
+        grouped = _group_files_by_directory(files_changed)
+        for dir_prefix, filenames in grouped.items():
+            lines.append(f"  [bold]{dir_prefix}[/bold] [dim]({len(filenames)})[/dim]")
+            for fname in filenames:
+                lines.append(f"    {fname}")
+
+    # ── Tests Added ─────────────────────────────────────────────────
+    if tests_added:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append(f"[bold green]Tests Added[/bold green]  [dim]({tests_count})[/dim]")
+        for t in tests_added:
+            lines.append(f"  [green]+[/green] {t}")
+
+    # ── Incomplete Tasks ────────────────────────────────────────────
+    if incomplete_tasks:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append(f"[bold red]Incomplete Tasks[/bold red]  [dim]({len(incomplete_tasks)})[/dim]")
+        for task in incomplete_tasks:
+            if isinstance(task, dict):
+                tid = task.get("task_id", task.get("id", "?"))
+                reason = task.get("reason", task.get("error", ""))
+                lines.append(f"  [red]✗[/red] [bold]{tid}[/bold]{f': {reason}' if reason else ''}")
+            else:
+                lines.append(f"  [red]✗[/red] {task}")
+
+    # ── Restricted Edits ────────────────────────────────────────────
+    if restricted_applied or restricted_failed:
+        lines.append("")
+        if restricted_applied:
+            lines.append(f"[dim]Restricted edits applied: {len(restricted_applied)}[/dim]")
+        if restricted_failed:
+            lines.append(f"[bold red]Restricted edits failed: {len(restricted_failed)}[/bold red]")
+            for edit in restricted_failed:
+                if isinstance(edit, dict):
+                    lines.append(f"  • {edit.get('file', edit.get('path', str(edit)))}")
+                else:
+                    lines.append(f"  • {edit}")
+
+    # ── Error ───────────────────────────────────────────────────────
+    if step.error_message:
+        lines.append("")
+        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+
+    render_full("\n".join(lines), title="Implementation")
+
+
 @register_renderer(StepType.ANALYZE)
 def _render_analyze(step: Step) -> None:
     outputs = step.outputs or {}

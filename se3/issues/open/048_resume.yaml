@@ -1,0 +1,11 @@
+id: 048
+title: Resume 场景下确认提示显示不完善
+description: 验证报告中提到 resume 时的确认提示显示存在 minor UX 问题，可能影响用户在中断恢复后的操作体验。
+status: open
+priority: low
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-08T11:03:45.429247'
+updated_at: '2026-04-08T11:03:45.429247'
