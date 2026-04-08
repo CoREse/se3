@@ -1,0 +1,11 @@
+id: 049
+title: single-group fallback 策略描述不准确
+description: threshold=0 时 single-group fallback 路径的执行策略描述可能对用户产生误导，应根据实际阈值调整文案。
+status: open
+priority: low
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-08T12:13:23.751326'
+updated_at: '2026-04-08T12:13:23.751326'

@@ -1,8 +1,6 @@
 # SE 3.0 Framework Configuration
 # Place in project root
 
-max_tasks_per_change: 5
-
 human_call:
   timeout_days: 7
   directory: se3/calls  # Human calls directory (legacy: human-calls)

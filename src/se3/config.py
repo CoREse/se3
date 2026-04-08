@@ -238,36 +238,6 @@ def load_config(project_root: Optional[Path] = None) -> Config:
     return Config.load(project_root)
 
 
-def load_session_config(project_root: Optional[Path] = None) -> dict:
-    """Load session configuration from project.
-    
-    Args:
-        project_root: Project root directory. If None, uses current working directory.
-        
-    Returns:
-        Dictionary with session configuration settings.
-    """
-    if project_root is None:
-        project_root = Path.cwd()
-    
-    config_path = project_root / "se3.yaml"
-    
-    if not config_path.exists():
-        return {"max_tasks_per_change": 5}
-    
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        
-        # Get session settings from config
-        session = data.get("session", {})
-        return {
-            "max_tasks_per_change": session.get("max_tasks_per_change", 5),
-        }
-    except Exception:
-        return {"max_tasks_per_change": 5}
-
-
 def load_confirmation_config(project_root: Optional[Path] = None) -> dict:
     """Load confirmation configuration from project.
     

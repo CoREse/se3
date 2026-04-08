@@ -1,0 +1,11 @@
+id: '050'
+title: TaskFormatter 缺少单元测试
+description: 新增的 TaskFormatter 组件未配套单元测试，后续修改可能引入回归。
+status: open
+priority: low
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-08T12:13:23.752387'
+updated_at: '2026-04-08T12:13:23.752387'

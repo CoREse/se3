@@ -162,7 +162,7 @@ SE3's core is a program-driven state machine. Each step has a clear responsibili
 | 2 | **read_spec** | Load relevant specification files | Automated |
 | 3 | **propose** | Generate a change proposal identifying affected files | LLM |
 | 4 | **design** | Architect the solution with design document | LLM |
-| 5 | **plan_tasks** | Break into concrete tasks (max 5 per group) | LLM |
+| 5 | **plan_tasks** | Break into concrete tasks | LLM |
 | 6 | **implement** | Write code, declare tests added | LLM |
 | 7 | **test** | Run test suite, trigger fix loop on failure | Automated |
 | 8 | **verify_spec** | Check implementation against spec requirements | LLM |
