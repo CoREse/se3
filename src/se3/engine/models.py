@@ -467,7 +467,7 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "uses_llm": True,
         "read_only": True,
         "inputs": ["task_description", "spec_content", "project_summary", "task_type", "scope"],
-        "outputs": ["plan", "task_groups", "total_complexity", "estimated_effort"],
+        "outputs": ["plan", "task_groups", "spec_changes", "total_complexity", "estimated_effort"],
     },
     # Deprecated step types (kept for backward compatibility with persisted state)
     StepType.PROPOSE: {

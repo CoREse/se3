@@ -136,6 +136,15 @@ Respond in JSON format:
             ]
         }}
     ],
+    "spec_changes": [
+        {{
+            "spec_name": "flow-engine",
+            "change_type": "add_requirement|modify_requirement|add_scenario|deprecate_requirement",
+            "target": "Requirement: Example Requirement Name",
+            "description": "What this change entails",
+            "rationale": "Why this change is needed"
+        }}
+    ],
     "total_complexity": "small|medium|large",
     "estimated_effort": "brief estimate"
 }}
@@ -146,6 +155,7 @@ Important:
 - `group_order` determines execution sequence
 - `depends_on` lists group_ids that must complete before this group
 - Each group will be implemented in a **separate LLM call with isolated context**
+- `spec_changes` declares expected spec modifications; use an empty array if none
 """
 
 # Medium depth output schema for bugfix
@@ -244,6 +254,24 @@ Respond in JSON format:
 ```
 """
 
+SPEC_CHANGES_SECTION = """## Spec Changes Declaration
+Analyze the gap between the current specifications and the planned implementation.
+Declare any spec changes you expect this task to introduce.
+
+For each expected change, provide:
+- **spec_name**: Which spec file is affected (e.g., "flow-engine", "se3-workflows")
+- **change_type**: One of:
+  - `add_requirement` — A new requirement will be added to the spec
+  - `modify_requirement` — An existing requirement will be changed
+  - `add_scenario` — A new scenario will be added to an existing requirement
+  - `deprecate_requirement` — An existing requirement will be marked as deprecated
+- **target**: The specific requirement or scenario affected (e.g., "Requirement: Plan spec_changes Output")
+- **description**: What the change entails
+- **rationale**: Why this change is needed
+
+If no spec changes are expected, return an empty array for `spec_changes`.
+"""
+
 REVISION_SECTION = """
 ## Previous Plan (to revise)
 {previous_output}
@@ -294,6 +322,7 @@ def _build_prompt(
         parts.append(PROPOSAL_SECTION)
         parts.append(DESIGN_SECTION)
         parts.append(TASKS_SECTION.format(part_label="Part 3"))
+        parts.append(SPEC_CHANGES_SECTION)
         parts.append(FULL_JSON_SCHEMA)
     elif depth == "medium":
         parts.append(PROPOSAL_SECTION)
@@ -402,6 +431,7 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         step.outputs["plan"] = plan
         step.outputs["task_groups"] = task_groups
+        step.outputs["spec_changes"] = result.get("spec_changes", [])
         step.outputs["total_complexity"] = result.get("total_complexity", "medium")
         step.outputs["estimated_effort"] = result.get("estimated_effort", "")
 
