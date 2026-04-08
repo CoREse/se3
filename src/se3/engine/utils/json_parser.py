@@ -122,13 +122,28 @@ def _extract_json_string(text: str) -> Optional[str]:
     """Extract JSON string from text (handles markdown code blocks)."""
     text = text.strip()
     
-    # Remove tool call preview lines (e.g., "[Tool Call: Read]")
-    # These are added by extract_assistant_text when LLM uses tools
+    # Remove tool call/result preview lines injected by extract_assistant_text.
+    # Old format: "[Tool Call: ...]", "[Tool Result: ...]"
+    # New format: "[Edit: ...]", "[Write: ...]", "[Read: ...]", "[Bash: ...]",
+    #   "[Grep: ...]", "[Glob: ...]", "[Tool: ...]" (generic),
+    #   "[Edit ✓", "[Write ✓", "[Read ✓", "[Bash ✓", "[Grep ✓", "[Glob ✓",
+    #   "[Result:", "[Result (error):"
+    _TOOL_PREVIEW_PREFIXES = (
+        # Old format (backward compat)
+        '[Tool Call:', '[Tool Result:',
+        # New tool_use previews
+        '[Edit:', '[Write:', '[Read:', '[Bash:', '[Grep:', '[Glob:', '[Tool:',
+        # New tool_result previews
+        '[Edit \u2713', '[Write \u2713', '[Read \u2713', '[Bash \u2713',
+        '[Grep \u2713', '[Glob \u2713',
+        '[Edit \u2717', '[Write \u2717',
+        '[Result:', '[Result (error):',
+    )
     lines = text.split('\n')
     cleaned_lines = []
     for line in lines:
         stripped = line.strip()
-        if not stripped.startswith('[Tool Call:') and not stripped.startswith('[Tool Result:'):
+        if not stripped.startswith(_TOOL_PREVIEW_PREFIXES):
             cleaned_lines.append(line)
     text = '\n'.join(cleaned_lines)
     text = text.strip()

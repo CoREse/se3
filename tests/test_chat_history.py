@@ -122,22 +122,33 @@ class TestExtractAssistantText:
             "message": {
                 "content": [
                     {"type": "text", "text": "Let me check"},
-                    {"type": "tool_use", "name": "Read", "input": {"path": "foo.py"}},
+                    {"type": "tool_use", "id": "tu-1", "name": "Read", "input": {"file_path": "foo.py"}},
                 ]
             }
         })
         result = extract_assistant_text(ndjson)
         assert "Let me check" in result
-        assert "[Tool Call: Read]" in result
+        # New format uses per-tool formatter: "[Read: foo.py]"
+        assert "[Read:" in result
 
     def test_tool_result(self):
-        ndjson = json.dumps({
+        # First emit a tool_use so the id->name mapping exists
+        tool_use_line = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "tool_use", "id": "123", "name": "Read", "input": {"file_path": "test.py"}},
+                ]
+            }
+        })
+        result_line = json.dumps({
             "type": "tool_result",
             "result": {"toolUseId": "123", "content": "file contents here"}
         })
+        ndjson = tool_use_line + "\n" + result_line
         result = extract_assistant_text(ndjson)
-        assert "[Tool Result:" in result
-        assert "file contents" in result
+        # New format: "[Read ✓ (1 lines)]" instead of "[Tool Result: ...]"
+        assert "[Read" in result
 
     def test_empty_input(self):
         assert extract_assistant_text("") == ""
@@ -377,7 +388,7 @@ class TestRenderSessionText:
             "message": {
                 "content": [
                     {"type": "text", "text": "Here is the analysis"},
-                    {"type": "tool_use", "name": "Read", "input": {"path": "foo.py"}},
+                    {"type": "tool_use", "name": "Read", "input": {"file_path": "foo.py"}},
                 ]
             }
         }
@@ -398,4 +409,6 @@ class TestRenderSessionText:
         )
         text = render_session_text(session)
         assert "Here is the analysis" in text
-        assert "Tool: Read" in text
+        # Per-tool formatter: "[Read: foo.py]"
+        assert "Read:" in text
+        assert "foo.py" in text

@@ -18,101 +18,11 @@ from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
-
-# Formatting utilities for consistent preview display
-
-def _truncate_preview(text: str, max_length: int = 60, ellipsis_str: str = '...') -> str:
-    """Truncate text to a preview with ellipsis if too long.
-
-    Args:
-        text: The text to truncate
-        max_length: Maximum length before truncation
-        ellipsis_str: String to append when truncated
-
-    Returns:
-        Truncated text with ellipsis if needed
-    """
-    if not text:
-        return ""
-    text = str(text).replace('\n', ' ')
-    if len(text) <= max_length:
-        return text
-    return text[:max_length] + ellipsis_str
-
-
-def _format_tool_use_preview(tool_name: str, input_data: dict) -> str:
-    """Format a tool_use preview showing key parameters.
-
-    Args:
-        tool_name: Name of the tool being called
-        input_data: Tool input parameters dictionary
-
-    Returns:
-        Formatted preview string like 'Tool: <name> | Input: <param1>=<value1>, ...'
-    """
-    if not input_data or not isinstance(input_data, dict):
-        return f"Tool: {tool_name} | Input: (none)"
-
-    # Extract key parameters - show up to 3 key=value pairs
-    params = []
-    for i, (key, value) in enumerate(input_data.items()):
-        if i >= 3:
-            params.append("...")
-            break
-
-        # Format the value based on type
-        if isinstance(value, str):
-            val_preview = _truncate_preview(value, max_length=30)
-            params.append(f"{key}={val_preview}")
-        elif isinstance(value, (int, float, bool)):
-            params.append(f"{key}={value}")
-        elif isinstance(value, (list, dict)):
-            val_str = json.dumps(value, ensure_ascii=False)
-            val_preview = _truncate_preview(val_str, max_length=30)
-            params.append(f"{key}={val_preview}")
-        else:
-            val_preview = _truncate_preview(str(value), max_length=30)
-            params.append(f"{key}={val_preview}")
-
-    if not params:
-        return f"Tool: {tool_name} | Input: (none)"
-
-    return f"Tool: {tool_name} | Input: {', '.join(params)}"
-
-
-def _format_tool_result_preview(result_data: Any) -> str:
-    """Format a tool_result preview.
-
-    Args:
-        result_data: Tool result data (can be string, dict, list, etc.)
-
-    Returns:
-        Formatted preview string like 'Result: <preview>'
-    """
-    if result_data is None:
-        return "Result: (empty)"
-
-    if isinstance(result_data, str):
-        if not result_data.strip():
-            return "Result: (empty)"
-        return f"Result: {_truncate_preview(result_data)}"
-
-    if isinstance(result_data, dict):
-        # Check for error in result
-        if result_data.get('isError') or result_data.get('is_error'):
-            error_msg = result_data.get('content', 'Unknown error')
-            return f"Result (error): {_truncate_preview(str(error_msg))}"
-
-        # Format dict as JSON string
-        result_str = json.dumps(result_data, ensure_ascii=False)
-        return f"Result: {_truncate_preview(result_str)}"
-
-    if isinstance(result_data, list):
-        result_str = json.dumps(result_data, ensure_ascii=False)
-        return f"Result: {_truncate_preview(result_str)}"
-
-    # Default to string representation
-    return f"Result: {_truncate_preview(str(result_data))}"
+from .tool_formatters import (
+    format_tool_result_preview,
+    format_tool_use_preview,
+    truncate_preview,
+)
 
 
 # Default project root for history storage
@@ -485,10 +395,8 @@ def format_conversation_for_llm(messages: List[ConversationMessage]) -> str:
                 for tc in msg.tool_calls:
                     tool_name = tc.get("name", "unknown")
                     tool_input = tc.get("input", {})
-                    input_str = json.dumps(tool_input, ensure_ascii=False)
-                    if len(input_str) > 200:
-                        input_str = input_str[:200] + "..."
-                    parts.append(f"[Tool Call: {tool_name}] {input_str}")
+                    preview = format_tool_use_preview(tool_name, tool_input)
+                    parts.append(f"[{preview}]")
 
         elif msg.role == "user":
             parts.append("[User]")
@@ -619,6 +527,7 @@ def extract_assistant_text(raw_ndjson: str) -> str:
         return ""
 
     text_parts = []
+    tool_use_id_to_name: Dict[str, str] = {}
     for line in raw_ndjson.strip().split("\n"):
         line = line.strip()
         if not line:
@@ -638,14 +547,21 @@ def extract_assistant_text(raw_ndjson: str) -> str:
                                 text_parts.append(text)
                         elif item.get("type") == "tool_use":
                             name = item.get("name", "unknown")
-                            text_parts.append(f"[Tool Call: {name}]")
+                            tool_input = item.get("input", {})
+                            tool_use_id = item.get("id", "")
+                            if tool_use_id:
+                                tool_use_id_to_name[tool_use_id] = name
+                            preview = format_tool_use_preview(name, tool_input)
+                            text_parts.append(f"[{preview}]")
 
             elif msg_type == "tool_result":
                 result = data.get("result", {})
                 content = result.get("content", "")
+                tool_use_id = result.get("toolUseId", "")
+                tool_name = tool_use_id_to_name.get(tool_use_id, "")
                 if content:
-                    preview = str(content)[:200]
-                    text_parts.append(f"[Tool Result: {preview}]")
+                    preview = format_tool_result_preview(tool_name, content)
+                    text_parts.append(f"[{preview}]")
 
         except json.JSONDecodeError:
             continue
@@ -713,6 +629,9 @@ def _render_ndjson_for_human(raw_ndjson: Union[str, list[dict]]) -> str:
             except json.JSONDecodeError:
                 continue
 
+    # Track tool_use_id -> tool_name for resolving tool_result names
+    tool_use_id_to_name: Dict[str, str] = {}
+
     # Process items
     for data in json_items:
         try:
@@ -730,27 +649,29 @@ def _render_ndjson_for_human(raw_ndjson: Union[str, list[dict]]) -> str:
                         elif item.get("type") == "tool_use":
                             name = item.get("name", "unknown")
                             tool_input = item.get("input", {})
-                            # Use consistent formatting with stream output
-                            preview = _format_tool_use_preview(name, tool_input)
+                            tool_use_id = item.get("id", "")
+                            if tool_use_id:
+                                tool_use_id_to_name[tool_use_id] = name
+                            preview = format_tool_use_preview(name, tool_input)
                             parts.append(f"[{preview}]")
 
             elif msg_type == "tool_result":
                 result = data.get("result", {})
                 content = result.get("content", "")
                 is_error = result.get("isError", False)
+                tool_use_id = result.get("toolUseId", "")
+                tool_name = tool_use_id_to_name.get(tool_use_id, "")
 
                 if is_error:
-                    # Format error result
-                    error_preview = _truncate_preview(str(content)) if content else "Unknown error"
+                    error_preview = truncate_preview(str(content)) if content else "Unknown error"
                     parts.append(f"[Result (error): {error_preview}]")
                 else:
-                    # Format normal result
-                    preview = _format_tool_result_preview(content)
+                    preview = format_tool_result_preview(tool_name, content)
                     parts.append(f"[{preview}]")
 
             elif msg_type == "error":
                 error_msg = data.get("error", "Unknown error")
-                parts.append(f"[Error] {_truncate_preview(str(error_msg))}")
+                parts.append(f"[Error] {truncate_preview(str(error_msg))}")
 
         except (json.JSONDecodeError, AttributeError):
             # Not protocol JSON - skip or show as-is

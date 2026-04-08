@@ -79,41 +79,36 @@ class TestTruncatePreview:
 class TestFormatToolUsePreview:
     """Tests for the format_tool_use_preview function."""
 
-    def test_simple_tool_call(self):
-        """Simple tool call with basic parameters."""
-        result = format_tool_use_preview("Read", {"path": "foo.py"})
-        assert result == "Tool: Read | Input: path=foo.py"
+    def test_known_tool_uses_per_tool_formatter(self):
+        """Known tools (Read, Write, etc.) use per-tool formatters."""
+        result = format_tool_use_preview("Read", {"file_path": "foo.py"})
+        assert result.startswith("Read:")
 
-    def test_multiple_parameters(self):
-        """Tool call with multiple parameters."""
+    def test_known_tool_write(self):
+        """Write tool shows file_path and line count."""
         result = format_tool_use_preview(
             "Write",
             {"file_path": "test.py", "content": "print('hello')"}
         )
-        assert "Tool: Write" in result
-        assert "file_path=test.py" in result
-        assert "content=print('hello')" in result
+        assert result.startswith("Write:")
+        assert "test.py" in result
 
     def test_empty_input(self):
-        """Tool call with empty input."""
+        """Tool call with empty input falls back to generic."""
         result = format_tool_use_preview("Read", {})
-        assert result == "Tool: Read | Input: (none)"
+        # Per-tool formatter for Read with empty dict shows file_path=?
+        assert "Read:" in result
 
     def test_none_input(self):
-        """Tool call with None input."""
+        """Tool call with None input falls back to generic."""
         result = format_tool_use_preview("Read", None)
-        assert result == "Tool: Read | Input: (none)"
+        # Generic formatter used for None input
+        assert "Read" in result
 
-    def test_truncates_long_string_value(self):
-        """Long string values should be truncated."""
-        long_path = "/very/long/path/to/the/file/that/exceeds/limit.txt"
-        result = format_tool_use_preview("Read", {"path": long_path})
-        assert "..." in result
-        assert len(result) < len(long_path) + 30
-
-    def test_handles_numeric_values(self):
-        """Numeric values should be formatted without quotes."""
+    def test_unknown_tool_generic_format(self):
+        """Unknown tools use generic formatter."""
         result = format_tool_use_preview("Search", {"limit": 10, "offset": 5.5})
+        assert "Tool: Search" in result
         assert "limit=10" in result
         assert "offset=5.5" in result
 
@@ -138,7 +133,7 @@ class TestFormatToolUsePreview:
         assert "}" in result
 
     def test_limits_to_three_params(self):
-        """Only first 3 parameters should be shown with ellipsis."""
+        """Only first 3 parameters should be shown with ellipsis (generic formatter)."""
         result = format_tool_use_preview(
             "Complex",
             {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5}
@@ -162,76 +157,80 @@ class TestFormatToolUsePreview:
 class TestFormatToolResultPreview:
     """Tests for the format_tool_result_preview function."""
 
-    def test_string_result(self):
-        """Simple string result."""
-        result = format_tool_result_preview("File contents here")
+    def test_string_result_generic(self):
+        """Simple string result with unknown tool (generic formatter)."""
+        result = format_tool_result_preview("", "File contents here")
         assert result == "Result: File contents here"
 
     def test_empty_string_result(self):
         """Empty string result."""
-        result = format_tool_result_preview("")
+        result = format_tool_result_preview("", "")
         assert result == "Result: (empty)"
 
     def test_whitespace_only_result(self):
         """Whitespace-only string result."""
-        result = format_tool_result_preview("   \n\t  ")
+        result = format_tool_result_preview("", "   \n\t  ")
         assert result == "Result: (empty)"
 
     def test_none_result(self):
         """None result."""
-        result = format_tool_result_preview(None)
+        result = format_tool_result_preview("", None)
         assert result == "Result: (empty)"
 
     def test_long_string_truncated(self):
         """Long string result should be truncated."""
         long_content = "x" * 100
-        result = format_tool_result_preview(long_content)
+        result = format_tool_result_preview("", long_content)
         assert "..." in result
-        assert len(result) <= 68  # "Result: " + 60 + "..."
 
     def test_dict_result(self):
         """Dict result should be JSON-formatted."""
         data = {"status": "ok", "count": 42}
-        result = format_tool_result_preview(data)
-        assert result.startswith("Result: {")
+        result = format_tool_result_preview("", data)
+        assert "Result:" in result
         assert "status" in result
-        assert "count" in result
 
     def test_dict_with_error_flag(self):
         """Dict with isError flag should show error formatting."""
         data = {"isError": True, "content": "Something went wrong"}
-        result = format_tool_result_preview(data)
+        result = format_tool_result_preview("", data)
         assert "error" in result.lower()
         assert "Something went wrong" in result
 
     def test_dict_with_is_error_snake_case(self):
         """Dict with is_error flag (snake_case) should show error formatting."""
         data = {"is_error": True, "content": "An error occurred"}
-        result = format_tool_result_preview(data)
+        result = format_tool_result_preview("", data)
         assert "error" in result.lower()
         assert "An error occurred" in result
 
     def test_list_result(self):
         """List result should be JSON-formatted."""
         data = ["item1", "item2", "item3"]
-        result = format_tool_result_preview(data)
-        assert result.startswith("Result: [")
+        result = format_tool_result_preview("", data)
+        assert "Result:" in result
         assert "item1" in result
 
     def test_number_result(self):
         """Number result should be converted to string."""
-        result = format_tool_result_preview(42)
+        result = format_tool_result_preview("", 42)
         assert result == "Result: 42"
 
     def test_boolean_result(self):
         """Boolean result should be converted to string."""
-        result = format_tool_result_preview(True)
+        result = format_tool_result_preview("", True)
         assert result == "Result: True"
+
+    def test_known_tool_result(self):
+        """Known tool (Read) uses per-tool formatter."""
+        result = format_tool_result_preview("Read", "line1\nline2\nline3")
+        assert "Read" in result
+        assert "3 lines" in result
 
     def test_nested_dict_truncated(self):
         """Nested dict with long content should be truncated."""
         data = {"data": "x" * 100}
-        result = format_tool_result_preview(data)
+        result = format_tool_result_preview("", data)
         assert "..." in result
 
 

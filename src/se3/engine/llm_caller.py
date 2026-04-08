@@ -95,101 +95,11 @@ def clear_phase1_cache(project_root: Path, flow_id: str, step_id: str) -> None:
             logger.warning(f"Failed to clear Phase 1 cache for {step_id}: {e}")
 
 
-def truncate_preview(text: str, max_length: int = 60, ellipsis_str: str = '...') -> str:
-    """Truncate text to a preview with ellipsis if too long.
-
-    Args:
-        text: The text to truncate
-        max_length: Maximum length before truncation
-        ellipsis_str: String to append when truncated
-
-    Returns:
-        Truncated text with ellipsis if needed
-    """
-    if not text:
-        return ""
-    text = str(text).replace('\n', ' ')
-    if len(text) <= max_length:
-        return text
-    truncate_at = max_length - len(ellipsis_str)
-    if truncate_at <= 0:
-        return ellipsis_str[:max_length]
-    return text[:truncate_at] + ellipsis_str
-
-
-def format_tool_use_preview(tool_name: str, input_data: dict) -> str:
-    """Format a tool_use preview showing key parameters.
-
-    Args:
-        tool_name: Name of the tool being called
-        input_data: Tool input parameters dictionary
-
-    Returns:
-        Formatted preview string like 'Tool: <name> | Input: <param1>=<value1>, ...'
-    """
-    if not input_data or not isinstance(input_data, dict):
-        return f"Tool: {tool_name} | Input: (none)"
-
-    # Extract key parameters - show up to 3 key=value pairs
-    params = []
-    for i, (key, value) in enumerate(input_data.items()):
-        if i >= 3:
-            params.append("...")
-            break
-
-        # Format the value based on type
-        if isinstance(value, str):
-            val_preview = truncate_preview(value, max_length=30)
-            params.append(f"{key}={val_preview}")
-        elif isinstance(value, (int, float, bool)):
-            params.append(f"{key}={value}")
-        elif isinstance(value, (list, dict)):
-            val_str = json.dumps(value, ensure_ascii=False)
-            val_preview = truncate_preview(val_str, max_length=30)
-            params.append(f"{key}={val_preview}")
-        else:
-            val_preview = truncate_preview(str(value), max_length=30)
-            params.append(f"{key}={val_preview}")
-
-    if not params:
-        return f"Tool: {tool_name} | Input: (none)"
-
-    return f"Tool: {tool_name} | Input: {', '.join(params)}"
-
-
-def format_tool_result_preview(result_data: Any) -> str:
-    """Format a tool_result preview.
-
-    Args:
-        result_data: Tool result data (can be string, dict, list, etc.)
-
-    Returns:
-        Formatted preview string like 'Result: <preview>'
-    """
-    if result_data is None:
-        return "Result: (empty)"
-
-    if isinstance(result_data, str):
-        if not result_data.strip():
-            return "Result: (empty)"
-        return f"Result: {truncate_preview(result_data)}"
-
-    if isinstance(result_data, dict):
-        # Check for error in result
-        if result_data.get('isError') or result_data.get('is_error'):
-            error_msg = result_data.get('content', 'Unknown error')
-            return f"Result (error): {truncate_preview(str(error_msg))}"
-
-        # Format dict as JSON string
-        result_str = json.dumps(result_data, ensure_ascii=False)
-        return f"Result: {truncate_preview(result_str)}"
-
-    if isinstance(result_data, list):
-        result_str = json.dumps(result_data, ensure_ascii=False)
-        return f"Result: {truncate_preview(result_str)}"
-
-    # Default to string representation
-    return f"Result: {truncate_preview(str(result_data))}"
+from .tool_formatters import (
+    format_tool_result_preview,
+    format_tool_use_preview,
+    truncate_preview,
+)
 
 
 class LLMCallError(Exception):
@@ -213,6 +123,7 @@ class StreamJSONTracker:
         self.total_text_len = 0
         self.start_time = time.time()
         self._last_ended_with_newline = True
+        self._tool_use_id_to_name: Dict[str, str] = {}  # Map tool_use_id -> tool_name
 
     def process_line(self, line: str) -> None:
         """Process a single line of NDJSON output."""
@@ -253,7 +164,10 @@ class StreamJSONTracker:
                         elif item_type == 'tool_use':
                             name = item.get('name', 'unknown')
                             tool_input = item.get('input', {})
+                            tool_use_id = item.get('id', '')
                             self.tool_calls.append(name)
+                            if tool_use_id:
+                                self._tool_use_id_to_name[tool_use_id] = name
                             # Format and print tool_use preview
                             preview = format_tool_use_preview(name, tool_input)
                             # Only add leading newline if previous output didn't end with one
@@ -266,6 +180,8 @@ class StreamJSONTracker:
                 result = data.get('result', {})
                 tool_use_id = result.get('toolUseId', 'unknown')
                 self.tool_results.append(tool_use_id)
+                # Resolve tool name from tracked tool_use events
+                tool_name = self._tool_use_id_to_name.get(tool_use_id, '')
                 # Extract and format tool result preview
                 content = result.get('content', '')
                 is_error = result.get('isError', False)
@@ -274,7 +190,7 @@ class StreamJSONTracker:
                     error_preview = truncate_preview(str(content)) if content else "Unknown error"
                     print(f"  [llm-stream] ❌ Tool error: {error_preview}...")
                 else:
-                    preview = format_tool_result_preview(content)
+                    preview = format_tool_result_preview(tool_name, content)
                     print(f"  [llm-stream] ✅ {preview}...")
                 self._last_ended_with_newline = True
 
