@@ -108,6 +108,8 @@ class JSONExtractor:
                 continue
             try:
                 data = json.loads(line)
+                if not isinstance(data, dict):
+                    continue
                 msg_type = data.get("type", "")
                 
                 # Only process assistant messages
