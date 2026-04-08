@@ -672,6 +672,47 @@ The `implement` step SHALL use a custom renderer that presents structured, human
 - **THEN** the renderer displays a yellow `◐ Partial` status bar
 - **AND** incomplete tasks are listed with their task IDs and reasons
 
+### Requirement: Implement Step Task Plan Display
+
+The `implement` step SHALL display a structured task plan panel at the start of execution, before any LLM calls are made, across all execution paths (single-call, LOC-merged single-call, DAG parallel, sequential).
+
+**Panel Contents:**
+
+The plan is rendered as a Rich `Panel` titled "Implementation Plan" containing three sections:
+
+1. **Strategy Line** — shows the selected execution strategy with a visual icon:
+   - `⚡ Single LLM call` — when groups collapse into a single call (with LOC and threshold info)
+   - `🔀 DAG parallel` — when using DAG parallel execution (with LOC, threshold, and group count)
+   - `📋 Sequential` — when executing groups sequentially (with group count)
+
+2. **Task Groups Tree** — a hierarchical tree labeled "Task Groups" showing:
+   - Each group with its ID, name, and task count
+   - Group dependencies (if any)
+   - Each task within its group, displaying: task ID, description, complexity badge (color-coded: green/small, yellow/medium, red/large), and estimated LOC
+
+3. **LOC Summary** — total estimated LOC with per-group LOC distribution
+
+**Error Handling:**
+- Display failures are caught and logged at DEBUG level; they SHALL NOT block execution.
+
+#### Scenario: Task plan displayed before single-call execution
+- **GIVEN** `plan` produced groups with total LOC ≤ threshold
+- **WHEN** the implement step begins execution
+- **THEN** the task plan panel is displayed with "Single LLM call" strategy
+- **AND** the panel shows all task groups and LOC summary before the LLM call starts
+
+#### Scenario: Task plan displayed before DAG parallel execution
+- **GIVEN** `plan` produced groups with total LOC > threshold and DAG topology
+- **WHEN** the implement step begins execution
+- **THEN** the task plan panel is displayed with "DAG parallel" strategy
+- **AND** the panel shows group dependencies and per-group LOC estimates
+
+#### Scenario: Task plan display failure does not block execution
+- **GIVEN** the task plan rendering raises an exception
+- **WHEN** the implement step attempts to display the plan
+- **THEN** the exception is caught and logged at DEBUG level
+- **AND** execution proceeds normally without the plan display
+
 ### Requirement: Test 步骤配置与多阶段执行
 
 test 步骤 SHALL 支持通过 `se3.yaml` 的 `test:` 配置段进行多阶段测试，并输出结构化结果。

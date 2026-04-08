@@ -238,6 +238,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     if len(groups) <= 1:
         # Fallback: single LLM call for empty or single group
+        _display_task_plan(groups, "single", _compute_total_loc(groups), 0)
         if isinstance(task_groups, list):
             task_groups_text = json.dumps(task_groups, indent=2, ensure_ascii=False)
         else:
@@ -269,6 +270,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             "Total LOC %d <= threshold %d, merging %d groups into single LLM call",
             total_loc, impl_config.group_loc_threshold, len(groups),
         )
+        _display_task_plan(groups, "single", total_loc, impl_config.group_loc_threshold)
         if isinstance(task_groups, list):
             task_groups_text = json.dumps(task_groups, indent=2, ensure_ascii=False)
         else:
@@ -292,6 +294,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     # --- DAG parallel path (when dependency info is present) ---
     if _should_use_dag(groups, total_loc, impl_config.group_loc_threshold):
+        _display_task_plan(groups, "dag_parallel", total_loc, impl_config.group_loc_threshold)
         if not has_commits(project_root):
             logger.warning(
                 "Repository has no commits — falling back to sequential "
@@ -414,6 +417,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             return result
 
     # --- Group-by-group execution ---
+    _display_task_plan(groups, "sequential", total_loc, impl_config.group_loc_threshold)
     logger.info("Executing %d task groups sequentially", len(groups))
 
     all_files_changed = []
@@ -580,6 +584,32 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         return StepStatus.PARTIAL
 
     return StepStatus.COMPLETED
+
+
+def _display_task_plan(
+    groups: list[dict],
+    strategy: str,
+    total_loc: int,
+    threshold: int,
+) -> None:
+    """Display implementation task plan with execution strategy.
+
+    Wraps the call in try/except so display failures never block execution.
+    """
+    try:
+        from ..formatters import TaskFormatter
+        from ..display import get_console
+
+        console = get_console()
+        formatter = TaskFormatter(console=console)
+        console.print(formatter.format_implement_plan(
+            task_groups=groups,
+            execution_strategy=strategy,
+            total_loc=total_loc,
+            loc_threshold=threshold,
+        ))
+    except Exception:
+        logger.debug("Could not render implementation plan", exc_info=True)
 
 
 def _extract_sorted_groups(task_groups) -> list[dict]:

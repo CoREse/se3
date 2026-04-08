@@ -65,6 +65,7 @@ The feature workflow SHALL follow these steps:
      - directive/small: shallow depth (tasks only)
 
 **4. IMPLEMENT**
+   - Display structured task plan panel showing execution strategy, task groups with LOC estimates, and LOC summary before any LLM calls
    - Write code following the plan
    - If total estimated LOC ≤ threshold (default 300), collapse all groups into a single LLM call
    - If total estimated LOC > threshold, execute groups via DAG parallel with branch relay strategy

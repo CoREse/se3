@@ -527,6 +527,159 @@ class TaskFormatter:
             weeks = hours / 40
             return f"~{weeks:.1f} weeks"
 
+    def format_implement_plan(
+        self,
+        task_groups: List[Dict[str, Any]],
+        execution_strategy: str,
+        total_loc: int,
+        loc_threshold: int,
+    ) -> Panel:
+        """Format implement step task plan with execution strategy summary.
+
+        Args:
+            task_groups: List of task group dictionaries
+            execution_strategy: One of 'single', 'dag_parallel', 'sequential'
+            total_loc: Total estimated lines of code across all tasks
+            loc_threshold: LOC threshold for group merging
+
+        Returns:
+            Rich Panel containing task tree with strategy summary
+        """
+        from rich.console import Group as RichGroup
+        from rich.text import Text
+
+        renderables = []
+
+        # Strategy summary line
+        strategy_line = self._format_strategy_line(
+            execution_strategy, total_loc, loc_threshold, len(task_groups),
+        )
+        renderables.append(strategy_line)
+        renderables.append(Text(""))  # blank separator
+
+        # Task tree (reuse existing tree logic)
+        if task_groups:
+            tree = self._build_implement_tree(task_groups)
+            renderables.append(tree)
+        else:
+            renderables.append(Text("[dim]No tasks to display[/dim]"))
+
+        # LOC statistics at bottom
+        loc_summary = self._format_loc_summary(task_groups, total_loc)
+        renderables.append(Text(""))  # blank separator
+        renderables.append(loc_summary)
+
+        return Panel(
+            RichGroup(*renderables),
+            title="[bold]Implementation Plan[/bold]",
+            border_style="blue",
+        )
+
+    def _format_strategy_line(
+        self,
+        strategy: str,
+        total_loc: int,
+        loc_threshold: int,
+        num_groups: int,
+    ) -> Text:
+        """Build the execution strategy summary line."""
+        from rich.text import Text
+
+        strategy_map = {
+            "single": (
+                "\u26a1",  # ⚡
+                f"Single LLM call ({total_loc} LOC \u2264 {loc_threshold} threshold)",
+            ),
+            "dag_parallel": (
+                "\U0001f500",  # 🔀
+                f"DAG parallel ({total_loc} LOC > {loc_threshold} threshold, {num_groups} groups)",
+            ),
+            "sequential": (
+                "\U0001f4cb",  # 📋
+                f"Sequential ({num_groups} groups)",
+            ),
+        }
+
+        icon, desc = strategy_map.get(
+            strategy,
+            ("\u2022", f"{strategy} ({num_groups} groups)"),
+        )
+
+        text = Text()
+        text.append(f" {icon} ", style="bold")
+        text.append("Strategy: ", style="bold cyan")
+        text.append(desc)
+        return text
+
+    def _build_implement_tree(self, task_groups: List[Dict[str, Any]]) -> Tree:
+        """Build a task tree for implement plan display."""
+        tree = Tree("[bold cyan]Task Groups[/bold cyan]")
+
+        for group in task_groups:
+            group_id = group.get("group_id", "G?")
+            name = group.get("name", "Unnamed Group")
+            depends_on = group.get("depends_on", [])
+            tasks = group.get("tasks", [])
+
+            # Group label with task count
+            group_label = f"[bold]{group_id}[/bold]: {name} [dim]({len(tasks)} tasks)[/dim]"
+            group_branch = tree.add(group_label)
+
+            if depends_on:
+                deps_str = ", ".join(f"[yellow]{d}[/yellow]" for d in depends_on)
+                group_branch.add(f"[dim]\u2192 Depends on: {deps_str}[/dim]")
+
+            for task in tasks:
+                task_id = task.get("id", "?")
+                description = task.get("description", "No description")
+                complexity = task.get("complexity", "medium").lower()
+                estimated_loc = task.get("estimated_loc", 50)
+                files = task.get("files", [])
+
+                color = self.COMPLEXITY_COLORS.get(complexity, "white")
+                icon = self.COMPLEXITY_ICONS.get(complexity, "\u2022")
+
+                task_label = (
+                    f"[bold]{task_id}[/bold]: {description} "
+                    f"[{color}]{icon} {complexity}[/{color}] "
+                    f"[dim]~{estimated_loc} LOC[/dim]"
+                )
+                task_node = group_branch.add(task_label)
+
+                if files:
+                    files_str = ", ".join(f"[blue]{f}[/blue]" for f in files[:3])
+                    if len(files) > 3:
+                        files_str += f" [dim]+{len(files) - 3} more[/dim]"
+                    task_node.add(f"[dim]\U0001f4c4 {files_str}[/dim]")
+
+        return tree
+
+    def _format_loc_summary(
+        self, task_groups: List[Dict[str, Any]], total_loc: int,
+    ) -> "Text":
+        """Build LOC statistics line."""
+        from rich.text import Text
+
+        # Per-group LOC distribution
+        parts = []
+        for group in task_groups:
+            group_id = group.get("group_id", "G?")
+            group_loc = sum(
+                t.get("estimated_loc", 50)
+                for t in group.get("tasks", [])
+                if isinstance(t, dict)
+            )
+            parts.append(f"{group_id}: ~{group_loc}")
+
+        text = Text()
+        text.append(" Total: ", style="bold")
+        text.append(f"~{total_loc} LOC", style="cyan")
+        if parts:
+            text.append("  (", style="dim")
+            text.append(" | ".join(parts), style="dim")
+            text.append(")", style="dim")
+        return text
+
     def format_dependencies(self, task_groups: List[Dict[str, Any]]) -> Panel:
         """Format dependency map for task groups.
 
