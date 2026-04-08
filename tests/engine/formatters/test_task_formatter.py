@@ -295,6 +295,38 @@ class TestTaskFormatter:
         avg = formatter._calculate_avg_complexity(3, counts)
         assert 1.8 < avg < 2.2  # Should be around 2.0
 
+    def test_format_strategy_line_single_group(self, formatter, console):
+        """Test strategy line for single group scenario (loc_threshold=0)."""
+        text = formatter._format_strategy_line("single", 141, 0, 1)
+        with console.capture() as capture:
+            console.print(text)
+        output = capture.get()
+        assert "Single group" in output
+        assert "single LLM call" in output
+        assert "141 LOC" in output
+        assert "threshold" not in output
+
+    def test_format_strategy_line_single_merged(self, formatter, console):
+        """Test strategy line for multi-group merge scenario (loc_threshold>0)."""
+        text = formatter._format_strategy_line("single", 200, 300, 3)
+        with console.capture() as capture:
+            console.print(text)
+        output = capture.get()
+        assert "Single LLM call" in output
+        assert "200 LOC" in output
+        assert "300 threshold" in output
+
+    def test_format_strategy_line_dag_parallel(self, formatter, console):
+        """Test strategy line for dag_parallel scenario."""
+        text = formatter._format_strategy_line("dag_parallel", 500, 300, 3)
+        with console.capture() as capture:
+            console.print(text)
+        output = capture.get()
+        assert "DAG parallel" in output
+        assert "500 LOC" in output
+        assert "300 threshold" in output
+        assert "3 groups" in output
+
 
 class TestFormatTaskGroupsConvenience:
     """Tests for the format_task_groups convenience function."""

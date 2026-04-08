@@ -571,13 +571,19 @@ The `complexity` field is preserved unchanged. `estimated_loc` is additive and d
 
 The `implement` step SHALL use an intelligent execution strategy that adapts based on total estimated lines of code and DAG topology.
 
-**LOC-Based Threshold:**
-- The implement step computes total `estimated_loc` across all tasks in all groups (tasks missing the field default to 50 LOC each).
-- If total LOC ≤ `implement.group_loc_threshold` (default: 300, configurable in `se3.yaml`), all groups are merged into a single LLM call regardless of grouping.
-- If total LOC > threshold, groups are executed according to the DAG parallel strategy.
+**Execution Strategy Selection:**
+- If there is exactly one task group, it is executed as a single LLM call directly (no threshold comparison needed).
+- If there are multiple groups, the implement step computes total `estimated_loc` across all tasks in all groups (tasks missing the field default to 50 LOC each).
+  - If total LOC ≤ `implement.group_loc_threshold` (default: 300, configurable in `se3.yaml`), all groups are merged into a single LLM call regardless of grouping.
+  - If total LOC > threshold, groups are executed according to the DAG parallel strategy.
 - The `plan` step grouping principles (high cohesion, low coupling) are preserved — the implement step only decides whether to collapse groups at execution time.
 
-#### Scenario: Small implementation collapses groups
+#### Scenario: Single group uses single LLM call directly
+- **GIVEN** `plan` produced exactly 1 group with estimated_loc = 141
+- **WHEN** the implement step executes
+- **THEN** the group is executed as a single LLM call without LOC threshold comparison
+
+#### Scenario: Small multi-group implementation collapses groups
 - **GIVEN** `plan` produced 3 groups with total estimated_loc = 180
 - **AND** `implement.group_loc_threshold` is 300
 - **WHEN** the implement step executes
@@ -723,7 +729,8 @@ The `implement` step SHALL display a structured task plan panel at the start of 
 The plan is rendered as a Rich `Panel` titled "Implementation Plan" containing three sections:
 
 1. **Strategy Line** — shows the selected execution strategy with a visual icon:
-   - `⚡ Single LLM call` — when groups collapse into a single call (with LOC and threshold info)
+   - `⚡ Single group → single LLM call` — when there is only one task group (with total LOC)
+   - `⚡ Single LLM call` — when multiple groups are merged under the LOC threshold (with LOC and threshold info)
    - `🔀 DAG parallel` — when using DAG parallel execution (with LOC, threshold, and group count)
    - `📋 Sequential` — when executing groups sequentially (with group count)
 
@@ -737,10 +744,16 @@ The plan is rendered as a Rich `Panel` titled "Implementation Plan" containing t
 **Error Handling:**
 - Display failures are caught and logged at DEBUG level; they SHALL NOT block execution.
 
-#### Scenario: Task plan displayed before single-call execution
-- **GIVEN** `plan` produced groups with total LOC ≤ threshold
+#### Scenario: Task plan displayed before single-group execution
+- **GIVEN** `plan` produced exactly one task group
 - **WHEN** the implement step begins execution
-- **THEN** the task plan panel is displayed with "Single LLM call" strategy
+- **THEN** the task plan panel is displayed with "Single group → single LLM call (N LOC)" strategy
+- **AND** the panel shows the task group and LOC summary before the LLM call starts
+
+#### Scenario: Task plan displayed before LOC-merged single-call execution
+- **GIVEN** `plan` produced multiple groups with total LOC ≤ threshold
+- **WHEN** the implement step begins execution
+- **THEN** the task plan panel is displayed with "Single LLM call (N LOC ≤ T threshold)" strategy
 - **AND** the panel shows all task groups and LOC summary before the LLM call starts
 
 #### Scenario: Task plan displayed before DAG parallel execution

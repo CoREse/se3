@@ -588,7 +588,9 @@ class TaskFormatter:
         strategy_map = {
             "single": (
                 "\u26a1",  # ⚡
-                f"Single LLM call ({total_loc} LOC \u2264 {loc_threshold} threshold)",
+                f"Single group \u2192 single LLM call ({total_loc} LOC)"
+                if loc_threshold == 0
+                else f"Single LLM call ({total_loc} LOC \u2264 {loc_threshold} threshold)",
             ),
             "dag_parallel": (
                 "\U0001f500",  # 🔀
