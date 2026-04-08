@@ -595,6 +595,7 @@ def _display_task_plan(
     """Display implementation task plan with execution strategy.
 
     Wraps the call in try/except so display failures never block execution.
+    For dag_parallel strategy, computes RelayPlan to show execution topology.
     """
     try:
         from ..formatters import TaskFormatter
@@ -602,11 +603,22 @@ def _display_task_plan(
 
         console = get_console()
         formatter = TaskFormatter(console=console)
+
+        # Compute relay plan for DAG parallel topology display
+        relay_plan = None
+        if strategy == "dag_parallel" and len(groups) > 1:
+            try:
+                reduced = transitive_reduce(groups)
+                relay_plan = classify_chains(reduced)
+            except Exception:
+                logger.debug("Could not compute relay plan for display", exc_info=True)
+
         console.print(formatter.format_implement_plan(
             task_groups=groups,
             execution_strategy=strategy,
             total_loc=total_loc,
             loc_threshold=threshold,
+            relay_plan=relay_plan,
         ))
     except Exception:
         logger.debug("Could not render implementation plan", exc_info=True)

@@ -925,7 +925,7 @@ The `implement` step SHALL display a structured task plan panel at the start of 
 
 **Panel Contents:**
 
-The plan is rendered as a Rich `Panel` titled "Implementation Plan" containing three sections:
+The plan is rendered as a Rich `Panel` titled "Implementation Plan" containing up to four sections:
 
 1. **Strategy Line** — shows the selected execution strategy with a visual icon:
    - `⚡ Single group → single LLM call` — when there is only one task group (with total LOC)
@@ -938,7 +938,18 @@ The plan is rendered as a Rich `Panel` titled "Implementation Plan" containing t
    - Group dependencies (if any)
    - Each task within its group, displaying: task ID, description, complexity badge (color-coded: green/small, yellow/medium, red/large), and estimated LOC
 
-3. **LOC Summary** — total estimated LOC with per-group LOC distribution
+3. **Execution Topology** (DAG parallel only) — a layered diagram showing how groups are scheduled across execution waves, rendered using Rich Text with ANSI styling. Only displayed when the execution strategy is `dag_parallel` and a relay plan is available:
+   - Groups are arranged into topologically-sorted **waves**; groups within the same wave execute in parallel.
+   - Each wave is labeled with its sequential **LLM call numbers** (e.g., `LLM #1, #2`).
+   - Each group node is annotated with its relationship type:
+     - `● root` (green) — creates a new worktree
+     - `→ relay` (blue) — reuses the predecessor's worktree (linear chain continuation)
+     - `⑂ fork` (magenta) — forks a new branch from a predecessor's worktree
+     - `⊕ merge ←` (yellow) — convergence point that merges secondary predecessor branches before executing
+     - `◆ leaf` (yellow) — chain endpoint that merges back to the base branch
+   - Waves are connected by `│▼` vertical connectors.
+
+4. **LOC Summary** — total estimated LOC with per-group LOC distribution
 
 **Error Handling:**
 - Display failures are caught and logged at DEBUG level; they SHALL NOT block execution.
@@ -960,6 +971,7 @@ The plan is rendered as a Rich `Panel` titled "Implementation Plan" containing t
 - **WHEN** the implement step begins execution
 - **THEN** the task plan panel is displayed with "DAG parallel" strategy
 - **AND** the panel shows group dependencies and per-group LOC estimates
+- **AND** the panel includes an Execution Topology section showing waves, LLM call numbering, and relay/fork/merge annotations
 
 #### Scenario: Task plan display failure does not block execution
 - **GIVEN** the task plan rendering raises an exception

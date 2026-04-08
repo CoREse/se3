@@ -1,0 +1,12 @@
+id: '051'
+title: 重复的测试文件
+description: tests/test_tool_formatters.py (355行) 和 tests/engine/test_tool_formatters.py
+  (467行) 功能重叠，应合并或删除其一以避免维护负担。
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-08T17:14:43.248821'
+updated_at: '2026-04-08T17:14:43.248821'

@@ -7,7 +7,10 @@ human-readable formatted output using Rich library components.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
+
+if TYPE_CHECKING:
+    from ..dag_scheduler import RelayPlan
 
 from rich.panel import Panel
 from rich.table import Table
@@ -533,6 +536,7 @@ class TaskFormatter:
         execution_strategy: str,
         total_loc: int,
         loc_threshold: int,
+        relay_plan: Optional[RelayPlan] = None,
     ) -> Panel:
         """Format implement step task plan with execution strategy summary.
 
@@ -541,6 +545,7 @@ class TaskFormatter:
             execution_strategy: One of 'single', 'dag_parallel', 'sequential'
             total_loc: Total estimated lines of code across all tasks
             loc_threshold: LOC threshold for group merging
+            relay_plan: Relay execution plan (only for dag_parallel strategy)
 
         Returns:
             Rich Panel containing task tree with strategy summary
@@ -563,6 +568,20 @@ class TaskFormatter:
             renderables.append(tree)
         else:
             renderables.append(Text("[dim]No tasks to display[/dim]"))
+
+        # DAG topology diagram (only for dag_parallel with relay_plan)
+        if (
+            execution_strategy == "dag_parallel"
+            and relay_plan is not None
+            and len(task_groups) > 1
+        ):
+            try:
+                topology = self._build_dag_topology(task_groups, relay_plan)
+                if topology.plain.strip():
+                    renderables.append(Text(""))  # blank separator
+                    renderables.append(topology)
+            except Exception:
+                logger.debug("Could not render DAG topology", exc_info=True)
 
         # LOC statistics at bottom
         loc_summary = self._format_loc_summary(task_groups, total_loc)
@@ -655,6 +674,131 @@ class TaskFormatter:
                     task_node.add(f"[dim]\U0001f4c4 {files_str}[/dim]")
 
         return tree
+
+    @staticmethod
+    def _compute_topo_waves(groups: List[Dict[str, Any]]) -> List[List[str]]:
+        """Compute topological wave layers using Kahn's algorithm.
+
+        Each wave contains groups that can execute in parallel.
+        Groups are sorted within each wave by ``group_order``.
+        """
+        order_map = {g["group_id"]: g.get("group_order", 0) for g in groups}
+        all_ids = set(order_map)
+
+        in_deg: dict[str, int] = {gid: 0 for gid in all_ids}
+        fwd: dict[str, list[str]] = {gid: [] for gid in all_ids}
+
+        for g in groups:
+            gid = g["group_id"]
+            for dep in g.get("depends_on", []):
+                if dep in all_ids:
+                    fwd[dep].append(gid)
+                    in_deg[gid] += 1
+
+        waves: list[list[str]] = []
+        queue = sorted(
+            [gid for gid, d in in_deg.items() if d == 0],
+            key=lambda gid: order_map[gid],
+        )
+
+        while queue:
+            waves.append(queue)
+            nxt: list[str] = []
+            for gid in queue:
+                for child in fwd[gid]:
+                    in_deg[child] -= 1
+                    if in_deg[child] == 0:
+                        nxt.append(child)
+            queue = sorted(nxt, key=lambda gid: order_map[gid])
+
+        return waves
+
+    def _build_dag_topology(
+        self,
+        groups: List[Dict[str, Any]],
+        relay_plan: RelayPlan,
+    ) -> "Text":
+        """Build a layered DAG execution topology diagram.
+
+        Shows execution waves with relay/fork/merge annotations and
+        LLM call numbering.  Returns empty ``Text`` when there is
+        only one group (topology adds no information).
+        """
+        from rich.text import Text
+
+        if len(groups) <= 1:
+            return Text("")
+
+        group_map = {g["group_id"]: g for g in groups}
+        waves = self._compute_topo_waves(groups)
+        if not waves:
+            return Text("")
+
+        # Assign sequential LLM call numbers
+        call_num: dict[str, int] = {}
+        n = 1
+        for wave in waves:
+            for gid in wave:
+                call_num[gid] = n
+                n += 1
+
+        text = Text()
+        text.append("  Execution Topology\n", style="bold cyan underline")
+
+        for wi, wave in enumerate(waves):
+            # Wave header with LLM call numbers
+            calls = ", ".join(f"#{call_num[gid]}" for gid in wave)
+            text.append(f"\n  Wave {wi + 1}", style="bold")
+            text.append(f"  LLM {calls}\n", style="dim cyan")
+            text.append("  " + "\u2500" * 42 + "\n", style="dim")
+
+            for gid in wave:
+                name = group_map.get(gid, {}).get("name", "")
+                is_root = gid in relay_plan.root_nodes
+                is_leaf = gid in relay_plan.leaf_nodes
+
+                # Node marker: ● root, ◆ leaf, ○ middle
+                if is_root:
+                    text.append("    \u25cf ", style="bold green")
+                elif is_leaf:
+                    text.append("    \u25c6 ", style="bold yellow")
+                else:
+                    text.append("    \u25cb ", style="bold blue")
+
+                text.append(gid, style="bold")
+                text.append(f"  {name}\n")
+
+                # Relationship annotation
+                if is_root:
+                    text.append("      new worktree\n", style="dim green")
+                else:
+                    pred = relay_plan.relay_map.get(gid)
+                    if pred is not None:
+                        text.append("      \u2192 relay ", style="blue")
+                        text.append(f"from {pred} (reuse worktree)\n", style="dim")
+                    elif gid in relay_plan.fork_from:
+                        src = relay_plan.fork_from[gid]
+                        text.append("      \u2442 fork ", style="magenta")
+                        text.append(f"from {src} (new branch)\n", style="dim")
+
+                # Convergence merge
+                if gid in relay_plan.convergence_points:
+                    sec = relay_plan.convergence_points[gid].secondary_predecessors
+                    text.append(
+                        f"      \u2295 merge \u2190 {', '.join(sec)}\n",
+                        style="yellow",
+                    )
+
+                # Leaf merge-back
+                if is_leaf:
+                    text.append("      \u21a9 merge-back\n", style="dim yellow")
+
+            # Connector between waves
+            if wi < len(waves) - 1:
+                text.append("      \u2502\n", style="dim")
+                text.append("      \u25bc\n", style="dim")
+
+        return text
 
     def _format_loc_summary(
         self, task_groups: List[Dict[str, Any]], total_loc: int,
