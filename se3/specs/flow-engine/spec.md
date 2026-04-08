@@ -331,7 +331,7 @@ The injected prompt SHALL:
 
 ### Requirement: 聊天记录系统（Chat History）
 
-流程引擎 SHALL 记录每次 LLM 调用的 prompt 和回应，支持重试时注入对话上下文，并提供人类浏览接口。
+流程引擎 SHALL 记录每次 LLM 调用的 prompt 和回应，支持重试时注入对话上下文，并提供人类浏览接口。工具调用事件（tool_use / tool_result）SHALL 使用 per-tool 语义化格式渲染人类可读预览，格式化逻辑集中在 `tool_formatters` 模块中。
 
 **存储格式：**
 - 存储路径：`se3/history/{flow_id}/{step_id}.jsonl`
@@ -350,6 +350,26 @@ The injected prompt SHALL:
 - `format_history_for_retry()` — 为重试格式化之前的对话上下文
 - `extract_assistant_text()` — 从 NDJSON 提取 assistant 文本内容
 
+**工具调用格式化（tool_formatters 模块）：**
+
+`tool_formatters.py` 是工具调用预览格式化的唯一权威来源，由 `llm_caller.py`（流式输出）和 `chat_history.py`（历史渲染/重试上下文）共同消费。
+
+- 公共 API：`format_tool_use_preview(tool_name, input_data)` 和 `format_tool_result_preview(tool_name, result_data)`
+- 内部维护 `TOOL_FORMATTERS` 字典注册表（`{tool_name: {use: fn, result: fn}}`），将工具名映射到专用格式化函数
+- 未注册的工具名回退到通用格式化器（key=value 截断预览）
+- 提供 `truncate_preview()` 通用截断工具函数
+
+**内置 per-tool 格式化器：**
+
+| Tool | tool_use preview | tool_result preview |
+|------|-----------------|-------------------|
+| Edit | `Edit: {file_path} ({n} lines → {m} lines)` | `Edit ✓ {file_path}` or error info |
+| Write | `Write: {file_path} ({n} lines)` | `Write ✓ {file_path}` |
+| Read | `Read: {file_path}:{offset}-{end}` | `Read ✓ ({n} lines)` |
+| Bash | `Bash: {command preview}` | `Bash ✓ ({n} lines output)` |
+| Grep | `Grep: /{pattern}/ in {path}` | `Grep ✓ ({n} matches)` |
+| Glob | `Glob: {pattern} in {path}` | `Glob ✓ ({n} files)` |
+
 #### Scenario: 记录 LLM 对话
 - **WHEN** LLMCaller 发送 prompt 给 LLM
 - **THEN** 自动记录 prompt 到 `se3/history/{flow_id}/{step_id}.jsonl`
@@ -366,6 +386,20 @@ The injected prompt SHALL:
 - **THEN** 从聊天记录中获取之前的对话上下文
 - **AND** 将上下文注入到重试 prompt 前面
 - **AND** 格式为 `[Previous conversation context for this step]: ... [The above attempt(s) failed.]`
+
+#### Scenario: 工具调用语义化渲染
+- **WHEN** LLM 流式输出包含 `tool_use` 或 `tool_result` 事件
+- **OR** 聊天记录需要渲染历史中的工具调用
+- **THEN** `format_tool_use_preview(tool_name, input_data)` 根据 `TOOL_FORMATTERS` 注册表路由到 per-tool 格式化函数
+- **AND** `format_tool_result_preview(tool_name, result_data)` 同理路由到 per-tool 结果格式化函数
+- **AND** Edit 工具显示文件路径和变更行数（e.g. `Edit: path/file.py (3 lines → 5 lines)`）
+- **AND** Write 工具显示文件路径和内容行数
+- **AND** Read 工具显示文件路径和读取范围
+- **AND** Bash 工具显示命令截断预览
+- **AND** Grep 工具显示搜索模式和路径
+- **AND** Glob 工具显示匹配模式和路径
+- **AND** 未注册的工具回退到通用格式化器（key=value 截断，最多 3 个参数）
+- **AND** 格式化在 LLM 抽象层（tool_formatters 模块）完成，不依赖具体 agent 工具实现
 
 #### Scenario: 人类浏览聊天记录
 - **WHEN** 用户执行 `se3 history` 或 `se3 history list`
