@@ -184,11 +184,11 @@ se3 run --discover "我想做一个用户管理功能"
 | `discovery` | 需求探索（多轮对话） | 是 | STRICT | 否 | initial_description | refined_description, discovery_summary |
 | `analyze` | 分析任务类型和范围 | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning |
 | `read_spec` | 读取相关 spec 文件 | 否（程序自动） | - | **是** | scope | relevant_specs, spec_content |
-| `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type | plan{proposal,design}, task_groups |
+| `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type | plan{proposal,design}, task_groups, spec_changes |
 | `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed |
 | `test` | 运行测试验证 | 否（程序执行） | - | 否 | - | test_results, tests_passed |
-| `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | implementation, spec_content | verification_result, issues |
-| `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | 否 | changes_made | updated_specs |
+| `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, fix_needed, fix_instructions, fix_context |
+| `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | 否 | changes_made, verification_result, spec_changes, design_doc | updated_specs |
 | `version_analyze` | 分析变更确定版本类型 | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning |
 | `commit` | 提交变更 | 否（程序执行） | - | 否 | changes_made, bump_type | commit_hash |
 | `summarize` | 生成总结和 handoff | 是 | 文本 | **是** | all_previous_outputs | summary (Markdown 文本) |
@@ -418,9 +418,10 @@ The injected prompt SHALL:
 **输入构建规则：**
 - 所有步骤接收 `task_description` 和 `flow_id`
 - `read_spec` 接收 analyze 的 `scope`
-- `plan` 接收 `spec_content`、`task_type`、`scope`，输出 `plan`（含 proposal + design）和 `task_groups`
+- `plan` 接收 `spec_content`、`task_type`、`scope`，输出 `plan`（含 proposal + design）、`task_groups` 和 `spec_changes`（仅 full depth）
 - `implement` 接收 `design_doc`（从 plan.design 映射）和 `task_groups`
-- `verify_spec` 接收 `implementation`
+- `verify_spec` 接收 `changes_made`、`spec_content`、`test_results`、`fix_iteration` 和 `spec_changes`（从 plan 步骤传递，用于区分有意变更与回归）
+- `update_spec` 接收 `changes_made`、`verification_result`、`spec_changes`（从 plan 步骤传递，作为变更指引清单）和 `design_doc`（从 plan.design 映射，提供架构上下文）
 - `commit` 接收 `changes_made`
 - `summarize` 接收所有前序输出
 
@@ -566,6 +567,104 @@ The `complexity` field is preserved unchanged. `estimated_loc` is additive and d
 - **WHEN** `plan` produces task_groups
 - **THEN** each task includes an `estimated_loc` integer field
 - **AND** the `complexity` field remains unchanged
+
+### Requirement: Plan spec_changes Output
+
+The `plan` step at full depth (task_type `feature` or `discovery`) SHALL output a `spec_changes` array declaring expected spec modifications. At medium and shallow depths (bugfix, directive, small), `spec_changes` is omitted from the JSON schema and defaults to an empty array.
+
+**spec_changes entry schema:**
+```json
+{
+    "spec_name": "flow-engine",
+    "change_type": "add_requirement|modify_requirement|add_scenario|deprecate_requirement",
+    "target": "Requirement: Example Requirement Name",
+    "description": "What this change entails",
+    "rationale": "Why this change is needed"
+}
+```
+
+**Prompt composition:**
+- At full depth, the plan prompt includes a "Spec Changes Declaration" section instructing the LLM to analyze the gap between current specifications and the planned implementation.
+- The JSON schema at full depth includes the `spec_changes` array.
+- The plan handler extracts `spec_changes` from the LLM response via `result.get("spec_changes", [])` and stores it in `step.outputs["spec_changes"]`.
+- The state machine forwards `spec_changes` to downstream steps (`verify_spec`, `update_spec`) via `_build_step_inputs`.
+
+**Data flow:**
+- `plan` → `verify_spec`: `spec_changes` allows verify_spec to distinguish intentional deviations from regressions.
+- `plan` → `update_spec`: `spec_changes` serves as a guided checklist for spec updates.
+
+#### Scenario: Full-depth plan includes spec_changes
+- **WHEN** the plan step executes at full depth (feature or discovery task)
+- **THEN** the LLM prompt includes the "Spec Changes Declaration" section
+- **AND** the output JSON schema includes the `spec_changes` array
+- **AND** `step.outputs["spec_changes"]` contains the declared changes (may be empty)
+
+#### Scenario: Non-full-depth plan omits spec_changes from schema
+- **WHEN** the plan step executes at medium or shallow depth (bugfix, directive, small)
+- **THEN** the LLM prompt does not include the "Spec Changes Declaration" section
+- **AND** `step.outputs["spec_changes"]` defaults to an empty array
+
+#### Scenario: spec_changes forwarded to downstream steps
+- **WHEN** the state machine builds inputs for `verify_spec` or `update_spec`
+- **THEN** `spec_changes` from the plan step is included in the inputs
+- **AND** if no plan step completed or spec_changes was not produced, defaults to an empty array
+
+### Requirement: verify_spec Planned Change Awareness
+
+The `verify_spec` step SHALL receive `spec_changes` from the plan step and use it to distinguish intentional spec deviations from unintended regressions.
+
+**Behavior:**
+- When `spec_changes` is non-empty, the verify_spec prompt instructs the LLM to treat deviations matching plan-declared changes as intentional (severity: info), not regressions (severity: error).
+- Deviations NOT covered by planned changes are still flagged at their normal severity.
+- When `spec_changes` is empty (e.g., bugfix tasks or tasks with no expected spec impact), verify_spec behaves as before — all deviations from spec are potential errors.
+
+**Prompt section:**
+The "Planned Spec Changes" section is formatted into the prompt using `_format_spec_changes()`, which renders each entry as `- [change_type] spec_name :: target` with an optional description line.
+
+#### Scenario: Intentional deviation classified as info
+- **GIVEN** the plan step declared a spec_change: `[add_requirement] flow-engine :: Requirement: New Feature X`
+- **AND** the implementation introduces behavior not covered by current specs but matching the declared change
+- **WHEN** verify_spec executes
+- **THEN** the deviation is classified as severity `info` (intentional change)
+- **AND** verify_spec does NOT trigger REVISION_NEEDED for this deviation
+
+#### Scenario: Unplanned deviation classified as error
+- **GIVEN** the plan step declared no spec_changes (or the deviation does not match any declared change)
+- **AND** the implementation deviates from the current spec
+- **WHEN** verify_spec executes
+- **THEN** the deviation is classified as severity `error`
+- **AND** verify_spec may trigger REVISION_NEEDED
+
+#### Scenario: Empty spec_changes preserves existing behavior
+- **GIVEN** the plan step produced an empty `spec_changes` array (e.g., bugfix task)
+- **WHEN** verify_spec executes
+- **THEN** verify_spec behaves identically to the pre-refactoring behavior
+- **AND** all deviations from spec are evaluated at their normal severity
+
+### Requirement: update_spec Guided Execution
+
+The `update_spec` step SHALL receive `spec_changes` and `design_doc` from the plan step, shifting from pure inference mode to guided execution when guidance is available.
+
+**Two modes:**
+1. **Guided mode** (when `spec_changes` is non-empty): The LLM uses `spec_changes` as a primary checklist, executing each declared change intent (add, modify, deprecate) in the corresponding spec files. `design_doc` provides architectural rationale to produce more accurate and well-motivated spec updates.
+2. **Inference mode** (when `spec_changes` is empty): The LLM determines which specs need updating by analyzing the changes made and verification results, as before.
+
+**Prompt composition:**
+- The "Spec Change Guidance" section is formatted using `_format_spec_changes()` which renders each entry with spec_name, change_type, target, description, and rationale.
+- The "Design Context" section is formatted using `_format_design_doc()` which renders the design overview, components, and architecture decisions.
+
+#### Scenario: Guided spec update with spec_changes
+- **GIVEN** the plan step produced non-empty `spec_changes` and a `design_doc`
+- **WHEN** update_spec executes
+- **THEN** the LLM uses `spec_changes` as the primary checklist for updates
+- **AND** the LLM uses `design_doc` to understand architectural rationale
+- **AND** spec updates align with the declared change intents
+
+#### Scenario: Inference spec update without guidance
+- **GIVEN** the plan step produced empty `spec_changes` (e.g., bugfix task)
+- **WHEN** update_spec executes
+- **THEN** the LLM infers which specs need updating from changes_made and verification_result
+- **AND** update_spec behavior is identical to pre-refactoring
 
 ### Requirement: Implement Step DAG Execution Strategy
 

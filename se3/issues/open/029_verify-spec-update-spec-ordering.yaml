@@ -1,25 +1,36 @@
-id: '029'
+id: 029
 title: verify_spec 与 update_spec 的顺序和职责边界问题
-description: |
-  verify_spec 当前对照 spec 检查代码合规性，但对于修改现有行为的任务，
+description: 'verify_spec 当前对照 spec 检查代码合规性，但对于修改现有行为的任务，
+
   代码有意违反旧 spec 是正常的（update_spec 还没跑）。
+
   spec compliance → REVISION_NEEDED 会在此场景下触发错误的 fix loop。
 
+
   核心矛盾：
+
   - update 在 verify 前：spec 跟着代码走，verify 形同虚设
+
   - update 在 verify 后（现状）：verify 对照过时 spec，误报
 
+
   可能的方向：
+
   1. verify_spec 改为对照任务意图（而非 spec）检查代码
+
   2. spec compliance REVISION_NEEDED 只在 bugfix/review 触发（不改现有行为的 workflow）
+
   3. verify_spec prompt 区分"回归"和"有意变更"
+
   4. 将 update_spec 重构为 spec-first（放在 design 后，基于设计方案预定义规范）
-status: open
+
+  '
+status: in-progress
 priority: medium
 type: design
 tags:
 - step-ordering
 - verify-spec
 - update-spec
-created_at: '2026-04-01'
-updated_at: '2026-04-01'
+created_at: '2026-04-01T00:00:00'
+updated_at: '2026-04-08T15:22:12.949049'
