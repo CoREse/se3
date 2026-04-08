@@ -13,6 +13,7 @@ from se3.engine.steps.verify_spec import (
     _format_changes,
     _format_test_results,
     _format_fix_context,
+    _format_spec_changes,
     _get_max_fix_iterations,
     VERIFY_PROMPT,
 )
@@ -70,6 +71,15 @@ class TestVerifySpecHandler:
         assert "test_analysis" in VERIFY_PROMPT
         assert "fix_instructions" in VERIFY_PROMPT
         assert "fix_context" in VERIFY_PROMPT
+
+    def test_verify_prompt_includes_spec_changes_placeholder(self):
+        """Test that VERIFY_PROMPT includes {spec_changes} placeholder."""
+        assert "{spec_changes}" in VERIFY_PROMPT
+
+    def test_verify_prompt_includes_planned_changes_instruction(self):
+        """Test that VERIFY_PROMPT instruction 6 covers planned spec changes judgment rule."""
+        assert "Planned Spec Changes" in VERIFY_PROMPT
+        assert "intentional changes" in VERIFY_PROMPT or "intentional" in VERIFY_PROMPT
 
     def test_handler_returns_completed_when_tests_pass(self, flow, step, mock_llm_response):
         """Test that handler returns COMPLETED when tests pass."""
@@ -286,6 +296,63 @@ class TestFormatFixContext:
         assert "final fix attempt" in result
 
 
+class TestFormatSpecChanges:
+    """Test cases for _format_spec_changes."""
+
+    def test_empty_list(self):
+        assert _format_spec_changes([]) == "No planned spec changes."
+
+    def test_none_input(self):
+        assert _format_spec_changes(None) == "No planned spec changes."
+
+    def test_single_change(self):
+        changes = [
+            {
+                "spec_name": "flow-engine",
+                "change_type": "add_requirement",
+                "target": "Requirement: New Feature",
+                "description": "Add new feature requirement",
+            }
+        ]
+        result = _format_spec_changes(changes)
+        assert "- [add_requirement] flow-engine :: Requirement: New Feature" in result
+        assert "  Add new feature requirement" in result
+
+    def test_multiple_changes(self):
+        changes = [
+            {
+                "spec_name": "flow-engine",
+                "change_type": "add_requirement",
+                "target": "Requirement: A",
+                "description": "First change",
+            },
+            {
+                "spec_name": "se3-workflows",
+                "change_type": "modify_requirement",
+                "target": "Requirement: B",
+                "description": "Second change",
+            },
+        ]
+        result = _format_spec_changes(changes)
+        assert "[add_requirement] flow-engine :: Requirement: A" in result
+        assert "[modify_requirement] se3-workflows :: Requirement: B" in result
+        assert "First change" in result
+        assert "Second change" in result
+
+    def test_change_without_description(self):
+        changes = [
+            {
+                "spec_name": "spec",
+                "change_type": "deprecate_requirement",
+                "target": "Requirement: Old",
+            }
+        ]
+        result = _format_spec_changes(changes)
+        assert "- [deprecate_requirement] spec :: Requirement: Old" in result
+        # No indented description line
+        assert result.count("\n") == 0
+
+
 class TestGetMaxFixIterations:
     """Test cases for _get_max_fix_iterations."""
 
@@ -370,6 +437,86 @@ class TestIntegration:
             assert "## Task Description" in prompt
             assert "## Relevant Specifications" in prompt
             assert "## Changes Made" in prompt
+            assert "## Planned Spec Changes" in prompt
             assert "## Test Results" in prompt
             assert "## Fix Context" in prompt
             assert "### Test Failure Analysis" in prompt
+
+    def test_prompt_includes_spec_changes_when_provided(self, tmp_path):
+        """Test that spec_changes from inputs are injected into the prompt."""
+        flow = FlowInstance(
+            flow_id="test-flow-456",
+            task_description="Feature task",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+            change_path=tmp_path / "changes" / "test-change",
+        )
+        flow.state.selected_steps = [StepType.VERIFY_SPEC]
+
+        step = Step(
+            step_type=StepType.VERIFY_SPEC,
+            status=StepStatus.PENDING,
+            inputs={
+                "task_description": "Feature task",
+                "spec_content": {"spec.md": "Spec content"},
+                "changes_made": {"files_changed": []},
+                "test_results": {"passed": True, "returncode": 0, "stdout": "OK"},
+                "spec_changes": [
+                    {
+                        "spec_name": "flow-engine",
+                        "change_type": "add_requirement",
+                        "target": "Requirement: Plan spec_changes Output",
+                        "description": "New output field for spec change intent",
+                    }
+                ],
+            },
+        )
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = '{"verified": true}'
+            mock_caller_class.return_value = mock_caller
+
+            verify_spec_handler(step, flow)
+
+            call_args = mock_caller.call.call_args
+            prompt = call_args[1]["prompt"]
+
+            assert "## Planned Spec Changes" in prompt
+            assert "[add_requirement] flow-engine :: Requirement: Plan spec_changes Output" in prompt
+            assert "New output field for spec change intent" in prompt
+
+    def test_prompt_shows_no_planned_changes_when_empty(self, tmp_path):
+        """Test that empty spec_changes results in 'No planned spec changes.' in prompt."""
+        flow = FlowInstance(
+            flow_id="test-flow-789",
+            task_description="Bugfix task",
+            task_type="bugfix",
+            status=FlowStatus.RUNNING,
+            change_path=tmp_path / "changes" / "test-change",
+        )
+        flow.state.selected_steps = [StepType.VERIFY_SPEC]
+
+        step = Step(
+            step_type=StepType.VERIFY_SPEC,
+            status=StepStatus.PENDING,
+            inputs={
+                "task_description": "Bugfix task",
+                "spec_content": {},
+                "changes_made": {},
+                "test_results": {},
+            },
+        )
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = '{"verified": true}'
+            mock_caller_class.return_value = mock_caller
+
+            verify_spec_handler(step, flow)
+
+            call_args = mock_caller.call.call_args
+            prompt = call_args[1]["prompt"]
+
+            assert "## Planned Spec Changes" in prompt
+            assert "No planned spec changes." in prompt

@@ -36,6 +36,9 @@ VERIFY_PROMPT = """You are an expert software quality assurance engineer. Verify
 ## Changes Made
 {changes_made}
 
+## Planned Spec Changes
+{spec_changes}
+
 ## Test Results
 {test_results}
 
@@ -50,6 +53,7 @@ Verify the implementation against the specifications. Check:
 3. **No Unintended Changes**: Are there any changes that weren't specified?
 4. **Correctness**: Is the implementation logically correct?
 5. **Test Results**: Did all tests pass? If not, analyze the failures.
+6. **Planned Spec Changes**: If "Planned Spec Changes" lists specific changes declared by the plan step, treat deviations matching those declarations as intentional changes (severity: info), NOT regressions (severity: error). Only deviations NOT covered by planned changes should be flagged as errors.
 
 ### Test Failure Analysis
 If tests failed, analyze the test output to identify:
@@ -106,6 +110,7 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     spec_content = step.inputs.get("spec_content", {})
     changes_made = step.inputs.get("changes_made", {})
     test_results = step.inputs.get("test_results", {})
+    spec_changes = step.inputs.get("spec_changes", [])
 
     # Get fix iteration count from inputs
     fix_iteration = step.inputs.get("fix_iteration", 0)
@@ -116,6 +121,7 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     changes_text = _format_changes(changes_made)
     test_text = _format_test_results(test_results)
     fix_context_text = _format_fix_context(fix_iteration, max_iterations)
+    spec_changes_text = _format_spec_changes(spec_changes)
 
     # Build prompt
     prompt = VERIFY_PROMPT.format(
@@ -124,6 +130,7 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         changes_made=changes_text,
         test_results=test_text,
         fix_context=fix_context_text,
+        spec_changes=spec_changes_text,
     )
 
     # Append issue discovery injection if applicable
@@ -403,6 +410,31 @@ def _format_test_results(test_results: dict[str, Any]) -> str:
     if stderr:
         lines.append(f"\nError output:\n{stderr[-500:]}")
 
+    return "\n".join(lines)
+
+
+def _format_spec_changes(spec_changes: list[dict[str, str]] | None) -> str:
+    """Format spec_changes list into readable text for the prompt.
+
+    Args:
+        spec_changes: List of spec change declarations from the plan step.
+            Each dict has keys: spec_name, change_type, target, description.
+
+    Returns:
+        Formatted text describing planned spec changes.
+    """
+    if not spec_changes:
+        return "No planned spec changes."
+
+    lines = []
+    for change in spec_changes:
+        spec_name = change.get("spec_name", "unknown")
+        change_type = change.get("change_type", "unknown")
+        target = change.get("target", "unknown")
+        description = change.get("description", "")
+        lines.append(f"- [{change_type}] {spec_name} :: {target}")
+        if description:
+            lines.append(f"  {description}")
     return "\n".join(lines)
 
 
