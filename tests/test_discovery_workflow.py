@@ -128,8 +128,8 @@ class TestDiscoveryHandler:
         assert step.inputs["discovery_state"]["mode"] == "synthesis"
 
     @patch("se3.engine.steps.discovery.LLMCaller")
-    def test_discovery_confirmation_completes(self, mock_caller_class):
-        """Confirmation with ready_to_proceed should complete."""
+    def test_discovery_confirmation_pauses_for_programmatic_confirm(self, mock_caller_class):
+        """Confirmation with ready_to_proceed should PAUSE for programmatic confirmation."""
         mock_caller = Mock()
         mock_caller_class.return_value = mock_caller
         mock_caller.call.return_value = json.dumps({
@@ -154,18 +154,13 @@ class TestDiscoveryHandler:
 
         result = discovery_handler(step, flow)
 
-        assert result == StepStatus.COMPLETED
-        # Confirmation mode outputs only refined_description and status
+        assert result == StepStatus.PAUSED
+        assert step.outputs["awaiting_programmatic_confirm"] is True
         assert step.outputs["refined_description"] == "Build a user authentication system"
-        assert step.outputs["requirements_clarified"] is True
-        assert "message" in step.outputs  # Always present
-        # Internal state should not be in outputs
-        assert "mode" not in step.outputs
-        assert "round" not in step.outputs
 
     @patch("se3.engine.steps.discovery.LLMCaller")
     def test_discovery_high_round_with_user_confirmation(self, mock_caller_class):
-        """Should allow confirmation at any round number (no max rounds limit)."""
+        """Should pause for programmatic confirm at any round number."""
         mock_caller = Mock()
         mock_caller_class.return_value = mock_caller
         mock_caller.call.return_value = json.dumps({
@@ -191,10 +186,81 @@ class TestDiscoveryHandler:
 
         result = discovery_handler(step, flow)
 
-        # Should process the confirmation, not just fallback
-        assert result == StepStatus.COMPLETED
+        # Should pause for programmatic confirmation, not directly complete
+        assert result == StepStatus.PAUSED
+        assert step.outputs["awaiting_programmatic_confirm"] is True
         assert step.outputs["refined_description"] == "Final round refined description"
+
+
+class TestProgrammaticConfirmation:
+    """Test programmatic confirmation gate in discovery handler."""
+
+    def test_discovery_programmatic_confirm_completes(self):
+        """When programmatic_confirmed=True, handler should complete without LLM."""
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={
+                "task_description": "I want auth",
+                "programmatic_confirmed": True,
+                "discovery_state": {"round": 3, "history": [
+                    {"role": "assistant", "content": "What do you need?", "round": 0},
+                    {"role": "user", "content": "Auth system", "round": 1},
+                    {"role": "assistant", "content": "Confirmed", "round": 2},
+                ]},
+            },
+        )
+        # Pre-populate outputs as they would be after the PAUSED state
+        step.outputs["refined_description"] = "Build a user authentication system"
+        step.outputs["awaiting_programmatic_confirm"] = True
+
+        flow = FlowInstance(task_description="I want auth")
+
+        # No LLMCaller mock needed — should not call LLM at all
+        result = discovery_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs["refined_description"] == "Build a user authentication system"
         assert step.outputs["requirements_clarified"] is True
+        assert "discovery_summary" in step.outputs
+        # awaiting flag should be cleared
+        assert "awaiting_programmatic_confirm" not in step.outputs
+
+    @patch("se3.engine.steps.discovery.LLMCaller")
+    def test_discovery_programmatic_confirm_continue(self, mock_caller_class):
+        """When awaiting flag cleared and new user_response given, should continue discovery."""
+        mock_caller = Mock()
+        mock_caller_class.return_value = mock_caller
+        mock_caller.call.return_value = json.dumps({
+            "mode": "question",
+            "content": "What specific aspects need clarification?",
+            "questions": ["What auth method?"],
+            "thinking": "User wants to continue",
+        })
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={
+                "task_description": "I want auth",
+                "discovery_state": {"round": 3, "history": [
+                    {"role": "assistant", "content": "What do you need?", "round": 0},
+                    {"role": "user", "content": "Auth system", "round": 1},
+                ]},
+                "resumed": True,
+                "user_response": "Actually, I also need OAuth support",
+            },
+        )
+        # Outputs should NOT have awaiting flag (it was cleared by run loop)
+        step.outputs["message"] = "Previous message"
+
+        flow = FlowInstance(task_description="I want auth")
+
+        result = discovery_handler(step, flow)
+
+        assert result == StepStatus.PAUSED
+        # LLM should have been called
+        mock_caller.call.assert_called_once()
+        # Should not have awaiting flag
+        assert "awaiting_programmatic_confirm" not in step.outputs
 
 
 class TestUserResponseParsing:

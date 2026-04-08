@@ -414,6 +414,12 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
     Returns:
         User response string, or None to exit
     """
+    # Programmatic confirmation gate: LLM confirmed, now require human approval
+    if current_step.outputs.get("awaiting_programmatic_confirm"):
+        return _handle_discovery_programmatic_confirm(
+            flow, current_step, persistence, prompt_history
+        )
+
     render_full(
         "Discovery mode is exploring your requirements.\n"
         "Please respond to the questions above to help clarify what you want to build.",
@@ -448,6 +454,94 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
     # If user confirmed a synthesis, mark it
     if parsed["confirmed"] and current_step.inputs.get("discovery_state", {}).get("mode") == "synthesis":
         current_step.outputs["user_confirmed"] = True
+
+    return user_input
+
+
+# Sentinel returned by programmatic confirm handler when user chooses to proceed
+_PROGRAMMATIC_CONFIRM = "__PROGRAMMATIC_CONFIRM__"
+
+
+def _handle_discovery_programmatic_confirm(
+    flow: FlowInstance,
+    current_step: Any,
+    persistence: PersistenceManager,
+    prompt_history: Any = None,
+) -> Optional[str]:
+    """Handle programmatic confirmation gate after LLM confirms discovery.
+
+    Presents numbered choices to the user:
+    1. Confirm and proceed to the next step
+    2. Still have questions — continue discovery
+
+    Args:
+        flow: Current flow instance
+        current_step: The discovery step
+        persistence: Persistence manager
+        prompt_history: Prompt history for readline
+
+    Returns:
+        _PROGRAMMATIC_CONFIRM sentinel if user confirms,
+        user's follow-up input string if they want to continue,
+        or None if cancelled (Ctrl+C).
+    """
+    try:
+        choice = prompt_user_choice(
+            "The discovery analysis is ready. How would you like to proceed?",
+            [
+                "Confirm and proceed to implementation planning",
+                "I have more questions or changes — continue discovery",
+            ],
+        )
+    except KeyboardInterrupt:
+        persistence.save_flow(flow)
+        render_full(
+            "Discovery paused. Flow state saved.\n"
+            "Resume with: se3 run --resume",
+            title="Paused",
+        )
+        return None
+
+    if choice == 0:
+        # User confirmed — mark for programmatic confirmation
+        current_step.inputs["programmatic_confirmed"] = True
+        return _PROGRAMMATIC_CONFIRM
+
+    # User wants to continue — clear the programmatic confirm flag
+    current_step.outputs.pop("awaiting_programmatic_confirm", None)
+
+    render_full(
+        "Continuing discovery. Please provide your questions or feedback.",
+        title="Discovery Continue",
+    )
+
+    try:
+        user_input = _read_multiline_input(
+            prompt_title="Discovery Response",
+            prompt_message="Enter your response (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+            history=prompt_history,
+        )
+    except KeyboardInterrupt:
+        persistence.save_flow(flow)
+        render_full(
+            "Discovery paused. Flow state saved.\n"
+            "Resume with: se3 run --resume",
+            title="Paused",
+        )
+        return None
+
+    if user_input is None:
+        persistence.save_flow(flow)
+        render_full(
+            "Discovery paused. Flow state saved.\n"
+            "Resume with: se3 run --resume",
+            title="Paused",
+        )
+        return None
+
+    if not user_input:
+        get_console().print("[yellow]Please provide a response or press Ctrl+C to exit.[/yellow]")
+        return _handle_discovery_programmatic_confirm(flow, current_step, persistence, prompt_history)
 
     return user_input
 

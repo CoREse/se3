@@ -233,6 +233,17 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
     Returns:
         StepStatus.PAUSED while waiting for user, StepStatus.COMPLETED when done
     """
+    # Programmatic confirmation early return: user already confirmed via program gate
+    if step.inputs.get("programmatic_confirmed"):
+        refined_description = step.outputs.get("refined_description", "")
+        step.outputs["discovery_summary"] = _generate_summary(
+            step.inputs.get("discovery_state", {}).get("history", [])
+        )
+        step.outputs["requirements_clarified"] = True
+        step.outputs.pop("awaiting_programmatic_confirm", None)
+        logger.info("Discovery complete - programmatic confirmation received")
+        return StepStatus.COMPLETED
+
     # Get or initialize discovery state
     discovery_state = step.inputs.get("discovery_state", {})
     round_number = discovery_state.get("round", 0)
@@ -332,21 +343,20 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
         )
 
         if mode == "confirmation" and ready_to_proceed and refined_description and not questions and has_user_interaction:
-            # Discovery complete - user has confirmed and no remaining questions
+            # LLM confirmed — pause for programmatic user confirmation gate
             step.outputs["refined_description"] = refined_description
-            step.outputs["discovery_summary"] = _generate_summary(conversation_history)
-            step.outputs["requirements_clarified"] = True
-            logger.info("Discovery complete - user confirmed refined description")
+            step.outputs["awaiting_programmatic_confirm"] = True
+            logger.info("Discovery LLM confirmed — awaiting programmatic user confirmation")
 
-            # Show final confirmation to user
+            # Show the confirmed description and inform user that program will ask for confirmation
             _display_discovery_message(
-                "✅ Discovery complete! Here's the confirmed task description:",
+                "Discovery analysis complete. Here's the confirmed task description:",
                 refined_description,
                 questions=None,
                 is_confirmation=True,
             )
 
-            return StepStatus.COMPLETED
+            return StepStatus.PAUSED
 
         elif (mode == "synthesis" and refined_description and not questions) or \
              (mode == "confirmation" and refined_description and not has_user_interaction):

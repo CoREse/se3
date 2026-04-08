@@ -92,7 +92,8 @@ se3 run --discover "我想做一个用户管理功能"
 2. **对话迭代**: 用户回答后，AI 继续追问或转向综合
 3. **综合确认**: AI 总结理解并生成精炼的任务描述
 4. **用户确认**: 用户确认或要求修改
-5. **进入分析**: 确认后使用精炼描述继续 `analyze` 步骤
+5. **程序化确认门控**: LLM 确认后，程序向用户展示编号选项，要求人工明确选择才能继续
+6. **进入分析**: 人工确认后使用精炼描述继续 `analyze` 步骤
 
 **状态管理：**
 - 对话历史保存在 `discovery_state` 中
@@ -102,7 +103,18 @@ se3 run --discover "我想做一个用户管理功能"
 **LLM 调用模式：**
 - `question` 模式: 向用户提出具体问题
 - `synthesis` 模式: 总结理解并生成精炼描述
-- `confirmation` 模式: 用户确认后完成 discovery
+- `confirmation` 模式: 用户确认后暂停等待程序化确认门控
+
+**程序化确认门控：**
+
+当 LLM 的 `confirmation` 模式判定需求已明确并生成精炼描述后，discovery 步骤不直接完成，而是返回 `PAUSED` 状态并设置 `awaiting_programmatic_confirm=True`。程序运行循环检测到此标志后，向用户展示编号选项：
+
+1. **确认并继续** — 进入实现规划阶段
+2. **还有问题** — 继续 discovery 对话
+
+只有用户明确选择选项 1 时，流程才会继续。选择选项 2 将清除确认标志并重新进入 discovery 对话，用户可以提供额外的问题或反馈。
+
+这确保了 LLM 的确认判断不会单方面推进流程，人工始终拥有最终决定权。
 
 #### Scenario: 需求探索对话
 - **GIVEN** 用户执行 `se3 run --discover "我想做一个用户相关功能"`
@@ -122,8 +134,24 @@ se3 run --discover "我想做一个用户管理功能"
 - **THEN** 恢复到 discovery 步骤
 - **AND** 继续第 3 轮对话
 
+#### Scenario: 程序化确认门控 — 用户确认继续
+- **GIVEN** LLM 在 confirmation 模式下判定需求已明确
+- **AND** discovery 步骤返回 PAUSED 且 `awaiting_programmatic_confirm=True`
+- **WHEN** 程序向用户展示编号选项且用户选择"确认并继续"
+- **THEN** 设置 `programmatic_confirmed=True` 到步骤输入
+- **AND** 重新执行 discovery handler，handler 检测到此标志后直接完成步骤
+- **AND** 生成 `discovery_summary` 并设置 `requirements_clarified=True`
+
+#### Scenario: 程序化确认门控 — 用户继续探索
+- **GIVEN** LLM 在 confirmation 模式下判定需求已明确
+- **AND** discovery 步骤返回 PAUSED 且 `awaiting_programmatic_confirm=True`
+- **WHEN** 程序向用户展示编号选项且用户选择"还有问题"
+- **THEN** 清除 `awaiting_programmatic_confirm` 标志
+- **AND** 提示用户输入问题或反馈
+- **AND** 将用户输入作为新的 discovery 轮次继续对话
+
 #### Scenario: Discovery 输出传递
-- **GIVEN** discovery 步骤完成且用户已确认
+- **GIVEN** discovery 步骤完成且用户已通过程序化确认门控确认
 - **WHEN** 流程进入 `analyze` 步骤
 - **THEN** `refined_description` 自动作为 `task_description` 传递给 analyze
 

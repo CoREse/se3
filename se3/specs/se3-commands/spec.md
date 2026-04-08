@@ -72,7 +72,10 @@ se3 run --discover "I want to build..."
 - **WHEN** user executes `se3 run --discover "Idea"`
 - **THEN** the flow engine starts in discovery mode
 - **AND** explores requirements through multi-turn conversation
-- **AND** proceeds to analyze after user confirmation
+- **AND** after LLM confirms requirements are clear, presents a numbered choice to the user:
+  1. Confirm and proceed to implementation planning
+  2. Continue discovery with more questions
+- **AND** only proceeds to analyze when the user explicitly selects option 1
 
 ### Requirement: `se3 init` Command
 
