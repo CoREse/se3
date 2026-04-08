@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import pytest
+from pathlib import Path
+from unittest.mock import Mock, patch
 
+from se3.engine.models import FlowInstance, Step, StepStatus, StepType, FlowStatus
 from se3.engine.steps.update_spec import (
     _format_spec_changes,
     _format_design_doc,
+    update_spec_handler,
     UPDATE_SPEC_PROMPT,
 )
 
@@ -173,3 +177,104 @@ class TestUpdateSpecPromptPlaceholders:
         )
         assert "[add_requirement] spec-a" in rendered
         assert "### Overview" in rendered
+
+
+class TestUpdateSpecHandlerIntegration:
+    """Test that update_spec_handler reads spec_changes/design_doc from inputs and injects into prompt."""
+
+    @pytest.fixture
+    def flow(self, tmp_path):
+        flow = FlowInstance(
+            flow_id="test-flow-us",
+            task_description="Add feature",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+            change_path=tmp_path / "changes" / "test",
+        )
+        flow.state.selected_steps = [StepType.UPDATE_SPEC]
+        return flow
+
+    def _make_step(self, spec_changes=None, design_doc=None):
+        inputs = {
+            "task_description": "Add feature",
+            "changes_made": {"files_changed": ["src/foo.py"]},
+            "verification_result": {"verified": True, "summary": "OK"},
+        }
+        if spec_changes is not None:
+            inputs["spec_changes"] = spec_changes
+        if design_doc is not None:
+            inputs["design_doc"] = design_doc
+        return Step(
+            step_type=StepType.UPDATE_SPEC,
+            status=StepStatus.PENDING,
+            inputs=inputs,
+        )
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.context_builder.get_step_language_instruction", return_value="")
+    def test_handler_injects_spec_changes_into_prompt(self, _lang, _inj, flow):
+        step = self._make_step(
+            spec_changes=[
+                {
+                    "spec_name": "flow-engine",
+                    "change_type": "add_requirement",
+                    "target": "Requirement: New Output",
+                    "description": "Add spec_changes output",
+                    "rationale": "For downstream guidance",
+                }
+            ],
+        )
+
+        with patch("se3.engine.steps.update_spec.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = '{"specs_updated": [], "new_capabilities": []}'
+            mock_cls.return_value = mock_caller
+
+            result = update_spec_handler(step, flow)
+
+            prompt = mock_caller.call.call_args[1]["prompt"]
+            assert "[add_requirement] flow-engine: Requirement: New Output" in prompt
+            assert "Description: Add spec_changes output" in prompt
+            assert "Rationale: For downstream guidance" in prompt
+            assert result == StepStatus.COMPLETED
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.context_builder.get_step_language_instruction", return_value="")
+    def test_handler_injects_design_doc_into_prompt(self, _lang, _inj, flow):
+        step = self._make_step(
+            design_doc={
+                "overview": "Refactor the data flow pipeline",
+                "components": [{"component": "plan.py", "responsibilities": "Generate changes"}],
+                "architecture_decisions": [{"decision": "Use intent, not diff", "rationale": "Too early for diffs"}],
+            },
+        )
+
+        with patch("se3.engine.steps.update_spec.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = '{"specs_updated": [], "new_capabilities": []}'
+            mock_cls.return_value = mock_caller
+
+            update_spec_handler(step, flow)
+
+            prompt = mock_caller.call.call_args[1]["prompt"]
+            assert "Refactor the data flow pipeline" in prompt
+            assert "**plan.py**" in prompt
+            assert "**Use intent, not diff**" in prompt
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.context_builder.get_step_language_instruction", return_value="")
+    def test_handler_defaults_when_no_spec_changes_or_design_doc(self, _lang, _inj, flow):
+        """When inputs omit spec_changes and design_doc, prompt uses default messages."""
+        step = self._make_step()  # No spec_changes or design_doc
+
+        with patch("se3.engine.steps.update_spec.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = '{"specs_updated": [], "new_capabilities": []}'
+            mock_cls.return_value = mock_caller
+
+            result = update_spec_handler(step, flow)
+
+            prompt = mock_caller.call.call_args[1]["prompt"]
+            assert "No specific spec changes planned." in prompt
+            assert "No design document available." in prompt
+            assert result == StepStatus.COMPLETED
