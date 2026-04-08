@@ -176,6 +176,104 @@ class TestExtractAssistantText:
         assert '"task_type"' in result
         assert '"feature"' in result
 
+    def test_edit_tool_use_semantic_preview(self):
+        """Edit tool_use should show file path and diff info, not generic format."""
+        ndjson = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Applying fix"},
+                    {
+                        "type": "tool_use",
+                        "id": "tu-edit-1",
+                        "name": "Edit",
+                        "input": {
+                            "file_path": "src/app.py",
+                            "old_string": "x = 1",
+                            "new_string": "x = 2\ny = 3",
+                        },
+                    },
+                ]
+            }
+        })
+        result = extract_assistant_text(ndjson)
+        assert "Applying fix" in result
+        assert "[Edit:" in result
+        assert "src/app.py" in result
+
+    def test_edit_tool_result_semantic_preview(self):
+        """Edit tool_result should use per-tool formatter via id→name mapping."""
+        tool_use_line = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-edit-2",
+                    "name": "Edit",
+                    "input": {"file_path": "a.py", "old_string": "a", "new_string": "b"},
+                }]
+            }
+        })
+        result_line = json.dumps({
+            "type": "tool_result",
+            "result": {
+                "toolUseId": "tu-edit-2",
+                "content": "\u2713 edited a.py",
+                "isError": False,
+            }
+        })
+        ndjson = tool_use_line + "\n" + result_line
+        result = extract_assistant_text(ndjson)
+        assert "[Edit" in result
+        assert "\u2713" in result
+
+    def test_write_tool_use_semantic_preview(self):
+        """Write tool_use should show file path and line count."""
+        ndjson = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-write-1",
+                    "name": "Write",
+                    "input": {
+                        "file_path": "new_file.py",
+                        "content": "line1\nline2\nline3",
+                    },
+                }]
+            }
+        })
+        result = extract_assistant_text(ndjson)
+        assert "[Write:" in result
+        assert "new_file.py" in result
+        assert "3 lines" in result
+
+    def test_write_tool_result_semantic_preview(self):
+        """Write tool_result should use per-tool formatter."""
+        tool_use_line = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-write-2",
+                    "name": "Write",
+                    "input": {"file_path": "out.py", "content": "x"},
+                }]
+            }
+        })
+        result_line = json.dumps({
+            "type": "tool_result",
+            "result": {
+                "toolUseId": "tu-write-2",
+                "content": "Created out.py",
+                "isError": False,
+            }
+        })
+        ndjson = tool_use_line + "\n" + result_line
+        result = extract_assistant_text(ndjson)
+        assert "[Write" in result
+        assert "\u2713" in result
+
 
 # --- Record and retrieve ---
 
@@ -412,3 +510,83 @@ class TestRenderSessionText:
         # Per-tool formatter: "[Read: foo.py]"
         assert "Read:" in text
         assert "foo.py" in text
+
+    def test_render_edit_tool_semantic_preview(self):
+        """Edit tool in history should show file path and diff info."""
+        ndjson_dict = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Fixing the bug"},
+                    {
+                        "type": "tool_use",
+                        "id": "tu-e1",
+                        "name": "Edit",
+                        "input": {
+                            "file_path": "src/handler.py",
+                            "old_string": "return None",
+                            "new_string": "return result",
+                        },
+                    },
+                ]
+            }
+        }
+        session = ChatSession(
+            flow_id="flow1",
+            step_id="step1",
+            step_type="implement",
+            messages=[
+                ChatMessage(
+                    role="assistant",
+                    content="Fixing the bug",
+                    raw_json=[ndjson_dict],
+                    timestamp="2026-01-01T12:00:00",
+                    step_type="implement",
+                    attempt=0,
+                ),
+            ],
+        )
+        text = render_session_text(session)
+        assert "Fixing the bug" in text
+        assert "Edit:" in text
+        assert "src/handler.py" in text
+
+    def test_render_write_tool_semantic_preview(self):
+        """Write tool in history should show file path and line count."""
+        ndjson_dict = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {"type": "text", "text": "Creating the file"},
+                    {
+                        "type": "tool_use",
+                        "id": "tu-w1",
+                        "name": "Write",
+                        "input": {
+                            "file_path": "tests/test_new.py",
+                            "content": "import pytest\n\ndef test_something():\n    pass\n",
+                        },
+                    },
+                ]
+            }
+        }
+        session = ChatSession(
+            flow_id="flow1",
+            step_id="step1",
+            step_type="implement",
+            messages=[
+                ChatMessage(
+                    role="assistant",
+                    content="Creating the file",
+                    raw_json=[ndjson_dict],
+                    timestamp="2026-01-01T12:00:00",
+                    step_type="implement",
+                    attempt=0,
+                ),
+            ],
+        )
+        text = render_session_text(session)
+        assert "Creating the file" in text
+        assert "Write:" in text
+        assert "tests/test_new.py" in text
+        assert "4 lines" in text

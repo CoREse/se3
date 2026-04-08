@@ -274,15 +274,16 @@ class TestStreamJSONTracker:
         assert tracker.total_text_len == 11
 
     def test_process_tool_use(self, capsys):
-        """Tool use messages should be tracked and formatted."""
+        """Tool use messages should be tracked and formatted with per-tool preview."""
         tracker = StreamJSONTracker()
         line = json.dumps({
             "type": "assistant",
             "message": {
                 "content": [{
                     "type": "tool_use",
+                    "id": "tu-read-1",
                     "name": "Read",
-                    "input": {"path": "test.py"}
+                    "input": {"file_path": "test.py"}
                 }]
             }
         })
@@ -290,24 +291,44 @@ class TestStreamJSONTracker:
         assert tracker.message_count == 1
         assert len(tracker.tool_calls) == 1
         assert tracker.tool_calls[0] == "Read"
+        captured = capsys.readouterr()
+        # Per-tool formatter: "Read: test.py" not "Tool: Read | Input: ..."
+        assert "Read:" in captured.out
+        assert "test.py" in captured.out
 
     def test_process_tool_result_success(self, capsys):
-        """Successful tool results should be tracked."""
+        """Successful tool results should be tracked and use per-tool formatting."""
         tracker = StreamJSONTracker()
-        line = json.dumps({
+        # First, emit a tool_use so the id→name mapping is populated
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tool-123",
+                    "name": "Read",
+                    "input": {"file_path": "test.py"}
+                }]
+            }
+        }))
+        # Now emit the result
+        tracker.process_line(json.dumps({
             "type": "tool_result",
             "result": {
                 "toolUseId": "tool-123",
-                "content": "File content here",
+                "content": "line1\nline2\nline3",
                 "isError": False
             }
-        })
-        tracker.process_line(line)
+        }))
         assert len(tracker.tool_results) == 1
         assert tracker.tool_results[0] == "tool-123"
+        captured = capsys.readouterr()
+        # Per-tool result: "Read ✓ (3 lines)" instead of generic
+        assert "Read" in captured.out
+        assert "3 lines" in captured.out
 
     def test_process_tool_result_error(self, capsys):
-        """Error tool results should be tracked."""
+        """Error tool results should be tracked and show error preview."""
         tracker = StreamJSONTracker()
         line = json.dumps({
             "type": "tool_result",
@@ -319,6 +340,8 @@ class TestStreamJSONTracker:
         })
         tracker.process_line(line)
         assert len(tracker.tool_results) == 1
+        captured = capsys.readouterr()
+        assert "Error message" in captured.out
 
     def test_process_error_message(self, capsys):
         """Error messages should be tracked."""
@@ -390,6 +413,125 @@ class TestStreamJSONTracker:
         tracker.process_line(line)
         captured = capsys.readouterr()
         assert "Tool: Search" in captured.out
+
+    def test_edit_tool_use_shows_file_and_diff_info(self, capsys):
+        """Edit tool_use should show file path and line change counts."""
+        tracker = StreamJSONTracker()
+        line = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-edit-1",
+                    "name": "Edit",
+                    "input": {
+                        "file_path": "src/main.py",
+                        "old_string": "x = 1\ny = 2",
+                        "new_string": "x = 10\ny = 20\nz = 30",
+                    }
+                }]
+            }
+        })
+        tracker.process_line(line)
+        captured = capsys.readouterr()
+        assert "Edit:" in captured.out
+        assert "src/main.py" in captured.out
+        assert "2 lines" in captured.out
+        assert "3 lines" in captured.out
+
+    def test_edit_tool_result_shows_per_tool_format(self, capsys):
+        """Edit tool_result should use per-tool formatter after id→name resolution."""
+        tracker = StreamJSONTracker()
+        # Emit tool_use to establish id→name mapping
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-edit-2",
+                    "name": "Edit",
+                    "input": {"file_path": "a.py", "old_string": "a", "new_string": "b"}
+                }]
+            }
+        }))
+        # Emit result
+        tracker.process_line(json.dumps({
+            "type": "tool_result",
+            "result": {
+                "toolUseId": "tu-edit-2",
+                "content": "✓ edited a.py",
+                "isError": False
+            }
+        }))
+        captured = capsys.readouterr()
+        assert "Edit" in captured.out
+        assert "\u2713" in captured.out
+
+    def test_write_tool_use_shows_file_and_line_count(self, capsys):
+        """Write tool_use should show file path and line count."""
+        tracker = StreamJSONTracker()
+        line = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-write-1",
+                    "name": "Write",
+                    "input": {
+                        "file_path": "output.py",
+                        "content": "line1\nline2\nline3\nline4",
+                    }
+                }]
+            }
+        })
+        tracker.process_line(line)
+        captured = capsys.readouterr()
+        assert "Write:" in captured.out
+        assert "output.py" in captured.out
+        assert "4 lines" in captured.out
+
+    def test_write_tool_result_shows_per_tool_format(self, capsys):
+        """Write tool_result should use per-tool formatter."""
+        tracker = StreamJSONTracker()
+        # Emit tool_use first
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-write-2",
+                    "name": "Write",
+                    "input": {"file_path": "out.py", "content": "x"}
+                }]
+            }
+        }))
+        # Emit result
+        tracker.process_line(json.dumps({
+            "type": "tool_result",
+            "result": {
+                "toolUseId": "tu-write-2",
+                "content": "Created out.py",
+                "isError": False
+            }
+        }))
+        captured = capsys.readouterr()
+        assert "Write" in captured.out
+        assert "\u2713" in captured.out
+
+    def test_tool_result_without_prior_use_falls_back(self, capsys):
+        """Tool result without prior tool_use should use generic formatter."""
+        tracker = StreamJSONTracker()
+        tracker.process_line(json.dumps({
+            "type": "tool_result",
+            "result": {
+                "toolUseId": "orphan-id",
+                "content": "some result text",
+                "isError": False
+            }
+        }))
+        captured = capsys.readouterr()
+        # Without id→name mapping, falls back to generic "Result: ..."
+        assert "Result:" in captured.out
 
 
 class TestExtractTextFromNDJSON:
