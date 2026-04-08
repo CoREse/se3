@@ -326,6 +326,11 @@ class LLMCaller:
         self.external_attempt = external_attempt  # Track external retry (e.g., from implement.py)
         self.retry_mode = retry_mode  # 'continue' (resume from breakpoint) or 'retry' (restart)
 
+        # Last raw result text from `type: "result"` NDJSON message.
+        # Available after call() returns, for callers that need the full
+        # LLM output text (not just the parsed JSON).
+        self.last_raw_result: Optional[str] = None
+
         # Agent management
         if agents is not None:
             self._agents = agents
@@ -864,6 +869,10 @@ class LLMCaller:
                 # Record the response (whether success, failure, or interrupted)
                 self._record_response(result.output or "", self.external_attempt)
 
+                # Extract the type: "result" message's text for callers that
+                # need the full LLM output (e.g. discovery multi-turn context)
+                self.last_raw_result = self._extract_result_text(result.output or "")
+
                 # If interrupted by Ctrl+C, re-raise after saving partial output
                 if isinstance(getattr(result, 'interrupted', False), bool) and result.interrupted:
                     logger.info("LLM call interrupted by user, partial output saved to history")
@@ -977,6 +986,35 @@ class LLMCaller:
             return None
 
         return ''.join(text_parts)
+
+    @staticmethod
+    def _extract_result_text(raw_ndjson: str) -> Optional[str]:
+        """Extract the result text from a type: "result" NDJSON message.
+
+        This is the LLM's complete final output text — the synthesized
+        conclusion after all tool calls and reasoning.
+
+        Args:
+            raw_ndjson: Raw NDJSON output string from Claude CLI.
+
+        Returns:
+            The result text, or None if no result message found.
+        """
+        if not raw_ndjson:
+            return None
+        for line in raw_ndjson.strip().split('\n'):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, dict) and data.get('type') == 'result':
+                result_text = data.get('result')
+                if result_text:
+                    return result_text
+        return None
 
     @staticmethod
     def _contains_valid_json(output: str) -> bool:

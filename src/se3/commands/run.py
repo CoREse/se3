@@ -393,7 +393,9 @@ def _restore_discovery_display(current_step: Any) -> None:
             break
 
     if last_assistant:
-        content = last_assistant.get("content", "")
+        # Use step.outputs["message"] for display (clean parsed content),
+        # NOT history content (which is the full raw LLM result text for context).
+        content = current_step.outputs.get("message", last_assistant.get("content", ""))
         # Re-display proposed_description if it was set
         proposed = current_step.outputs.get("proposed_description", "")
         questions = current_step.outputs.get("questions", [])
@@ -667,9 +669,13 @@ def _run_flow_impl(
         # Detect and handle resume of a RUNNING or FAILED step
         current_step = flow.state.get_current_step()
         if current_step and current_step.status == StepStatus.RUNNING:
-            # Step was interrupted - prepare for resumption
+            # Step was interrupted - prepare for resumption with context
             current_step.status = StepStatus.PENDING
             current_step.inputs["resumed"] = True
+            # Increment retry_count so LLMCaller picks up conversation history
+            # from the interrupted run via _get_retry_context()
+            current_step.inputs["retry_count"] = current_step.inputs.get("retry_count", 0) + 1
+            current_step.retry_count = 0
             logger.info(f"Resuming interrupted step: {current_step.step_id} ({current_step.step_type.value})")
             persistence.save_flow(flow)
         elif current_step and current_step.status == StepStatus.FAILED:

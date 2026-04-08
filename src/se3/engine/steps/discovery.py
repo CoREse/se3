@@ -270,7 +270,7 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
     try:
         if round_number == 0 and not resumed:
             # Initial discovery round
-            result = _run_discovery_round(
+            result, raw_result_text = _run_discovery_round(
                 project_root=project_root,
                 flow=flow,
                 step=step,
@@ -292,7 +292,7 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
                     "round": round_number,
                 })
 
-            result = _run_discovery_round(
+            result, raw_result_text = _run_discovery_round(
                 project_root=project_root,
                 flow=flow,
                 step=step,
@@ -312,12 +312,13 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
         ready_to_proceed = result.get("ready_to_proceed", False)
         refined_description = result.get("refined_description", "")
 
-        # Add assistant message to history
+        # Store the LLM's full raw result text as context for subsequent rounds,
+        # not just the parsed JSON content field. This preserves the complete
+        # output including analysis, proposals, and conclusions.
         conversation_history.append({
             "role": "assistant",
-            "content": content,
+            "content": raw_result_text,
             "round": round_number,
-            "mode": mode,
         })
 
         # Update discovery state (internal tracking only)
@@ -392,7 +393,7 @@ def _run_discovery_round(
     project_context: str = "",
     specs_info: str = "",
     base_spec_content: str = "",
-) -> Dict[str, Any]:
+) -> tuple[Dict[str, Any], str]:
     """Run a single discovery round with the LLM.
 
     Args:
@@ -409,7 +410,7 @@ def _run_discovery_round(
         base_spec_content: Content of base spec (if available)
 
     Returns:
-        Parsed JSON result from LLM
+        Tuple of (parsed JSON result, raw result text from LLM)
     """
     # Format conversation history for prompt
     history_text = _format_conversation_history(conversation_history)
@@ -455,7 +456,10 @@ def _run_discovery_round(
     if not result:
         raise ValueError("Failed to parse LLM response")
 
-    return result
+    # Get raw result text for context preservation
+    raw_result_text = caller.last_raw_result or response
+
+    return result, raw_result_text
 
 
 def _format_conversation_history(history: List[Dict[str, str]]) -> str:
