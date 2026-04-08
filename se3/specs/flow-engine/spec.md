@@ -179,20 +179,20 @@ se3 run --discover "我想做一个用户管理功能"
 
 流程引擎 SHALL 定义固定的 12 步骤池，所有流程步骤从此池中选取。
 
-| 步骤 | 职责 | LLM 参与 | JSON 模式 | 输入 | 输出 |
-|------|------|---------|-----------|------|------|
-| `discovery` | 需求探索（多轮对话） | 是 | STRICT | initial_description | refined_description, discovery_summary |
-| `analyze` | 分析任务类型和范围 | 是 | STRICT | task_description | task_type, scope, complexity, reasoning |
-| `read_spec` | 读取相关 spec 文件 | 否（程序自动） | - | scope | relevant_specs, spec_content |
-| `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | spec_content, task_description, task_type | plan{proposal,design}, task_groups |
-| `implement` | 编写代码实现 | 是 | TWO_PHASE | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed |
-| `test` | 运行测试验证 | 否（程序执行） | - | - | test_results, tests_passed |
-| `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | implementation, spec_content | verification_result, issues |
-| `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | changes_made | updated_specs |
-| `version_analyze` | 分析变更确定版本类型 | 是 | EXTRACT | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning |
-| `commit` | 提交变更 | 否（程序执行） | - | changes_made, bump_type | commit_hash |
-| `summarize` | 生成总结和 handoff | 是 | 文本 | all_previous_outputs | summary (Markdown 文本) |
-| `project_summary` | 生成项目上下文摘要 | 是 | 文本 | 项目状态 | 摘要字符串 |
+| 步骤 | 职责 | LLM 参与 | JSON 模式 | Read-Only | 输入 | 输出 |
+|------|------|---------|-----------|-----------|------|------|
+| `discovery` | 需求探索（多轮对话） | 是 | STRICT | 否 | initial_description | refined_description, discovery_summary |
+| `analyze` | 分析任务类型和范围 | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning |
+| `read_spec` | 读取相关 spec 文件 | 否（程序自动） | - | **是** | scope | relevant_specs, spec_content |
+| `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type | plan{proposal,design}, task_groups |
+| `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed |
+| `test` | 运行测试验证 | 否（程序执行） | - | 否 | - | test_results, tests_passed |
+| `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | implementation, spec_content | verification_result, issues |
+| `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | 否 | changes_made | updated_specs |
+| `version_analyze` | 分析变更确定版本类型 | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning |
+| `commit` | 提交变更 | 否（程序执行） | - | 否 | changes_made, bump_type | commit_hash |
+| `summarize` | 生成总结和 handoff | 是 | 文本 | **是** | all_previous_outputs | summary (Markdown 文本) |
+| `project_summary` | 生成项目上下文摘要 | 是 | 文本 | **是** | 项目状态 | 摘要字符串 |
 
 **不同任务类型的步骤序列：**
 - `discovery`: discovery → analyze → read_spec → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
@@ -253,6 +253,48 @@ The step type enum SHALL retain deprecated values `PROPOSE`, `DESIGN`, and `PLAN
 - **WHEN** 步骤内的 LLM 调用失败（超时、API 错误、输出无效）
 - **THEN** 流程引擎执行重试策略（最多 3 次）
 - **AND** 如果重试仍失败，暂停流程并通知用户
+
+### Requirement: Read-Only Step Constraint Injection
+
+The flow engine SHALL enforce a prompt-level file modification prohibition for read-only steps, preventing the LLM from accidentally modifying code during analysis-only steps.
+
+**Read-Only Step Attribute:**
+
+Each entry in the step pool (`STEP_POOL`) SHALL include a `read_only` boolean attribute. Steps marked `read_only: true` are:
+- `analyze`, `project_summary`, `read_spec`, `plan`, `verify_spec`, `version_analyze`, `summarize`
+
+Steps explicitly marked `read_only: false`:
+- `discovery`, `implement`, `test`, `update_spec`, `commit`, `confirm`
+- Deprecated steps (`propose`, `design`, `plan_tasks`)
+
+**Injection Mechanism:**
+
+1. `context_builder.get_read_only_injection(step_type)` queries STEP_POOL by step name to determine if the step is read-only. If so, it returns a constraint prompt; otherwise returns an empty string.
+2. `LLMCaller.call()` invokes `get_read_only_injection()` after user extra_prompt injection but before mode dispatch. The constraint is appended to the prompt for all JSON modes (STRICT, EXTRACT, TWO_PHASE, OFF).
+
+**Constraint Prompt Content:**
+
+The injected prompt SHALL:
+- Explicitly forbid use of Write, Edit, NotebookEdit tools
+- Explicitly forbid creating new files
+- Explicitly forbid shell commands that modify files (sed, awk, tee, redirects)
+- Explicitly allow Read, Grep, Glob, and read-only Bash commands
+- State that the step's purpose is analysis and reasoning only
+
+#### Scenario: Read-only step receives constraint injection
+- **WHEN** LLMCaller executes a step marked `read_only: true` (e.g., `analyze`, `plan`)
+- **THEN** the read-only constraint prompt is appended to the LLM prompt
+- **AND** the constraint forbids all file modification tools and commands
+
+#### Scenario: Non-read-only step receives no constraint
+- **WHEN** LLMCaller executes a step marked `read_only: false` (e.g., `implement`, `update_spec`)
+- **THEN** no read-only constraint is injected
+- **AND** the LLM can freely modify files
+
+#### Scenario: Discovery step is not read-only
+- **WHEN** LLMCaller executes the `discovery` step
+- **THEN** no read-only constraint is injected
+- **AND** the discovery step can use file modification tools if needed
 
 ### Requirement: JSON 提取模式
 

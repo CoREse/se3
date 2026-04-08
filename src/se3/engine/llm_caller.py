@@ -448,6 +448,13 @@ class LLMCaller:
         if injected_parts:
             prompt = f"{prompt}\n\n[Additional user instruction]: {chr(10).join(injected_parts)}"
 
+        # Inject read-only constraint for read-only steps
+        from .context_builder import get_read_only_injection
+        read_only_constraint = get_read_only_injection(self.step_type)
+        if read_only_constraint:
+            prompt = f"{prompt}{read_only_constraint}"
+            logger.debug(f"Injected read-only constraint for step '{self.step_type}'")
+
         # Dispatch to appropriate handler based on mode
         if mode == "two_phase":
             return self._call_two_phase(

@@ -114,6 +114,49 @@ def get_issue_discovery_injection(step_type: str, project_root: Path) -> str:
     return ISSUE_DISCOVERY_PROMPT
 
 
+def get_read_only_injection(step_type: str) -> str:
+    """Get read-only constraint prompt injection for a step.
+
+    Queries STEP_POOL to check if the given step_type is marked as read_only.
+    If so, returns a prompt constraint forbidding file modifications.
+
+    Args:
+        step_type: Current step type name (e.g., "analyze", "implement")
+
+    Returns:
+        Read-only constraint prompt string, or empty string if step is not read-only.
+    """
+    from .models import STEP_POOL
+
+    # Find matching step in STEP_POOL by name
+    is_read_only = False
+    for _st, info in STEP_POOL.items():
+        if info.get("name") == step_type:
+            is_read_only = info.get("read_only", False)
+            break
+
+    if not is_read_only:
+        return ""
+
+    return (
+        "\n\n## READ-ONLY STEP CONSTRAINT\n"
+        "**CRITICAL: This is a read-only analysis step. You MUST NOT modify any files.**\n\n"
+        "Forbidden actions:\n"
+        "- Do NOT use the Write tool to create or overwrite any files\n"
+        "- Do NOT use the Edit tool to modify any files\n"
+        "- Do NOT use the NotebookEdit tool\n"
+        "- Do NOT create new files of any kind\n"
+        "- Do NOT run shell commands that modify files (e.g., sed, awk, tee, redirects with >)\n\n"
+        "Allowed actions:\n"
+        "- Use Read to read file contents\n"
+        "- Use Grep to search file contents\n"
+        "- Use Glob to find files by pattern\n"
+        "- Use Bash for read-only commands (e.g., git log, git diff, ls, cat)\n\n"
+        "Your sole purpose in this step is analysis and reasoning. "
+        "Output your findings as structured data only."
+    )
+
+
 def get_runtime_context_injection(project_root: Path, main_repo_root: Path | None = None) -> str:
     """Get runtime directory structure context for LLM.
 
