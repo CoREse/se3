@@ -1,0 +1,175 @@
+"""Tests for the update_spec step handler — spec_changes and design_doc integration."""
+
+from __future__ import annotations
+
+import pytest
+
+from se3.engine.steps.update_spec import (
+    _format_spec_changes,
+    _format_design_doc,
+    UPDATE_SPEC_PROMPT,
+)
+
+
+class TestFormatSpecChanges:
+    """Tests for _format_spec_changes helper."""
+
+    def test_empty_list_returns_default(self):
+        assert _format_spec_changes([]) == "No specific spec changes planned."
+
+    def test_none_like_empty(self):
+        """Falsy input returns default message."""
+        assert _format_spec_changes(None) == "No specific spec changes planned."
+
+    def test_single_change(self):
+        changes = [
+            {
+                "spec_name": "flow-engine",
+                "change_type": "add_requirement",
+                "target": "Requirement: Plan spec_changes Output",
+                "description": "New output field",
+                "rationale": "Guidance for downstream steps",
+            }
+        ]
+        result = _format_spec_changes(changes)
+        assert "[add_requirement] flow-engine: Requirement: Plan spec_changes Output" in result
+        assert "Description: New output field" in result
+        assert "Rationale: Guidance for downstream steps" in result
+
+    def test_multiple_changes(self):
+        changes = [
+            {"spec_name": "spec-a", "change_type": "modify_requirement", "target": "Req A"},
+            {"spec_name": "spec-b", "change_type": "add_scenario", "target": "Scenario B"},
+        ]
+        result = _format_spec_changes(changes)
+        assert "[modify_requirement] spec-a" in result
+        assert "[add_scenario] spec-b" in result
+
+    def test_missing_optional_fields(self):
+        """description and rationale are optional."""
+        changes = [
+            {"spec_name": "s", "change_type": "deprecate_requirement", "target": "Old Req"}
+        ]
+        result = _format_spec_changes(changes)
+        assert "[deprecate_requirement] s: Old Req" in result
+        assert "Description:" not in result
+        assert "Rationale:" not in result
+
+    def test_missing_required_fields_uses_defaults(self):
+        """Missing spec_name/change_type/target use 'unknown'/empty."""
+        changes = [{}]
+        result = _format_spec_changes(changes)
+        assert "[unknown] unknown:" in result
+
+
+class TestFormatDesignDoc:
+    """Tests for _format_design_doc helper."""
+
+    def test_empty_dict_returns_default(self):
+        assert _format_design_doc({}) == "No design document available."
+
+    def test_none_returns_default(self):
+        assert _format_design_doc(None) == "No design document available."
+
+    def test_overview_only(self):
+        doc = {"overview": "High-level summary of the design."}
+        result = _format_design_doc(doc)
+        assert "### Overview" in result
+        assert "High-level summary of the design." in result
+
+    def test_components(self):
+        doc = {
+            "components": [
+                {"component": "plan.py", "responsibilities": "Generate spec_changes"},
+                {"component": "state_machine.py", "responsibilities": "Forward inputs"},
+            ]
+        }
+        result = _format_design_doc(doc)
+        assert "### Components" in result
+        assert "**plan.py**" in result
+        assert "**state_machine.py**" in result
+
+    def test_components_with_name_key(self):
+        """Components may use 'name' instead of 'component'."""
+        doc = {"components": [{"name": "MyComponent", "description": "Does things"}]}
+        result = _format_design_doc(doc)
+        assert "**MyComponent**: Does things" in result
+
+    def test_architecture_decisions(self):
+        doc = {
+            "architecture_decisions": [
+                {
+                    "decision": "Use intent declarations, not diffs",
+                    "rationale": "Plan stage is too early for precise diffs",
+                }
+            ]
+        }
+        result = _format_design_doc(doc)
+        assert "### Architecture Decisions" in result
+        assert "**Use intent declarations, not diffs**" in result
+        assert "Rationale: Plan stage is too early for precise diffs" in result
+
+    def test_full_design_doc(self):
+        doc = {
+            "overview": "Refactor data flow.",
+            "components": [{"component": "A", "responsibilities": "Do A"}],
+            "architecture_decisions": [{"decision": "D1", "rationale": "R1"}],
+        }
+        result = _format_design_doc(doc)
+        assert "### Overview" in result
+        assert "### Components" in result
+        assert "### Architecture Decisions" in result
+
+    def test_empty_subsections_returns_default(self):
+        """Dict with only empty/missing subsections returns default."""
+        doc = {"overview": "", "components": [], "architecture_decisions": []}
+        assert _format_design_doc(doc) == "No design document available."
+
+
+class TestUpdateSpecPromptPlaceholders:
+    """Verify prompt contains the expected placeholders."""
+
+    def test_spec_changes_placeholder(self):
+        assert "{spec_changes}" in UPDATE_SPEC_PROMPT
+
+    def test_design_doc_placeholder(self):
+        assert "{design_doc}" in UPDATE_SPEC_PROMPT
+
+    def test_guided_mode_instructions(self):
+        assert "Spec Change Guidance" in UPDATE_SPEC_PROMPT
+        assert "checklist" in UPDATE_SPEC_PROMPT
+
+    def test_inference_fallback_instructions(self):
+        assert "inference mode" in UPDATE_SPEC_PROMPT
+
+    def test_existing_placeholders_preserved(self):
+        assert "{task_description}" in UPDATE_SPEC_PROMPT
+        assert "{changes_made}" in UPDATE_SPEC_PROMPT
+        assert "{verification_result}" in UPDATE_SPEC_PROMPT
+        assert "{specs_dir}" in UPDATE_SPEC_PROMPT
+
+    def test_prompt_renders_with_empty_inputs(self):
+        """Prompt renders without error when spec_changes and design_doc are empty defaults."""
+        rendered = UPDATE_SPEC_PROMPT.format(
+            task_description="Test task",
+            changes_made="No changes",
+            verification_result="No verification",
+            spec_changes="No specific spec changes planned.",
+            design_doc="No design document available.",
+            specs_dir="/tmp/specs",
+        )
+        assert "No specific spec changes planned." in rendered
+        assert "No design document available." in rendered
+
+    def test_prompt_renders_with_real_inputs(self):
+        """Prompt renders with actual spec_changes and design_doc content."""
+        rendered = UPDATE_SPEC_PROMPT.format(
+            task_description="Add feature X",
+            changes_made="- modified: src/foo.py",
+            verification_result="Verified: true",
+            spec_changes="- [add_requirement] spec-a: New Req",
+            design_doc="### Overview\nRefactor data flow.",
+            specs_dir="/project/se3/specs",
+        )
+        assert "[add_requirement] spec-a" in rendered
+        assert "### Overview" in rendered

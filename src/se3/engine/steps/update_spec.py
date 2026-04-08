@@ -28,15 +28,23 @@ UPDATE_SPEC_PROMPT = """You are an expert technical writer. Update the project s
 ## Verification Results
 {verification_result}
 
+## Spec Change Guidance
+{spec_changes}
+
+## Design Context
+{design_doc}
+
 ## Specs Directory
 {specs_dir}
 
 ## Instructions
 1. Read the relevant spec files in the specs directory using the Read tool.
-2. Determine which specs need updating to reflect the changes made.
-3. Use the Edit tool to directly modify the spec files. Follow existing formatting conventions.
-4. Only update specs that genuinely need changes — do not rewrite specs unnecessarily.
-5. Follow spec guardrails: do NOT delete existing requirements, only add or modify.
+2. If Spec Change Guidance is provided above, use it as your primary checklist for updates — execute each declared change intent (add, modify, deprecate) in the corresponding spec files. This is your guided mode.
+3. If no Spec Change Guidance is available, determine which specs need updating by analyzing the changes made and verification results. This is the inference mode.
+4. Use the Edit tool to directly modify the spec files. Follow existing formatting conventions.
+5. Only update specs that genuinely need changes — do not rewrite specs unnecessarily.
+6. Follow spec guardrails: do NOT delete existing requirements, only add or modify.
+7. If Design Context is provided, use it to understand the architectural rationale behind changes — this helps produce more accurate and well-motivated spec updates.
 
 When you are done, output a JSON summary:
 ```json
@@ -71,6 +79,8 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     task_description = step.inputs.get("task_description", "")
     changes_made = step.inputs.get("changes_made", {})
     verification_result = step.inputs.get("verification_result", {})
+    spec_changes = step.inputs.get("spec_changes", [])
+    design_doc = step.inputs.get("design_doc", {})
 
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
 
@@ -82,12 +92,16 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Format inputs
     changes_text = _format_changes(changes_made)
     verification_text = _format_verification(verification_result)
+    spec_changes_text = _format_spec_changes(spec_changes)
+    design_doc_text = _format_design_doc(design_doc)
 
     # Build prompt
     prompt = UPDATE_SPEC_PROMPT.format(
         task_description=task_description,
         changes_made=changes_text,
         verification_result=verification_text,
+        spec_changes=spec_changes_text,
+        design_doc=design_doc_text,
         specs_dir=specs_dir,
     )
 
@@ -139,6 +153,60 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.exception("Update spec step failed")
         step.error_message = f"Spec update failed: {str(e)}"
         return StepStatus.FAILED
+
+
+def _format_spec_changes(spec_changes: list[dict[str, Any]]) -> str:
+    """Format spec_changes list into readable text for the prompt."""
+    if not spec_changes:
+        return "No specific spec changes planned."
+
+    lines = []
+    for change in spec_changes:
+        spec_name = change.get("spec_name", "unknown")
+        change_type = change.get("change_type", "unknown")
+        target = change.get("target", "")
+        description = change.get("description", "")
+        rationale = change.get("rationale", "")
+
+        lines.append(f"- [{change_type}] {spec_name}: {target}")
+        if description:
+            lines.append(f"  Description: {description}")
+        if rationale:
+            lines.append(f"  Rationale: {rationale}")
+
+    return "\n".join(lines)
+
+
+def _format_design_doc(design_doc: dict[str, Any]) -> str:
+    """Format design_doc dict into readable text for the prompt."""
+    if not design_doc:
+        return "No design document available."
+
+    lines = []
+
+    overview = design_doc.get("overview", "")
+    if overview:
+        lines.append(f"### Overview\n{overview}")
+
+    components = design_doc.get("components", [])
+    if components:
+        lines.append("\n### Components")
+        for comp in components:
+            name = comp.get("component", comp.get("name", "unknown"))
+            resp = comp.get("responsibilities", comp.get("description", ""))
+            lines.append(f"- **{name}**: {resp}")
+
+    decisions = design_doc.get("architecture_decisions", [])
+    if decisions:
+        lines.append("\n### Architecture Decisions")
+        for dec in decisions:
+            decision = dec.get("decision", "")
+            rationale = dec.get("rationale", "")
+            lines.append(f"- **{decision}**")
+            if rationale:
+                lines.append(f"  Rationale: {rationale}")
+
+    return "\n".join(lines) if lines else "No design document available."
 
 
 def _format_changes(changes_made: dict[str, Any]) -> str:
