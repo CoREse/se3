@@ -1,0 +1,11 @@
+id: '056'
+title: Diff 输出缺少逐行行号
+description: render_diff() 当前只显示 +/- 前缀的 diff 行，没有显示文件中的实际行号。Claude Code 的 diff 展示包含行号，这对定位变更位置很有帮助。
+status: open
+priority: low
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-09T14:06:02.837280'
+updated_at: '2026-04-09T14:06:02.837280'

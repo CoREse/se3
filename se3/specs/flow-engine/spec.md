@@ -202,18 +202,20 @@ se3 run --discover "我想做一个用户管理功能"
 | `test` | 运行测试验证 | 否（程序执行） | - | 否 | - | test_results, tests_passed |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, fix_needed, fix_instructions, fix_context |
 | `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | 否 | changes_made, verification_result, spec_changes, design_doc | updated_specs |
-| `version_analyze` | 分析变更确定版本类型 | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning |
+| `version_analyze` | 分析变更确定版本类型 + 生成 commit message | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning, commit_message |
 | `commit` | 提交变更 | 否（程序执行） | - | 否 | changes_made, bump_type | commit_hash |
 | `summarize` | 生成总结和 handoff | 是 | 文本 | **是** | all_previous_outputs | summary (Markdown 文本) |
 | ~~`project_summary`~~ | ~~生成项目上下文摘要~~ (deprecated — merged into analyze) | 是 | 文本 | **是** | 项目状态 | 摘要字符串 |
 
 **不同任务类型的步骤序列：**
-- `discovery`: discovery → analyze → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
-- `feature`: analyze → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
-- `bugfix`: analyze → plan → implement → test → verify_spec → **version_analyze** → commit → summarize
-- `review`: analyze → verify_spec → summarize
-- `small`: analyze → implement → test → **version_analyze** → commit → summarize
-- `directive`: analyze → plan → implement → **version_analyze** → commit → summarize
+- `discovery`: discovery → analyze → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit
+- `feature`: analyze → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit
+- `bugfix`: analyze → plan → implement → test → verify_spec → **version_analyze** → commit
+- `review`: analyze → verify_spec
+- `small`: analyze → implement → test → **version_analyze** → commit
+- `directive`: analyze → plan → implement → **version_analyze** → commit
+
+**Note:** The `summarize` step is not in any default sequence. It remains available in the step pool and can be added via `se3.yaml` configuration. When `summarize` is not in the sequence, the `commit` step generates a template-based summary document (`se3/state/summary-{flow_id}.md`) using structured data from the flow state.
 
 #### Scenario: Feature 任务完整流程
 - **WHEN** 任务类型为 `feature`
@@ -496,8 +498,8 @@ The injected prompt SHALL:
 - `implement` 接收 `design_doc`（从 plan.design 映射）、`task_groups`、`spec_content`（从 analyze）、`project_summary`（从 analyze）
 - `verify_spec` 接收 `changes_made`、`spec_content`（从 analyze）、`test_results`、`fix_iteration`、`spec_changes`（从 plan 步骤传递，用于区分有意变更与回归）和 `relevant_specs`（从 analyze）
 - `update_spec` 接收 `changes_made`、`verification_result`、`spec_changes`（从 plan 步骤传递，作为变更指引清单）和 `design_doc`（从 plan.design 映射，提供架构上下文）
-- `commit` 接收 `changes_made`
-- `summarize` 接收所有前序输出
+- `commit` 接收 `changes_made`、`commit_message`（from version_analyze）、`bump_type`（from version_analyze）
+- `summarize` 接收所有前序输出（when included in step sequence）
 
 #### Scenario: 步骤输入自动构建
 - **WHEN** 流程转换到新步骤
@@ -522,9 +524,17 @@ The injected prompt SHALL:
   "bump_type": "major|minor|patch|none",
   "reasoning": "基于 SemVer 2.0.0 的详细解释",
   "confidence": "high|medium|low",
-  "suggested_version": "X.Y.Z"
+  "suggested_version": "X.Y.Z",
+  "commit_message": "Concise imperative commit summary (max 72 chars)"
 }
 ```
+
+**commit_message 生成规则：**
+- 使用祈使语气（如 "Add feature" 而非 "Added feature"）
+- 以动词开头，描述实际完成的工作
+- 最多 72 字符
+- 不包含任务类型前缀（如 "feat:" 或 "fix:"）——前缀由 commit 步骤自动添加
+- 当 version_analyze 未能提供 commit_message 时，commit 步骤按优先级回退：proposal summary → implement_summary → task description template
 
 **决策规则：**
 - **MAJOR**: 不兼容的 API 变更、删除功能、破坏性行为变更
@@ -548,7 +558,21 @@ The injected prompt SHALL:
 
 ### Requirement: Commit 步骤版本管理
 
-`commit` 步骤 SHALL 集成自动版本更新功能，根据 `version_analyze` 的结果自动 bump 版本号，并更新相关文档。
+`commit` 步骤 SHALL 集成自动版本更新功能，根据 `version_analyze` 的结果自动 bump 版本号，并更新相关文档。commit 步骤不包含独立的 LLM 调用——commit message 来自 `version_analyze` 步骤。
+
+**Commit Message Priority Chain:**
+1. `commit_message` from `version_analyze` step (via `step.inputs`)
+2. `proposal.summary` from plan step (fallback)
+3. `implement_summary` from implement step (fallback)
+4. Template from task description (last resort)
+
+The commit step prepends the `task_type` prefix (e.g., `feature:`, `bugfix:`) to the message automatically.
+
+**Template Summary Generation:**
+- When the `summarize` step is NOT in the flow's step sequence, the commit step generates a template-based summary document at `se3/state/summary-{flow_id}.md`
+- The template uses structured data from the flow state: commit message, changed files, test results, version info
+- No LLM call is needed — this is a deterministic template operation
+- When the `summarize` step IS in the sequence, it generates a richer LLM-based summary (existing behavior)
 
 **版本更新流程：**
 1. 检测项目类型（Python/Node.js）并定位版本文件（pyproject.toml/package.json）
@@ -683,37 +707,81 @@ The `plan` step at full depth (task_type `feature` or `discovery`) SHALL output 
 - **THEN** `spec_changes` from the plan step is included in the inputs
 - **AND** if no plan step completed or spec_changes was not produced, defaults to an empty array
 
-### Requirement: verify_spec Planned Change Awareness
+### Requirement: verify_spec Unified Priority and Scope Mechanism
+
+The `verify_spec` step SHALL use the unified issue priority system (`critical/high/medium/low`) and a scope dimension (`in_scope/out_of_scope`) to classify issues found during verification.
+
+**Priority Levels (unified with issue system):**
+- `critical`: Core functionality broken, data loss/corruption possible, security vulnerabilities introduced
+- `high`: Requirement not met, specified behavior incorrect, or tests fail due to implementation bugs
+- `medium`: Partial implementation gap, missing edge case handling, non-critical deviation from spec
+- `low`: Minor style issues, documentation gaps, suggestions for improvement that don't affect correctness
+
+**Scope Dimension:**
+- `in_scope`: Issue directly introduced by current task's implementation, or current task claims to address it but has not. Blocks current flow and must be fixed.
+- `out_of_scope`: Pre-existing problem discovered during verification, or relates to functionality outside current task boundaries. Filed as an issue via `IssueManager.create()`, does not block current flow.
+
+**verified Field (Rule-Based Computation):**
+- The `verified` field is NOT determined by LLM output — it is computed by code: `verified = (in_scope_count == 0) and tests_passed`
+- If the LLM outputs a `verified` field, it is ignored/overridden by the rule-based computation
+- This eliminates inconsistency between displayed verification status and actual flow behavior
+
+**REVISION_NEEDED Logic:**
+- Triggered when `in_scope_count > 0` (spec compliance issues) OR `tests_passed == False` (test failures)
+- Only triggers if `fix_iteration < max_fix_iterations` (default 3)
+- When `max_fix_iterations` is exhausted, the step completes with a warning (behavior unchanged)
+
+**Out-of-Scope Issue Filing:**
+- Out-of-scope issues are deterministically filed via `IssueManager.create()` with the issue's priority, tagged with `auto-discovered`, `source:verify-spec`, and `out-of-scope`
+- This replaces the probabilistic B-class discovery mechanism for verify_spec
+
+**Planned Change Awareness:**
 
 The `verify_spec` step SHALL receive `spec_changes` from the plan step and use it to distinguish intentional spec deviations from unintended regressions.
 
-**Behavior:**
-- When `spec_changes` is non-empty, the verify_spec prompt instructs the LLM to treat deviations matching plan-declared changes as intentional (severity: info), not regressions (severity: error).
-- Deviations NOT covered by planned changes are still flagged at their normal severity.
-- When `spec_changes` is empty (e.g., bugfix tasks or tasks with no expected spec impact), verify_spec behaves as before — all deviations from spec are potential errors.
+- When `spec_changes` is non-empty, the verify_spec prompt instructs the LLM to treat deviations matching plan-declared changes as intentional (low priority, out_of_scope), not regressions.
+- Deviations NOT covered by planned changes are still flagged at their normal priority.
+- When `spec_changes` is empty (e.g., bugfix tasks), all deviations from spec are evaluated at their normal priority.
 
 **Prompt section:**
 The "Planned Spec Changes" section is formatted into the prompt using `_format_spec_changes()`, which renders each entry as `- [change_type] spec_name :: target` with an optional description line.
 
-#### Scenario: Intentional deviation classified as info
+#### Scenario: In-scope issue triggers REVISION_NEEDED
+- **GIVEN** verify_spec finds an issue classified as `in_scope` with priority `high`
+- **WHEN** `fix_iteration < max_fix_iterations`
+- **THEN** verify_spec returns REVISION_NEEDED
+- **AND** `verified` is computed as `False`
+
+#### Scenario: Out-of-scope issue does not block flow
+- **GIVEN** verify_spec finds an issue classified as `out_of_scope` with priority `medium`
+- **WHEN** no in-scope issues exist and tests pass
+- **THEN** verify_spec returns COMPLETED
+- **AND** `verified` is computed as `True`
+- **AND** the out-of-scope issue is filed via `IssueManager.create()`
+
+#### Scenario: Intentional deviation classified as low/out_of_scope
 - **GIVEN** the plan step declared a spec_change: `[add_requirement] flow-engine :: Requirement: New Feature X`
 - **AND** the implementation introduces behavior not covered by current specs but matching the declared change
 - **WHEN** verify_spec executes
-- **THEN** the deviation is classified as severity `info` (intentional change)
+- **THEN** the deviation is classified as low priority, out_of_scope
 - **AND** verify_spec does NOT trigger REVISION_NEEDED for this deviation
 
-#### Scenario: Unplanned deviation classified as error
+#### Scenario: Unplanned deviation classified as in_scope
 - **GIVEN** the plan step declared no spec_changes (or the deviation does not match any declared change)
 - **AND** the implementation deviates from the current spec
 - **WHEN** verify_spec executes
-- **THEN** the deviation is classified as severity `error`
+- **THEN** the deviation is classified at its normal priority with scope `in_scope`
 - **AND** verify_spec may trigger REVISION_NEEDED
 
 #### Scenario: Empty spec_changes preserves existing behavior
 - **GIVEN** the plan step produced an empty `spec_changes` array (e.g., bugfix task)
 - **WHEN** verify_spec executes
-- **THEN** verify_spec behaves identically to the pre-refactoring behavior
-- **AND** all deviations from spec are evaluated at their normal severity
+- **THEN** all deviations from spec are evaluated at their normal priority with scope determined by the LLM
+
+#### Scenario: verified field computed by rule
+- **GIVEN** LLM outputs `verified: true` but `in_scope_count > 0`
+- **WHEN** verify_spec processes the result
+- **THEN** `verified` is overridden to `False` by the rule: `(in_scope_count == 0) and tests_passed`
 
 ### Requirement: update_spec Guided Execution
 

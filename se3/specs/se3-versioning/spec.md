@@ -172,7 +172,7 @@ Note: When a version script is present, it takes priority over file detection.
 SE3 SHALL provide intelligent version bumping using LLM analysis of actual changes, rather than relying solely on task type classification.
 
 **Version Analyze Step:**
-A dedicated `version_analyze` step SHALL run after `update_spec` and before `commit` to determine the appropriate SemVer bump type based on:
+A dedicated `version_analyze` step SHALL run after `update_spec` and before `commit` to determine the appropriate SemVer bump type and generate the commit message, based on:
 - **Spec changes (updated_specs)**: API contract changes - PRIMARY indicator for breaking/non-breaking
 - **Files changed (changes_made)**: Implementation details and scope
 - **Verification results**: Consistency checks against specs
@@ -185,9 +185,12 @@ Spec changes are prioritized as they directly reflect API contract modifications
   "bump_type": "major|minor|patch|none",
   "reasoning": "Explanation based on SemVer 2.0.0 rules and specific changes",
   "confidence": "high|medium|low",
-  "suggested_version": "X.Y.Z"
+  "suggested_version": "X.Y.Z",
+  "commit_message": "Concise imperative commit summary (max 72 chars)"
 }
 ```
+
+The `commit_message` field is generated alongside version analysis. It uses imperative mood, starts with a verb, and does not include task type prefixes. The commit step consumes this field as the primary source for the git commit message subject line.
 
 **Semantic Versioning 2.0.0 Decision Criteria:**
 - **MAJOR**: Incompatible API changes, removed functionality, breaking behavioral changes

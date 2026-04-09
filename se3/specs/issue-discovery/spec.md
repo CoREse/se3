@@ -26,7 +26,7 @@ The system SHALL support two classes of issue discovery:
 - **AND** duplicate issues are suppressed within the same flow execution
 
 #### Scenario: B-class injection into whitelisted step
-- **WHEN** a whitelisted step (e.g., `verify_spec`, `summarize`) builds its LLM prompt
+- **WHEN** a whitelisted step (e.g., `summarize`) builds its LLM prompt
 - **THEN** the issue discovery prompt fragment is appended to the prompt
 - **AND** the LLM may optionally report `discovered_issues` in its response
 
@@ -42,11 +42,12 @@ The system SHALL determine which steps receive B-class prompt injection via a co
 ```yaml
 issue_discovery:
   steps:
-    - verify_spec
     - summarize
 ```
 
-**Default whitelist:** `["verify_spec", "summarize"]`
+**Default whitelist:** `["summarize"]`
+
+**Note:** `verify_spec` was removed from the default whitelist. The `verify_spec` step now uses a deterministic scope mechanism to file out-of-scope issues directly via `IssueManager.create()`, replacing the probabilistic B-class discovery approach.
 
 **Forbidden steps (hardcoded):** `{"implement", "test"}` — these steps NEVER receive injection regardless of configuration.
 
@@ -54,7 +55,7 @@ The `get_issue_discovery_injection(step_type, project_root)` function encapsulat
 
 #### Scenario: Default whitelist
 - **WHEN** no `issue_discovery.steps` is configured in `se3.yaml`
-- **THEN** only `verify_spec` and `summarize` receive injection
+- **THEN** only `summarize` receives injection
 
 #### Scenario: Custom whitelist
 - **WHEN** `issue_discovery.steps: ["plan", "summarize"]` is configured
@@ -72,7 +73,7 @@ The injection prompt SHALL instruct the LLM to optionally report issues outside 
 **Data structure for each discovered issue:**
 - `title`: Short descriptive title (required)
 - `description`: Details about the issue (required)
-- `priority_hint`: One of `"error"`, `"warning"`, or `"info"` (required)
+- `priority_hint`: One of `"critical"`, `"high"`, `"medium"`, or `"low"` (required)
 
 The LLM may include `discovered_issues` as a JSON field in its response (for JSON-mode steps like `verify_spec`) or as a JSON code block in natural language responses (for text-mode steps like `summarize`).
 
@@ -100,18 +101,12 @@ The system SHALL deduplicate discovered issues within a single flow execution.
 
 ### Requirement: Priority Mapping
 
-The system SHALL map `priority_hint` from LLM responses to issue priority levels.
+The system SHALL use `priority_hint` from LLM responses directly as the issue priority level, with no translation mapping.
 
-**Mapping rules:**
-| Step Type | priority_hint | Issue Priority |
-|-----------|--------------|---------------|
-| verify_spec | error | high |
-| verify_spec | warning | medium |
-| verify_spec | info | low |
-| summarize | error | high |
-| summarize | warning | medium |
-| summarize | info | low |
-| (default) | (any) | medium |
+**Direct mapping rules:**
+- `priority_hint` values (`critical`, `high`, `medium`, `low`) are used directly as the issue priority
+- If `priority_hint` is not one of the valid values, it defaults to `medium`
+- No per-step priority translation table is needed
 
 A-class issues from fix loop exhaustion always have `high` priority.
 
@@ -124,7 +119,9 @@ All auto-discovered issues SHALL be tagged with:
 ## Architecture
 
 ```
-Handler (summarize, verify_spec, ...)
+B-class Discovery (summarize, and other whitelisted steps):
+
+Handler (summarize, ...)
     │
     ├── get_issue_discovery_injection(step_type, project_root)
     │       └── Returns prompt fragment or ""
@@ -138,6 +135,16 @@ State Machine (after step completion)
     └── IssueDiscovery.collect_issues_from_output(flow, step_type, outputs)
             ├── Parse discovered_issues
             ├── Deduplicate
-            ├── Map priority
+            ├── Use priority_hint directly as issue priority
             └── IssueManager.create()
+
+verify_spec Deterministic Filing (separate from B-class):
+
+verify_spec handler
+    │
+    ├── LLM classifies issues with priority + scope
+    │
+    ├── in_scope issues → trigger REVISION_NEEDED
+    │
+    └── out_of_scope issues → IssueManager.create() directly
 ```

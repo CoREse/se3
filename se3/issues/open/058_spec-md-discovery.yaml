@@ -1,0 +1,11 @@
+id: 058
+title: spec.md 在 discovery 步骤中被修改
+description: commit b266c72e 包含 se3/specs/flow-engine/spec.md 的 16 行变更。Discovery 步骤通常不应修改规范文件，需确认这是否为预期行为。
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-09T14:06:02.838857'
+updated_at: '2026-04-09T14:06:02.838857'

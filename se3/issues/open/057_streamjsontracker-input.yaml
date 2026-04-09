@@ -1,0 +1,12 @@
+id: '057'
+title: StreamJSONTracker input 缓存可能泄漏
+description: _tool_use_id_to_input 字典在 tool_result 到达时通过 .pop() 清理。但如果流异常中断导致 tool_result
+  未到达，缓存的 input 不会被清理。对于长时间运行的 session 可能造成内存泄漏。
+status: open
+priority: low
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-09T14:06:02.838069'
+updated_at: '2026-04-09T14:06:02.838069'

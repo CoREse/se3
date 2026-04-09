@@ -8,31 +8,34 @@ Define the standard workflows for SE3 development using the Flow Engine's 12-ste
 
 ### Requirement: Workflow Types
 
-The system SHALL support five workflow types, mapped to different step sequences from the 12-step pool:
+The system SHALL support five workflow types, mapped to different step sequences from the step pool:
 
 | Type | Steps | When Used |
 |------|-------|-----------|
-| `feature` | analyze → plan → implement → test → verify_spec → update_spec → commit → summarize | New functionality or significant enhancement |
-| `bugfix` | analyze → plan → implement → test → verify_spec → commit → summarize | Bug reports (plan uses medium depth) |
-| `review` | analyze → verify_spec → summarize | Code review, audit, or analysis |
-| `small` | analyze → implement → test → commit → summarize | Minor fixes, typos, simple changes |
-| `directive` | analyze → plan → implement → commit → summarize | Following specific instructions (plan uses shallow depth) |
+| `feature` | analyze → plan → implement → test → verify_spec → update_spec → version_analyze → commit | New functionality or significant enhancement |
+| `bugfix` | analyze → plan → implement → test → verify_spec → version_analyze → commit | Bug reports (plan uses medium depth) |
+| `review` | analyze → verify_spec | Code review, audit, or analysis |
+| `small` | analyze → implement → test → version_analyze → commit | Minor fixes, typos, simple changes |
+| `directive` | analyze → plan → implement → version_analyze → commit | Following specific instructions (plan uses shallow depth) |
 
-**Step Pool (8 active steps):**
+**Step Pool (8 active steps in default sequences):**
 1. **analyze** - Analyze task type and scope, collect project context, select and load relevant specs
 2. **plan** - Unified planning: proposal + design + task breakdown (adapts depth by task_type)
 3. **implement** - Write code implementation
 4. **test** - Run tests to verify
 5. **verify_spec** - Check implementation vs spec
 6. **update_spec** - Update spec records
-7. **commit** - Commit changes
-8. **summarize** - Generate summary and handoff
+7. **version_analyze** - Analyze changes to determine SemVer bump type and generate commit message
+8. **commit** - Commit changes (generates template summary when summarize step is absent)
+
+**Optional step (available in pool, not in default sequences):**
+- **summarize** - Generate LLM-based summary and handoff. Can be added to step sequences via `se3.yaml` configuration. When absent, the commit step generates a template-based summary document.
 
 **Note:** `read_spec` and `project_summary` are deprecated — their functionality is now merged into the `analyze` step. Deprecated handlers are retained for backward compatibility with persisted flows.
 
 #### Scenario: Feature workflow selection
 - **WHEN** input is classified as "feature-request"
-- **THEN** the system uses the feature workflow with full 8 steps
+- **THEN** the system uses the feature workflow with full 8 default steps
 
 #### Scenario: Bug fix workflow selection
 - **WHEN** input is classified as "bug-report"
@@ -87,19 +90,19 @@ The feature workflow SHALL follow these steps:
    - Add new capabilities documentation
    - Mark scenarios as implemented
 
-**7. COMMIT**
-   - Stage and commit all changes
-   - Generate meaningful commit message
-   - Update version according to bump rules
+**7. VERSION_ANALYZE**
+   - Analyze changes to determine SemVer bump type
+   - Generate commit message
 
-**8. SUMMARIZE**
-   - Generate session summary
-   - Document changes made
-   - Provide handoff context for future sessions
+**8. COMMIT**
+   - Stage and commit all changes
+   - Use commit message from version_analyze (or fallback chain)
+   - Update version according to bump rules
+   - Generate template summary document when summarize step is absent
 
 #### Scenario: Large feature
 - **WHEN** a feature is complex with multiple components
-- **THEN** go through all 8 steps with full-depth plan
+- **THEN** go through all 8 default steps with full-depth plan
 - **AND** the plan includes formal proposal, design, and task groups
 
 #### Scenario: Medium feature
@@ -132,11 +135,11 @@ The bugfix workflow SHALL follow these steps (plan uses medium depth):
 **5. VERIFY_SPEC**
    - Verify fix meets requirements
 
-**6. COMMIT**
-   - Commit the fix
+**6. VERSION_ANALYZE**
+   - Determine version bump type and generate commit message
 
-**7. SUMMARIZE**
-   - Document the bug and fix
+**7. COMMIT**
+   - Commit the fix with version bump
 
 #### Scenario: Complex bug fix
 - **WHEN** a bug requires significant changes
@@ -157,10 +160,8 @@ The review workflow SHALL follow minimal steps:
 
 **2. VERIFY_SPEC**
    - Review code against specs (consumes `spec_content` directly from analyze)
-   - Categorize findings: critical / warning / suggestion
-
-**3. SUMMARIZE**
-   - Provide review report
+   - Categorize findings by priority: critical / high / medium / low
+   - Classify scope: in_scope / out_of_scope
 
 #### Scenario: Code review
 - **WHEN** user asks for a review
@@ -175,8 +176,8 @@ The small workflow SHALL be used for simple changes:
 1. ANALYZE - Confirm it's a small change
 2. IMPLEMENT - Direct code changes
 3. TEST - Run tests
-4. COMMIT - Commit changes
-5. SUMMARIZE - Document the change
+4. VERSION_ANALYZE - Determine version bump and generate commit message
+5. COMMIT - Commit changes
 
 #### Scenario: Documentation update
 - **WHEN** updating README or comments

@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from se3.engine.models import FlowInstance, Step, StepStatus
 from se3.engine.steps.commit import _generate_commit_message
@@ -182,11 +180,11 @@ class TestCommitPartialCompletion:
         assert "Refactored auth module and updated tests" in first_line
 
 
-class TestCommitMessageFallbackChain:
-    """Tests for the full commit message fallback chain (no LLM)."""
+class TestCommitMessageTemplateFallback:
+    """Tests for commit message template fallback when no summary available."""
 
-    def test_fallback_to_task_description(self):
-        """When no commit_message, proposal, or implement_summary, use task description."""
+    def test_task_description_used_as_fallback(self):
+        """Task description is used directly when no summary available."""
         flow = _make_flow(task_description="Fix memory leak in cache")
         step = _make_step({
             "proposal": {},
@@ -209,8 +207,8 @@ class TestCommitMessageFallbackChain:
         desc_part = first_line.split(": ", 1)[1]
         assert len(desc_part) == 60
 
-    def test_no_llm_call_in_any_path(self):
-        """Commit message generation never calls LLM (LLMCaller removed)."""
+    def test_no_llm_call_in_fallback_path(self):
+        """Commit message generation never calls LLM."""
         flow = _make_flow()
         step = _make_step({
             "proposal": {},

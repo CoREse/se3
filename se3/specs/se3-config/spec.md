@@ -25,7 +25,7 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - `claude_commands`: List of `{cmd, priority}` for Claude CLI resolution
 - `language.language`: Language for human-facing steps (default: null)
 - `language.spec_language`: Language for spec writing (default: null)
-- `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: ["verify_spec", "summarize"])
+- `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: ["summarize"])
 - `conflict_resolver.strategy`: Merge conflict resolution strategy — `"human"` or `"llm"` (default: `"human"`)
 - `implement.group_loc_threshold`: LOC threshold for collapsing task groups into a single LLM call (default: 300)
 

@@ -1,0 +1,12 @@
+id: '055'
+title: Write 覆写文件无法生成 diff
+description: 当 Write 工具覆写已有文件时，format_tool_diff 无法获取原文件内容，因此无法生成 diff。这是架构层面的限制——formatter
+  层不应直接访问文件系统。需要在 agent 工具层传递 old_content。
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-04-09T14:06:02.836081'
+updated_at: '2026-04-09T14:06:02.836081'
