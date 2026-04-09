@@ -439,71 +439,194 @@ def _render_implement(step: Step) -> None:
 def _render_analyze(step: Step) -> None:
     outputs = step.outputs or {}
 
-    # Check for structured analysis result
-    for key in ("analysis", "analysis_result"):
-        if key in outputs and isinstance(outputs[key], dict):
-            value = outputs[key]
-            if any(k in value for k in ("summary", "findings", "insights", "recommendations")):
-                _render_analysis_dict(value)
-                return
+    task_type = outputs.get("task_type", "N/A")
+    complexity = outputs.get("complexity", "N/A")
+    scope = outputs.get("scope", "N/A")
 
-    # Otherwise use default rendering
-    _default_render(step, "Analysis")
-
-
-def _render_analysis_dict(analysis: Dict[str, Any]) -> None:
-    """Render a structured analysis dict (migrated from output.display_analysis)."""
     lines: list[str] = []
 
-    summary = analysis.get("summary", "")
+    # ── Top status bar ─────────────────────────────────────────────
+    lines.append(f"[bold]{task_type}[/bold]  │  {complexity}  │  {scope}")
+
+    # ── Reasoning ──────────────────────────────────────────────────
+    reasoning = outputs.get("reasoning", "")
+    if reasoning:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append("[bold cyan]Reasoning[/bold cyan]")
+        lines.append(f"  {reasoning}")
+
+    # ── Relevant Specs ─────────────────────────────────────────────
+    relevant_specs = outputs.get("relevant_specs", [])
+    if relevant_specs:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append("[bold yellow]Relevant Specs[/bold yellow]")
+        for spec in relevant_specs:
+            if isinstance(spec, dict):
+                name = spec.get("name", spec.get("spec_name", str(spec)))
+            else:
+                name = str(spec)
+            lines.append(f"  • {name}")
+
+    # ── Error ──────────────────────────────────────────────────────
+    if step.error_message:
+        lines.append("")
+        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+
+    render_full("\n".join(lines), title="Analysis")
+
+
+@register_renderer(StepType.VERIFY_SPEC)
+def _render_verify_spec(step: Step) -> None:
+    outputs = step.outputs or {}
+
+    lines: list[str] = []
+
+    # ── Verified status ────────────────────────────────────────────
+    verified = outputs.get("verified", outputs.get("fix_needed") is not None and not outputs.get("fix_needed"))
+    if verified:
+        lines.append("[bold green]✓ PASSED[/bold green]")
+    else:
+        lines.append("[bold red]✗ FAILED[/bold red]")
+
+    # ── Summary ────────────────────────────────────────────────────
+    summary = outputs.get("summary", "")
     if summary:
-        lines.append("[bold cyan]Analysis Summary[/bold cyan]")
-        lines.append(summary)
         lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append(f"  {summary}")
 
-    findings = analysis.get("findings", analysis.get("insights", []))
-    if findings:
-        lines.append("[bold yellow]Findings[/bold yellow]")
-        for finding in findings:
-            if isinstance(finding, dict):
-                ftitle = finding.get("title", finding.get("name", ""))
-                desc = finding.get("description", finding.get("detail", ""))
-                if ftitle:
-                    lines.append(f"\n[bold]{ftitle}[/bold]")
-                if desc:
-                    lines.append(desc)
+    # ── Issues by severity ─────────────────────────────────────────
+    issues = outputs.get("issues", [])
+    if issues and isinstance(issues, list):
+        severity_groups: Dict[str, list] = {"error": [], "warning": [], "info": []}
+        for issue in issues:
+            if isinstance(issue, dict):
+                sev = issue.get("severity", "info").lower()
+                severity_groups.setdefault(sev, []).append(issue)
             else:
-                lines.append(f"  • {finding}")
-        lines.append("")
+                severity_groups["info"].append({"message": str(issue)})
 
-    recommendations = analysis.get("recommendations", [])
-    if recommendations:
-        lines.append("[bold green]Recommendations[/bold green]")
+        severity_styles = {
+            "error": ("[bold red]error[/bold red]", "[red]"),
+            "warning": ("[bold yellow]warning[/bold yellow]", "[yellow]"),
+            "info": ("[dim]info[/dim]", "[dim]"),
+        }
+
+        for sev in ("error", "warning", "info"):
+            group = severity_groups.get(sev, [])
+            if not group:
+                continue
+            lines.append("")
+            lines.append("[dim]" + "─" * 50 + "[/dim]")
+            lines.append("")
+            label, color = severity_styles[sev]
+            lines.append(f"{label}  [dim]({len(group)})[/dim]")
+            for issue in group:
+                msg = issue.get("message", "") if isinstance(issue, dict) else str(issue)
+                lines.append(f"  {color}•[/{color.lstrip('[')}] {msg}")
+                suggestion = issue.get("suggestion", "") if isinstance(issue, dict) else ""
+                if suggestion:
+                    lines.append(f"    [dim]→ {suggestion}[/dim]")
+
+    # ── Recommendations ────────────────────────────────────────────
+    recommendations = outputs.get("recommendations", [])
+    if recommendations and isinstance(recommendations, list):
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append("[bold cyan]Recommendations[/bold cyan]")
         for rec in recommendations:
-            if isinstance(rec, dict):
-                action = rec.get("action", rec.get("recommendation", ""))
-                priority = rec.get("priority", "")
-                if priority:
-                    lines.append(f"\n• [{priority}] {action}")
-                else:
-                    lines.append(f"• {action}")
-            else:
-                lines.append(f"  • {rec}")
+            lines.append(f"  • {rec}")
+
+    # ── Error ──────────────────────────────────────────────────────
+    if step.error_message:
         lines.append("")
+        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
 
-    for key, value in analysis.items():
-        if key not in ("summary", "findings", "insights", "recommendations"):
-            if value:
-                lines.append(f"[bold]{key.replace('_', ' ').title()}[/bold]")
-                if isinstance(value, list):
-                    for item in value:
-                        lines.append(f"  • {item}")
-                elif isinstance(value, dict):
-                    for k, v in value.items():
-                        lines.append(f"  [bold]{k}:[/bold] {v}")
-                else:
-                    lines.append(str(value))
-                lines.append("")
+    render_full("\n".join(lines), title="Spec Verification")
 
-    if lines:
-        render_full("\n".join(lines), title="Analysis Results")
+
+@register_renderer(StepType.UPDATE_SPEC)
+def _render_update_spec(step: Step) -> None:
+    outputs = step.outputs or {}
+
+    specs_updated = outputs.get("updated_specs", outputs.get("specs_updated", []))
+    new_capabilities = outputs.get("new_capabilities", [])
+
+    if not specs_updated and not new_capabilities:
+        render_full("[dim]No spec updates needed[/dim]", title="Spec Update")
+        return
+
+    lines: list[str] = []
+
+    # ── Updated specs ──────────────────────────────────────────────
+    if specs_updated and isinstance(specs_updated, list):
+        for spec in specs_updated:
+            if isinstance(spec, dict):
+                name = spec.get("spec_name", spec.get("name", "unknown"))
+                desc = spec.get("change_description", spec.get("description", ""))
+                lines.append(f"  [green]✓[/green] [bold]{name}[/bold]: {desc}")
+            else:
+                lines.append(f"  [green]✓[/green] {spec}")
+
+    # ── New capabilities ───────────────────────────────────────────
+    if new_capabilities and isinstance(new_capabilities, list):
+        if lines:
+            lines.append("")
+            lines.append("[dim]" + "─" * 50 + "[/dim]")
+            lines.append("")
+        lines.append("[bold cyan]New Capabilities[/bold cyan]")
+        for cap in new_capabilities:
+            lines.append(f"  • {cap}")
+
+    # ── Error ──────────────────────────────────────────────────────
+    if step.error_message:
+        lines.append("")
+        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+
+    render_full("\n".join(lines), title="Spec Update")
+
+
+@register_renderer(StepType.COMMIT)
+def _render_commit(step: Step) -> None:
+    outputs = step.outputs or {}
+
+    committed = outputs.get("committed", False)
+
+    if not committed:
+        render_full("[dim]No changes to commit[/dim]", title="Commit")
+        return
+
+    lines: list[str] = []
+
+    # ── Top line: hash + version ───────────────────────────────────
+    commit_hash = outputs.get("commit_hash", "N/A")
+    short_hash = commit_hash[:7] if isinstance(commit_hash, str) and len(commit_hash) > 7 else commit_hash
+    header = f"[bold]{short_hash}[/bold]"
+
+    version_bumped = outputs.get("version_bumped", False)
+    version = outputs.get("version", "")
+    if version_bumped and version:
+        header += f"  │  [bold cyan]v{version}[/bold cyan]"
+
+    lines.append(header)
+
+    # ── Commit message ─────────────────────────────────────────────
+    commit_message = outputs.get("commit_message", "")
+    if commit_message:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append(f"  {commit_message}")
+
+    # ── Error ──────────────────────────────────────────────────────
+    if step.error_message:
+        lines.append("")
+        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+
+    render_full("\n".join(lines), title="Commit")

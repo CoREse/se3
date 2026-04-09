@@ -1,0 +1,27 @@
+id: '054'
+title: 'Fix loop exhausted: Analyze总结框的显示优化。现在的Analyze框里面只是单纯地把json内容显示出来了，没有显示优化。然后，spec
+  content只用显示用到了哪些spec就行了，spec具体内容是传给下游的'
+description: "The fix loop reached maximum iterations while working on: Analyze总结框的显示优化。现在的Analyze框里面只是单纯地把json内容显示出来了，没有显示优化。然后，spec\
+  \ content只用显示用到了哪些spec就行了，spec具体内容是传给下游的，不是给人看的。spec verification显示也没有优化，还有Spec\
+  \ Update，Commit。\n\n**Trigger step:** test\n**Fix iterations:** 3\n\n**Last test\
+  \ output (truncated):**\n```\nr more information.\n    warnings.warn(\n\n-- Docs:\
+  \ https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n===========================\
+  \ short test summary info ============================\nFAILED tests/test_discovery_workflow.py::TestDiscoveryLLMCallErrorHandling::test_discovery_llm_json_extraction_failure\n\
+  FAILED tests/test_discovery_workflow.py::TestDiscoveryLLMCallErrorHandling::test_discovery_other_llm_error\n\
+  ============ 2 failed, 1344 passed, 10 skipped, 1 warning in 9.02s =============\n\
+  \n```\n\n**Fix attempt history:**\n- Iteration 1: unknown\n- Iteration 2: unknown\n\
+  - Iteration 3: unknown\n\n**Last fix instructions:**\nTests are failing. Please\
+  \ review and fix the implementation.\n\nTest output:\n/python3.14/unittest/mock.py\"\
+  , line 1175, in __call__\n    return self._mock_call(*args, **kwargs)\n        \
+  \   ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/home/cre/.pixi/envs/pip/lib/python3.14/unittest/mock.py\"\
+  , line 1179, in _mock_call\n    return self._execute_mock_call(*args, **kwargs)\n\
+  \           ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^\n  File \"/home/cre/.pixi/envs/pip/lib/python3.14/unittest/mock.py\"\
+  , line 1234, in _execu"
+status: open
+priority: high
+type: bug
+tags:
+- auto-discovered
+- source:fix-loop
+created_at: '2026-04-09T12:10:49.576483'
+updated_at: '2026-04-09T12:10:49.576483'

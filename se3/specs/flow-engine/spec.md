@@ -1007,6 +1007,107 @@ The plan is rendered as a Rich `Panel` titled "Implementation Plan" containing u
 - **THEN** the exception is caught and logged at DEBUG level
 - **AND** execution proceeds normally without the plan display
 
+### Requirement: Step Output Rendering — Analyze, Verify Spec, Update Spec, Commit
+
+The `analyze`, `verify_spec`, `update_spec`, and `commit` steps SHALL each use a custom renderer that presents structured, human-readable output instead of raw JSON key-value listing. All renderers use `render_full()` as their sole output interface, consistent with the Implement renderer's style.
+
+#### Analyze Renderer
+
+The `analyze` step renderer SHALL display a top-line status bar followed by reasoning and relevant specs.
+
+**Status Bar:**
+- A single line showing `task_type`, `complexity`, and `scope` separated by `│` delimiters (e.g. `feature  │  medium  │  src/engine`).
+
+**Sections (displayed in order when data is present):**
+1. **Reasoning** — the analysis reasoning as a body paragraph.
+2. **Relevant Specs** — a bullet list showing only spec names (extracted from `name` or `spec_name` fields of spec objects).
+
+**Hidden fields:** `spec_content` and `project_summary` are intentionally omitted from display — they are downstream data payloads, not user-facing information.
+
+**Output keys consumed by the renderer:**
+- `task_type`, `complexity`, `scope`, `reasoning`, `relevant_specs`
+
+##### Scenario: Analyze rendering with all fields
+- **WHEN** the analyze step completes with `task_type`, `complexity`, `scope`, `reasoning`, and `relevant_specs`
+- **THEN** the renderer displays a status bar with task_type, complexity, and scope
+- **AND** reasoning is shown as a labeled body paragraph
+- **AND** relevant specs are listed by name only
+
+##### Scenario: Analyze rendering hides internal data
+- **WHEN** the analyze step outputs include `spec_content` or `project_summary`
+- **THEN** these fields are not displayed to the user
+
+#### Verify Spec Renderer
+
+The `verify_spec` step renderer SHALL display verification status, issues grouped by severity, and recommendations.
+
+**Status Line:**
+- `✓ PASSED` in green when `verified` is true; `✗ FAILED` in red when false.
+
+**Sections (displayed in order when data is present):**
+1. **Summary** — verification summary as body text.
+2. **Issues by severity** — issues grouped into `error` (red prefix), `warning` (yellow prefix), and `info` (dim prefix) sections. Each issue shows its `message`, and optionally a `suggestion` line below it.
+3. **Recommendations** — a bullet list of recommendations.
+
+**Hidden fields:** `fix_context`, `fix_iteration`, `fix_needed`, `max_fix_iterations`, `verification_result` and other internal mechanism fields are omitted from display.
+
+**Output keys consumed by the renderer:**
+- `verified`, `summary`, `issues`, `recommendations`
+
+##### Scenario: Spec verification passed
+- **WHEN** the verify_spec step completes with `verified: true`
+- **THEN** the renderer displays a green `✓ PASSED` status
+
+##### Scenario: Spec verification failed with issues
+- **WHEN** the verify_spec step completes with `verified: false` and issues of mixed severity
+- **THEN** issues are grouped by severity (error, warning, info) with appropriate color coding
+- **AND** each issue shows its message and optional suggestion
+
+#### Update Spec Renderer
+
+The `update_spec` step renderer SHALL display updated specs as a checklist or a no-update message.
+
+**When specs were updated:**
+- Each updated spec is shown as `✓ spec-name: change description` (green checkmark, bold name).
+- `new_capabilities` are listed as a bullet list under a "New Capabilities" heading.
+
+**When no specs were updated:**
+- Displays `No spec updates needed` as a dim message.
+
+**Output keys consumed by the renderer:**
+- `updated_specs` (or `specs_updated`), `new_capabilities`
+
+##### Scenario: Specs updated rendering
+- **WHEN** the update_spec step completes with one or more entries in `updated_specs`
+- **THEN** each spec is rendered as a `✓ name: description` line
+
+##### Scenario: No spec updates
+- **WHEN** the update_spec step completes with empty `updated_specs` and empty `new_capabilities`
+- **THEN** the renderer displays `No spec updates needed`
+
+#### Commit Renderer
+
+The `commit` step renderer SHALL display commit details or a no-changes message.
+
+**When committed is false:**
+- Displays `No changes to commit` as a dim message.
+
+**When committed is true:**
+- Top line shows the short commit hash (first 7 characters), optionally followed by the version (e.g. `v1.2.3`) if `version_bumped` is true.
+- Commit message is displayed below a separator.
+
+**Output keys consumed by the renderer:**
+- `committed`, `commit_hash`, `commit_message`, `version_bumped`, `version`
+
+##### Scenario: Commit with version bump
+- **WHEN** the commit step completes with `committed: true` and `version_bumped: true`
+- **THEN** the renderer displays the short hash and version on the top line
+- **AND** the commit message is displayed below
+
+##### Scenario: No changes committed
+- **WHEN** the commit step completes with `committed: false`
+- **THEN** the renderer displays `No changes to commit`
+
 ### Requirement: Test 步骤配置与多阶段执行
 
 test 步骤 SHALL 支持通过 `se3.yaml` 的 `test:` 配置段进行多阶段测试，并输出结构化结果。
