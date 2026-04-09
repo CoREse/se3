@@ -84,6 +84,7 @@ class TestCreateFromFixLoopExhaustion:
 
         assert issue is not None
         assert issue.priority == "high"
+        assert issue.scope == "in_scope"  # A-class issues are always in_scope
         assert "auto-discovered" in issue.tags
         assert "source:fix-loop" in issue.tags
 
@@ -231,6 +232,7 @@ class TestCollectIssuesFromOutput:
         assert len(issues) == 1
         assert "auto-discovered" in issues[0].tags
         assert "source:verify-spec" in issues[0].tags
+        assert issues[0].scope == "in_scope"  # B-class issues default to in_scope
 
     def test_summarize_source_tag(self, discovery, basic_flow):
         outputs = {

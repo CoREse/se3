@@ -118,10 +118,10 @@ class TestRichCloseTag:
     """Rich close tags must not have extra ] characters."""
 
     @patch("se3.engine.step_renderers.render_full")
-    def test_red_close_tag(self, mock_render):
+    def test_red_close_tag_for_high_priority(self, mock_render):
         step = _make_step({
             "verified": False,
-            "issues": [{"severity": "error", "message": "broken"}],
+            "issues": [{"priority": "high", "scope": "in_scope", "message": "broken"}],
         })
         from se3.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
@@ -131,10 +131,10 @@ class TestRichCloseTag:
         assert "[/red]]" not in content
 
     @patch("se3.engine.step_renderers.render_full")
-    def test_yellow_close_tag(self, mock_render):
+    def test_yellow_close_tag_for_medium_priority(self, mock_render):
         step = _make_step({
             "verified": False,
-            "issues": [{"severity": "warning", "message": "risky"}],
+            "issues": [{"priority": "medium", "scope": "in_scope", "message": "risky"}],
         })
         from se3.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
@@ -144,10 +144,10 @@ class TestRichCloseTag:
         assert "[/yellow]]" not in content
 
     @patch("se3.engine.step_renderers.render_full")
-    def test_dim_close_tag(self, mock_render):
+    def test_dim_close_tag_for_low_priority(self, mock_render):
         step = _make_step({
             "verified": False,
-            "issues": [{"severity": "info", "message": "note"}],
+            "issues": [{"priority": "low", "scope": "in_scope", "message": "note"}],
         })
         from se3.engine.step_renderers import _render_verify_spec
         _render_verify_spec(step)
@@ -157,14 +157,15 @@ class TestRichCloseTag:
         assert "[/dim]]" not in content
 
     @patch("se3.engine.step_renderers.render_full")
-    def test_all_severities_correct_tags(self, mock_render):
-        """All three severity levels produce correct close tags."""
+    def test_all_priorities_correct_tags(self, mock_render):
+        """All priority levels produce correct close tags."""
         step = _make_step({
             "verified": False,
             "issues": [
-                {"severity": "error", "message": "err"},
-                {"severity": "warning", "message": "warn"},
-                {"severity": "info", "message": "info"},
+                {"priority": "critical", "scope": "in_scope", "message": "crit"},
+                {"priority": "high", "scope": "in_scope", "message": "err"},
+                {"priority": "medium", "scope": "in_scope", "message": "warn"},
+                {"priority": "low", "scope": "in_scope", "message": "info"},
             ],
         })
         from se3.engine.step_renderers import _render_verify_spec

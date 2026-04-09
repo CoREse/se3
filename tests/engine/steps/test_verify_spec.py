@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import pytest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, MagicMock
 
 from se3.engine.models import FlowInstance, Step, StepStatus, StepType, FlowStatus, State
 from se3.engine.steps.verify_spec import (
@@ -15,6 +16,7 @@ from se3.engine.steps.verify_spec import (
     _format_fix_context,
     _format_spec_changes,
     _get_max_fix_iterations,
+    _file_out_of_scope_issues,
     VERIFY_PROMPT,
 )
 
@@ -55,15 +57,35 @@ class TestVerifySpecHandler:
 
     @pytest.fixture
     def mock_llm_response(self):
-        """Create a mock LLM response."""
-        return """{
-            "verified": true,
+        """Create a mock LLM response with no issues (passes verification)."""
+        return json.dumps({
             "issues": [],
             "summary": "All good",
             "recommendations": [],
-            "test_analysis": {"tests_passed": true, "failure_summary": "", "root_cause": ""},
-            "fix_instructions": ""
-        }"""
+            "test_analysis": {"tests_passed": True, "failure_summary": "", "root_cause": ""},
+            "fix_instructions": "",
+        })
+
+    def test_verify_prompt_uses_priority_not_severity(self):
+        """Test that VERIFY_PROMPT uses priority (critical|high|medium|low) instead of severity."""
+        assert "critical|high|medium|low" in VERIFY_PROMPT
+        assert '"priority":' in VERIFY_PROMPT
+        # severity should no longer be in the JSON schema
+        assert '"severity":' not in VERIFY_PROMPT
+
+    def test_verify_prompt_includes_scope_definitions(self):
+        """Test that VERIFY_PROMPT includes scope (in_scope|out_of_scope) definitions."""
+        assert "in_scope|out_of_scope" in VERIFY_PROMPT
+        assert '"scope":' in VERIFY_PROMPT
+        assert "### Issue Scope" in VERIFY_PROMPT
+
+    def test_verify_prompt_includes_priority_definitions(self):
+        """Test that VERIFY_PROMPT includes priority level definitions."""
+        assert "### Issue Priority Levels" in VERIFY_PROMPT
+        assert "**critical**:" in VERIFY_PROMPT
+        assert "**high**:" in VERIFY_PROMPT
+        assert "**medium**:" in VERIFY_PROMPT
+        assert "**low**:" in VERIFY_PROMPT
 
     def test_verify_prompt_includes_test_failure_analysis(self):
         """Test that VERIFY_PROMPT includes test failure analysis instructions."""
@@ -79,10 +101,19 @@ class TestVerifySpecHandler:
     def test_verify_prompt_includes_planned_changes_instruction(self):
         """Test that VERIFY_PROMPT instruction 6 covers planned spec changes judgment rule."""
         assert "Planned Spec Changes" in VERIFY_PROMPT
-        assert "intentional changes" in VERIFY_PROMPT or "intentional" in VERIFY_PROMPT
+        assert "intentional" in VERIFY_PROMPT
 
-    def test_handler_returns_completed_when_tests_pass(self, flow, step, mock_llm_response):
-        """Test that handler returns COMPLETED when tests pass."""
+    def test_verify_prompt_no_verified_field_in_schema(self):
+        """Test that VERIFY_PROMPT JSON schema does not ask for 'verified' from LLM."""
+        # The JSON example block should not contain "verified" as an output field
+        # We check the JSON block specifically (between ```json and ```)
+        json_block_start = VERIFY_PROMPT.index('```json')
+        json_block_end = VERIFY_PROMPT.index('```', json_block_start + 7)
+        json_block = VERIFY_PROMPT[json_block_start:json_block_end]
+        assert '"verified"' not in json_block
+
+    def test_handler_returns_completed_when_no_issues(self, flow, step, mock_llm_response):
+        """Test that handler returns COMPLETED when no issues found."""
         with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
             mock_caller = Mock()
             mock_caller.call.return_value = mock_llm_response
@@ -92,20 +123,22 @@ class TestVerifySpecHandler:
 
             assert result == StepStatus.COMPLETED
             assert step.outputs["verified"] is True
+            assert step.outputs["in_scope_count"] == 0
+            assert step.outputs["out_of_scope_count"] == 0
 
-    def test_handler_returns_revision_needed_when_tests_fail_and_under_max_iterations(self, flow, step):
-        """Test that handler returns REVISION_NEEDED when tests fail and under max iterations."""
-        step.inputs["test_results"] = {"passed": False, "returncode": 1, "stdout": "Test failed", "stderr": "AssertionError"}
-        step.inputs["fix_iteration"] = 0
-
-        mock_response = """{
-            "verified": false,
-            "issues": [{"severity": "error", "message": "Tests failed"}],
-            "summary": "Tests failed - fix needed",
-            "recommendations": ["Fix the test"],
-            "test_analysis": {"tests_passed": false, "failure_summary": "Assertion error", "root_cause": "Bug in code"},
-            "fix_instructions": "Fix the assertion in test.py line 10"
-        }"""
+    def test_verified_is_rule_based_not_from_llm(self, flow, step):
+        """Test that verified is computed from rule, ignoring LLM's verified field."""
+        # LLM says verified=True but has in_scope issues → rule says False
+        mock_response = json.dumps({
+            "verified": True,  # LLM says True, but should be ignored
+            "issues": [
+                {"priority": "high", "scope": "in_scope", "message": "Missing implementation"}
+            ],
+            "summary": "Has issues",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": True},
+            "fix_instructions": "Fix it",
+        })
 
         with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
             mock_caller = Mock()
@@ -113,6 +146,83 @@ class TestVerifySpecHandler:
             mock_caller_class.return_value = mock_caller
 
             result = verify_spec_handler(step, flow)
+
+            # verified should be False because there's an in_scope issue
+            assert step.outputs["verified"] is False
+            assert result == StepStatus.REVISION_NEEDED
+
+    def test_verified_true_when_only_out_of_scope_issues(self, flow, step):
+        """Test that verified=True when all issues are out_of_scope."""
+        mock_response = json.dumps({
+            "issues": [
+                {"priority": "high", "scope": "out_of_scope", "message": "Pre-existing bug"},
+                {"priority": "medium", "scope": "out_of_scope", "message": "Old tech debt"},
+            ],
+            "summary": "Only pre-existing issues",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": True},
+            "fix_instructions": "",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+                result = verify_spec_handler(step, flow)
+
+            assert result == StepStatus.COMPLETED
+            assert step.outputs["verified"] is True
+            assert step.outputs["in_scope_count"] == 0
+            assert step.outputs["out_of_scope_count"] == 2
+
+    def test_in_scope_issue_triggers_revision_needed(self, flow, step):
+        """Test that any in_scope issue triggers REVISION_NEEDED."""
+        step.inputs["fix_iteration"] = 0
+
+        mock_response = json.dumps({
+            "issues": [
+                {"priority": "low", "scope": "in_scope", "message": "Minor in-scope issue"},
+            ],
+            "summary": "Has in-scope issue",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": True},
+            "fix_instructions": "Fix minor issue",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+                result = verify_spec_handler(step, flow)
+
+            assert result == StepStatus.REVISION_NEEDED
+            assert step.outputs["fix_needed"] is True
+            assert step.outputs["in_scope_count"] == 1
+
+    def test_handler_returns_revision_needed_when_tests_fail_and_under_max_iterations(self, flow, step):
+        """Test that handler returns REVISION_NEEDED when tests fail and under max iterations."""
+        step.inputs["test_results"] = {"passed": False, "returncode": 1, "stdout": "Test failed", "stderr": "AssertionError"}
+        step.inputs["fix_iteration"] = 0
+
+        mock_response = json.dumps({
+            "issues": [{"priority": "high", "scope": "in_scope", "message": "Tests failed"}],
+            "summary": "Tests failed - fix needed",
+            "recommendations": ["Fix the test"],
+            "test_analysis": {"tests_passed": False, "failure_summary": "Assertion error", "root_cause": "Bug in code"},
+            "fix_instructions": "Fix the assertion in test.py line 10",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+                result = verify_spec_handler(step, flow)
 
             assert result == StepStatus.REVISION_NEEDED
             assert step.outputs["fix_needed"] is True
@@ -124,14 +234,13 @@ class TestVerifySpecHandler:
         step.inputs["test_results"] = {"passed": False, "returncode": 1, "stdout": "Test failed", "stderr": "AssertionError"}
         step.inputs["fix_iteration"] = 3  # At max iterations
 
-        mock_response = """{
-            "verified": false,
-            "issues": [{"severity": "error", "message": "Tests failed"}],
+        mock_response = json.dumps({
+            "issues": [{"priority": "high", "scope": "in_scope", "message": "Tests failed"}],
             "summary": "Tests still failing",
             "recommendations": [],
-            "test_analysis": {"tests_passed": false, "failure_summary": "Still failing", "root_cause": "Unknown"},
-            "fix_instructions": "Keep trying"
-        }"""
+            "test_analysis": {"tests_passed": False, "failure_summary": "Still failing", "root_cause": "Unknown"},
+            "fix_instructions": "Keep trying",
+        })
 
         with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
             mock_caller = Mock()
@@ -139,7 +248,8 @@ class TestVerifySpecHandler:
             mock_caller_class.return_value = mock_caller
 
             with patch("se3.engine.steps.verify_spec._get_max_fix_iterations", return_value=3):
-                result = verify_spec_handler(step, flow)
+                with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+                    result = verify_spec_handler(step, flow)
 
             assert result == StepStatus.COMPLETED
             assert step.outputs.get("max_iterations_reached") is True
@@ -150,21 +260,21 @@ class TestVerifySpecHandler:
         step.inputs["fix_iteration"] = 2
         step.inputs["test_results"] = {"passed": False, "returncode": 1, "stdout": "Failed", "stderr": ""}
 
-        mock_response = """{
-            "verified": false,
+        mock_response = json.dumps({
             "issues": [],
             "summary": "",
             "recommendations": [],
-            "test_analysis": {"tests_passed": false, "failure_summary": "", "root_cause": ""},
-            "fix_instructions": "Fix it"
-        }"""
+            "test_analysis": {"tests_passed": False, "failure_summary": "", "root_cause": ""},
+            "fix_instructions": "Fix it",
+        })
 
         with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
             mock_caller = Mock()
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            verify_spec_handler(step, flow)
+            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+                verify_spec_handler(step, flow)
 
             # Should include iteration 2 in prompt
             call_args = mock_caller.call.call_args
@@ -177,21 +287,21 @@ class TestVerifySpecHandler:
         step.inputs["test_results"] = test_results
         step.inputs["fix_iteration"] = 1
 
-        mock_response = """{
-            "verified": false,
+        mock_response = json.dumps({
             "issues": [],
             "summary": "",
             "recommendations": [],
-            "test_analysis": {"tests_passed": false, "failure_summary": "Summary", "root_cause": "Root cause"},
-            "fix_instructions": "Instructions here"
-        }"""
+            "test_analysis": {"tests_passed": False, "failure_summary": "Summary", "root_cause": "Root cause"},
+            "fix_instructions": "Instructions here",
+        })
 
         with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
             mock_caller = Mock()
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            verify_spec_handler(step, flow)
+            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+                verify_spec_handler(step, flow)
 
             fix_context = step.outputs.get("fix_context")
             assert fix_context is not None
@@ -199,6 +309,164 @@ class TestVerifySpecHandler:
             assert fix_context["test_analysis"]["tests_passed"] is False
             assert fix_context["fix_instructions"] == "Instructions here"
             assert fix_context["iteration"] == 2  # Incremented
+
+    def test_out_of_scope_issues_filed(self, flow, step):
+        """Test that out-of-scope issues are filed via IssueManager."""
+        mock_response = json.dumps({
+            "issues": [
+                {"priority": "medium", "scope": "out_of_scope", "message": "Pre-existing bug in auth", "suggestion": "Refactor auth module"},
+            ],
+            "summary": "All in-scope checks passed",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": True},
+            "fix_instructions": "",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues") as mock_file:
+                result = verify_spec_handler(step, flow)
+
+                assert result == StepStatus.COMPLETED
+                assert step.outputs["verified"] is True
+                # Verify _file_out_of_scope_issues was called with the out-of-scope issues
+                mock_file.assert_called_once()
+                filed_issues = mock_file.call_args[0][0]
+                assert len(filed_issues) == 1
+                assert filed_issues[0]["scope"] == "out_of_scope"
+
+    def test_mixed_scope_issues(self, flow, step):
+        """Test handling of mixed in_scope and out_of_scope issues."""
+        step.inputs["fix_iteration"] = 0
+
+        mock_response = json.dumps({
+            "issues": [
+                {"priority": "high", "scope": "in_scope", "message": "Missing error handling"},
+                {"priority": "medium", "scope": "out_of_scope", "message": "Old tech debt"},
+                {"priority": "low", "scope": "out_of_scope", "message": "Style issue"},
+            ],
+            "summary": "Mixed issues found",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": True},
+            "fix_instructions": "Add error handling",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+                result = verify_spec_handler(step, flow)
+
+            assert result == StepStatus.REVISION_NEEDED
+            assert step.outputs["in_scope_count"] == 1
+            assert step.outputs["out_of_scope_count"] == 2
+            assert step.outputs["verified"] is False
+
+    def test_scope_defaults_to_in_scope(self, flow, step):
+        """Test that issues without explicit scope default to in_scope."""
+        step.inputs["fix_iteration"] = 0
+
+        mock_response = json.dumps({
+            "issues": [
+                {"priority": "high", "message": "No scope specified"},
+            ],
+            "summary": "Issue without scope",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": True},
+            "fix_instructions": "Fix it",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+                result = verify_spec_handler(step, flow)
+
+            assert result == StepStatus.REVISION_NEEDED
+            assert step.outputs["in_scope_count"] == 1
+
+    def test_max_iterations_reached_with_in_scope_issues(self, flow, step):
+        """Test that max iterations reached with in-scope issues completes with warning."""
+        step.inputs["fix_iteration"] = 3
+
+        mock_response = json.dumps({
+            "issues": [
+                {"priority": "high", "scope": "in_scope", "message": "Persistent issue"},
+            ],
+            "summary": "Still has issues",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": True},
+            "fix_instructions": "Need more work",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            with patch("se3.engine.steps.verify_spec._get_max_fix_iterations", return_value=3):
+                with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+                    result = verify_spec_handler(step, flow)
+
+            assert result == StepStatus.COMPLETED
+            assert step.outputs.get("max_iterations_reached") is True
+            assert step.outputs["in_scope_count"] == 1
+
+
+class TestFileOutOfScopeIssues:
+    """Test cases for _file_out_of_scope_issues."""
+
+    def test_files_issues_via_issue_manager(self, tmp_path):
+        """Test that out-of-scope issues are filed as YAML issue files."""
+        (tmp_path / "se3" / "issues" / "open").mkdir(parents=True)
+        (tmp_path / "se3" / "issues" / "closed").mkdir(parents=True)
+
+        flow = FlowInstance(
+            flow_id="test-flow",
+            task_description="Test",
+            status=FlowStatus.RUNNING,
+            change_path=tmp_path / "changes" / "test",
+        )
+
+        issues = [
+            {"priority": "medium", "scope": "out_of_scope", "message": "Pre-existing bug", "suggestion": "Fix it"},
+            {"priority": "low", "scope": "out_of_scope", "message": "Style issue"},
+        ]
+
+        _file_out_of_scope_issues(issues, flow, tmp_path)
+
+        # Verify files were created
+        from se3.engine.issue_manager import IssueManager
+        mgr = IssueManager(tmp_path)
+        created = mgr.list_issues()
+        assert len(created) == 2
+        assert created[0].scope == "out_of_scope"
+        assert created[1].scope == "out_of_scope"
+        assert "auto-discovered" in created[0].tags
+        assert "source:verify-spec" in created[0].tags
+        assert "out-of-scope" in created[0].tags
+
+    def test_empty_list_is_noop(self, tmp_path):
+        """Test that empty out-of-scope list does nothing."""
+        flow = Mock()
+        _file_out_of_scope_issues([], flow, tmp_path)
+        # No error, no files created
+
+    def test_handles_exception_gracefully(self, tmp_path):
+        """Test that filing errors are caught and logged, not raised."""
+        flow = Mock()
+        # tmp_path doesn't have issue dirs, IssueManager.create will fail
+        # but _file_out_of_scope_issues should handle it gracefully
+        issues = [{"priority": "high", "scope": "out_of_scope", "message": "Test"}]
+        # Should not raise
+        _file_out_of_scope_issues(issues, flow, tmp_path / "nonexistent")
 
 
 class TestFormatSpecContent:
@@ -425,7 +693,7 @@ class TestIntegration:
 
         with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
             mock_caller = Mock()
-            mock_caller.call.return_value = '{"verified": true}'
+            mock_caller.call.return_value = '{"issues": []}'
             mock_caller_class.return_value = mock_caller
 
             verify_spec_handler(step, flow)
@@ -474,7 +742,7 @@ class TestIntegration:
 
         with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
             mock_caller = Mock()
-            mock_caller.call.return_value = '{"verified": true}'
+            mock_caller.call.return_value = '{"issues": []}'
             mock_caller_class.return_value = mock_caller
 
             verify_spec_handler(step, flow)
@@ -510,7 +778,7 @@ class TestIntegration:
 
         with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
             mock_caller = Mock()
-            mock_caller.call.return_value = '{"verified": true}'
+            mock_caller.call.return_value = '{"issues": []}'
             mock_caller_class.return_value = mock_caller
 
             verify_spec_handler(step, flow)

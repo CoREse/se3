@@ -138,9 +138,9 @@ class TestRenderVerifySpec:
             "verified": False,
             "summary": "Issues found.",
             "issues": [
-                {"severity": "error", "message": "Missing function", "suggestion": "Add the function"},
-                {"severity": "warning", "message": "Unused import"},
-                {"severity": "info", "message": "Style note"},
+                {"priority": "high", "scope": "in_scope", "message": "Missing function", "suggestion": "Add the function"},
+                {"priority": "medium", "scope": "in_scope", "message": "Unused import"},
+                {"priority": "low", "scope": "out_of_scope", "message": "Style note"},
             ],
         })
 
@@ -166,8 +166,8 @@ class TestRenderVerifySpec:
 
         content = mock_render_full.call_args[0][0]
         assert "PASSED" in content
-        # No severity group headers
-        assert "error" not in content.lower().replace("error_message", "")
+        # No scope/priority group headers when no issues
+        assert "In-scope" not in content
 
     @patch("se3.engine.step_renderers.render_full")
     def test_with_recommendations(self, mock_render_full):
@@ -251,13 +251,14 @@ class TestRenderVerifySpec:
 
     @patch("se3.engine.step_renderers.render_full")
     def test_rich_close_tag_no_extra_bracket(self, mock_render_full):
-        """Close tags for issue severity colors must not have extra ] chars."""
+        """Close tags for issue priority colors must not have extra ] chars."""
         step = _make_step(StepType.VERIFY_SPEC, {
             "verified": False,
             "issues": [
-                {"severity": "error", "message": "err msg"},
-                {"severity": "warning", "message": "warn msg"},
-                {"severity": "info", "message": "info msg"},
+                {"priority": "critical", "scope": "in_scope", "message": "crit msg"},
+                {"priority": "high", "scope": "in_scope", "message": "err msg"},
+                {"priority": "medium", "scope": "in_scope", "message": "warn msg"},
+                {"priority": "low", "scope": "in_scope", "message": "info msg"},
             ],
         })
 

@@ -501,35 +501,39 @@ def _render_verify_spec(step: Step) -> None:
         lines.append("")
         lines.append(f"  {summary}")
 
-    # ── Issues by severity ─────────────────────────────────────────
+    # ── Issues by scope and priority ─────────────────────────────────
     issues = outputs.get("issues", [])
     if issues and isinstance(issues, list):
-        severity_groups: Dict[str, list] = {"error": [], "warning": [], "info": []}
+        # Group by scope first, then by priority within each scope
+        scope_groups: Dict[str, list] = {"in_scope": [], "out_of_scope": []}
         for issue in issues:
             if isinstance(issue, dict):
-                sev = issue.get("severity", "info").lower()
-                severity_groups.setdefault(sev, []).append(issue)
+                scope = issue.get("scope", "in_scope")
+                scope_groups.setdefault(scope, []).append(issue)
             else:
-                severity_groups["info"].append({"message": str(issue)})
+                scope_groups["in_scope"].append({"message": str(issue), "priority": "medium"})
 
-        severity_styles = {
-            "error": ("[bold red]error[/bold red]", "[red]"),
-            "warning": ("[bold yellow]warning[/bold yellow]", "[yellow]"),
-            "info": ("[dim]info[/dim]", "[dim]"),
+        priority_styles = {
+            "critical": ("[bold red]critical[/bold red]", "[red]"),
+            "high": ("[bold red]high[/bold red]", "[red]"),
+            "medium": ("[bold yellow]medium[/bold yellow]", "[yellow]"),
+            "low": ("[dim]low[/dim]", "[dim]"),
         }
 
-        for sev in ("error", "warning", "info"):
-            group = severity_groups.get(sev, [])
+        for scope_label, scope_key in [("In-scope", "in_scope"), ("Out-of-scope", "out_of_scope")]:
+            group = scope_groups.get(scope_key, [])
             if not group:
                 continue
             lines.append("")
             lines.append("[dim]" + "─" * 50 + "[/dim]")
             lines.append("")
-            label, color = severity_styles[sev]
-            lines.append(f"{label}  [dim]({len(group)})[/dim]")
+            scope_style = "[bold red]" if scope_key == "in_scope" else "[dim]"
+            lines.append(f"{scope_style}{scope_label}[/{scope_style[1:-1]}]  [dim]({len(group)})[/dim]")
             for issue in group:
                 msg = issue.get("message", "") if isinstance(issue, dict) else str(issue)
-                lines.append(f"  {color}•[/{color[1:-1]}] {msg}")
+                prio = issue.get("priority", "medium").lower() if isinstance(issue, dict) else "medium"
+                _label, color = priority_styles.get(prio, ("[dim]medium[/dim]", "[dim]"))
+                lines.append(f"  {color}•[/{color[1:-1]}] [{prio}] {msg}")
                 suggestion = issue.get("suggestion", "") if isinstance(issue, dict) else ""
                 if suggestion:
                     lines.append(f"    [dim]→ {suggestion}[/dim]")

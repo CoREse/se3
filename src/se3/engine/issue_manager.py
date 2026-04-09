@@ -42,6 +42,7 @@ class Issue:
     description: str
     status: IssueStatus = IssueStatus.OPEN
     priority: str = "medium"
+    scope: str = "in_scope"
     type: str = "bug"
     tags: List[str] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
@@ -55,6 +56,7 @@ class Issue:
             "description": self.description,
             "status": self.status.value,
             "priority": self.priority,
+            "scope": self.scope,
             "type": self.type,
             "tags": self.tags,
             "created_at": self.created_at.isoformat(),
@@ -86,6 +88,7 @@ class Issue:
             description=data.get("description", ""),
             status=IssueStatus(data.get("status", "open")),
             priority=data.get("priority", "medium"),
+            scope=data.get("scope", "in_scope"),
             type=data.get("type", "bug"),
             tags=data.get("tags", []),
             created_at=created_at,
@@ -189,6 +192,7 @@ class IssueManager:
         title: str,
         description: str,
         priority: str = "medium",
+        scope: str = "in_scope",
         tags: Optional[List[str]] = None,
         type: str = "bug",
     ) -> Issue:
@@ -205,6 +209,7 @@ class IssueManager:
             description=description,
             status=IssueStatus.OPEN,
             priority=priority,
+            scope=scope,
             type=type,
             tags=tags or [],
             created_at=now,

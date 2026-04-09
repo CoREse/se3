@@ -528,7 +528,7 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "uses_llm": True,
         "read_only": True,
         "inputs": ["changes_made", "spec_content", "test_results", "fix_iteration", "spec_changes"],
-        "outputs": ["verification_result", "verified", "issues", "fix_needed", "fix_instructions", "fix_context"],
+        "outputs": ["verification_result", "verified", "issues", "fix_needed", "fix_instructions", "fix_context", "in_scope_count", "out_of_scope_count"],
     },
     StepType.UPDATE_SPEC: {
         "name": "update_spec",

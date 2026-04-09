@@ -16,6 +16,7 @@ try:
 except ImportError:
     yaml = None
 
+from ..issue_manager import IssueManager
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
 from ..utils.json_parser import parse_json_response
@@ -54,7 +55,19 @@ Verify the implementation against the specifications. Check:
 3. **No Unintended Changes**: Are there any changes that weren't specified?
 4. **Correctness**: Is the implementation logically correct?
 5. **Test Results**: Did all tests pass? If not, analyze the failures.
-6. **Planned Spec Changes**: If "Planned Spec Changes" lists specific changes declared by the plan step, treat deviations matching those declarations as intentional changes (severity: info), NOT regressions (severity: error). Only deviations NOT covered by planned changes should be flagged as errors.
+6. **Planned Spec Changes**: If "Planned Spec Changes" lists specific changes declared by the plan step, treat deviations matching those declarations as intentional changes (scope: out_of_scope, priority: low), NOT regressions. Only deviations NOT covered by planned changes should be flagged as in_scope issues.
+
+### Issue Priority Levels
+Use the following priority levels for each issue:
+- **critical**: The implementation is fundamentally broken — core functionality does not work, data loss or corruption is possible, or security vulnerabilities are introduced. Must be fixed immediately.
+- **high**: A requirement is not met, a specified behavior is incorrect, or tests fail due to implementation bugs. Should be fixed before shipping.
+- **medium**: A partial implementation gap, missing edge case handling, or a non-critical deviation from the spec. Important but not blocking.
+- **low**: Minor style issues, documentation gaps, or suggestions for improvement that don't affect correctness.
+
+### Issue Scope
+For each issue, determine its scope:
+- **in_scope**: The issue was directly introduced by the current task's implementation, or the current task claims to address it but has not. These issues block the current flow and must be fixed.
+- **out_of_scope**: The issue is a pre-existing problem discovered during verification, or relates to functionality outside the current task's boundaries. These issues will be tracked separately and do not block the current flow.
 
 ### Test Failure Analysis
 If tests failed, analyze the test output to identify:
@@ -66,10 +79,10 @@ If tests failed, analyze the test output to identify:
 Respond in JSON format:
 ```json
 {{
-    "verified": true|false,
     "issues": [
         {{
-            "severity": "error|warning|info",
+            "priority": "critical|high|medium|low",
+            "scope": "in_scope|out_of_scope",
             "message": "Description of the issue",
             "suggestion": "How to fix (if applicable)"
         }}
@@ -85,10 +98,7 @@ Respond in JSON format:
 }}
 ```
 
-Set "verified" to true if the implementation is acceptable (may have minor issues).
-Set "verified" to false only if there are critical errors that must be fixed.
-
-The "fix_instructions" field is REQUIRED when tests failed. Provide clear, actionable instructions that the implement step can use to fix the issues.
+The "fix_instructions" field is REQUIRED when tests failed or when in_scope issues exist. Provide clear, actionable instructions that the implement step can use to fix the issues.
 """
 
 
@@ -97,6 +107,15 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     Verifies implementation against specifications using LLM.
     Detects test failures and triggers REVISION_NEEDED when appropriate.
+
+    The ``verified`` field is computed by rule, not by LLM:
+        verified = (in_scope_count == 0) and tests_passed
+
+    REVISION_NEEDED is triggered when:
+        in_scope_count > 0 or tests_passed == False
+
+    Out-of-scope issues are filed via IssueManager.create() and do not
+    block the flow.
 
     Args:
         step: The current step being executed
@@ -144,38 +163,31 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     logger.info(f"Verifying implementation against specifications (fix iteration: {fix_iteration})...")
 
     try:
-        # Call LLM for verification (use EXTRACT mode to avoid retry on format issues)
+        # Call LLM for verification
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
         response = caller.call(
             prompt=prompt,
             json_mode="two_phase",
-            json_schema_hint='{"verified": true|false, "issues": [{"severity": "error|warning", "message": "..."}], "summary": "...", "recommendations": [], "test_analysis": {"tests_passed": true|false, "failure_summary": "...", "root_cause": "..."}, "fix_instructions": "..."}',
+            json_schema_hint='{"issues": [{"priority": "critical|high|medium|low", "scope": "in_scope|out_of_scope", "message": "..."}], "summary": "...", "recommendations": [], "test_analysis": {"tests_passed": true|false, "failure_summary": "...", "root_cause": "..."}, "fix_instructions": "..."}',
         )
 
-        # Parse JSON response
-        verification = parse_json_response(response, required_keys=["verified"])
+        # Parse JSON response — "issues" is the primary required key
+        verification = parse_json_response(response, required_keys=["issues"])
 
         if not verification:
             step.error_message = "Failed to parse verification from LLM response"
             return StepStatus.FAILED
 
-        # Store outputs
-        step.outputs["verification_result"] = verification
-        step.outputs["verified"] = verification.get("verified", False)
-        step.outputs["issues"] = verification.get("issues", [])
-
-        # Transparently pass through discovered_issues for B-class collection
-        discovered_issues = verification.get("discovered_issues", [])
-        if discovered_issues:
-            step.outputs["discovered_issues"] = discovered_issues
-
+        # Extract issues and classify by scope
         issues = verification.get("issues", [])
-        error_count = sum(1 for i in issues if i.get("severity") == "error")
+        in_scope_issues = [i for i in issues if i.get("scope", "in_scope") == "in_scope"]
+        out_of_scope_issues = [i for i in issues if i.get("scope") == "out_of_scope"]
+        in_scope_count = len(in_scope_issues)
+        out_of_scope_count = len(out_of_scope_issues)
 
         # Check test results - support both old flat format and new structured format
         if test_results and isinstance(test_results, dict):
-            # New structured format has "overall_passed"; old format has "passed"
             tests_passed = test_results.get("overall_passed", test_results.get("passed", False))
             returncode = test_results.get("returncode", 0)
             if returncode != 0 and tests_passed:
@@ -183,10 +195,28 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 tests_passed = False
         else:
             tests_passed = True
-        
+
+        # Rule-based verified: ignore LLM's verified field
+        verified = (in_scope_count == 0) and tests_passed
+
+        # Store outputs
+        step.outputs["verification_result"] = verification
+        step.outputs["verified"] = verified
+        step.outputs["issues"] = issues
+        step.outputs["in_scope_count"] = in_scope_count
+        step.outputs["out_of_scope_count"] = out_of_scope_count
+
+        # Transparently pass through discovered_issues for B-class collection
+        discovered_issues = verification.get("discovered_issues", [])
+        if discovered_issues:
+            step.outputs["discovered_issues"] = discovered_issues
+
+        # File out-of-scope issues via IssueManager
+        _file_out_of_scope_issues(out_of_scope_issues, flow, project_root)
+
         test_analysis = verification.get("test_analysis", {})
         fix_instructions = verification.get("fix_instructions", "")
-        
+
         # If tests failed but LLM didn't provide fix instructions, generate default
         if not tests_passed and not fix_instructions:
             stdout = test_results.get("stdout", "") if isinstance(test_results, dict) else ""
@@ -198,15 +228,13 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if fix_instructions:
             step.outputs["fix_instructions"] = fix_instructions
 
-        # Determine if we need to fix
+        # Determine if we need to fix — tests failure path
         if not tests_passed:
             logger.warning(f"TESTS FAILED - fix iteration {fix_iteration}/{max_iterations}")
 
             if fix_iteration < max_iterations:
-                # Return REVISION_NEEDED to trigger fix loop
                 logger.info(f"Returning REVISION_NEEDED - will attempt fix (iteration {fix_iteration + 1})")
 
-                # Store fix context for next implement step
                 step.outputs["fix_needed"] = True
                 step.outputs["fix_iteration"] = fix_iteration
                 step.outputs["max_fix_iterations"] = max_iterations
@@ -219,62 +247,93 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
                 return StepStatus.REVISION_NEEDED
             else:
-                # Max iterations reached - complete with warning
                 logger.warning(f"Max fix iterations ({max_iterations}) reached - completing with test failures")
                 step.outputs["max_iterations_reached"] = True
                 step.outputs["warning"] = f"Tests still failing after {max_iterations} fix attempts"
 
                 return StepStatus.COMPLETED
 
-        # Tests passed - check spec compliance
-        if verification.get("verified", False):
-            logger.info(f"Verification passed ({len(issues)} issues found, {error_count} errors)")
-            return StepStatus.COMPLETED
+        # Tests passed — check in-scope spec compliance issues
+        if in_scope_count > 0:
+            logger.warning(f"Spec verification failed: {in_scope_count} in-scope issue(s) found")
 
-        # Spec verification failed (verified=False)
-        logger.warning(f"Spec verification failed: {error_count} errors found")
+            if fix_iteration < max_iterations:
+                logger.info(f"Returning REVISION_NEEDED for spec compliance fix (iteration {fix_iteration + 1})")
 
-        if error_count > 0 and fix_iteration < max_iterations:
-            # Return REVISION_NEEDED to trigger fix loop for spec compliance issues
-            logger.info(f"Returning REVISION_NEEDED for spec compliance fix (iteration {fix_iteration + 1})")
+                # Build fix instructions if LLM didn't provide them
+                if not fix_instructions:
+                    issue_details = "\n".join(
+                        f"- [{i.get('priority', 'high')}] {i.get('message', '')}"
+                        for i in in_scope_issues
+                    )
+                    fix_instructions = (
+                        f"Spec verification failed with {in_scope_count} in-scope issue(s):\n{issue_details}\n\n"
+                        "Fix the implementation to match the specifications."
+                    )
 
-            # Build fix instructions if LLM didn't provide them
-            if not fix_instructions:
-                issue_details = "\n".join(
-                    f"- [{i.get('severity', 'error')}] {i.get('message', '')}"
-                    for i in issues if i.get("severity") == "error"
-                )
-                fix_instructions = (
-                    f"Spec verification failed with {error_count} error(s):\n{issue_details}\n\n"
-                    "Fix the implementation to match the specifications."
-                )
+                step.outputs["fix_needed"] = True
+                step.outputs["fix_iteration"] = fix_iteration
+                step.outputs["max_fix_iterations"] = max_iterations
+                step.outputs["fix_instructions"] = fix_instructions
+                step.outputs["fix_context"] = {
+                    "spec_issues": in_scope_issues,
+                    "test_results": test_results,
+                    "test_analysis": test_analysis,
+                    "reason": "spec_compliance",
+                    "iteration": fix_iteration + 1,
+                }
 
-            step.outputs["fix_needed"] = True
-            step.outputs["fix_iteration"] = fix_iteration
-            step.outputs["max_fix_iterations"] = max_iterations
-            step.outputs["fix_instructions"] = fix_instructions
-            step.outputs["fix_context"] = {
-                "spec_issues": issues,
-                "test_results": test_results,
-                "test_analysis": test_analysis,
-                "reason": "spec_compliance",
-                "iteration": fix_iteration + 1,
-            }
+                return StepStatus.REVISION_NEEDED
 
-            return StepStatus.REVISION_NEEDED
-
-        # No errors or max iterations reached - complete with warning
-        if error_count > 0:
-            logger.warning(f"Max fix iterations ({max_iterations}) reached with {error_count} spec errors")
+            # Max iterations reached with in-scope issues
+            logger.warning(f"Max fix iterations ({max_iterations}) reached with {in_scope_count} in-scope issue(s)")
             step.outputs["max_iterations_reached"] = True
             step.outputs["warning"] = f"Spec verification still failing after {max_iterations} fix attempts"
 
+        logger.info(f"Verification {'passed' if verified else 'completed'} ({len(issues)} issues: {in_scope_count} in-scope, {out_of_scope_count} out-of-scope)")
         return StepStatus.COMPLETED
 
     except Exception as e:
         logger.exception("Verify step failed")
         step.error_message = f"Verification failed: {str(e)}"
         return StepStatus.FAILED
+
+
+def _file_out_of_scope_issues(
+    out_of_scope_issues: list[dict[str, Any]],
+    flow: FlowInstance,
+    project_root: Path,
+) -> None:
+    """File out-of-scope issues as tracked issues via IssueManager.
+
+    Each out-of-scope issue is persisted as a YAML issue file so it can
+    be addressed in a future flow without blocking the current one.
+    """
+    if not out_of_scope_issues:
+        return
+
+    try:
+        mgr = IssueManager(project_root)
+        for issue_data in out_of_scope_issues:
+            title = issue_data.get("message", "Untitled out-of-scope issue")
+            suggestion = issue_data.get("suggestion", "")
+            description = title
+            if suggestion:
+                description = f"{title}\n\nSuggestion: {suggestion}"
+            priority = issue_data.get("priority", "medium")
+            tags = ["auto-discovered", "source:verify-spec", "out-of-scope"]
+
+            mgr.create(
+                title=title,
+                description=description,
+                priority=priority,
+                scope="out_of_scope",
+                tags=tags,
+                type="bug",
+            )
+            logger.info(f"Filed out-of-scope issue: {title}")
+    except Exception as e:
+        logger.warning(f"Failed to file out-of-scope issues: {e}")
 
 
 def _get_max_fix_iterations(flow: FlowInstance) -> int:
