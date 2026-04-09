@@ -1051,8 +1051,10 @@ The `verify_spec` step renderer SHALL display verification status, issues groupe
 
 **Hidden fields:** `fix_context`, `fix_iteration`, `fix_needed`, `max_fix_iterations`, `verification_result` and other internal mechanism fields are omitted from display.
 
+**Field fallback:** `summary` and `recommendations` are first read from top-level `outputs`; if absent or empty, the renderer falls back to reading them from `outputs["verification_result"]` (a nested dict produced by the verify_spec handler). This ensures the renderer works regardless of whether these fields are extracted to the top level.
+
 **Output keys consumed by the renderer:**
-- `verified`, `summary`, `issues`, `recommendations`
+- `verified`, `summary`, `issues`, `recommendations`, `verification_result` (fallback source)
 
 ##### Scenario: Spec verification passed
 - **WHEN** the verify_spec step completes with `verified: true`
@@ -1161,10 +1163,31 @@ test:
 - **THEN** 跳过 `in_fix_loop: false` 的阶段
 
 #### Scenario: test 失败触发 fix loop
-- **WHEN** test 步骤执行完成且 `overall_passed` 为 false
+- **WHEN** test 步骤执行完成且存在 new test failures、net-new regressions 或 unparseable failures
 - **THEN** test 步骤返回 `REVISION_NEEDED` 状态
 - **AND** 流程直接进入 fix loop 返回 implement 步骤
 - **AND** 跳过 verify_spec 步骤（因为问题已通过测试发现）
+- **AND** fix instructions 包含 `_extract_failures_section()` 智能提取的诊断信息（FAILURES/ERRORS 段），而非简单的 stdout 末尾截断
+
+#### Scenario: Pre-existing failures 不触发 fix loop
+- **WHEN** test 步骤执行完成且 `overall_passed` 为 false
+- **AND** 所有失败测试均为 pre-existing failures（存在于 `se3/state/known_test_failures.json` 中）
+- **THEN** test 步骤返回 `COMPLETED` 状态（不触发 fix loop）
+- **AND** `step.outputs["pre_existing_failures"]` 记录这些已知失败
+- **AND** 通过 A-class issue discovery 创建 medium 优先级 issue 报告这些 pre-existing failures
+- **AND** 日志记录 "Tests failed but all failures are pre-existing — not triggering fix loop"
+
+#### Scenario: Known test failures 持久化
+- **WHEN** test 步骤完成执行
+- **THEN** 所有 regression failures 写入 `se3/state/known_test_failures.json`（atomic write）
+- **AND** 已有条目更新 `last_seen` 时间戳
+- **AND** 新条目记录 `reason`（从 pytest 输出提取）、`first_seen`、`last_seen`
+
+#### Scenario: 智能 failure 诊断提取
+- **WHEN** test 步骤需要构建 fix instructions
+- **THEN** `_extract_failures_section()` 从 pytest 输出中定位 `= FAILURES =` 或 `= ERRORS =` 段
+- **AND** 如果段内容超过 max_chars（默认 3000），按 test block 截断并保留 assertion 和 traceback 尾部
+- **AND** 如果未找到 FAILURES/ERRORS 段，回退到 stdout 末尾截断
 
 #### Scenario: Revision flow previous_output serialization
 - **WHEN** the state machine transitions to a revision (confirm review loop or fix loop)

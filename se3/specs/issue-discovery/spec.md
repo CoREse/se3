@@ -18,6 +18,13 @@ The system SHALL support two classes of issue discovery:
 - **THEN** `IssueDiscovery.create_from_fix_loop_exhaustion()` creates a `high` priority issue
 - **AND** the issue includes fix history, last test output, and fix instructions
 
+#### Scenario: A-class trigger on pre-existing test failures
+- **WHEN** the test step detects failures that exist in `se3/state/known_test_failures.json` (not introduced by the current change)
+- **THEN** `IssueDiscovery.create_from_pre_existing_failures()` creates a `medium` priority issue
+- **AND** the issue lists each pre-existing failing test with its test_id and reason
+- **AND** the issue is tagged with `auto-discovered` and `source:test-pre-existing`
+- **AND** duplicate issues are suppressed within the same flow execution
+
 #### Scenario: B-class injection into whitelisted step
 - **WHEN** a whitelisted step (e.g., `verify_spec`, `summarize`) builds its LLM prompt
 - **THEN** the issue discovery prompt fragment is appended to the prompt
