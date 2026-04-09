@@ -4,6 +4,12 @@ Analyzes the task description to determine:
 - Task type (feature, bugfix, review, small, directive)
 - Scope of changes
 - Required steps for the workflow
+- Relevant specs to load for downstream steps
+
+This is the "super-analyze" step: it combines task classification with
+spec selection in a single LLM call, and programmatically collects
+project context (replacing the former PROJECT_SUMMARY step) and loads
+spec content (replacing the former READ_SPEC step).
 """
 
 from __future__ import annotations
@@ -11,10 +17,12 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 
+from ..context_builder import ContextBuilder
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, StepType, get_default_step_sequence
+from ..project_context import ProjectContextCollector, list_spec_names
 from ..utils.json_parser import parse_json_response
 from ...config import insert_confirmation_steps
 
@@ -29,7 +37,7 @@ ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze th
    - "review": Code review, audit, or analysis without code changes
    - "small": Minor fix, typo, or simple change (trivial scope, e.g., README update, comment fix)
    - "directive": Following specific instructions or requirements
-   
+
    IMPORTANT: Do NOT use "discovery" - discovery mode is triggered separately via --discover flag.
 
 2. **scope**: Brief description of what files/modules are likely affected
@@ -38,12 +46,18 @@ ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze th
 
 4. **reasoning**: Brief explanation of your classification
 
+5. **selected_specs**: Based on the task scope and the available specs listed below, select which specifications are relevant to this task. Choose specs whose content would help understand the requirements, architecture, or conventions relevant to the task. Be selective — only include specs that are genuinely relevant. If no specs are relevant, return an empty list. Do NOT include "base" — it is always loaded automatically.
+
+## Available Specs
+{available_specs}
+
 Respond in JSON format:
 {{
     "task_type": "feature|bugfix|review|small|directive",
     "scope": "description of affected areas",
     "complexity": "simple|medium|complex",
-    "reasoning": "explanation"
+    "reasoning": "explanation",
+    "selected_specs": ["spec-name-1", "spec-name-2"]
 }}
 
 Task description:
@@ -59,6 +73,11 @@ Project context:
 def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the analyze step.
 
+    This is the "super-analyze" handler that combines:
+    1. Programmatic pre-processing: project context collection + spec name listing
+    2. Single LLM call: task classification + spec selection
+    3. Programmatic post-processing: spec content loading (base + selected)
+
     Args:
         step: The current step being executed
         flow: The flow instance containing context
@@ -73,18 +92,27 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.error_message = "No task description provided"
         return StepStatus.FAILED
 
-    # Gather project context
-    project_context = _gather_project_context(flow)
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
 
-    # Build prompt
+    # --- Pre-processing (programmatic, no LLM) ---
+
+    # (1) Collect structured project context
+    project_summary = _collect_project_summary(project_root)
+
+    # (2) List available spec names
+    builder = ContextBuilder(project_root)
+    spec_names = list_spec_names(builder.specs_dir)
+    available_specs = ", ".join(spec_names) if spec_names else "(none)"
+
+    # Build prompt with project context and spec names
     prompt = ANALYZE_PROMPT.format(
         task_description=task_description,
-        project_context=project_context,
+        project_context=project_summary,
+        available_specs=available_specs,
     )
 
     # Append issue discovery injection if applicable
     from ..context_builder import get_issue_discovery_injection
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     injection = get_issue_discovery_injection("analyze", project_root)
     if injection:
         prompt += injection
@@ -92,7 +120,7 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     logger.info(f"Analyzing task: {task_description[:60]}...")
 
     try:
-        # Call LLM for analysis
+        # --- LLM call: task classification + spec selection ---
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
         response = caller.call(prompt=prompt, json_mode="two_phase")
@@ -121,17 +149,30 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         flow.state.update_task_type(resolved_task_type)
         flow.task_type = resolved_task_type
 
-        # Store outputs
+        # --- Post-processing: load spec content programmatically ---
+        selected_specs = result.get("selected_specs", [])
+        spec_content, relevant_specs = _load_specs(
+            builder, selected_specs, spec_names,
+        )
+
+        # Store outputs (original + new)
         step.outputs["task_type"] = task_type
         step.outputs["scope"] = result.get("scope", "")
         step.outputs["complexity"] = result.get("complexity", "medium")
         step.outputs["reasoning"] = result.get("reasoning", "")
+        step.outputs["project_summary"] = project_summary
+        step.outputs["relevant_specs"] = relevant_specs
+        step.outputs["spec_content"] = spec_content
 
         # Update flow's selected steps based on task_type (fixed sequences)
         # Note: discover mode is handled separately via --discover flag, not by analyze
         _update_flow_steps(flow, resolved_task_type)
 
-        logger.info(f"Analysis complete: type={resolved_task_type}, complexity={result.get('complexity')}")
+        logger.info(
+            f"Analysis complete: type={resolved_task_type}, "
+            f"complexity={result.get('complexity')}, "
+            f"specs={relevant_specs}"
+        )
 
         return StepStatus.COMPLETED
 
@@ -195,48 +236,123 @@ def _handle_type_conflict(flow: FlowInstance, resolved_type: str) -> str:
     return resolved_type
 
 
-def _gather_project_context(flow: FlowInstance) -> str:
-    """Gather relevant project context for analysis.
+def _collect_project_summary(project_root: Path) -> str:
+    """Collect structured project context and format as text summary.
+
+    Uses ProjectContextCollector to gather git status, flow engine state,
+    backlog, and spec list, then formats them into a concise text block.
+    This replaces the former PROJECT_SUMMARY LLM step with a programmatic
+    approach — no LLM call needed.
 
     Args:
-        flow: The flow instance
+        project_root: Project root directory
 
     Returns:
-        String containing project context information
+        Formatted project context string
     """
-    context_parts = []
+    try:
+        collector = ProjectContextCollector(project_root)
+        raw = collector.collect()
+    except Exception as e:
+        logger.debug(f"Failed to collect project context: {e}")
+        return "No additional context available"
 
-    # Check for existing change
-    if flow.change_name:
-        context_parts.append(f"Active change: {flow.change_name}")
+    parts: List[str] = []
 
-    # Check for project structure
-    project_root = Path(flow.change_path).parent if flow.change_path else Path.cwd()
+    # Git status
+    git = raw.get("git", {})
+    branch = git.get("branch", "unknown")
+    uncommitted = git.get("uncommitted_count", 0)
+    parts.append(f"Branch: {branch}")
+    if uncommitted:
+        parts.append(f"Uncommitted changes: {uncommitted}")
+    commits = git.get("last_commits", [])
+    if commits:
+        parts.append("Recent commits:")
+        for c in commits[:5]:
+            parts.append(f"  - {c}")
 
-    # Look for common project indicators
-    if (project_root / "pyproject.toml").exists():
-        context_parts.append("Project type: Python (pyproject.toml found)")
-    elif (project_root / "package.json").exists():
-        context_parts.append("Project type: Node.js (package.json found)")
-    elif (project_root / "Cargo.toml").exists():
-        context_parts.append("Project type: Rust (Cargo.toml found)")
-    elif (project_root / "go.mod").exists():
-        context_parts.append("Project type: Go (go.mod found)")
+    # Flow engine
+    flow_engine = raw.get("flow_engine")
+    if flow_engine:
+        active = flow_engine.get("active_flows", [])
+        if active:
+            parts.append(f"Active flows: {len(active)}")
+            for f in active[:3]:
+                parts.append(f"  - {f.get('description', 'unknown')}")
 
-    # Check for test framework
-    if (project_root / "pytest.ini").exists() or (project_root / "setup.py").exists():
-        context_parts.append("Testing: pytest")
+    # Backlog highlights
+    backlog = raw.get("backlog", [])
+    if backlog:
+        parts.append(f"Backlog items: {len(backlog)}")
+        for item in backlog[:5]:
+            status = item.get("status", "?")
+            title = item.get("title", item.get("slug", "?"))
+            parts.append(f"  - [{status}] {title}")
 
-    # Check for specs
-    spec_dir = project_root / "specs"
-    if not spec_dir.exists():
-        spec_dir = project_root / "openspec" / "specs"
-    if spec_dir.exists():
-        spec_count = len(list(spec_dir.glob("**/*.md")))
-        if spec_count > 0:
-            context_parts.append(f"Specs: {spec_count} found")
+    # Specs
+    specs = raw.get("specs", [])
+    if specs:
+        parts.append(f"Available specs: {', '.join(specs)}")
 
-    return "\n".join(context_parts) if context_parts else "No additional context available"
+    return "\n".join(parts) if parts else "No additional context available"
+
+
+def _load_specs(
+    builder: ContextBuilder,
+    selected_specs: Any,
+    known_spec_names: List[str],
+) -> tuple[Dict[str, str], List[str]]:
+    """Load spec content programmatically after LLM selection.
+
+    Auto-loads base spec (if exists) regardless of LLM selection.
+    Validates selected spec names against known specs and loads their content.
+
+    Args:
+        builder: ContextBuilder instance for spec loading
+        selected_specs: List of spec names selected by LLM (may be invalid)
+        known_spec_names: Valid spec names from the specs directory
+
+    Returns:
+        Tuple of (spec_content dict, relevant_specs list)
+    """
+    spec_content: Dict[str, str] = {}
+    relevant_specs: List[str] = []
+
+    # Auto-load base spec (always, regardless of LLM selection)
+    base_content = builder._load_spec_content("base")
+    if base_content:
+        spec_content["base"] = base_content
+        relevant_specs.append("base")
+        logger.info(f"Auto-loaded base spec ({len(base_content)} chars)")
+
+    # Validate and sanitize selected_specs from LLM
+    if not isinstance(selected_specs, list):
+        logger.warning(f"selected_specs is not a list ({type(selected_specs)}), using empty list")
+        selected_specs = []
+
+    for spec_name in selected_specs:
+        if not isinstance(spec_name, str):
+            continue
+        # Skip base (already loaded) and unknown names
+        if spec_name == "base":
+            continue
+        if spec_name not in known_spec_names:
+            logger.warning(f"LLM selected unknown spec '{spec_name}', skipping")
+            continue
+        if spec_name in spec_content:
+            continue
+
+        content = builder._load_spec_content(spec_name)
+        if content:
+            spec_content[spec_name] = content
+            relevant_specs.append(spec_name)
+            logger.debug(f"Loaded spec: {spec_name} ({len(content)} chars)")
+        else:
+            logger.warning(f"Could not load spec content: {spec_name}")
+
+    logger.info(f"Loaded {len(spec_content)} specs: {relevant_specs}")
+    return spec_content, relevant_specs
 
 
 def _update_flow_steps(
