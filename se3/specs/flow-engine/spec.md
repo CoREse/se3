@@ -182,9 +182,9 @@ se3 run --discover "我想做一个用户管理功能"
 | 步骤 | 职责 | LLM 参与 | JSON 模式 | Read-Only | 输入 | 输出 |
 |------|------|---------|-----------|-----------|------|------|
 | `discovery` | 需求探索（多轮对话） | 是 | STRICT | 否 | initial_description | refined_description, discovery_summary |
-| `analyze` | 分析任务类型和范围 | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning |
-| `read_spec` | 读取相关 spec 文件 | 否（程序自动） | - | **是** | scope | relevant_specs, spec_content |
-| `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type | plan{proposal,design}, task_groups, spec_changes |
+| `analyze` | 分析任务类型和范围；收集项目上下文；选择并加载 spec | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content, selected_specs |
+| ~~`read_spec`~~ | ~~读取相关 spec 文件~~ (deprecated — merged into analyze) | 否（程序自动） | - | **是** | scope | relevant_specs, spec_content |
+| `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type, project_summary | plan{proposal,design}, task_groups, spec_changes |
 | `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed |
 | `test` | 运行测试验证 | 否（程序执行） | - | 否 | - | test_results, tests_passed |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, fix_needed, fix_instructions, fix_context |
@@ -192,19 +192,19 @@ se3 run --discover "我想做一个用户管理功能"
 | `version_analyze` | 分析变更确定版本类型 | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning |
 | `commit` | 提交变更 | 否（程序执行） | - | 否 | changes_made, bump_type | commit_hash |
 | `summarize` | 生成总结和 handoff | 是 | 文本 | **是** | all_previous_outputs | summary (Markdown 文本) |
-| `project_summary` | 生成项目上下文摘要 | 是 | 文本 | **是** | 项目状态 | 摘要字符串 |
+| ~~`project_summary`~~ | ~~生成项目上下文摘要~~ (deprecated — merged into analyze) | 是 | 文本 | **是** | 项目状态 | 摘要字符串 |
 
 **不同任务类型的步骤序列：**
-- `discovery`: discovery → analyze → read_spec → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
-- `feature`: analyze → read_spec → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
-- `bugfix`: analyze → read_spec → plan → implement → test → verify_spec → **version_analyze** → commit → summarize
-- `review`: analyze → read_spec → verify_spec → summarize
+- `discovery`: discovery → analyze → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
+- `feature`: analyze → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit → summarize
+- `bugfix`: analyze → plan → implement → test → verify_spec → **version_analyze** → commit → summarize
+- `review`: analyze → verify_spec → summarize
 - `small`: analyze → implement → test → **version_analyze** → commit → summarize
-- `directive`: analyze → read_spec → plan → implement → **version_analyze** → commit → summarize
+- `directive`: analyze → plan → implement → **version_analyze** → commit → summarize
 
 #### Scenario: Feature 任务完整流程
 - **WHEN** 任务类型为 `feature`
-- **THEN** 执行完整的 10 步流程（plan 使用 full 深度）
+- **THEN** 执行完整的 9 步流程（plan 使用 full 深度）
 
 #### Scenario: Small 任务简化流程
 - **WHEN** 任务类型为 `small`
@@ -212,16 +212,20 @@ se3 run --discover "我想做一个用户管理功能"
 
 ### Requirement: Deprecated Step Type Backward Compatibility
 
-The step type enum SHALL retain deprecated values `PROPOSE`, `DESIGN`, and `PLAN_TASKS` with stub handlers that forward to `plan_handler`. This ensures persisted flows created before the plan unification can resume without crashing.
+The step type enum SHALL retain deprecated values with stub handlers that forward to the appropriate current handler. This ensures persisted flows created before step unification/merges can resume without crashing.
 
-**Retained entries:**
+**Retained entries (plan unification):**
 - `StepTypeValue.PROPOSE` — deprecated, forwards to plan_handler
 - `StepTypeValue.DESIGN` — deprecated, forwards to plan_handler
 - `StepTypeValue.PLAN_TASKS` — deprecated, forwards to plan_handler
 
+**Retained entries (analyze merge):**
+- `StepTypeValue.PROJECT_SUMMARY` — deprecated, forwards to project_summary_handler
+- `StepTypeValue.READ_SPEC` — deprecated, forwards to read_spec_handler
+
 **Behavior:**
 - Stub handlers log a deprecation warning with the flow ID and step ID
-- The plan_handler executes normally regardless of which step type triggered it
+- The target handler executes normally regardless of which step type triggered it
 - Display titles and renderers for deprecated types are retained so history/status views render correctly
 
 #### Scenario: Resuming a persisted flow with old step types
@@ -229,9 +233,19 @@ The step type enum SHALL retain deprecated values `PROPOSE`, `DESIGN`, and `PLAN
 - **THEN** the stub handler forwards execution to plan_handler
 - **AND** a deprecation warning is logged
 
+#### Scenario: Resuming a persisted flow with PROJECT_SUMMARY or READ_SPEC steps
+- **WHEN** a flow persisted with `PROJECT_SUMMARY` or `READ_SPEC` step types is resumed
+- **THEN** the stub handler forwards execution to the original handler (project_summary_handler or read_spec_handler respectively)
+- **AND** a deprecation warning is logged
+
 #### Scenario: New flows use unified PLAN step
 - **WHEN** a new flow is created
 - **THEN** the step sequence contains only `PLAN`, never `PROPOSE`, `DESIGN`, or `PLAN_TASKS`
+
+#### Scenario: New flows do not include PROJECT_SUMMARY or READ_SPEC
+- **WHEN** a new flow is created
+- **THEN** the step sequence does not contain `PROJECT_SUMMARY` or `READ_SPEC`
+- **AND** their functionality is provided by the `ANALYZE` step
 
 ### Requirement: 步骤内 LLM 调用
 
@@ -261,7 +275,8 @@ The flow engine SHALL enforce a prompt-level file modification prohibition for r
 **Read-Only Step Attribute:**
 
 Each entry in the step pool (`STEP_POOL`) SHALL include a `read_only` boolean attribute. Steps marked `read_only: true` are:
-- `analyze`, `project_summary`, `read_spec`, `plan`, `verify_spec`, `version_analyze`, `summarize`
+- `analyze`, `plan`, `verify_spec`, `version_analyze`, `summarize`
+- Deprecated steps (`project_summary`, `read_spec`)
 
 Steps explicitly marked `read_only: false`:
 - `discovery`, `implement`, `test`, `update_spec`, `commit`, `confirm`
@@ -302,7 +317,7 @@ The injected prompt SHALL:
 
 | 模式 | 描述 | 适用场景 |
 |------|------|----------|
-| **STRICT** | 强制 JSON 格式，失败重试 | 简单输出（analyze, read_spec） |
+| **STRICT** | 强制 JSON 格式，失败重试 | 简单输出（analyze） |
 | **EXTRACT** | 要求 JSON 格式，失败时用 LLM 提取 | 中等复杂度（verify_spec, update_spec） |
 | **TWO_PHASE** | 自然生成 + LLM 提取 | 复杂/大输出（plan, implement） |
 
@@ -451,10 +466,10 @@ The injected prompt SHALL:
 
 **输入构建规则：**
 - 所有步骤接收 `task_description` 和 `flow_id`
-- `read_spec` 接收 analyze 的 `scope`
-- `plan` 接收 `spec_content`、`task_type`、`scope`，输出 `plan`（含 proposal + design）、`task_groups` 和 `spec_changes`（仅 full depth）
-- `implement` 接收 `design_doc`（从 plan.design 映射）和 `task_groups`
-- `verify_spec` 接收 `changes_made`、`spec_content`、`test_results`、`fix_iteration` 和 `spec_changes`（从 plan 步骤传递，用于区分有意变更与回归）
+- `analyze` 输出 `task_type`、`scope`、`complexity`、`reasoning`、`project_summary`、`relevant_specs`、`spec_content`、`selected_specs`；其中 `project_summary` 由 `ProjectContextCollector.collect()` 程序化生成（非 LLM），`spec_content` 由后处理程序化加载（base spec 自动附加 + LLM 选择的 spec）
+- `plan` 接收 `spec_content`（从 analyze）、`task_type`、`scope`、`project_summary`（从 analyze），输出 `plan`（含 proposal + design）、`task_groups` 和 `spec_changes`（仅 full depth）
+- `implement` 接收 `design_doc`（从 plan.design 映射）、`task_groups`、`spec_content`（从 analyze）、`project_summary`（从 analyze）
+- `verify_spec` 接收 `changes_made`、`spec_content`（从 analyze）、`test_results`、`fix_iteration`、`spec_changes`（从 plan 步骤传递，用于区分有意变更与回归）和 `relevant_specs`（从 analyze）
 - `update_spec` 接收 `changes_made`、`verification_result`、`spec_changes`（从 plan 步骤传递，作为变更指引清单）和 `design_doc`（从 plan.design 映射，提供架构上下文）
 - `commit` 接收 `changes_made`
 - `summarize` 接收所有前序输出

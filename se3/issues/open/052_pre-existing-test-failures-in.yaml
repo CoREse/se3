@@ -1,0 +1,14 @@
+id: '052'
+title: Pre-existing test failures in TestTestStep and TestCommitStep
+description: TestTestStep::test_test_failure asserts step.outputs['tests_passed']
+  is False but the test handler behavior may have changed. TestCommitStep::test_commit_success
+  has insufficient mock side_effects (StopIteration). These failures exist independently
+  of the analyze merge changes.
+status: open
+priority: medium
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+created_at: '2026-04-09T10:34:42.861112'
+updated_at: '2026-04-09T10:34:42.861112'

@@ -12,26 +12,27 @@ The system SHALL support five workflow types, mapped to different step sequences
 
 | Type | Steps | When Used |
 |------|-------|-----------|
-| `feature` | analyze → read_spec → plan → implement → test → verify_spec → update_spec → commit → summarize | New functionality or significant enhancement |
-| `bugfix` | analyze → read_spec → plan → implement → test → verify_spec → commit → summarize | Bug reports (plan uses medium depth) |
-| `review` | analyze → read_spec → verify_spec → summarize | Code review, audit, or analysis |
+| `feature` | analyze → plan → implement → test → verify_spec → update_spec → commit → summarize | New functionality or significant enhancement |
+| `bugfix` | analyze → plan → implement → test → verify_spec → commit → summarize | Bug reports (plan uses medium depth) |
+| `review` | analyze → verify_spec → summarize | Code review, audit, or analysis |
 | `small` | analyze → implement → test → commit → summarize | Minor fixes, typos, simple changes |
-| `directive` | analyze → read_spec → plan → implement → commit → summarize | Following specific instructions (plan uses shallow depth) |
+| `directive` | analyze → plan → implement → commit → summarize | Following specific instructions (plan uses shallow depth) |
 
-**Step Pool (9 steps):**
-1. **analyze** - Analyze task type and scope
-2. **read_spec** - Read relevant specifications
-3. **plan** - Unified planning: proposal + design + task breakdown (adapts depth by task_type)
-4. **implement** - Write code implementation
-5. **test** - Run tests to verify
-6. **verify_spec** - Check implementation vs spec
-7. **update_spec** - Update spec records
-8. **commit** - Commit changes
-9. **summarize** - Generate summary and handoff
+**Step Pool (8 active steps):**
+1. **analyze** - Analyze task type and scope, collect project context, select and load relevant specs
+2. **plan** - Unified planning: proposal + design + task breakdown (adapts depth by task_type)
+3. **implement** - Write code implementation
+4. **test** - Run tests to verify
+5. **verify_spec** - Check implementation vs spec
+6. **update_spec** - Update spec records
+7. **commit** - Commit changes
+8. **summarize** - Generate summary and handoff
+
+**Note:** `read_spec` and `project_summary` are deprecated — their functionality is now merged into the `analyze` step. Deprecated handlers are retained for backward compatibility with persisted flows.
 
 #### Scenario: Feature workflow selection
 - **WHEN** input is classified as "feature-request"
-- **THEN** the system uses the feature workflow with full 9 steps
+- **THEN** the system uses the feature workflow with full 8 steps
 
 #### Scenario: Bug fix workflow selection
 - **WHEN** input is classified as "bug-report"
@@ -46,15 +47,13 @@ The system SHALL support five workflow types, mapped to different step sequences
 The feature workflow SHALL follow these steps:
 
 **1. ANALYZE**
-   - Classify task type (feature/bugfix/review/small/directive)
-   - Determine scope and complexity
-   - Select appropriate step sequence
+   - Collect structured project context via `ProjectContextCollector.collect()` (programmatic, no LLM)
+   - Programmatically list available spec names
+   - Single LLM call to classify task type (feature/bugfix/review/small/directive), determine scope and complexity, and select relevant specs (`selected_specs`)
+   - Post-processing: programmatically load spec content (base spec auto-attached + selected specs)
+   - Outputs: task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content, selected_specs
 
-**2. READ_SPEC**
-   - Automatically discover relevant specs based on scope
-   - Load spec content into context
-
-**3. PLAN** (unified planning step, adapts depth by task_type)
+**2. PLAN** (unified planning step, adapts depth by task_type)
    - Generate change proposal (summary, motivation, files, risks)
    - Create design document (architecture decisions, components, data flow)
    - Break implementation into concrete task groups
@@ -64,7 +63,7 @@ The feature workflow SHALL follow these steps:
      - bugfix: medium depth (proposal + lightweight design + tasks)
      - directive/small: shallow depth (tasks only)
 
-**4. IMPLEMENT**
+**3. IMPLEMENT**
    - Display structured task plan panel showing execution strategy, task groups with LOC estimates, and LOC summary before any LLM calls
    - Write code following the plan
    - If total estimated LOC ≤ threshold (default 300), collapse all groups into a single LLM call
@@ -72,35 +71,35 @@ The feature workflow SHALL follow these steps:
    - Include tests where applicable
    - Follow project conventions
 
-**5. TEST**
+**4. TEST**
    - Run test suite automatically
    - Report test results
    - If tests fail, trigger fix loop to return to implement step
    - If tests pass, continue to verify_spec for spec compliance check
 
-**6. VERIFY_SPEC**
+**5. VERIFY_SPEC**
    - Check implementation against specifications
    - Verify all scenarios are covered
    - Identify any discrepancies
 
-**7. UPDATE_SPEC**
+**6. UPDATE_SPEC**
    - Update specs to reflect changes made
    - Add new capabilities documentation
    - Mark scenarios as implemented
 
-**8. COMMIT**
+**7. COMMIT**
    - Stage and commit all changes
    - Generate meaningful commit message
    - Update version according to bump rules
 
-**9. SUMMARIZE**
+**8. SUMMARIZE**
    - Generate session summary
    - Document changes made
    - Provide handoff context for future sessions
 
 #### Scenario: Large feature
 - **WHEN** a feature is complex with multiple components
-- **THEN** go through all 9 steps with full-depth plan
+- **THEN** go through all 8 steps with full-depth plan
 - **AND** the plan includes formal proposal, design, and task groups
 
 #### Scenario: Medium feature
@@ -115,30 +114,28 @@ The bugfix workflow SHALL follow these steps (plan uses medium depth):
    - Reproduce the bug
    - Identify root cause
    - Determine affected components
+   - Collect project context and load relevant specs (merged from former project_summary and read_spec steps)
 
-**2. READ_SPEC**
-   - Read relevant specs for context
-
-**3. PLAN** (medium depth: proposal + lightweight design + tasks)
+**2. PLAN** (medium depth: proposal + lightweight design + tasks)
    - Generate fix proposal
    - Identify files to modify
    - Break complex fixes into task groups
 
-**4. IMPLEMENT**
+**3. IMPLEMENT**
    - Fix the bug
    - Add regression tests
 
-**5. TEST**
+**4. TEST**
    - Run tests to verify fix
    - Run regression tests
 
-**6. VERIFY_SPEC**
+**5. VERIFY_SPEC**
    - Verify fix meets requirements
 
-**7. COMMIT**
+**6. COMMIT**
    - Commit the fix
 
-**8. SUMMARIZE**
+**7. SUMMARIZE**
    - Document the bug and fix
 
 #### Scenario: Complex bug fix
@@ -156,15 +153,13 @@ The review workflow SHALL follow minimal steps:
 **1. ANALYZE**
    - Understand review scope
    - Identify what to review
+   - Collect project context and load relevant specs
 
-**2. READ_SPEC**
-   - Read relevant specifications
-
-**3. VERIFY_SPEC**
-   - Review code against specs
+**2. VERIFY_SPEC**
+   - Review code against specs (consumes `spec_content` directly from analyze)
    - Categorize findings: critical / warning / suggestion
 
-**4. SUMMARIZE**
+**3. SUMMARIZE**
    - Provide review report
 
 #### Scenario: Code review
