@@ -577,6 +577,89 @@ class TestStreamJSONTracker:
         assert "Read" in captured.out
         assert "2 lines" in captured.out
 
+    def test_write_tool_use_caches_old_content(self, capsys, tmp_path):
+        """Write tool_use for existing file should cache old content."""
+        target = tmp_path / "existing.py"
+        target.write_text("old content\n", encoding="utf-8")
+        tracker = StreamJSONTracker()
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-w-old",
+                    "name": "Write",
+                    "input": {"file_path": str(target), "content": "new content\n"}
+                }]
+            }
+        }))
+        assert "tu-w-old" in tracker._tool_use_id_to_old_content
+        assert tracker._tool_use_id_to_old_content["tu-w-old"] == "old content\n"
+
+    def test_write_tool_use_nonexistent_file_caches_none(self, capsys):
+        """Write tool_use for non-existent file should cache None."""
+        tracker = StreamJSONTracker()
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-w-new",
+                    "name": "Write",
+                    "input": {"file_path": "/no/such/file.py", "content": "x"}
+                }]
+            }
+        }))
+        assert "tu-w-new" in tracker._tool_use_id_to_old_content
+        assert tracker._tool_use_id_to_old_content["tu-w-new"] is None
+
+    def test_print_summary_clears_caches(self, capsys):
+        """print_summary should clear id-to-name, input, and old_content caches."""
+        tracker = StreamJSONTracker()
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-cache",
+                    "name": "Edit",
+                    "input": {"file_path": "f.py", "old_string": "a", "new_string": "b"}
+                }]
+            }
+        }))
+        tracker._tool_use_id_to_old_content["tu-cache"] = "old"
+        assert len(tracker._tool_use_id_to_name) > 0
+        assert len(tracker._tool_use_id_to_input) > 0
+        assert len(tracker._tool_use_id_to_old_content) > 0
+
+        tracker.print_summary()
+        assert len(tracker._tool_use_id_to_name) == 0
+        assert len(tracker._tool_use_id_to_input) == 0
+        assert len(tracker._tool_use_id_to_old_content) == 0
+
+    def test_cache_eviction_on_overflow(self, capsys):
+        """Cache should evict oldest entry when exceeding _MAX_CACHE_SIZE."""
+        tracker = StreamJSONTracker()
+        # Fill cache to the limit
+        for i in range(StreamJSONTracker._MAX_CACHE_SIZE + 1):
+            tracker.process_line(json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "tool_use",
+                        "id": f"tu-{i}",
+                        "name": "Edit",
+                        "input": {"file_path": f"f{i}.py", "old_string": "a", "new_string": "b"}
+                    }]
+                }
+            }))
+        # First entry should have been evicted
+        assert "tu-0" not in tracker._tool_use_id_to_input
+        # Last entry should still be present
+        assert f"tu-{StreamJSONTracker._MAX_CACHE_SIZE}" in tracker._tool_use_id_to_input
+        # Total cache size should not exceed limit
+        assert len(tracker._tool_use_id_to_input) <= StreamJSONTracker._MAX_CACHE_SIZE
+
 
 class TestStreamJSONTrackerPrefix:
     """Tests for StreamJSONTracker stream_prefix behavior."""

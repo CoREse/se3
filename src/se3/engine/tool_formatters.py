@@ -376,13 +376,20 @@ def generate_edit_diff(old_string: str, new_string: str, file_path: str) -> list
     return [line.rstrip("\n") for line in diff]
 
 
-def format_tool_diff(tool_name: str, input_data: dict, result_data: Any) -> None:
+def format_tool_diff(
+    tool_name: str,
+    input_data: dict,
+    result_data: Any,
+    old_content: Optional[str] = None,
+) -> None:
     """Render diff output for Edit/Write tools. No-op for other tools.
 
     Args:
         tool_name: Tool name (e.g. 'Edit', 'Write')
         input_data: Cached tool input parameters
         result_data: Tool result data
+        old_content: For Write overwrites, the original file content before write.
+                     None means the file did not exist (new file).
     """
     from .display import render_diff
 
@@ -402,9 +409,13 @@ def format_tool_diff(tool_name: str, input_data: dict, result_data: Any) -> None
             file_path = input_data.get("file_path", "?")
             content = input_data.get("content", "")
             n_lines = len(content.splitlines()) if content else 0
-            # Check result text for "Created" indicator (new file)
-            result_text = _extract_text(result_data) if result_data else ""
-            if "created" in result_text.lower() or "new file" in result_text.lower():
+            if old_content is not None:
+                # Overwrite of existing file — generate unified diff
+                diff_lines = generate_edit_diff(old_content, content, file_path)
+                if diff_lines:
+                    render_diff(diff_lines, file_path)
+            else:
+                # New file — show "Created" summary
                 from .display import get_console
                 get_console().print(
                     f"  [green]Created[/green] {file_path} ({n_lines} lines)"
