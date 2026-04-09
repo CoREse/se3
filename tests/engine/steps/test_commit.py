@@ -505,6 +505,100 @@ class TestTemplateSummaryGeneration:
         assert "template mode" in content
 
 
+class TestTemplateSummaryVersionAnalysis:
+    """Tests for Version Analysis reasoning section in template summary."""
+
+    def test_generate_template_summary_with_reasoning(self, tmp_path):
+        """When step.inputs['reasoning'] has a value, summary includes ### Version Analysis."""
+        flow = _make_flow_with_state(
+            flow_id="va-001",
+            change_path=tmp_path / "se3.yaml",
+            task_description="Add feature X",
+            task_type="feature",
+        )
+        step = _make_step(inputs={"reasoning": "This is a minor bump because a new backward-compatible feature was added."})
+        step.outputs = {
+            "commit_message": "feature: add X",
+            "commit_hash": "abc12345",
+            "version": "1.3.0",
+            "version_bumped": True,
+        }
+
+        _generate_template_summary(flow, step)
+
+        summary_file = tmp_path / "se3" / "state" / "summary-va-001.md"
+        content = summary_file.read_text()
+        assert "### Version Analysis" in content
+        assert "This is a minor bump because a new backward-compatible feature was added." in content
+
+    def test_generate_template_summary_without_reasoning(self, tmp_path):
+        """When step.inputs has no 'reasoning' key, summary does not include ### Version Analysis."""
+        flow = _make_flow_with_state(
+            flow_id="va-002",
+            change_path=tmp_path / "se3.yaml",
+            task_description="Fix bug Y",
+            task_type="bugfix",
+        )
+        step = _make_step(inputs={"bump_type": "patch"})
+        step.outputs = {
+            "commit_message": "bugfix: fix Y",
+            "commit_hash": "def67890",
+            "version_bumped": False,
+        }
+
+        _generate_template_summary(flow, step)
+
+        summary_file = tmp_path / "se3" / "state" / "summary-va-002.md"
+        content = summary_file.read_text()
+        assert "### Version Analysis" not in content
+
+    def test_generate_template_summary_empty_reasoning(self, tmp_path):
+        """When step.inputs['reasoning'] is an empty string, summary does not include ### Version Analysis."""
+        flow = _make_flow_with_state(
+            flow_id="va-003",
+            change_path=tmp_path / "se3.yaml",
+            task_description="Refactor Z",
+            task_type="small",
+        )
+        step = _make_step(inputs={"reasoning": ""})
+        step.outputs = {
+            "commit_message": "small: refactor Z",
+            "commit_hash": "aaa11111",
+            "version_bumped": False,
+        }
+
+        _generate_template_summary(flow, step)
+
+        summary_file = tmp_path / "se3" / "state" / "summary-va-003.md"
+        content = summary_file.read_text()
+        assert "### Version Analysis" not in content
+
+    def test_version_analysis_section_position(self, tmp_path):
+        """### Version Analysis appears after Version line and before ### Commit Message."""
+        flow = _make_flow_with_state(
+            flow_id="va-004",
+            change_path=tmp_path / "se3.yaml",
+            task_description="Add feature W",
+            task_type="feature",
+        )
+        step = _make_step(inputs={"reasoning": "Minor bump: new feature added."})
+        step.outputs = {
+            "commit_message": "feature: add W",
+            "commit_hash": "bbb22222",
+            "version": "2.0.0",
+            "version_bumped": True,
+        }
+
+        _generate_template_summary(flow, step)
+
+        summary_file = tmp_path / "se3" / "state" / "summary-va-004.md"
+        content = summary_file.read_text()
+        version_pos = content.index("**Version:** 2.0.0")
+        analysis_pos = content.index("### Version Analysis")
+        commit_msg_pos = content.index("### Commit Message")
+        assert version_pos < analysis_pos < commit_msg_pos
+
+
 class TestCollectChangesFromFlow:
     """Tests for _collect_changes_from_flow helper."""
 

@@ -582,6 +582,7 @@ The commit step prepends the `task_type` prefix (e.g., `feature:`, `bugfix:`) to
 **Template Summary Generation:**
 - When the `summarize` step is NOT in the flow's step sequence, the commit step generates a template-based summary document at `se3/state/summary-{flow_id}.md`
 - The template uses structured data from the flow state: commit message, changed files, test results, version info
+- When the `version_analyze` step's `reasoning` field is available (non-empty) in `step.inputs`, the template includes a `### Version Analysis` section after the Version line and before the Commit Message section, containing the full reasoning text. Only the `reasoning` field is included — `bump_type` and `confidence` are not repeated here (version info is already shown in the Version line). If `reasoning` is absent or empty, this section is omitted.
 - No LLM call is needed — this is a deterministic template operation
 - When the `summarize` step IS in the sequence, it generates a richer LLM-based summary (existing behavior)
 

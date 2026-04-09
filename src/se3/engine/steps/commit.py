@@ -538,6 +538,12 @@ def _generate_template_summary(flow: FlowInstance, step: Step) -> None:
     if version_bumped and version:
         lines.append(f"**Version:** {version}\n")
 
+    # Version analysis reasoning (from version_analyze step via inputs)
+    reasoning = step.inputs.get("reasoning", "")
+    if reasoning and reasoning.strip():
+        lines.append(f"\n### Version Analysis\n")
+        lines.append(f"{reasoning.strip()}\n")
+
     # Commit message section
     if commit_message:
         lines.append(f"\n### Commit Message\n")
