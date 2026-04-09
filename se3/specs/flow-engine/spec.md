@@ -384,7 +384,7 @@ The injected prompt SHALL:
 
 `tool_formatters.py` 是工具调用预览格式化的唯一权威来源，由 `llm_caller.py`（流式输出）和 `chat_history.py`（历史渲染/重试上下文）共同消费。
 
-- 公共 API：`format_tool_use_preview(tool_name, input_data)`、`format_tool_result_preview(tool_name, result_data)`、和 `format_tool_diff(tool_name, input_data, result_data)`
+- 公共 API：`format_tool_use_preview(tool_name, input_data)`、`format_tool_result_preview(tool_name, result_data)`、和 `format_tool_diff(tool_name, input_data, result_data, old_content=None)`
 - 内部维护 `TOOL_FORMATTERS` 字典注册表（`{tool_name: {use: fn, result: fn, diff: str}}`），将工具名映射到专用格式化函数；可选的 `diff` 键标记该工具支持 diff 渲染
 - 未注册的工具名回退到通用格式化器（key=value 截断预览）
 - 提供 `truncate_preview()` 通用截断工具函数
@@ -421,7 +421,10 @@ The injected prompt SHALL:
 #### Scenario: 工具调用语义化渲染
 - **WHEN** LLM 流式输出包含 `tool_use` 或 `tool_result` 事件
 - **OR** 聊天记录需要渲染历史中的工具调用
-- **THEN** `format_tool_use_preview(tool_name, input_data)` 根据 `TOOL_FORMATTERS` 注册表路由到 per-tool 格式化函数
+- **THEN** `StreamJSONTracker.process_line()` 解析 NDJSON 行：`tool_use` 块嵌套在 `type: "assistant"` 消息的 `message.content[]` 中；`tool_result` 块嵌套在 `type: "user"` 消息的 `message.content[]` 中（字段使用 snake_case：`tool_use_id`、`is_error`）
+- **AND** 保留对 legacy 顶层 `type: "tool_result"` 格式的向后兼容处理（同时支持 `toolUseId`/camelCase 和 `tool_use_id`/snake_case）
+- **AND** 共享的 `_handle_tool_result()` 辅助方法统一处理两种格式的 tool_result 逻辑，避免重复
+- **AND** `format_tool_use_preview(tool_name, input_data)` 根据 `TOOL_FORMATTERS` 注册表路由到 per-tool 格式化函数
 - **AND** `format_tool_result_preview(tool_name, result_data)` 同理路由到 per-tool 结果格式化函数
 - **AND** Edit 工具显示文件路径和变更行数（e.g. `Edit: path/file.py (3 lines → 5 lines)`）
 - **AND** Write 工具显示文件路径和内容行数
@@ -435,13 +438,21 @@ The injected prompt SHALL:
 #### Scenario: Edit/Write 工具 diff 渲染
 - **WHEN** LLM 流式输出包含 Edit 或 Write 工具的 `tool_result` 事件
 - **THEN** `StreamJSONTracker` 在 `tool_use` 事件时缓存 Edit/Write 工具的输入参数到 `_tool_use_id_to_input` 映射
-- **AND** 在 `tool_result` 事件时取出缓存的输入参数，调用 `format_tool_diff(tool_name, input_data, result_data)`
+- **AND** 对于 Write 工具，在 `tool_use` 事件时额外读取目标文件的当前内容并缓存到 `_tool_use_id_to_old_content` 映射（文件不存在或读取失败时缓存 `None`）
+- **AND** 在 `tool_result` 事件时取出缓存的输入参数和原文件内容，调用 `format_tool_diff(tool_name, input_data, result_data, old_content=old_content)`
 - **AND** Edit 工具：从 `old_string` / `new_string` 通过 `generate_edit_diff()` 生成 unified diff，调用 `display.render_diff()` 渲染红（删除）/绿（新增）/青（hunk 标记）/灰（上下文）着色的 diff 面板
-- **AND** Write 工具（新建文件）：显示 `Created {file_path} ({n} lines)` 绿色标识，不展示行级 diff
-- **AND** Write 工具（覆写已有文件）：仅显示 preview 摘要（原文件内容不可从流式输入中获取）
+- **AND** Write 工具（新建文件，`old_content` 为 `None`）：显示 `Created {file_path} ({n} lines)` 绿色标识，不展示行级 diff
+- **AND** Write 工具（覆写已有文件，`old_content` 非 `None`）：通过 `generate_edit_diff(old_content, content, file_path)` 生成 unified diff 并渲染红/绿着色输出（文件 I/O 仅在 tracker 的 tool_use 阶段发生一次，formatter 层不访问文件系统）
 - **AND** diff 超过 `max_lines`（默认 50 行）时截断并显示剩余行数摘要
-- **AND** `display.render_diff()` 使用 Rich Panel + Text 对象逐行着色，面板标题为文件路径
+- **AND** `display.render_diff()` 使用 Rich Panel + Text 对象逐行着色，面板标题为文件路径；每行添加 dim 样式的行号前缀（从 `@@ -a,b +c,d @@` hunk header 解析起始行号，删除行显示旧文件行号，新增行和上下文行显示新文件行号）；`total` 行数统计排除 `---`/`+++` 头部行
 - **AND** 仅对 `TOOL_FORMATTERS` 注册表中包含 `diff` 键的工具执行 diff 渲染，其他工具为 no-op
+
+#### Scenario: StreamJSONTracker 缓存管理
+- **WHEN** `StreamJSONTracker` 缓存 tool_use 输入参数（`_tool_use_id_to_input`、`_tool_use_id_to_old_content`、`_tool_use_id_to_name`）
+- **THEN** 正常流程中 `_handle_tool_result()` 的成功路径通过 `.pop()` 清理对应条目
+- **AND** 错误路径（`is_error=True`）同样通过 `.pop()` 清理所有三个缓存字典中的对应条目
+- **AND** `print_summary()` 方法在流结束时调用 `.clear()` 清空所有缓存字典，防止流异常中断时的内存泄漏
+- **AND** 缓存容量限制为 `_MAX_CACHE_SIZE`（默认 100），超出时驱逐最旧条目（同时清理 `_tool_use_id_to_input`、`_tool_use_id_to_old_content` 和 `_tool_use_id_to_name`）
 
 #### Scenario: 多组执行时流式输出添加组标识前缀
 - **WHEN** implement step 分组执行（DAG parallel 或 sequential），多组分次调用 LLM
