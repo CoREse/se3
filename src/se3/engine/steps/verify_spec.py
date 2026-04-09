@@ -19,6 +19,7 @@ except ImportError:
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
 from ..utils.json_parser import parse_json_response
+from .test import _extract_failures_section
 
 logger = logging.getLogger(__name__)
 
@@ -190,7 +191,7 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if not tests_passed and not fix_instructions:
             stdout = test_results.get("stdout", "") if isinstance(test_results, dict) else ""
             stderr = test_results.get("stderr", "") if isinstance(test_results, dict) else ""
-            fix_instructions = f"Tests are failing. Please review and fix the implementation.\n\nTest output:\n{stdout[:1000]}\n\nStderr:\n{stderr[:500]}"
+            fix_instructions = f"Tests are failing. Please review and fix the implementation.\n\nTest output:\n{_extract_failures_section(stdout, max_chars=2000)}\n\nStderr:\n{stderr[-500:]}"
             logger.warning("Tests failed but LLM didn't provide fix instructions - using default")
 
         # Store fix instructions in outputs

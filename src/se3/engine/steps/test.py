@@ -26,6 +26,88 @@ from ..models import FlowInstance, Step, StepStatus
 logger = logging.getLogger(__name__)
 
 
+def _extract_failures_section(stdout: str, max_chars: int = 3000) -> str:
+    """Extract the FAILURES/ERRORS section from pytest output.
+
+    Intelligently extracts diagnostic information from pytest output:
+    1. Locates '= FAILURES =' or '= ERRORS =' section boundaries
+    2. If content fits within max_chars, returns it in full
+    3. If too long, truncates each test block keeping the last traceback
+       frames and assertion message
+    4. Falls back to the last max_chars of stdout if no section found
+
+    Args:
+        stdout: Full pytest stdout output
+        max_chars: Maximum characters to return
+
+    Returns:
+        Extracted diagnostic text, or empty string if stdout is empty
+    """
+    if not stdout:
+        return ""
+
+    # Try to locate FAILURES or ERRORS section
+    # pytest uses patterns like "= FAILURES =" or "= ERRORS ="
+    section_start = re.search(
+        r'^={2,}\s+(FAILURES|ERRORS)\s+=', stdout, re.MULTILINE,
+    )
+    if not section_start:
+        # No FAILURES/ERRORS section — fallback to tail
+        return stdout[-max_chars:]
+
+    # Find the end of the section (next '=' separator line or end of string)
+    section_body = stdout[section_start.start():]
+    # The section ends at the next top-level separator (e.g., "= short test summary info =")
+    end_match = re.search(
+        r'\n={2,}\s+(?!FAILURES|ERRORS)', section_body[1:],
+    )
+    if end_match:
+        section_text = section_body[: end_match.start() + 1]
+    else:
+        section_text = section_body
+
+    # If the section fits, return it entirely
+    if len(section_text) <= max_chars:
+        return section_text
+
+    # Section is too long — truncate per test block
+    # pytest separates test blocks with lines like "_ test_name _"
+    block_pattern = re.compile(r'^_{2,}\s+.+\s+_{2,}$', re.MULTILINE)
+    block_starts = [m.start() for m in block_pattern.finditer(section_text)]
+
+    if not block_starts:
+        # Can't parse blocks — return tail of section
+        return section_text[-max_chars:]
+
+    # Split into blocks
+    blocks: list[str] = []
+    for i, start in enumerate(block_starts):
+        end = block_starts[i + 1] if i + 1 < len(block_starts) else len(section_text)
+        blocks.append(section_text[start:end])
+
+    # Budget per block
+    header_line = section_text[: block_starts[0]] if block_starts[0] > 0 else ""
+    available = max_chars - len(header_line) - 40  # 40 chars overhead
+    per_block = max(200, available // max(len(blocks), 1))
+
+    truncated_blocks: list[str] = []
+    for block in blocks:
+        if len(block) <= per_block:
+            truncated_blocks.append(block)
+        else:
+            # Keep the block header line + last portion (assertion + traceback tail)
+            first_newline = block.find("\n")
+            block_header = block[: first_newline + 1] if first_newline != -1 else ""
+            remaining_budget = per_block - len(block_header) - 20
+            tail = block[-remaining_budget:] if remaining_budget > 0 else ""
+            truncated_blocks.append(
+                block_header + "    ... (truncated) ...\n" + tail,
+            )
+
+    result = header_line + "".join(truncated_blocks)
+    return result[:max_chars]
+
+
 def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the test step.
 
@@ -112,13 +194,15 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         stderr = primary_result.get("stderr", "")
 
         # Build default fix instructions from test output
+        failures_section = _extract_failures_section(stdout)
+        stderr_tail = stderr[-500:] if stderr else ""
         fix_instructions = f"""Tests are failing. Please review and fix the implementation.
 
 Test output:
-{stdout[-1500:]}
+{failures_section}
 
 Error output:
-{stderr[:1000]}
+{stderr_tail}
 """
 
         # Store fix context in outputs for the fix loop
