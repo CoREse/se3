@@ -534,6 +534,157 @@ class TestStreamJSONTracker:
         assert "Result:" in captured.out
 
 
+class TestStreamJSONTrackerPrefix:
+    """Tests for StreamJSONTracker stream_prefix behavior."""
+
+    def test_no_prefix_by_default(self, capsys):
+        """Without stream_prefix, output should have no prefix (backward compat)."""
+        tracker = StreamJSONTracker()
+        line = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-1",
+                    "name": "Read",
+                    "input": {"file_path": "test.py"}
+                }]
+            }
+        })
+        tracker.process_line(line)
+        captured = capsys.readouterr()
+        assert captured.out.strip().startswith("[llm-stream]")
+
+    def test_prefix_on_tool_use(self, capsys):
+        """With stream_prefix, tool_use lines should include the prefix."""
+        tracker = StreamJSONTracker(stream_prefix='[G1] ')
+        line = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-1",
+                    "name": "Read",
+                    "input": {"file_path": "test.py"}
+                }]
+            }
+        })
+        tracker.process_line(line)
+        captured = capsys.readouterr()
+        assert "[G1] [llm-stream]" in captured.out
+
+    def test_prefix_on_tool_error(self, capsys):
+        """With stream_prefix, tool error lines should include the prefix."""
+        tracker = StreamJSONTracker(stream_prefix='[G2] ')
+        line = json.dumps({
+            "type": "tool_result",
+            "result": {
+                "toolUseId": "tu-err",
+                "content": "Some error",
+                "isError": True
+            }
+        })
+        tracker.process_line(line)
+        captured = capsys.readouterr()
+        assert "[G2] [llm-stream]" in captured.out
+
+    def test_prefix_on_tool_result(self, capsys):
+        """With stream_prefix, tool result lines should include the prefix."""
+        tracker = StreamJSONTracker(stream_prefix='[G3] ')
+        # Emit tool_use first for id→name mapping
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-r1",
+                    "name": "Read",
+                    "input": {"file_path": "a.py"}
+                }]
+            }
+        }))
+        # Emit result
+        tracker.process_line(json.dumps({
+            "type": "tool_result",
+            "result": {
+                "toolUseId": "tu-r1",
+                "content": "line1\nline2",
+                "isError": False
+            }
+        }))
+        captured = capsys.readouterr()
+        # Both tool_use and tool_result lines should have prefix
+        assert captured.out.count("[G3] [llm-stream]") == 2
+
+    def test_prefix_on_error(self, capsys):
+        """With stream_prefix, error lines should include the prefix."""
+        tracker = StreamJSONTracker(stream_prefix='[G1] ')
+        line = json.dumps({
+            "type": "error",
+            "error": "Something went wrong"
+        })
+        tracker.process_line(line)
+        captured = capsys.readouterr()
+        assert "[G1] [llm-stream]" in captured.out
+
+    def test_prefix_on_summary(self, capsys):
+        """With stream_prefix, print_summary should include the prefix."""
+        tracker = StreamJSONTracker(stream_prefix='[G2] ')
+        tracker.print_summary()
+        captured = capsys.readouterr()
+        assert "[G2] [llm-stream]" in captured.out
+        assert "Stream complete" in captured.out
+
+    def test_merged_prefix(self, capsys):
+        """Merged group prefix like [G1+G2+G3] should work correctly."""
+        tracker = StreamJSONTracker(stream_prefix='[G1+G2+G3] ')
+        line = json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-m1",
+                    "name": "Edit",
+                    "input": {"file_path": "x.py", "old_string": "a", "new_string": "b"}
+                }]
+            }
+        })
+        tracker.process_line(line)
+        captured = capsys.readouterr()
+        assert "[G1+G2+G3] [llm-stream]" in captured.out
+
+    def test_empty_prefix_no_extra_space(self, capsys):
+        """Empty stream_prefix should produce same output as no prefix."""
+        tracker_no_prefix = StreamJSONTracker()
+        tracker_empty = StreamJSONTracker(stream_prefix='')
+
+        line = json.dumps({
+            "type": "error",
+            "error": "test error"
+        })
+        tracker_no_prefix.process_line(line)
+        out_no_prefix = capsys.readouterr().out
+
+        tracker_empty.process_line(line)
+        out_empty = capsys.readouterr().out
+
+        assert out_no_prefix == out_empty
+
+
+class TestLLMCallerStreamPrefix:
+    """Tests for LLMCaller stream_prefix parameter."""
+
+    def test_default_stream_prefix_is_empty(self):
+        """LLMCaller should default to empty stream_prefix."""
+        caller = LLMCaller()
+        assert caller.stream_prefix == ''
+
+    def test_stream_prefix_stored(self):
+        """LLMCaller should store the stream_prefix."""
+        caller = LLMCaller(stream_prefix='[G1] ')
+        assert caller.stream_prefix == '[G1] '
+
+
 class TestExtractTextFromNDJSON:
     """Tests for LLMCaller._extract_text_from_ndjson()."""
 

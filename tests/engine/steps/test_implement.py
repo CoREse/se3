@@ -1317,3 +1317,102 @@ class TestDagParallelResumeBehavior:
 
         # Combined counts
         assert len(step.outputs["implemented_groups"]) == 2
+
+
+class TestStreamPrefixConstruction:
+    """Test that implement.py constructs correct stream_prefix for each execution path."""
+
+    def test_single_group_no_prefix(self):
+        """Single group execution should not set stream_prefix (empty by default)."""
+        from se3.engine.llm_caller import LLMCaller
+        # When _run_single_llm_call is called without stream_prefix, it defaults to ''
+        caller = LLMCaller(stream_prefix='')
+        assert caller.stream_prefix == ''
+
+    def test_sequential_group_prefix_format(self):
+        """Sequential execution should use [Gx] prefix format."""
+        from se3.engine.llm_caller import LLMCaller
+        # Simulate what implement.py does for sequential execution
+        group_id = "G2"
+        caller = LLMCaller(stream_prefix=f'[{group_id}] ')
+        assert caller.stream_prefix == '[G2] '
+
+    def test_dag_parallel_group_prefix_format(self):
+        """DAG parallel execution should use [Gx] prefix format."""
+        from se3.engine.llm_caller import LLMCaller
+        group_id = "G3"
+        caller = LLMCaller(stream_prefix=f'[{group_id}] ')
+        assert caller.stream_prefix == '[G3] '
+
+    def test_loc_merge_prefix_format(self):
+        """LOC merge execution should use [G1+G2+G3] prefix format."""
+        # Simulate the merged prefix construction from implement.py
+        groups = [
+            {"group_id": "G1", "tasks": []},
+            {"group_id": "G2", "tasks": []},
+            {"group_id": "G3", "tasks": []},
+        ]
+        merged_group_ids = [g.get("group_id", f"G{i+1}") for i, g in enumerate(groups)]
+        merged_prefix = f"[{'+'.join(merged_group_ids)}] "
+        assert merged_prefix == "[G1+G2+G3] "
+
+    def test_loc_merge_prefix_two_groups(self):
+        """LOC merge with two groups should produce [G1+G2] prefix."""
+        groups = [
+            {"group_id": "G1", "tasks": []},
+            {"group_id": "G2", "tasks": []},
+        ]
+        merged_group_ids = [g.get("group_id", f"G{i+1}") for i, g in enumerate(groups)]
+        merged_prefix = f"[{'+'.join(merged_group_ids)}] "
+        assert merged_prefix == "[G1+G2] "
+
+    def test_loc_merge_prefix_fallback_group_ids(self):
+        """Groups without group_id should use fallback G1, G2, etc."""
+        groups = [
+            {"tasks": []},
+            {"tasks": []},
+        ]
+        merged_group_ids = [g.get("group_id", f"G{i+1}") for i, g in enumerate(groups)]
+        merged_prefix = f"[{'+'.join(merged_group_ids)}] "
+        assert merged_prefix == "[G1+G2] "
+
+    @patch("se3.engine.steps.implement._run_single_llm_call")
+    @patch("se3.engine.steps.implement._resolve_files_changed")
+    @patch("se3.engine.steps.implement._display_task_plan")
+    @patch("se3.engine.steps.implement._compute_total_loc", return_value=100)
+    @patch("se3.engine.steps.implement._extract_sorted_groups")
+    def test_loc_merge_passes_prefix_to_run_single(
+        self, mock_extract, mock_loc, mock_display, mock_resolve, mock_run
+    ):
+        """LOC merge path should pass merged prefix to _run_single_llm_call."""
+        mock_extract.return_value = [
+            {"group_id": "G1", "tasks": [], "depends_on": []},
+            {"group_id": "G2", "tasks": [], "depends_on": []},
+        ]
+        mock_run.return_value = StepStatus.COMPLETED
+
+        step = Step(step_id="s1", step_type=StepType.IMPLEMENT)
+        step.inputs = {
+            "task_description": "test",
+            "task_type": "feature",
+            "design_doc": "",
+            "task_groups": [{"group_id": "G1"}, {"group_id": "G2"}],
+            "spec_content": "",
+        }
+        flow = FlowInstance(
+            flow_id="f1",
+            task_description="test",
+            task_type="feature",
+        )
+        flow.change_path = Path("/tmp/test/se3.yaml")
+
+        from se3.engine.steps.implement import implement_handler
+        with patch("se3.config.ImplementConfig.load") as mock_config:
+            mock_config.return_value = MagicMock(group_loc_threshold=300)
+            implement_handler(step, flow)
+
+        # Verify _run_single_llm_call was called with stream_prefix='[G1+G2] '
+        mock_run.assert_called_once()
+        call_kwargs = mock_run.call_args
+        assert call_kwargs.kwargs.get("stream_prefix") == "[G1+G2] " or \
+               (len(call_kwargs.args) > 7 and call_kwargs.args[7] == "[G1+G2] ")

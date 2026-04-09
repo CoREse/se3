@@ -443,6 +443,17 @@ The injected prompt SHALL:
 - **AND** `display.render_diff()` 使用 Rich Panel + Text 对象逐行着色，面板标题为文件路径
 - **AND** 仅对 `TOOL_FORMATTERS` 注册表中包含 `diff` 键的工具执行 diff 渲染，其他工具为 no-op
 
+#### Scenario: 多组执行时流式输出添加组标识前缀
+- **WHEN** implement step 分组执行（DAG parallel 或 sequential），多组分次调用 LLM
+- **THEN** 每行 `[llm-stream]` 和 `[llm-caller]` 输出前添加组标识前缀，格式为 `[G1] [llm-stream] ...`
+- **AND** 前缀通过 `LLMCaller` 构造函数的 `stream_prefix` 参数传入，再透传给 `StreamJSONTracker`
+- **AND** `StreamJSONTracker` 在所有 `[llm-stream]` 打印行（tool_use、tool_result、error、summary）前插入 `stream_prefix`
+- **AND** `LLMCaller` 在所有 `[llm-caller]` 打印行（Phase 2 提取、JSON 重试、缓存跳过等）前同样插入 `stream_prefix`
+- **WHEN** 单组或单次 LLM 调用（无分组执行）
+- **THEN** `stream_prefix` 为空字符串，不添加任何前缀，保持现有输出格式
+- **WHEN** LOC 阈值触发多组合并为单次 LLM 调用
+- **THEN** 前缀显示合并后的组名，格式为 `[G1+G2+G3] [llm-stream] ...`
+
 #### Scenario: 人类浏览聊天记录
 - **WHEN** 用户执行 `se3 history` 或 `se3 history list`
 - **THEN** 展示所有 flow 的列表，聚合来自三个数据源：

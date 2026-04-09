@@ -286,8 +286,13 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if injection:
             prompt += injection
 
+        # Construct merged group prefix like [G1+G2+G3]
+        merged_group_ids = [g.get("group_id", f"G{i+1}") for i, g in enumerate(groups)]
+        merged_prefix = f"[{'+'.join(merged_group_ids)}] "
+
         result = _run_single_llm_call(
             prompt, step, flow, project_root, task_groups, retry_count,
+            stream_prefix=merged_prefix,
         )
         _resolve_files_changed(step, project_root, baseline_hash)
         return result
@@ -485,6 +490,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 step_id=group_step_id,
                 step_type=step.step_type.value,
                 external_attempt=retry_count,
+                stream_prefix=f'[{group_id}] ',
             )
             response = caller.call(
                 prompt=prompt,
@@ -842,6 +848,7 @@ def _make_execute_fn(
                 step_id=group_step_id,
                 step_type=step.step_type.value,
                 external_attempt=retry_count,
+                stream_prefix=f'[{group_id}] ',
             )
             response = caller.call(
                 prompt=prompt,
@@ -1381,6 +1388,7 @@ def _run_single_llm_call(
     project_root: Path,
     task_groups,
     retry_count: int,
+    stream_prefix: str = '',
 ) -> StepStatus:
     """Execute a single LLM call for implement (fallback path)."""
     try:
@@ -1390,6 +1398,7 @@ def _run_single_llm_call(
             step_id=step.step_id,
             step_type=step.step_type.value,
             external_attempt=retry_count,
+            stream_prefix=stream_prefix,
         )
         response = caller.call(
             prompt=prompt,

@@ -116,7 +116,8 @@ class StreamJSONTracker:
     allowing users to see progress as Claude Code runs.
     """
 
-    def __init__(self):
+    def __init__(self, stream_prefix: str = ''):
+        self.stream_prefix = stream_prefix
         self.message_count = 0
         self.tool_calls = []
         self.tool_results = []
@@ -177,7 +178,7 @@ class StreamJSONTracker:
                             # Only add leading newline if previous output didn't end with one
                             if not self._last_ended_with_newline:
                                 print()
-                            print(f"  [llm-stream] 🔧 {preview}...")
+                            print(f"  {self.stream_prefix}[llm-stream] 🔧 {preview}...")
                             self._last_ended_with_newline = True
 
             elif msg_type == 'tool_result':
@@ -192,10 +193,10 @@ class StreamJSONTracker:
 
                 if is_error:
                     error_preview = truncate_preview(str(content)) if content else "Unknown error"
-                    print(f"  [llm-stream] ❌ Tool error: {error_preview}...")
+                    print(f"  {self.stream_prefix}[llm-stream] ❌ Tool error: {error_preview}...")
                 else:
                     preview = format_tool_result_preview(tool_name, content)
-                    print(f"  [llm-stream] ✅ {preview}...")
+                    print(f"  {self.stream_prefix}[llm-stream] ✅ {preview}...")
                     # Render diff for Edit/Write tools
                     cached_input = self._tool_use_id_to_input.pop(tool_use_id, None)
                     if cached_input and tool_name in ("Edit", "Write"):
@@ -204,7 +205,7 @@ class StreamJSONTracker:
 
             elif msg_type == 'error':
                 error_msg = data.get('error', 'Unknown error')
-                print(f"  [llm-stream] ❌ Error: {truncate_preview(str(error_msg))}")
+                print(f"  {self.stream_prefix}[llm-stream] ❌ Error: {truncate_preview(str(error_msg))}")
                 self._last_ended_with_newline = True
 
         except json.JSONDecodeError:
@@ -214,7 +215,7 @@ class StreamJSONTracker:
     def print_summary(self) -> None:
         """Print final summary of the stream."""
         duration = time.time() - self.start_time
-        print(f"  [llm-stream] ✓ Stream complete: {self.message_count} messages, "
+        print(f"  {self.stream_prefix}[llm-stream] ✓ Stream complete: {self.message_count} messages, "
               f"{len(self.tool_calls)} tool calls, {self.total_text_len} chars "
               f"({duration:.1f}s)")
 
@@ -240,6 +241,7 @@ class LLMCaller:
         external_attempt: int = 0,
         retry_mode: str = "continue",
         agents: Optional[List[Dict[str, Any]]] = None,
+        stream_prefix: str = '',
     ):
         self.project_root = Path(project_root) if project_root else Path.cwd()
         self.max_retries = max_retries
@@ -249,6 +251,7 @@ class LLMCaller:
         self.step_type = step_type or ""
         self.external_attempt = external_attempt  # Track external retry (e.g., from implement.py)
         self.retry_mode = retry_mode  # 'continue' (resume from breakpoint) or 'retry' (restart)
+        self.stream_prefix = stream_prefix
 
         # Last raw result text from `type: "result"` NDJSON message.
         # Available after call() returns, for callers that need the full
@@ -504,7 +507,7 @@ class LLMCaller:
             return output
 
         # Extract JSON using LLM
-        print("  [llm-caller] 🔍 Extracting JSON from output (extract mode)...")
+        print(f"  {self.stream_prefix}[llm-caller] 🔍 Extracting JSON from output (extract mode)...")
 
         from .json_extractor import JSONExtractor
 
@@ -526,7 +529,7 @@ class LLMCaller:
         # Return as JSON string (parse_json_response will handle it)
         json_str = json.dumps(result, ensure_ascii=False, indent=2)
 
-        print("  [llm-caller] ✅ JSON extraction complete")
+        print(f"  {self.stream_prefix}[llm-caller] ✅ JSON extraction complete")
         return json_str
 
     def _get_phase1_cache_path(self) -> Optional[Path]:
@@ -562,7 +565,7 @@ class LLMCaller:
         if self.external_attempt > 0 and cache_path and cache_path.exists():
             try:
                 phase1_output = cache_path.read_text(encoding="utf-8")
-                print("  [llm-caller] ⏩ Phase 1 skipped (cached from previous attempt)")
+                print(f"  {self.stream_prefix}[llm-caller] ⏩ Phase 1 skipped (cached from previous attempt)")
                 logger.info(f"Using cached Phase 1 output ({len(phase1_output)} chars)")
             except OSError as e:
                 logger.warning(f"Failed to read Phase 1 cache, re-running Phase 1: {e}")
@@ -594,7 +597,7 @@ class LLMCaller:
         # Check if phase 1 output already contains valid JSON (skip phase 2)
         if self._contains_valid_json(phase1_output):
             logger.info("Two-phase: phase 1 output contained valid JSON, skipping phase 2")
-            print("  [llm-caller] ✅ Phase 1 output contained valid JSON, phase 2 skipped")
+            print(f"  {self.stream_prefix}[llm-caller] ✅ Phase 1 output contained valid JSON, phase 2 skipped")
             # Step fully done — delete cache
             if cache_path and cache_path.exists():
                 try:
@@ -606,7 +609,7 @@ class LLMCaller:
             return json.dumps(result, ensure_ascii=False, indent=2)
 
         # Phase 2: Extract JSON via LLM
-        print("  [llm-caller] 🔍 Phase 2: Extracting JSON from output...")
+        print(f"  {self.stream_prefix}[llm-caller] 🔍 Phase 2: Extracting JSON from output...")
 
         from .json_extractor import JSONExtractor
 
@@ -635,7 +638,7 @@ class LLMCaller:
         # Return as JSON string (parse_json_response will handle it)
         json_str = json.dumps(result, ensure_ascii=False, indent=2)
 
-        print("  [llm-caller] ✅ JSON extraction complete")
+        print(f"  {self.stream_prefix}[llm-caller] ✅ JSON extraction complete")
         return json_str
 
     @staticmethod
@@ -773,7 +776,7 @@ class LLMCaller:
                         on_output=on_output,
                     )
                 else:
-                    stream_tracker = StreamJSONTracker()
+                    stream_tracker = StreamJSONTracker(stream_prefix=self.stream_prefix)
 
                     def on_stream_output(line: str) -> None:
                         stream_tracker.process_line(line)
@@ -813,7 +816,7 @@ class LLMCaller:
                     # Check if JSON is required but not received
                     if require_json and json_retry_count < max_json_retries:
                         if not self._contains_valid_json(result.output):
-                            print(f"  [llm-caller] ⚠️  Response is not valid JSON, requesting JSON format (retry {json_retry_count + 1}/{max_json_retries})")
+                            print(f"  {self.stream_prefix}[llm-caller] ⚠️  Response is not valid JSON, requesting JSON format (retry {json_retry_count + 1}/{max_json_retries})")
                             json_prompt = self._create_json_retry_prompt(prompt, result.output)
                             # Record the JSON retry prompt too (use a distinct attempt number for JSON retries)
                             json_attempt = self.external_attempt * 100 + json_retry_count  # Distinguish JSON retries
