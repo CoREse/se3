@@ -146,10 +146,14 @@ class TestGetInjectionPrompt:
     """Tests for B-class prompt injection."""
 
     def test_whitelist_steps_return_prompt(self):
-        for step_type in ["verify_spec", "summarize"]:
+        for step_type in ["summarize"]:
             result = IssueDiscovery.get_injection_prompt(step_type)
             assert result is not None
             assert "discovered_issues" in result
+
+    def test_verify_spec_no_longer_injected(self):
+        result = IssueDiscovery.get_injection_prompt("verify_spec")
+        assert result is None
 
     def test_forbidden_steps_return_none(self):
         for step_type in ["implement", "test"]:
@@ -162,55 +166,62 @@ class TestGetInjectionPrompt:
             assert result is None
 
     def test_prompt_contains_json_format(self):
-        prompt = IssueDiscovery.get_injection_prompt("verify_spec")
+        prompt = IssueDiscovery.get_injection_prompt("summarize")
         assert "title" in prompt
         assert "description" in prompt
         assert "priority_hint" in prompt
+
+    def test_prompt_uses_new_priority_values(self):
+        prompt = IssueDiscovery.get_injection_prompt("summarize")
+        assert "critical" in prompt
+        assert "high" in prompt
+        assert "medium" in prompt
+        assert "low" in prompt
 
 
 class TestCollectIssuesFromOutput:
     """Tests for B-class issue collection."""
 
-    def test_verify_spec_warning_maps_to_medium(self, discovery, basic_flow):
+    def test_critical_priority_hint_used_directly(self, discovery, basic_flow):
         outputs = {
             "discovered_issues": [
-                {"title": "Missing logging", "description": "No logging in auth module", "priority_hint": "warning"},
+                {"title": "Critical flaw", "description": "System crash", "priority_hint": "critical"},
             ]
         }
 
-        issues = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs)
+        issues = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
 
         assert len(issues) == 1
-        assert issues[0].priority == "medium"
+        assert issues[0].priority == "critical"
 
-    def test_verify_spec_info_maps_to_low(self, discovery, basic_flow):
+    def test_high_priority_hint_used_directly(self, discovery, basic_flow):
         outputs = {
             "discovered_issues": [
-                {"title": "Consider caching", "description": "Auth could use caching", "priority_hint": "info"},
+                {"title": "Security flaw", "description": "Token not validated", "priority_hint": "high"},
             ]
         }
 
-        issues = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs)
-
-        assert len(issues) == 1
-        assert issues[0].priority == "low"
-
-    def test_verify_spec_error_maps_to_high(self, discovery, basic_flow):
-        outputs = {
-            "discovered_issues": [
-                {"title": "Security flaw", "description": "Token not validated", "priority_hint": "error"},
-            ]
-        }
-
-        issues = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs)
+        issues = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
 
         assert len(issues) == 1
         assert issues[0].priority == "high"
 
-    def test_summarize_default_priority(self, discovery, basic_flow):
+    def test_medium_priority_hint_used_directly(self, discovery, basic_flow):
         outputs = {
             "discovered_issues": [
-                {"title": "TODO cleanup", "description": "Several TODO comments left", "priority_hint": "info"},
+                {"title": "Missing logging", "description": "No logging in auth module", "priority_hint": "medium"},
+            ]
+        }
+
+        issues = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
+
+        assert len(issues) == 1
+        assert issues[0].priority == "medium"
+
+    def test_low_priority_hint_used_directly(self, discovery, basic_flow):
+        outputs = {
+            "discovered_issues": [
+                {"title": "Consider caching", "description": "Auth could use caching", "priority_hint": "low"},
             ]
         }
 
@@ -219,55 +230,67 @@ class TestCollectIssuesFromOutput:
         assert len(issues) == 1
         assert issues[0].priority == "low"
 
-    def test_adds_correct_tags(self, discovery, basic_flow):
+    def test_invalid_priority_hint_defaults_to_medium(self, discovery, basic_flow):
         outputs = {
             "discovered_issues": [
-                {"title": "Test issue", "description": "desc", "priority_hint": "warning"},
-            ]
-        }
-
-        issues = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs)
-
-        assert len(issues) == 1
-        assert "auto-discovered" in issues[0].tags
-        assert "source:verify-spec" in issues[0].tags
-
-    def test_summarize_source_tag(self, discovery, basic_flow):
-        outputs = {
-            "discovered_issues": [
-                {"title": "Note", "description": "A note", "priority_hint": "info"},
+                {"title": "Bad hint", "description": "desc", "priority_hint": "warning"},
             ]
         }
 
         issues = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
 
         assert len(issues) == 1
+        assert issues[0].priority == "medium"
+
+    def test_missing_priority_hint_defaults_to_medium(self, discovery, basic_flow):
+        outputs = {
+            "discovered_issues": [
+                {"title": "No hint", "description": "desc"},
+            ]
+        }
+
+        issues = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
+
+        assert len(issues) == 1
+        assert issues[0].priority == "medium"
+
+    def test_adds_correct_tags(self, discovery, basic_flow):
+        outputs = {
+            "discovered_issues": [
+                {"title": "Test issue", "description": "desc", "priority_hint": "medium"},
+            ]
+        }
+
+        issues = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
+
+        assert len(issues) == 1
+        assert "auto-discovered" in issues[0].tags
         assert "source:summarize" in issues[0].tags
 
     def test_multiple_issues(self, discovery, basic_flow):
         outputs = {
             "discovered_issues": [
-                {"title": "Issue A", "description": "desc A", "priority_hint": "warning"},
-                {"title": "Issue B", "description": "desc B", "priority_hint": "info"},
-                {"title": "Issue C", "description": "desc C", "priority_hint": "error"},
+                {"title": "Issue A", "description": "desc A", "priority_hint": "medium"},
+                {"title": "Issue B", "description": "desc B", "priority_hint": "low"},
+                {"title": "Issue C", "description": "desc C", "priority_hint": "high"},
             ]
         }
 
-        issues = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs)
+        issues = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
 
         assert len(issues) == 3
 
     def test_empty_discovered_issues(self, discovery, basic_flow):
         outputs = {"discovered_issues": []}
 
-        issues = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs)
+        issues = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
 
         assert len(issues) == 0
 
     def test_no_discovered_issues_key(self, discovery, basic_flow):
         outputs = {"some_other_key": "value"}
 
-        issues = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs)
+        issues = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
 
         assert len(issues) == 0
 
@@ -277,11 +300,11 @@ class TestCollectIssuesFromOutput:
                 "not a dict",
                 {"no_title": "missing title field"},
                 {"title": "", "description": "empty title"},
-                {"title": "Valid issue", "description": "This is valid", "priority_hint": "warning"},
+                {"title": "Valid issue", "description": "This is valid", "priority_hint": "medium"},
             ]
         }
 
-        issues = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs)
+        issues = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
 
         assert len(issues) == 1
         assert issues[0].title == "Valid issue"
@@ -289,11 +312,23 @@ class TestCollectIssuesFromOutput:
     def test_non_whitelist_step_returns_empty(self, discovery, basic_flow):
         outputs = {
             "discovered_issues": [
-                {"title": "Sneaky issue", "description": "desc", "priority_hint": "warning"},
+                {"title": "Sneaky issue", "description": "desc", "priority_hint": "medium"},
             ]
         }
 
         issues = discovery.collect_issues_from_output(basic_flow, "implement", outputs)
+
+        assert len(issues) == 0
+
+    def test_verify_spec_no_longer_in_whitelist(self, discovery, basic_flow):
+        """verify_spec is removed from B-class whitelist; scope mechanism replaces it."""
+        outputs = {
+            "discovered_issues": [
+                {"title": "Should not collect", "description": "desc", "priority_hint": "high"},
+            ]
+        }
+
+        issues = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs)
 
         assert len(issues) == 0
 
@@ -304,12 +339,12 @@ class TestDeduplication:
     def test_exact_duplicate_blocked(self, discovery, basic_flow):
         outputs = {
             "discovered_issues": [
-                {"title": "Missing error handling", "description": "desc1", "priority_hint": "warning"},
+                {"title": "Missing error handling", "description": "desc1", "priority_hint": "medium"},
             ]
         }
 
-        issues1 = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs)
-        issues2 = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs)
+        issues1 = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
+        issues2 = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
 
         assert len(issues1) == 1
         assert len(issues2) == 0
@@ -317,17 +352,17 @@ class TestDeduplication:
     def test_case_insensitive_dedup(self, discovery, basic_flow):
         outputs1 = {
             "discovered_issues": [
-                {"title": "Missing Error Handling", "description": "d1", "priority_hint": "warning"},
+                {"title": "Missing Error Handling", "description": "d1", "priority_hint": "medium"},
             ]
         }
         outputs2 = {
             "discovered_issues": [
-                {"title": "missing error handling", "description": "d2", "priority_hint": "warning"},
+                {"title": "missing error handling", "description": "d2", "priority_hint": "medium"},
             ]
         }
 
-        issues1 = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs1)
-        issues2 = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs2)
+        issues1 = discovery.collect_issues_from_output(basic_flow, "summarize", outputs1)
+        issues2 = discovery.collect_issues_from_output(basic_flow, "summarize", outputs2)
 
         assert len(issues1) == 1
         assert len(issues2) == 0
@@ -335,17 +370,17 @@ class TestDeduplication:
     def test_punctuation_insensitive_dedup(self, discovery, basic_flow):
         outputs1 = {
             "discovered_issues": [
-                {"title": "Missing: error handling!", "description": "d1", "priority_hint": "warning"},
+                {"title": "Missing: error handling!", "description": "d1", "priority_hint": "medium"},
             ]
         }
         outputs2 = {
             "discovered_issues": [
-                {"title": "Missing error handling", "description": "d2", "priority_hint": "warning"},
+                {"title": "Missing error handling", "description": "d2", "priority_hint": "medium"},
             ]
         }
 
-        issues1 = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs1)
-        issues2 = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs2)
+        issues1 = discovery.collect_issues_from_output(basic_flow, "summarize", outputs1)
+        issues2 = discovery.collect_issues_from_output(basic_flow, "summarize", outputs2)
 
         assert len(issues1) == 1
         assert len(issues2) == 0
@@ -353,17 +388,17 @@ class TestDeduplication:
     def test_different_titles_not_deduped(self, discovery, basic_flow):
         outputs1 = {
             "discovered_issues": [
-                {"title": "Missing error handling", "description": "d1", "priority_hint": "warning"},
+                {"title": "Missing error handling", "description": "d1", "priority_hint": "medium"},
             ]
         }
         outputs2 = {
             "discovered_issues": [
-                {"title": "Security vulnerability in auth", "description": "d2", "priority_hint": "warning"},
+                {"title": "Security vulnerability in auth", "description": "d2", "priority_hint": "medium"},
             ]
         }
 
-        issues1 = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs1)
-        issues2 = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs2)
+        issues1 = discovery.collect_issues_from_output(basic_flow, "summarize", outputs1)
+        issues2 = discovery.collect_issues_from_output(basic_flow, "summarize", outputs2)
 
         assert len(issues1) == 1
         assert len(issues2) == 1
@@ -378,10 +413,10 @@ class TestDeduplication:
         # Then try B-class with similar title
         outputs = {
             "discovered_issues": [
-                {"title": issue1.title, "description": "dup", "priority_hint": "warning"},
+                {"title": issue1.title, "description": "dup", "priority_hint": "medium"},
             ]
         }
-        issues2 = discovery.collect_issues_from_output(basic_flow, "verify_spec", outputs)
+        issues2 = discovery.collect_issues_from_output(basic_flow, "summarize", outputs)
 
         assert issue1 is not None
         assert len(issues2) == 0
@@ -453,18 +488,18 @@ class TestStateMachineIntegration:
             status=FlowStatus.RUNNING,
         )
 
-        # Create a verify_spec step that will return discovered issues
-        step = Step(step_type=StepType.VERIFY_SPEC, status=StepStatus.PENDING)
+        # Create a summarize step that will return discovered issues
+        step = Step(step_type=StepType.SUMMARIZE, status=StepStatus.PENDING)
         flow.state.add_step(step)
 
         # Mock handler that sets discovered_issues
         def mock_handler(s, f):
             s.outputs["discovered_issues"] = [
-                {"title": "Missing test coverage", "description": "Auth module untested", "priority_hint": "warning"},
+                {"title": "Missing test coverage", "description": "Auth module untested", "priority_hint": "medium"},
             ]
             return StepStatus.COMPLETED
 
-        sm.register_handler(StepType.VERIFY_SPEC, mock_handler)
+        sm.register_handler(StepType.SUMMARIZE, mock_handler)
 
         with patch.object(sm.persistence, 'save_flow'):
             sm.run_step(flow, step)
@@ -474,7 +509,7 @@ class TestStateMachineIntegration:
         issues = mgr.list_issues()
         assert len(issues) == 1
         assert issues[0].title == "Missing test coverage"
-        assert "source:verify-spec" in issues[0].tags
+        assert "source:summarize" in issues[0].tags
 
     def test_implement_step_no_issue_collection(self, project_root):
         """Implement step's discovered_issues should not be collected."""

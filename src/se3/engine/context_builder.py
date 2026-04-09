@@ -67,7 +67,7 @@ def get_step_language_instruction(step_type: str, project_root: Path) -> str:
 ISSUE_DISCOVERY_FORBIDDEN_STEPS = {"implement", "test"}
 
 # Default steps that receive issue discovery prompt injection
-ISSUE_DISCOVERY_DEFAULT_STEPS = ["verify_spec", "summarize"]
+ISSUE_DISCOVERY_DEFAULT_STEPS = ["summarize"]
 
 
 def get_issue_discovery_injection(step_type: str, project_root: Path) -> str:
