@@ -170,7 +170,7 @@ class TestStepSequenceNoProjectSummaryOrReadSpec:
 
     def test_review_sequence_analyze_then_verify_spec(self):
         seq = get_default_step_sequence("review")
-        assert seq == [StepType.ANALYZE, StepType.VERIFY_SPEC, StepType.SUMMARIZE]
+        assert seq == [StepType.ANALYZE, StepType.VERIFY_SPEC]
 
     def test_small_sequence_unchanged(self):
         """Small sequence never had PROJECT_SUMMARY or READ_SPEC."""
@@ -181,7 +181,6 @@ class TestStepSequenceNoProjectSummaryOrReadSpec:
             StepType.TEST,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
-            StepType.SUMMARIZE,
         ]
 
     def test_discovery_sequence_starts_with_discovery_then_analyze(self):
