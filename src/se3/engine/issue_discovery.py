@@ -17,23 +17,13 @@ from .models import FlowInstance, Step, StepType
 logger = logging.getLogger(__name__)
 
 # Steps that receive issue-discovery prompt injection and collection
-ISSUE_DISCOVERY_STEPS = {"verify_spec", "summarize"}
+ISSUE_DISCOVERY_STEPS = {"summarize"}
 
 # Steps explicitly forbidden from producing issues
 ISSUE_FORBIDDEN_STEPS = {"implement", "test"}
 
-# Priority mapping: (step_type, severity_hint) -> issue priority
-_PRIORITY_MAP = {
-    ("verify_spec", "warning"): "medium",
-    ("verify_spec", "info"): "low",
-    ("verify_spec", "error"): "high",
-    ("summarize", "warning"): "medium",
-    ("summarize", "info"): "low",
-    ("summarize", "error"): "high",
-}
-
-# Default priority when no mapping matches
-_DEFAULT_PRIORITY = "medium"
+# Valid priority values for direct priority_hint usage
+_VALID_PRIORITIES = {"critical", "high", "medium", "low"}
 
 # Source tag mapping
 _SOURCE_TAG_MAP = {
@@ -49,7 +39,7 @@ While performing your primary task above, if you notice any issues, concerns, or
 Each discovered issue should have:
 - `title`: A short descriptive title
 - `description`: Details about the issue
-- `priority_hint`: One of "error", "warning", or "info"
+- `priority_hint`: One of "critical", "high", "medium", or "low"
 
 Only report genuine concerns — do NOT fabricate issues. If there are no issues to report, omit the `discovered_issues` field or use an empty array.
 
@@ -60,7 +50,7 @@ Example (add to your JSON output or append as a JSON block):
         {
             "title": "Missing error handling in auth module",
             "description": "The authentication module does not handle token expiration gracefully.",
-            "priority_hint": "warning"
+            "priority_hint": "medium"
         }
     ]
 }
@@ -284,13 +274,10 @@ class IssueDiscovery:
                 continue
 
             description = item.get("description", "").strip()
-            priority_hint = item.get("priority_hint", "info").lower()
+            priority_hint = item.get("priority_hint", "medium").lower()
 
-            # Map priority based on step type and hint
-            priority = _PRIORITY_MAP.get(
-                (step_type, priority_hint),
-                _DEFAULT_PRIORITY,
-            )
+            # Use priority_hint directly if valid, default to medium
+            priority = priority_hint if priority_hint in _VALID_PRIORITIES else "medium"
 
             tags = ["auto-discovered", source_tag]
 
