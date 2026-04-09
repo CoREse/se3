@@ -354,7 +354,7 @@ def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> N
     console = get_console()
     text = Text()
     displayed = 0
-    total = len(diff_lines)
+    total = sum(1 for l in diff_lines if not l.startswith('--- ') and not l.startswith('+++ '))
 
     old_line_no = 0
     new_line_no = 0

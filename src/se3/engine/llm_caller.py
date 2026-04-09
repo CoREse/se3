@@ -156,6 +156,7 @@ class StreamJSONTracker:
             old_content = self._tool_use_id_to_old_content.pop(tool_use_id, None)
             if cached_input and tool_name in ("Edit", "Write"):
                 format_tool_diff(tool_name, cached_input, content, old_content=old_content)
+            self._tool_use_id_to_name.pop(tool_use_id, None)
         self._last_ended_with_newline = True
 
     def process_line(self, line: str) -> None:
@@ -218,6 +219,7 @@ class StreamJSONTracker:
                                         oldest = next(iter(self._tool_use_id_to_input))
                                         self._tool_use_id_to_input.pop(oldest, None)
                                         self._tool_use_id_to_old_content.pop(oldest, None)
+                                        self._tool_use_id_to_name.pop(oldest, None)
                             # Format and print tool_use preview
                             preview = format_tool_use_preview(name, tool_input)
                             # Only add leading newline if previous output didn't end with one

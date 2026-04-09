@@ -192,6 +192,9 @@ def _format_design_doc(design_doc: dict[str, Any]) -> str:
     if components:
         lines.append("\n### Components")
         for comp in components:
+            if isinstance(comp, str):
+                lines.append(f"- {comp}")
+                continue
             name = comp.get("component", comp.get("name", "unknown"))
             resp = comp.get("responsibilities", comp.get("description", ""))
             lines.append(f"- **{name}**: {resp}")
@@ -200,6 +203,9 @@ def _format_design_doc(design_doc: dict[str, Any]) -> str:
     if decisions:
         lines.append("\n### Architecture Decisions")
         for dec in decisions:
+            if isinstance(dec, str):
+                lines.append(f"- **{dec}**")
+                continue
             decision = dec.get("decision", "")
             rationale = dec.get("rationale", "")
             lines.append(f"- **{decision}**")
