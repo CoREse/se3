@@ -439,25 +439,29 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
     },
     StepType.ANALYZE: {
         "name": "analyze",
-        "description": "Analyze input, determine task type and scope",
+        "description": "Analyze input, determine task type and scope; collect project context and select/load specs",
         "uses_llm": True,
         "read_only": True,
         "inputs": ["task_description", "project_context"],
-        "outputs": ["task_type", "scope", "required_steps"],
+        "outputs": ["task_type", "scope", "complexity", "reasoning", "project_summary", "relevant_specs", "spec_content"],
     },
+    # Deprecated: PROJECT_SUMMARY merged into ANALYZE (kept for backward compat with persisted flows)
     StepType.PROJECT_SUMMARY: {
         "name": "project_summary",
-        "description": "Generate project context summary via LLM",
+        "description": "Generate project context summary (deprecated: merged into analyze)",
         "uses_llm": True,
         "read_only": True,
+        "deprecated": True,
         "inputs": ["task_description"],
         "outputs": ["project_summary"],
     },
+    # Deprecated: READ_SPEC merged into ANALYZE (kept for backward compat with persisted flows)
     StepType.READ_SPEC: {
         "name": "read_spec",
-        "description": "Read relevant OpenSpec specs (LLM-driven selection)",
+        "description": "Read relevant OpenSpec specs (deprecated: merged into analyze)",
         "uses_llm": True,
         "read_only": True,
+        "deprecated": True,
         "inputs": ["task_type", "scope", "project_summary"],
         "outputs": ["relevant_specs", "spec_content"],
     },
@@ -574,8 +578,6 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
     sequences: Dict[str, List[StepType]] = {
         "feature": [
             StepType.ANALYZE,
-            StepType.PROJECT_SUMMARY,
-            StepType.READ_SPEC,
             StepType.PLAN,
             StepType.IMPLEMENT,
             StepType.TEST,
@@ -587,8 +589,6 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
         ],
         "bugfix": [
             StepType.ANALYZE,
-            StepType.PROJECT_SUMMARY,
-            StepType.READ_SPEC,
             StepType.PLAN,
             StepType.IMPLEMENT,
             StepType.TEST,
@@ -599,8 +599,6 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
         ],
         "review": [
             StepType.ANALYZE,
-            StepType.PROJECT_SUMMARY,
-            StepType.READ_SPEC,
             StepType.VERIFY_SPEC,
             StepType.SUMMARIZE,
         ],
@@ -614,8 +612,6 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
         ],
         "directive": [
             StepType.ANALYZE,
-            StepType.PROJECT_SUMMARY,
-            StepType.READ_SPEC,
             StepType.PLAN,
             StepType.IMPLEMENT,
             StepType.VERSION_ANALYZE,
@@ -625,8 +621,6 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
         "discovery": [
             StepType.DISCOVERY,
             StepType.ANALYZE,
-            StepType.PROJECT_SUMMARY,
-            StepType.READ_SPEC,
             StepType.PLAN,
             StepType.IMPLEMENT,
             StepType.TEST,

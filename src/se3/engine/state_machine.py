@@ -615,6 +615,11 @@ class StateMachine:
                 elif step.step_type == StepType.ANALYZE:
                     inputs["task_type"] = step.outputs.get("task_type")
                     inputs["scope"] = step.outputs.get("scope")
+                    # New outputs merged from former project_summary and read_spec steps
+                    inputs["project_summary"] = step.outputs.get("project_summary")
+                    inputs["relevant_specs"] = step.outputs.get("relevant_specs")
+                    inputs["spec_content"] = step.outputs.get("spec_content")
+                # Deprecated: PROJECT_SUMMARY and READ_SPEC merged into ANALYZE (backward compat for persisted flows)
                 elif step.step_type == StepType.PROJECT_SUMMARY:
                     inputs["project_summary"] = step.outputs.get("project_summary")
                 elif step.step_type == StepType.READ_SPEC:

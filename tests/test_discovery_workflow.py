@@ -52,8 +52,8 @@ class TestDiscoveryStepSequence:
     def test_discovery_sequence_length(self):
         """Discovery sequence should include all standard steps."""
         sequence = get_default_step_sequence("discovery")
-        # Should have discovery + all feature steps
-        assert len(sequence) >= 12  # discovery + analyze + ... + summarize
+        # Should have discovery + all feature steps (project_summary and read_spec merged into analyze)
+        assert len(sequence) >= 10  # discovery + analyze + plan + ... + summarize
 
 
 class TestDiscoveryHandler:
