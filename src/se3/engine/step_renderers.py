@@ -493,7 +493,8 @@ def _render_verify_spec(step: Step) -> None:
         lines.append("[bold red]✗ FAILED[/bold red]")
 
     # ── Summary ────────────────────────────────────────────────────
-    summary = outputs.get("summary", "")
+    verification_result = outputs.get("verification_result", {})
+    summary = outputs.get("summary", "") or (verification_result.get("summary", "") if isinstance(verification_result, dict) else "")
     if summary:
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")
@@ -528,13 +529,13 @@ def _render_verify_spec(step: Step) -> None:
             lines.append(f"{label}  [dim]({len(group)})[/dim]")
             for issue in group:
                 msg = issue.get("message", "") if isinstance(issue, dict) else str(issue)
-                lines.append(f"  {color}•[/{color.lstrip('[')}] {msg}")
+                lines.append(f"  {color}•[/{color[1:-1]}] {msg}")
                 suggestion = issue.get("suggestion", "") if isinstance(issue, dict) else ""
                 if suggestion:
                     lines.append(f"    [dim]→ {suggestion}[/dim]")
 
     # ── Recommendations ────────────────────────────────────────────
-    recommendations = outputs.get("recommendations", [])
+    recommendations = outputs.get("recommendations", []) or (verification_result.get("recommendations", []) if isinstance(verification_result, dict) else [])
     if recommendations and isinstance(recommendations, list):
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")

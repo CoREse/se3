@@ -196,6 +196,84 @@ class TestRenderVerifySpec:
         content = mock_render_full.call_args[0][0]
         assert "PASSED" in content
 
+    @patch("se3.engine.step_renderers.render_full")
+    def test_summary_from_verification_result(self, mock_render_full):
+        """summary should fall back to verification_result nested dict."""
+        step = _make_step(StepType.VERIFY_SPEC, {
+            "verified": True,
+            "verification_result": {
+                "verified": True,
+                "summary": "Nested summary text",
+                "recommendations": ["Rec from nested"],
+            },
+        })
+
+        from se3.engine.step_renderers import _render_verify_spec
+        _render_verify_spec(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "Nested summary text" in content
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_recommendations_from_verification_result(self, mock_render_full):
+        """recommendations should fall back to verification_result nested dict."""
+        step = _make_step(StepType.VERIFY_SPEC, {
+            "verified": True,
+            "verification_result": {
+                "verified": True,
+                "recommendations": ["Use type hints", "Add docstrings"],
+            },
+        })
+
+        from se3.engine.step_renderers import _render_verify_spec
+        _render_verify_spec(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "Use type hints" in content
+        assert "Add docstrings" in content
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_toplevel_summary_takes_precedence(self, mock_render_full):
+        """When top-level summary exists, it should be used over nested one."""
+        step = _make_step(StepType.VERIFY_SPEC, {
+            "verified": True,
+            "summary": "Top-level summary",
+            "verification_result": {
+                "summary": "Nested summary",
+            },
+        })
+
+        from se3.engine.step_renderers import _render_verify_spec
+        _render_verify_spec(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "Top-level summary" in content
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_rich_close_tag_no_extra_bracket(self, mock_render_full):
+        """Close tags for issue severity colors must not have extra ] chars."""
+        step = _make_step(StepType.VERIFY_SPEC, {
+            "verified": False,
+            "issues": [
+                {"severity": "error", "message": "err msg"},
+                {"severity": "warning", "message": "warn msg"},
+                {"severity": "info", "message": "info msg"},
+            ],
+        })
+
+        from se3.engine.step_renderers import _render_verify_spec
+        _render_verify_spec(step)
+
+        content = mock_render_full.call_args[0][0]
+        # Correct close tags
+        assert "[/red]" in content
+        assert "[/yellow]" in content
+        assert "[/dim]" in content
+        # No malformed double-bracket close tags
+        assert "[/red]]" not in content
+        assert "[/yellow]]" not in content
+        assert "[/dim]]" not in content
+
 
 # ---------------------------------------------------------------------------
 # _render_update_spec
