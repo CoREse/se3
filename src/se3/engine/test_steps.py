@@ -22,17 +22,37 @@ from .steps import (
 class TestAnalyzeStep:
     """Tests for the analyze step."""
 
+    @patch("se3.engine.steps.analyze.list_spec_names", return_value=["base", "flow-engine", "se3-workflows"])
+    @patch("se3.engine.steps.analyze.ProjectContextCollector")
+    @patch("se3.engine.steps.analyze.ContextBuilder")
     @patch("se3.engine.steps.analyze.LLMCaller")
-    def test_analyze_success(self, MockLLMCaller):
-        """Test successful analysis."""
+    def test_analyze_success(self, MockLLMCaller, MockContextBuilder, MockCollector, mock_list_specs):
+        """Test successful analysis includes all new output fields."""
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
             "task_type": "feature",
             "scope": "backend",
             "complexity": "medium",
-            "required_steps": ["analyze", "plan", "implement", "test"],
+            "reasoning": "New user login feature",
+            "selected_specs": ["flow-engine"],
         })
         MockLLMCaller.return_value = mock_caller
+
+        # Mock project context collector
+        mock_collector_inst = MagicMock()
+        mock_collector_inst.collect.return_value = {
+            "git": {"branch": "main", "uncommitted_count": 0},
+            "specs": ["base", "flow-engine"],
+        }
+        MockCollector.return_value = mock_collector_inst
+
+        # Mock context builder for spec loading
+        mock_builder = MagicMock()
+        mock_builder.specs_dir = Path("/tmp/specs")
+        def mock_load_spec(name):
+            return f"# {name} spec content"
+        mock_builder._load_spec_content.side_effect = mock_load_spec
+        MockContextBuilder.return_value = mock_builder
 
         flow = FlowInstance(task_description="Add user login")
         step = Step(step_type=StepType.ANALYZE)
@@ -41,8 +61,96 @@ class TestAnalyzeStep:
         result = analyze_handler(step, flow)
 
         assert result == StepStatus.COMPLETED
-        assert "task_type" in step.outputs
+        # Original outputs
         assert step.outputs["task_type"] == "feature"
+        assert step.outputs["scope"] == "backend"
+        assert step.outputs["complexity"] == "medium"
+        assert step.outputs["reasoning"] == "New user login feature"
+        # New merged outputs
+        assert "project_summary" in step.outputs
+        assert isinstance(step.outputs["project_summary"], str)
+        assert len(step.outputs["project_summary"]) > 0
+        assert "relevant_specs" in step.outputs
+        assert "base" in step.outputs["relevant_specs"]
+        assert "flow-engine" in step.outputs["relevant_specs"]
+        assert "spec_content" in step.outputs
+        assert "base" in step.outputs["spec_content"]
+        assert "flow-engine" in step.outputs["spec_content"]
+
+    @patch("se3.engine.steps.analyze.list_spec_names", return_value=["base"])
+    @patch("se3.engine.steps.analyze.ProjectContextCollector")
+    @patch("se3.engine.steps.analyze.ContextBuilder")
+    @patch("se3.engine.steps.analyze.LLMCaller")
+    def test_analyze_empty_selected_specs_loads_base(self, MockLLMCaller, MockContextBuilder, MockCollector, mock_list_specs):
+        """Test that base spec is loaded even when LLM returns empty selected_specs."""
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = json.dumps({
+            "task_type": "small",
+            "scope": "readme",
+            "complexity": "simple",
+            "reasoning": "Typo fix",
+            "selected_specs": [],
+        })
+        MockLLMCaller.return_value = mock_caller
+
+        mock_collector_inst = MagicMock()
+        mock_collector_inst.collect.return_value = {"git": {"branch": "main"}}
+        MockCollector.return_value = mock_collector_inst
+
+        mock_builder = MagicMock()
+        mock_builder.specs_dir = Path("/tmp/specs")
+        mock_builder._load_spec_content.side_effect = lambda name: f"# {name} content" if name == "base" else None
+        MockContextBuilder.return_value = mock_builder
+
+        flow = FlowInstance(task_description="Fix typo")
+        step = Step(step_type=StepType.ANALYZE)
+        step.inputs["task_description"] = "Fix typo"
+
+        result = analyze_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        assert "base" in step.outputs["spec_content"]
+        assert step.outputs["relevant_specs"] == ["base"]
+
+    @patch("se3.engine.steps.analyze.list_spec_names", return_value=["base", "flow-engine"])
+    @patch("se3.engine.steps.analyze.ProjectContextCollector")
+    @patch("se3.engine.steps.analyze.ContextBuilder")
+    @patch("se3.engine.steps.analyze.LLMCaller")
+    def test_analyze_invalid_spec_names_skipped(self, MockLLMCaller, MockContextBuilder, MockCollector, mock_list_specs):
+        """Test that invalid spec names from LLM are skipped without failure."""
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = json.dumps({
+            "task_type": "feature",
+            "scope": "auth module",
+            "complexity": "medium",
+            "reasoning": "Auth feature",
+            "selected_specs": ["nonexistent-spec", "also-fake", "flow-engine"],
+        })
+        MockLLMCaller.return_value = mock_caller
+
+        mock_collector_inst = MagicMock()
+        mock_collector_inst.collect.return_value = {"git": {"branch": "main"}}
+        MockCollector.return_value = mock_collector_inst
+
+        mock_builder = MagicMock()
+        mock_builder.specs_dir = Path("/tmp/specs")
+        mock_builder._load_spec_content.side_effect = lambda name: f"# {name} content"
+        MockContextBuilder.return_value = mock_builder
+
+        flow = FlowInstance(task_description="Add auth")
+        step = Step(step_type=StepType.ANALYZE)
+        step.inputs["task_description"] = "Add auth"
+
+        result = analyze_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        # Invalid specs should be skipped, only base and flow-engine loaded
+        assert "nonexistent-spec" not in step.outputs["spec_content"]
+        assert "also-fake" not in step.outputs["spec_content"]
+        assert "base" in step.outputs["spec_content"]
+        assert "flow-engine" in step.outputs["spec_content"]
+        assert "nonexistent-spec" not in step.outputs["relevant_specs"]
+        assert "also-fake" not in step.outputs["relevant_specs"]
 
     @patch("se3.engine.steps.analyze.LLMCaller")
     def test_analyze_invalid_json(self, MockLLMCaller):
@@ -351,6 +459,203 @@ class TestSummarizeHandlerIssueDiscoveryIntegration:
                 "Issue discovery injection was NOT found in the summarize handler prompt. "
                 "This means the injection is not reaching the LLM."
             )
+
+
+class TestBuildStepInputs:
+    """Tests for _build_step_inputs ANALYZE mapping and downstream consumption."""
+
+    def _make_state_machine(self, tmp_path):
+        """Create a StateMachine with a temp project root."""
+        from .state_machine import StateMachine
+        return StateMachine(project_root=tmp_path)
+
+    def _make_flow_with_analyze(self, task_desc="Test task", analyze_outputs=None):
+        """Create a FlowInstance with a completed ANALYZE step in history."""
+        flow = FlowInstance(task_description=task_desc)
+        analyze_step = Step(step_type=StepType.ANALYZE)
+        analyze_step.status = StepStatus.COMPLETED
+        defaults = {
+            "task_type": "feature",
+            "scope": "backend",
+            "project_summary": "Branch: main\nRecent commits:\n  - abc123",
+            "relevant_specs": ["base", "flow-engine"],
+            "spec_content": {
+                "base": "# base spec content",
+                "flow-engine": "# flow-engine spec content",
+            },
+        }
+        if analyze_outputs:
+            defaults.update(analyze_outputs)
+        analyze_step.outputs = defaults
+        flow.state.steps[analyze_step.step_id] = analyze_step
+        flow.state.step_history.append(analyze_step.step_id)
+        return flow
+
+    def test_analyze_mapping_includes_new_fields(self, tmp_path):
+        """ANALYZE outputs include spec_content, relevant_specs, project_summary."""
+        sm = self._make_state_machine(tmp_path)
+        flow = self._make_flow_with_analyze()
+
+        inputs = sm._build_step_inputs(flow, StepType.PLAN)
+
+        assert inputs["project_summary"] == "Branch: main\nRecent commits:\n  - abc123"
+        assert inputs["relevant_specs"] == ["base", "flow-engine"]
+        assert inputs["spec_content"] == {
+            "base": "# base spec content",
+            "flow-engine": "# flow-engine spec content",
+        }
+        assert inputs["task_type"] == "feature"
+        assert inputs["scope"] == "backend"
+
+    def test_plan_step_receives_spec_content_and_project_summary(self, tmp_path):
+        """PLAN step inputs include spec_content and project_summary from ANALYZE."""
+        sm = self._make_state_machine(tmp_path)
+        flow = self._make_flow_with_analyze()
+
+        inputs = sm._build_step_inputs(flow, StepType.PLAN)
+
+        assert "spec_content" in inputs
+        assert "project_summary" in inputs
+        assert "base" in inputs["spec_content"]
+
+    def test_verify_spec_receives_spec_content(self, tmp_path):
+        """VERIFY_SPEC step inputs include spec_content from ANALYZE (review flow key path)."""
+        sm = self._make_state_machine(tmp_path)
+        flow = self._make_flow_with_analyze()
+
+        inputs = sm._build_step_inputs(flow, StepType.VERIFY_SPEC)
+
+        assert "spec_content" in inputs
+        assert inputs["spec_content"]["base"] == "# base spec content"
+        assert inputs["spec_content"]["flow-engine"] == "# flow-engine spec content"
+
+    def test_implement_step_receives_spec_content(self, tmp_path):
+        """IMPLEMENT step inputs include spec_content from ANALYZE."""
+        sm = self._make_state_machine(tmp_path)
+        flow = self._make_flow_with_analyze()
+
+        inputs = sm._build_step_inputs(flow, StepType.IMPLEMENT)
+
+        assert "spec_content" in inputs
+        assert "relevant_specs" in inputs
+
+    def test_review_flow_verify_spec_gets_spec_content_without_read_spec(self, tmp_path):
+        """In review flow (ANALYZE → VERIFY_SPEC), verify_spec gets spec_content directly from ANALYZE."""
+        sm = self._make_state_machine(tmp_path)
+        # Simulate review flow: only ANALYZE completed, no READ_SPEC step
+        flow = self._make_flow_with_analyze(
+            task_desc="Review auth module",
+            analyze_outputs={
+                "task_type": "review",
+                "scope": "auth",
+                "spec_content": {"base": "# base", "auth-spec": "# auth spec"},
+                "relevant_specs": ["base", "auth-spec"],
+                "project_summary": "Branch: review-branch",
+            },
+        )
+
+        inputs = sm._build_step_inputs(flow, StepType.VERIFY_SPEC)
+
+        # verify_spec must get spec_content even though there's no READ_SPEC step
+        assert inputs["spec_content"] == {"base": "# base", "auth-spec": "# auth spec"}
+        assert inputs["relevant_specs"] == ["base", "auth-spec"]
+
+    def test_deprecated_project_summary_step_backward_compat(self, tmp_path):
+        """Persisted flows with old PROJECT_SUMMARY step still provide project_summary."""
+        sm = self._make_state_machine(tmp_path)
+        flow = FlowInstance(task_description="Old flow")
+
+        # Simulate old flow with separate PROJECT_SUMMARY step
+        ps_step = Step(step_type=StepType.PROJECT_SUMMARY)
+        ps_step.status = StepStatus.COMPLETED
+        ps_step.outputs = {"project_summary": "Old-style project summary"}
+        flow.state.steps[ps_step.step_id] = ps_step
+        flow.state.step_history.append(ps_step.step_id)
+
+        inputs = sm._build_step_inputs(flow, StepType.PLAN)
+
+        assert inputs["project_summary"] == "Old-style project summary"
+
+    def test_deprecated_read_spec_step_backward_compat(self, tmp_path):
+        """Persisted flows with old READ_SPEC step still provide spec_content."""
+        sm = self._make_state_machine(tmp_path)
+        flow = FlowInstance(task_description="Old flow")
+
+        # Simulate old flow with separate READ_SPEC step
+        rs_step = Step(step_type=StepType.READ_SPEC)
+        rs_step.status = StepStatus.COMPLETED
+        rs_step.outputs = {
+            "relevant_specs": ["base"],
+            "spec_content": {"base": "# old base content"},
+        }
+        flow.state.steps[rs_step.step_id] = rs_step
+        flow.state.step_history.append(rs_step.step_id)
+
+        inputs = sm._build_step_inputs(flow, StepType.PLAN)
+
+        assert inputs["relevant_specs"] == ["base"]
+        assert inputs["spec_content"] == {"base": "# old base content"}
+
+
+class TestStepSequences:
+    """Tests verifying step sequences do not contain deprecated PROJECT_SUMMARY/READ_SPEC."""
+
+    def test_all_task_types_exclude_project_summary(self):
+        """All 6 task type sequences must not contain PROJECT_SUMMARY."""
+        from .models import get_default_step_sequence
+        for task_type in ["feature", "bugfix", "review", "small", "directive", "discovery"]:
+            seq = get_default_step_sequence(task_type)
+            assert StepType.PROJECT_SUMMARY not in seq, (
+                f"{task_type} sequence still contains PROJECT_SUMMARY"
+            )
+
+    def test_all_task_types_exclude_read_spec(self):
+        """All 6 task type sequences must not contain READ_SPEC."""
+        from .models import get_default_step_sequence
+        for task_type in ["feature", "bugfix", "review", "small", "directive", "discovery"]:
+            seq = get_default_step_sequence(task_type)
+            assert StepType.READ_SPEC not in seq, (
+                f"{task_type} sequence still contains READ_SPEC"
+            )
+
+    def test_small_sequence_unchanged(self):
+        """Small task sequence: ANALYZE → IMPLEMENT → TEST → VERSION_ANALYZE → COMMIT → SUMMARIZE."""
+        from .models import get_default_step_sequence
+        seq = get_default_step_sequence("small")
+        expected = [
+            StepType.ANALYZE,
+            StepType.IMPLEMENT,
+            StepType.TEST,
+            StepType.VERSION_ANALYZE,
+            StepType.COMMIT,
+            StepType.SUMMARIZE,
+        ]
+        assert seq == expected
+
+    def test_feature_sequence_starts_with_analyze(self):
+        """Feature sequence starts with ANALYZE (not PROJECT_SUMMARY)."""
+        from .models import get_default_step_sequence
+        seq = get_default_step_sequence("feature")
+        assert seq[0] == StepType.ANALYZE
+
+    def test_review_sequence_has_verify_spec(self):
+        """Review sequence: ANALYZE → VERIFY_SPEC → SUMMARIZE (no READ_SPEC between)."""
+        from .models import get_default_step_sequence
+        seq = get_default_step_sequence("review")
+        assert seq == [
+            StepType.ANALYZE,
+            StepType.VERIFY_SPEC,
+            StepType.SUMMARIZE,
+        ]
+
+    def test_discovery_sequence_starts_with_discovery_then_analyze(self):
+        """Discovery sequence starts with DISCOVERY → ANALYZE (no PROJECT_SUMMARY/READ_SPEC)."""
+        from .models import get_default_step_sequence
+        seq = get_default_step_sequence("discovery")
+        assert seq[0] == StepType.DISCOVERY
+        assert seq[1] == StepType.ANALYZE
+        assert StepType.PROJECT_SUMMARY not in seq
+        assert StepType.READ_SPEC not in seq
 
 
 if __name__ == "__main__":
