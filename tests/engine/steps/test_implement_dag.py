@@ -1312,7 +1312,7 @@ class TestBranchDeletion:
             spec_summary="", injection=None, retry_count=0,
         )
 
-        # Both G1 and G2 branches should be deleted
+        # Only actual branch names should be deleted (G2 reuses G1's branch)
         deleted = {c[0][1] for c in mock_del.call_args_list}
         assert "impl/f/G1" in deleted
-        assert "impl/f/G2" in deleted
+        assert "impl/f/G2" not in deleted  # G2 has no separate branch

@@ -925,6 +925,32 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - **AND** the resolver retries up to 3 times if needed
 - **AND** there is no fallback to `--theirs` or `pending_human`
 
+**DAG Branch Cleanup:**
+- After all leaf merges complete, the DAG parallel strategy cleans up implementation branches.
+- Branch names for cleanup SHALL be collected from actual `GroupResult.branch_name` values (not constructed from group IDs), because relay chains cause downstream groups to reuse a root group's branch rather than having their own.
+- Recovered group branches (from `prior_outputs.implemented_groups` during DAG resume) that were already deleted during the recovery phase SHALL be tracked and skipped during final cleanup, preventing duplicate deletion errors.
+- Recovered group branches that were NOT successfully deleted during recovery SHALL still be included in final cleanup as a fallback.
+
+#### Scenario: DAG branch cleanup uses actual branch names
+- **GIVEN** a relay chain where G2 reuses G1's branch
+- **WHEN** final branch cleanup runs after leaf merges
+- **THEN** branch names are collected from each GroupResult's `branch_name` field
+- **AND** duplicate branch names are deduplicated (via set)
+- **AND** no "branch not found" error occurs for groups sharing a relay branch
+
+#### Scenario: DAG resume skips already-deleted branches in final cleanup
+- **GIVEN** a DAG resume recovered groups G2 and G4 from prior_outputs
+- **AND** their branches were successfully merged and deleted during the recovery phase
+- **WHEN** final branch cleanup runs
+- **THEN** G2 and G4 branches are skipped because they were already deleted
+- **AND** no "branch not found" error occurs
+
+#### Scenario: DAG resume retains fallback for failed recovery deletions
+- **GIVEN** a DAG resume recovered group G3 from prior_outputs
+- **AND** branch deletion failed during the recovery phase
+- **WHEN** final branch cleanup runs
+- **THEN** G3's branch is included in final cleanup as a fallback attempt
+
 ### Requirement: Worktree Cleanup Resilience
 
 The worktree cleanup subsystem SHALL be resilient to cascading failures. `force_cleanup_worktree` executes a multi-step cleanup pipeline where each step is independently fault-tolerant — a single step timing out or raising an exception MUST NOT prevent subsequent steps from executing.

@@ -1124,6 +1124,7 @@ def _run_dag_parallel(
     # Disaster recovery: merge surviving branches from prior_outputs
     # before running new groups (so new groups see recovered code)
     recovered_groups: list[str] = list(prior_outputs.get("implemented_groups", [])) if prior_outputs else []
+    already_deleted_gids: set[str] = set()
     if recovered_groups:
         from ..worktree import has_new_commits
         for gid in recovered_groups:
@@ -1156,11 +1157,13 @@ def _run_dag_parallel(
                     )
                     if success:
                         delete_branch(project_root, branch)
+                        already_deleted_gids.add(gid)
                     else:
                         logger.error("DAG resume: merge failed for recovered %s", gid)
                 else:
                     # Branch exists but no new commits — clean up
                     delete_branch(project_root, branch)
+                    already_deleted_gids.add(gid)
             except Exception as e:
                 logger.warning("DAG resume: failed to process branch %s: %s", branch, e)
 
@@ -1286,11 +1289,15 @@ def _run_dag_parallel(
             logger.error("DAG: leaf merge failed for %s (branch %s)", gid, branch)
             merge_failures.append(gid)
 
-    # Delete impl branches (all groups including recovered — covers failed/skipped)
-    all_gids = [g.get("group_id", g.get("name", "unknown")) for g in groups]
-    all_gids.extend(recovered_groups)
-    for gid in all_gids:
-        branch = f"impl/{flow.flow_id}/{gid}"
+    # Delete impl branches — collect actual branch names from results + recovered
+    branches_to_delete: set[str] = set()
+    for r in results:
+        if r.branch_name:
+            branches_to_delete.add(r.branch_name)
+    for gid in recovered_groups:
+        if gid not in already_deleted_gids:
+            branches_to_delete.add(f"impl/{flow.flow_id}/{gid}")
+    for branch in branches_to_delete:
         try:
             delete_branch(project_root, branch)
         except Exception:
