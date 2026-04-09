@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..context_builder import ContextBuilder
-from ..llm_caller import LLMCaller
+from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus, StepType
 from ..utils.json_parser import parse_json_response
 
@@ -390,6 +390,29 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 step.outputs["proposed_description"] = refined_description
             _display_discovery_message(content, refined_description, questions)
             return StepStatus.PAUSED
+
+    except LLMCallError as e:
+        from ..output import render_full
+
+        error_msg = str(e)
+        if "JSON extraction failed" in error_msg:
+            friendly_message = (
+                "LLM 未能返回有效的 JSON 结构化输出，"
+                "可能是模型生成了叙述性文本而非预期的 JSON 格式。\n\n"
+                "流程引擎将自动重试此步骤。"
+            )
+            logger.warning(
+                "Discovery: LLM did not return valid JSON output. "
+                "The step will be retried automatically. Original error: %s",
+                error_msg,
+            )
+        else:
+            friendly_message = f"LLM 调用失败: {error_msg}"
+            logger.warning("Discovery: LLM call failed: %s", error_msg)
+
+        step.error_message = friendly_message
+        render_full(friendly_message, title="Discovery Error")
+        return StepStatus.FAILED
 
     except Exception as e:
         logger.exception("Discovery step failed")

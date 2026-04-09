@@ -155,6 +155,19 @@ se3 run --discover "我想做一个用户管理功能"
 - **WHEN** 流程进入 `analyze` 步骤
 - **THEN** `refined_description` 自动作为 `task_description` 传递给 analyze
 
+#### Scenario: Discovery LLM JSON 提取失败时的友好错误提示
+- **GIVEN** discovery 步骤执行 LLM 调用使用 two-phase JSON 模式
+- **WHEN** LLM 返回叙述性文本而非有效 JSON，导致 `LLMCallError`（消息包含 "JSON extraction failed"）
+- **THEN** discovery_handler 捕获 `LLMCallError` 并向用户展示友好的错误面板（通过 `render_full`），说明 LLM 未能返回有效 JSON 结构化输出
+- **AND** 步骤返回 `StepStatus.FAILED`，由流程引擎的重试机制自动处理（最多 3 次）
+- **AND** 不向用户暴露原始 traceback
+
+#### Scenario: Discovery 其他 LLM 调用错误的友好提示
+- **GIVEN** discovery 步骤执行 LLM 调用
+- **WHEN** LLM 调用因非 JSON 提取原因失败，抛出 `LLMCallError`
+- **THEN** discovery_handler 捕获错误并展示简洁的错误描述（包含原始错误消息）
+- **AND** 步骤返回 `StepStatus.FAILED`
+
 ### Requirement: 状态机驱动流程
 
 流程引擎 SHALL 以 Python 有限状态机实现，每个状态对应一个流程步骤。步骤之间的转换由程序逻辑控制，而非 LLM 决定。

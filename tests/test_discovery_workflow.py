@@ -421,5 +421,81 @@ class TestDiscoveryPromptTemplates:
         assert "se3/specs/" in CONTINUE_DISCOVERY_PROMPT
 
 
+class TestDiscoveryLLMCallErrorHandling:
+    """Test that LLMCallError is caught with friendly messages."""
+
+    @patch("se3.engine.output.render_full")
+    @patch("se3.engine.steps.discovery.LLMCaller")
+    def test_discovery_llm_json_extraction_failure(self, mock_caller_class, mock_render):
+        """JSON extraction failure should return FAILED with friendly error message and panel."""
+        from se3.engine.llm_caller import LLMCallError
+
+        mock_caller = Mock()
+        mock_caller_class.return_value = mock_caller
+        mock_caller.call.side_effect = LLMCallError(
+            "Two-phase JSON extraction failed: no valid JSON found in response"
+        )
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={"task_description": "I want to build something"},
+        )
+        flow = FlowInstance(task_description="I want to build something")
+
+        result = discovery_handler(step, flow)
+
+        assert result == StepStatus.FAILED
+        assert "JSON" in step.error_message
+        assert "Two-phase" not in step.error_message
+        assert "traceback" not in step.error_message.lower()
+        # Verify render_full was called to show friendly panel
+        mock_render.assert_called_once()
+        rendered_text = mock_render.call_args[0][0]
+        assert "JSON" in rendered_text
+
+    @patch("se3.engine.output.render_full")
+    @patch("se3.engine.steps.discovery.LLMCaller")
+    def test_discovery_other_llm_error(self, mock_caller_class, mock_render):
+        """Other LLMCallError should return FAILED with concise error description and panel."""
+        from se3.engine.llm_caller import LLMCallError
+
+        mock_caller = Mock()
+        mock_caller_class.return_value = mock_caller
+        mock_caller.call.side_effect = LLMCallError("API timeout after 60s")
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={"task_description": "I want to build something"},
+        )
+        flow = FlowInstance(task_description="I want to build something")
+
+        result = discovery_handler(step, flow)
+
+        assert result == StepStatus.FAILED
+        assert "API timeout" in step.error_message
+        assert step.error_message.startswith("LLM 调用失败")
+        # Verify render_full was called to show friendly panel
+        mock_render.assert_called_once()
+
+    @patch("se3.engine.steps.discovery.LLMCaller")
+    def test_discovery_non_llm_error(self, mock_caller_class):
+        """Non-LLMCallError exceptions should still go through generic except path."""
+        mock_caller = Mock()
+        mock_caller_class.return_value = mock_caller
+        mock_caller.call.side_effect = RuntimeError("unexpected internal error")
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={"task_description": "I want to build something"},
+        )
+        flow = FlowInstance(task_description="I want to build something")
+
+        result = discovery_handler(step, flow)
+
+        assert result == StepStatus.FAILED
+        assert step.error_message.startswith("Discovery failed:")
+        assert "unexpected internal error" in step.error_message
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
