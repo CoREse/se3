@@ -660,6 +660,76 @@ class TestStreamJSONTracker:
         # Total cache size should not exceed limit
         assert len(tracker._tool_use_id_to_input) <= StreamJSONTracker._MAX_CACHE_SIZE
 
+    def test_error_result_cleans_up_caches(self, capsys):
+        """Error tool_result should clean up all cached entries for that tool_use_id."""
+        tracker = StreamJSONTracker()
+        # Emit tool_use to populate caches
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-err-cleanup",
+                    "name": "Edit",
+                    "input": {"file_path": "f.py", "old_string": "a", "new_string": "b"}
+                }]
+            }
+        }))
+        # Verify caches are populated
+        assert "tu-err-cleanup" in tracker._tool_use_id_to_name
+        assert "tu-err-cleanup" in tracker._tool_use_id_to_input
+
+        # Emit error result
+        tracker.process_line(json.dumps({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu-err-cleanup",
+                    "content": "File not found",
+                    "is_error": True
+                }]
+            }
+        }))
+        # All caches for this id should be cleaned up
+        assert "tu-err-cleanup" not in tracker._tool_use_id_to_name
+        assert "tu-err-cleanup" not in tracker._tool_use_id_to_input
+        assert "tu-err-cleanup" not in tracker._tool_use_id_to_old_content
+
+    def test_error_result_does_not_affect_other_entries(self, capsys):
+        """Error cleanup should only remove the specific tool_use_id, not others."""
+        tracker = StreamJSONTracker()
+        # Emit two tool_uses
+        for tid in ("tu-keep", "tu-fail"):
+            tracker.process_line(json.dumps({
+                "type": "assistant",
+                "message": {
+                    "content": [{
+                        "type": "tool_use",
+                        "id": tid,
+                        "name": "Edit",
+                        "input": {"file_path": f"{tid}.py", "old_string": "a", "new_string": "b"}
+                    }]
+                }
+            }))
+        # Emit error only for tu-fail
+        tracker.process_line(json.dumps({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu-fail",
+                    "content": "Error",
+                    "is_error": True
+                }]
+            }
+        }))
+        # tu-fail should be cleaned up
+        assert "tu-fail" not in tracker._tool_use_id_to_input
+        # tu-keep should still be in cache
+        assert "tu-keep" in tracker._tool_use_id_to_input
+        assert "tu-keep" in tracker._tool_use_id_to_name
+
 
 class TestStreamJSONTrackerPrefix:
     """Tests for StreamJSONTracker stream_prefix behavior."""

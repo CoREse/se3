@@ -144,6 +144,10 @@ class StreamJSONTracker:
         if is_error:
             error_preview = truncate_preview(str(content)) if content else "Unknown error"
             print(f"  {self.stream_prefix}[llm-stream] ❌ Tool error: {error_preview}...")
+            # Clean up caches for failed tool calls to prevent leaks
+            self._tool_use_id_to_input.pop(tool_use_id, None)
+            self._tool_use_id_to_old_content.pop(tool_use_id, None)
+            self._tool_use_id_to_name.pop(tool_use_id, None)
         else:
             preview = format_tool_result_preview(tool_name, content)
             print(f"  {self.stream_prefix}[llm-stream] ✅ {preview}...")

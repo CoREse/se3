@@ -646,9 +646,9 @@ class TestStreamJSONTrackerDiff:
         input_data = {"file_path": "f.py", "old_string": "a", "new_string": "b"}
         tracker.process_line(self._tool_use_event("Edit", input_data))
         tracker.process_line(self._tool_result_event("tu_1", "old_string not found", is_error=True))
-        # On error, cache is NOT consumed by diff (error branch skips it)
-        # but it stays in cache since the pop only happens in the else branch
-        assert "tu_1" in tracker._tool_use_id_to_input
+        # On error, cache should be cleaned up to prevent leaks (#057)
+        assert "tu_1" not in tracker._tool_use_id_to_input
+        assert "tu_1" not in tracker._tool_use_id_to_name
 
     def test_full_edit_flow_renders_diff(self):
         from se3.engine.display import set_console
