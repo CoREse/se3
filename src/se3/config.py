@@ -709,6 +709,92 @@ class ImplementConfig:
             return cls()
 
 
+@dataclass
+class StepConfig:
+    """Step sequence configuration loaded from se3.yaml steps: section.
+
+    Allows appending optional steps (e.g. summarize) back into the default
+    step sequence via configuration.
+
+    Example se3.yaml:
+        steps:
+          append:
+            - summarize
+    """
+
+    append_steps: list[str] = field(default_factory=list)
+
+    @classmethod
+    def load(cls, project_root: Path) -> "StepConfig":
+        """Load step configuration from se3.yaml."""
+        config_path = Path(project_root) / "se3.yaml"
+        if not config_path.exists():
+            return cls()
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            steps_data = data.get("steps", {})
+            if not steps_data or not isinstance(steps_data, dict):
+                return cls()
+            append_raw = steps_data.get("append", [])
+            if not isinstance(append_raw, list):
+                return cls()
+            return cls(append_steps=[str(s) for s in append_raw])
+        except Exception:
+            return cls()
+
+
+def load_step_config(project_root: Optional[Path] = None) -> StepConfig:
+    """Load step configuration from project.
+
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+
+    Returns:
+        StepConfig instance with loaded or default settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    return StepConfig.load(project_root)
+
+
+def apply_step_config(steps: list, project_root: Optional[Path] = None) -> list:
+    """Append configured steps to the step sequence.
+
+    Reads ``steps.append`` from se3.yaml and appends valid StepType values
+    to the end of the step sequence (if not already present).
+
+    Args:
+        steps: Original step sequence (list of StepType)
+        project_root: Project root directory for loading config
+
+    Returns:
+        Modified step sequence with appended steps
+    """
+    config = load_step_config(project_root)
+    if not config.append_steps:
+        return steps
+
+    from .engine.models import StepType
+
+    # Build set of existing step values for dedup
+    existing = {s.value if hasattr(s, "value") else str(s) for s in steps}
+
+    result = list(steps)
+    for step_name in config.append_steps:
+        if step_name in existing:
+            continue
+        # Validate the step name against StepType enum
+        try:
+            step_type = StepType(step_name)
+            result.append(step_type)
+            existing.add(step_name)
+        except ValueError:
+            pass  # Ignore invalid step names
+
+    return result
+
+
 def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
     """Get the maximum number of fix iterations for the test-verify-fix loop.
 

@@ -139,6 +139,9 @@ class StateMachine:
         # Determine initial step sequence
         selected_steps = get_default_step_sequence(task_type)
 
+        # Append optional steps from se3.yaml (e.g. summarize)
+        selected_steps = self._apply_step_config(selected_steps)
+
         # Insert confirmation steps based on config
         selected_steps = self._insert_confirmation_steps(selected_steps)
 
@@ -180,6 +183,18 @@ class StateMachine:
         logger.info(f"Created flow {flow.flow_id} for task: {task_description[:50]}...")
 
         return flow
+
+    def _apply_step_config(self, steps: list[StepType]) -> list[StepType]:
+        """Append optional steps from se3.yaml steps.append configuration.
+
+        Args:
+            steps: Original step sequence
+
+        Returns:
+            Modified step sequence with appended steps
+        """
+        from ..config import apply_step_config
+        return apply_step_config(steps, self.project_root)
 
     def _insert_confirmation_steps(self, steps: list[StepType]) -> list[StepType]:
         """Insert CONFIRM steps after configured step types.

@@ -1,4 +1,4 @@
-"""Tests for extended exception handling and auto-repair in commit step."""
+"""Tests for extended exception handling, auto-repair, and template summary in commit step."""
 
 from __future__ import annotations
 
@@ -7,8 +7,13 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
 
-from se3.engine.models import FlowInstance, Step, StepStatus
-from se3.engine.steps.commit import commit_handler
+from se3.engine.models import FlowInstance, State, Step, StepStatus, StepType
+from se3.engine.steps.commit import (
+    commit_handler,
+    _generate_template_summary,
+    _collect_changes_from_flow,
+    _collect_test_results_from_flow,
+)
 from se3.engine.version_bumper import BumpType, VersionBumper, VersionConfig
 
 
@@ -23,6 +28,14 @@ def _make_flow(**kwargs) -> FlowInstance:
     flow = MagicMock(spec=FlowInstance)
     for k, v in defaults.items():
         setattr(flow, k, v)
+    # Ensure state.selected_steps exists for template summary check
+    state = MagicMock(spec=State)
+    state.selected_steps = kwargs.get("selected_steps", [
+        StepType.ANALYZE, StepType.IMPLEMENT, StepType.COMMIT, StepType.SUMMARIZE,
+    ])
+    state.step_history = []
+    state.steps = {}
+    flow.state = state
     return flow
 
 
@@ -378,3 +391,179 @@ class TestValueErrorKeyErrorRegression:
 
         assert result == StepStatus.FAILED
         assert "still broken" in step.error_message
+
+
+# ---------------------------------------------------------------------------
+# Helpers for template summary tests
+# ---------------------------------------------------------------------------
+
+def _make_flow_with_state(**kwargs) -> FlowInstance:
+    """Create a FlowInstance with a real-ish State for template summary tests."""
+    defaults = {
+        "flow_id": "test-flow-summary",
+        "task_description": "Add new feature",
+        "task_type": "feature",
+        "change_path": Path("/tmp/project/se3.yaml"),
+    }
+    defaults.update(kwargs)
+
+    flow = MagicMock(spec=FlowInstance)
+    for k, v in defaults.items():
+        setattr(flow, k, v)
+
+    # Build a state with selected_steps and step_history
+    state = MagicMock(spec=State)
+    state.selected_steps = kwargs.get("selected_steps", [
+        StepType.ANALYZE, StepType.IMPLEMENT, StepType.TEST,
+        StepType.VERSION_ANALYZE, StepType.COMMIT,
+    ])
+    state.step_history = kwargs.get("step_history", [])
+    state.steps = kwargs.get("steps", {})
+    flow.state = state
+    return flow
+
+
+class TestTemplateSummaryGeneration:
+    """Template summary is generated when SUMMARIZE step is absent."""
+
+    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc12345")
+    @patch("se3.engine.steps.commit.subprocess")
+    @patch("se3.engine.steps.commit._has_changes", return_value=True)
+    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("se3.engine.steps.commit._generate_commit_message", return_value="feature: add X")
+    @patch("se3.engine.steps.commit._generate_template_summary")
+    def test_template_summary_called_when_no_summarize_step(
+        self, mock_template, mock_commit_msg, mock_load_cfg, mock_has_changes,
+        mock_subprocess, mock_hash
+    ):
+        """When SUMMARIZE is not in selected_steps, _generate_template_summary is called."""
+        mock_load_cfg.return_value = _default_version_config(enabled=False)
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        flow = _make_flow_with_state(selected_steps=[
+            StepType.ANALYZE, StepType.IMPLEMENT, StepType.COMMIT,
+        ])
+        step = _make_step({"task_description": "Add X"})
+
+        result = commit_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        mock_template.assert_called_once_with(flow, step)
+
+    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc12345")
+    @patch("se3.engine.steps.commit.subprocess")
+    @patch("se3.engine.steps.commit._has_changes", return_value=True)
+    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("se3.engine.steps.commit._generate_commit_message", return_value="feature: add X")
+    @patch("se3.engine.steps.commit._generate_template_summary")
+    def test_template_summary_not_called_when_summarize_step_present(
+        self, mock_template, mock_commit_msg, mock_load_cfg, mock_has_changes,
+        mock_subprocess, mock_hash
+    ):
+        """When SUMMARIZE is in selected_steps, _generate_template_summary is NOT called."""
+        mock_load_cfg.return_value = _default_version_config(enabled=False)
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        flow = _make_flow_with_state(selected_steps=[
+            StepType.ANALYZE, StepType.IMPLEMENT, StepType.COMMIT, StepType.SUMMARIZE,
+        ])
+        step = _make_step({"task_description": "Add X"})
+
+        result = commit_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        mock_template.assert_not_called()
+
+    def test_generate_template_summary_creates_file(self, tmp_path):
+        """_generate_template_summary writes a summary file to se3/state/."""
+        flow = _make_flow_with_state(
+            flow_id="ts-001",
+            change_path=tmp_path / "se3.yaml",
+            task_description="Implement auth",
+            task_type="feature",
+            step_history=[],
+            steps={},
+        )
+        step = _make_step()
+        step.outputs = {
+            "commit_message": "feature: implement auth",
+            "commit_hash": "deadbeef12345678",
+            "version": "1.2.0",
+            "version_bumped": True,
+        }
+
+        _generate_template_summary(flow, step)
+
+        summary_file = tmp_path / "se3" / "state" / "summary-ts-001.md"
+        assert summary_file.exists()
+        content = summary_file.read_text()
+        assert "Implement auth" in content
+        assert "feature" in content
+        assert "deadbeef" in content
+        assert "1.2.0" in content
+        assert "feature: implement auth" in content
+        assert "template mode" in content
+
+
+class TestCollectChangesFromFlow:
+    """Tests for _collect_changes_from_flow helper."""
+
+    def test_collects_string_file_paths(self):
+        impl_step = MagicMock(spec=Step)
+        impl_step.step_type = StepType.IMPLEMENT
+        impl_step.outputs = {"files_changed": ["src/a.py", "src/b.py"]}
+
+        flow = _make_flow_with_state(
+            step_history=["impl-1"],
+            steps={"impl-1": impl_step},
+        )
+
+        result = _collect_changes_from_flow(flow)
+        assert result == ["src/a.py", "src/b.py"]
+
+    def test_collects_dict_file_paths(self):
+        impl_step = MagicMock(spec=Step)
+        impl_step.step_type = StepType.IMPLEMENT
+        impl_step.outputs = {
+            "files_changed": [
+                {"path": "src/a.py", "action": "modified"},
+                {"path": "src/b.py", "action": "created"},
+            ]
+        }
+
+        flow = _make_flow_with_state(
+            step_history=["impl-1"],
+            steps={"impl-1": impl_step},
+        )
+
+        result = _collect_changes_from_flow(flow)
+        assert result == ["src/a.py", "src/b.py"]
+
+    def test_returns_empty_when_no_implement_step(self):
+        flow = _make_flow_with_state(step_history=[], steps={})
+        assert _collect_changes_from_flow(flow) == []
+
+
+class TestCollectTestResultsFromFlow:
+    """Tests for _collect_test_results_from_flow helper."""
+
+    def test_returns_most_recent_test_results(self):
+        test_step_1 = MagicMock(spec=Step)
+        test_step_1.step_type = StepType.TEST
+        test_step_1.outputs = {"test_results": {"passed": False}}
+
+        test_step_2 = MagicMock(spec=Step)
+        test_step_2.step_type = StepType.TEST
+        test_step_2.outputs = {"test_results": {"passed": True}}
+
+        flow = _make_flow_with_state(
+            step_history=["test-1", "test-2"],
+            steps={"test-1": test_step_1, "test-2": test_step_2},
+        )
+
+        result = _collect_test_results_from_flow(flow)
+        assert result == {"passed": True}
+
+    def test_returns_empty_dict_when_no_test_step(self):
+        flow = _make_flow_with_state(step_history=[], steps={})
+        assert _collect_test_results_from_flow(flow) == {}
