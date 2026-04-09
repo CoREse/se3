@@ -82,6 +82,12 @@ Analyze the changes above and determine:
 
 4. **suggested_version**: What should the new version be? (e.g., "1.3.0")
 
+5. **commit_message**: Write a concise git commit message summary (first line only, max 72 characters).
+   - Use imperative mood (e.g., "Add feature" not "Added feature")
+   - Start with a verb describing the action
+   - Be specific but brief — describe what was done, not what was planned
+   - Do NOT include the task type prefix (like "feat:" or "fix:")
+
 Respond in valid JSON format:
 
 ```json
@@ -89,7 +95,8 @@ Respond in valid JSON format:
   "bump_type": "major|minor|patch|none",
   "reasoning": "Detailed explanation referencing specific changes and SemVer rules",
   "confidence": "high|medium|low",
-  "suggested_version": "X.Y.Z"
+  "suggested_version": "X.Y.Z",
+  "commit_message": "Concise imperative commit summary (max 72 chars)"
 }}
 ```
 
@@ -193,6 +200,7 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["confidence"] = result["confidence"]
         step.outputs["suggested_version"] = result["suggested_version"]
         step.outputs["current_version"] = current_version
+        step.outputs["commit_message"] = result.get("commit_message") or _fallback_commit_message(task_type, task_description)
 
         # Log the decision
         logger.info(
@@ -211,7 +219,8 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["reasoning"] = f"LLM analysis failed ({e}), using fallback based on task type"
         step.outputs["confidence"] = "low"
         step.outputs["suggested_version"] = "auto"  # Will be calculated by commit step
-        
+        step.outputs["commit_message"] = _fallback_commit_message(task_type, task_description)
+
         logger.warning(f"Using fallback bump type: {fallback_bump}")
         return StepStatus.COMPLETED
 
@@ -456,6 +465,7 @@ def _validate_result(result: dict[str, Any]) -> dict[str, Any]:
         "reasoning": result.get("reasoning", "No reasoning provided"),
         "confidence": confidence,
         "suggested_version": result.get("suggested_version", "auto"),
+        "commit_message": result.get("commit_message", ""),
     }
 
 
@@ -481,3 +491,26 @@ def _get_fallback_bump_type(task_type: str) -> str:
         "breaking": "major",
     }
     return fallback_map.get(task_type, "patch")
+
+
+def _fallback_commit_message(task_type: str, task_description: str) -> str:
+    """Generate a fallback commit message from task type and description.
+
+    Used when the LLM does not produce a commit_message field or when
+    the entire version_analyze LLM call fails.
+
+    Args:
+        task_type: The type of task
+        task_description: The task description
+
+    Returns:
+        A commit message string (without task_type prefix)
+    """
+    desc = task_description.strip()
+    if not desc:
+        return "Update project"
+    # Use first sentence, truncated to 72 chars
+    first_line = desc.split(".")[0].strip()
+    if len(first_line) > 72:
+        first_line = first_line[:69] + "..."
+    return first_line

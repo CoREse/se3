@@ -667,6 +667,7 @@ class StateMachine:
                     inputs["reasoning"] = step.outputs.get("reasoning")
                     inputs["confidence"] = step.outputs.get("confidence")
                     inputs["suggested_version"] = step.outputs.get("suggested_version")
+                    inputs["commit_message"] = step.outputs.get("commit_message")
                 elif step.step_type == StepType.COMMIT:
                     inputs["commit_hash"] = step.outputs.get("commit_hash")
                 elif step.step_type == StepType.CONFIRM:

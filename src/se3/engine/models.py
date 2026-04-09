@@ -540,18 +540,18 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
     },
     StepType.VERSION_ANALYZE: {
         "name": "version_analyze",
-        "description": "Analyze changes using LLM to determine SemVer bump type",
+        "description": "Analyze changes to determine SemVer bump type and generate commit message",
         "uses_llm": True,
         "read_only": True,
         "inputs": ["changes_made", "summary", "verification_result", "task_type"],
-        "outputs": ["bump_type", "reasoning", "confidence", "suggested_version"],
+        "outputs": ["bump_type", "reasoning", "confidence", "suggested_version", "commit_message"],
     },
     StepType.COMMIT: {
         "name": "commit",
-        "description": "Commit changes with LLM-generated message when needed",
-        "uses_llm": True,
+        "description": "Commit changes with version bump",
+        "uses_llm": False,
         "read_only": False,
-        "inputs": ["changes_made", "updated_specs", "bump_type", "proposal"],
+        "inputs": ["changes_made", "updated_specs", "bump_type", "proposal", "commit_message"],
         "outputs": ["commit_hash"],
     },
     StepType.SUMMARIZE: {
