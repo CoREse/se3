@@ -181,7 +181,7 @@ se3 run --discover "我想做一个用户管理功能"
 
 | 步骤 | 职责 | LLM 参与 | JSON 模式 | Read-Only | 输入 | 输出 |
 |------|------|---------|-----------|-----------|------|------|
-| `discovery` | 需求探索（多轮对话） | 是 | STRICT | 否 | initial_description | refined_description, discovery_summary |
+| `discovery` | 需求探索（多轮对话） | 是 | STRICT | **是** | initial_description | refined_description, discovery_summary |
 | `analyze` | 分析任务类型和范围；收集项目上下文；选择并加载 spec | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content, selected_specs |
 | ~~`read_spec`~~ | ~~读取相关 spec 文件~~ (deprecated — merged into analyze) | 否（程序自动） | - | **是** | scope | relevant_specs, spec_content |
 | `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type, project_summary | plan{proposal,design}, task_groups, spec_changes |
@@ -275,11 +275,11 @@ The flow engine SHALL enforce a prompt-level file modification prohibition for r
 **Read-Only Step Attribute:**
 
 Each entry in the step pool (`STEP_POOL`) SHALL include a `read_only` boolean attribute. Steps marked `read_only: true` are:
-- `analyze`, `plan`, `verify_spec`, `version_analyze`, `summarize`
+- `discovery`, `analyze`, `plan`, `verify_spec`, `version_analyze`, `summarize`
 - Deprecated steps (`project_summary`, `read_spec`)
 
 Steps explicitly marked `read_only: false`:
-- `discovery`, `implement`, `test`, `update_spec`, `commit`, `confirm`
+- `implement`, `test`, `update_spec`, `commit`, `confirm`
 - Deprecated steps (`propose`, `design`, `plan_tasks`)
 
 **Injection Mechanism:**
@@ -306,10 +306,10 @@ The injected prompt SHALL:
 - **THEN** no read-only constraint is injected
 - **AND** the LLM can freely modify files
 
-#### Scenario: Discovery step is not read-only
+#### Scenario: Discovery step is read-only
 - **WHEN** LLMCaller executes the `discovery` step
-- **THEN** no read-only constraint is injected
-- **AND** the discovery step can use file modification tools if needed
+- **THEN** the read-only constraint prompt is appended to the LLM prompt
+- **AND** the discovery step cannot modify files, consistent with its sole responsibility of producing the Proposed Task Description
 
 ### Requirement: JSON 提取模式
 

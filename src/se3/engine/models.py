@@ -433,7 +433,7 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "name": "discovery",
         "description": "Discovery mode: explore requirements with user through multi-turn conversation",
         "uses_llm": True,
-        "read_only": False,
+        "read_only": True,
         "inputs": ["initial_description", "conversation_history"],
         "outputs": ["refined_description", "discovery_summary", "requirements_clarified"],
     },

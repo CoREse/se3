@@ -20,6 +20,8 @@ from se3.engine.steps.discovery import (
     parse_user_response,
     _format_conversation_history,
     _generate_summary,
+    INITIAL_DISCOVERY_PROMPT,
+    CONTINUE_DISCOVERY_PROMPT,
 )
 
 
@@ -371,6 +373,52 @@ class TestConversationHistory:
         result = _generate_summary(history)
         assert "2 rounds" in result
         assert "2 user inputs" in result
+
+
+class TestDiscoveryPromptTemplates:
+    """Test that discovery prompt templates enforce responsibility boundaries."""
+
+    def test_initial_prompt_no_full_tool_access(self):
+        """INITIAL_DISCOVERY_PROMPT must not contain 'full tool access'."""
+        assert "full tool access" not in INITIAL_DISCOVERY_PROMPT
+
+    def test_continue_prompt_no_full_tool_access(self):
+        """CONTINUE_DISCOVERY_PROMPT must not contain 'full tool access'."""
+        assert "full tool access" not in CONTINUE_DISCOVERY_PROMPT
+
+    def test_initial_prompt_declares_sole_responsibility(self):
+        """INITIAL_DISCOVERY_PROMPT must declare the sole output is Proposed Task Description."""
+        assert "Proposed Task Description" in INITIAL_DISCOVERY_PROMPT
+        assert "ONLY job" in INITIAL_DISCOVERY_PROMPT or "ONLY" in INITIAL_DISCOVERY_PROMPT
+
+    def test_continue_prompt_declares_sole_responsibility(self):
+        """CONTINUE_DISCOVERY_PROMPT must declare the sole output is Proposed Task Description."""
+        assert "Proposed Task Description" in CONTINUE_DISCOVERY_PROMPT
+        assert "ONLY job" in CONTINUE_DISCOVERY_PROMPT or "ONLY" in CONTINUE_DISCOVERY_PROMPT
+
+    def test_initial_prompt_forbids_overreach(self):
+        """INITIAL_DISCOVERY_PROMPT must forbid implementation plans, code, and file modifications."""
+        assert "MUST NOT" in INITIAL_DISCOVERY_PROMPT
+        assert "implementation plan" in INITIAL_DISCOVERY_PROMPT.lower() or "implementation" in INITIAL_DISCOVERY_PROMPT.lower()
+        assert "code" in INITIAL_DISCOVERY_PROMPT.lower()
+        assert "Modify any files" in INITIAL_DISCOVERY_PROMPT or "modify" in INITIAL_DISCOVERY_PROMPT.lower()
+
+    def test_continue_prompt_forbids_overreach(self):
+        """CONTINUE_DISCOVERY_PROMPT must forbid implementation plans, code, and file modifications."""
+        assert "MUST NOT" in CONTINUE_DISCOVERY_PROMPT
+        assert "implementation plan" in CONTINUE_DISCOVERY_PROMPT.lower() or "implementation" in CONTINUE_DISCOVERY_PROMPT.lower()
+        assert "code" in CONTINUE_DISCOVERY_PROMPT.lower()
+        assert "Modify any files" in CONTINUE_DISCOVERY_PROMPT or "modify" in CONTINUE_DISCOVERY_PROMPT.lower()
+
+    def test_initial_prompt_allows_reading(self):
+        """INITIAL_DISCOVERY_PROMPT must allow reading spec files and source code."""
+        assert "read" in INITIAL_DISCOVERY_PROMPT.lower()
+        assert "se3/specs/" in INITIAL_DISCOVERY_PROMPT
+
+    def test_continue_prompt_allows_reading(self):
+        """CONTINUE_DISCOVERY_PROMPT must allow reading spec files and source code."""
+        assert "read" in CONTINUE_DISCOVERY_PROMPT.lower()
+        assert "se3/specs/" in CONTINUE_DISCOVERY_PROMPT
 
 
 if __name__ == "__main__":

@@ -26,6 +26,7 @@ class TestStepPoolReadOnly:
     def test_read_only_steps(self):
         """Steps that should be marked read_only=True."""
         expected_read_only = {
+            StepType.DISCOVERY,
             StepType.ANALYZE,
             StepType.PROJECT_SUMMARY,
             StepType.READ_SPEC,
@@ -42,7 +43,6 @@ class TestStepPoolReadOnly:
     def test_non_read_only_steps(self):
         """Steps that should be marked read_only=False."""
         expected_non_read_only = {
-            StepType.DISCOVERY,
             StepType.PROPOSE,
             StepType.DESIGN,
             StepType.PLAN_TASKS,
@@ -57,9 +57,9 @@ class TestStepPoolReadOnly:
                 f"{step_type.value} should be read_only=False"
             )
 
-    def test_discovery_is_not_read_only(self):
-        """DISCOVERY must NOT be read-only (explicit requirement)."""
-        assert STEP_POOL[StepType.DISCOVERY]["read_only"] is False
+    def test_discovery_is_read_only(self):
+        """DISCOVERY must be read-only."""
+        assert STEP_POOL[StepType.DISCOVERY]["read_only"] is True
 
 
 # --- get_read_only_injection() tests ---
@@ -69,7 +69,7 @@ class TestGetReadOnlyInjection:
     """Verify the injection function returns correct results."""
 
     @pytest.mark.parametrize("step_name", [
-        "analyze", "project_summary", "read_spec", "plan",
+        "discovery", "analyze", "project_summary", "read_spec", "plan",
         "verify_spec", "version_analyze", "summarize",
     ])
     def test_read_only_steps_return_constraint(self, step_name):
@@ -80,7 +80,7 @@ class TestGetReadOnlyInjection:
         assert "MUST NOT modify" in result
 
     @pytest.mark.parametrize("step_name", [
-        "discovery", "implement", "test", "update_spec", "commit", "confirm",
+        "implement", "test", "update_spec", "commit", "confirm",
     ])
     def test_non_read_only_steps_return_empty(self, step_name):
         """Non-read-only steps should return empty string."""
