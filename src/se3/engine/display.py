@@ -6,6 +6,7 @@ and design documents completely without truncation.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Optional
 
 from rich.console import Console
@@ -13,6 +14,8 @@ from rich.panel import Panel
 from rich.text import Text
 from rich.markdown import Markdown
 from rich.syntax import Syntax
+
+_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
 # Global console instance for consistent output
@@ -341,7 +344,7 @@ def render_code(content: str, language: str = "python", title: Optional[str] = N
 
 
 def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> None:
-    """Render unified diff with red/green/cyan coloring using Rich.
+    """Render unified diff with red/green/cyan coloring and line numbers.
 
     Args:
         diff_lines: Lines from difflib.unified_diff output
@@ -352,6 +355,11 @@ def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> N
     text = Text()
     displayed = 0
     total = len(diff_lines)
+
+    old_line_no = 0
+    new_line_no = 0
+    # Width for line number columns (fixed for alignment)
+    lno_width = 4
 
     for line in diff_lines:
         # Skip the --- / +++ header lines (redundant with panel title)
@@ -367,13 +375,26 @@ def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> N
             text.append("\n")
 
         if line.startswith("@@"):
+            # Parse hunk header to extract starting line numbers
+            m = _HUNK_HEADER_RE.match(line)
+            if m:
+                old_line_no = int(m.group(1))
+                new_line_no = int(m.group(2))
             text.append(line, style="cyan")
         elif line.startswith("-"):
+            text.append(f"{old_line_no:>{lno_width}} ", style="dim")
             text.append(line, style="red")
+            old_line_no += 1
         elif line.startswith("+"):
+            text.append(f"{new_line_no:>{lno_width}} ", style="dim")
             text.append(line, style="green")
+            new_line_no += 1
         else:
+            # Context line — show new-file line number
+            text.append(f"{new_line_no:>{lno_width}} ", style="dim")
             text.append(line, style="dim")
+            old_line_no += 1
+            new_line_no += 1
 
         displayed += 1
 

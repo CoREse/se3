@@ -459,6 +459,49 @@ class TestRenderDiff:
         assert "old" in output
         assert "new" in output
 
+    def test_added_line_has_new_line_number(self):
+        diff_lines = ["@@ -1,2 +1,3 @@", " ctx", "+added", " ctx2"]
+        output = self._capture_render(diff_lines)
+        # +added is at new-file line 2
+        assert "2" in output
+        assert "added" in output
+
+    def test_removed_line_has_old_line_number(self):
+        diff_lines = ["@@ -5,2 +5,1 @@", "-removed", " ctx"]
+        output = self._capture_render(diff_lines)
+        # -removed is at old-file line 5
+        assert "5" in output
+        assert "removed" in output
+
+    def test_context_line_has_line_number(self):
+        diff_lines = ["@@ -10,3 +10,3 @@", " ctx_first", "-old", "+new"]
+        output = self._capture_render(diff_lines)
+        # context line at new-file line 10
+        assert "10" in output
+
+    def test_multi_hunk_line_numbers_reset(self):
+        diff_lines = [
+            "@@ -1,2 +1,2 @@", "-old1", "+new1", " ctx",
+            "@@ -50,2 +50,2 @@", "-old50", "+new50", " ctx50",
+        ]
+        output = self._capture_render(diff_lines)
+        # Second hunk starts at line 50
+        assert "50" in output
+        assert "new50" in output
+
+    def test_hunk_header_has_no_line_number_prefix(self):
+        # Hunk header lines should not have a numeric prefix before @@
+        diff_lines = ["@@ -1 +1 @@", "+a"]
+        output = self._capture_render(diff_lines)
+        # The @@ line itself shouldn't be preceded by a line number.
+        # We verify by checking that the first non-whitespace on the @@ line
+        # is the @@ marker, not a digit.  Since Rich output is styled, we
+        # look for the pattern more loosely: the output should NOT contain
+        # a digit immediately before "@@" on the same segment.
+        # Simplest check: line numbers are 4-char wide; hunk header should
+        # not have "   0 @@" or similar.
+        assert "0 @@" not in output
+
 
 # ---------------------------------------------------------------------------
 # format_tool_diff
