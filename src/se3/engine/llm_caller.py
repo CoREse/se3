@@ -128,6 +128,27 @@ class StreamJSONTracker:
         self._tool_use_id_to_name: Dict[str, str] = {}  # Map tool_use_id -> tool_name
         self._tool_use_id_to_input: Dict[str, dict] = {}  # Cache Edit/Write inputs for diff
 
+    def _handle_tool_result(self, tool_use_id: str, content: Any, is_error: bool) -> None:
+        """Handle a single tool_result event.
+
+        Shared by both the legacy top-level tool_result format and the
+        newer type='user' nested format.
+        """
+        self.tool_results.append(tool_use_id)
+        tool_name = self._tool_use_id_to_name.get(tool_use_id, '')
+
+        if is_error:
+            error_preview = truncate_preview(str(content)) if content else "Unknown error"
+            print(f"  {self.stream_prefix}[llm-stream] ❌ Tool error: {error_preview}...")
+        else:
+            preview = format_tool_result_preview(tool_name, content)
+            print(f"  {self.stream_prefix}[llm-stream] ✅ {preview}...")
+            # Render diff for Edit/Write tools
+            cached_input = self._tool_use_id_to_input.pop(tool_use_id, None)
+            if cached_input and tool_name in ("Edit", "Write"):
+                format_tool_diff(tool_name, cached_input, content)
+        self._last_ended_with_newline = True
+
     def process_line(self, line: str) -> None:
         """Process a single line of NDJSON output."""
         line = line.strip()
@@ -182,26 +203,23 @@ class StreamJSONTracker:
                             self._last_ended_with_newline = True
 
             elif msg_type == 'tool_result':
+                # Legacy top-level tool_result format (backward compat)
                 result = data.get('result', {})
-                tool_use_id = result.get('toolUseId', 'unknown')
-                self.tool_results.append(tool_use_id)
-                # Resolve tool name from tracked tool_use events
-                tool_name = self._tool_use_id_to_name.get(tool_use_id, '')
-                # Extract and format tool result preview
+                tool_use_id = result.get('toolUseId', result.get('tool_use_id', 'unknown'))
                 content = result.get('content', '')
-                is_error = result.get('isError', False)
+                is_error = result.get('isError', result.get('is_error', False))
+                self._handle_tool_result(tool_use_id, content, is_error)
 
-                if is_error:
-                    error_preview = truncate_preview(str(content)) if content else "Unknown error"
-                    print(f"  {self.stream_prefix}[llm-stream] ❌ Tool error: {error_preview}...")
-                else:
-                    preview = format_tool_result_preview(tool_name, content)
-                    print(f"  {self.stream_prefix}[llm-stream] ✅ {preview}...")
-                    # Render diff for Edit/Write tools
-                    cached_input = self._tool_use_id_to_input.pop(tool_use_id, None)
-                    if cached_input and tool_name in ("Edit", "Write"):
-                        format_tool_diff(tool_name, cached_input, content)
-                self._last_ended_with_newline = True
+            elif msg_type == 'user':
+                # CLI actual format: tool_result blocks nested inside user messages
+                message = data.get('message', {})
+                msg_content = message.get('content', [])
+                for item in msg_content:
+                    if isinstance(item, dict) and item.get('type') == 'tool_result':
+                        tool_use_id = item.get('tool_use_id', 'unknown')
+                        content = item.get('content', '')
+                        is_error = item.get('is_error', False)
+                        self._handle_tool_result(tool_use_id, content, is_error)
 
             elif msg_type == 'error':
                 error_msg = data.get('error', 'Unknown error')

@@ -548,11 +548,14 @@ class TestStreamJSONTrackerDiff:
 
     def _tool_result_event(self, tool_use_id="tu_1", content="done", is_error=False):
         return json.dumps({
-            "type": "tool_result",
-            "result": {
-                "toolUseId": tool_use_id,
-                "content": content,
-                "isError": is_error,
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                    "is_error": is_error,
+                }]
             }
         })
 

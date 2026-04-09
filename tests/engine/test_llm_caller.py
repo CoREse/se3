@@ -311,13 +311,16 @@ class TestStreamJSONTracker:
                 }]
             }
         }))
-        # Now emit the result
+        # Now emit the result in CLI actual format (type='user' wrapper)
         tracker.process_line(json.dumps({
-            "type": "tool_result",
-            "result": {
-                "toolUseId": "tool-123",
-                "content": "line1\nline2\nline3",
-                "isError": False
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tool-123",
+                    "content": "line1\nline2\nline3",
+                    "is_error": False
+                }]
             }
         }))
         assert len(tracker.tool_results) == 1
@@ -331,11 +334,14 @@ class TestStreamJSONTracker:
         """Error tool results should be tracked and show error preview."""
         tracker = StreamJSONTracker()
         line = json.dumps({
-            "type": "tool_result",
-            "result": {
-                "toolUseId": "tool-456",
-                "content": "Error message",
-                "isError": True
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tool-456",
+                    "content": "Error message",
+                    "is_error": True
+                }]
             }
         })
         tracker.process_line(line)
@@ -454,13 +460,16 @@ class TestStreamJSONTracker:
                 }]
             }
         }))
-        # Emit result
+        # Emit result in CLI actual format
         tracker.process_line(json.dumps({
-            "type": "tool_result",
-            "result": {
-                "toolUseId": "tu-edit-2",
-                "content": "✓ edited a.py",
-                "isError": False
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu-edit-2",
+                    "content": "✓ edited a.py",
+                    "is_error": False
+                }]
             }
         }))
         captured = capsys.readouterr()
@@ -505,13 +514,16 @@ class TestStreamJSONTracker:
                 }]
             }
         }))
-        # Emit result
+        # Emit result in CLI actual format
         tracker.process_line(json.dumps({
-            "type": "tool_result",
-            "result": {
-                "toolUseId": "tu-write-2",
-                "content": "Created out.py",
-                "isError": False
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu-write-2",
+                    "content": "Created out.py",
+                    "is_error": False
+                }]
             }
         }))
         captured = capsys.readouterr()
@@ -522,16 +534,48 @@ class TestStreamJSONTracker:
         """Tool result without prior tool_use should use generic formatter."""
         tracker = StreamJSONTracker()
         tracker.process_line(json.dumps({
-            "type": "tool_result",
-            "result": {
-                "toolUseId": "orphan-id",
-                "content": "some result text",
-                "isError": False
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "orphan-id",
+                    "content": "some result text",
+                    "is_error": False
+                }]
             }
         }))
         captured = capsys.readouterr()
         # Without id→name mapping, falls back to generic "Result: ..."
         assert "Result:" in captured.out
+
+    def test_legacy_tool_result_format_backward_compat(self, capsys):
+        """Legacy top-level tool_result format should still work (backward compat)."""
+        tracker = StreamJSONTracker()
+        # Emit tool_use first
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "legacy-123",
+                    "name": "Read",
+                    "input": {"file_path": "test.py"}
+                }]
+            }
+        }))
+        # Emit result in legacy format (top-level tool_result with camelCase)
+        tracker.process_line(json.dumps({
+            "type": "tool_result",
+            "result": {
+                "toolUseId": "legacy-123",
+                "content": "line1\nline2",
+                "isError": False
+            }
+        }))
+        assert len(tracker.tool_results) == 1
+        captured = capsys.readouterr()
+        assert "Read" in captured.out
+        assert "2 lines" in captured.out
 
 
 class TestStreamJSONTrackerPrefix:
@@ -577,11 +621,14 @@ class TestStreamJSONTrackerPrefix:
         """With stream_prefix, tool error lines should include the prefix."""
         tracker = StreamJSONTracker(stream_prefix='[G2] ')
         line = json.dumps({
-            "type": "tool_result",
-            "result": {
-                "toolUseId": "tu-err",
-                "content": "Some error",
-                "isError": True
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu-err",
+                    "content": "Some error",
+                    "is_error": True
+                }]
             }
         })
         tracker.process_line(line)
@@ -603,13 +650,16 @@ class TestStreamJSONTrackerPrefix:
                 }]
             }
         }))
-        # Emit result
+        # Emit result in CLI actual format
         tracker.process_line(json.dumps({
-            "type": "tool_result",
-            "result": {
-                "toolUseId": "tu-r1",
-                "content": "line1\nline2",
-                "isError": False
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu-r1",
+                    "content": "line1\nline2",
+                    "is_error": False
+                }]
             }
         }))
         captured = capsys.readouterr()
