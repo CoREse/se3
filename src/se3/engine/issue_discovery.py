@@ -160,6 +160,70 @@ class IssueDiscovery:
             logger.warning(f"Failed to create fix-loop issue: {e}")
             return None
 
+    def create_from_pre_existing_failures(
+        self,
+        flow: FlowInstance,
+        pre_existing_failures: List[Dict[str, Any]],
+    ) -> Optional[Issue]:
+        """Create an issue for pre-existing test failures.
+
+        A-class trigger: called by test_handler when pre-existing failures
+        are detected (failures present in known_test_failures.json that
+        were not introduced by the current change).
+
+        Args:
+            flow: Current flow instance
+            pre_existing_failures: List of {test_id, reason} dicts
+
+        Returns:
+            Created Issue, or None if no failures, deduplicated, or failed
+        """
+        if not pre_existing_failures:
+            return None
+
+        count = len(pre_existing_failures)
+        title = f"Pre-existing test failures ({count} test{'s' if count != 1 else ''})"
+
+        if self._is_duplicate(title):
+            logger.debug(f"Deduplicated pre-existing failures issue: {title}")
+            return None
+
+        # Build description
+        desc_parts = [
+            f"**{count} pre-existing test failure(s)** detected during flow execution.",
+            "These failures were NOT introduced by the current change.",
+            "",
+            "**Failing tests:**",
+        ]
+        for entry in pre_existing_failures:
+            tid = entry.get("test_id", "unknown")
+            reason = entry.get("reason", "unknown")
+            desc_parts.append(f"- `{tid}`: {reason}")
+
+        desc_parts.extend([
+            "",
+            f"**Task:** {flow.task_description[:200]}",
+            "",
+            "These tests should be investigated and fixed to prevent the broken-window effect.",
+        ])
+
+        description = "\n".join(desc_parts)
+
+        try:
+            issue = self.issue_manager.create(
+                title=title,
+                description=description,
+                priority="medium",
+                tags=["auto-discovered", "source:test-pre-existing"],
+                type="bug",
+            )
+            self._created_titles.append(self._normalize_title(title))
+            logger.info(f"Created pre-existing failures issue: {issue.id}")
+            return issue
+        except Exception as e:
+            logger.warning(f"Failed to create pre-existing failures issue: {e}")
+            return None
+
     @staticmethod
     def get_injection_prompt(step_type: str) -> Optional[str]:
         """Get the issue discovery prompt fragment for a step type.

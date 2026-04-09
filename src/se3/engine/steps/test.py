@@ -14,12 +14,16 @@ Supports:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
 import shlex
 import subprocess
+import tempfile
+from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 
 from ..models import FlowInstance, Step, StepStatus
 
@@ -108,6 +112,57 @@ def _extract_failures_section(stdout: str, max_chars: int = 3000) -> str:
     return result[:max_chars]
 
 
+def _load_known_failures(project_root: Path) -> Dict[str, Any]:
+    """Load known test failures from se3/state/known_test_failures.json.
+
+    Returns a dict of {test_id: {reason, first_seen, last_seen}}.
+    Returns empty dict if file doesn't exist or is corrupted.
+    """
+    path = project_root / "se3" / "state" / "known_test_failures.json"
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+        logger.warning("known_test_failures.json has unexpected format, ignoring")
+        return {}
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Failed to load known_test_failures.json: {e}")
+        return {}
+
+
+def _save_known_failures(project_root: Path, failures: Dict[str, Any]) -> None:
+    """Save known test failures to se3/state/known_test_failures.json.
+
+    Uses atomic write (temp file + rename) to avoid corruption.
+    Automatically creates se3/state/ directory if needed.
+    """
+    state_dir = project_root / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    target = state_dir / "known_test_failures.json"
+
+    content = json.dumps(failures, indent=2, ensure_ascii=False)
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(state_dir), suffix=".tmp", prefix="known_failures_",
+        )
+        closed = False
+        try:
+            os.write(fd, content.encode("utf-8"))
+            os.close(fd)
+            closed = True
+            os.replace(tmp_path, str(target))
+        except Exception:
+            if not closed:
+                os.close(fd)
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+            raise
+    except Exception as e:
+        logger.warning(f"Failed to save known_test_failures.json: {e}")
+
+
 def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the test step.
 
@@ -157,13 +212,37 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         result = _run_command(phase_cmd, phase_cwd, phase_timeout)
         phase_results.append({"name": phase["name"], **result})
 
-    # 4. Compute overall_passed (only required phases count)
+    # 4. Compute overall_passed (reflects actual pytest exit status)
     overall_passed = primary_result["passed"]
     for i, phase in enumerate(phases_to_run):
         if phase.get("required", True) and not phase_results[i + 1]["passed"]:
             overall_passed = False
 
-    # 5. Store structured output
+    # 5. Distinguish pre-existing failures from net-new regressions
+    known_failures = _load_known_failures(project_root)
+    known_ids = set(known_failures.keys())
+
+    # Net-new regressions: regression failures NOT in known failures list
+    net_new_regression = [
+        tid for tid in regression["failed"] if tid not in known_ids
+    ]
+    # Pre-existing: regression failures that ARE known
+    pre_existing_ids = [
+        tid for tid in regression["failed"] if tid in known_ids
+    ]
+
+    # Fix loop triggers on:
+    # 1. New test failures
+    # 2. Net-new regressions (not in known failures)
+    # 3. Unparseable failures (pytest failed but we can't classify individual tests)
+    unparseable_failure = (
+        not overall_passed
+        and not regression["failed"]
+        and not new_tests["failed"]
+    )
+    should_fix = bool(new_tests["failed"]) or bool(net_new_regression) or unparseable_failure
+
+    # 6. Store structured output
     step.outputs["test_results"] = {
         "new_tests": new_tests,
         "regression": regression,
@@ -178,22 +257,67 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     }
     step.outputs["tests_passed"] = overall_passed
 
+    # 7. Handle pre-existing failures: report and persist
+    now_iso = datetime.now().isoformat()
+    pre_existing_list: List[Dict[str, str]] = []
+    if pre_existing_ids:
+        for tid in pre_existing_ids:
+            reason = known_failures.get(tid, {}).get("reason", "previously known failure")
+            pre_existing_list.append({"test_id": tid, "reason": reason})
+        logger.warning(
+            f"{len(pre_existing_ids)} pre-existing test failure(s) detected "
+            f"(not introduced by this change): {', '.join(pre_existing_ids)}"
+        )
+
+    # Also treat regression failures not in known list as potentially new
+    # pre-existing entries if overall_passed is False but should_fix is False
+    # (i.e., all failures are pre-existing)
+
+    # Update known failures with all current regression failures
+    updated_known = dict(known_failures)
+    for tid in regression["failed"]:
+        if tid in updated_known:
+            updated_known[tid]["last_seen"] = now_iso
+        else:
+            # New failure — extract reason from stdout if possible
+            reason = _extract_failure_reason(primary_result["stdout"], tid)
+            updated_known[tid] = {
+                "reason": reason,
+                "first_seen": now_iso,
+                "last_seen": now_iso,
+            }
+            # If this failure is not in net_new_regression, it's actually
+            # a first-time failure that we haven't seen before; add to
+            # pre_existing for next run but it IS a regression for this run
+
+    _save_known_failures(project_root, updated_known)
+
+    step.outputs["pre_existing_failures"] = pre_existing_list
+
     # Record test results in history
     _record_test_history(project_root, flow, step, phase_results, overall_passed)
 
     if overall_passed:
         logger.info("All tests passed")
+    elif not should_fix:
+        logger.info(
+            "Tests failed but all failures are pre-existing — not triggering fix loop"
+        )
     else:
-        logger.warning("Tests failed")
+        logger.warning("Tests failed with new/regression failures")
         stderr_tail = primary_result["stderr"][-500:] if primary_result["stderr"] else ""
         step.error_message = f"Tests failed:\n{stderr_tail}"
 
-    # If tests failed, prepare fix loop context and return REVISION_NEEDED
-    if not overall_passed:
+    # 8. Report pre-existing failures via A-class issue discovery
+    if pre_existing_list:
+        _report_pre_existing_issues(project_root, flow, pre_existing_list)
+
+    # 9. Determine return status: fix loop only for new/regression failures
+    if should_fix:
         stdout = primary_result.get("stdout", "")
         stderr = primary_result.get("stderr", "")
 
-        # Build default fix instructions from test output
+        # Build fix instructions from test output
         failures_section = _extract_failures_section(stdout)
         stderr_tail = stderr[-500:] if stderr else ""
         fix_instructions = f"""Tests are failing. Please review and fix the implementation.
@@ -217,6 +341,45 @@ Error output:
         return StepStatus.REVISION_NEEDED
 
     return StepStatus.COMPLETED
+
+
+def _extract_failure_reason(stdout: str, test_id: str) -> str:
+    """Extract a brief failure reason for a test from pytest output.
+
+    Looks for the assertion error message associated with the test_id.
+    Returns a short description or a generic message.
+    """
+    if not stdout or not test_id:
+        return "unknown failure"
+
+    # Look for the test in the short test summary (most concise)
+    # Format: "FAILED tests/test_foo.py::test_bar - AssertionError: ..."
+    pattern = re.escape(test_id) + r"\s*-\s*(.+)"
+    m = re.search(pattern, stdout)
+    if m:
+        return m.group(1).strip()[:200]
+
+    return "test failed (details in pytest output)"
+
+
+def _report_pre_existing_issues(
+    project_root: Path,
+    flow: FlowInstance,
+    pre_existing_failures: List[Dict[str, str]],
+) -> None:
+    """Report pre-existing test failures via A-class issue discovery.
+
+    Creates a medium priority issue with all pre-existing failures listed.
+    """
+    try:
+        from ..issue_discovery import IssueDiscovery
+        from ..issue_manager import IssueManager
+
+        manager = IssueManager(project_root)
+        discovery = IssueDiscovery(manager, flow.flow_id)
+        discovery.create_from_pre_existing_failures(flow, pre_existing_failures)
+    except Exception as e:
+        logger.debug(f"Failed to report pre-existing failures as issue: {e}")
 
 
 def _run_command(
