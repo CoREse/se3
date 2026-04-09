@@ -96,6 +96,7 @@ def clear_phase1_cache(project_root: Path, flow_id: str, step_id: str) -> None:
 
 
 from .tool_formatters import (
+    format_tool_diff,
     format_tool_result_preview,
     format_tool_use_preview,
     truncate_preview,
@@ -124,6 +125,7 @@ class StreamJSONTracker:
         self.start_time = time.time()
         self._last_ended_with_newline = True
         self._tool_use_id_to_name: Dict[str, str] = {}  # Map tool_use_id -> tool_name
+        self._tool_use_id_to_input: Dict[str, dict] = {}  # Cache Edit/Write inputs for diff
 
     def process_line(self, line: str) -> None:
         """Process a single line of NDJSON output."""
@@ -168,6 +170,8 @@ class StreamJSONTracker:
                             self.tool_calls.append(name)
                             if tool_use_id:
                                 self._tool_use_id_to_name[tool_use_id] = name
+                                if name in ("Edit", "Write"):
+                                    self._tool_use_id_to_input[tool_use_id] = tool_input
                             # Format and print tool_use preview
                             preview = format_tool_use_preview(name, tool_input)
                             # Only add leading newline if previous output didn't end with one
@@ -192,6 +196,10 @@ class StreamJSONTracker:
                 else:
                     preview = format_tool_result_preview(tool_name, content)
                     print(f"  [llm-stream] ✅ {preview}...")
+                    # Render diff for Edit/Write tools
+                    cached_input = self._tool_use_id_to_input.pop(tool_use_id, None)
+                    if cached_input and tool_name in ("Edit", "Write"):
+                        format_tool_diff(tool_name, cached_input, content)
                 self._last_ended_with_newline = True
 
             elif msg_type == 'error':

@@ -382,10 +382,11 @@ The injected prompt SHALL:
 
 `tool_formatters.py` 是工具调用预览格式化的唯一权威来源，由 `llm_caller.py`（流式输出）和 `chat_history.py`（历史渲染/重试上下文）共同消费。
 
-- 公共 API：`format_tool_use_preview(tool_name, input_data)` 和 `format_tool_result_preview(tool_name, result_data)`
-- 内部维护 `TOOL_FORMATTERS` 字典注册表（`{tool_name: {use: fn, result: fn}}`），将工具名映射到专用格式化函数
+- 公共 API：`format_tool_use_preview(tool_name, input_data)`、`format_tool_result_preview(tool_name, result_data)`、和 `format_tool_diff(tool_name, input_data, result_data)`
+- 内部维护 `TOOL_FORMATTERS` 字典注册表（`{tool_name: {use: fn, result: fn, diff: str}}`），将工具名映射到专用格式化函数；可选的 `diff` 键标记该工具支持 diff 渲染
 - 未注册的工具名回退到通用格式化器（key=value 截断预览）
 - 提供 `truncate_preview()` 通用截断工具函数
+- 提供 `generate_edit_diff(old_string, new_string, file_path)` 使用 `difflib.unified_diff` 生成 unified diff（3 行上下文）
 
 **内置 per-tool 格式化器：**
 
@@ -428,6 +429,17 @@ The injected prompt SHALL:
 - **AND** Glob 工具显示匹配模式和路径
 - **AND** 未注册的工具回退到通用格式化器（key=value 截断，最多 3 个参数）
 - **AND** 格式化在 LLM 抽象层（tool_formatters 模块）完成，不依赖具体 agent 工具实现
+
+#### Scenario: Edit/Write 工具 diff 渲染
+- **WHEN** LLM 流式输出包含 Edit 或 Write 工具的 `tool_result` 事件
+- **THEN** `StreamJSONTracker` 在 `tool_use` 事件时缓存 Edit/Write 工具的输入参数到 `_tool_use_id_to_input` 映射
+- **AND** 在 `tool_result` 事件时取出缓存的输入参数，调用 `format_tool_diff(tool_name, input_data, result_data)`
+- **AND** Edit 工具：从 `old_string` / `new_string` 通过 `generate_edit_diff()` 生成 unified diff，调用 `display.render_diff()` 渲染红（删除）/绿（新增）/青（hunk 标记）/灰（上下文）着色的 diff 面板
+- **AND** Write 工具（新建文件）：显示 `Created {file_path} ({n} lines)` 绿色标识，不展示行级 diff
+- **AND** Write 工具（覆写已有文件）：仅显示 preview 摘要（原文件内容不可从流式输入中获取）
+- **AND** diff 超过 `max_lines`（默认 50 行）时截断并显示剩余行数摘要
+- **AND** `display.render_diff()` 使用 Rich Panel + Text 对象逐行着色，面板标题为文件路径
+- **AND** 仅对 `TOOL_FORMATTERS` 注册表中包含 `diff` 键的工具执行 diff 渲染，其他工具为 no-op
 
 #### Scenario: 人类浏览聊天记录
 - **WHEN** 用户执行 `se3 history` 或 `se3 history list`

@@ -138,26 +138,15 @@ class TestLLMCallerRetryMode:
             retry_mode="continue",
         )
 
-        with patch("se3.engine.chat_history.format_history_for_retry") as mock_fmt:
-            mock_fmt.return_value = None
-            # Need to reimport so the patched version is used
-            import importlib
-            import se3.engine.llm_caller
-            importlib.reload(se3.engine.llm_caller)
-
-        # Use a fresh approach: patch at the point of import inside _get_retry_context
+        # Patch at the point of import inside _get_retry_context
         from unittest.mock import call
-        original_format = None
         calls_made = []
 
         def tracking_format(*args, **kwargs):
             calls_made.append((args, kwargs))
             return None
 
-        with patch.dict("sys.modules", {}):
-            pass
-
-        # Simpler approach: just call and check via the chat_history module directly
+        # Patch via the chat_history module directly
         import se3.engine.chat_history as ch_mod
         original_fn = ch_mod.format_history_for_retry
         try:

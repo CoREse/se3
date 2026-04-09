@@ -10,6 +10,7 @@ Architecture: dictionary registry (TOOL_FORMATTERS) mapping tool names to
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 from typing import Any, Callable, Dict, Optional
@@ -289,8 +290,8 @@ ToolUseFormatter = Callable[[dict], str]
 ToolResultFormatter = Callable[[Any], str]
 
 TOOL_FORMATTERS: Dict[str, Dict[str, Any]] = {
-    "Edit": {"use": _format_edit_use, "result": _format_edit_result},
-    "Write": {"use": _format_write_use, "result": _format_write_result},
+    "Edit": {"use": _format_edit_use, "result": _format_edit_result, "diff": "_edit"},
+    "Write": {"use": _format_write_use, "result": _format_write_result, "diff": "_write"},
     "Read": {"use": _format_read_use, "result": _format_read_result},
     "Bash": {"use": _format_bash_use, "result": _format_bash_result},
     "Grep": {"use": _format_grep_use, "result": _format_grep_result},
@@ -344,3 +345,69 @@ def format_tool_result_preview(tool_name: str, result_data: Any) -> str:
         except Exception:
             logger.debug("Tool-specific result formatter failed for %s, falling back", tool_name)
     return _generic_tool_result_preview(result_data)
+
+
+# ---------------------------------------------------------------------------
+# Diff generation & rendering
+# ---------------------------------------------------------------------------
+
+def generate_edit_diff(old_string: str, new_string: str, file_path: str) -> list[str]:
+    """Generate unified diff lines from Edit tool's old/new strings.
+
+    Args:
+        old_string: Original text being replaced
+        new_string: Replacement text
+        file_path: File path for diff header
+
+    Returns:
+        List of diff lines (empty if strings are identical)
+    """
+    if old_string == new_string:
+        return []
+    old_lines = old_string.splitlines(keepends=True)
+    new_lines = new_string.splitlines(keepends=True)
+    diff = difflib.unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=f"a/{file_path}",
+        tofile=f"b/{file_path}",
+        n=3,
+    )
+    return [line.rstrip("\n") for line in diff]
+
+
+def format_tool_diff(tool_name: str, input_data: dict, result_data: Any) -> None:
+    """Render diff output for Edit/Write tools. No-op for other tools.
+
+    Args:
+        tool_name: Tool name (e.g. 'Edit', 'Write')
+        input_data: Cached tool input parameters
+        result_data: Tool result data
+    """
+    from .display import render_diff
+
+    entry = TOOL_FORMATTERS.get(tool_name)
+    if not entry or "diff" not in entry:
+        return
+
+    try:
+        if tool_name == "Edit":
+            old_string = input_data.get("old_string", "")
+            new_string = input_data.get("new_string", "")
+            file_path = input_data.get("file_path", "?")
+            diff_lines = generate_edit_diff(old_string, new_string, file_path)
+            if diff_lines:
+                render_diff(diff_lines, file_path)
+        elif tool_name == "Write":
+            file_path = input_data.get("file_path", "?")
+            content = input_data.get("content", "")
+            n_lines = len(content.splitlines()) if content else 0
+            # Check result text for "Created" indicator (new file)
+            result_text = _extract_text(result_data) if result_data else ""
+            if "created" in result_text.lower() or "new file" in result_text.lower():
+                from .display import get_console
+                get_console().print(
+                    f"  [green]Created[/green] {file_path} ({n_lines} lines)"
+                )
+    except Exception:
+        logger.debug("Diff rendering failed for %s", tool_name, exc_info=True)

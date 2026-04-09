@@ -340,6 +340,53 @@ def render_code(content: str, language: str = "python", title: Optional[str] = N
     console.print(panel)
 
 
+def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> None:
+    """Render unified diff with red/green/cyan coloring using Rich.
+
+    Args:
+        diff_lines: Lines from difflib.unified_diff output
+        file_path: File path for the panel title
+        max_lines: Max displayable lines before truncation
+    """
+    console = get_console()
+    text = Text()
+    displayed = 0
+    total = len(diff_lines)
+
+    for line in diff_lines:
+        # Skip the --- / +++ header lines (redundant with panel title)
+        if line.startswith("--- ") or line.startswith("+++ "):
+            continue
+
+        if displayed >= max_lines:
+            remaining = total - displayed
+            text.append(f"\n... ({remaining} more lines)", style="dim")
+            break
+
+        if displayed > 0:
+            text.append("\n")
+
+        if line.startswith("@@"):
+            text.append(line, style="cyan")
+        elif line.startswith("-"):
+            text.append(line, style="red")
+        elif line.startswith("+"):
+            text.append(line, style="green")
+        else:
+            text.append(line, style="dim")
+
+        displayed += 1
+
+    if displayed > 0:
+        panel = Panel(
+            text,
+            title=file_path,
+            border_style="yellow",
+            expand=True,
+        )
+        console.print(panel)
+
+
 def render_markdown(content: str, title: Optional[str] = None) -> None:
     """Render markdown content.
 
