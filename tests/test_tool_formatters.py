@@ -508,13 +508,13 @@ class TestRenderDiff:
 # ---------------------------------------------------------------------------
 
 class TestFormatToolDiff:
-    def _capture_diff(self, tool_name, input_data, result_data):
+    def _capture_diff(self, tool_name, input_data, result_data, old_content=None):
         from se3.engine.display import set_console
         buf = io.StringIO()
         test_console = Console(file=buf, force_terminal=True, width=120)
         set_console(test_console)
         try:
-            format_tool_diff(tool_name, input_data, result_data)
+            format_tool_diff(tool_name, input_data, result_data, old_content=old_content)
         finally:
             set_console(None)
         return buf.getvalue()
@@ -548,19 +548,68 @@ class TestFormatToolDiff:
         assert "new_file.py" in output
         assert "lines" in output
 
-    def test_write_overwrite_no_diff(self):
-        # Write overwriting existing file - no "Created" in result
+    def test_write_overwrite_no_diff_without_old_content(self):
+        # Write overwriting existing file without old_content → "Created" summary
+        # (old_content=None means new file, which is the default)
         input_data = {
             "file_path": "existing.py",
             "content": "new content\n",
         }
         output = self._capture_diff("Write", input_data, "Wrote existing.py")
-        # Should not render anything (no diff for overwrites)
-        assert output == ""
+        # Without old_content, treated as new file → "Created" summary
+        assert "Created" in output
 
     def test_unknown_tool_no_output(self):
         output = self._capture_diff("Bash", {"command": "ls"}, "output")
         assert output == ""
+
+    def test_write_overwrite_with_old_content_renders_diff(self):
+        input_data = {
+            "file_path": "existing.py",
+            "content": "new content\nline2\n",
+        }
+        output = self._capture_diff(
+            "Write", input_data, "Wrote existing.py",
+            old_content="old content\nline2\n",
+        )
+        assert "old content" in output
+        assert "new content" in output
+        assert "existing.py" in output
+
+    def test_write_overwrite_empty_file_renders_diff(self):
+        # old_content="" means overwriting an empty file
+        input_data = {
+            "file_path": "empty.py",
+            "content": "new line\n",
+        }
+        output = self._capture_diff(
+            "Write", input_data, "Wrote empty.py",
+            old_content="",
+        )
+        assert "new line" in output
+
+    def test_write_overwrite_identical_no_diff(self):
+        input_data = {
+            "file_path": "same.py",
+            "content": "same content\n",
+        }
+        output = self._capture_diff(
+            "Write", input_data, "Wrote same.py",
+            old_content="same content\n",
+        )
+        # Identical content → no diff rendered
+        assert output == ""
+
+    def test_write_new_file_old_content_none_shows_created(self):
+        input_data = {
+            "file_path": "brand_new.py",
+            "content": "hello\n",
+        }
+        output = self._capture_diff(
+            "Write", input_data, "Created brand_new.py",
+            old_content=None,
+        )
+        assert "Created" in output
 
     def test_edit_missing_fields_no_crash(self):
         output = self._capture_diff("Edit", {}, "done")
@@ -640,9 +689,9 @@ class TestStreamJSONTrackerDiff:
         input_data = {"file_path": "f.py", "old_string": "a", "new_string": "b"}
         tracker.process_line(self._tool_use_event("Edit", input_data))
         tracker.process_line(self._tool_result_event("tu_1", "old_string not found", is_error=True))
-        # On error, cache is NOT consumed by diff (error branch skips it)
-        # but it stays in cache since the pop only happens in the else branch
-        assert "tu_1" in tracker._tool_use_id_to_input
+        # On error, cache should be cleaned up to prevent leaks (#057)
+        assert "tu_1" not in tracker._tool_use_id_to_input
+        assert "tu_1" not in tracker._tool_use_id_to_name
 
     def test_full_edit_flow_renders_diff(self):
         from se3.engine.display import set_console
@@ -663,3 +712,70 @@ class TestStreamJSONTrackerDiff:
         assert "src/app.py" in output
         assert "pass" in output
         assert "world" in output
+
+    def test_write_overwrite_caches_old_content(self, tmp_path):
+        """Write tool_use for existing file caches old content."""
+        target = tmp_path / "existing.py"
+        target.write_text("old stuff\n", encoding="utf-8")
+        tracker = self._make_tracker()
+        input_data = {"file_path": str(target), "content": "new stuff\n"}
+        tracker.process_line(self._tool_use_event("Write", input_data))
+        assert "tu_1" in tracker._tool_use_id_to_old_content
+        assert tracker._tool_use_id_to_old_content["tu_1"] == "old stuff\n"
+
+    def test_write_new_file_caches_none(self):
+        """Write tool_use for non-existent file caches None."""
+        tracker = self._make_tracker()
+        input_data = {"file_path": "/nonexistent/path/file.py", "content": "x"}
+        tracker.process_line(self._tool_use_event("Write", input_data))
+        assert "tu_1" in tracker._tool_use_id_to_old_content
+        assert tracker._tool_use_id_to_old_content["tu_1"] is None
+
+    def test_write_overwrite_full_flow(self, tmp_path):
+        """Full Write overwrite flow: tool_use → read file → tool_result → diff rendered."""
+        from se3.engine.display import set_console
+        target = tmp_path / "overwrite.py"
+        target.write_text("old line\n", encoding="utf-8")
+        buf = io.StringIO()
+        set_console(Console(file=buf, force_terminal=True, width=120))
+        try:
+            tracker = self._make_tracker()
+            input_data = {"file_path": str(target), "content": "new line\n"}
+            tracker.process_line(self._tool_use_event("Write", input_data))
+            tracker.process_line(self._tool_result_event("tu_1", "Wrote overwrite.py"))
+        finally:
+            set_console(None)
+        output = buf.getvalue()
+        assert "old line" in output
+        assert "new line" in output
+        # old_content cache should be consumed
+        assert "tu_1" not in tracker._tool_use_id_to_old_content
+
+    def test_write_new_file_shows_created(self):
+        """Write to non-existent file shows Created summary (old_content=None)."""
+        from se3.engine.display import set_console
+        buf = io.StringIO()
+        set_console(Console(file=buf, force_terminal=True, width=120))
+        try:
+            tracker = self._make_tracker()
+            input_data = {"file_path": "/tmp/new_file.py", "content": "hello\n"}
+            tracker.process_line(self._tool_use_event("Write", input_data))
+            tracker.process_line(self._tool_result_event("tu_1", "Created /tmp/new_file.py"))
+        finally:
+            set_console(None)
+        output = buf.getvalue()
+        assert "Created" in output
+
+    def test_print_summary_clears_caches(self):
+        """print_summary() should clear all caches."""
+        tracker = self._make_tracker()
+        input_data = {"file_path": "f.py", "old_string": "a", "new_string": "b"}
+        tracker.process_line(self._tool_use_event("Edit", input_data))
+        # Populate old_content cache manually
+        tracker._tool_use_id_to_old_content["tu_1"] = "old"
+        assert len(tracker._tool_use_id_to_input) > 0
+        assert len(tracker._tool_use_id_to_name) > 0
+        tracker.print_summary()
+        assert len(tracker._tool_use_id_to_input) == 0
+        assert len(tracker._tool_use_id_to_old_content) == 0
+        assert len(tracker._tool_use_id_to_name) == 0

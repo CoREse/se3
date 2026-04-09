@@ -116,6 +116,9 @@ class StreamJSONTracker:
     allowing users to see progress as Claude Code runs.
     """
 
+    # Maximum number of cached tool entries before oldest are evicted
+    _MAX_CACHE_SIZE = 100
+
     def __init__(self, stream_prefix: str = ''):
         self.stream_prefix = stream_prefix
         self.message_count = 0
@@ -127,6 +130,7 @@ class StreamJSONTracker:
         self._last_ended_with_newline = True
         self._tool_use_id_to_name: Dict[str, str] = {}  # Map tool_use_id -> tool_name
         self._tool_use_id_to_input: Dict[str, dict] = {}  # Cache Edit/Write inputs for diff
+        self._tool_use_id_to_old_content: Dict[str, Optional[str]] = {}  # Cache Write target file content
 
     def _handle_tool_result(self, tool_use_id: str, content: Any, is_error: bool) -> None:
         """Handle a single tool_result event.
@@ -140,13 +144,18 @@ class StreamJSONTracker:
         if is_error:
             error_preview = truncate_preview(str(content)) if content else "Unknown error"
             print(f"  {self.stream_prefix}[llm-stream] ❌ Tool error: {error_preview}...")
+            # Clean up caches for failed tool calls to prevent leaks
+            self._tool_use_id_to_input.pop(tool_use_id, None)
+            self._tool_use_id_to_old_content.pop(tool_use_id, None)
+            self._tool_use_id_to_name.pop(tool_use_id, None)
         else:
             preview = format_tool_result_preview(tool_name, content)
             print(f"  {self.stream_prefix}[llm-stream] ✅ {preview}...")
             # Render diff for Edit/Write tools
             cached_input = self._tool_use_id_to_input.pop(tool_use_id, None)
+            old_content = self._tool_use_id_to_old_content.pop(tool_use_id, None)
             if cached_input and tool_name in ("Edit", "Write"):
-                format_tool_diff(tool_name, cached_input, content)
+                format_tool_diff(tool_name, cached_input, content, old_content=old_content)
         self._last_ended_with_newline = True
 
     def process_line(self, line: str) -> None:
@@ -194,6 +203,21 @@ class StreamJSONTracker:
                                 self._tool_use_id_to_name[tool_use_id] = name
                                 if name in ("Edit", "Write"):
                                     self._tool_use_id_to_input[tool_use_id] = tool_input
+                                    # For Write tools, cache the current file content for diff
+                                    if name == "Write":
+                                        file_path = tool_input.get("file_path", "")
+                                        if file_path:
+                                            try:
+                                                self._tool_use_id_to_old_content[tool_use_id] = Path(file_path).read_text(encoding="utf-8")
+                                            except (OSError, UnicodeDecodeError):
+                                                self._tool_use_id_to_old_content[tool_use_id] = None
+                                        else:
+                                            self._tool_use_id_to_old_content[tool_use_id] = None
+                                    # Evict oldest entries if cache exceeds limit
+                                    if len(self._tool_use_id_to_input) > self._MAX_CACHE_SIZE:
+                                        oldest = next(iter(self._tool_use_id_to_input))
+                                        self._tool_use_id_to_input.pop(oldest, None)
+                                        self._tool_use_id_to_old_content.pop(oldest, None)
                             # Format and print tool_use preview
                             preview = format_tool_use_preview(name, tool_input)
                             # Only add leading newline if previous output didn't end with one
@@ -236,6 +260,10 @@ class StreamJSONTracker:
         print(f"  {self.stream_prefix}[llm-stream] ✓ Stream complete: {self.message_count} messages, "
               f"{len(self.tool_calls)} tool calls, {self.total_text_len} chars "
               f"({duration:.1f}s)")
+        # Clean up caches to prevent memory leaks on stream interruption
+        self._tool_use_id_to_input.clear()
+        self._tool_use_id_to_old_content.clear()
+        self._tool_use_id_to_name.clear()
 
 
 class LLMCaller:
