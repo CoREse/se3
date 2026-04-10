@@ -1,0 +1,19 @@
+id: 059
+title: Stale comment in tests/commands/test_run.py:418 still references 'state_machine.run'
+  which no longer exists.
+description: 'Stale comment in tests/commands/test_run.py:418 still references ''state_machine.run''
+  which no longer exists.
+
+
+  Suggestion: Update the comment to reference the orchestration loop in _run_flow_impl()
+  instead.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-10T10:37:14.849871'
+updated_at: '2026-04-10T10:37:14.849871'

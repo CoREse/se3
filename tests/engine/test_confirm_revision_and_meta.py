@@ -121,14 +121,32 @@ class TestBugB_ConfirmRevisionNoInfiniteLoop:
 
         flow.status = FlowStatus.RUNNING
 
-        # Run the flow — before the fix, this would infinite-loop on CONFIRM
-        result = self.sm.run(flow)
+        # Drive the flow manually using init_flow + run_step + transition_to_next
+        self.sm.init_flow(flow)
+
+        max_iterations = 100
+        iterations = 0
+        while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED) and iterations < max_iterations:
+            iterations += 1
+            current_step = flow.state.get_current_step()
+            if not current_step:
+                flow.status = FlowStatus.COMPLETED
+                break
+            step_status = self.sm.run_step(flow, current_step)
+            if step_status == StepStatus.FAILED:
+                flow.status = FlowStatus.FAILED
+                break
+            if step_status == StepStatus.PAUSED:
+                flow.status = FlowStatus.PAUSED
+                break
+            if not self.sm.transition_to_next(flow):
+                break
 
         # The propose step should have been re-executed (revision)
         assert propose_call_count >= 1, "PROPOSE step should have been re-run after revision"
 
         # Flow should not have hit max iterations (the old bug)
-        assert result != FlowStatus.FAILED, "Flow should not fail from infinite loop"
+        assert flow.status != FlowStatus.FAILED, "Flow should not fail from infinite loop"
 
     def test_confirm_revision_calls_transition_to_next(self):
         """Verify that transition_to_next is called (not skipped) when
@@ -344,26 +362,14 @@ class TestWriteFlowMeta:
 
         assert original_meta == resumed_meta
 
-    def test_meta_json_written_during_run(self):
-        """run() should call _write_flow_meta before the main loop."""
+    def test_meta_json_written_by_init_flow(self):
+        """init_flow() should call _write_flow_meta, writing _meta.json."""
         flow = FlowInstance(
             task_description="Test",
             task_type="feature",
         )
-        flow.state.selected_steps = [StepType.ANALYZE]
 
-        first_step = Step(
-            step_type=StepType.ANALYZE,
-            status=StepStatus.PENDING,
-        )
-        flow.state.add_step(first_step)
-        flow.state.current_step_id = first_step.step_id
-        flow.status = FlowStatus.RUNNING
-
-        # Register a handler that completes immediately
-        self.sm.register_handler(StepType.ANALYZE, lambda s, f: StepStatus.COMPLETED)
-
-        self.sm.run(flow)
+        self.sm.init_flow(flow)
 
         from se3.engine.chat_history import _history_dir
         meta_path = _history_dir(self.project_root, flow.flow_id) / "_meta.json"

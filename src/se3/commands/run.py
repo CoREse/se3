@@ -734,6 +734,10 @@ def _run_flow_impl(
             content.append(f"Change: {change_name}")
         render_full("\n".join(content), title="New Flow")
 
+    # Initialize flow metadata and baseline commit (idempotent — safe for both
+    # new and resumed flows).
+    state_machine.init_flow(flow)
+
     # Execute flow
     while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED):
         current_step = flow.state.get_current_step()

@@ -177,11 +177,29 @@ se3 run --discover "我想做一个用户管理功能"
 2. LLM 只处理步骤内部的工作（思考、生成、分析）
 3. LLM 的输出不改变步骤转换逻辑
 
+**Flow Lifecycle API:**
+
+The `StateMachine` SHALL expose the following public lifecycle API for orchestrators:
+
+1. `create_flow(task_description, task_type)` — Create a new `FlowInstance` (or load an existing one for resume)
+2. `init_flow(flow)` — Initialize flow metadata and baseline commit. Writes `_meta.json` (containing `se3_version`, `python_version`, `created_at`) to the session history directory and records the current git HEAD as `baseline_commit` on the flow instance for change detection during the commit step. Both operations are idempotent: if `_meta.json` already exists or `baseline_commit` is already set, they are skipped — making `init_flow` safe for both new and resumed flows.
+3. `run_step(flow, step)` — Execute a single step
+4. `transition_to_next(flow)` — Advance to the next step
+
+The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create_flow()` → `init_flow()` → while loop of `run_step()`/`transition_to_next()`.
+
 #### Scenario: 正常流程执行
 - **WHEN** 用户执行 `se3 run` 并提供任务描述
 - **THEN** 流程引擎从 `init` 状态开始
+- **AND** 调用 `init_flow()` 写入 `_meta.json` 并记录 baseline commit
 - **AND** 按程序定义的转换规则依次进入后续步骤
 - **AND** 每个步骤内调用 LLM 处理该步骤的具体工作
+
+#### Scenario: init_flow idempotent on resume
+- **WHEN** a flow is resumed via `se3 run --resume`
+- **AND** `init_flow()` is called on the loaded flow instance
+- **THEN** `_meta.json` is not overwritten (file already exists guard)
+- **AND** `baseline_commit` is not overwritten (already-set guard)
 
 #### Scenario: 步骤池动态选择
 - **WHEN** 流程引擎完成 `analyze` 步骤
@@ -1372,11 +1390,11 @@ test:
                             │
 ┌───────────────────────────▼─────────────────────────────────┐
 │                  State Machine                              │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ create_flow │→ │  run_step   │→ │ transition_to_next  │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-│         ↑                │                      │           │
-│         └────────────────┴──────────────────────┘           │
+│  ┌─────────────┐ ┌───────────┐ ┌───────────┐ ┌──────────────────┐ │
+│  │ create_flow │→│ init_flow │→│ run_step  │→│transition_to_next│ │
+│  └─────────────┘ └───────────┘ └───────────┘ └──────────────────┘ │
+│         ↑                           │                  │          │
+│         └───────────────────────────┴──────────────────┘          │
 └───────────────────────────┬─────────────────────────────────┘
                             │
         ┌───────────────────┼───────────────────┐

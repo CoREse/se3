@@ -821,98 +821,20 @@ class StateMachine:
         except Exception as e:
             logger.warning(f"Failed to record baseline commit: {e}")
 
-    def run(self, flow: FlowInstance) -> FlowStatus:
-        """Run the flow from current state to completion.
+    def init_flow(self, flow: FlowInstance) -> None:
+        """Initialize a flow after creation or before resumption.
+
+        Part of the flow lifecycle API: create_flow() → init_flow() → run_step()/transition_to_next().
+
+        Writes ``_meta.json`` (version info) and records the baseline commit for
+        change detection.  Both operations are idempotent, so calling this on a
+        resumed flow is safe (existing meta / baseline are preserved).
 
         Args:
-            flow: Flow instance to run
-
-        Returns:
-            Final flow status
+            flow: Flow instance to initialize
         """
-        logger.info(f"Starting flow {flow.flow_id}")
-
         self._write_flow_meta(flow)
         self._record_baseline_commit(flow)
-
-        max_iterations = 100  # Safety limit
-        iterations = 0
-
-        while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED) and iterations < max_iterations:
-            iterations += 1
-
-            current_step = flow.state.get_current_step()
-
-            if not current_step:
-                logger.error("No current step in flow")
-                flow.status = FlowStatus.FAILED
-                break
-
-            # Run current step
-            step_status = self.run_step(flow, current_step)
-
-            if step_status == StepStatus.FAILED:
-                # Check if we should retry
-                if current_step.retry_count < current_step.max_retries:
-                    current_step.retry_count += 1
-                    current_step.status = StepStatus.RETRYING
-                    # Inject retry metadata so step handlers can detect retry context
-                    current_step.inputs["is_retry"] = True
-                    current_step.inputs["retry_count"] = current_step.retry_count
-                    logger.info(f"Retrying step {current_step.step_type.value} (attempt {current_step.retry_count})")
-                    continue
-                else:
-                    flow.status = FlowStatus.FAILED
-                    break
-
-            if step_status == StepStatus.PAUSED:
-                # Flow paused for user input
-                flow.status = FlowStatus.PAUSED
-                logger.info("Flow paused - waiting for user input")
-                break
-
-            if step_status == StepStatus.REVISION_NEEDED:
-                # REVISION_NEEDED: fall through to transition_to_next() which handles
-                # both CONFIRM revision (via _transition_to_revision) and
-                # TEST/VERIFY_SPEC fix loop (via _transition_to_fix)
-                if current_step.step_type == StepType.CONFIRM:
-                    logger.info("Revision triggered by CONFIRM, proceeding to transition_to_next")
-
-            # Transition to next step
-            next_step = self.transition_to_next(flow)
-
-            if not next_step:
-                # No more steps - flow complete
-                break
-
-        if iterations >= max_iterations:
-            logger.error("Max iterations reached - possible infinite loop")
-            flow.status = FlowStatus.FAILED
-
-        # Final save
-        self.persistence.save_flow(flow)
-
-        logger.info(f"Flow {flow.flow_id} finished with status: {flow.status.value}")
-
-        return flow.status
-
-    def resume(self, flow: FlowInstance) -> FlowStatus:
-        """Resume a paused flow.
-
-        Args:
-            flow: Flow instance to resume
-
-        Returns:
-            Final flow status
-        """
-        if flow.status not in (FlowStatus.PAUSED, FlowStatus.FAILED):
-            logger.warning(f"Cannot resume flow with status {flow.status.value}")
-            return flow.status
-
-        logger.info(f"Resuming flow {flow.flow_id} (was {flow.status.value})")
-        flow.status = FlowStatus.RUNNING
-
-        return self.run(flow)
 
     def get_progress(self, flow: FlowInstance) -> Dict[str, Any]:
         """Get detailed progress information.

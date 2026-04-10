@@ -92,22 +92,15 @@ class TestBaselineCommitRecording:
 
         sm.persistence.save_flow.assert_called_once_with(flow)
 
-    def test_run_calls_record_baseline_commit(self, tmp_path):
-        """The run() method calls _record_baseline_commit before executing steps."""
+    def test_init_flow_calls_record_baseline_commit(self, tmp_path):
+        """init_flow() calls _record_baseline_commit."""
         sm = StateMachine(tmp_path)
 
         flow = FlowInstance(task_description="test", status=FlowStatus.INIT)
-        flow.state.selected_steps = [StepType.ANALYZE]
-        step = Step(step_type=StepType.ANALYZE, status=StepStatus.PENDING)
-        flow.state.add_step(step)
-        flow.state.current_step_id = step.step_id
-
-        # Register a handler that completes immediately
-        sm.register_handler(StepType.ANALYZE, lambda s, f: StepStatus.COMPLETED)
 
         with patch.object(sm, "_record_baseline_commit") as mock_record, \
              patch.object(sm, "_write_flow_meta"):
-            sm.run(flow)
+            sm.init_flow(flow)
 
         mock_record.assert_called_once_with(flow)
 

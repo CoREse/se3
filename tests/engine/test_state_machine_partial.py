@@ -129,12 +129,13 @@ class TestPartialTransition:
 
 
 class TestPartialRunLoop:
-    """Test that the run() loop handles PARTIAL without retrying."""
+    """Test that init_flow() + run_step()/transition_to_next() handles PARTIAL without retrying."""
 
     def test_partial_does_not_retry(self, state_machine):
-        """PARTIAL status should NOT trigger retry logic in run()."""
+        """PARTIAL status should NOT trigger retry logic."""
         flow, impl_step = _make_flow_with_implement(StepStatus.PENDING)
         flow.state.selected_steps = [StepType.IMPLEMENT]
+        flow.status = FlowStatus.RUNNING
 
         call_count = 0
 
@@ -147,11 +148,14 @@ class TestPartialRunLoop:
 
         state_machine.register_handler(StepType.IMPLEMENT, handler)
 
-        status = state_machine.run(flow)
+        state_machine.init_flow(flow)
+        step_status = state_machine.run_step(flow, impl_step)
+        state_machine.transition_to_next(flow)
 
         # Handler should be called exactly once (no retries)
         assert call_count == 1
-        assert status == FlowStatus.COMPLETED
+        assert step_status == StepStatus.PARTIAL
+        assert flow.status == FlowStatus.COMPLETED
 
 
 class TestBuildStepInputsPartial:
@@ -401,7 +405,7 @@ class TestPartialFlowDoesNotFail:
         flow = FlowInstance(
             task_description="test task",
             task_type="feature",
-            status=FlowStatus.INIT,
+            status=FlowStatus.RUNNING,
         )
         flow.state.selected_steps = [StepType.IMPLEMENT, StepType.COMMIT]
         flow.state.current_step_index = 0
@@ -432,10 +436,20 @@ class TestPartialFlowDoesNotFail:
         state_machine.register_handler(StepType.IMPLEMENT, impl_handler)
         state_machine.register_handler(StepType.COMMIT, commit_handler)
 
-        final_status = state_machine.run(flow)
+        state_machine.init_flow(flow)
 
-        assert final_status == FlowStatus.COMPLETED
-        assert final_status != FlowStatus.FAILED
+        # Drive the flow manually: run_step + transition_to_next
+        while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED):
+            current = flow.state.get_current_step()
+            if not current:
+                flow.status = FlowStatus.COMPLETED
+                break
+            state_machine.run_step(flow, current)
+            if not state_machine.transition_to_next(flow):
+                break
+
+        assert flow.status == FlowStatus.COMPLETED
+        assert flow.status != FlowStatus.FAILED
         assert call_order == ["implement", "commit"]
 
     def test_partial_implement_through_full_pipeline(self, state_machine):
@@ -443,7 +457,7 @@ class TestPartialFlowDoesNotFail:
         flow = FlowInstance(
             task_description="test task",
             task_type="feature",
-            status=FlowStatus.INIT,
+            status=FlowStatus.RUNNING,
         )
         flow.state.selected_steps = [StepType.IMPLEMENT, StepType.COMMIT, StepType.SUMMARIZE]
         flow.state.current_step_index = 0
@@ -483,9 +497,19 @@ class TestPartialFlowDoesNotFail:
         state_machine.register_handler(StepType.COMMIT, commit_handler)
         state_machine.register_handler(StepType.SUMMARIZE, summarize_handler)
 
-        final_status = state_machine.run(flow)
+        state_machine.init_flow(flow)
 
-        assert final_status == FlowStatus.COMPLETED
+        # Drive the flow manually: run_step + transition_to_next
+        while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED):
+            current = flow.state.get_current_step()
+            if not current:
+                flow.status = FlowStatus.COMPLETED
+                break
+            state_machine.run_step(flow, current)
+            if not state_machine.transition_to_next(flow):
+                break
+
+        assert flow.status == FlowStatus.COMPLETED
 
         # Verify commit received correct inputs
         ci = received_inputs["commit"]

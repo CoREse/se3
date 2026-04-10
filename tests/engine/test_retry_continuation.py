@@ -181,7 +181,7 @@ class TestStateMachineRetryMetadata:
             inputs={"task_description": "test"},
         )
 
-        # Simulate the retry logic from state_machine.run()
+        # Simulate the retry logic from the orchestration loop
         # (extracted to avoid needing a full flow setup)
         step.status = StepStatus.FAILED
         assert "is_retry" not in step.inputs
@@ -262,12 +262,12 @@ class TestStateMachineLoadOrCreateFailedFlow:
         assert result_flow.flow_id == "new-flow"
 
 
-class TestStateMachineResumeFailedFlow:
-    """Tests for StateMachine.resume accepting FAILED flows."""
+class TestInitFlowIdempotency:
+    """Tests that init_flow() is safe for FAILED, PAUSED, and COMPLETED flows."""
 
-    def test_resume_accepts_failed_flow(self):
-        """resume() should accept FAILED flows and set status to RUNNING."""
-        from se3.engine.models import FlowInstance, FlowStatus, Step, StepType, StepStatus
+    def test_init_flow_safe_for_failed_flow(self):
+        """init_flow() can be called on a FAILED flow (idempotent guards skip existing data)."""
+        from se3.engine.models import FlowInstance, FlowStatus
         from se3.engine.state_machine import StateMachine
         from unittest.mock import MagicMock, patch
 
@@ -280,20 +280,18 @@ class TestStateMachineResumeFailedFlow:
             status=FlowStatus.FAILED,
         )
 
-        # Mock sm.run to just return the flow status
-        sm.run = MagicMock(return_value=FlowStatus.COMPLETED)
+        with patch.object(sm, "_write_flow_meta") as mock_meta, \
+             patch.object(sm, "_record_baseline_commit") as mock_baseline:
+            sm.init_flow(failed_flow)
 
-        result = sm.resume(failed_flow)
+        mock_meta.assert_called_once_with(failed_flow)
+        mock_baseline.assert_called_once_with(failed_flow)
 
-        # Flow status should have been set to RUNNING before run() was called
-        sm.run.assert_called_once_with(failed_flow)
-        assert result == FlowStatus.COMPLETED
-
-    def test_resume_still_works_for_paused_flow(self):
-        """resume() should still work for PAUSED flows (existing behavior)."""
+    def test_init_flow_safe_for_paused_flow(self):
+        """init_flow() can be called on a PAUSED flow (idempotent)."""
         from se3.engine.models import FlowInstance, FlowStatus
         from se3.engine.state_machine import StateMachine
-        from unittest.mock import MagicMock
+        from unittest.mock import MagicMock, patch
 
         mock_persistence = MagicMock()
         sm = StateMachine(project_root=Path("/tmp"), persistence=mock_persistence)
@@ -304,17 +302,18 @@ class TestStateMachineResumeFailedFlow:
             status=FlowStatus.PAUSED,
         )
 
-        sm.run = MagicMock(return_value=FlowStatus.COMPLETED)
-        result = sm.resume(paused_flow)
+        with patch.object(sm, "_write_flow_meta") as mock_meta, \
+             patch.object(sm, "_record_baseline_commit") as mock_baseline:
+            sm.init_flow(paused_flow)
 
-        sm.run.assert_called_once_with(paused_flow)
-        assert result == FlowStatus.COMPLETED
+        mock_meta.assert_called_once_with(paused_flow)
+        mock_baseline.assert_called_once_with(paused_flow)
 
-    def test_resume_rejects_completed_flow(self):
-        """resume() should reject COMPLETED flows."""
+    def test_init_flow_safe_for_completed_flow(self):
+        """init_flow() can be called on a COMPLETED flow (idempotent — guards skip)."""
         from se3.engine.models import FlowInstance, FlowStatus
         from se3.engine.state_machine import StateMachine
-        from unittest.mock import MagicMock
+        from unittest.mock import MagicMock, patch
 
         mock_persistence = MagicMock()
         sm = StateMachine(project_root=Path("/tmp"), persistence=mock_persistence)
@@ -325,8 +324,9 @@ class TestStateMachineResumeFailedFlow:
             status=FlowStatus.COMPLETED,
         )
 
-        sm.run = MagicMock()
-        result = sm.resume(completed_flow)
+        with patch.object(sm, "_write_flow_meta") as mock_meta, \
+             patch.object(sm, "_record_baseline_commit") as mock_baseline:
+            sm.init_flow(completed_flow)
 
-        sm.run.assert_not_called()
-        assert result == FlowStatus.COMPLETED
+        mock_meta.assert_called_once_with(completed_flow)
+        mock_baseline.assert_called_once_with(completed_flow)
