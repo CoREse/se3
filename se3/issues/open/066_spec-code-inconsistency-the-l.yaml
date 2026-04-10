@@ -1,0 +1,21 @@
+id: '066'
+title: 'Spec-code inconsistency: The LLM Content Truncation Strategy table specifies
+  ''tail'' direction for ''Chat history retry/continue | assistant response'', but
+  the implementation now uses head+tail truncation. The spec needs updating.'
+description: 'Spec-code inconsistency: The LLM Content Truncation Strategy table specifies
+  ''tail'' direction for ''Chat history retry/continue | assistant response'', but
+  the implementation now uses head+tail truncation. The spec needs updating.
+
+
+  Suggestion: The update_spec step should change the direction column from ''tail''
+  to ''head+tail'' for assistant responses in the truncation table.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-10T14:54:36.946699'
+updated_at: '2026-04-10T14:54:36.946699'

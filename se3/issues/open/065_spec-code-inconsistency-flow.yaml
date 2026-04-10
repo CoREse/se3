@@ -1,0 +1,23 @@
+id: '065'
+title: 'Spec-code inconsistency: flow-engine spec scenarios ''SELF_CHECK 代码审查通过''
+  and ''SELF_CHECK 发现遗漏触发 fix loop'' still reference critical/high-only filtering,
+  but the implementation now treats all severity levels as actionable. The spec needs
+  updating to reflect the new behavior.'
+description: 'Spec-code inconsistency: flow-engine spec scenarios ''SELF_CHECK 代码审查通过''
+  and ''SELF_CHECK 发现遗漏触发 fix loop'' still reference critical/high-only filtering,
+  but the implementation now treats all severity levels as actionable. The spec needs
+  updating to reflect the new behavior.
+
+
+  Suggestion: The update_spec step should update the two SELF_CHECK scenarios in the
+  flow-engine spec to say ''any issue'' instead of ''critical or high severity''.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-10T14:54:36.945274'
+updated_at: '2026-04-10T14:54:36.945274'

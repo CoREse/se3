@@ -108,7 +108,7 @@ class IssueDiscovery:
         if test_results:
             stdout = ""
             if isinstance(test_results, dict):
-                stdout = test_results.get("stdout", "")
+                stdout = test_results.get("stdout", "")[-1000:]
                 if not stdout:
                     # Try phases format
                     for phase in test_results.get("phases", []):

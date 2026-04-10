@@ -489,21 +489,27 @@ def format_history_for_retry(
                         formatted = format_conversation_for_llm(conversation)
                         # In 'continue' mode, preserve tool-call-containing responses untruncated
                         if not has_tool_calls and len(formatted) > assistant_fallback_limit:
-                            formatted = "... [truncated]\n" + formatted[-assistant_fallback_limit:]
+                            head_size = min(1000, assistant_fallback_limit // 4)
+                            tail_size = assistant_fallback_limit - head_size
+                            formatted = formatted[:head_size] + "\n... [middle truncated, showing head+tail] ...\n" + formatted[-tail_size:]
                         parts.append(f"\n[Assistant Response]:")
                         parts.append(formatted)
                     else:
                         # Fallback to simplified content if parsing fails
                         content = msg.content
                         if len(content) > assistant_fallback_limit:
-                            content = "... [truncated]\n" + content[-assistant_fallback_limit:]
+                            head_size = min(1000, assistant_fallback_limit // 4)
+                            tail_size = assistant_fallback_limit - head_size
+                            content = content[:head_size] + "\n... [middle truncated, showing head+tail] ...\n" + content[-tail_size:]
                         parts.append(f"\n[Assistant Response]:")
                         parts.append(content)
                 else:
                     # No raw_json, use simplified content
                     content = msg.content
                     if len(content) > assistant_fallback_limit:
-                        content = "... [truncated]\n" + content[-assistant_fallback_limit:]
+                        head_size = min(1000, assistant_fallback_limit // 4)
+                        tail_size = assistant_fallback_limit - head_size
+                        content = content[:head_size] + "\n... [middle truncated, showing head+tail] ...\n" + content[-tail_size:]
                     parts.append(f"\n[Assistant Response]:")
                     parts.append(content)
 

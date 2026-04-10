@@ -153,7 +153,7 @@ class TestFormatHistoryForRetryMode:
 
     @patch("se3.engine.chat_history.get_step_history")
     def test_retry_mode_truncates_long_assistant_responses(self, mock_get):
-        """In retry mode, long assistant responses without raw_json should be truncated at 2000."""
+        """In retry mode, long assistant responses use head+tail truncation at 2000."""
         long_response = "y" * 3000
         mock_get.return_value = _make_session([
             _make_user_message("Do X"),
@@ -161,8 +161,11 @@ class TestFormatHistoryForRetryMode:
         ])
         result = format_history_for_retry(Path("/tmp"), "flow", "step", mode="retry")
         assert result is not None
-        assert "y" * 2000 in result
-        assert "y" * 2001 not in result
+        # head=500, tail=1500 for retry mode (limit=2000)
+        assert "y" * 500 in result
+        assert "middle truncated, showing head+tail" in result
+        assert "y" * 1500 in result
+        assert "y" * 1501 not in result
 
     @patch("se3.engine.chat_history.get_step_history")
     def test_no_history_returns_none(self, mock_get):

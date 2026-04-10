@@ -72,7 +72,8 @@ class TestSelfCheckHandler:
         assert step.outputs["actionable_count"] == 0
         assert step.outputs["issues"] == []
 
-    def test_returns_completed_when_only_medium_low_issues(self, flow, step):
+    def test_returns_revision_needed_when_medium_low_issues(self, flow, step):
+        step.inputs["fix_iteration"] = 0
         response = json.dumps({
             "issues": [
                 {"severity": "medium", "description": "Could add defensive check", "location": "src/feature.py:42"},
@@ -88,9 +89,10 @@ class TestSelfCheckHandler:
 
             result = self_check_handler(step, flow)
 
-        assert result == StepStatus.COMPLETED
-        assert step.outputs["actionable_count"] == 0
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs["actionable_count"] == 2
         assert len(step.outputs["issues"]) == 2
+        assert step.outputs["fix_needed"] is True
 
     def test_returns_revision_needed_with_critical_issues(self, flow, step):
         step.inputs["fix_iteration"] = 0
@@ -133,7 +135,7 @@ class TestSelfCheckHandler:
             result = self_check_handler(step, flow)
 
         assert result == StepStatus.REVISION_NEEDED
-        assert step.outputs["actionable_count"] == 1
+        assert step.outputs["actionable_count"] == 2
         assert step.outputs["fix_instructions"]
         assert "Unhandled error path" in step.outputs["fix_instructions"]
 
@@ -182,7 +184,7 @@ class TestSelfCheckHandler:
         assert result == StepStatus.FAILED
         assert step.error_message
 
-    def test_fix_context_contains_only_actionable_issues(self, flow, step):
+    def test_fix_context_contains_all_issues(self, flow, step):
         step.inputs["fix_iteration"] = 0
         response = json.dumps({
             "issues": [
@@ -202,11 +204,11 @@ class TestSelfCheckHandler:
             result = self_check_handler(step, flow)
 
         assert result == StepStatus.REVISION_NEEDED
-        assert step.outputs["actionable_count"] == 2
+        assert step.outputs["actionable_count"] == 4
         fix_issues = step.outputs["fix_context"]["issues"]
-        assert len(fix_issues) == 2
+        assert len(fix_issues) == 4
         severities = {i["severity"] for i in fix_issues}
-        assert severities == {"critical", "high"}
+        assert severities == {"critical", "high", "medium", "low"}
 
     def test_uses_two_phase_json_mode(self, flow, step):
         response = json.dumps({"issues": [], "summary": "OK"})

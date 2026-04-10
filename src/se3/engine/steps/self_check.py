@@ -80,8 +80,8 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     Performs LLM-based code review checking logic completeness,
     robustness, and test coverage gaps. Does NOT check spec compliance.
 
-    Returns REVISION_NEEDED when critical/high issues are found and
-    fix iterations remain. Returns COMPLETED when no actionable issues
+    Returns REVISION_NEEDED when any issues are found and
+    fix iterations remain. Returns COMPLETED when no issues
     exist or max iterations are exhausted.
     """
     task_description = step.inputs.get("task_description", "")
@@ -130,9 +130,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             return StepStatus.FAILED
 
         issues = result.get("issues", [])
-        actionable = [
-            i for i in issues if i.get("severity") in ("critical", "high")
-        ]
+        actionable = issues
         actionable_count = len(actionable)
 
         step.outputs["self_check_result"] = result

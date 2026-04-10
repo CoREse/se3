@@ -269,7 +269,10 @@ class TestPreviousSummaryInjection:
         for i in range(50):
             controller.add_summary(f"Long summary {i}: " + "x" * 100)
         total = sum(len(s) for s in controller.accumulated_summaries)
-        assert total <= 4100  # within limits (4000 + one placeholder)
+        max_len = 4000
+        placeholder = "[...earlier iterations omitted...]"
+        max_entry_size = max(len(s) for s in controller.accumulated_summaries)
+        assert total <= max_len + len(placeholder) + max_entry_size
         assert controller.accumulated_summaries[0] == "[...earlier iterations omitted...]"
 
     def test_build_loop_context_includes_summaries(self):

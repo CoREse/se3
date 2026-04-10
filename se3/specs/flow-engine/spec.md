@@ -246,13 +246,13 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 
 #### Scenario: SELF_CHECK 代码审查通过
 - **WHEN** self_check 步骤完成 LLM 代码审查
-- **AND** 未发现 critical 或 high severity 的遗漏
+- **AND** 未发现任何 severity 的遗漏（issues 列表为空）
 - **THEN** self_check 返回 COMPLETED
 - **AND** 流程继续到 verify_spec 步骤
 
 #### Scenario: SELF_CHECK 发现遗漏触发 fix loop
 - **WHEN** self_check 步骤完成 LLM 代码审查
-- **AND** 发现 critical 或 high severity 的遗漏
+- **AND** 发现任何 severity（critical/high/medium/low）的遗漏
 - **AND** fix_iteration < max_fix_iterations
 - **THEN** self_check 返回 REVISION_NEEDED
 - **AND** 附带 fix_context（遗漏列表）和 fix_instructions
@@ -526,7 +526,7 @@ The flow engine SHALL apply content-aware truncation when feeding diagnostic out
 **Truncation Direction Policy:**
 - **Error content** (stderr, error tool_results): tail-truncate (`content[-N:]`) — error root causes and tracebacks appear at the end
 - **Non-error content** (stdout, normal tool_results): head-truncate (`content[:N]`) — context and setup appear at the start
-- **Assistant responses** in retry/continue context: tail-truncate — final conclusions, tool results, and last actions are at the end
+- **Assistant responses** in retry/continue context: head+tail truncate (head 1000 chars + tail for remainder) — preserves initial step instructions and schema definitions at the start, plus final conclusions and tool results at the end
 - **User prompts** in retry/continue context: head-truncate — instructions and intent are at the start
 
 **Minimum Truncation Limits for LLM-consumed content:**
@@ -538,7 +538,7 @@ The flow engine SHALL apply content-aware truncation when feeding diagnostic out
 | LLM prompt test results (verify_spec, self_check) | stderr per phase | 1500 | tail |
 | LLM prompt test results (verify_spec, self_check) | stdout per phase | 1000 | tail |
 | Chat history tool_result | content | 2000 | direction-aware |
-| Chat history retry/continue | assistant response | 2000/4000 | tail |
+| Chat history retry/continue | assistant response | 2000/4000 | head+tail (head 1000 + tail remainder) |
 | JSON retry prompt (LLM caller) | previous response | 1500 | head |
 | Test history record | stderr per phase | 1000 | tail |
 | Test history record | stdout per phase | 1000 | tail |
@@ -553,9 +553,9 @@ The flow engine SHALL apply content-aware truncation when feeding diagnostic out
 - **WHEN** the system truncates stderr or error tool_result content for LLM consumption
 - **THEN** tail truncation (`content[-N:]`) is used to preserve the error root cause
 
-#### Scenario: Assistant response uses tail truncation in retry context
+#### Scenario: Assistant response uses head+tail truncation in retry context
 - **WHEN** `format_history_for_retry()` truncates a previous assistant response
-- **THEN** tail truncation is used to preserve final conclusions and tool results
+- **THEN** head+tail truncation is used: head (1000 chars) preserves step instructions and schema definitions, tail (remainder of budget) preserves final conclusions and tool results
 - **AND** user prompts use head truncation to preserve instructions
 
 #### Scenario: Loop iteration summaries use FIFO eviction
@@ -1258,7 +1258,7 @@ The `analyze` step renderer SHALL display a top-line status bar followed by reas
 The `self_check` step renderer SHALL display review status and issues grouped by severity.
 
 **Status Line:**
-- `✓ PASSED` in green when no critical/high issues found; `✗ ISSUES FOUND` in red when critical/high issues exist.
+- `✓ PASSED` in green when no actionable issues found; `✗ ISSUES FOUND` in red when any actionable issues exist (all severity levels are actionable).
 
 **Sections (displayed in order when data is present):**
 1. **Issues by severity** — issues grouped by severity level (critical, high, medium, low). Each issue shows its description and location.
@@ -1267,11 +1267,11 @@ The `self_check` step renderer SHALL display review status and issues grouped by
 - `status`, `issues`
 
 ##### Scenario: Self check passed rendering
-- **WHEN** the self_check step completes with no critical/high issues
+- **WHEN** the self_check step completes with no issues
 - **THEN** the renderer displays a green `✓ PASSED` status
 
 ##### Scenario: Self check found issues rendering
-- **WHEN** the self_check step completes with critical or high severity issues
+- **WHEN** the self_check step completes with any severity issues
 - **THEN** issues are grouped by severity with appropriate color coding
 - **AND** each issue shows its description and location
 
