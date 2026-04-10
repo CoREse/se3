@@ -405,7 +405,9 @@ The injected prompt SHALL:
 - 公共 API：`format_tool_use_preview(tool_name, input_data)`、`format_tool_result_preview(tool_name, result_data)`、和 `format_tool_diff(tool_name, input_data, result_data, old_content=None)`
 - 内部维护 `TOOL_FORMATTERS` 字典注册表（`{tool_name: {use: fn, result: fn, diff: str}}`），将工具名映射到专用格式化函数；可选的 `diff` 键标记该工具支持 diff 渲染
 - 未注册的工具名回退到通用格式化器（key=value 截断预览）
-- 提供 `truncate_preview()` 通用截断工具函数
+- 提供 `truncate_preview()` 通用截断工具函数（用于非路径文本：命令字符串、错误信息、JSON 等）
+- 提供 `truncate_path()` 文件路径专用截断函数：(1) 将绝对路径转为相对于 project root 的相对路径；(2) 若仍超过 `max_length`（默认 160 字符），缩略中间部分保留首段目录和文件名（格式 `first_dir/.../filename`）；(3) 文件名（最后一段）永远不被截断。Per-tool 格式化器中所有文件路径参数使用 `truncate_path` 而非 `truncate_preview`
+- 提供模块级 `set_project_root(root)` / `get_project_root()` 函数管理项目根目录，供 `truncate_path` 在路径转换时使用；`LLMCaller` 在创建 `StreamJSONTracker` 前调用 `set_project_root()` 设置项目根目录
 - 提供 `generate_edit_diff(old_string, new_string, file_path)` 使用 `difflib.unified_diff` 生成 unified diff（3 行上下文）
 
 **内置 per-tool 格式化器：**
@@ -481,7 +483,7 @@ The injected prompt SHALL:
 - **WHEN** 单组或单次 LLM 调用（无分组执行）
 - **THEN** `stream_prefix` 为空字符串，不添加任何前缀，保持现有输出格式
 - **WHEN** LOC 阈值触发多组合并为单次 LLM 调用
-- **THEN** 前缀显示合并后的组名，格式为 `[G1+G2+G3] [llm-stream] ...`
+- **THEN** 不显示组前缀（单 LLM Call 只有一条执行流，合并组名前缀为冗余信息），与单组执行路径保持一致
 
 #### Scenario: 人类浏览聊天记录
 - **WHEN** 用户执行 `se3 history` 或 `se3 history list`

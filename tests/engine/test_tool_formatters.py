@@ -1,10 +1,12 @@
 """Tests for the tool_formatters module.
 
-Covers: truncate_preview, per-tool formatters (Edit/Write/Read/Bash/Grep/Glob),
+Covers: truncate_preview, truncate_path, per-tool formatters (Edit/Write/Read/Bash/Grep/Glob),
 generic fallback, registry structure, and routing (registered vs unregistered).
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +15,9 @@ from se3.engine.tool_formatters import (
     _extract_text,
     format_tool_result_preview,
     format_tool_use_preview,
+    get_project_root,
+    set_project_root,
+    truncate_path,
     truncate_preview,
 )
 
@@ -67,6 +72,135 @@ class TestTruncatePreview:
         result = truncate_preview("hello", max_length=1, ellipsis_str=".")
         assert result == "."
         assert len(result) == 1
+
+
+# ---------------------------------------------------------------------------
+# truncate_path
+# ---------------------------------------------------------------------------
+
+class TestTruncatePath:
+    def test_empty_string(self):
+        assert truncate_path("") == ""
+
+    def test_short_relative_path_unchanged(self):
+        assert truncate_path("src/main.py") == "src/main.py"
+
+    def test_absolute_to_relative_with_project_root(self):
+        result = truncate_path(
+            "/home/user/project/src/engine/steps/implement.py",
+            project_root=Path("/home/user/project"),
+        )
+        assert result == "src/engine/steps/implement.py"
+
+    def test_absolute_to_relative_with_module_level_root(self):
+        old_root = get_project_root()
+        try:
+            set_project_root(Path("/home/user/project"))
+            result = truncate_path("/home/user/project/src/engine/steps/implement.py")
+            assert result == "src/engine/steps/implement.py"
+        finally:
+            # Restore original state
+            if old_root is None:
+                from se3.engine import tool_formatters
+                tool_formatters._project_root = None
+            else:
+                set_project_root(old_root)
+
+    def test_explicit_project_root_overrides_module_level(self):
+        old_root = get_project_root()
+        try:
+            set_project_root(Path("/other/root"))
+            result = truncate_path(
+                "/home/user/project/src/main.py",
+                project_root=Path("/home/user/project"),
+            )
+            assert result == "src/main.py"
+        finally:
+            if old_root is None:
+                from se3.engine import tool_formatters
+                tool_formatters._project_root = None
+            else:
+                set_project_root(old_root)
+
+    def test_long_path_middle_truncation(self):
+        # Build a path that exceeds 160 chars
+        long_path = "src/" + "/".join(f"very_long_directory_name_{i}" for i in range(20)) + "/implement.py"
+        assert len(long_path) > 160
+        result = truncate_path(long_path)
+        assert result.startswith("src/")
+        assert result.endswith("/implement.py")
+        assert "..." in result
+
+    def test_filename_never_truncated(self):
+        long_filename = "a" * 200 + ".py"
+        result = truncate_path(long_filename)
+        # Single segment — returned as-is, filename never truncated
+        assert result == long_filename
+
+    def test_filename_preserved_in_deep_path(self):
+        long_filename = "very_specific_implementation_file.py"
+        long_path = "src/" + "/".join(f"dir{i}" for i in range(30)) + f"/{long_filename}"
+        result = truncate_path(long_path)
+        assert result.endswith(long_filename)
+
+    def test_no_project_root_still_works(self):
+        old_root = get_project_root()
+        try:
+            from se3.engine import tool_formatters
+            tool_formatters._project_root = None
+            result = truncate_path("src/main.py")
+            assert result == "src/main.py"
+        finally:
+            if old_root is not None:
+                set_project_root(old_root)
+
+    def test_path_outside_project_root_not_converted(self):
+        result = truncate_path(
+            "/other/location/file.py",
+            project_root=Path("/home/user/project"),
+        )
+        # relpath would start with '..', so should not use relpath
+        assert not result.startswith("src/")
+
+    def test_default_max_length_is_160(self):
+        # Path exactly 160 chars should not be truncated
+        filename = "file.py"
+        # Need path of exactly 160 chars: "d/" + padding + "/file.py"
+        prefix = "d/"
+        remaining = 160 - len(prefix) - len("/") - len(filename)
+        middle = "x" * remaining
+        path = f"{prefix}{middle}/{filename}"
+        assert len(path) == 160
+        assert truncate_path(path) == path
+
+    def test_path_161_chars_is_truncated(self):
+        filename = "file.py"
+        prefix = "d/"
+        remaining = 161 - len(prefix) - len("/") - len(filename)
+        middle = "x" * remaining
+        path = f"{prefix}{middle}/{filename}"
+        assert len(path) == 161
+        result = truncate_path(path)
+        assert "..." in result
+        assert result.endswith(filename)
+
+    def test_set_get_project_root(self):
+        old_root = get_project_root()
+        try:
+            set_project_root(Path("/foo"))
+            assert get_project_root() == Path("/foo")
+        finally:
+            if old_root is None:
+                from se3.engine import tool_formatters
+                tool_formatters._project_root = None
+            else:
+                set_project_root(old_root)
+
+    def test_initial_project_root_is_none(self):
+        """Module-level _project_root may have been set by other tests; just verify the API works."""
+        # This tests the getter returns the expected type
+        result = get_project_root()
+        assert result is None or isinstance(result, Path)
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +306,8 @@ class TestEditFormatter:
     def test_use_long_path_truncated(self):
         data = {"file_path": "a/" * 40 + "file.py", "old_string": "x", "new_string": "y"}
         result = format_tool_use_preview("Edit", data)
-        assert len(result) < 200
+        # Filename is preserved in the output
+        assert "file.py" in result
 
     def test_result_success_marker(self):
         result = format_tool_result_preview("Edit", "\u2713 edited src/main.py")

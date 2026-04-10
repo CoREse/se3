@@ -1381,10 +1381,10 @@ class TestStreamPrefixConstruction:
     @patch("se3.engine.steps.implement._display_task_plan")
     @patch("se3.engine.steps.implement._compute_total_loc", return_value=100)
     @patch("se3.engine.steps.implement._extract_sorted_groups")
-    def test_loc_merge_passes_prefix_to_run_single(
+    def test_loc_merge_no_prefix_for_single_call(
         self, mock_extract, mock_loc, mock_display, mock_resolve, mock_run
     ):
-        """LOC merge path should pass merged prefix to _run_single_llm_call."""
+        """LOC merge path should NOT pass stream_prefix to _run_single_llm_call."""
         mock_extract.return_value = [
             {"group_id": "G1", "tasks": [], "depends_on": []},
             {"group_id": "G2", "tasks": [], "depends_on": []},
@@ -1411,8 +1411,7 @@ class TestStreamPrefixConstruction:
             mock_config.return_value = MagicMock(group_loc_threshold=300)
             implement_handler(step, flow)
 
-        # Verify _run_single_llm_call was called with stream_prefix='[G1+G2] '
+        # Verify _run_single_llm_call was called without stream_prefix
         mock_run.assert_called_once()
         call_kwargs = mock_run.call_args
-        assert call_kwargs.kwargs.get("stream_prefix") == "[G1+G2] " or \
-               (len(call_kwargs.args) > 7 and call_kwargs.args[7] == "[G1+G2] ")
+        assert "stream_prefix" not in call_kwargs.kwargs

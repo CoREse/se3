@@ -99,6 +99,7 @@ from .tool_formatters import (
     format_tool_diff,
     format_tool_result_preview,
     format_tool_use_preview,
+    set_project_root,
     truncate_preview,
 )
 
@@ -824,6 +825,7 @@ class LLMCaller:
                         on_output=on_output,
                     )
                 else:
+                    set_project_root(self.project_root)
                     stream_tracker = StreamJSONTracker(stream_prefix=self.stream_prefix)
 
                     def on_stream_output(line: str) -> None:

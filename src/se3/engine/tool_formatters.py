@@ -13,14 +13,89 @@ from __future__ import annotations
 import difflib
 import json
 import logging
+import os
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Module-level project root for path truncation
+# ---------------------------------------------------------------------------
+
+_project_root: Optional[Path] = None
+
+
+def set_project_root(root: Path) -> None:
+    """Set the project root directory for path truncation."""
+    global _project_root
+    _project_root = root
+
+
+def get_project_root() -> Optional[Path]:
+    """Get the current project root directory."""
+    return _project_root
+
+
+# ---------------------------------------------------------------------------
 # Core utility
 # ---------------------------------------------------------------------------
+
+def truncate_path(path: str, max_length: int = 160, project_root: Optional[Path] = None) -> str:
+    """Truncate a file path, preserving the filename and first directory segment.
+
+    1. Convert absolute path to relative (using project_root or module-level default).
+    2. If still too long, abbreviate middle segments: first_dir/.../filename
+    3. The filename (last segment) is never truncated.
+
+    Args:
+        path: The file path to truncate
+        max_length: Maximum length (default 160, matching Claude Code)
+        project_root: Optional project root for relative conversion;
+                      falls back to module-level _project_root
+
+    Returns:
+        Truncated path string
+    """
+    if not path:
+        return ""
+
+    path = str(path)
+
+    # Step 1: Convert absolute path to relative
+    root = project_root or _project_root
+    if root and os.path.isabs(path):
+        try:
+            rel = os.path.relpath(path, str(root))
+            # Only use relpath if it doesn't go upward excessively
+            if not rel.startswith('..'):
+                path = rel
+        except ValueError:
+            # On Windows, relpath can fail across drives
+            pass
+
+    if len(path) <= max_length:
+        return path
+
+    # Step 2: Middle truncation — keep first segment and filename
+    parts = path.replace('\\', '/').split('/')
+    filename = parts[-1]
+
+    # If only one segment (just a filename), return as-is (never truncate filename)
+    if len(parts) <= 1:
+        return path
+
+    first_segment = parts[0]
+    abbreviated = f"{first_segment}/.../{filename}"
+
+    if len(abbreviated) <= max_length:
+        return abbreviated
+
+    # Even abbreviated form is too long — just return first_segment/.../filename
+    # (filename is never truncated)
+    return abbreviated
+
 
 def truncate_preview(text: str, max_length: int = 60, ellipsis_str: str = '...') -> str:
     """Truncate text to a preview with ellipsis if too long.
@@ -116,7 +191,7 @@ def _format_edit_use(input_data: dict) -> str:
     old_lines = len(old_string.splitlines()) if old_string else 0
     new_lines = len(new_string.splitlines()) if new_string else 0
 
-    path_preview = truncate_preview(file_path, max_length=50)
+    path_preview = truncate_path(file_path)
     if old_lines or new_lines:
         return f"Edit: {path_preview} ({old_lines} lines \u2192 {new_lines} lines)"
     return f"Edit: {path_preview}"
@@ -141,7 +216,7 @@ def _format_write_use(input_data: dict) -> str:
     file_path = input_data.get("file_path", "?")
     content = input_data.get("content", "")
     n_lines = len(content.splitlines()) if content else 0
-    path_preview = truncate_preview(file_path, max_length=50)
+    path_preview = truncate_path(file_path)
     if n_lines:
         return f"Write: {path_preview} ({n_lines} lines)"
     return f"Write: {path_preview} (empty)"
@@ -160,7 +235,7 @@ def _format_write_result(result_data: Any) -> str:
 
 def _format_read_use(input_data: dict) -> str:
     file_path = input_data.get("file_path", "?")
-    path_preview = truncate_preview(file_path, max_length=50)
+    path_preview = truncate_path(file_path)
     offset = input_data.get("offset")
     limit = input_data.get("limit")
     if offset is not None and limit is not None:
@@ -206,7 +281,7 @@ def _format_grep_use(input_data: dict) -> str:
     pattern = input_data.get("pattern", "?")
     path = input_data.get("path", ".")
     pattern_preview = truncate_preview(pattern, max_length=30)
-    path_preview = truncate_preview(path, max_length=30)
+    path_preview = truncate_path(path)
     return f"Grep: /{pattern_preview}/ in {path_preview}"
 
 
@@ -226,7 +301,7 @@ def _format_glob_use(input_data: dict) -> str:
     pattern = input_data.get("pattern", "?")
     path = input_data.get("path", ".")
     pattern_preview = truncate_preview(pattern, max_length=30)
-    path_preview = truncate_preview(path, max_length=30)
+    path_preview = truncate_path(path)
     return f"Glob: {pattern_preview} in {path_preview}"
 
 
