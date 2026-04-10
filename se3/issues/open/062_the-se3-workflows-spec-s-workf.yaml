@@ -1,0 +1,20 @@
+id: '062'
+title: The se3-workflows spec's Workflow Types table still lists 8 active steps; it
+  should say 9 after adding SELF_CHECK. The spec_changes plan already declares this
+  modification.
+description: 'The se3-workflows spec''s Workflow Types table still lists 8 active
+  steps; it should say 9 after adding SELF_CHECK. The spec_changes plan already declares
+  this modification.
+
+
+  Suggestion: The update_spec step will handle this spec update.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-10T13:16:33.686572'
+updated_at: '2026-04-10T13:16:33.686572'

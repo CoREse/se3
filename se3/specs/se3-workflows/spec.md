@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define the standard workflows for SE3 development using the Flow Engine's 12-step state machine. These workflows govern how different types of work are processed from intake to completion through the unified `se3 run` entry point.
+Define the standard workflows for SE3 development using the Flow Engine's 13-step state machine. These workflows govern how different types of work are processed from intake to completion through the unified `se3 run` entry point.
 
 ## Requirements
 
@@ -12,21 +12,22 @@ The system SHALL support five workflow types, mapped to different step sequences
 
 | Type | Steps | When Used |
 |------|-------|-----------|
-| `feature` | analyze → plan → implement → test → verify_spec → update_spec → version_analyze → commit | New functionality or significant enhancement |
-| `bugfix` | analyze → plan → implement → test → verify_spec → version_analyze → commit | Bug reports (plan uses medium depth) |
+| `feature` | analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit | New functionality or significant enhancement |
+| `bugfix` | analyze → plan → implement → test → self_check → verify_spec → version_analyze → commit | Bug reports (plan uses medium depth) |
 | `review` | analyze → verify_spec | Code review, audit, or analysis |
 | `small` | analyze → implement → test → version_analyze → commit | Minor fixes, typos, simple changes |
 | `directive` | analyze → plan → implement → version_analyze → commit | Following specific instructions (plan uses shallow depth) |
 
-**Step Pool (8 active steps in default sequences):**
+**Step Pool (9 active steps in default sequences):**
 1. **analyze** - Analyze task type and scope, collect project context, select and load relevant specs
 2. **plan** - Unified planning: proposal + design + task breakdown (adapts depth by task_type)
 3. **implement** - Write code implementation
 4. **test** - Run tests to verify
-5. **verify_spec** - Check implementation vs spec
-6. **update_spec** - Update spec records
-7. **version_analyze** - Analyze changes to determine SemVer bump type and generate commit message
-8. **commit** - Commit changes (generates template summary when summarize step is absent)
+5. **self_check** - LLM code review for logic completeness, robustness, functional gaps, and test coverage gaps (excludes spec compliance)
+6. **verify_spec** - Check implementation vs spec
+7. **update_spec** - Update spec records
+8. **version_analyze** - Analyze changes to determine SemVer bump type and generate commit message
+9. **commit** - Commit changes (generates template summary when summarize step is absent)
 
 **Optional step (available in pool, not in default sequences):**
 - **summarize** - Generate LLM-based summary and handoff. Can be added to step sequences via `se3.yaml` configuration. When absent, the commit step generates a template-based summary document.
@@ -35,7 +36,7 @@ The system SHALL support five workflow types, mapped to different step sequences
 
 #### Scenario: Feature workflow selection
 - **WHEN** input is classified as "feature-request"
-- **THEN** the system uses the feature workflow with full 8 default steps
+- **THEN** the system uses the feature workflow with full 9 default steps
 
 #### Scenario: Bug fix workflow selection
 - **WHEN** input is classified as "bug-report"
@@ -78,23 +79,30 @@ The feature workflow SHALL follow these steps:
    - Run test suite automatically
    - Report test results
    - If tests fail, trigger fix loop to return to implement step
-   - If tests pass, continue to verify_spec for spec compliance check
+   - If tests pass, continue to self_check for code review
 
-**5. VERIFY_SPEC**
+**5. SELF_CHECK**
+   - LLM reviews implementation for logic completeness, robustness, functional gaps, and test coverage gaps
+   - Explicitly excludes spec compliance checks (handled by verify_spec)
+   - Receives test_results and changes_made as input context
+   - If critical/high issues found, trigger fix loop to return to implement step
+   - If no critical/high issues, continue to verify_spec
+
+**6. VERIFY_SPEC**
    - Check implementation against specifications
    - Verify all scenarios are covered
    - Identify any discrepancies
 
-**6. UPDATE_SPEC**
+**7. UPDATE_SPEC**
    - Update specs to reflect changes made
    - Add new capabilities documentation
    - Mark scenarios as implemented
 
-**7. VERSION_ANALYZE**
+**8. VERSION_ANALYZE**
    - Analyze changes to determine SemVer bump type
    - Generate commit message
 
-**8. COMMIT**
+**9. COMMIT**
    - Stage and commit all changes
    - Use commit message from version_analyze (or fallback chain)
    - Update version according to bump rules
@@ -102,7 +110,7 @@ The feature workflow SHALL follow these steps:
 
 #### Scenario: Large feature
 - **WHEN** a feature is complex with multiple components
-- **THEN** go through all 8 default steps with full-depth plan
+- **THEN** go through all 9 default steps with full-depth plan
 - **AND** the plan includes formal proposal, design, and task groups
 
 #### Scenario: Medium feature
@@ -132,13 +140,17 @@ The bugfix workflow SHALL follow these steps (plan uses medium depth):
    - Run tests to verify fix
    - Run regression tests
 
-**5. VERIFY_SPEC**
+**5. SELF_CHECK**
+   - LLM reviews fix for logic completeness, robustness, and functional gaps
+   - Ensures the fix doesn't introduce new issues or miss related changes
+
+**6. VERIFY_SPEC**
    - Verify fix meets requirements
 
-**6. VERSION_ANALYZE**
+**7. VERSION_ANALYZE**
    - Determine version bump type and generate commit message
 
-**7. COMMIT**
+**8. COMMIT**
    - Commit the fix with version bump
 
 #### Scenario: Complex bug fix

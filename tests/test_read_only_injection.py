@@ -34,6 +34,7 @@ class TestStepPoolReadOnly:
             StepType.VERIFY_SPEC,
             StepType.VERSION_ANALYZE,
             StepType.SUMMARIZE,
+            StepType.SELF_CHECK,
         }
         for step_type in expected_read_only:
             assert STEP_POOL[step_type]["read_only"] is True, (
@@ -70,7 +71,7 @@ class TestGetReadOnlyInjection:
 
     @pytest.mark.parametrize("step_name", [
         "discovery", "analyze", "project_summary", "read_spec", "plan",
-        "verify_spec", "version_analyze", "summarize",
+        "verify_spec", "version_analyze", "summarize", "self_check",
     ])
     def test_read_only_steps_return_constraint(self, step_name):
         """Read-only steps should return a non-empty constraint prompt."""

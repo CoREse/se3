@@ -2,7 +2,7 @@
 
 ## Purpose
 
-定义 SE3 3.0 的核心流程引擎（Flow Engine）：一个程序驱动的状态机，通过统一的 `se3 run` 入口控制开发流程的 11 个步骤编排，在每个步骤内调用 LLM 处理需要"思考"的部分。
+定义 SE3 3.0 的核心流程引擎（Flow Engine）：一个程序驱动的状态机，通过统一的 `se3 run` 入口控制开发流程的 13 个步骤编排，在每个步骤内调用 LLM 处理需要"思考"的部分。
 
 ## Requirements
 
@@ -206,9 +206,9 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 - **THEN** 根据分析结果从固定步骤池中选取后续需要的步骤
 - **AND** 步骤池是预定义的有限集合，不由 LLM 凭空生成
 
-### Requirement: 12 步流程池
+### Requirement: 13 步流程池
 
-流程引擎 SHALL 定义固定的 12 步骤池，所有流程步骤从此池中选取。
+流程引擎 SHALL 定义固定的 13 步骤池，所有流程步骤从此池中选取。
 
 | 步骤 | 职责 | LLM 参与 | JSON 模式 | Read-Only | 输入 | 输出 |
 |------|------|---------|-----------|-----------|------|------|
@@ -218,6 +218,7 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 | `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type, project_summary | plan{proposal,design}, task_groups, spec_changes |
 | `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed |
 | `test` | 运行测试验证 | 否（程序执行） | - | 否 | - | test_results, tests_passed |
+| `self_check` | LLM 代码审查：逻辑完整性、代码健壮性、功能遗漏、测试未覆盖区域（不检查 spec 合规性） | 是 | TWO_PHASE | **是** | test_results, changes_made, spec_content, fix_iteration | issues (structured list with description, severity, location), status |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, fix_needed, fix_instructions, fix_context |
 | `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | 否 | changes_made, verification_result, spec_changes, design_doc | updated_specs |
 | `version_analyze` | 分析变更确定版本类型 + 生成 commit message | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning, commit_message |
@@ -226,9 +227,9 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 | ~~`project_summary`~~ | ~~生成项目上下文摘要~~ (deprecated — merged into analyze) | 是 | 文本 | **是** | 项目状态 | 摘要字符串 |
 
 **不同任务类型的步骤序列：**
-- `discovery`: discovery → analyze → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit
-- `feature`: analyze → plan → implement → test → verify_spec → update_spec → **version_analyze** → commit
-- `bugfix`: analyze → plan → implement → test → verify_spec → **version_analyze** → commit
+- `discovery`: discovery → analyze → plan → implement → test → **self_check** → verify_spec → update_spec → **version_analyze** → commit
+- `feature`: analyze → plan → implement → test → **self_check** → verify_spec → update_spec → **version_analyze** → commit
+- `bugfix`: analyze → plan → implement → test → **self_check** → verify_spec → **version_analyze** → commit
 - `review`: analyze → verify_spec
 - `small`: analyze → implement → test → **version_analyze** → commit
 - `directive`: analyze → plan → implement → **version_analyze** → commit
@@ -237,11 +238,27 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 
 #### Scenario: Feature 任务完整流程
 - **WHEN** 任务类型为 `feature`
-- **THEN** 执行完整的 9 步流程（plan 使用 full 深度）
+- **THEN** 执行完整的 10 步流程（plan 使用 full 深度），包含 self_check 步骤
 
 #### Scenario: Small 任务简化流程
 - **WHEN** 任务类型为 `small`
-- **THEN** 跳过 plan 步骤
+- **THEN** 跳过 plan 和 self_check 步骤
+
+#### Scenario: SELF_CHECK 代码审查通过
+- **WHEN** self_check 步骤完成 LLM 代码审查
+- **AND** 未发现 critical 或 high severity 的遗漏
+- **THEN** self_check 返回 COMPLETED
+- **AND** 流程继续到 verify_spec 步骤
+
+#### Scenario: SELF_CHECK 发现遗漏触发 fix loop
+- **WHEN** self_check 步骤完成 LLM 代码审查
+- **AND** 发现 critical 或 high severity 的遗漏
+- **AND** fix_iteration < max_fix_iterations
+- **THEN** self_check 返回 REVISION_NEEDED
+- **AND** 附带 fix_context（遗漏列表）和 fix_instructions
+- **AND** 触发现有 fix loop 机制回到 IMPLEMENT 步骤
+- **AND** 修复后重跑 TEST → SELF_CHECK 直到遗漏列表为空或达到 max_fix_iterations 上限
+- **NOTE** fix_iterations 是全局计数器，TEST、SELF_CHECK、VERIFY_SPEC 三者共享，总循环次数不超过 max_fix_iterations
 
 ### Requirement: Deprecated Step Type Backward Compatibility
 
@@ -308,7 +325,7 @@ The flow engine SHALL enforce a prompt-level file modification prohibition for r
 **Read-Only Step Attribute:**
 
 Each entry in the step pool (`STEP_POOL`) SHALL include a `read_only` boolean attribute. Steps marked `read_only: true` are:
-- `discovery`, `analyze`, `plan`, `verify_spec`, `version_analyze`, `summarize`
+- `discovery`, `analyze`, `plan`, `self_check`, `verify_spec`, `version_analyze`, `summarize`
 - Deprecated steps (`project_summary`, `read_spec`)
 
 Steps explicitly marked `read_only: false`:
@@ -343,6 +360,11 @@ The injected prompt SHALL:
 - **WHEN** LLMCaller executes the `discovery` step
 - **THEN** the read-only constraint prompt is appended to the LLM prompt
 - **AND** the discovery step cannot modify files, consistent with its sole responsibility of producing the Proposed Task Description
+
+#### Scenario: SELF_CHECK step is read-only
+- **WHEN** LLMCaller executes the `self_check` step
+- **THEN** the read-only constraint prompt is appended to the LLM prompt
+- **AND** the self_check step cannot modify files, consistent with its sole responsibility of reviewing code for logic completeness and robustness
 
 ### Requirement: JSON 提取模式
 
@@ -538,6 +560,7 @@ The injected prompt SHALL:
 - `analyze` 输出 `task_type`、`scope`、`complexity`、`reasoning`、`project_summary`、`relevant_specs`、`spec_content`、`selected_specs`；其中 `project_summary` 由 `ProjectContextCollector.collect()` 程序化生成（非 LLM），`spec_content` 由后处理程序化加载（base spec 自动附加 + LLM 选择的 spec）
 - `plan` 接收 `spec_content`（从 analyze）、`task_type`、`scope`、`project_summary`（从 analyze），输出 `plan`（含 proposal + design）、`task_groups` 和 `spec_changes`（仅 full depth）
 - `implement` 接收 `design_doc`（从 plan.design 映射）、`task_groups`、`spec_content`（从 analyze）、`project_summary`（从 analyze）
+- `self_check` 接收 `test_results`（从 test）、`changes_made`（从 implement）、`spec_content`（从 analyze）、`fix_iteration`（当前 fix loop 迭代次数）
 - `verify_spec` 接收 `changes_made`、`spec_content`（从 analyze）、`test_results`、`fix_iteration`、`spec_changes`（从 plan 步骤传递，用于区分有意变更与回归）和 `relevant_specs`（从 analyze）
 - `update_spec` 接收 `changes_made`、`verification_result`、`spec_changes`（从 plan 步骤传递，作为变更指引清单）和 `design_doc`（从 plan.design 映射，提供架构上下文）
 - `commit` 接收 `changes_made`、`commit_message`（from version_analyze）、`bump_type`（from version_analyze）
@@ -1156,9 +1179,9 @@ The plan is rendered as a Rich `Panel` titled "Implementation Plan" containing u
 - **THEN** the exception is caught and logged at DEBUG level
 - **AND** execution proceeds normally without the plan display
 
-### Requirement: Step Output Rendering — Analyze, Verify Spec, Update Spec, Commit
+### Requirement: Step Output Rendering — Analyze, Self Check, Verify Spec, Update Spec, Commit
 
-The `analyze`, `verify_spec`, `update_spec`, and `commit` steps SHALL each use a custom renderer that presents structured, human-readable output instead of raw JSON key-value listing. All renderers use `render_full()` as their sole output interface, consistent with the Implement renderer's style.
+The `analyze`, `self_check`, `verify_spec`, `update_spec`, and `commit` steps SHALL each use a custom renderer that presents structured, human-readable output instead of raw JSON key-value listing. All renderers use `render_full()` as their sole output interface, consistent with the Implement renderer's style.
 
 #### Analyze Renderer
 
@@ -1185,6 +1208,28 @@ The `analyze` step renderer SHALL display a top-line status bar followed by reas
 ##### Scenario: Analyze rendering hides internal data
 - **WHEN** the analyze step outputs include `spec_content` or `project_summary`
 - **THEN** these fields are not displayed to the user
+
+#### Self Check Renderer
+
+The `self_check` step renderer SHALL display review status and issues grouped by severity.
+
+**Status Line:**
+- `✓ PASSED` in green when no critical/high issues found; `✗ ISSUES FOUND` in red when critical/high issues exist.
+
+**Sections (displayed in order when data is present):**
+1. **Issues by severity** — issues grouped by severity level (critical, high, medium, low). Each issue shows its description and location.
+
+**Output keys consumed by the renderer:**
+- `status`, `issues`
+
+##### Scenario: Self check passed rendering
+- **WHEN** the self_check step completes with no critical/high issues
+- **THEN** the renderer displays a green `✓ PASSED` status
+
+##### Scenario: Self check found issues rendering
+- **WHEN** the self_check step completes with critical or high severity issues
+- **THEN** issues are grouped by severity with appropriate color coding
+- **AND** each issue shows its description and location
 
 #### Verify Spec Renderer
 
@@ -1344,10 +1389,11 @@ test:
 - **THEN** `json.dumps` MUST use `default=str` as a defensive fallback
 - **AND** step handlers that store `StepStatus` in `step.outputs["result"]` MUST convert it to its string `.value` before storing (root cause prevention)
 
-#### Scenario: test 通过后进行 spec 验证
+#### Scenario: test 通过后进行代码自检
 - **WHEN** test 步骤执行完成且 `overall_passed` 为 true
 - **THEN** test 步骤返回 `COMPLETED` 状态
-- **AND** 流程继续到 verify_spec 步骤进行 spec 合规性检查
+- **AND** 流程继续到 self_check 步骤进行 LLM 代码审查（对于 feature/bugfix/discovery 工作流）
+- **AND** self_check 通过后继续到 verify_spec 步骤进行 spec 合规性检查
 
 #### Scenario: verify_spec 检查 spec coverage
 - **WHEN** verify_spec 接收到 `test_mapping`
@@ -1403,7 +1449,7 @@ test:
         ▼                   ▼                   ▼
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
 │ Step Handler │    │ Persistence  │    │ LLM Caller   │
-│  (12 steps)  │    │(engine.json) │    │(claude -p)   │
+│  (13 steps)  │    │(engine.json) │    │(claude -p)   │
 │  +discovery  │    │              │    │              │
 └──────────────┘    └──────────────┘    └──────┬───────┘
                                                │
@@ -1424,7 +1470,7 @@ test:
 
 **Step:**
 - step_id: 唯一标识
-- step_type: 步骤类型（12 种之一，包括 discovery）
+- step_type: 步骤类型（13 种之一，包括 discovery 和 self_check）
 - status: 步骤状态 (PENDING, RUNNING, COMPLETED, FAILED, RETRYING, PAUSED)
 - inputs: 输入字典
 - outputs: 输出字典（所有值必须是 JSON 可序列化的原始类型；枚举值存入前须转换为字符串 `.value`）

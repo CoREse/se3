@@ -1,0 +1,20 @@
+id: '063'
+title: There are two very similar state-machine integration test files (test_state_machine_self_check.py
+  and test_self_check_state_machine.py) with overlapping coverage. This duplication
+  is harmless but could be consolidated.
+description: 'There are two very similar state-machine integration test files (test_state_machine_self_check.py
+  and test_self_check_state_machine.py) with overlapping coverage. This duplication
+  is harmless but could be consolidated.
+
+
+  Suggestion: Consider merging these two test files in a future cleanup. Not blocking.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-10T13:16:33.687505'
+updated_at: '2026-04-10T13:16:33.687505'
