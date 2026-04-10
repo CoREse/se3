@@ -130,21 +130,17 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             return StepStatus.FAILED
 
         issues = result.get("issues", [])
-        actionable = issues
-        actionable_count = len(actionable)
 
         step.outputs["self_check_result"] = result
         step.outputs["issues"] = issues
-        step.outputs["actionable_count"] = actionable_count
+        step.outputs["actionable_count"] = len(issues)
 
-        if actionable_count == 0:
-            logger.info(
-                f"Self-check passed ({len(issues)} issues, {actionable_count} actionable)"
-            )
+        if not issues:
+            logger.info("Self-check passed (no issues found)")
             return StepStatus.COMPLETED
 
         logger.warning(
-            f"Self-check found {actionable_count} actionable issue(s) "
+            f"Self-check found {len(issues)} issue(s) "
             f"(fix iteration {fix_iteration}/{max_iterations})"
         )
 
@@ -155,7 +151,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             )
             step.outputs["max_iterations_reached"] = True
             step.outputs["warning"] = (
-                f"Self-check still has {actionable_count} actionable issue(s) "
+                f"Self-check still has {len(issues)} issue(s) "
                 f"after {max_iterations} fix attempts"
             )
             return StepStatus.COMPLETED
@@ -163,10 +159,10 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         issue_details = "\n".join(
             f"- [{i.get('severity', 'high')}] {i.get('location', '?')}: "
             f"{i.get('description', '')}"
-            for i in actionable
+            for i in issues
         )
         fix_instructions = (
-            f"Self-check found {actionable_count} issue(s) that need fixing:\n"
+            f"Self-check found {len(issues)} issue(s) that need fixing:\n"
             f"{issue_details}\n\n"
             "Fix the issues listed above and ensure the logic is correct."
         )
@@ -177,7 +173,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["fix_instructions"] = fix_instructions
         step.outputs["fix_context"] = {
             "reason": "self_check",
-            "issues": actionable,
+            "issues": issues,
             "iteration": fix_iteration + 1,
         }
 

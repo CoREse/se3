@@ -1,0 +1,26 @@
+id: '067'
+title: 'Fix loop exhausted: 解决se3/history/20260410-142744_6e76dd7f这个session里self check阶段发现的那几个issue'
+description: "The fix loop reached maximum iterations while working on: 解决se3/history/20260410-142744_6e76dd7f这个session里self\
+  \ check阶段发现的那几个issue\n\n**Trigger step:** verify_spec\n**Fix iterations:** 3\n\n\
+  **Last test output (truncated):**\n```\nrktreeVerification::test_no_worktree_deletes_directly\
+  \ PASSED [ 99%]\ntests/test_worktree.py::TestDeleteBranchWorktreeVerification::test_worktree_exists_triggers_cleanup_then_deletes\
+  \ PASSED [ 99%]\ntests/test_worktree.py::TestDeleteBranchWorktreeVerification::test_cleanup_fails_still_attempts_branch_delete\
+  \ PASSED [100%]\n\n=============================== warnings summary ===============================\n\
+  tests/test_se3_module_system.py::test_initialization\n  /home/cre/.pixi/envs/pip/lib/python3.14/site-packages/_pytest/python.py:170:\
+  \ PytestReturnNotNoneWarning: Test functions should return None, but tests/test_se3_module_system.py::test_initialization\
+  \ returned <class 'bool'>.\n  Did you mean to use `assert` instead of `return`?\n\
+  \  See https://docs.pytest.org/en/stable/how-to/assert.html#return-not-none for\
+  \ more information.\n    warnings.warn(\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n\
+  ================= 1646 passed, 10 skipped, 1 warning in 10.41s =================\n\
+  \n```\n\n**Fix attempt history:**\n- Iteration 1: unknown\n- Iteration 2: unknown\n\
+  - Iteration 3: unknown\n\n**Last fix instructions:**\nBoth fixes are already applied\
+  \ in the working tree. Commit the changes to issue_discovery.py and self_check.py."
+status: open
+priority: high
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:fix-loop
+created_at: '2026-04-10T15:17:36.821065'
+updated_at: '2026-04-10T15:17:36.821065'

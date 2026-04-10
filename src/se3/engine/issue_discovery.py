@@ -108,12 +108,12 @@ class IssueDiscovery:
         if test_results:
             stdout = ""
             if isinstance(test_results, dict):
-                stdout = test_results.get("stdout", "")[-1000:]
+                stdout = (test_results.get("stdout") or "")[-1000:]
                 if not stdout:
                     # Try phases format
                     for phase in test_results.get("phases", []):
                         if not phase.get("passed", True):
-                            stdout = phase.get("stdout", "")[-1000:]
+                            stdout = (phase.get("stdout") or "")[-1000:]
                             break
             if stdout:
                 desc_parts.extend(["", "**Last test output (truncated):**", f"```\n{stdout}\n```"])
