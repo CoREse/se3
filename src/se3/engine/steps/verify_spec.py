@@ -47,6 +47,8 @@ VERIFY_PROMPT = """You are an expert software quality assurance engineer. Verify
 ## Fix Context
 {fix_context}
 
+{previous_verification}
+
 ## Instructions
 Verify the implementation against the specifications. Check:
 
@@ -56,6 +58,7 @@ Verify the implementation against the specifications. Check:
 4. **Correctness**: Is the implementation logically correct?
 5. **Test Results**: Did all tests pass? If not, analyze the failures.
 6. **Planned Spec Changes**: If "Planned Spec Changes" lists specific changes declared by the plan step, treat deviations matching those declarations as intentional changes (scope: out_of_scope, priority: low), NOT regressions. Only deviations NOT covered by planned changes should be flagged as in_scope issues.
+7. **Previous Verification**: If a "Previous Verification" section is present, issues listed there were already reported and a fix was attempted. Only re-report an issue if it STILL EXISTS in the current code. Do NOT re-report issues that have been successfully resolved.
 
 ### Issue Priority Levels
 Use the following priority levels for each issue:
@@ -134,14 +137,21 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     # Get fix iteration count from inputs
     fix_iteration = step.inputs.get("fix_iteration", 0)
-    max_iterations = _get_max_fix_iterations(flow)
+    max_iterations = step.inputs.get("max_fix_iterations") or _get_max_fix_iterations(flow)
+    prev_issues = step.inputs.get("prev_issues", [])
+    prev_fix_instructions = step.inputs.get("prev_fix_instructions", "")
+    fix_history = step.inputs.get("fix_history", [])
 
     # Format inputs
     spec_text = _format_spec_content(spec_content)
     changes_text = _format_changes(changes_made)
     test_text = _format_test_results(test_results)
-    fix_context_text = _format_fix_context(fix_iteration, max_iterations)
+    fix_context_text = _format_fix_context(
+        fix_iteration, max_iterations,
+        fix_history=fix_history,
+    )
     spec_changes_text = _format_spec_changes(spec_changes)
+    prev_verification_text = _format_previous_verification(prev_issues, prev_fix_instructions)
 
     # Build prompt
     prompt = VERIFY_PROMPT.format(
@@ -151,6 +161,7 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         test_results=test_text,
         fix_context=fix_context_text,
         spec_changes=spec_changes_text,
+        previous_verification=prev_verification_text,
     )
 
     # Append issue discovery injection if applicable
@@ -219,8 +230,8 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         # If tests failed but LLM didn't provide fix instructions, generate default
         if not tests_passed and not fix_instructions:
-            stdout = test_results.get("stdout", "") if isinstance(test_results, dict) else ""
-            stderr = test_results.get("stderr", "") if isinstance(test_results, dict) else ""
+            stdout = (test_results.get("stdout") or "") if isinstance(test_results, dict) else ""
+            stderr = (test_results.get("stderr") or "") if isinstance(test_results, dict) else ""
             fix_instructions = f"Tests are failing. Please review and fix the implementation.\n\nTest output:\n{_extract_failures_section(stdout, max_chars=3000)}\n\nStderr:\n{stderr[-2000:]}"
             logger.warning("Tests failed but LLM didn't provide fix instructions - using default")
 
@@ -242,6 +253,7 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
                     "test_results": test_results,
                     "test_analysis": test_analysis,
                     "fix_instructions": fix_instructions,
+                    "reason": "test_failure",
                     "iteration": fix_iteration + 1,
                 }
 
@@ -498,8 +510,16 @@ def _format_spec_changes(spec_changes: list[dict[str, str]] | None) -> str:
     return "\n".join(lines)
 
 
-def _format_fix_context(fix_iteration: int, max_iterations: int) -> str:
-    """Format fix context for inclusion in prompt."""
+def _format_fix_context(
+    fix_iteration: int,
+    max_iterations: int,
+    fix_history: list | None = None,
+) -> str:
+    """Format fix context for inclusion in prompt.
+
+    Note: prev_issues are rendered by _format_previous_verification()
+    into the {previous_verification} slot to avoid duplication.
+    """
     if fix_iteration == 0:
         return "This is the initial verification (no previous fix attempts)."
 
@@ -510,5 +530,45 @@ def _format_fix_context(fix_iteration: int, max_iterations: int) -> str:
 
     if fix_iteration >= max_iterations:
         lines.append("WARNING: This is the final fix attempt. If tests still fail, the flow will complete with failures.")
+
+    if fix_history:
+        lines.append("")
+        lines.append("## Fix History")
+        for entry in fix_history:
+            it = entry.get("iteration", "?")
+            reason = entry.get("reason", "unknown")
+            trigger = entry.get("trigger_step_type", "unknown")
+            lines.append(f"- Iteration {it}: triggered by {trigger} ({reason})")
+
+    return "\n".join(lines)
+
+
+def _format_previous_verification(
+    prev_issues: list | None,
+    prev_fix_instructions: str | None,
+) -> str:
+    if not prev_issues:
+        return ""
+
+    lines = [
+        "## Previous Verification",
+        "The following issues were reported in the previous verification round.",
+        "The implement step has attempted to fix them.",
+        "Verify whether each issue has been resolved — only report issues that STILL EXIST.",
+        "",
+    ]
+    max_issues = 20
+    for issue in prev_issues[:max_issues]:
+        scope = issue.get("scope", "in_scope")
+        priority = issue.get("priority", "high")
+        msg = issue.get("message", "")
+        lines.append(f"- [{priority}/{scope}] {msg}")
+    if len(prev_issues) > max_issues:
+        lines.append(f"- ... and {len(prev_issues) - max_issues} more issues (truncated)")
+
+    if prev_fix_instructions:
+        lines.append("")
+        lines.append("### Fix Instructions Given to Implement Step")
+        lines.append(prev_fix_instructions[:3000])
 
     return "\n".join(lines)

@@ -124,8 +124,7 @@ class IssueDiscovery:
             desc_parts.extend(["", "**Fix attempt history:**"])
             for entry in fix_history[-5:]:
                 iteration = entry.get("iteration", "?")
-                ctx = entry.get("context", {})
-                reason = ctx.get("reason", "unknown")
+                reason = entry.get("reason", "unknown")
                 desc_parts.append(f"- Iteration {iteration}: {reason}")
 
         # Include fix instructions if available

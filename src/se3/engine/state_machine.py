@@ -5,6 +5,7 @@ The StateMachine controls step transitions and execution flow.
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import subprocess
@@ -50,6 +51,37 @@ class TransitionError(StateMachineError):
     """Error during state transition."""
 
     pass
+
+
+def _infer_fix_reason(trigger_step_type: str) -> str:
+    reason_map = {
+        "self_check": "self_check",
+        "test": "test_failure",
+        "verify_spec": "spec_compliance",
+    }
+    # For unknown trigger types, return the trigger type itself rather than
+    # silently mislabeling as "spec_compliance". Keeps future step types debuggable.
+    return reason_map.get(trigger_step_type, trigger_step_type or "unknown")
+
+
+# Cap on serialized previous_output size (bytes) to prevent unbounded
+# accumulation across many fix iterations.
+_PREVIOUS_OUTPUT_MAX_BYTES = 20_000
+
+# Cap on issues stored per fix_history entry to prevent unbounded growth
+# when a verify_spec round reports a large issue list.
+_FIX_HISTORY_ISSUES_CAP = 10
+
+
+def _cap_issue_list(value: Any) -> list:
+    """Return a capped list of issue dicts. Tolerates non-list input (e.g. bool,
+    None, a single dict) so fix_history stays well-formed regardless of what a
+    step placed under `spec_issues`/`issues`."""
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value[:_FIX_HISTORY_ISSUES_CAP]
+    return []
 
 
 class StateMachine:
@@ -366,7 +398,8 @@ class StateMachine:
                 fix_step = self._transition_to_fix(flow, current_step)
                 if fix_step:
                     return fix_step
-                # If transition failed, fall through to normal progression
+                # No implement step found — fall through to normal progression
+                logger.info("Fix transition returned None, falling through to next step")
 
         # Handle review loop: if current step is CONFIRM and revision was requested
         if current_step.step_type == StepType.CONFIRM:
@@ -537,7 +570,13 @@ class StateMachine:
                 "trigger_step_id": trigger_step.step_id,
                 "trigger_step_type": trigger_step_type,
                 "implement_step_id": implement_step.step_id,
-                "reason": fix_context.get("reason", "test_failure" if fix_context.get("test_failed") else "spec_compliance"),
+                "reason": fix_context.get("reason") or _infer_fix_reason(trigger_step_type),
+                "fix_instructions_summary": fix_instructions[:500] if fix_instructions else "",
+                "issues": copy.deepcopy(
+                    _cap_issue_list(
+                        fix_context.get("spec_issues") or fix_context.get("issues", [])
+                    )
+                ),
             }
         )
 
@@ -556,7 +595,31 @@ class StateMachine:
         implement_step.inputs["is_fix_iteration"] = True
         implement_step.inputs["fix_iteration"] = iteration
 
-        # Copy relevant outputs from previous implement as reference
+        # Serialize previous outputs for reference. Exclude internal keys and
+        # any nested previous_output to prevent quadratic growth across iterations.
+        # Cap serialized size so a runaway output can't blow the next prompt.
+        prev_outputs = {
+            k: v for k, v in implement_step.outputs.items()
+            if not k.startswith("_") and k != "previous_output"
+        }
+        if prev_outputs:
+            try:
+                serialized = json.dumps(prev_outputs, default=str)
+                if len(serialized) > _PREVIOUS_OUTPUT_MAX_BYTES:
+                    logger.info(
+                        "previous_output truncated from %d to %d bytes",
+                        len(serialized), _PREVIOUS_OUTPUT_MAX_BYTES,
+                    )
+                    implement_step.inputs["previous_output"] = {
+                        "_truncated": True,
+                        "_original_size": len(serialized),
+                        "preview": serialized[:_PREVIOUS_OUTPUT_MAX_BYTES],
+                    }
+                else:
+                    implement_step.inputs["previous_output"] = json.loads(serialized)
+            except Exception:
+                logger.warning("Failed to serialize previous outputs", exc_info=True)
+                implement_step.inputs["previous_output"] = {}
         prev_changes = implement_step.outputs.get("changes_made", {})
         if prev_changes:
             implement_step.inputs["previous_changes"] = prev_changes
@@ -746,11 +809,24 @@ class StateMachine:
             fix_iteration = flow.state.get_fix_iteration()
             if fix_iteration > 0:
                 inputs["fix_iteration"] = fix_iteration
+                inputs["fix_history"] = copy.deepcopy(flow.state.fix_history)
+                inputs["max_fix_iterations"] = self._get_max_fix_iterations()
+                # Find previous SELF_CHECK with REVISION_NEEDED (skipped by history loop)
+                for step_id in reversed(flow.state.step_history):
+                    step = flow.state.steps.get(step_id)
+                    if not step or step.status == StepStatus.FAILED:
+                        continue
+                    if (step.step_type == StepType.SELF_CHECK
+                            and step.status == StepStatus.REVISION_NEEDED):
+                        inputs["prev_self_check_issues"] = copy.deepcopy(
+                            step.outputs.get("issues", [])
+                        )
+                        break
             # Ensure test_results and changes_made are present (from history loop above)
             # If not already set, find them from step history
             for step_id in reversed(flow.state.step_history):
                 step = flow.state.steps.get(step_id)
-                if not step:
+                if not step or step.status == StepStatus.FAILED:
                     continue
                 if step.step_type == StepType.TEST and "test_results" not in inputs:
                     inputs["test_results"] = step.outputs.get("test_results")
@@ -760,6 +836,28 @@ class StateMachine:
                         "implemented_groups": step.outputs.get("implemented_groups", []),
                     }
 
+        # Special handling for VERIFY_SPEC step when in fix iteration
+        if step_type == StepType.VERIFY_SPEC:
+            fix_iteration = flow.state.get_fix_iteration()
+            if fix_iteration > 0:
+                inputs["fix_iteration"] = fix_iteration
+                inputs["fix_history"] = copy.deepcopy(flow.state.fix_history)
+                inputs["max_fix_iterations"] = self._get_max_fix_iterations()
+                # Find previous VERIFY_SPEC with REVISION_NEEDED
+                for step_id in reversed(flow.state.step_history):
+                    step = flow.state.steps.get(step_id)
+                    if not step or step.status == StepStatus.FAILED:
+                        continue
+                    if (step.step_type == StepType.VERIFY_SPEC
+                            and step.status == StepStatus.REVISION_NEEDED):
+                        inputs["prev_verification_result"] = copy.deepcopy(
+                            step.outputs.get("verification_result")
+                        )
+                        inputs["prev_fix_instructions"] = step.outputs.get("fix_instructions") or ""
+                        all_issues = step.outputs.get("issues", [])
+                        inputs["prev_issues"] = copy.deepcopy(all_issues[:30])
+                        break
+
         # Special handling for IMPLEMENT step when in fix iteration
         if step_type == StepType.IMPLEMENT:
             # Check if we're in a fix loop
@@ -767,19 +865,34 @@ class StateMachine:
             if fix_iteration > 0:
                 # Include fix context for the implement step
                 inputs["fix_iteration"] = fix_iteration
-                inputs["fix_history"] = flow.state.fix_history
+                inputs["fix_history"] = copy.deepcopy(flow.state.fix_history)
 
                 # Find the most recent TEST and VERIFY_SPEC steps for context
+                found_test = False
+                found_verify = False
                 for step_id in reversed(flow.state.step_history):
                     step = flow.state.steps.get(step_id)
-                    if step and step.step_type == StepType.TEST:
-                        if "test_results" not in inputs:
-                            inputs["test_results"] = step.outputs.get("test_results")
-                    elif step and step.step_type == StepType.VERIFY_SPEC:
-                        # Always use the most recent VERIFY_SPEC in fix loop
-                        inputs["verification_result"] = step.outputs.get("verification_result")
-                        inputs["fix_instructions"] = step.outputs.get("fix_instructions")
-                        inputs["fix_context"] = step.outputs.get("fix_context")
+                    if not step or step.status == StepStatus.FAILED:
+                        continue
+                    if step.step_type == StepType.TEST and not found_test:
+                        # Always overwrite with a deep copy in the fix loop —
+                        # the base-loop version is a direct reference, which would
+                        # leak later mutations to step.outputs.
+                        inputs["test_results"] = copy.deepcopy(
+                            step.outputs.get("test_results")
+                        )
+                        found_test = True
+                    elif step.step_type == StepType.VERIFY_SPEC and not found_verify:
+                        inputs["verification_result"] = copy.deepcopy(
+                            step.outputs.get("verification_result")
+                        )
+                        inputs["fix_instructions"] = step.outputs.get("fix_instructions") or ""
+                        inputs["fix_context"] = copy.deepcopy(
+                            step.outputs.get("fix_context")
+                        )
+                        found_verify = True
+                    if found_test and found_verify:
+                        break
 
         return inputs
 

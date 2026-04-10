@@ -63,9 +63,9 @@ def flow_with_fix_history(basic_flow):
     """Create a flow with fix history."""
     basic_flow.state.fix_iterations = 3
     basic_flow.state.fix_history = [
-        {"iteration": 1, "timestamp": datetime.now().isoformat(), "context": {"reason": "test_failure"}},
-        {"iteration": 2, "timestamp": datetime.now().isoformat(), "context": {"reason": "test_failure"}},
-        {"iteration": 3, "timestamp": datetime.now().isoformat(), "context": {"reason": "test_failure"}},
+        {"iteration": 1, "timestamp": datetime.now().isoformat(), "reason": "test_failure"},
+        {"iteration": 2, "timestamp": datetime.now().isoformat(), "reason": "test_failure"},
+        {"iteration": 3, "timestamp": datetime.now().isoformat(), "reason": "test_failure"},
     ]
     return basic_flow
 

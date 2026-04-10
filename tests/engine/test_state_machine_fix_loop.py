@@ -396,6 +396,385 @@ class TestBuildStepInputsWithFixContext:
         assert "fix_history" not in inputs
 
 
+class TestBuildStepInputsVerifySpec:
+    """Test _build_step_inputs propagation for VERIFY_SPEC in fix loop."""
+
+    @pytest.fixture
+    def state_machine(self, tmp_path):
+        return StateMachine(project_root=tmp_path)
+
+    @pytest.fixture
+    def flow_in_fix_loop(self):
+        flow = FlowInstance(
+            flow_id="test-flow-vs",
+            task_description="Test task",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.increment_fix_iteration(fix_context={"reason": "spec_compliance"})
+
+        impl_step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"files_changed": ["a.py"]},
+        )
+        flow.state.add_step(impl_step)
+
+        test_step = Step(
+            step_type=StepType.TEST,
+            status=StepStatus.COMPLETED,
+            outputs={"test_results": {"passed": True}},
+        )
+        flow.state.add_step(test_step)
+
+        prev_verify = Step(
+            step_type=StepType.VERIFY_SPEC,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "verification_result": {"issues": [{"message": "Missing check", "scope": "in_scope"}]},
+                "fix_instructions": "Add boundary check in handler",
+                "issues": [{"message": "Missing check", "scope": "in_scope", "priority": "high"}],
+            },
+        )
+        flow.state.add_step(prev_verify)
+
+        return flow
+
+    def test_propagates_fix_iteration(self, state_machine, flow_in_fix_loop):
+        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
+        assert inputs["fix_iteration"] == 1
+
+    def test_propagates_fix_history(self, state_machine, flow_in_fix_loop):
+        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
+        assert len(inputs["fix_history"]) == 1
+        assert inputs["fix_history"][0]["reason"] == "spec_compliance"
+
+    def test_propagates_max_fix_iterations(self, state_machine, flow_in_fix_loop):
+        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
+        assert "max_fix_iterations" in inputs
+        assert inputs["max_fix_iterations"] >= 1
+
+    def test_propagates_prev_issues(self, state_machine, flow_in_fix_loop):
+        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
+        assert len(inputs["prev_issues"]) == 1
+        assert inputs["prev_issues"][0]["message"] == "Missing check"
+
+    def test_propagates_prev_verification_result(self, state_machine, flow_in_fix_loop):
+        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
+        assert inputs["prev_verification_result"]["issues"][0]["message"] == "Missing check"
+
+    def test_propagates_prev_fix_instructions(self, state_machine, flow_in_fix_loop):
+        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
+        assert inputs["prev_fix_instructions"] == "Add boundary check in handler"
+
+    def test_no_prev_data_when_not_in_fix_loop(self, state_machine):
+        flow = FlowInstance(
+            flow_id="test-flow-vs2",
+            task_description="Test task",
+            status=FlowStatus.RUNNING,
+        )
+        inputs = state_machine._build_step_inputs(flow, StepType.VERIFY_SPEC)
+        assert "prev_issues" not in inputs
+        assert "fix_iteration" not in inputs
+
+
+class TestBuildStepInputsSelfCheck:
+    """Test _build_step_inputs propagation for SELF_CHECK in fix loop."""
+
+    @pytest.fixture
+    def state_machine(self, tmp_path):
+        return StateMachine(project_root=tmp_path)
+
+    @pytest.fixture
+    def flow_in_fix_loop(self):
+        flow = FlowInstance(
+            flow_id="test-flow-sc",
+            task_description="Test task",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.increment_fix_iteration(fix_context={"reason": "self_check"})
+
+        impl_step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"files_changed": ["b.py"]},
+        )
+        flow.state.add_step(impl_step)
+
+        test_step = Step(
+            step_type=StepType.TEST,
+            status=StepStatus.COMPLETED,
+            outputs={"test_results": {"passed": True}},
+        )
+        flow.state.add_step(test_step)
+
+        prev_sc = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "issues": [{"severity": "high", "description": "Missing null check", "location": "handler.py:42"}],
+            },
+        )
+        flow.state.add_step(prev_sc)
+
+        return flow
+
+    def test_propagates_fix_iteration(self, state_machine, flow_in_fix_loop):
+        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.SELF_CHECK)
+        assert inputs["fix_iteration"] == 1
+
+    def test_propagates_fix_history(self, state_machine, flow_in_fix_loop):
+        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.SELF_CHECK)
+        assert len(inputs["fix_history"]) == 1
+        assert inputs["fix_history"][0]["reason"] == "self_check"
+
+    def test_propagates_max_fix_iterations(self, state_machine, flow_in_fix_loop):
+        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.SELF_CHECK)
+        assert "max_fix_iterations" in inputs
+
+    def test_propagates_prev_self_check_issues(self, state_machine, flow_in_fix_loop):
+        inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.SELF_CHECK)
+        assert len(inputs["prev_self_check_issues"]) == 1
+        assert inputs["prev_self_check_issues"][0]["description"] == "Missing null check"
+
+    def test_no_prev_data_when_not_in_fix_loop(self, state_machine):
+        flow = FlowInstance(
+            flow_id="test-flow-sc2",
+            task_description="Test task",
+            status=FlowStatus.RUNNING,
+        )
+        inputs = state_machine._build_step_inputs(flow, StepType.SELF_CHECK)
+        assert "prev_self_check_issues" not in inputs
+        assert "fix_iteration" not in inputs
+
+
+class TestPrevInputsDeepCopy:
+    """Previous-iteration data passed into inputs must be deep-copied so that
+    later mutations on step.outputs cannot corrupt the snapshot the next step sees."""
+
+    @pytest.fixture
+    def state_machine(self, tmp_path):
+        return StateMachine(project_root=tmp_path)
+
+    def _make_flow_with_prev_verify(self):
+        flow = FlowInstance(
+            flow_id="test-deepcopy-vs",
+            task_description="Test task",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.increment_fix_iteration(fix_context={"reason": "spec_compliance"})
+
+        impl_step = Step(step_type=StepType.IMPLEMENT, status=StepStatus.COMPLETED, outputs={})
+        flow.state.add_step(impl_step)
+
+        prev_verify = Step(
+            step_type=StepType.VERIFY_SPEC,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "verification_result": {"issues": [{"message": "A", "scope": "in_scope"}]},
+                "fix_instructions": "do X",
+                "issues": [{"message": "A", "scope": "in_scope", "priority": "high"}],
+            },
+        )
+        flow.state.add_step(prev_verify)
+        return flow, prev_verify
+
+    def test_verify_spec_prev_issues_is_deep_copied(self, state_machine):
+        flow, prev_verify = self._make_flow_with_prev_verify()
+        inputs = state_machine._build_step_inputs(flow, StepType.VERIFY_SPEC)
+
+        # Mutate the snapshot inside inputs; originals on the step must be untouched.
+        inputs["prev_issues"][0]["message"] = "MUTATED"
+        inputs["prev_verification_result"]["issues"][0]["message"] = "MUTATED"
+
+        assert prev_verify.outputs["issues"][0]["message"] == "A"
+        assert prev_verify.outputs["verification_result"]["issues"][0]["message"] == "A"
+
+    def test_self_check_prev_issues_is_deep_copied(self, state_machine):
+        flow = FlowInstance(
+            flow_id="test-deepcopy-sc",
+            task_description="Test task",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.increment_fix_iteration(fix_context={"reason": "self_check"})
+        flow.state.add_step(Step(step_type=StepType.IMPLEMENT, status=StepStatus.COMPLETED, outputs={}))
+        prev_sc = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={"issues": [{"severity": "high", "description": "D", "location": "f.py:1"}]},
+        )
+        flow.state.add_step(prev_sc)
+
+        inputs = state_machine._build_step_inputs(flow, StepType.SELF_CHECK)
+        inputs["prev_self_check_issues"][0]["description"] = "MUTATED"
+        assert prev_sc.outputs["issues"][0]["description"] == "D"
+
+    def test_implement_test_and_verify_results_deep_copied(self, state_machine):
+        flow = FlowInstance(
+            flow_id="test-deepcopy-impl",
+            task_description="Test task",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.increment_fix_iteration(fix_context={"reason": "test_failure"})
+        flow.state.add_step(Step(step_type=StepType.IMPLEMENT, status=StepStatus.COMPLETED, outputs={}))
+        test_step = Step(
+            step_type=StepType.TEST,
+            status=StepStatus.COMPLETED,
+            outputs={"test_results": {"passed": False, "failures": [{"name": "t1"}]}},
+        )
+        flow.state.add_step(test_step)
+        verify_step = Step(
+            step_type=StepType.VERIFY_SPEC,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "verification_result": {"issues": [{"message": "V"}]},
+                "fix_instructions": "do Y",
+                "fix_context": {"spec_issues": [{"priority": "high", "message": "V"}]},
+            },
+        )
+        flow.state.add_step(verify_step)
+
+        inputs = state_machine._build_step_inputs(flow, StepType.IMPLEMENT)
+
+        inputs["test_results"]["failures"][0]["name"] = "MUTATED"
+        inputs["verification_result"]["issues"][0]["message"] = "MUTATED"
+        inputs["fix_context"]["spec_issues"][0]["message"] = "MUTATED"
+
+        assert test_step.outputs["test_results"]["failures"][0]["name"] == "t1"
+        assert verify_step.outputs["verification_result"]["issues"][0]["message"] == "V"
+        assert verify_step.outputs["fix_context"]["spec_issues"][0]["message"] == "V"
+
+
+class TestMultiIterationAccumulation:
+    """Verify that fix_history and previous_output behave correctly across
+    multiple fix iterations — the scenario that was never tested before."""
+
+    @pytest.fixture
+    def state_machine(self, tmp_path):
+        return StateMachine(project_root=tmp_path)
+
+    def test_fix_history_accumulates_across_iterations(self, state_machine):
+        flow = FlowInstance(
+            flow_id="test-accum-history",
+            task_description="T",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.increment_fix_iteration(fix_context={"reason": "test_failure"})
+        flow.state.increment_fix_iteration(fix_context={"reason": "self_check"})
+        flow.state.increment_fix_iteration(fix_context={"reason": "spec_compliance"})
+        flow.state.add_step(Step(step_type=StepType.IMPLEMENT, status=StepStatus.COMPLETED, outputs={}))
+
+        inputs = state_machine._build_step_inputs(flow, StepType.IMPLEMENT)
+
+        assert len(inputs["fix_history"]) == 3
+        reasons = [e["reason"] for e in inputs["fix_history"]]
+        assert reasons == ["test_failure", "self_check", "spec_compliance"]
+        iterations = [e["iteration"] for e in inputs["fix_history"]]
+        assert iterations == [1, 2, 3]
+
+    def test_fix_history_snapshot_is_independent_of_state(self, state_machine):
+        flow = FlowInstance(
+            flow_id="test-accum-snapshot",
+            task_description="T",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.increment_fix_iteration(fix_context={"reason": "test_failure"})
+        flow.state.add_step(Step(step_type=StepType.IMPLEMENT, status=StepStatus.COMPLETED, outputs={}))
+
+        inputs = state_machine._build_step_inputs(flow, StepType.IMPLEMENT)
+        # Mutating the snapshot must not pollute state.fix_history.
+        inputs["fix_history"].append({"iteration": 99, "reason": "fake"})
+        assert len(flow.state.fix_history) == 1
+
+    def test_transition_to_fix_caps_previous_output_size(self, tmp_path):
+        from se3.engine.state_machine import _PREVIOUS_OUTPUT_MAX_BYTES
+
+        sm = StateMachine(project_root=tmp_path)
+        flow = FlowInstance(
+            flow_id="test-truncate-prevout",
+            task_description="T",
+            status=FlowStatus.RUNNING,
+        )
+        huge = "x" * (_PREVIOUS_OUTPUT_MAX_BYTES * 2)
+        impl_step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"big_blob": huge, "files_changed": ["a.py"]},
+        )
+        flow.state.add_step(impl_step)
+
+        trigger = Step(
+            step_type=StepType.TEST,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "fix_needed": True,
+                "fix_instructions": "re-run",
+                "fix_context": {"reason": "test_failure"},
+            },
+        )
+        flow.state.add_step(trigger)
+
+        with patch.object(sm, "persistence") as mock_pers:
+            mock_pers.save_flow = Mock()
+            result = sm._transition_to_fix(flow, trigger)
+
+        assert result is impl_step
+        prev = impl_step.inputs["previous_output"]
+        assert prev.get("_truncated") is True
+        assert prev["_original_size"] > _PREVIOUS_OUTPUT_MAX_BYTES
+        assert len(prev["preview"]) <= _PREVIOUS_OUTPUT_MAX_BYTES
+
+    def test_transition_to_fix_excludes_nested_previous_output(self, tmp_path):
+        sm = StateMachine(project_root=tmp_path)
+        flow = FlowInstance(
+            flow_id="test-no-nest-prevout",
+            task_description="T",
+            status=FlowStatus.RUNNING,
+        )
+        # Simulate an LLM that echoed previous_output back into outputs.
+        impl_step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={
+                "files_changed": ["a.py"],
+                "previous_output": {"stale": "data"},
+            },
+        )
+        flow.state.add_step(impl_step)
+        trigger = Step(
+            step_type=StepType.TEST,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "fix_needed": True,
+                "fix_instructions": "re-run",
+                "fix_context": {"reason": "test_failure"},
+            },
+        )
+        flow.state.add_step(trigger)
+
+        with patch.object(sm, "persistence") as mock_pers:
+            mock_pers.save_flow = Mock()
+            sm._transition_to_fix(flow, trigger)
+
+        prev = impl_step.inputs["previous_output"]
+        # The key must not have re-nested a "previous_output" child.
+        assert "previous_output" not in prev
+        assert "files_changed" in prev
+
+
+class TestInferFixReason:
+    def test_known_trigger_types(self):
+        from se3.engine.state_machine import _infer_fix_reason
+        assert _infer_fix_reason("test") == "test_failure"
+        assert _infer_fix_reason("self_check") == "self_check"
+        assert _infer_fix_reason("verify_spec") == "spec_compliance"
+
+    def test_unknown_type_returns_trigger_itself(self):
+        from se3.engine.state_machine import _infer_fix_reason
+        # Not silently labeled as "spec_compliance" anymore — returns the input.
+        assert _infer_fix_reason("lint") == "lint"
+        assert _infer_fix_reason("") == "unknown"
+
+
 class TestMaxFixIterations:
     """Test cases for max fix iterations configuration."""
 

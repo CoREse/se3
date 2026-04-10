@@ -90,12 +90,18 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     spec_content = step.inputs.get("spec_content", {})
 
     fix_iteration = step.inputs.get("fix_iteration", 0)
-    max_iterations = _get_max_fix_iterations(flow)
+    max_iterations = step.inputs.get("max_fix_iterations") or _get_max_fix_iterations(flow)
+    prev_issues = step.inputs.get("prev_self_check_issues", [])
+    fix_history = step.inputs.get("fix_history", [])
 
     changes_text = _format_changes(changes_made)
     test_text = _format_test_results(test_results)
     spec_text = _format_spec_content(spec_content)
-    fix_context_text = _format_fix_context(fix_iteration, max_iterations)
+    fix_context_text = _format_fix_context(
+        fix_iteration, max_iterations,
+        prev_issues=prev_issues,
+        fix_history=fix_history,
+    )
 
     prompt = SELF_CHECK_PROMPT.format(
         task_description=task_description,
@@ -276,7 +282,12 @@ def _format_spec_content(spec_content: dict[str, str]) -> str:
     return "\n".join(parts)
 
 
-def _format_fix_context(fix_iteration: int, max_iterations: int) -> str:
+def _format_fix_context(
+    fix_iteration: int,
+    max_iterations: int,
+    prev_issues: list | None = None,
+    fix_history: list | None = None,
+) -> str:
     if fix_iteration == 0:
         return "This is the initial self-check (no previous fix attempts)."
 
@@ -290,5 +301,28 @@ def _format_fix_context(fix_iteration: int, max_iterations: int) -> str:
             "WARNING: This is the final fix attempt. "
             "If issues remain, the flow will proceed with outstanding issues."
         )
+
+    if prev_issues:
+        lines.append("")
+        lines.append("## Previously Reported Issues")
+        lines.append("The following issues were reported in the previous self-check.")
+        lines.append("Only report issues that STILL EXIST after the fix attempt.")
+        lines.append("Do NOT re-report issues that have been successfully fixed.")
+        lines.append("")
+        for issue in prev_issues:
+            severity = issue.get("severity", "high")
+            desc = issue.get("description", "")
+            location = issue.get("location", "")
+            loc_suffix = f" @ {location}" if location else ""
+            lines.append(f"- [{severity}] {desc}{loc_suffix}")
+
+    if fix_history:
+        lines.append("")
+        lines.append("## Fix History")
+        for entry in fix_history:
+            it = entry.get("iteration", "?")
+            reason = entry.get("reason", "unknown")
+            trigger = entry.get("trigger_step_type", "unknown")
+            lines.append(f"- Iteration {it}: triggered by {trigger} ({reason})")
 
     return "\n".join(lines)

@@ -336,6 +336,7 @@ Error output:
             "test_failed": True,
             "test_results": step.outputs["test_results"],
             "reason": "test_failure",
+            "iteration": step.inputs.get("fix_iteration", 0) + 1,
         }
 
         return StepStatus.REVISION_NEEDED

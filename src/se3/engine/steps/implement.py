@@ -129,11 +129,18 @@ FIX_PROMPT = """You are an expert software engineer. Fix the issues found in the
 ## Task Description
 {task_description}
 
+{spec_summary}
+
+{design_section}
+
 ## Fix Instructions
 {fix_instructions}
 
 ## Fix Context
 {fix_context}
+
+## Fix History
+{fix_history}
 
 ## Fix Iteration
 This is fix iteration {fix_iteration}.
@@ -218,11 +225,17 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Build the prompt
     if is_fix_iteration and fix_instructions:
         logger.info(f"Running fix iteration {fix_iteration}")
+        fix_history = step.inputs.get("fix_history", [])
+        fix_history_text = _format_fix_history(fix_history)
+        fix_context_text = _format_fix_context_structured(fix_context)
         prompt = FIX_PROMPT.format(
             task_description=task_description,
             fix_instructions=fix_instructions,
-            fix_context=fix_context or "No additional context.",
+            fix_context=fix_context_text,
             fix_iteration=fix_iteration,
+            fix_history=fix_history_text,
+            spec_summary=spec_summary,
+            design_section=design_section,
         )
         if injection:
             prompt += injection
@@ -1662,6 +1675,67 @@ def _resolve_files_changed(step: Step, project_root: Path, baseline_hash: str | 
     except Exception as e:
         logger.debug("Failed to resolve files_changed from git: %s", e)
         # Keep LLM-reported files_changed as fallback
+
+
+def _format_fix_history(fix_history: list) -> str:
+    """Format fix history for inclusion in FIX_PROMPT."""
+    if not fix_history:
+        return "No previous fix attempts."
+
+    lines = []
+    for entry in fix_history:
+        it = entry.get("iteration", "?")
+        reason = entry.get("reason", "unknown")
+        trigger = entry.get("trigger_step_type", "unknown")
+        summary = entry.get("fix_instructions_summary", "")
+        lines.append(f"- Iteration {it}: triggered by {trigger} ({reason})")
+        if summary:
+            lines.append(f"  Summary: {summary[:200]}")
+
+    return "\n".join(lines)
+
+
+def _format_fix_context_structured(fix_context: dict | str | None) -> str:
+    if not fix_context:
+        return "No additional context."
+    if isinstance(fix_context, str):
+        return fix_context
+
+    lines = []
+    reason = fix_context.get("reason", "unknown")
+    lines.append(f"Reason: {reason}")
+
+    if reason == "test_failure" or fix_context.get("test_failed"):
+        test_analysis = fix_context.get("test_analysis", {})
+        if test_analysis:
+            summary = test_analysis.get("failure_summary", "")
+            root_cause = test_analysis.get("root_cause", "")
+            if summary:
+                lines.append(f"Failure summary: {summary}")
+            if root_cause:
+                lines.append(f"Root cause: {root_cause}")
+
+    if reason == "spec_compliance":
+        spec_issues = fix_context.get("spec_issues", [])
+        if spec_issues:
+            lines.append("Spec issues:")
+            for issue in spec_issues:
+                priority = issue.get("priority", "high")
+                msg = issue.get("message", "")
+                lines.append(f"  - [{priority}] {msg}")
+
+    if reason == "self_check":
+        issues = fix_context.get("issues", [])
+        if issues:
+            lines.append("Self-check findings:")
+            for issue in issues:
+                severity = issue.get("severity", "high")
+                desc = issue.get("description", "")
+                location = issue.get("location", "")
+                loc_suffix = f" @ {location}" if location else ""
+                lines.append(f"  - [{severity}] {desc}{loc_suffix}")
+
+    return "\n".join(lines) if lines else "No additional context."
 
 
 def _format_spec_brief(spec_content: dict[str, str]) -> str:
