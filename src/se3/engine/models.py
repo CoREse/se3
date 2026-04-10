@@ -27,6 +27,7 @@ class StepType(Enum):
     CONFIRM = "confirm"  # Review and confirm previous step output
     IMPLEMENT = "implement"  # Write code (most critical step)
     TEST = "test"  # Run tests (program execution, not LLM)
+    SELF_CHECK = "self_check"  # Code self-review: logic completeness and robustness
     VERIFY_SPEC = "verify_spec"  # Check implementation vs spec consistency
     UPDATE_SPEC = "update_spec"  # Update spec to record changes
     VERSION_ANALYZE = "version_analyze"  # Analyze changes to determine version bump type
@@ -522,6 +523,14 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "inputs": ["changes_made"],
         "outputs": ["test_results"],
     },
+    StepType.SELF_CHECK: {
+        "name": "self_check",
+        "description": "Code self-review: check logic completeness, robustness, and test coverage gaps",
+        "uses_llm": True,
+        "read_only": True,
+        "inputs": ["changes_made", "test_results", "spec_content", "task_description"],
+        "outputs": ["self_check_result", "issues", "actionable_count"],
+    },
     StepType.VERIFY_SPEC: {
         "name": "verify_spec",
         "description": "Check implementation vs spec consistency",
@@ -581,6 +590,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.PLAN,
             StepType.IMPLEMENT,
             StepType.TEST,
+            StepType.SELF_CHECK,
             StepType.VERIFY_SPEC,
             StepType.UPDATE_SPEC,
             StepType.VERSION_ANALYZE,
@@ -591,6 +601,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.PLAN,
             StepType.IMPLEMENT,
             StepType.TEST,
+            StepType.SELF_CHECK,
             StepType.VERIFY_SPEC,
             StepType.VERSION_ANALYZE,
             StepType.COMMIT,
@@ -619,6 +630,7 @@ def get_default_step_sequence(task_type: str = "feature") -> List[StepType]:
             StepType.PLAN,
             StepType.IMPLEMENT,
             StepType.TEST,
+            StepType.SELF_CHECK,
             StepType.VERIFY_SPEC,
             StepType.UPDATE_SPEC,
             StepType.VERSION_ANALYZE,

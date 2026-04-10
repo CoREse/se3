@@ -33,6 +33,7 @@ STEP_DISPLAY_TITLES: Dict[StepType, str] = {
     StepType.CONFIRM: "Confirmation",
     StepType.IMPLEMENT: "Implementation",
     StepType.TEST: "Testing",
+    StepType.SELF_CHECK: "Self Check",
     StepType.VERIFY_SPEC: "Spec Verification",
     StepType.UPDATE_SPEC: "Spec Update",
     StepType.VERSION_ANALYZE: "Version Analysis",
