@@ -340,9 +340,9 @@ class StateMachine:
             )
             return None
 
-        # Handle test-verify-fix loop: if TEST or VERIFY_SPEC returns REVISION_NEEDED
+        # Handle test-selfcheck-verify-fix loop: if TEST, SELF_CHECK, or VERIFY_SPEC returns REVISION_NEEDED
         if (
-            current_step.step_type in (StepType.TEST, StepType.VERIFY_SPEC)
+            current_step.step_type in (StepType.TEST, StepType.SELF_CHECK, StepType.VERIFY_SPEC)
             and current_step.status == StepStatus.REVISION_NEEDED
         ):
             # Check if max iterations reached
@@ -496,15 +496,15 @@ class StateMachine:
         flow: FlowInstance,
         trigger_step: Step,
     ) -> Optional[Step]:
-        """Transition from TEST or VERIFY_SPEC back to IMPLEMENT for fixing issues.
+        """Transition from TEST, SELF_CHECK, or VERIFY_SPEC back to IMPLEMENT for fixing issues.
 
-        This implements the test-verify-fix loop. When tests fail (detected by TEST
-        or VERIFY_SPEC step), the step returns REVISION_NEEDED and this method
-        transitions back to the implement step with fix context.
+        This implements the test-selfcheck-verify-fix loop. When issues are detected
+        (by TEST, SELF_CHECK, or VERIFY_SPEC step), the step returns REVISION_NEEDED
+        and this method transitions back to the implement step with fix context.
 
         Args:
             flow: Current flow instance
-            trigger_step: The step (TEST or VERIFY_SPEC) that detected issues
+            trigger_step: The step (TEST, SELF_CHECK, or VERIFY_SPEC) that detected issues
 
         Returns:
             The implement step being re-run, or None if failed
@@ -579,8 +579,12 @@ class StateMachine:
         print(f"Iteration: {iteration}")
         if fix_context.get("test_failed"):
             print(f"Reason: Tests failed")
+        if trigger_step_type == "self_check":
+            print(f"Source: self_check (code review)")
         if trigger_step_type == "verify_spec":
             print(f"Source: verify_spec (spec compliance check)")
+        if fix_context.get("reason") == "self_check":
+            print(f"Reason: Code review found actionable issues")
         if fix_context.get("spec_issues"):
             print(f"Reason: Spec compliance issues found")
         print(f"Instructions: {fix_instructions[:200]}..." if len(fix_instructions) > 200 else f"Instructions: {fix_instructions}")
@@ -671,6 +675,9 @@ class StateMachine:
                     inputs["restricted_edits_failed"] = step.outputs.get("restricted_edits_failed", [])
                 elif step.step_type == StepType.TEST:
                     inputs["test_results"] = step.outputs.get("test_results")
+                elif step.step_type == StepType.SELF_CHECK:
+                    inputs["self_check_result"] = step.outputs.get("self_check_result")
+                    inputs["self_check_issues"] = step.outputs.get("issues")
                 elif step.step_type == StepType.VERIFY_SPEC:
                     inputs["verification_result"] = step.outputs.get("verification_result")
                     inputs["fix_instructions"] = step.outputs.get("fix_instructions")
@@ -733,6 +740,25 @@ class StateMachine:
             if fix_iteration > 0:
                 inputs["is_fix_iteration"] = True
                 inputs["fix_iteration"] = fix_iteration
+
+        # Special handling for SELF_CHECK step: ensure it receives test_results and changes_made
+        if step_type == StepType.SELF_CHECK:
+            fix_iteration = flow.state.get_fix_iteration()
+            if fix_iteration > 0:
+                inputs["fix_iteration"] = fix_iteration
+            # Ensure test_results and changes_made are present (from history loop above)
+            # If not already set, find them from step history
+            for step_id in reversed(flow.state.step_history):
+                step = flow.state.steps.get(step_id)
+                if not step:
+                    continue
+                if step.step_type == StepType.TEST and "test_results" not in inputs:
+                    inputs["test_results"] = step.outputs.get("test_results")
+                elif step.step_type == StepType.IMPLEMENT and "changes_made" not in inputs:
+                    inputs["changes_made"] = {
+                        "files_changed": step.outputs.get("files_changed", []),
+                        "implemented_groups": step.outputs.get("implemented_groups", []),
+                    }
 
         # Special handling for IMPLEMENT step when in fix iteration
         if step_type == StepType.IMPLEMENT:
