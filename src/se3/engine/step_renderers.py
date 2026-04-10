@@ -480,6 +480,68 @@ def _render_analyze(step: Step) -> None:
     render_full("\n".join(lines), title="Analysis")
 
 
+@register_renderer(StepType.SELF_CHECK)
+def _render_self_check(step: Step) -> None:
+    outputs = step.outputs or {}
+
+    lines: list[str] = []
+
+    # ── Status line ───────────────────────────────────────────────
+    actionable_count = outputs.get("actionable_count", 0)
+    issues = outputs.get("issues", [])
+    if actionable_count == 0:
+        lines.append("[bold green]✓ PASSED[/bold green]")
+    else:
+        lines.append(f"[bold red]✗ {actionable_count} actionable issue(s)[/bold red]")
+
+    # ── Summary ───────────────────────────────────────────────────
+    result = outputs.get("self_check_result", {})
+    summary = result.get("summary", "") if isinstance(result, dict) else ""
+    if summary:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append(f"  {summary}")
+
+    # ── Issues by severity ────────────────────────────────────────
+    if issues and isinstance(issues, list):
+        severity_styles = {
+            "critical": ("[bold red]critical[/bold red]", "[red]"),
+            "high": ("[bold red]high[/bold red]", "[red]"),
+            "medium": ("[bold yellow]medium[/bold yellow]", "[yellow]"),
+            "low": ("[dim]low[/dim]", "[dim]"),
+        }
+
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+
+        for severity in ("critical", "high", "medium", "low"):
+            group = [i for i in issues if isinstance(i, dict) and i.get("severity") == severity]
+            if not group:
+                continue
+            _label, color = severity_styles.get(severity, ("[dim]?[/dim]", "[dim]"))
+            lines.append(f"{color}{severity}[/{color[1:-1]}]  [dim]({len(group)})[/dim]")
+            for issue in group:
+                desc = issue.get("description", "")
+                location = issue.get("location", "")
+                loc_suffix = f" [dim]@ {location}[/dim]" if location else ""
+                lines.append(f"  {color}•[/{color[1:-1]}] {desc}{loc_suffix}")
+            lines.append("")
+
+    # ── Warning ───────────────────────────────────────────────────
+    warning = outputs.get("warning", "")
+    if warning:
+        lines.append(f"[bold yellow]⚠ {warning}[/bold yellow]")
+
+    # ── Error ─────────────────────────────────────────────────────
+    if step.error_message:
+        lines.append("")
+        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+
+    render_full("\n".join(lines), title="Self Check")
+
+
 @register_renderer(StepType.VERIFY_SPEC)
 def _render_verify_spec(step: Step) -> None:
     outputs = step.outputs or {}
