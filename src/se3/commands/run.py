@@ -954,7 +954,7 @@ def _generate_iteration_summary(
                 capture_output=True, text=True, timeout=30,
             )
             if diff_result.returncode == 0:
-                diff_text = diff_result.stdout[:3000]
+                diff_text = diff_result.stdout[:5000]
 
         # Collect test results from flow state if available
         test_output = ""

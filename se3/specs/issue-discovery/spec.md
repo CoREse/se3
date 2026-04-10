@@ -16,7 +16,7 @@ The system SHALL support two classes of issue discovery:
 #### Scenario: A-class trigger on fix loop exhaustion
 - **WHEN** the test→verify_spec→implement fix loop reaches `max_fix_iterations`
 - **THEN** `IssueDiscovery.create_from_fix_loop_exhaustion()` creates a `high` priority issue
-- **AND** the issue includes fix history, last test output, and fix instructions
+- **AND** the issue includes fix history (last 5 entries), last test output (tail 1000 chars), and fix instructions (first 1500 chars)
 
 #### Scenario: A-class trigger on pre-existing test failures
 - **WHEN** the test step detects failures that exist in `se3/state/known_test_failures.json` (not introduced by the current change)

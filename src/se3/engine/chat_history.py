@@ -407,8 +407,11 @@ def format_conversation_for_llm(messages: List[ConversationMessage]) -> str:
             if msg.tool_results:
                 for tr in msg.tool_results:
                     content = str(tr["content"])
-                    if len(content) > 500:
-                        content = content[:500] + "\n... [truncated]"
+                    if len(content) > 2000:
+                        if tr.get("is_error"):
+                            content = "... [truncated]\n" + content[-2000:]
+                        else:
+                            content = content[:2000] + "\n... [truncated]"
                     status = " (error)" if tr.get("is_error") else ""
                     parts.append(f"[Tool Result{status}]: {content}")
 
@@ -486,21 +489,21 @@ def format_history_for_retry(
                         formatted = format_conversation_for_llm(conversation)
                         # In 'continue' mode, preserve tool-call-containing responses untruncated
                         if not has_tool_calls and len(formatted) > assistant_fallback_limit:
-                            formatted = formatted[:assistant_fallback_limit] + "\n... [truncated]"
+                            formatted = "... [truncated]\n" + formatted[-assistant_fallback_limit:]
                         parts.append(f"\n[Assistant Response]:")
                         parts.append(formatted)
                     else:
                         # Fallback to simplified content if parsing fails
                         content = msg.content
                         if len(content) > assistant_fallback_limit:
-                            content = content[:assistant_fallback_limit] + "\n... [truncated]"
+                            content = "... [truncated]\n" + content[-assistant_fallback_limit:]
                         parts.append(f"\n[Assistant Response]:")
                         parts.append(content)
                 else:
                     # No raw_json, use simplified content
                     content = msg.content
                     if len(content) > assistant_fallback_limit:
-                        content = content[:assistant_fallback_limit] + "\n... [truncated]"
+                        content = "... [truncated]\n" + content[-assistant_fallback_limit:]
                     parts.append(f"\n[Assistant Response]:")
                     parts.append(content)
 

@@ -126,15 +126,15 @@ class LoopController:
     def add_summary(self, summary: str) -> None:
         """Append an iteration summary to the accumulated list.
 
-        Enforces a total length cap of 2000 characters.  When exceeded,
+        Enforces a total length cap of 4000 characters.  When exceeded,
         early entries are replaced with a placeholder.
         """
         self.accumulated_summaries.append(summary)
         self._truncate_summaries()
 
     def _truncate_summaries(self) -> None:
-        """Ensure total accumulated summary length stays under 2000 chars."""
-        max_len = 2000
+        """Ensure total accumulated summary length stays under 4000 chars."""
+        max_len = 4000
         placeholder = "[...earlier iterations omitted...]"
         total = sum(len(s) for s in self.accumulated_summaries)
         if total <= max_len:

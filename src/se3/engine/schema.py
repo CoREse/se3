@@ -396,8 +396,8 @@ def _summarize_outputs(outputs: Dict[str, Any], step_type: str) -> Dict[str, Any
         if field in outputs:
             value = outputs[field]
             # Truncate long values
-            if isinstance(value, str) and len(value) > 200:
-                summary[field] = value[:200] + "..."
+            if isinstance(value, str) and len(value) > 1000:
+                summary[field] = value[:1000] + "..."
             else:
                 summary[field] = value
 

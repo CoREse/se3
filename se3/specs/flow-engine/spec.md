@@ -519,6 +519,50 @@ The injected prompt SHALL:
 - **AND** 支持按 flow_id 和 step_type 筛选查看
 - **AND** 区分通讯 JSON（解析渲染）和 LLM 输出 JSON（原样展示）
 
+### Requirement: LLM Content Truncation Strategy
+
+The flow engine SHALL apply content-aware truncation when feeding diagnostic output (stderr, stdout, tool results, step summaries) into LLM prompts, to maximize the LLM's ability to diagnose and fix issues within token constraints.
+
+**Truncation Direction Policy:**
+- **Error content** (stderr, error tool_results): tail-truncate (`content[-N:]`) — error root causes and tracebacks appear at the end
+- **Non-error content** (stdout, normal tool_results): head-truncate (`content[:N]`) — context and setup appear at the start
+- **Assistant responses** in retry/continue context: tail-truncate — final conclusions, tool results, and last actions are at the end
+- **User prompts** in retry/continue context: head-truncate — instructions and intent are at the start
+
+**Minimum Truncation Limits for LLM-consumed content:**
+
+| Context | Content Type | Min Chars | Direction |
+|---------|-------------|-----------|-----------|
+| Fix instructions (test, verify_spec) | stderr | 2000 | tail |
+| Fix instructions (test, verify_spec) | failures section | 3000 | smart (per test block) |
+| LLM prompt test results (verify_spec, self_check) | stderr per phase | 1500 | tail |
+| LLM prompt test results (verify_spec, self_check) | stdout per phase | 1000 | tail |
+| Chat history tool_result | content | 2000 | direction-aware |
+| Chat history retry/continue | assistant response | 2000/4000 | tail |
+| JSON retry prompt (LLM caller) | previous response | 1500 | head |
+| Test history record | stderr per phase | 1000 | tail |
+| Test history record | stdout per phase | 1000 | tail |
+| Loop iteration summaries | accumulated total | 4000 | FIFO eviction |
+| Context.json step output values | string values | 1000 | head |
+| Iteration summary diff (run.py) | git diff | 5000 | head |
+| Salvage diff summary | git diff | 4000 | head |
+
+**Design rationale:** Stderr is the primary source of traceback and error diagnostics for LLM-driven fix loops. Previous limits (300-500 chars) were insufficient for a single Python traceback. The limits above ensure at least one complete error chain is preserved in all diagnostic contexts.
+
+#### Scenario: Error content uses tail truncation
+- **WHEN** the system truncates stderr or error tool_result content for LLM consumption
+- **THEN** tail truncation (`content[-N:]`) is used to preserve the error root cause
+
+#### Scenario: Assistant response uses tail truncation in retry context
+- **WHEN** `format_history_for_retry()` truncates a previous assistant response
+- **THEN** tail truncation is used to preserve final conclusions and tool results
+- **AND** user prompts use head truncation to preserve instructions
+
+#### Scenario: Loop iteration summaries use FIFO eviction
+- **WHEN** accumulated iteration summaries exceed the total character limit
+- **THEN** earliest summaries are evicted first, replaced with a placeholder
+- **AND** recent iteration summaries are preserved in full
+
 ### Requirement: 状态持久化与恢复
 
 流程引擎 SHALL 将运行状态持久化为 JSON 文件（`se3/state/engine.json`），支持任意步骤中断后精确恢复。

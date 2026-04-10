@@ -1,0 +1,23 @@
+id: '064'
+title: 'Issue 12 (task_description truncation at line 195): The checklist suggested
+  using full text at line 195, and the implementation does remove the [:200] truncation.
+  However, for very long task descriptions (1000+ chars), embedding the full text
+  in an issue description field may produce unnecessarily verbose issues.'
+description: 'Issue 12 (task_description truncation at line 195): The checklist suggested
+  using full text at line 195, and the implementation does remove the [:200] truncation.
+  However, for very long task descriptions (1000+ chars), embedding the full text
+  in an issue description field may produce unnecessarily verbose issues.
+
+
+  Suggestion: This is a minor trade-off and acceptable as-is. The original 200-char
+  limit was too short; full text is reasonable for issue descriptions.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-10T14:21:22.486767'
+updated_at: '2026-04-10T14:21:22.486767'

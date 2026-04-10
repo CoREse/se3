@@ -221,7 +221,7 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if not tests_passed and not fix_instructions:
             stdout = test_results.get("stdout", "") if isinstance(test_results, dict) else ""
             stderr = test_results.get("stderr", "") if isinstance(test_results, dict) else ""
-            fix_instructions = f"Tests are failing. Please review and fix the implementation.\n\nTest output:\n{_extract_failures_section(stdout, max_chars=2000)}\n\nStderr:\n{stderr[-500:]}"
+            fix_instructions = f"Tests are failing. Please review and fix the implementation.\n\nTest output:\n{_extract_failures_section(stdout, max_chars=3000)}\n\nStderr:\n{stderr[-2000:]}"
             logger.warning("Tests failed but LLM didn't provide fix instructions - using default")
 
         # Store fix instructions in outputs
@@ -453,7 +453,7 @@ def _format_test_results(test_results: dict[str, Any]) -> str:
                 lines.append(f"Output (last 1000 chars):\n{stdout[-1000:]}")
             stderr = phase.get("stderr", "")
             if stderr and not passed:
-                lines.append(f"Stderr (last 500 chars):\n{stderr[-500:]}")
+                lines.append(f"Stderr (last 1500 chars):\n{stderr[-1500:]}")
 
         return "\n".join(lines)
 
@@ -468,7 +468,7 @@ def _format_test_results(test_results: dict[str, Any]) -> str:
 
     stderr = test_results.get("stderr", "")
     if stderr:
-        lines.append(f"\nError output:\n{stderr[-500:]}")
+        lines.append(f"\nError output:\n{stderr[-1500:]}")
 
     return "\n".join(lines)
 

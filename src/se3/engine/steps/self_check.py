@@ -250,7 +250,7 @@ def _format_test_results(test_results: dict[str, Any]) -> str:
                 lines.append(f"Output (last 1000 chars):\n{stdout[-1000:]}")
             stderr = phase.get("stderr", "")
             if stderr and not passed:
-                lines.append(f"Stderr (last 500 chars):\n{stderr[-500:]}")
+                lines.append(f"Stderr (last 1500 chars):\n{stderr[-1500:]}")
 
         return "\n".join(lines)
 
@@ -264,7 +264,7 @@ def _format_test_results(test_results: dict[str, Any]) -> str:
 
     stderr = test_results.get("stderr", "")
     if stderr:
-        lines.append(f"\nError output:\n{stderr[-500:]}")
+        lines.append(f"\nError output:\n{stderr[-1500:]}")
 
     return "\n".join(lines)
 

@@ -1023,7 +1023,7 @@ class LLMCaller:
 
 IMPORTANT: Your previous response was not in the required JSON format. You responded with:
 ---
-{text_content[:500]}
+{text_content[:1500]}
 ---
 
 Please respond ONLY with valid JSON as specified in the instructions above. Do not include any explanatory text before or after the JSON."""

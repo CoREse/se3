@@ -113,16 +113,16 @@ class IssueDiscovery:
                     # Try phases format
                     for phase in test_results.get("phases", []):
                         if not phase.get("passed", True):
-                            stdout = phase.get("stdout", "")[-500:]
+                            stdout = phase.get("stdout", "")[-1000:]
                             break
             if stdout:
-                desc_parts.extend(["", "**Last test output (truncated):**", f"```\n{stdout[-500:]}\n```"])
+                desc_parts.extend(["", "**Last test output (truncated):**", f"```\n{stdout}\n```"])
 
         # Include fix history summary
         fix_history = flow.state.fix_history
         if fix_history:
             desc_parts.extend(["", "**Fix attempt history:**"])
-            for entry in fix_history[-3:]:  # Last 3 entries
+            for entry in fix_history[-5:]:
                 iteration = entry.get("iteration", "?")
                 ctx = entry.get("context", {})
                 reason = ctx.get("reason", "unknown")
@@ -131,7 +131,7 @@ class IssueDiscovery:
         # Include fix instructions if available
         fix_instructions = trigger_step.outputs.get("fix_instructions", "")
         if fix_instructions:
-            desc_parts.extend(["", "**Last fix instructions:**", fix_instructions[:500]])
+            desc_parts.extend(["", "**Last fix instructions:**", fix_instructions[:1500]])
 
         description = "\n".join(desc_parts)
 
@@ -192,7 +192,7 @@ class IssueDiscovery:
 
         desc_parts.extend([
             "",
-            f"**Task:** {flow.task_description[:200]}",
+            f"**Task:** {flow.task_description}",
             "",
             "These tests should be investigated and fixed to prevent the broken-window effect.",
         ])

@@ -169,7 +169,7 @@ def _assess_git_diff(project_root: Path) -> Dict[str, Any]:
         capture_output=True, text=True, cwd=project_root,
     )
     full_diff = result.stdout
-    info["diff_summary"] = full_diff[:2000] if full_diff else ""
+    info["diff_summary"] = full_diff[:4000] if full_diff else ""
 
     # Changed file list
     info["changed_files"] = []
