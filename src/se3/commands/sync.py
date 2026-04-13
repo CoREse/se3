@@ -8,9 +8,11 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import logging
 from enum import Enum
 from pathlib import Path
+from typing import Optional
 
 import typer
 
@@ -48,3 +50,42 @@ def sync_command(
     )
 
     logger.info("se3 sync called with mode=%s, project_root=%s", mode.value, project_root)
+
+
+def process_call_response(
+    call_file: Path,
+    project_root: Optional[Path] = None,
+) -> None:
+    """Process an MCP call response file for sync conflicts.
+
+    Scans the response file for the given call file, parses each
+    conflict's decision, and executes the corresponding action.
+
+    Args:
+        call_file: Path to the original call file.
+        project_root: Project root directory. Auto-detected if None.
+    """
+    from ..engine.sync_engine import SyncEngine
+
+    if project_root is None:
+        from .run import get_project_root
+        project_root = get_project_root()
+
+    call_path = Path(call_file)
+    if not call_path.exists():
+        render_text(f"Call file not found: {call_path}", title="SE3 Sync Error")
+        return
+
+    response_path = Path(str(call_path) + ".response")
+    if not response_path.exists():
+        render_text(f"Response file not found: {response_path}", title="SE3 Sync Error")
+        return
+
+    engine = SyncEngine(project_root)
+    result = engine.process_call_response(call_path)
+
+    render_text(
+        f"Specs updated: {result['specs_updated']}\n"
+        f"Issues created: {result['issues_created']}",
+        title="SE3 Sync — Call Response Processed",
+    )

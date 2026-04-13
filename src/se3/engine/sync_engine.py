@@ -43,14 +43,18 @@ class SpecDiff:
     spec_name: str
     description: str
     code_location: str = ""
+    confidence: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d: Dict[str, Any] = {
             "diff_type": self.diff_type.value,
             "spec_name": self.spec_name,
             "description": self.description,
             "code_location": self.code_location,
         }
+        if self.confidence:
+            d["confidence"] = self.confidence
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SpecDiff:
@@ -59,6 +63,7 @@ class SpecDiff:
             spec_name=data["spec_name"],
             description=data["description"],
             code_location=data.get("code_location", ""),
+            confidence=data.get("confidence", ""),
         )
 
 
@@ -117,10 +122,11 @@ class Conflict:
     spec_content: str = ""
     code_content: str = ""
     code_location: str = ""
+    confidence: str = ""
     decision: ConflictDecision = ConflictDecision.PENDING
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d: Dict[str, Any] = {
             "spec_name": self.spec_name,
             "description": self.description,
             "spec_content": self.spec_content,
@@ -128,6 +134,9 @@ class Conflict:
             "code_location": self.code_location,
             "decision": self.decision.value,
         }
+        if self.confidence:
+            d["confidence"] = self.confidence
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> Conflict:
@@ -137,6 +146,7 @@ class Conflict:
             spec_content=data.get("spec_content", ""),
             code_content=data.get("code_content", ""),
             code_location=data.get("code_location", ""),
+            confidence=data.get("confidence", ""),
             decision=ConflictDecision(data.get("decision", "pending")),
         )
 
@@ -201,6 +211,60 @@ class SyncResult:
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False)
 
+
+_CONFLICT_RESOLUTION_PROMPT = """\
+You are an expert software engineer resolving a spec-code conflict.
+
+## Conflict Details
+
+**Spec:** {spec_name}
+**Description:** {description}
+**Code location:** {code_location}
+
+## Current Spec Content
+
+{spec_content}
+
+## Task
+
+Decide how to resolve this conflict:
+
+1. **update_spec** — The code is correct or represents a deliberate improvement; update the spec to match.
+2. **create_issue** — The spec is correct; the code needs to be fixed.
+
+Consider:
+- If the code represents a deliberate improvement or natural evolution, choose update_spec.
+- If the code appears to violate an intentional, important requirement, choose create_issue.
+
+Return a JSON object:
+{{"decision": "update_spec" or "create_issue", "reasoning": "Brief explanation"}}
+"""
+
+_CONFLICT_SPEC_UPDATE_PROMPT = """\
+You are an expert software engineer updating a specification document.
+
+## Task
+
+A conflict was found between the spec and project code. The decision is to update
+the spec to match the code's actual behavior.
+
+## Conflict
+
+{description}
+Code location: {code_location}
+
+## Spec: {spec_name}
+
+### Current Spec Content
+
+{spec_content}
+
+## Instructions
+
+Return the complete updated spec content (the full markdown document).
+Modify only the parts that conflict with the code's behavior.
+Keep all other existing requirements intact.
+"""
 
 _SPEC_UPDATE_PROMPT_TEMPLATE = """\
 You are an expert software engineer updating a specification document.
@@ -294,7 +358,7 @@ class SyncEngine:
         3. Analyze each spec
         4. Process results by diff type
         5. Manage issue lifecycle
-        6. Generate call file for conflicts (if needed)
+        6. Handle conflicts based on mode
 
         Returns:
             SyncResult with all analysis results and actions taken.
@@ -342,12 +406,24 @@ class SyncEngine:
         closed = self._manage_issue_lifecycle(all_gap_titles)
         result.issues_closed += closed
 
-        conflicts = self._collect_conflicts(result.analyses)
-        result.conflicts = conflicts
+        all_conflicts = self._gather_all_conflicts(result.analyses)
 
-        if conflicts and self.mode != "fast":
-            call_path = self._generate_call_file(conflicts)
-            result.call_file = str(call_path)
+        if self.mode == "fast":
+            cr = self._handle_conflicts_fast(all_conflicts, llm_caller)
+            result.specs_updated += cr["specs_updated"]
+            result.issues_created += cr["issues_created"]
+        elif self.mode == "strict":
+            cr = self._handle_conflicts_strict(all_conflicts)
+            result.conflicts = cr["conflicts"]
+            if cr["call_file"]:
+                result.call_file = cr["call_file"]
+        else:
+            cr = self._handle_conflicts_default(all_conflicts, llm_caller)
+            result.specs_updated += cr["specs_updated"]
+            result.issues_created += cr["issues_created"]
+            result.conflicts = cr["unresolved"]
+            if cr["call_file"]:
+                result.call_file = cr["call_file"]
 
         return result
 
@@ -480,24 +556,17 @@ class SyncEngine:
 
         return closed
 
-    def _collect_conflicts(self, analyses: List[SpecAnalysis]) -> List[Conflict]:
-        """Collect conflicts from all analyses based on mode.
-
-        In 'fast' mode, no conflicts are collected (LLM handles all).
-        In 'default' mode, only LLM-uncertain conflicts are collected.
-        In 'strict' mode, all conflicts are collected.
-        """
+    def _gather_all_conflicts(self, analyses: List[SpecAnalysis]) -> List[Conflict]:
+        """Gather all conflict diffs from analyses into Conflict objects."""
         conflicts: List[Conflict] = []
 
         for analysis in analyses:
             for diff in analysis.conflicts:
-                if self.mode == "fast":
-                    continue
-
                 conflicts.append(Conflict(
                     spec_name=diff.spec_name,
                     description=diff.description,
                     code_location=diff.code_location,
+                    confidence=diff.confidence,
                 ))
 
         return conflicts
@@ -541,3 +610,256 @@ class SyncEngine:
 
         logger.info("Generated sync call file: %s", call_file)
         return call_file
+
+    def _resolve_conflict_via_llm(
+        self, conflict: Conflict, llm_caller: Any
+    ) -> str:
+        """Call LLM to decide how to resolve a conflict.
+
+        Returns:
+            'update_spec' or 'create_issue'.
+        """
+        spec_content = ""
+        if conflict.spec_name in self._specs:
+            spec_content = self._specs[conflict.spec_name].get("content", "")
+
+        prompt = _CONFLICT_RESOLUTION_PROMPT.format(
+            spec_name=conflict.spec_name,
+            description=conflict.description,
+            code_location=conflict.code_location or "(not specified)",
+            spec_content=spec_content or "(not available)",
+        )
+
+        try:
+            response = llm_caller.call(prompt=prompt, json_mode="extract")
+            data = json.loads(response)
+            decision = data.get("decision", "create_issue")
+            if decision in ("update_spec", "create_issue"):
+                return decision
+            logger.warning("Unknown LLM decision '%s', defaulting to create_issue", decision)
+            return "create_issue"
+        except Exception as e:
+            logger.error("LLM conflict resolution failed for '%s': %s", conflict.spec_name, e)
+            return "create_issue"
+
+    def _apply_conflict_spec_update(
+        self, conflict: Conflict, llm_caller: Any
+    ) -> bool:
+        """Use LLM to update a spec file based on a conflict resolution.
+
+        Returns:
+            True if the spec was updated successfully.
+        """
+        spec_info = self._specs.get(conflict.spec_name)
+        if not spec_info:
+            logger.warning("Spec '%s' not found for conflict update", conflict.spec_name)
+            return False
+
+        prompt = _CONFLICT_SPEC_UPDATE_PROMPT.format(
+            spec_name=conflict.spec_name,
+            description=conflict.description,
+            code_location=conflict.code_location or "(not specified)",
+            spec_content=spec_info["content"],
+        )
+
+        try:
+            updated_content = llm_caller.call(prompt=prompt, json_mode="off")
+            updated_content = updated_content.strip()
+
+            if not updated_content:
+                logger.warning("LLM returned empty content for conflict spec update '%s'", conflict.spec_name)
+                return False
+
+            Path(spec_info["path"]).write_text(updated_content, encoding="utf-8")
+            logger.info("Updated spec '%s' for conflict resolution", conflict.spec_name)
+            return True
+        except Exception as e:
+            logger.error("Failed to update spec '%s' for conflict: %s", conflict.spec_name, e)
+            return False
+
+    def _apply_conflict_create_issue(self, conflict: Conflict) -> bool:
+        """Create an issue for a conflict.
+
+        Returns:
+            True if the issue was created successfully.
+        """
+        from .issue_manager import IssueManager
+
+        mgr = IssueManager(self.project_root)
+        title = f"[sync-conflict] {conflict.spec_name}: {conflict.description}"
+
+        existing = mgr.find_open_by_title(title)
+        if existing:
+            logger.info("Skipping duplicate issue for conflict: %s", title)
+            return False
+
+        description = (
+            f"Spec '{conflict.spec_name}' conflicts with the code implementation.\n\n"
+            f"**Conflict:** {conflict.description}\n"
+        )
+        if conflict.code_location:
+            description += f"**Code location:** {conflict.code_location}\n"
+
+        mgr.create(
+            title=title,
+            description=description,
+            priority="high",
+            scope="in_scope",
+            tags=list(SYNC_TAGS) + ["conflict"],
+            type="task",
+        )
+        logger.info("Created issue for conflict: %s", title)
+        return True
+
+    def _handle_conflicts_fast(
+        self, conflicts: List[Conflict], llm_caller: Any
+    ) -> Dict[str, Any]:
+        """Fast mode: LLM auto-handles all conflicts.
+
+        For each conflict, calls LLM to decide whether to update the spec
+        or create an issue, then executes the decision.
+
+        Returns:
+            Dict with specs_updated and issues_created counts.
+        """
+        specs_updated = 0
+        issues_created = 0
+
+        for conflict in conflicts:
+            decision = self._resolve_conflict_via_llm(conflict, llm_caller)
+
+            if decision == "update_spec":
+                if self._apply_conflict_spec_update(conflict, llm_caller):
+                    specs_updated += 1
+            else:
+                if self._apply_conflict_create_issue(conflict):
+                    issues_created += 1
+
+        return {"specs_updated": specs_updated, "issues_created": issues_created}
+
+    def _handle_conflicts_strict(
+        self, conflicts: List[Conflict]
+    ) -> Dict[str, Any]:
+        """Strict mode: all conflicts collected into one MCP call file.
+
+        Returns:
+            Dict with conflicts list and optional call_file path.
+        """
+        if not conflicts:
+            return {"conflicts": [], "call_file": None}
+
+        call_path = self._generate_call_file(conflicts)
+        return {"conflicts": conflicts, "call_file": str(call_path)}
+
+    def _handle_conflicts_default(
+        self, conflicts: List[Conflict], llm_caller: Any
+    ) -> Dict[str, Any]:
+        """Default mode: LLM auto-handles high-confidence, collects low-confidence.
+
+        High-confidence conflicts are resolved automatically by LLM.
+        Low-confidence conflicts are batched into an MCP call file for
+        human decision.
+
+        Returns:
+            Dict with specs_updated, issues_created, unresolved list, and call_file.
+        """
+        specs_updated = 0
+        issues_created = 0
+        unresolved: List[Conflict] = []
+
+        for conflict in conflicts:
+            if conflict.confidence == "high":
+                decision = self._resolve_conflict_via_llm(conflict, llm_caller)
+                if decision == "update_spec":
+                    if self._apply_conflict_spec_update(conflict, llm_caller):
+                        specs_updated += 1
+                else:
+                    if self._apply_conflict_create_issue(conflict):
+                        issues_created += 1
+            else:
+                unresolved.append(conflict)
+
+        call_file: Optional[str] = None
+        if unresolved:
+            call_path = self._generate_call_file(unresolved)
+            call_file = str(call_path)
+
+        return {
+            "specs_updated": specs_updated,
+            "issues_created": issues_created,
+            "unresolved": unresolved,
+            "call_file": call_file,
+        }
+
+    def process_call_response(
+        self, call_file_path: Path, llm_caller: Any = None
+    ) -> Dict[str, Any]:
+        """Process an MCP call response file for sync conflicts.
+
+        Reads the response file, parses each conflict's decision, and
+        executes the corresponding action (update spec or create issue).
+
+        Args:
+            call_file_path: Path to the original call file (response file
+                is at {call_file_path}.response).
+            llm_caller: LLMCaller instance. Created if None.
+
+        Returns:
+            Dict with specs_updated and issues_created counts.
+        """
+        response_path = Path(str(call_file_path) + ".response")
+
+        if not response_path.exists():
+            logger.warning("Response file not found: %s", response_path)
+            return {"specs_updated": 0, "issues_created": 0}
+
+        try:
+            response_data = json.loads(response_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error("Failed to read response file '%s': %s", response_path, e)
+            return {"specs_updated": 0, "issues_created": 0}
+
+        if not self._specs:
+            self._load_specs()
+
+        if llm_caller is None:
+            from .llm_caller import LLMCaller
+            llm_caller = LLMCaller(project_root=self.project_root)
+
+        call_data: Dict[str, Any] = {}
+        try:
+            call_data = json.loads(Path(call_file_path).read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error("Failed to read call file '%s': %s", call_file_path, e)
+            return {"specs_updated": 0, "issues_created": 0}
+
+        call_conflicts = {
+            c["id"]: c for c in call_data.get("conflicts", [])
+        }
+
+        specs_updated = 0
+        issues_created = 0
+
+        for item in response_data.get("conflicts", []):
+            conflict_id = item.get("id")
+            decision = item.get("decision", "")
+
+            if decision not in ("update_spec", "create_issue"):
+                logger.warning("Skipping conflict %s with invalid decision '%s'", conflict_id, decision)
+                continue
+
+            original = call_conflicts.get(conflict_id, {})
+            conflict = Conflict(
+                spec_name=original.get("spec_name", ""),
+                description=original.get("description", ""),
+                code_location=original.get("code_location", ""),
+            )
+
+            if decision == "update_spec":
+                if self._apply_conflict_spec_update(conflict, llm_caller):
+                    specs_updated += 1
+            else:
+                if self._apply_conflict_create_issue(conflict):
+                    issues_created += 1
+
+        return {"specs_updated": specs_updated, "issues_created": issues_created}

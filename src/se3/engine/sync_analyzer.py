@@ -23,7 +23,8 @@ _ANALYSIS_JSON_SCHEMA = """\
       "type": "gap | extension | conflict",
       "description": "Clear description of the difference",
       "spec_requirement": "The relevant spec requirement text",
-      "code_location": "file_path:line_number or description of code area"
+      "code_location": "file_path:line_number or description of code area",
+      "confidence": "high | low  (only for conflict type — how confident you are about resolving this automatically)"
     }
   ]
 }"""
@@ -59,6 +60,9 @@ Classify each difference into exactly one of these three types:
    - The spec says "SHALL use JWT tokens" but the code uses session tokens.
    - The spec defines a specific API interface but the code uses a different signature.
    - Behavioral differences where the code contradicts the spec's stated requirements.
+   - For each conflict, include a "confidence" field:
+     - "high" — You are confident about which side (spec or code) is correct and how to resolve it.
+     - "low" — The resolution is ambiguous and requires human judgment.
 
 ## Rules
 
@@ -248,12 +252,17 @@ class SyncAnalyzer:
                 )
                 continue
 
+            confidence = ""
+            if diff_type == DiffType.CONFLICT:
+                confidence = item.get("confidence", "low")
+
             diffs.append(
                 SpecDiff(
                     diff_type=diff_type,
                     spec_name=spec_name,
                     description=item.get("description", ""),
                     code_location=item.get("code_location", ""),
+                    confidence=confidence,
                 )
             )
 

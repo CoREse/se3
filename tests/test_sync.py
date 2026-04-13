@@ -1012,45 +1012,46 @@ class TestSyncEngineIssueLifecycle:
         assert len(mgr.list_issues()) == 1
 
 
-class TestSyncEngineCollectConflicts:
+class TestSyncEngineGatherAllConflicts:
     def _make_analyses(self):
         return [
             SpecAnalysis(
                 spec_name="auth",
                 diffs=[
-                    SpecDiff(DiffType.CONFLICT, "auth", "Token mismatch", "src/auth.py:10"),
+                    SpecDiff(DiffType.CONFLICT, "auth", "Token mismatch", "src/auth.py:10", confidence="high"),
                     SpecDiff(DiffType.GAP, "auth", "Missing feature"),
                 ],
             ),
             SpecAnalysis(
                 spec_name="config",
                 diffs=[
-                    SpecDiff(DiffType.CONFLICT, "config", "Format mismatch"),
+                    SpecDiff(DiffType.CONFLICT, "config", "Format mismatch", confidence="low"),
                 ],
             ),
         ]
 
-    def test_default_mode_collects_conflicts(self):
+    def test_gathers_all_conflicts(self):
         engine = SyncEngine(Path("/fake"), mode="default")
-        conflicts = engine._collect_conflicts(self._make_analyses())
+        conflicts = engine._gather_all_conflicts(self._make_analyses())
         assert len(conflicts) == 2
         assert conflicts[0].spec_name == "auth"
         assert conflicts[1].spec_name == "config"
 
-    def test_strict_mode_collects_all_conflicts(self):
-        engine = SyncEngine(Path("/fake"), mode="strict")
-        conflicts = engine._collect_conflicts(self._make_analyses())
-        assert len(conflicts) == 2
+    def test_preserves_confidence(self):
+        engine = SyncEngine(Path("/fake"))
+        conflicts = engine._gather_all_conflicts(self._make_analyses())
+        assert conflicts[0].confidence == "high"
+        assert conflicts[1].confidence == "low"
 
-    def test_fast_mode_collects_no_conflicts(self):
-        engine = SyncEngine(Path("/fake"), mode="fast")
-        conflicts = engine._collect_conflicts(self._make_analyses())
-        assert len(conflicts) == 0
+    def test_excludes_non_conflicts(self):
+        engine = SyncEngine(Path("/fake"))
+        conflicts = engine._gather_all_conflicts(self._make_analyses())
+        assert all(c.description != "Missing feature" for c in conflicts)
 
     def test_no_conflicts_in_analysis(self):
-        engine = SyncEngine(Path("/fake"), mode="default")
+        engine = SyncEngine(Path("/fake"))
         analyses = [SpecAnalysis(spec_name="clean", diffs=[])]
-        conflicts = engine._collect_conflicts(analyses)
+        conflicts = engine._gather_all_conflicts(analyses)
         assert conflicts == []
 
 
@@ -1177,16 +1178,584 @@ class TestSyncEngineRun:
              patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None), \
              patch("se3.engine.project_context.ProjectContextCollector.collect",
                    return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
-             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze:
+             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
+             patch("se3.engine.sync_engine.SyncEngine._handle_conflicts_fast") as mock_fast:
 
             mock_analyze.return_value = SpecAnalysis(
                 spec_name="auth",
                 diffs=[SpecDiff(DiffType.CONFLICT, "auth", "Token mismatch")],
             )
+            mock_fast.return_value = {"specs_updated": 1, "issues_created": 0}
 
             engine = SyncEngine(tmp_path, mode="fast")
             engine._sync_issues = []
             result = engine.run()
 
             assert result.call_file is None
-            assert len(result.conflicts) == 0
+            mock_fast.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# SpecDiff confidence field tests
+# ---------------------------------------------------------------------------
+
+class TestSpecDiffConfidence:
+    def test_confidence_default_empty(self):
+        diff = SpecDiff(DiffType.CONFLICT, "auth", "mismatch")
+        assert diff.confidence == ""
+
+    def test_confidence_roundtrip(self):
+        diff = SpecDiff(DiffType.CONFLICT, "auth", "mismatch", confidence="high")
+        data = diff.to_dict()
+        assert data["confidence"] == "high"
+        restored = SpecDiff.from_dict(data)
+        assert restored.confidence == "high"
+
+    def test_confidence_omitted_in_dict_when_empty(self):
+        diff = SpecDiff(DiffType.GAP, "auth", "gap")
+        data = diff.to_dict()
+        assert "confidence" not in data
+
+    def test_from_dict_missing_confidence(self):
+        data = {"diff_type": "conflict", "spec_name": "x", "description": "d"}
+        diff = SpecDiff.from_dict(data)
+        assert diff.confidence == ""
+
+
+class TestConflictConfidence:
+    def test_confidence_roundtrip(self):
+        c = Conflict(spec_name="auth", description="d", confidence="low")
+        data = c.to_dict()
+        assert data["confidence"] == "low"
+        restored = Conflict.from_dict(data)
+        assert restored.confidence == "low"
+
+    def test_confidence_omitted_when_empty(self):
+        c = Conflict(spec_name="auth", description="d")
+        data = c.to_dict()
+        assert "confidence" not in data
+
+
+# ---------------------------------------------------------------------------
+# SyncAnalyzer confidence parsing tests
+# ---------------------------------------------------------------------------
+
+class TestSyncAnalyzerConfidence:
+    def test_conflict_gets_confidence(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = json.dumps({
+            "diffs": [
+                {"type": "conflict", "description": "mismatch", "confidence": "high"},
+            ]
+        })
+        result = analyzer._parse_analysis_response("auth", response)
+        assert result.diffs[0].confidence == "high"
+
+    def test_conflict_defaults_to_low(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = json.dumps({
+            "diffs": [
+                {"type": "conflict", "description": "mismatch"},
+            ]
+        })
+        result = analyzer._parse_analysis_response("auth", response)
+        assert result.diffs[0].confidence == "low"
+
+    def test_gap_gets_no_confidence(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = json.dumps({
+            "diffs": [
+                {"type": "gap", "description": "missing", "confidence": "high"},
+            ]
+        })
+        result = analyzer._parse_analysis_response("auth", response)
+        assert result.diffs[0].confidence == ""
+
+    def test_extension_gets_no_confidence(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = json.dumps({
+            "diffs": [
+                {"type": "extension", "description": "extra"},
+            ]
+        })
+        result = analyzer._parse_analysis_response("auth", response)
+        assert result.diffs[0].confidence == ""
+
+    def test_analysis_prompt_mentions_confidence(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        prompt = analyzer._build_analysis_prompt("x", "s", "c")
+        assert "confidence" in prompt.lower()
+
+
+# ---------------------------------------------------------------------------
+# Conflict resolution helper tests
+# ---------------------------------------------------------------------------
+
+class TestResolveConflictViaLLM:
+    def test_returns_update_spec(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({"decision": "update_spec", "reasoning": "code is correct"})
+
+        conflict = Conflict(spec_name="auth", description="Token mismatch")
+        decision = engine._resolve_conflict_via_llm(conflict, llm)
+
+        assert decision == "update_spec"
+
+    def test_returns_create_issue(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({"decision": "create_issue", "reasoning": "spec is correct"})
+
+        conflict = Conflict(spec_name="auth", description="Token mismatch")
+        decision = engine._resolve_conflict_via_llm(conflict, llm)
+
+        assert decision == "create_issue"
+
+    def test_defaults_to_create_issue_on_unknown(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({"decision": "unknown"})
+
+        conflict = Conflict(spec_name="x", description="d")
+        decision = engine._resolve_conflict_via_llm(conflict, llm)
+
+        assert decision == "create_issue"
+
+    def test_defaults_to_create_issue_on_error(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        llm = MagicMock()
+        llm.call.side_effect = RuntimeError("LLM fail")
+
+        conflict = Conflict(spec_name="x", description="d")
+        decision = engine._resolve_conflict_via_llm(conflict, llm)
+
+        assert decision == "create_issue"
+
+    def test_prompt_includes_spec_content(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec with JWT")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({"decision": "create_issue"})
+
+        conflict = Conflict(spec_name="auth", description="Token mismatch")
+        engine._resolve_conflict_via_llm(conflict, llm)
+
+        prompt = llm.call.call_args.kwargs.get("prompt") or llm.call.call_args[0][0]
+        assert "Auth spec with JWT" in prompt
+
+
+class TestApplyConflictSpecUpdate:
+    def test_updates_spec_file(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Old auth spec")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = "# Updated auth spec"
+
+        conflict = Conflict(spec_name="auth", description="Token mismatch")
+        success = engine._apply_conflict_spec_update(conflict, llm)
+
+        assert success
+        actual = (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text()
+        assert actual == "# Updated auth spec"
+
+    def test_returns_false_when_spec_not_found(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+
+        conflict = Conflict(spec_name="nonexistent", description="d")
+        success = engine._apply_conflict_spec_update(conflict, MagicMock())
+
+        assert not success
+
+    def test_returns_false_on_empty_llm_response(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Original")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = "   "
+
+        conflict = Conflict(spec_name="auth", description="d")
+        success = engine._apply_conflict_spec_update(conflict, llm)
+
+        assert not success
+        assert (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text() == "# Original"
+
+    def test_returns_false_on_llm_error(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Original")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.side_effect = RuntimeError("fail")
+
+        conflict = Conflict(spec_name="auth", description="d")
+        success = engine._apply_conflict_spec_update(conflict, llm)
+
+        assert not success
+
+
+class TestApplyConflictCreateIssue:
+    def test_creates_issue(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        conflict = Conflict(spec_name="auth", description="Token mismatch", code_location="src/auth.py:10")
+
+        success = engine._apply_conflict_create_issue(conflict)
+
+        assert success
+        mgr = IssueManager(tmp_path)
+        issues = mgr.list_issues()
+        assert len(issues) == 1
+        assert "[sync-conflict] auth: Token mismatch" in issues[0].title
+        assert "conflict" in issues[0].tags
+        assert "src/auth.py:10" in issues[0].description
+
+    def test_idempotent_no_duplicates(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        conflict = Conflict(spec_name="auth", description="Token mismatch")
+
+        engine._apply_conflict_create_issue(conflict)
+        success = engine._apply_conflict_create_issue(conflict)
+
+        assert not success
+        mgr = IssueManager(tmp_path)
+        assert len(mgr.list_issues()) == 1
+
+
+# ---------------------------------------------------------------------------
+# Fast mode handler tests
+# ---------------------------------------------------------------------------
+
+class TestHandleConflictsFast:
+    def test_auto_resolves_all_conflicts(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+        engine = SyncEngine(tmp_path, mode="fast")
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.side_effect = [
+            json.dumps({"decision": "update_spec"}),
+            "# Updated auth spec",
+            json.dumps({"decision": "create_issue"}),
+        ]
+
+        conflicts = [
+            Conflict(spec_name="auth", description="Conflict A"),
+            Conflict(spec_name="auth", description="Conflict B"),
+        ]
+
+        result = engine._handle_conflicts_fast(conflicts, llm)
+
+        assert result["specs_updated"] == 1
+        assert result["issues_created"] == 1
+
+    def test_no_call_file_generated(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="fast")
+        result = engine._handle_conflicts_fast([], MagicMock())
+
+        assert result == {"specs_updated": 0, "issues_created": 0}
+        assert not (tmp_path / "se3" / "calls").exists()
+
+    def test_empty_conflicts(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="fast")
+        result = engine._handle_conflicts_fast([], MagicMock())
+        assert result["specs_updated"] == 0
+        assert result["issues_created"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Strict mode handler tests
+# ---------------------------------------------------------------------------
+
+class TestHandleConflictsStrict:
+    def test_generates_call_file_for_all(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="strict")
+        conflicts = [
+            Conflict(spec_name="auth", description="Conflict A"),
+            Conflict(spec_name="config", description="Conflict B"),
+        ]
+
+        result = engine._handle_conflicts_strict(conflicts)
+
+        assert len(result["conflicts"]) == 2
+        assert result["call_file"] is not None
+        call_path = Path(result["call_file"])
+        assert call_path.exists()
+
+        data = json.loads(call_path.read_text())
+        assert data["type"] == "sync_conflicts"
+        assert len(data["conflicts"]) == 2
+        assert data["conflicts"][0]["options"] == ["update_spec", "create_issue"]
+
+    def test_no_conflicts_no_call_file(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="strict")
+        result = engine._handle_conflicts_strict([])
+
+        assert result["conflicts"] == []
+        assert result["call_file"] is None
+
+
+# ---------------------------------------------------------------------------
+# Default mode handler tests
+# ---------------------------------------------------------------------------
+
+class TestHandleConflictsDefault:
+    def test_auto_resolves_high_confidence(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+        engine = SyncEngine(tmp_path, mode="default")
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.side_effect = [
+            json.dumps({"decision": "update_spec"}),
+            "# Updated spec",
+        ]
+
+        conflicts = [
+            Conflict(spec_name="auth", description="Mismatch A", confidence="high"),
+        ]
+
+        result = engine._handle_conflicts_default(conflicts, llm)
+
+        assert result["specs_updated"] == 1
+        assert result["issues_created"] == 0
+        assert result["unresolved"] == []
+        assert result["call_file"] is None
+
+    def test_collects_low_confidence(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="default")
+
+        conflicts = [
+            Conflict(spec_name="auth", description="Mismatch A", confidence="low"),
+            Conflict(spec_name="config", description="Mismatch B", confidence=""),
+        ]
+
+        result = engine._handle_conflicts_default(conflicts, MagicMock())
+
+        assert result["specs_updated"] == 0
+        assert result["issues_created"] == 0
+        assert len(result["unresolved"]) == 2
+        assert result["call_file"] is not None
+
+    def test_mixed_confidence(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+        engine = SyncEngine(tmp_path, mode="default")
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.side_effect = [
+            json.dumps({"decision": "create_issue"}),
+        ]
+
+        conflicts = [
+            Conflict(spec_name="auth", description="High conf", confidence="high"),
+            Conflict(spec_name="config", description="Low conf", confidence="low"),
+        ]
+
+        result = engine._handle_conflicts_default(conflicts, llm)
+
+        assert result["issues_created"] == 1
+        assert len(result["unresolved"]) == 1
+        assert result["unresolved"][0].description == "Low conf"
+        assert result["call_file"] is not None
+
+    def test_no_low_confidence_no_call_file(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+        engine = SyncEngine(tmp_path, mode="default")
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.side_effect = [
+            json.dumps({"decision": "update_spec"}),
+            "# Updated spec",
+        ]
+
+        conflicts = [
+            Conflict(spec_name="auth", description="High only", confidence="high"),
+        ]
+
+        result = engine._handle_conflicts_default(conflicts, llm)
+
+        assert result["call_file"] is None
+        assert result["unresolved"] == []
+
+
+# ---------------------------------------------------------------------------
+# Process call response tests
+# ---------------------------------------------------------------------------
+
+class TestProcessCallResponse:
+    def _create_call_and_response(self, tmp_path, call_conflicts, response_decisions):
+        calls_dir = tmp_path / "se3" / "calls"
+        calls_dir.mkdir(parents=True, exist_ok=True)
+
+        call_file = calls_dir / "sync_conflicts_12345.json"
+        call_data = {
+            "type": "sync_conflicts",
+            "mode": "strict",
+            "timestamp": 12345,
+            "conflicts": call_conflicts,
+        }
+        call_file.write_text(json.dumps(call_data), encoding="utf-8")
+
+        response_file = calls_dir / "sync_conflicts_12345.json.response"
+        response_data = {"conflicts": response_decisions}
+        response_file.write_text(json.dumps(response_data), encoding="utf-8")
+
+        return call_file
+
+    def test_processes_update_spec_decision(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Old auth spec")
+
+        call_file = self._create_call_and_response(
+            tmp_path,
+            [{"id": 1, "spec_name": "auth", "description": "Token mismatch", "code_location": "src/a.py"}],
+            [{"id": 1, "decision": "update_spec"}],
+        )
+
+        llm = MagicMock()
+        llm.call.return_value = "# Fixed auth spec"
+
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+        result = engine.process_call_response(call_file, llm)
+
+        assert result["specs_updated"] == 1
+        assert result["issues_created"] == 0
+        actual = (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text()
+        assert actual == "# Fixed auth spec"
+
+    def test_processes_create_issue_decision(self, tmp_path):
+        call_file = self._create_call_and_response(
+            tmp_path,
+            [{"id": 1, "spec_name": "auth", "description": "Token mismatch", "code_location": ""}],
+            [{"id": 1, "decision": "create_issue"}],
+        )
+
+        engine = SyncEngine(tmp_path)
+        result = engine.process_call_response(call_file, MagicMock())
+
+        assert result["specs_updated"] == 0
+        assert result["issues_created"] == 1
+        mgr = IssueManager(tmp_path)
+        issues = mgr.list_issues()
+        assert len(issues) == 1
+        assert "[sync-conflict]" in issues[0].title
+
+    def test_mixed_decisions(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+
+        call_file = self._create_call_and_response(
+            tmp_path,
+            [
+                {"id": 1, "spec_name": "auth", "description": "Conflict A", "code_location": ""},
+                {"id": 2, "spec_name": "config", "description": "Conflict B", "code_location": ""},
+            ],
+            [
+                {"id": 1, "decision": "update_spec"},
+                {"id": 2, "decision": "create_issue"},
+            ],
+        )
+
+        llm = MagicMock()
+        llm.call.return_value = "# Updated auth"
+
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+        result = engine.process_call_response(call_file, llm)
+
+        assert result["specs_updated"] == 1
+        assert result["issues_created"] == 1
+
+    def test_skips_invalid_decision(self, tmp_path):
+        call_file = self._create_call_and_response(
+            tmp_path,
+            [{"id": 1, "spec_name": "x", "description": "d", "code_location": ""}],
+            [{"id": 1, "decision": "invalid"}],
+        )
+
+        engine = SyncEngine(tmp_path)
+        result = engine.process_call_response(call_file, MagicMock())
+
+        assert result["specs_updated"] == 0
+        assert result["issues_created"] == 0
+
+    def test_missing_response_file(self, tmp_path):
+        calls_dir = tmp_path / "se3" / "calls"
+        calls_dir.mkdir(parents=True, exist_ok=True)
+        call_file = calls_dir / "sync_conflicts_99.json"
+        call_file.write_text("{}", encoding="utf-8")
+
+        engine = SyncEngine(tmp_path)
+        result = engine.process_call_response(call_file)
+
+        assert result == {"specs_updated": 0, "issues_created": 0}
+
+    def test_invalid_response_json(self, tmp_path):
+        calls_dir = tmp_path / "se3" / "calls"
+        calls_dir.mkdir(parents=True, exist_ok=True)
+        call_file = calls_dir / "sync_conflicts_99.json"
+        call_file.write_text("{}", encoding="utf-8")
+        response_file = calls_dir / "sync_conflicts_99.json.response"
+        response_file.write_text("not json", encoding="utf-8")
+
+        engine = SyncEngine(tmp_path)
+        result = engine.process_call_response(call_file)
+
+        assert result == {"specs_updated": 0, "issues_created": 0}
+
+    def test_loads_specs_if_not_loaded(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+
+        call_file = self._create_call_and_response(
+            tmp_path,
+            [{"id": 1, "spec_name": "auth", "description": "d", "code_location": ""}],
+            [{"id": 1, "decision": "update_spec"}],
+        )
+
+        llm = MagicMock()
+        llm.call.return_value = "# Updated"
+
+        engine = SyncEngine(tmp_path)
+        result = engine.process_call_response(call_file, llm)
+
+        assert result["specs_updated"] == 1
+
+
+# ---------------------------------------------------------------------------
+# CLI process_call_response tests
+# ---------------------------------------------------------------------------
+
+class TestSyncCLIProcessCallResponse:
+    def test_imports(self):
+        from se3.commands.sync import process_call_response
+        assert callable(process_call_response)
+
+    def test_missing_call_file(self, tmp_path):
+        from se3.commands.sync import process_call_response
+
+        process_call_response(
+            call_file=tmp_path / "nonexistent.json",
+            project_root=tmp_path,
+        )
+
+    def test_missing_response_file(self, tmp_path):
+        from se3.commands.sync import process_call_response
+
+        call_file = tmp_path / "call.json"
+        call_file.write_text("{}", encoding="utf-8")
+
+        process_call_response(
+            call_file=call_file,
+            project_root=tmp_path,
+        )
