@@ -34,6 +34,10 @@ except ImportError:
     psutil = None
 
 # Keywords indicating usage/rate limit in Claude CLI output
+# Threshold for auto-filing prompt arguments to avoid execve() E2BIG.
+# Linux MAX_ARG_STRLEN is 128 KB; 100 KB leaves ~28 KB safety margin.
+_MAX_ARG_BYTES = 102400
+
 USAGE_LIMIT_KEYWORDS = [
     "usage limit",
     "rate limit",
@@ -126,8 +130,15 @@ class ClaudeCodeRunner(AgentRunner):
                     with tempfile.NamedTemporaryFile(mode='w', suffix='.prompt',
                                                    dir=temp_dir, delete=False,
                                                    encoding='utf-8') as f:
-                        f.write(file_path.read_text(encoding='utf-8'))
                         temp_file = Path(f.name)
+                        try:
+                            f.write(file_path.read_text(encoding='utf-8'))
+                        except Exception:
+                            try:
+                                temp_file.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            raise
                     resolved.append(f"@{temp_file}")
                 else:
                     # If file not found, keep original arg
@@ -148,18 +159,44 @@ class ClaudeCodeRunner(AgentRunner):
                         with tempfile.NamedTemporaryFile(mode='w', suffix='.prompt',
                                                        dir=temp_dir, delete=False,
                                                        encoding='utf-8') as f:
-                            f.write(file_path.read_text(encoding='utf-8'))
                             temp_file = Path(f.name)
+                            try:
+                                f.write(file_path.read_text(encoding='utf-8'))
+                            except Exception:
+                                try:
+                                    temp_file.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                                raise
                         resolved.append(arg)
                         resolved.append(f"@{temp_file}")
                     else:
                         resolved.append(arg)
                         resolved.append(prompt_arg)
                 else:
-                    # Regular prompt text - pass directly to avoid temp file issues
-                    # in non-interactive environments (SSH, nohup, etc.)
-                    resolved.append(arg)
-                    resolved.append(prompt_arg)
+                    # Regular prompt text — check if it exceeds the safe
+                    # execve() argument size and auto-file when necessary.
+                    if len(prompt_arg.encode('utf-8')) > _MAX_ARG_BYTES:
+                        import tempfile
+                        with tempfile.NamedTemporaryFile(
+                            mode='w', suffix='.prompt',
+                            dir=temp_dir, delete=False,
+                            encoding='utf-8',
+                        ) as f:
+                            temp_file = Path(f.name)
+                            try:
+                                f.write(prompt_arg)
+                            except Exception:
+                                try:
+                                    temp_file.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                                raise
+                        resolved.append(arg)
+                        resolved.append(f"@{temp_file}")
+                    else:
+                        resolved.append(arg)
+                        resolved.append(prompt_arg)
             else:
                 resolved.append(arg)
 
@@ -239,6 +276,9 @@ class ClaudeCodeRunner(AgentRunner):
         """Start Claude asynchronously (for collab workers/managers).
 
         Handles @file syntax for prompt files to avoid command-line length issues.
+        Temp files created by ``_resolve_args`` are attached to the returned
+        process as ``proc._se3_temp_files`` (list of Path).  Callers SHOULD
+        clean them up after the process finishes.
 
         Args:
             args: Arguments to pass after the claude command (e.g. ["-p", prompt] or ["@prompt.txt"]).
@@ -258,17 +298,34 @@ class ClaudeCodeRunner(AgentRunner):
         cmd_entry = self.commands[cmd_index]
         # Resolve arguments (handle @file syntax)
         resolved_args = self._resolve_args(args, cwd)
+
+        # Track temp files created by _resolve_args for cleanup
+        temp_files: List[Path] = []
+        for arg in resolved_args:
+            if arg.startswith("@"):
+                temp_files.append(Path(arg[1:]))
+
         full_cmd = [cmd_entry["cmd"], "--dangerously-skip-permissions"] + resolved_args
 
-        proc = subprocess.Popen(
-            full_cmd,
-            cwd=cwd,
-            env=env,
-            stdout=stdout,
-            stderr=stderr,
-            **kwargs,
-        )
+        try:
+            proc = subprocess.Popen(
+                full_cmd,
+                cwd=cwd,
+                env=env,
+                stdout=stdout,
+                stderr=stderr,
+                **kwargs,
+            )
+        except Exception:
+            for tf in temp_files:
+                try:
+                    tf.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            raise
 
+        # Attach temp files to process for caller cleanup after process finishes
+        proc._se3_temp_files = temp_files
         return proc, cmd_index
 
     def retry_with_next(
@@ -289,6 +346,9 @@ class ClaudeCodeRunner(AgentRunner):
 
         Returns:
             Tuple of (Popen process, new cmd_index) or None if exhausted.
+            The returned process may have a ``_se3_temp_files`` attribute
+            (list of Path) attached by :meth:`popen`.  Callers SHOULD
+            clean them up after the process finishes.
         """
         warnings.warn(
             "retry_with_next is deprecated; agent rotation is handled by LLMCaller",

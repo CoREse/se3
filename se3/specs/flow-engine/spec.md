@@ -308,6 +308,20 @@ The step type enum SHALL retain deprecated values with stub handlers that forwar
 4. 解析响应（支持 JSON 和文本）
 5. 存储输出到步骤状态
 
+**Large Prompt Auto-Filing:**
+
+The CLI adapter (`ClaudeCodeRunner._resolve_args()`) SHALL automatically file prompt arguments to temporary files when their UTF-8 byte length exceeds 100 KB (102,400 bytes), preventing `execve()` `E2BIG` errors caused by Linux's `MAX_ARG_STRLEN` limit (128 KB).
+
+- **Threshold:** 100 KB (102,400 bytes). This leaves ~28 KB safety margin below the 128 KB `MAX_ARG_STRLEN` hard limit, covering multi-byte UTF-8 encoding and environment variable space.
+- **Mechanism:** When `-p`/`--prompt` is followed by a plain-text argument (not an `@file` reference) whose `len(prompt_arg.encode('utf-8'))` exceeds the threshold, the prompt content is written to a temp file in `se3/tmp/` (using `NamedTemporaryFile` with `.prompt` suffix, `delete=False`), and the command-line argument is replaced with `@{temp_file_path}`.
+- **Below threshold:** The prompt argument is passed directly on the command line (existing behavior).
+- **Scope:** `_resolve_args()` is called by all three execution paths (`run()`, `popen()`, `run_with_monitor()`), so the protection applies universally.
+- **Temp file cleanup:**
+  - `run()` and `run_with_monitor()`: temp files are tracked and cleaned up in `finally` blocks.
+  - `popen()`: temp files are attached to the process as `proc._se3_temp_files` for caller cleanup; on `Popen` failure, temp files are cleaned up immediately.
+  - On write failure during temp file creation, the orphan file is deleted before re-raising.
+- **Chat history preservation:** `_record_prompt()` in `LLMCaller` executes before `_resolve_args()`, so chat history always records the original prompt text, not the `@file` reference.
+
 #### Scenario: 自动注入上下文
 - **WHEN** 流程引擎进入某个步骤
 - **THEN** 程序自动收集该步骤所需的上下文
@@ -317,6 +331,21 @@ The step type enum SHALL retain deprecated values with stub handlers that forwar
 - **WHEN** 步骤内的 LLM 调用失败（超时、API 错误、输出无效）
 - **THEN** 流程引擎执行重试策略（最多 3 次）
 - **AND** 如果重试仍失败，暂停流程并通知用户
+
+#### Scenario: Large prompt auto-filed to temp file
+- **WHEN** a `-p`/`--prompt` argument's UTF-8 byte length exceeds 100 KB (102,400 bytes)
+- **THEN** `_resolve_args()` writes the prompt to a temp file in `se3/tmp/` with `.prompt` suffix
+- **AND** replaces the command-line argument with `@{temp_file_path}`
+- **AND** the temp file is cleaned up after execution completes
+
+#### Scenario: Prompt below auto-filing threshold
+- **WHEN** a `-p`/`--prompt` argument's UTF-8 byte length is at or below 100 KB
+- **THEN** the prompt is passed directly as a command-line argument (no file creation)
+
+#### Scenario: Auto-filing temp file write failure
+- **WHEN** writing the prompt to a temp file fails (e.g., disk full)
+- **THEN** the orphan temp file is deleted before the exception propagates
+- **AND** no stale temp files are left behind
 
 ### Requirement: Read-Only Step Constraint Injection
 
