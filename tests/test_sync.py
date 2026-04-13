@@ -396,6 +396,65 @@ class TestSyncCLI:
         with pytest.raises(ValueError):
             SyncMode("invalid")
 
+    @patch("se3.engine.sync_engine.SyncEngine.run")
+    def test_sync_command_calls_engine_run(self, mock_run, tmp_path):
+        from se3.commands.sync import SyncMode, sync_command
+
+        mock_run.return_value = SyncResult()
+        sync_command(mode=SyncMode.DEFAULT, project_root=tmp_path)
+        mock_run.assert_called_once()
+
+    @patch("se3.engine.sync_engine.SyncEngine.run")
+    def test_sync_command_passes_mode_to_engine(self, mock_run, tmp_path):
+        from se3.commands.sync import SyncMode, sync_command
+
+        mock_run.return_value = SyncResult()
+        sync_command(mode=SyncMode.FAST, project_root=tmp_path)
+
+    @patch("se3.engine.sync_engine.SyncEngine.run")
+    def test_sync_command_renders_all_in_sync(self, mock_run, tmp_path, capsys):
+        from se3.commands.sync import SyncMode, sync_command
+
+        mock_run.return_value = SyncResult(
+            analyses=[SpecAnalysis(spec_name="base", diffs=[])],
+        )
+        sync_command(mode=SyncMode.DEFAULT, project_root=tmp_path)
+
+    @patch("se3.engine.sync_engine.SyncEngine.run")
+    def test_sync_command_renders_diffs_found(self, mock_run, tmp_path):
+        from se3.commands.sync import SyncMode, sync_command
+
+        mock_run.return_value = SyncResult(
+            analyses=[
+                SpecAnalysis(
+                    spec_name="auth",
+                    diffs=[
+                        SpecDiff(DiffType.GAP, "auth", "Missing login"),
+                        SpecDiff(DiffType.EXTENSION, "auth", "Extra feature"),
+                    ],
+                ),
+            ],
+            issues_created=1,
+            specs_updated=1,
+        )
+        sync_command(mode=SyncMode.DEFAULT, project_root=tmp_path)
+
+    @patch("se3.engine.sync_engine.SyncEngine.run")
+    def test_sync_command_renders_conflicts_with_call_file(self, mock_run, tmp_path):
+        from se3.commands.sync import SyncMode, sync_command
+
+        mock_run.return_value = SyncResult(
+            analyses=[
+                SpecAnalysis(
+                    spec_name="auth",
+                    diffs=[SpecDiff(DiffType.CONFLICT, "auth", "Token mismatch")],
+                ),
+            ],
+            conflicts=[Conflict(spec_name="auth", description="Token mismatch")],
+            call_file="/tmp/se3/calls/sync_conflicts_123.json",
+        )
+        sync_command(mode=SyncMode.STRICT, project_root=tmp_path)
+
 
 # ---------------------------------------------------------------------------
 # SyncAnalyzer tests
@@ -1759,3 +1818,147 @@ class TestSyncCLIProcessCallResponse:
             call_file=call_file,
             project_root=tmp_path,
         )
+
+
+# ---------------------------------------------------------------------------
+# Progress callback tests
+# ---------------------------------------------------------------------------
+
+class TestSyncEngineProgressCallback:
+    @patch("se3.engine.sync_engine.SyncEngine._load_specs")
+    @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
+    @patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec")
+    @patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None)
+    @patch("se3.engine.project_context.ProjectContextCollector.collect")
+    def test_progress_callback_called_for_each_spec(
+        self, mock_collect, mock_llm_init, mock_analyze, mock_load_issues, mock_load_specs, tmp_path
+    ):
+        mock_collect.return_value = {"git": {}, "flow_engine": None, "backlog": [], "specs": []}
+        mock_load_specs.return_value = {
+            "base": {"name": "base", "path": Path("f"), "content": "# Base"},
+            "auth": {"name": "auth", "path": Path("g"), "content": "# Auth"},
+        }
+        mock_analyze.side_effect = [
+            SpecAnalysis(spec_name="base", diffs=[]),
+            SpecAnalysis(spec_name="auth", diffs=[
+                SpecDiff(DiffType.GAP, "auth", "Missing login"),
+            ]),
+        ]
+        mock_load_issues.return_value = []
+
+        calls = []
+
+        def callback(phase, spec_name, index, total, analysis):
+            calls.append((phase, spec_name, index, total))
+
+        engine = SyncEngine(tmp_path)
+        engine._sync_issues = []
+        engine.run(progress_callback=callback)
+
+        assert len(calls) == 4
+        assert calls[0] == ("analyzing", "base", 0, 2)
+        assert calls[1] == ("analyzed", "base", 0, 2)
+        assert calls[2] == ("analyzing", "auth", 1, 2)
+        assert calls[3] == ("analyzed", "auth", 1, 2)
+
+    @patch("se3.engine.sync_engine.SyncEngine._load_specs")
+    @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
+    @patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec")
+    @patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None)
+    @patch("se3.engine.project_context.ProjectContextCollector.collect")
+    def test_progress_callback_receives_analysis_on_analyzed(
+        self, mock_collect, mock_llm_init, mock_analyze, mock_load_issues, mock_load_specs, tmp_path
+    ):
+        mock_collect.return_value = {"git": {}, "flow_engine": None, "backlog": [], "specs": []}
+        mock_load_specs.return_value = {
+            "base": {"name": "base", "path": Path("f"), "content": "# Base"},
+        }
+        analysis = SpecAnalysis(spec_name="base", diffs=[])
+        mock_analyze.return_value = analysis
+        mock_load_issues.return_value = []
+
+        received = []
+
+        def callback(phase, spec_name, index, total, analysis_result):
+            received.append((phase, analysis_result))
+
+        engine = SyncEngine(tmp_path)
+        engine._sync_issues = []
+        engine.run(progress_callback=callback)
+
+        assert received[0] == ("analyzing", None)
+        assert received[1][0] == "analyzed"
+        assert received[1][1] is not None
+        assert received[1][1].spec_name == "base"
+
+    @patch("se3.engine.sync_engine.SyncEngine._load_specs")
+    @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
+    @patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None)
+    @patch("se3.engine.project_context.ProjectContextCollector.collect")
+    def test_run_works_without_callback(
+        self, mock_collect, mock_llm_init, mock_load_issues, mock_load_specs, tmp_path
+    ):
+        mock_collect.return_value = {"git": {}, "flow_engine": None, "backlog": [], "specs": []}
+        mock_load_specs.return_value = {}
+        mock_load_issues.return_value = []
+
+        engine = SyncEngine(tmp_path)
+        engine._sync_issues = []
+
+        with patch("se3.engine.sync_analyzer.SyncAnalyzer.generate_base_spec"):
+            mock_load_specs.side_effect = [{}, {}]
+            result = engine.run()
+            assert isinstance(result, SyncResult)
+
+
+# ---------------------------------------------------------------------------
+# Render sync results tests
+# ---------------------------------------------------------------------------
+
+class TestRenderSyncResults:
+    def test_render_all_in_sync(self):
+        from se3.commands.sync import _render_sync_results
+
+        result = SyncResult(
+            analyses=[SpecAnalysis(spec_name="base", diffs=[])],
+        )
+        _render_sync_results(result)
+
+    def test_render_with_diffs(self):
+        from se3.commands.sync import _render_sync_results
+
+        result = SyncResult(
+            analyses=[
+                SpecAnalysis(
+                    spec_name="auth",
+                    diffs=[
+                        SpecDiff(DiffType.GAP, "auth", "Missing login"),
+                        SpecDiff(DiffType.EXTENSION, "auth", "Extra feature"),
+                        SpecDiff(DiffType.CONFLICT, "auth", "Token mismatch"),
+                    ],
+                ),
+            ],
+            issues_created=1,
+            issues_closed=2,
+            specs_updated=1,
+        )
+        _render_sync_results(result)
+
+    def test_render_with_conflicts_and_call_file(self):
+        from se3.commands.sync import _render_sync_results
+
+        result = SyncResult(
+            analyses=[
+                SpecAnalysis(
+                    spec_name="auth",
+                    diffs=[SpecDiff(DiffType.CONFLICT, "auth", "Token mismatch")],
+                ),
+            ],
+            conflicts=[Conflict(spec_name="auth", description="Token mismatch")],
+            call_file="/tmp/se3/calls/sync_conflicts_123.json",
+        )
+        _render_sync_results(result)
+
+    def test_render_empty_result(self):
+        from se3.commands.sync import _render_sync_results
+        _render_sync_results(SyncResult())

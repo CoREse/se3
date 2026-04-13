@@ -350,7 +350,7 @@ class SyncEngine:
         self._sync_issues = mgr.list_by_tags(SYNC_TAGS, include_closed=False)
         return self._existing_issues
 
-    def run(self) -> SyncResult:
+    def run(self, progress_callback: Any = None) -> SyncResult:
         """Execute the full sync workflow.
 
         1. Load specs (generate base if missing)
@@ -359,6 +359,10 @@ class SyncEngine:
         4. Process results by diff type
         5. Manage issue lifecycle
         6. Handle conflicts based on mode
+
+        Args:
+            progress_callback: Optional callback(phase, spec_name, index, total, analysis).
+                phase is "analyzing" (before) or "analyzed" (after).
 
         Returns:
             SyncResult with all analysis results and actions taken.
@@ -385,12 +389,20 @@ class SyncEngine:
         self._load_existing_issues()
 
         all_gap_titles: set[str] = set()
+        spec_items = list(specs.items())
+        total = len(spec_items)
 
-        for spec_name, spec_info in specs.items():
+        for i, (spec_name, spec_info) in enumerate(spec_items):
+            if progress_callback:
+                progress_callback("analyzing", spec_name, i, total, None)
+
             analysis = analyzer.analyze_spec(
                 spec_name, spec_info["content"], project_context
             )
             result.analyses.append(analysis)
+
+            if progress_callback:
+                progress_callback("analyzed", spec_name, i, total, analysis)
 
             gaps_created = self._process_gaps(analysis.gaps)
             result.issues_created += gaps_created
