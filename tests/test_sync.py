@@ -376,6 +376,108 @@ class TestIssueManagerListByTags:
 
 
 # ---------------------------------------------------------------------------
+# IssueManager extension boundary tests
+# ---------------------------------------------------------------------------
+
+class TestFindOpenByTitleBoundary:
+    def test_exact_match(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync] auth: Missing login", "desc")
+
+        found = mgr.find_open_by_title("[sync] auth: Missing login")
+        assert found is not None
+        assert found.title == "[sync] auth: Missing login"
+
+    def test_partial_match_at_start(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync] auth: Missing login", "desc")
+
+        found = mgr.find_open_by_title("[sync]")
+        assert found is not None
+
+    def test_partial_match_at_end(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync] auth: Missing login", "desc")
+
+        found = mgr.find_open_by_title("Missing login")
+        assert found is not None
+
+    def test_special_characters_in_search(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync-conflict] auth: Token (JWT)", "desc")
+
+        found = mgr.find_open_by_title("[sync-conflict]")
+        assert found is not None
+
+    def test_unicode_in_title(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("修复登录缺陷", "描述")
+
+        found = mgr.find_open_by_title("登录")
+        assert found is not None
+
+
+class TestCloseIssueBoundary:
+    def test_close_preserves_issue_data(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("Test issue", "detailed description", priority="high", tags=["source:sync"])
+
+        closed = mgr.close_issue("001", reason="resolved")
+        assert closed.title == "Test issue"
+        assert closed.description == "detailed description"
+        assert closed.priority == "high"
+        assert "source:sync" in closed.tags
+
+    def test_close_moves_to_closed_dir(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("Test issue", "desc")
+
+        mgr.close_issue("001")
+        assert len(list(mgr.closed_dir.glob("001_*"))) == 1
+        assert len(list(mgr.open_dir.glob("001_*"))) == 0
+
+    def test_close_sets_updated_at(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        issue = mgr.create("Test issue", "desc")
+        original_updated = issue.updated_at
+
+        closed = mgr.close_issue("001")
+        assert closed.updated_at >= original_updated
+
+
+class TestListByTagsBoundary:
+    def test_subset_tag_matching(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("A", "d", tags=["source:sync", "auto-discovered", "extra"])
+
+        result = mgr.list_by_tags(["source:sync", "auto-discovered"])
+        assert len(result) == 1
+
+    def test_superset_tags_does_not_match(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("A", "d", tags=["source:sync"])
+
+        result = mgr.list_by_tags(["source:sync", "extra-tag-not-on-issue"])
+        assert len(result) == 0
+
+    def test_empty_issue_tags_does_not_match(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("A", "d", tags=[])
+
+        result = mgr.list_by_tags(["source:sync"])
+        assert len(result) == 0
+
+    def test_many_issues_performance(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        for i in range(20):
+            tags = ["source:sync"] if i % 2 == 0 else ["manual"]
+            mgr.create(f"Issue {i}", "d", tags=tags)
+
+        result = mgr.list_by_tags(["source:sync"])
+        assert len(result) == 10
+
+
+# ---------------------------------------------------------------------------
 # CLI registration test
 # ---------------------------------------------------------------------------
 
