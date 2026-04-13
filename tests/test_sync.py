@@ -1,8 +1,11 @@
-"""Tests for SE3 Sync — data models, CLI registration, and IssueManager extensions."""
+"""Tests for SE3 Sync — data models, CLI registration, IssueManager extensions, and SyncAnalyzer."""
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 import yaml
@@ -16,6 +19,7 @@ from se3.engine.sync_engine import (
     SpecDiff,
     SyncResult,
 )
+from se3.engine.sync_analyzer import SyncAnalyzer
 
 
 # ---------------------------------------------------------------------------
@@ -391,3 +395,297 @@ class TestSyncCLI:
 
         with pytest.raises(ValueError):
             SyncMode("invalid")
+
+
+# ---------------------------------------------------------------------------
+# SyncAnalyzer tests
+# ---------------------------------------------------------------------------
+
+class TestSyncAnalyzerInit:
+    def test_init_stores_attributes(self, tmp_path):
+        caller = MagicMock()
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        assert analyzer.project_root == tmp_path
+        assert analyzer.llm_caller is caller
+
+
+class TestBuildAnalysisPrompt:
+    def test_prompt_contains_spec_name(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        prompt = analyzer._build_analysis_prompt("auth", "spec text", "context")
+        assert "auth" in prompt
+
+    def test_prompt_contains_spec_content(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        prompt = analyzer._build_analysis_prompt("x", "SHALL validate inputs", "ctx")
+        assert "SHALL validate inputs" in prompt
+
+    def test_prompt_contains_project_context(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        prompt = analyzer._build_analysis_prompt("x", "spec", "project files here")
+        assert "project files here" in prompt
+
+    def test_prompt_defines_three_diff_types(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        prompt = analyzer._build_analysis_prompt("x", "s", "c")
+        assert "gap" in prompt.lower()
+        assert "extension" in prompt.lower()
+        assert "conflict" in prompt.lower()
+
+    def test_prompt_contains_json_schema(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        prompt = analyzer._build_analysis_prompt("x", "s", "c")
+        assert '"diffs"' in prompt
+        assert '"type"' in prompt
+        assert '"description"' in prompt
+        assert '"code_location"' in prompt
+
+
+class TestParseAnalysisResponse:
+    def test_parse_valid_response(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = json.dumps({
+            "diffs": [
+                {
+                    "type": "gap",
+                    "description": "Missing login endpoint",
+                    "spec_requirement": "SHALL provide login",
+                    "code_location": "src/auth.py",
+                },
+                {
+                    "type": "extension",
+                    "description": "Extra helper function",
+                    "spec_requirement": "",
+                    "code_location": "src/utils.py:10",
+                },
+            ]
+        })
+        result = analyzer._parse_analysis_response("auth", response)
+        assert result.spec_name == "auth"
+        assert len(result.diffs) == 2
+        assert result.diffs[0].diff_type == DiffType.GAP
+        assert result.diffs[0].description == "Missing login endpoint"
+        assert result.diffs[1].diff_type == DiffType.EXTENSION
+
+    def test_parse_empty_diffs(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = json.dumps({"diffs": []})
+        result = analyzer._parse_analysis_response("clean", response)
+        assert result.is_in_sync
+        assert result.diffs == []
+
+    def test_parse_all_diff_types(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = json.dumps({
+            "diffs": [
+                {"type": "gap", "description": "g"},
+                {"type": "extension", "description": "e"},
+                {"type": "conflict", "description": "c"},
+            ]
+        })
+        result = analyzer._parse_analysis_response("spec", response)
+        assert len(result.gaps) == 1
+        assert len(result.extensions) == 1
+        assert len(result.conflicts) == 1
+
+    def test_parse_skips_unknown_diff_type(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = json.dumps({
+            "diffs": [
+                {"type": "gap", "description": "valid"},
+                {"type": "unknown_type", "description": "invalid"},
+            ]
+        })
+        result = analyzer._parse_analysis_response("spec", response)
+        assert len(result.diffs) == 1
+        assert result.diffs[0].diff_type == DiffType.GAP
+
+    def test_parse_invalid_json(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        result = analyzer._parse_analysis_response("spec", "not json at all")
+        assert len(result.diffs) == 1
+        assert result.diffs[0].diff_type == DiffType.CONFLICT
+        assert "JSON parse error" in result.diffs[0].description
+
+    def test_parse_missing_diffs_key(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = json.dumps({"something_else": True})
+        result = analyzer._parse_analysis_response("spec", response)
+        assert result.is_in_sync
+
+    def test_parse_preserves_code_location(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = json.dumps({
+            "diffs": [
+                {
+                    "type": "gap",
+                    "description": "missing",
+                    "code_location": "src/api/routes.py:42",
+                }
+            ]
+        })
+        result = analyzer._parse_analysis_response("spec", response)
+        assert result.diffs[0].code_location == "src/api/routes.py:42"
+
+    def test_parse_defaults_code_location(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = json.dumps({
+            "diffs": [{"type": "gap", "description": "missing"}]
+        })
+        result = analyzer._parse_analysis_response("spec", response)
+        assert result.diffs[0].code_location == ""
+
+
+class TestAnalyzeSpec:
+    def test_successful_analysis(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = json.dumps({
+            "diffs": [
+                {"type": "gap", "description": "Missing feature X"},
+            ]
+        })
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        result = analyzer.analyze_spec("auth", "spec content", "context")
+
+        assert result.spec_name == "auth"
+        assert len(result.diffs) == 1
+        assert result.diffs[0].diff_type == DiffType.GAP
+        caller.call.assert_called_once()
+
+    def test_uses_extract_json_mode(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = json.dumps({"diffs": []})
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        analyzer.analyze_spec("x", "spec", "ctx")
+
+        call_kwargs = caller.call.call_args
+        assert call_kwargs.kwargs.get("json_mode") == "extract"
+
+    def test_retries_on_llm_error(self, tmp_path):
+        from se3.engine.llm_caller import LLMCallError
+
+        caller = MagicMock()
+        caller.call.side_effect = [
+            LLMCallError("rate limit"),
+            json.dumps({"diffs": [{"type": "gap", "description": "found"}]}),
+        ]
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        result = analyzer.analyze_spec("auth", "spec", "ctx")
+
+        assert caller.call.call_count == 2
+        assert len(result.diffs) == 1
+        assert result.diffs[0].diff_type == DiffType.GAP
+
+    def test_retries_on_generic_exception(self, tmp_path):
+        caller = MagicMock()
+        caller.call.side_effect = [
+            RuntimeError("unexpected"),
+            json.dumps({"diffs": []}),
+        ]
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        result = analyzer.analyze_spec("x", "s", "c")
+
+        assert caller.call.call_count == 2
+        assert result.is_in_sync
+
+    def test_returns_error_analysis_after_max_retries(self, tmp_path):
+        from se3.engine.llm_caller import LLMCallError
+
+        caller = MagicMock()
+        caller.call.side_effect = LLMCallError("persistent failure")
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        result = analyzer.analyze_spec("broken", "spec", "ctx")
+
+        assert caller.call.call_count == 3
+        assert len(result.diffs) == 1
+        assert result.diffs[0].diff_type == DiffType.CONFLICT
+        assert "3 attempts" in result.diffs[0].description
+        assert "persistent failure" in result.diffs[0].description
+
+    def test_all_in_sync_result(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = json.dumps({"diffs": []})
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        result = analyzer.analyze_spec("clean", "spec", "ctx")
+
+        assert result.is_in_sync
+        assert result.spec_name == "clean"
+
+    def test_prompt_includes_spec_content(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = json.dumps({"diffs": []})
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        analyzer.analyze_spec("auth", "SHALL provide authentication", "ctx")
+
+        prompt_arg = caller.call.call_args.kwargs.get("prompt") or caller.call.call_args[0][0]
+        assert "SHALL provide authentication" in prompt_arg
+
+
+class TestGenerateBaseSpec:
+    def test_generates_and_writes_base_spec(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = "# My Project — Base Specification\n\n## Purpose\nTest project."
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        content = analyzer.generate_base_spec("project context here")
+
+        assert "Base Specification" in content
+        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        assert spec_path.exists()
+        assert spec_path.read_text(encoding="utf-8") == content
+
+    def test_creates_directories(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = "# Spec"
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        analyzer.generate_base_spec("ctx")
+
+        assert (tmp_path / "se3" / "specs" / "base").is_dir()
+
+    def test_uses_off_json_mode(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = "# Spec"
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        analyzer.generate_base_spec("ctx")
+
+        call_kwargs = caller.call.call_args
+        assert call_kwargs.kwargs.get("json_mode") == "off"
+
+    def test_prompt_includes_project_context(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = "# Spec"
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        analyzer.generate_base_spec("my special project context")
+
+        prompt_arg = caller.call.call_args.kwargs.get("prompt") or caller.call.call_args[0][0]
+        assert "my special project context" in prompt_arg
+
+    def test_raises_on_llm_failure(self, tmp_path):
+        from se3.engine.llm_caller import LLMCallError
+
+        caller = MagicMock()
+        caller.call.side_effect = LLMCallError("timeout")
+        analyzer = SyncAnalyzer(tmp_path, caller)
+
+        with pytest.raises(LLMCallError):
+            analyzer.generate_base_spec("ctx")
+
+    def test_overwrites_existing_base_spec(self, tmp_path):
+        base_dir = tmp_path / "se3" / "specs" / "base"
+        base_dir.mkdir(parents=True)
+        (base_dir / "spec.md").write_text("old content")
+
+        caller = MagicMock()
+        caller.call.return_value = "# New Spec"
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        content = analyzer.generate_base_spec("ctx")
+
+        assert content == "# New Spec"
+        assert (base_dir / "spec.md").read_text() == "# New Spec"
+
+    def test_strips_response_whitespace(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = "\n\n  # Spec Content  \n\n"
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        content = analyzer.generate_base_spec("ctx")
+
+        assert content == "# Spec Content"
