@@ -431,6 +431,36 @@ app.add_typer(history_app, name="history", help="View and manage session history
 app.add_typer(issue_app, name="issue", help="Manage SE3 issues")
 
 
+@app.command(name="sync")
+def sync_cmd(
+    mode: str = typer.Option("default", "--mode", "-m", help="Conflict handling mode: default, strict, or fast"),
+):
+    """Check and synchronize se3/specs/ with project code.
+
+    Compares spec files against actual code and handles differences:
+    - Spec ahead of code: creates issues for unimplemented items
+    - Code extends spec: updates spec to reflect code
+    - Conflicts: handled per --mode setting
+
+    Examples:
+        se3 sync
+        se3 sync --mode=strict
+        se3 sync --mode=fast
+    """
+    from .commands.sync import SyncMode, sync_command
+
+    try:
+        sync_mode = SyncMode(mode)
+    except ValueError:
+        render_text(
+            f"Invalid mode '{mode}'. Must be one of: default, strict, fast",
+            title="Error",
+        )
+        raise typer.Exit(1)
+
+    sync_command(mode=sync_mode)
+
+
 @app.command(name="salvage")
 def salvage_cmd(
     project_root: Optional[str] = typer.Option(None, "--project-root", "-p", help="Project root directory"),

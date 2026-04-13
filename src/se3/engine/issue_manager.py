@@ -321,6 +321,100 @@ class IssueManager:
 
         return self.update_status(issue_id, IssueStatus.OPEN)
 
+    def find_open_by_title(self, title_keywords: str) -> Optional[Issue]:
+        """Find an open issue whose title contains the given keywords.
+
+        Performs case-insensitive substring matching on issue titles.
+        Returns the first match, or None if no open issue matches.
+
+        Args:
+            title_keywords: Keywords to search for in issue titles.
+        """
+        keywords_lower = title_keywords.lower()
+        if not self.open_dir.exists():
+            return None
+        for f in sorted(self.open_dir.glob("*.yaml")):
+            issue = self._read_issue(f)
+            if issue and keywords_lower in issue.title.lower():
+                return issue
+        return None
+
+    def close_issue(self, issue_id: str, reason: str = "") -> Issue:
+        """Close an open issue, moving it to the closed/ directory.
+
+        Args:
+            issue_id: ID of the issue to close.
+            reason: Optional reason for closing.
+
+        Raises:
+            ValueError: If the issue is not found or cannot be closed.
+        """
+        filepath = self._find_issue_file(issue_id)
+        if not filepath:
+            raise ValueError(f"Issue '{issue_id}' not found")
+
+        issue = self._read_issue(filepath)
+        if not issue:
+            raise ValueError(f"Issue '{issue_id}' could not be read")
+
+        if issue.status in _CLOSED_DIR_STATUSES:
+            return issue
+
+        target_status = IssueStatus.CLOSED
+        valid = _VALID_TRANSITIONS.get(issue.status, [])
+        if target_status not in valid:
+            if IssueStatus.RESOLVED in valid:
+                target_status = IssueStatus.RESOLVED
+            else:
+                raise ValueError(
+                    f"Cannot close issue '{issue_id}' with status '{issue.status.value}'. "
+                    f"Valid transitions: {[s.value for s in valid]}"
+                )
+
+        issue.status = target_status
+        issue.updated_at = datetime.now()
+
+        self._write_issue(filepath, issue)
+
+        target_dir = self.closed_dir
+        if filepath.parent != target_dir:
+            target_path = target_dir / filepath.name
+            try:
+                self._ensure_dirs()
+                shutil.move(str(filepath), str(target_path))
+                logger.info("Closed issue %s: %s", issue_id, reason)
+            except OSError as e:
+                logger.warning("Failed to move issue file %s -> %s: %s", filepath, target_path, e)
+
+        return issue
+
+    def list_by_tags(self, tags: List[str], include_closed: bool = False) -> List[Issue]:
+        """List issues that contain all specified tags.
+
+        Args:
+            tags: Tags to filter by. An issue must have all of these tags.
+            include_closed: Whether to include closed issues.
+        """
+        if not tags:
+            return self.list_issues(include_closed=include_closed)
+
+        tags_set = set(tags)
+        result = []
+        dirs = [self.open_dir]
+        if include_closed:
+            dirs.append(self.closed_dir)
+
+        for directory in dirs:
+            if not directory.exists():
+                continue
+            for f in sorted(directory.glob("*.yaml")):
+                issue = self._read_issue(f)
+                if issue and tags_set.issubset(set(issue.tags)):
+                    result.append(issue)
+
+        result.sort(key=lambda i: i.id)
+        return result
+
     def _read_issue(self, filepath: Path) -> Optional[Issue]:
         """Read and parse an issue YAML file."""
         try:
