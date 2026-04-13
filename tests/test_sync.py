@@ -689,3 +689,504 @@ class TestGenerateBaseSpec:
         content = analyzer.generate_base_spec("ctx")
 
         assert content == "# Spec Content"
+
+
+# ---------------------------------------------------------------------------
+# SyncEngine tests
+# ---------------------------------------------------------------------------
+
+from se3.engine.sync_engine import SyncEngine, SYNC_TAGS
+
+
+def _create_spec(tmp_path, name, content="# Spec\n## Purpose\nTest spec."):
+    """Helper: create a spec directory with spec.md."""
+    spec_dir = tmp_path / "se3" / "specs" / name
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    (spec_dir / "spec.md").write_text(content, encoding="utf-8")
+    return spec_dir
+
+
+class TestSyncEngineInit:
+    def test_init_stores_attributes(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="strict")
+        assert engine.project_root == tmp_path
+        assert engine.mode == "strict"
+
+    def test_default_mode(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        assert engine.mode == "default"
+
+
+class TestSyncEngineLoadSpecs:
+    def test_loads_base_spec_first(self, tmp_path):
+        _create_spec(tmp_path, "base", "# Base spec content")
+        _create_spec(tmp_path, "auth", "# Auth spec content")
+
+        engine = SyncEngine(tmp_path)
+        specs = engine._load_specs()
+
+        assert "base" in specs
+        assert "auth" in specs
+        assert list(specs.keys())[0] == "base"
+        assert specs["base"]["content"] == "# Base spec content"
+
+    def test_loads_specs_without_base(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+        _create_spec(tmp_path, "config", "# Config spec")
+
+        engine = SyncEngine(tmp_path)
+        specs = engine._load_specs()
+
+        assert "base" not in specs
+        assert len(specs) == 2
+
+    def test_empty_specs_directory(self, tmp_path):
+        (tmp_path / "se3" / "specs").mkdir(parents=True, exist_ok=True)
+
+        engine = SyncEngine(tmp_path)
+        specs = engine._load_specs()
+
+        assert specs == {}
+
+    def test_no_specs_directory(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        specs = engine._load_specs()
+
+        assert specs == {}
+
+    def test_spec_content_is_read(self, tmp_path):
+        _create_spec(tmp_path, "my-spec", "Hello world spec content")
+
+        engine = SyncEngine(tmp_path)
+        specs = engine._load_specs()
+
+        assert specs["my-spec"]["content"] == "Hello world spec content"
+
+
+class TestSyncEngineLoadExistingIssues:
+    def test_loads_open_issues(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("Issue A", "desc", tags=["source:sync", "auto-discovered"])
+        mgr.create("Issue B", "desc", tags=["other"])
+
+        engine = SyncEngine(tmp_path)
+        issues = engine._load_existing_issues()
+
+        assert len(issues) == 2
+        assert len(engine._sync_issues) == 1
+        assert engine._sync_issues[0].title == "Issue A"
+
+    def test_empty_issues(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        issues = engine._load_existing_issues()
+
+        assert issues == []
+        assert engine._sync_issues == []
+
+
+class TestSyncEngineProcessGaps:
+    def test_creates_issues_for_gaps(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        gaps = [
+            SpecDiff(DiffType.GAP, "auth", "Missing login endpoint", "src/auth.py"),
+            SpecDiff(DiffType.GAP, "auth", "Missing signup endpoint"),
+        ]
+
+        created = engine._process_gaps(gaps)
+
+        assert created == 2
+        mgr = IssueManager(tmp_path)
+        issues = mgr.list_issues()
+        assert len(issues) == 2
+        assert all("source:sync" in i.tags for i in issues)
+        assert all("auto-discovered" in i.tags for i in issues)
+        assert issues[0].type == "task"
+
+    def test_idempotent_no_duplicates(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        gaps = [SpecDiff(DiffType.GAP, "auth", "Missing login endpoint")]
+
+        engine._process_gaps(gaps)
+        created = engine._process_gaps(gaps)
+
+        assert created == 0
+        mgr = IssueManager(tmp_path)
+        assert len(mgr.list_issues()) == 1
+
+    def test_empty_gaps(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        created = engine._process_gaps([])
+        assert created == 0
+
+    def test_issue_description_includes_gap_details(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        gaps = [SpecDiff(DiffType.GAP, "config", "Missing validation", "src/config.py:42")]
+
+        engine._process_gaps(gaps)
+
+        mgr = IssueManager(tmp_path)
+        issues = mgr.list_issues()
+        assert len(issues) == 1
+        assert "config" in issues[0].description
+        assert "Missing validation" in issues[0].description
+        assert "src/config.py:42" in issues[0].description
+
+    def test_issue_title_format(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        gaps = [SpecDiff(DiffType.GAP, "auth", "Missing login")]
+
+        engine._process_gaps(gaps)
+
+        mgr = IssueManager(tmp_path)
+        issues = mgr.list_issues()
+        assert issues[0].title == "[sync] auth: Missing login"
+
+
+class TestSyncEngineProcessExtensions:
+    def test_updates_spec_file(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Old content")
+
+        engine = SyncEngine(tmp_path)
+        llm_caller = MagicMock()
+        llm_caller.call.return_value = "# Updated auth spec with extensions"
+
+        spec_info = {
+            "name": "auth",
+            "content": "# Old content",
+            "path": tmp_path / "se3" / "specs" / "auth" / "spec.md",
+        }
+        extensions = [
+            SpecDiff(DiffType.EXTENSION, "auth", "Extra helper function", "src/utils.py:10"),
+        ]
+
+        updated = engine._process_extensions(extensions, spec_info, llm_caller)
+
+        assert updated == 1
+        actual = (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text()
+        assert actual == "# Updated auth spec with extensions"
+
+    def test_no_extensions_returns_zero(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        updated = engine._process_extensions([], {}, MagicMock())
+        assert updated == 0
+
+    def test_llm_failure_returns_zero(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Original content")
+
+        engine = SyncEngine(tmp_path)
+        llm_caller = MagicMock()
+        llm_caller.call.side_effect = RuntimeError("LLM timeout")
+
+        spec_info = {
+            "name": "auth",
+            "content": "# Original content",
+            "path": tmp_path / "se3" / "specs" / "auth" / "spec.md",
+        }
+        extensions = [SpecDiff(DiffType.EXTENSION, "auth", "Extra helper")]
+
+        updated = engine._process_extensions(extensions, spec_info, llm_caller)
+
+        assert updated == 0
+        actual = (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text()
+        assert actual == "# Original content"
+
+    def test_empty_llm_response_returns_zero(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Original")
+
+        engine = SyncEngine(tmp_path)
+        llm_caller = MagicMock()
+        llm_caller.call.return_value = "   "
+
+        spec_info = {
+            "name": "auth",
+            "content": "# Original",
+            "path": tmp_path / "se3" / "specs" / "auth" / "spec.md",
+        }
+        extensions = [SpecDiff(DiffType.EXTENSION, "auth", "Something")]
+
+        updated = engine._process_extensions(extensions, spec_info, llm_caller)
+        assert updated == 0
+
+    def test_prompt_includes_extension_descriptions(self, tmp_path):
+        _create_spec(tmp_path, "base", "# Base")
+
+        engine = SyncEngine(tmp_path)
+        llm_caller = MagicMock()
+        llm_caller.call.return_value = "# Updated"
+
+        spec_info = {
+            "name": "base",
+            "content": "# Base",
+            "path": tmp_path / "se3" / "specs" / "base" / "spec.md",
+        }
+        extensions = [
+            SpecDiff(DiffType.EXTENSION, "base", "New helper A", "src/a.py"),
+            SpecDiff(DiffType.EXTENSION, "base", "New helper B"),
+        ]
+
+        engine._process_extensions(extensions, spec_info, llm_caller)
+
+        prompt = llm_caller.call.call_args.kwargs.get("prompt") or llm_caller.call.call_args[0][0]
+        assert "New helper A" in prompt
+        assert "New helper B" in prompt
+        assert "src/a.py" in prompt
+
+    def test_uses_off_json_mode(self, tmp_path):
+        _create_spec(tmp_path, "x", "# X")
+
+        engine = SyncEngine(tmp_path)
+        llm_caller = MagicMock()
+        llm_caller.call.return_value = "# Updated"
+
+        spec_info = {
+            "name": "x",
+            "content": "# X",
+            "path": tmp_path / "se3" / "specs" / "x" / "spec.md",
+        }
+
+        engine._process_extensions(
+            [SpecDiff(DiffType.EXTENSION, "x", "ext")], spec_info, llm_caller
+        )
+
+        assert llm_caller.call.call_args.kwargs.get("json_mode") == "off"
+
+
+class TestSyncEngineIssueLifecycle:
+    def test_auto_closes_resolved_gaps(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create(
+            "[sync] auth: Missing login",
+            "desc",
+            tags=["auto-discovered", "source:sync"],
+        )
+        mgr.create(
+            "[sync] auth: Missing signup",
+            "desc",
+            tags=["auto-discovered", "source:sync"],
+        )
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        current_gaps = {"[sync] auth: Missing login"}
+        closed = engine._manage_issue_lifecycle(current_gaps)
+
+        assert closed == 1
+        remaining = mgr.list_issues()
+        assert len(remaining) == 1
+        assert remaining[0].title == "[sync] auth: Missing login"
+
+    def test_no_sync_issues_closes_nothing(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        engine._sync_issues = []
+
+        closed = engine._manage_issue_lifecycle(set())
+        assert closed == 0
+
+    def test_all_gaps_still_present(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create(
+            "[sync] auth: Missing login",
+            "desc",
+            tags=["auto-discovered", "source:sync"],
+        )
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        current_gaps = {"[sync] auth: Missing login"}
+        closed = engine._manage_issue_lifecycle(current_gaps)
+
+        assert closed == 0
+        assert len(mgr.list_issues()) == 1
+
+    def test_non_sync_issues_not_affected(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("Manual issue", "desc", tags=["manual"])
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        closed = engine._manage_issue_lifecycle(set())
+        assert closed == 0
+        assert len(mgr.list_issues()) == 1
+
+
+class TestSyncEngineCollectConflicts:
+    def _make_analyses(self):
+        return [
+            SpecAnalysis(
+                spec_name="auth",
+                diffs=[
+                    SpecDiff(DiffType.CONFLICT, "auth", "Token mismatch", "src/auth.py:10"),
+                    SpecDiff(DiffType.GAP, "auth", "Missing feature"),
+                ],
+            ),
+            SpecAnalysis(
+                spec_name="config",
+                diffs=[
+                    SpecDiff(DiffType.CONFLICT, "config", "Format mismatch"),
+                ],
+            ),
+        ]
+
+    def test_default_mode_collects_conflicts(self):
+        engine = SyncEngine(Path("/fake"), mode="default")
+        conflicts = engine._collect_conflicts(self._make_analyses())
+        assert len(conflicts) == 2
+        assert conflicts[0].spec_name == "auth"
+        assert conflicts[1].spec_name == "config"
+
+    def test_strict_mode_collects_all_conflicts(self):
+        engine = SyncEngine(Path("/fake"), mode="strict")
+        conflicts = engine._collect_conflicts(self._make_analyses())
+        assert len(conflicts) == 2
+
+    def test_fast_mode_collects_no_conflicts(self):
+        engine = SyncEngine(Path("/fake"), mode="fast")
+        conflicts = engine._collect_conflicts(self._make_analyses())
+        assert len(conflicts) == 0
+
+    def test_no_conflicts_in_analysis(self):
+        engine = SyncEngine(Path("/fake"), mode="default")
+        analyses = [SpecAnalysis(spec_name="clean", diffs=[])]
+        conflicts = engine._collect_conflicts(analyses)
+        assert conflicts == []
+
+
+class TestSyncEngineGenerateCallFile:
+    def test_generates_call_file(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="default")
+        conflicts = [
+            Conflict(spec_name="auth", description="Token mismatch", code_location="src/a.py"),
+            Conflict(spec_name="config", description="Format mismatch"),
+        ]
+
+        call_path = engine._generate_call_file(conflicts)
+
+        assert call_path.exists()
+        assert call_path.parent == tmp_path / "se3" / "calls"
+
+        data = json.loads(call_path.read_text())
+        assert data["type"] == "sync_conflicts"
+        assert data["mode"] == "default"
+        assert len(data["conflicts"]) == 2
+        assert data["conflicts"][0]["id"] == 1
+        assert data["conflicts"][0]["spec_name"] == "auth"
+        assert data["conflicts"][0]["decision"] == "pending"
+        assert data["conflicts"][1]["id"] == 2
+
+    def test_creates_calls_directory(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        conflicts = [Conflict(spec_name="x", description="d")]
+
+        call_path = engine._generate_call_file(conflicts)
+        assert (tmp_path / "se3" / "calls").is_dir()
+
+    def test_call_file_contains_options(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        conflicts = [Conflict(spec_name="x", description="d")]
+
+        call_path = engine._generate_call_file(conflicts)
+        data = json.loads(call_path.read_text())
+
+        assert data["conflicts"][0]["options"] == ["update_spec", "create_issue"]
+
+
+class TestSyncEngineRun:
+    @patch("se3.engine.sync_engine.SyncEngine._load_specs")
+    @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
+    @patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec")
+    @patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None)
+    @patch("se3.engine.project_context.ProjectContextCollector.collect")
+    def test_run_orchestrates_workflow(
+        self, mock_collect, mock_llm_init, mock_analyze, mock_load_issues, mock_load_specs, tmp_path
+    ):
+        mock_collect.return_value = {"git": {}, "flow_engine": None, "backlog": [], "specs": []}
+
+        mock_load_specs.return_value = {
+            "base": {
+                "name": "base",
+                "path": tmp_path / "se3" / "specs" / "base" / "spec.md",
+                "content": "# Base spec",
+            },
+        }
+
+        mock_analyze.return_value = SpecAnalysis(spec_name="base", diffs=[])
+        mock_load_issues.return_value = []
+
+        engine = SyncEngine(tmp_path)
+        result = engine.run()
+
+        assert isinstance(result, SyncResult)
+        assert len(result.analyses) == 1
+        mock_analyze.assert_called_once()
+        mock_load_issues.assert_called_once()
+
+    @patch("se3.engine.sync_engine.SyncEngine._load_specs")
+    @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
+    @patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec")
+    @patch("se3.engine.sync_analyzer.SyncAnalyzer.generate_base_spec")
+    @patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None)
+    @patch("se3.engine.project_context.ProjectContextCollector.collect")
+    def test_run_generates_base_spec_if_missing(
+        self, mock_collect, mock_llm_init, mock_gen_base, mock_analyze,
+        mock_load_issues, mock_load_specs, tmp_path
+    ):
+        mock_collect.return_value = {"git": {}, "flow_engine": None, "backlog": [], "specs": []}
+        mock_load_specs.side_effect = [
+            {},
+            {"base": {"name": "base", "path": Path("f"), "content": "# Base"}},
+        ]
+        mock_analyze.return_value = SpecAnalysis(spec_name="base", diffs=[])
+        mock_load_issues.return_value = []
+
+        engine = SyncEngine(tmp_path)
+        result = engine.run()
+
+        mock_gen_base.assert_called_once()
+        assert len(result.analyses) == 1
+
+    def test_run_with_gaps_creates_issues(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+
+        with patch("se3.engine.sync_engine.SyncEngine._load_existing_issues", return_value=[]), \
+             patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None), \
+             patch("se3.engine.project_context.ProjectContextCollector.collect",
+                   return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
+             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze:
+
+            mock_analyze.return_value = SpecAnalysis(
+                spec_name="auth",
+                diffs=[SpecDiff(DiffType.GAP, "auth", "Missing login endpoint")],
+            )
+
+            engine = SyncEngine(tmp_path)
+            engine._sync_issues = []
+            result = engine.run()
+
+            assert result.issues_created == 1
+            mgr = IssueManager(tmp_path)
+            issues = mgr.list_issues()
+            assert len(issues) == 1
+
+    def test_run_fast_mode_no_call_file(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+
+        with patch("se3.engine.sync_engine.SyncEngine._load_existing_issues", return_value=[]), \
+             patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None), \
+             patch("se3.engine.project_context.ProjectContextCollector.collect",
+                   return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
+             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze:
+
+            mock_analyze.return_value = SpecAnalysis(
+                spec_name="auth",
+                diffs=[SpecDiff(DiffType.CONFLICT, "auth", "Token mismatch")],
+            )
+
+            engine = SyncEngine(tmp_path, mode="fast")
+            engine._sync_issues = []
+            result = engine.run()
+
+            assert result.call_file is None
+            assert len(result.conflicts) == 0
