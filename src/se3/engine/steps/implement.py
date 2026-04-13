@@ -1678,7 +1678,12 @@ def _resolve_files_changed(step: Step, project_root: Path, baseline_hash: str | 
 
 
 def _format_fix_history(fix_history: list) -> str:
-    """Format fix history for inclusion in FIX_PROMPT."""
+    """Format fix history for inclusion in FIX_PROMPT.
+
+    Uses the structured ``issues`` list (already capped at 10 entries per
+    iteration) rather than the raw fix_instructions text, keeping the
+    prompt bounded regardless of LLM verbosity.
+    """
     if not fix_history:
         return "No previous fix attempts."
 
@@ -1687,10 +1692,23 @@ def _format_fix_history(fix_history: list) -> str:
         it = entry.get("iteration", "?")
         reason = entry.get("reason", "unknown")
         trigger = entry.get("trigger_step_type", "unknown")
-        summary = entry.get("fix_instructions_summary", "")
         lines.append(f"- Iteration {it}: triggered by {trigger} ({reason})")
-        if summary:
-            lines.append(f"  Summary: {summary[:200]}")
+        issues = entry.get("issues", [])
+        if issues:
+            for issue in issues[:5]:
+                # Issues are normalized by state_machine._normalize_issue_fields
+                # to always carry a "severity" key.
+                sev = issue.get("severity", "?")
+                desc = issue.get("description") or issue.get("message", "")
+                loc = issue.get("location", "")
+                loc_str = f" @ {loc}" if loc else ""
+                lines.append(f"  - [{sev}] {desc}{loc_str}")
+            if len(issues) > 5:
+                lines.append(f"  ... and {len(issues) - 5} more issue(s)")
+        # Backward compat: old fix_history entries may still carry this field
+        # (already truncated to 500 chars at storage time, no re-truncation needed)
+        elif entry.get("fix_instructions_summary"):
+            lines.append(f"  Summary: {entry['fix_instructions_summary']}")
 
     return "\n".join(lines)
 

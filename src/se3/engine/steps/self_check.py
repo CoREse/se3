@@ -13,6 +13,7 @@ from typing import Any
 
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ..truncation import PHASE_STDERR_TAIL_CHARS, PHASE_STDOUT_TAIL_CHARS
 from ..utils.json_parser import parse_json_response
 from .verify_spec import _get_max_fix_iterations
 
@@ -247,10 +248,10 @@ def _format_test_results(test_results: dict[str, Any]) -> str:
             )
             stdout = phase.get("stdout", "")
             if stdout and not passed:
-                lines.append(f"Output (last 1000 chars):\n{stdout[-1000:]}")
+                lines.append(f"Output (last {PHASE_STDOUT_TAIL_CHARS} chars):\n{stdout[-PHASE_STDOUT_TAIL_CHARS:]}")
             stderr = phase.get("stderr", "")
             if stderr and not passed:
-                lines.append(f"Stderr (last 1500 chars):\n{stderr[-1500:]}")
+                lines.append(f"Stderr (last {PHASE_STDERR_TAIL_CHARS} chars):\n{stderr[-PHASE_STDERR_TAIL_CHARS:]}")
 
         return "\n".join(lines)
 
@@ -260,11 +261,11 @@ def _format_test_results(test_results: dict[str, Any]) -> str:
 
     stdout = test_results.get("stdout", "")
     if stdout:
-        lines.append(f"\nTest output:\n{stdout[-1000:]}")
+        lines.append(f"\nTest output:\n{stdout[-PHASE_STDOUT_TAIL_CHARS:]}")
 
     stderr = test_results.get("stderr", "")
     if stderr:
-        lines.append(f"\nError output:\n{stderr[-1500:]}")
+        lines.append(f"\nError output:\n{stderr[-PHASE_STDERR_TAIL_CHARS:]}")
 
     return "\n".join(lines)
 

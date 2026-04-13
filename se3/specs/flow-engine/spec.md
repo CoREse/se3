@@ -596,17 +596,21 @@ The flow engine SHALL apply content-aware truncation when feeding diagnostic out
 |---------|-------------|-----------|-----------|
 | Fix instructions (test, verify_spec) | stderr | 2000 | tail |
 | Fix instructions (test, verify_spec) | failures section | 3000 | smart (per test block) |
-| LLM prompt test results (verify_spec, self_check) | stderr per phase | 1500 | tail |
-| LLM prompt test results (verify_spec, self_check) | stdout per phase | 1000 | tail |
+| LLM prompt test results (verify_spec, self_check) | stderr per phase | 2000 | tail |
+| LLM prompt test results (verify_spec, self_check) | stdout per phase | 2000 | tail |
 | Chat history tool_result | content | 2000 | direction-aware |
 | Chat history retry/continue | assistant response | 2000/4000 | head+tail (head 1000 + tail remainder) |
 | JSON retry prompt (LLM caller) | previous response | 1500 | head |
-| Test history record | stderr per phase | 1000 | tail |
-| Test history record | stdout per phase | 1000 | tail |
-| Loop iteration summaries | accumulated total | 4000 | FIFO eviction |
+| Test history record | stderr per phase | 2000 | tail |
+| Test history record | stdout per phase | 2000 | tail |
+| Loop iteration summaries | accumulated total | 8000 | FIFO eviction |
 | Context.json step output values | string values | 1000 | head |
 | Iteration summary diff (run.py) | git diff | 5000 | head |
 | Salvage diff summary | git diff | 4000 | head |
+
+**Shared Truncation Constants Module:**
+
+Truncation limits consumed by step handlers (test, self_check, verify_spec) SHALL be defined as named constants in a shared `truncation.py` module (`se3/engine/truncation.py`), rather than hardcoded in each handler. This ensures consistency across handlers and provides a single location to adjust limits. Constants include `PHASE_STDOUT_TAIL_CHARS`, `PHASE_STDERR_TAIL_CHARS`, `TEST_HISTORY_STDOUT_TAIL_CHARS`, `TEST_HISTORY_STDERR_TAIL_CHARS`, `FIX_STDERR_TAIL_CHARS`, and `FAILURES_SECTION_MAX_CHARS`.
 
 **Design rationale:** Stderr is the primary source of traceback and error diagnostics for LLM-driven fix loops. Previous limits (300-500 chars) were insufficient for a single Python traceback. The limits above ensure at least one complete error chain is preserved in all diagnostic contexts.
 
@@ -623,6 +627,11 @@ The flow engine SHALL apply content-aware truncation when feeding diagnostic out
 - **WHEN** accumulated iteration summaries exceed the total character limit
 - **THEN** earliest summaries are evicted first, replaced with a placeholder
 - **AND** recent iteration summaries are preserved in full
+
+#### Scenario: Truncation constants are centralized
+- **WHEN** a step handler (test, self_check, verify_spec) truncates stdout or stderr content
+- **THEN** the truncation limit is imported from the shared `truncation.py` module
+- **AND** all handlers sharing the same truncation context use the same constant value
 
 ### Requirement: 状态持久化与恢复
 
@@ -712,12 +721,23 @@ The flow engine SHALL apply content-aware truncation when feeding diagnostic out
 - **PATCH**: 向后兼容的 bug 修复、性能优化、内部重构
 - **NONE**: 无版本价值的变更（仅格式化、注释等）
 
+**Verification result formatting:**
+- When `verification_result` includes an `issues` list, all issues SHALL be included in the LLM prompt (no display cap).
+- Issue severity is read from the `priority` field (matching verify_spec's unified priority system: `critical/high/medium/low`), not the `severity` field.
+- The summary counts critical/high priority issues as the primary indicator of unresolved problems.
+
 #### Scenario: 智能版本分析识别破坏性变更
 - **GIVEN** 任务类型为 `small`
 - **AND** 实际变更删除了公共函数的参数
 - **WHEN** `version_analyze` 步骤执行
 - **THEN** LLM 识别为 breaking change
 - **AND** 返回 `bump_type: major`
+
+#### Scenario: Version analyze shows all verification issues
+- **GIVEN** `verification_result` contains 15 issues of varying priority
+- **WHEN** `version_analyze` formats the verification result for the LLM prompt
+- **THEN** all 15 issues are included (no truncation to a fixed count)
+- **AND** the summary line uses the `priority` field to count critical/high issues
 
 #### Scenario: 低置信度处理
 - **GIVEN** `version_analyze` 返回 `confidence: low`
@@ -1493,6 +1513,45 @@ test:
 - **AND** the revised step's `previous_output` is serialized to JSON for the LLM prompt
 - **THEN** `json.dumps` MUST use `default=str` as a defensive fallback
 - **AND** step handlers that store `StepStatus` in `step.outputs["result"]` MUST convert it to its string `.value` before storing (root cause prevention)
+
+#### Fix History Structure
+
+When the state machine records a fix loop iteration in `fix_history`, each entry SHALL store structured issue data instead of a truncated text summary of fix_instructions.
+
+**Fix history entry schema:**
+```json
+{
+  "iteration": 1,
+  "trigger_step_type": "test|self_check|verify_spec",
+  "implement_step_id": "...",
+  "reason": "test_failure|spec_compliance|...",
+  "issues": [
+    {"severity": "high", "priority": "high", "description": "...", "location": "...", "message": "..."}
+  ]
+}
+```
+
+**Issue field normalization (`_normalize_issue_fields`):**
+- self_check issues use `severity`; verify_spec issues use `priority`. The state machine normalizes both onto every issue dict before storing in fix_history, so downstream consumers (e.g., `_format_fix_history` in the implement step) can use a single canonical field.
+- If `severity` is present but `priority` is absent, `priority` is set to `severity`'s value, and vice versa.
+
+**Fix history formatting for implement prompts:**
+- `_format_fix_history()` renders each iteration using the structured `issues` list (showing up to 5 issues with severity, description, and location) rather than a truncated text summary.
+- The `issues` list is already capped at 10 entries per iteration (via `_cap_issue_list`), keeping the prompt bounded regardless of LLM verbosity.
+- Backward compatibility: old fix_history entries carrying `fix_instructions_summary` are still supported as a fallback.
+
+**Source-aware storage policy:**
+- Fix instructions from test.py (raw test output: "Tests are failing..." + failures + stderr) are NOT stored in fix_history — the `reason` field ("test_failure") records the trigger, and current test output is always available in the next iteration.
+- Fix instructions from verify_spec (LLM-generated analysis and repair guidance) are preserved via the structured `issues` list, which captures the LLM's diagnostic intent for avoiding repeated fix directions.
+
+#### Scenario: Fix history stores structured issues
+- **WHEN** the state machine records a fix loop entry from verify_spec
+- **THEN** the entry's `issues` list contains normalized issue dicts with both `severity` and `priority` fields
+- **AND** no `fix_instructions_summary` field is stored
+
+#### Scenario: Fix history prev_issues cap aligned at 20
+- **WHEN** the state machine builds inputs for the verify_spec step during a fix iteration
+- **THEN** `prev_issues` is capped at 20 entries, matching the verify_spec prompt's display limit
 
 #### Scenario: test 通过后进行代码自检
 - **WHEN** test 步骤执行完成且 `overall_passed` 为 true

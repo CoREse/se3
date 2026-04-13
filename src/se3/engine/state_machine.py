@@ -84,6 +84,25 @@ def _cap_issue_list(value: Any) -> list:
     return []
 
 
+def _normalize_issue_fields(issues: list) -> list:
+    """Normalize issue dicts so downstream consumers can use a single field name.
+
+    self_check issues use ``severity`` while verify_spec issues use ``priority``.
+    This function ensures every issue dict carries a ``severity`` key (canonical
+    for fix_history) derived from whichever field is present, so that
+    ``_format_fix_history`` in the implement step does not need a dual-access
+    pattern.
+    """
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        if "severity" not in issue and "priority" in issue:
+            issue["severity"] = issue["priority"]
+        elif "priority" not in issue and "severity" in issue:
+            issue["priority"] = issue["severity"]
+    return issues
+
+
 class StateMachine:
     """Finite state machine for workflow execution.
 
@@ -571,10 +590,11 @@ class StateMachine:
                 "trigger_step_type": trigger_step_type,
                 "implement_step_id": implement_step.step_id,
                 "reason": fix_context.get("reason") or _infer_fix_reason(trigger_step_type),
-                "fix_instructions_summary": fix_instructions[:500] if fix_instructions else "",
-                "issues": copy.deepcopy(
-                    _cap_issue_list(
-                        fix_context.get("spec_issues") or fix_context.get("issues", [])
+                "issues": _normalize_issue_fields(
+                    copy.deepcopy(
+                        _cap_issue_list(
+                            fix_context.get("spec_issues") or fix_context.get("issues", [])
+                        )
                     )
                 ),
             }
@@ -855,7 +875,7 @@ class StateMachine:
                         )
                         inputs["prev_fix_instructions"] = step.outputs.get("fix_instructions") or ""
                         all_issues = step.outputs.get("issues", [])
-                        inputs["prev_issues"] = copy.deepcopy(all_issues[:30])
+                        inputs["prev_issues"] = copy.deepcopy(all_issues[:20])
                         break
 
         # Special handling for IMPLEMENT step when in fix iteration

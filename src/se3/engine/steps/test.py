@@ -26,11 +26,12 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from ..models import FlowInstance, Step, StepStatus
+from ..truncation import FAILURES_SECTION_MAX_CHARS, FIX_STDERR_TAIL_CHARS, TEST_HISTORY_STDERR_TAIL_CHARS, TEST_HISTORY_STDOUT_TAIL_CHARS
 
 logger = logging.getLogger(__name__)
 
 
-def _extract_failures_section(stdout: str, max_chars: int = 3000) -> str:
+def _extract_failures_section(stdout: str, max_chars: int = FAILURES_SECTION_MAX_CHARS) -> str:
     """Extract the FAILURES/ERRORS section from pytest output.
 
     Intelligently extracts diagnostic information from pytest output:
@@ -305,7 +306,7 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         )
     else:
         logger.warning("Tests failed with new/regression failures")
-        stderr_tail = primary_result["stderr"][-2000:] if primary_result["stderr"] else ""
+        stderr_tail = primary_result["stderr"][-FIX_STDERR_TAIL_CHARS:] if primary_result["stderr"] else ""
         step.error_message = f"Tests failed:\n{stderr_tail}"
 
     # 8. Report pre-existing failures via A-class issue discovery
@@ -319,7 +320,7 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         # Build fix instructions from test output
         failures_section = _extract_failures_section(stdout)
-        stderr_tail = stderr[-2000:] if stderr else ""
+        stderr_tail = stderr[-FIX_STDERR_TAIL_CHARS:] if stderr else ""
         fix_instructions = f"""Tests are failing. Please review and fix the implementation.
 
 Test output:
@@ -636,8 +637,8 @@ def _record_test_history(
         # Include failure output for failed phases (truncated)
         for i, p in enumerate(phase_results):
             if not p.get("passed", False):
-                stdout_tail = (p.get("stdout", "") or "")[-1000:]
-                stderr_tail = (p.get("stderr", "") or "")[-1000:]
+                stdout_tail = (p.get("stdout", "") or "")[-TEST_HISTORY_STDOUT_TAIL_CHARS:]
+                stderr_tail = (p.get("stderr", "") or "")[-TEST_HISTORY_STDERR_TAIL_CHARS:]
                 result_summary["phases"][i]["stdout_tail"] = stdout_tail
                 result_summary["phases"][i]["stderr_tail"] = stderr_tail
 

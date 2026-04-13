@@ -265,11 +265,11 @@ class TestPreviousSummaryInjection:
 
     def test_summary_truncation(self):
         controller = LoopController(project_root=Path("/tmp"), no_worktree=True)
-        # Add long summaries to exceed 4000 char limit
-        for i in range(50):
+        # Add long summaries to exceed 8000 char limit
+        for i in range(100):
             controller.add_summary(f"Long summary {i}: " + "x" * 100)
         total = sum(len(s) for s in controller.accumulated_summaries)
-        max_len = 4000
+        max_len = 8000
         placeholder = "[...earlier iterations omitted...]"
         max_entry_size = max(len(s) for s in controller.accumulated_summaries)
         assert total <= max_len + len(placeholder) + max_entry_size

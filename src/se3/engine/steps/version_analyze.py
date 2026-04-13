@@ -396,16 +396,13 @@ def _format_verification(verification_result: dict[str, Any]) -> str:
     
     issues = verification_result.get("issues", [])
     if issues:
-        error_count = sum(1 for i in issues if i.get("severity") == "error")
-        lines.append(f"Issues found: {len(issues)} ({error_count} errors)")
-        
-        # Show first few issues
-        for i, issue in enumerate(issues[:3]):
-            severity = issue.get("severity", "unknown")
+        error_count = sum(1 for i in issues if i.get("priority") in ("critical", "high"))
+        lines.append(f"Issues found: {len(issues)} ({error_count} critical/high)")
+
+        for i, issue in enumerate(issues):
+            priority = issue.get("priority", "unknown")
             message = issue.get("message", "")
-            lines.append(f"  - [{severity}] {message}")
-        if len(issues) > 3:
-            lines.append(f"  ... and {len(issues) - 3} more issues")
+            lines.append(f"  - [{priority}] {message}")
     
     return "\n".join(lines)
 
