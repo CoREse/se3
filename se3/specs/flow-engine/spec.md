@@ -168,6 +168,38 @@ se3 run --discover "我想做一个用户管理功能"
 - **THEN** discovery_handler 捕获错误并展示简洁的错误描述（包含原始错误消息）
 - **AND** 步骤返回 `StepStatus.FAILED`
 
+#### Discovery Message Display Rendering
+
+The `_display_discovery_message()` function SHALL render LLM-generated content fields (`content` and `refined_description`) as markdown using `rich.markdown.Markdown`, while structural UI elements (section titles, numbered question lists, confirmation prompts) use Rich `Text` with appropriate styling. Multiple renderables are combined via `rich.console.Group` and displayed inside a Rich `Panel` titled "Discovery".
+
+**Rendering rules by mode:**
+
+| Mode | `content` field | `refined_description` field | Structural elements |
+|------|----------------|---------------------------|---------------------|
+| Confirmation (`is_confirmation=True`) | Markdown | Markdown | — |
+| Synthesis + questions | Markdown | Markdown (under "Proposed Task Description:" heading) | Heading as styled `Text`, numbered questions as `Text` |
+| Synthesis (no questions) | Markdown | Markdown (under "Proposed Task Description:" heading) | Heading as styled `Text`, confirmation prompt as styled `Text` |
+| Question | Markdown | — | Numbered questions as `Text` |
+| General | Markdown | — | — |
+
+**Confirmation phase content display:**
+
+When the discovery step enters the confirmation phase (`is_confirmation=True`), `_display_discovery_message()` SHALL display the full LLM analysis content (`content` field) followed by the `refined_description`, both rendered as markdown. This ensures users see the complete LLM analysis (reasoning, summaries, context) alongside the final proposed description before making their confirmation decision.
+
+##### Scenario: Discovery message renders LLM content as markdown
+- **GIVEN** the discovery step receives LLM response with `content` and `refined_description` fields containing markdown syntax (headings, lists, bold, etc.)
+- **WHEN** `_display_discovery_message()` renders the message
+- **THEN** `content` and `refined_description` are rendered via `rich.markdown.Markdown`
+- **AND** structural elements (titles, numbered questions, confirmation prompts) use Rich `Text` with styling
+- **AND** all renderables are combined via `rich.console.Group` into a single `Panel`
+
+##### Scenario: Confirmation phase shows full LLM analysis content
+- **GIVEN** LLM enters confirmation mode with both `content` (analysis text) and `refined_description`
+- **WHEN** the confirmation display is rendered
+- **THEN** the full `content` from the LLM response is displayed as markdown
+- **AND** the `refined_description` is displayed as markdown below it
+- **AND** the user can review the complete analysis before choosing to confirm or continue exploration
+
 ### Requirement: 状态机驱动流程
 
 流程引擎 SHALL 以 Python 有限状态机实现，每个状态对应一个流程步骤。步骤之间的转换由程序逻辑控制，而非 LLM 决定。

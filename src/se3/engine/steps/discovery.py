@@ -365,9 +365,9 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step.outputs["awaiting_programmatic_confirm"] = True
             logger.info("Discovery LLM confirmed — awaiting programmatic user confirmation")
 
-            # Show the confirmed description and inform user that program will ask for confirmation
+            # Show LLM analysis content and confirmed description
             _display_discovery_message(
-                "Discovery analysis complete. Here's the confirmed task description:",
+                content,
                 refined_description,
                 questions=None,
                 is_confirmation=True,
@@ -551,60 +551,73 @@ def _display_discovery_message(
         questions: List of questions (if in question mode)
         is_confirmation: If True, this is a final confirmation display (not asking for input)
     """
-    from ..output import render_full
+    from rich.console import Group
+    from rich.markdown import Markdown
+    from rich.panel import Panel
+    from rich.text import Text
+    from ..display import get_console
 
-    lines = []
+    renderables = []
 
     if refined_description and is_confirmation:
-        # Final confirmation - show the confirmed description
-        lines.extend([
-            content,
-            "",
-            refined_description,
-            "",
-        ])
+        # Final confirmation - show LLM content as markdown, then refined description
+        if content:
+            renderables.append(Markdown(content))
+            renderables.append(Text(""))
+        renderables.append(Markdown(refined_description))
+        renderables.append(Text(""))
     elif refined_description and questions:
         # Synthesis with pending questions - show content, proposed description, then questions
         if content:
-            lines.extend([content, ""])
-        lines.extend([
-            "[bold cyan]Proposed Task Description:[/bold cyan]",
-            refined_description,
-            "",
-            "[bold yellow]Questions:[/bold yellow]",
-        ])
+            renderables.append(Markdown(content))
+            renderables.append(Text(""))
+        renderables.append(Text("Proposed Task Description:", style="bold cyan"))
+        renderables.append(Markdown(refined_description))
+        renderables.append(Text(""))
+        renderables.append(Text("Questions:", style="bold yellow"))
         for i, q in enumerate(questions, 1):
-            lines.append(f"  {i}. {q}")
-        lines.append("")
+            renderables.append(Text(f"  {i}. {q}"))
+        renderables.append(Text(""))
     elif refined_description:
         # Synthesis mode - show content explanation and proposed description
         if content:
-            lines.extend([content, ""])
-        lines.extend([
-            "[bold cyan]Proposed Task Description:[/bold cyan]",
-            refined_description,
-            "",
-            "Does this accurately capture what you want to build?",
-            "",
-            "Reply with:",
-            "  [bold]yes[/bold] or [bold]ok[/bold] to proceed with this description",
-            "  [bold]no[/bold] or provide corrections/clarifications",
-            "",
-        ])
+            renderables.append(Markdown(content))
+            renderables.append(Text(""))
+        renderables.append(Text("Proposed Task Description:", style="bold cyan"))
+        renderables.append(Markdown(refined_description))
+        renderables.append(Text(""))
+        prompt = Text()
+        prompt.append("Does this accurately capture what you want to build?\n\n")
+        prompt.append("Reply with:\n")
+        prompt.append("  yes", style="bold")
+        prompt.append(" or ")
+        prompt.append("ok", style="bold")
+        prompt.append(" to proceed with this description\n")
+        prompt.append("  no", style="bold")
+        prompt.append(" or provide corrections/clarifications\n")
+        renderables.append(prompt)
     elif questions:
         # Question mode - show the message and questions
         if content:
-            lines.extend([content, ""])
-        lines.append("[bold yellow]Questions:[/bold yellow]")
+            renderables.append(Markdown(content))
+            renderables.append(Text(""))
+        renderables.append(Text("Questions:", style="bold yellow"))
         for i, q in enumerate(questions, 1):
-            lines.append(f"  {i}. {q}")
-        lines.append("")
+            renderables.append(Text(f"  {i}. {q}"))
+        renderables.append(Text(""))
     else:
         # General message mode
-        lines.append(content)
-        lines.append("")
+        renderables.append(Markdown(content))
+        renderables.append(Text(""))
 
-    render_full("\n".join(lines), title="Discovery")
+    console = get_console()
+    panel = Panel(
+        Group(*renderables),
+        title="Discovery",
+        border_style="blue",
+        expand=True,
+    )
+    console.print(panel)
 
 
 def parse_user_response(response: str) -> Dict[str, Any]:
