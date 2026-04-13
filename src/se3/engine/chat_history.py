@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -687,6 +688,238 @@ def _render_ndjson_for_human(raw_ndjson: Union[str, list[dict]]) -> str:
             continue
 
     return "\n".join(parts)
+
+
+# Pre-compiled segment patterns for prompt segmentation (module-level to avoid
+# recompilation on every call). Ordered list of (pattern, title_fn) — first
+# match wins for each line.
+_SEGMENT_PATTERNS: list[tuple[re.Pattern, Any]] = [
+    # JSON mode wrapper
+    (re.compile(r"^CRITICAL:\s*You MUST respond with ONLY valid JSON"),
+     lambda _: "JSON Mode Instruction"),
+    # Read-only constraint
+    (re.compile(r"^READ-ONLY STEP CONSTRAINT|^=== READ-ONLY"),
+     lambda _: "Read-Only Constraint"),
+    # Language instruction
+    (re.compile(r"^IMPORTANT:\s*You MUST respond in"),
+     lambda _: "Language Instruction"),
+    # Step template preamble ("You are an expert ...")
+    (re.compile(r"^You are an expert"),
+     lambda _: "Step Instructions"),
+    # Discovery context
+    (re.compile(r"^## Discovery Context"),
+     lambda _: "Discovery Context"),
+    # Available specs
+    (re.compile(r"^## (Available Specifications|Available Specs)"),
+     lambda _: "Available Specifications"),
+    # Relevant specs
+    (re.compile(r"^## Relevant Specifications"),
+     lambda _: "Relevant Specifications"),
+    # Project context / summary
+    (re.compile(r"^## Project (Context|Summary)"),
+     lambda m: f"Project {m.group(1)}"),
+    # Additional user instruction
+    (re.compile(r"^\[Additional user instruction\]"),
+     lambda _: "Additional User Instruction"),
+    # Generic ## sections — capture the heading text
+    (re.compile(r"^## (.+)"),
+     lambda m: m.group(1).strip()),
+]
+
+
+def segment_prompt(prompt: str) -> list[dict[str, str]]:
+    """Split a prompt into labeled segments for structured display.
+
+    Identifies known section markers in SE3 prompts and splits the text
+    into segments with auto-detected titles.
+
+    Args:
+        prompt: The raw prompt text
+
+    Returns:
+        List of {"title": str, "content": str} dicts
+    """
+    lines = prompt.split("\n")
+    segments: list[dict[str, str]] = []
+    current_title = "Prompt"
+    current_lines: list[str] = []
+
+    def _flush():
+        text = "\n".join(current_lines).strip()
+        if text:
+            segments.append({"title": current_title, "content": text})
+
+    for line in lines:
+        stripped = line.strip()
+        matched = False
+        for pattern, title_fn in _SEGMENT_PATTERNS:
+            m = pattern.match(stripped)
+            if m:
+                _flush()
+                current_title = title_fn(m)
+                current_lines = [line]
+                matched = True
+                break
+        if not matched:
+            current_lines.append(line)
+
+    _flush()
+    return segments
+
+
+def render_session_detailed(
+    session: ChatSession,
+    verbose: bool = False,
+) -> list:
+    """Render a chat session with structured prompt and response display.
+
+    Returns a list of Rich renderables for console output.
+
+    Args:
+        session: The chat session to render
+        verbose: If True, show full response including tool calls via
+                 _render_ndjson_for_human(). If False, show only the final
+                 assistant text block.
+    """
+    from rich.panel import Panel
+    from rich.rule import Rule
+    from rich.text import Text
+    from rich.markdown import Markdown
+    from rich.console import Group
+
+    renderables = []
+
+    # Group messages by attempt
+    attempts: dict[int, list[ChatMessage]] = {}
+    for msg in session.messages:
+        attempts.setdefault(msg.attempt, []).append(msg)
+
+    for attempt_num in sorted(attempts.keys()):
+        msgs = attempts[attempt_num]
+        attempt_label = f"Attempt {attempt_num + 1}" if len(attempts) > 1 else ""
+
+        for msg in msgs:
+            if msg.role == "user":
+                # ── Prompt: structured segment display ──
+                segments = segment_prompt(msg.content)
+                prompt_parts = []
+                for seg in segments:
+                    header = Text(f"── {seg['title']} ──", style="bold cyan")
+                    # Show content as markdown for readability
+                    body = Markdown(seg["content"])
+                    prompt_parts.append(header)
+                    prompt_parts.append(body)
+                    prompt_parts.append(Text(""))  # spacer
+
+                title = "Prompt"
+                if attempt_label:
+                    title = f"Prompt ({attempt_label})"
+                renderables.append(Panel(
+                    Group(*prompt_parts),
+                    title=title,
+                    border_style="blue",
+                    expand=True,
+                ))
+
+            elif msg.role == "assistant":
+                # ── Response display ──
+                title = "Response"
+                if attempt_label:
+                    title = f"Response ({attempt_label})"
+
+                if verbose and msg.raw_json:
+                    # Full response with tool calls — reuse _render_ndjson_for_human
+                    # Use Text() instead of Markdown() to avoid rendering artifacts
+                    # (bracket sequences like [Edit: src/handler.py] get misinterpreted as links)
+                    rendered_text = _render_ndjson_for_human(msg.raw_json)
+                    renderables.append(Panel(
+                        Text(rendered_text) if rendered_text else Text("(empty response)", style="dim"),
+                        title=title,
+                        border_style="green",
+                        expand=True,
+                    ))
+                else:
+                    # Default: show only the final assistant text
+                    if msg.raw_json:
+                        text = _extract_final_text(msg.raw_json)
+                        # If no assistant text but there was tool activity,
+                        # fall back to showing tool activity summary
+                        if not text:
+                            text = _render_ndjson_for_human(msg.raw_json)
+                    else:
+                        text = msg.content
+                    if text:
+                        renderables.append(Panel(
+                            Markdown(text),
+                            title=title,
+                            border_style="green",
+                            expand=True,
+                        ))
+                    else:
+                        renderables.append(Panel(
+                            Text("(empty response)", style="dim"),
+                            title=title,
+                            border_style="green",
+                            expand=True,
+                        ))
+
+    return renderables
+
+
+def _extract_final_text(raw_json: list[dict]) -> str:
+    """Extract the final text block from assistant messages in raw NDJSON.
+
+    Returns the last text content from the last assistant message,
+    skipping intermediate tool calls and tool results.
+    """
+    last_text = ""
+    for data in raw_json:
+        try:
+            if data.get("type") == "assistant":
+                message = data.get("message", {})
+                content = message.get("content", [])
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text":
+                        text = item.get("text", "")
+                        if text:
+                            last_text = text
+        except (AttributeError, TypeError):
+            continue
+    return last_text
+
+
+def get_detailed_json(
+    project_root: Path,
+    flow_id: str,
+) -> list[dict]:
+    """Get detailed chat history data as structured JSON for a flow.
+
+    Returns a list of step entries, each containing segmented prompt
+    and full response data.
+    """
+    sessions = get_flow_history(project_root, flow_id)
+    result = []
+    for session in sessions:
+        step_data = {
+            "step_id": session.step_id,
+            "step_type": session.step_type,
+            "messages": [],
+        }
+        for msg in session.messages:
+            msg_data: dict = {
+                "role": msg.role,
+                "attempt": msg.attempt,
+                "timestamp": msg.timestamp,
+            }
+            if msg.role == "user":
+                msg_data["segments"] = segment_prompt(msg.content)
+                msg_data["content"] = msg.content
+            elif msg.role == "assistant":
+                msg_data["content"] = msg.content
+                msg_data["raw_json"] = msg.raw_json
+            step_data["messages"].append(msg_data)
+        result.append(step_data)
+    return result
 
 
 def _append_message(

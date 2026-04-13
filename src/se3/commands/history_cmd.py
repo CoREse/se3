@@ -25,7 +25,12 @@ from rich.table import Table
 
 # Import necessary modules from the engine
 from ..engine.persistence import PersistenceManager
-from ..engine.chat_history import list_flows as list_chat_flows, get_flow_history
+from ..engine.chat_history import (
+    list_flows as list_chat_flows,
+    get_flow_history,
+    get_detailed_json,
+    render_session_detailed,
+)
 
 app = typer.Typer(help="View and manage session history")
 console = Console()
@@ -301,8 +306,14 @@ def list_cmd(
 def show_cmd(
     flow_id: str = typer.Argument(..., help="Flow ID to show details for"),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    detailed: bool = typer.Option(False, "--detailed", "-d", help="Show LLM call details for each step"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Show full response including tool calls (requires --detailed)"),
 ):
     """Show detailed information about a specific flow."""
+    # --verbose implies --detailed
+    if verbose and not detailed:
+        detailed = True
+
     project_root = get_project_root()
 
     detail = get_flow_detail(project_root, flow_id)
@@ -324,8 +335,12 @@ def show_cmd(
         typer.echo(f"Flow '{flow_id}' not found.", err=True)
         raise typer.Exit(1)
 
-    if json_output:
+    if json_output and not detailed:
         typer.echo(json.dumps(detail, indent=2, default=str))
+        return
+
+    if json_output and detailed:
+        _show_detailed_json(project_root, detail)
         return
 
     # Display formatted details
@@ -376,7 +391,41 @@ def show_cmd(
             )
         console.print(steps_table)
 
+    # Detailed LLM call display
+    if detailed:
+        _show_detailed_sessions(project_root, detail['flow_id'], verbose=verbose)
+
     console.print(f"\n[dim]Use 'se3 history restore {detail['flow_id']}' to resume this flow.[/dim]\n")
+
+
+def _show_detailed_sessions(
+    project_root: Path, flow_id: str, verbose: bool = False
+) -> None:
+    """Render detailed LLM call sessions for a flow."""
+    from rich.rule import Rule
+
+    sessions = get_flow_history(project_root, flow_id)
+    if not sessions:
+        console.print("\n[dim]No chat history available for this flow.[/dim]")
+        return
+
+    console.print(f"\n[bold]LLM Call Details:[/bold]")
+
+    for session in sessions:
+        console.print(Rule(
+            f"{session.step_type} (id: {session.step_id})",
+            style="cyan",
+        ))
+        renderables = render_session_detailed(session, verbose=verbose)
+        for r in renderables:
+            console.print(r)
+
+
+def _show_detailed_json(project_root: Path, detail: dict) -> None:
+    """Output detailed flow info with chat history as JSON."""
+    flow_id = detail["flow_id"]
+    output = {**detail, "chat_history": get_detailed_json(project_root, flow_id)}
+    typer.echo(json.dumps(output, indent=2, default=str))
 
 
 @app.command(name="restore")
@@ -469,29 +518,6 @@ def archived_cmd(
         )
 
     console.print(table)
-
-
-def _status_color(status: str) -> str:
-    """Get color for status."""
-    return {
-        "completed": "green",
-        "failed": "red",
-        "running": "yellow",
-        "init": "blue",
-        "paused": "magenta",
-    }.get(status.lower(), "white")
-
-
-def _step_status_color(status: str) -> str:
-    """Get color for step status."""
-    return {
-        "completed": "green",
-        "failed": "red",
-        "running": "yellow",
-        "pending": "dim",
-        "retrying": "magenta",
-        "paused": "cyan",
-    }.get(status.lower(), "white")
 
 
 if __name__ == "__main__":

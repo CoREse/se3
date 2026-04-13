@@ -142,6 +142,9 @@ se3 history list --active-only       # Show only the active flow
 se3 history list --archived-only     # Show only archived flows
 se3 history list --json              # Output as JSON
 se3 history show <flow_id>           # Show detailed info for a flow
+se3 history show <flow_id> --detailed          # Show LLM call details (structured prompt + final response)
+se3 history show <flow_id> --detailed --verbose  # Show full response including tool calls
+se3 history show <flow_id> --detailed --json     # Output detailed chat history as JSON
 se3 history restore <flow_id>        # Resume a flow (delegates to se3 run --resume)
 se3 history archived                 # List only archived flows
 ```
@@ -168,6 +171,27 @@ Results are de-duplicated by `flow_id` and sorted by `updated_at` descending.
 - **GIVEN** a valid flow_id (or unambiguous prefix)
 - **WHEN** user runs `se3 history show <flow_id>`
 - **THEN** displays detailed step-by-step breakdown of the flow
+
+#### Scenario: Show flow details with LLM call details
+- **GIVEN** a valid flow_id with chat history
+- **WHEN** user runs `se3 history show <flow_id> --detailed`
+- **THEN** displays flow metadata and step table as usual
+- **AND** appends each step's LLM call details: prompt is shown as structured segments (auto-detected sections such as JSON Mode Instruction, Step Instructions, Available Specifications, Discovery Context, Read-Only Constraint, Language Instruction, Additional User Instruction, etc.) using Rich Panels with labeled titles
+- **AND** response shows only the final assistant text block (skipping intermediate tool calls and tool results)
+- **AND** multiple attempts within a step are shown separately with attempt labels
+
+#### Scenario: Detailed with verbose response
+- **WHEN** user runs `se3 history show <flow_id> --detailed --verbose`
+- **THEN** prompt display is identical to `--detailed` (structured segments)
+- **AND** response display reuses `_render_ndjson_for_human()` to show the full conversation flow including text content and tool call/result summaries (via `format_tool_use_preview()` / `format_tool_result_preview()`), consistent with `se3 run` streaming style
+- **AND** `--verbose` implies `--detailed`
+
+#### Scenario: Detailed JSON output
+- **WHEN** user runs `se3 history show <flow_id> --detailed --json`
+- **THEN** outputs structured JSON containing flow metadata plus a `chat_history` array
+- **AND** each entry in `chat_history` includes `step_id`, `step_type`, and `messages`
+- **AND** user messages include `segments` (auto-segmented prompt sections) and full `content`
+- **AND** assistant messages include `content`, and `raw_json` (original NDJSON data)
 
 #### Scenario: Restore a flow
 - **WHEN** user runs `se3 history restore <flow_id>`

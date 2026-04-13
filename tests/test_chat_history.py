@@ -12,12 +12,15 @@ from se3.engine.chat_history import (
     ChatSession,
     extract_assistant_text,
     format_history_for_retry,
+    get_detailed_json,
     get_flow_history,
     get_step_history,
     list_flows,
     record_prompt,
     record_response,
+    render_session_detailed,
     render_session_text,
+    segment_prompt,
 )
 
 
@@ -590,3 +593,312 @@ class TestRenderSessionText:
         assert "Write:" in text
         assert "tests/test_new.py" in text
         assert "4 lines" in text
+
+
+# --- Prompt segmentation ---
+
+class TestSegmentPrompt:
+    def test_json_mode_wrapper(self):
+        prompt = (
+            "CRITICAL: You MUST respond with ONLY valid JSON.\n\n"
+            "You are an expert software engineering assistant.\n"
+            "Analyze the task."
+        )
+        segments = segment_prompt(prompt)
+        assert len(segments) == 2
+        assert segments[0]["title"] == "JSON Mode Instruction"
+        assert segments[1]["title"] == "Step Instructions"
+
+    def test_read_only_constraint(self):
+        prompt = (
+            "You are an expert.\n\n"
+            "## Task Description\nDo something.\n\n"
+            "READ-ONLY STEP CONSTRAINT\nDo not write files."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Step Instructions" in titles
+        assert "Task Description" in titles
+        assert "Read-Only Constraint" in titles
+
+    def test_language_instruction(self):
+        prompt = (
+            "## Task Description\nDo something.\n\n"
+            "IMPORTANT: You MUST respond in Chinese."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Language Instruction" in titles
+
+    def test_generic_sections(self):
+        prompt = (
+            "## Task Description\nDo something.\n\n"
+            "## Changes Made\nFile changed.\n\n"
+            "## Test Results\nAll passed."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Task Description" in titles
+        assert "Changes Made" in titles
+        assert "Test Results" in titles
+
+    def test_available_specifications(self):
+        prompt = (
+            "## Available Specifications\nbase, flow-engine\n\n"
+            "## Relevant Specifications\n### base\nContent here."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Available Specifications" in titles
+        assert "Relevant Specifications" in titles
+
+    def test_additional_user_instruction(self):
+        prompt = (
+            "## Task Description\nDo something.\n\n"
+            "[Additional user instruction]\nDo it this way."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Additional User Instruction" in titles
+
+    def test_empty_prompt(self):
+        segments = segment_prompt("")
+        assert segments == []
+
+    def test_plain_text_prompt(self):
+        segments = segment_prompt("Just a simple prompt.")
+        assert len(segments) == 1
+        assert segments[0]["title"] == "Prompt"
+        assert segments[0]["content"] == "Just a simple prompt."
+
+
+# --- Detailed session rendering ---
+
+class TestRenderSessionDetailed:
+    def _make_session(self, messages=None):
+        if messages is None:
+            ndjson_dict = {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "Thinking..."},
+                        {"type": "tool_use", "id": "t1", "name": "Read",
+                         "input": {"file_path": "foo.py"}},
+                        {"type": "text", "text": "Final answer here."},
+                    ]
+                }
+            }
+            messages = [
+                ChatMessage(
+                    role="user",
+                    content="## Task Description\nDo something.\n\nREAD-ONLY STEP CONSTRAINT\nNo writes.",
+                    raw_json=[],
+                    timestamp="2026-01-01T12:00:00",
+                    step_type="analyze",
+                    attempt=0,
+                ),
+                ChatMessage(
+                    role="assistant",
+                    content="Final answer here.",
+                    raw_json=[ndjson_dict],
+                    timestamp="2026-01-01T12:00:05",
+                    step_type="analyze",
+                    attempt=0,
+                ),
+            ]
+        return ChatSession(
+            flow_id="flow1", step_id="step1", step_type="analyze",
+            messages=messages,
+        )
+
+    def test_returns_renderables(self):
+        session = self._make_session()
+        renderables = render_session_detailed(session, verbose=False)
+        assert len(renderables) == 2  # prompt panel + response panel
+
+    def test_verbose_returns_renderables(self):
+        session = self._make_session()
+        renderables = render_session_detailed(session, verbose=True)
+        assert len(renderables) == 2
+
+    def test_non_verbose_shows_final_text(self):
+        """Non-verbose mode should extract only the final text block."""
+        from rich.console import Console
+        from io import StringIO
+        session = self._make_session()
+        renderables = render_session_detailed(session, verbose=False)
+        buf = StringIO()
+        c = Console(file=buf, force_terminal=False, width=200)
+        for r in renderables:
+            c.print(r)
+        output = buf.getvalue()
+        # Should have the final text
+        assert "Final answer here" in output
+        # Should NOT have tool call details in non-verbose
+        assert "Read:" not in output
+
+    def test_verbose_shows_tool_calls(self):
+        """Verbose mode should include tool call previews."""
+        from rich.console import Console
+        from io import StringIO
+        session = self._make_session()
+        renderables = render_session_detailed(session, verbose=True)
+        buf = StringIO()
+        c = Console(file=buf, force_terminal=False, width=200)
+        for r in renderables:
+            c.print(r)
+        output = buf.getvalue()
+        # Should have tool call info
+        assert "Read:" in output
+
+    def test_prompt_segmentation_in_panel(self):
+        """Prompt panel should contain segment titles."""
+        from rich.console import Console
+        from io import StringIO
+        session = self._make_session()
+        renderables = render_session_detailed(session, verbose=False)
+        buf = StringIO()
+        c = Console(file=buf, force_terminal=False, width=200)
+        c.print(renderables[0])  # Prompt panel
+        output = buf.getvalue()
+        assert "Task Description" in output
+        assert "Read-Only Constraint" in output
+
+    def test_multiple_attempts_labeling(self):
+        """Sessions with multiple attempts should show 'Attempt N' labels."""
+        from rich.console import Console
+        from io import StringIO
+        ndjson_dict = {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": "First try failed."}]
+            }
+        }
+        ndjson_dict2 = {
+            "type": "assistant",
+            "message": {
+                "content": [{"type": "text", "text": "Second try succeeded."}]
+            }
+        }
+        messages = [
+            ChatMessage(
+                role="user", content="Do something.",
+                raw_json=[], timestamp="2026-01-01T12:00:00",
+                step_type="analyze", attempt=0,
+            ),
+            ChatMessage(
+                role="assistant", content="First try failed.",
+                raw_json=[ndjson_dict], timestamp="2026-01-01T12:00:05",
+                step_type="analyze", attempt=0,
+            ),
+            ChatMessage(
+                role="user", content="Do something again.",
+                raw_json=[], timestamp="2026-01-01T12:01:00",
+                step_type="analyze", attempt=1,
+            ),
+            ChatMessage(
+                role="assistant", content="Second try succeeded.",
+                raw_json=[ndjson_dict2], timestamp="2026-01-01T12:01:05",
+                step_type="analyze", attempt=1,
+            ),
+        ]
+        session = self._make_session(messages=messages)
+        renderables = render_session_detailed(session, verbose=False)
+        # Should have 4 panels: prompt+response for each attempt
+        assert len(renderables) == 4
+        buf = StringIO()
+        c = Console(file=buf, force_terminal=False, width=200)
+        for r in renderables:
+            c.print(r)
+        output = buf.getvalue()
+        assert "Attempt 1" in output
+        assert "Attempt 2" in output
+        assert "First try failed" in output
+        assert "Second try succeeded" in output
+
+    def test_empty_raw_json_falls_back_to_content(self):
+        """When raw_json is empty, render_session_detailed should fall back to msg.content."""
+        from rich.console import Console
+        from io import StringIO
+        messages = [
+            ChatMessage(
+                role="user", content="Do something.",
+                raw_json=[], timestamp="2026-01-01T12:00:00",
+                step_type="analyze", attempt=0,
+            ),
+            ChatMessage(
+                role="assistant", content="Fallback content here.",
+                raw_json=[], timestamp="2026-01-01T12:00:05",
+                step_type="analyze", attempt=0,
+            ),
+        ]
+        session = self._make_session(messages=messages)
+        renderables = render_session_detailed(session, verbose=False)
+        assert len(renderables) == 2
+        buf = StringIO()
+        c = Console(file=buf, force_terminal=False, width=200)
+        for r in renderables:
+            c.print(r)
+        output = buf.getvalue()
+        assert "Fallback content here" in output
+
+    def test_tool_only_raw_json_shows_activity(self):
+        """When raw_json has tool activity but no text, should show tool summary not '(empty response)'."""
+        from rich.console import Console
+        from io import StringIO
+        # raw_json with only tool_result entries, no assistant text
+        tool_result_dict = {
+            "type": "tool_result",
+            "result": {"toolUseId": "t1", "content": "file contents", "isError": False}
+        }
+        messages = [
+            ChatMessage(
+                role="user", content="Do something.",
+                raw_json=[], timestamp="2026-01-01T12:00:00",
+                step_type="analyze", attempt=0,
+            ),
+            ChatMessage(
+                role="assistant", content="",
+                raw_json=[tool_result_dict], timestamp="2026-01-01T12:00:05",
+                step_type="analyze", attempt=0,
+            ),
+        ]
+        session = self._make_session(messages=messages)
+        renderables = render_session_detailed(session, verbose=False)
+        buf = StringIO()
+        c = Console(file=buf, force_terminal=False, width=200)
+        for r in renderables:
+            c.print(r)
+        output = buf.getvalue()
+        # Should NOT show "(empty response)" since there was tool activity
+        assert "(empty response)" not in output
+
+
+# --- Detailed JSON output ---
+
+class TestGetDetailedJson:
+    def test_returns_structured_data(self, tmp_project):
+        record_prompt(tmp_project, "flow1", "step_a", "analyze",
+                      "## Task Description\nDo something.", 0)
+        ndjson = json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Result"}]}
+        })
+        record_response(tmp_project, "flow1", "step_a", "analyze", ndjson, 0)
+
+        result = get_detailed_json(tmp_project, "flow1")
+        assert len(result) == 1
+        step = result[0]
+        assert step["step_type"] == "analyze"
+        assert len(step["messages"]) == 2
+
+        # User message should have segments
+        user_msg = step["messages"][0]
+        assert user_msg["role"] == "user"
+        assert "segments" in user_msg
+        assert any(s["title"] == "Task Description" for s in user_msg["segments"])
+
+        # Assistant message should have content and raw_json
+        asst_msg = step["messages"][1]
+        assert asst_msg["role"] == "assistant"
+        assert "raw_json" in asst_msg

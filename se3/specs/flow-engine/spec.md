@@ -480,6 +480,10 @@ The injected prompt SHALL:
 - `record_response()` — 记录 LLM 原始回应
 - `format_history_for_retry()` — 为重试格式化之前的对话上下文
 - `extract_assistant_text()` — 从 NDJSON 提取 assistant 文本内容
+- `segment_prompt()` — 将 prompt 拆分为标注段落，用于结构化展示
+- `render_session_detailed()` — 渲染带结构化 prompt 和 response 的 Rich 可视输出
+- `get_detailed_json()` — 获取包含分段 prompt 和完整 response 的结构化 JSON
+- `_extract_final_text()` — 从 raw_json 中提取最后一个 assistant text block
 
 **工具调用格式化（tool_formatters 模块）：**
 
@@ -579,6 +583,33 @@ The injected prompt SHALL:
 - **AND** 支持 `--json` 输出 JSON 格式
 - **AND** 支持按 flow_id 和 step_type 筛选查看
 - **AND** 区分通讯 JSON（解析渲染）和 LLM 输出 JSON（原样展示）
+
+#### Scenario: Prompt 段落自动分割
+- **WHEN** `segment_prompt()` 处理一个 SE3 prompt 文本
+- **THEN** 使用预编译的正则模式匹配已知段落标记（如 `CRITICAL: You MUST respond with ONLY valid JSON`、`READ-ONLY STEP CONSTRAINT`、`IMPORTANT: You MUST respond in`、`You are an expert`、`## Discovery Context`、`## Available Specifications`、`## Project Context`、`[Additional user instruction]` 等）
+- **AND** 将 prompt 拆分为 `[{"title": str, "content": str}]` 数组
+- **AND** 首段默认标题为 "Prompt"，后续段落标题由匹配的模式自动生成
+- **AND** 通用 `## Heading` 模式作为 fallback 捕获未匹配的 markdown 二级标题
+
+#### Scenario: 结构化详细渲染（非 verbose）
+- **WHEN** `render_session_detailed(session, verbose=False)` 被调用
+- **THEN** 返回 Rich renderables 列表
+- **AND** 用户 prompt 按 `segment_prompt()` 分段，每段使用带标题的 Rich Panel 展示
+- **AND** assistant response 仅展示最终 text block（通过 `_extract_final_text()` 提取最后一个 `type: "assistant"` 消息中最后一个 `type: "text"` 内容块）
+- **AND** 若无 text 内容但有 tool 活动，fallback 到 `_render_ndjson_for_human()` 展示 tool 活动摘要
+- **AND** 按 attempt 分组，多次 attempt 分开展示并标注序号
+
+#### Scenario: 结构化详细渲染（verbose）
+- **WHEN** `render_session_detailed(session, verbose=True)` 被调用
+- **THEN** prompt 展示与非 verbose 模式相同（结构化分段）
+- **AND** response 复用 `_render_ndjson_for_human()` 展示完整对话流，包括 text 内容和 tool 调用/结果摘要
+- **AND** verbose 模式下 response 使用 `Text()` 而非 `Markdown()` 渲染，避免方括号格式（如 `[Edit: file.py]`）被误解析为 Rich markup
+
+#### Scenario: 详细 JSON 输出
+- **WHEN** `get_detailed_json(project_root, flow_id)` 被调用
+- **THEN** 返回结构化数组，每个元素包含 `step_id`、`step_type` 和 `messages`
+- **AND** user 消息包含 `segments`（`segment_prompt()` 分段结果）和原始 `content`
+- **AND** assistant 消息包含 `content`（提取的文本）和 `raw_json`（原始 NDJSON 数据）
 
 ### Requirement: LLM Content Truncation Strategy
 
