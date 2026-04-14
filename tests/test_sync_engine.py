@@ -18,6 +18,7 @@ from se3.engine.sync_engine import (
     SpecDiff,
     SyncEngine,
     SyncResult,
+    strip_markdown_fences,
 )
 
 
@@ -926,3 +927,143 @@ class TestSyncEngineRunIntegration:
             assert result.specs_updated == 1
             assert result.conflicts == []
             assert result.call_file is None
+
+
+# ---------------------------------------------------------------------------
+# strip_markdown_fences unit tests
+# ---------------------------------------------------------------------------
+
+class TestStripMarkdownFences:
+    def test_strips_fences_with_language(self):
+        text = "```markdown\n# Heading\n\nContent here.\n```"
+        assert strip_markdown_fences(text) == "# Heading\n\nContent here."
+
+    def test_strips_fences_without_language(self):
+        text = "```\n# Heading\n\nContent here.\n```"
+        assert strip_markdown_fences(text) == "# Heading\n\nContent here."
+
+    def test_strips_fences_with_md_language(self):
+        text = "```md\n# Title\n```"
+        assert strip_markdown_fences(text) == "# Title"
+
+    def test_no_fences_returns_original(self):
+        text = "# Just a heading\n\nSome content."
+        assert strip_markdown_fences(text) == text
+
+    def test_empty_string_returns_empty(self):
+        assert strip_markdown_fences("") == ""
+
+    def test_only_opening_fence_returns_original(self):
+        text = "```markdown\n# Heading\nNo closing fence"
+        assert strip_markdown_fences(text) == text
+
+    def test_only_closing_fence_returns_original(self):
+        text = "# Heading\nContent\n```"
+        assert strip_markdown_fences(text) == text
+
+    def test_preserves_inner_fences(self):
+        text = "```markdown\n# Doc\n\n```python\nprint('hi')\n```\n\nMore text.\n```"
+        result = strip_markdown_fences(text)
+        assert "```python" in result
+        assert result.startswith("# Doc")
+        assert result.endswith("More text.")
+
+    def test_handles_surrounding_whitespace(self):
+        text = "  \n```markdown\n# Content\n```\n  "
+        assert strip_markdown_fences(text) == "# Content"
+
+    def test_whitespace_only_returns_original(self):
+        text = "   \n\n   "
+        assert strip_markdown_fences(text) == text
+
+
+# ---------------------------------------------------------------------------
+# _apply_conflict_spec_update length guard
+# ---------------------------------------------------------------------------
+
+class TestApplyConflictSpecUpdateLengthGuard:
+    def test_rejects_suspiciously_short_response(self, tmp_path):
+        original = "# Auth Spec\n\n## Purpose\nDetailed auth specification.\n" * 5
+        _create_spec(tmp_path, "auth", original)
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = "# Short"
+
+        conflict = Conflict(spec_name="auth", description="Token mismatch")
+        result = engine._apply_conflict_spec_update(conflict, llm)
+
+        assert result is False
+        assert (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text() == original
+
+    def test_accepts_normal_length_response(self, tmp_path):
+        original = "# Auth Spec\n## Purpose\nAuth."
+        _create_spec(tmp_path, "auth", original)
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        updated = "# Auth Spec\n## Purpose\nAuth updated with new info."
+        llm = MagicMock()
+        llm.call.return_value = updated
+
+        conflict = Conflict(spec_name="auth", description="Token mismatch")
+        result = engine._apply_conflict_spec_update(conflict, llm)
+
+        assert result is True
+        assert (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text() == updated
+
+    def test_boundary_at_fifty_percent(self, tmp_path):
+        original = "x" * 100
+        _create_spec(tmp_path, "auth", original)
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = "x" * 49
+        conflict = Conflict(spec_name="auth", description="d")
+        assert engine._apply_conflict_spec_update(conflict, llm) is False
+
+        llm.call.return_value = "x" * 50
+        assert engine._apply_conflict_spec_update(conflict, llm) is True
+
+    def test_strips_fences_before_length_check(self, tmp_path):
+        original = "# Auth Spec\n## Purpose\nAuth module details."
+        _create_spec(tmp_path, "auth", original)
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        fenced = "```markdown\n# Auth Spec\n## Purpose\nAuth module details updated.\n```"
+        llm = MagicMock()
+        llm.call.return_value = fenced
+
+        conflict = Conflict(spec_name="auth", description="d")
+        result = engine._apply_conflict_spec_update(conflict, llm)
+
+        assert result is True
+        written = (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text()
+        assert not written.startswith("```")
+
+
+# ---------------------------------------------------------------------------
+# _process_extensions fence stripping
+# ---------------------------------------------------------------------------
+
+class TestProcessExtensionsFenceStripping:
+    def test_strips_fences_from_llm_response(self, tmp_path):
+        original = "# Auth\n## Purpose\nOriginal spec."
+        _create_spec(tmp_path, "auth", original)
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        fenced = "```markdown\n# Auth\n## Purpose\nOriginal spec.\n\n### New\nNew feature.\n```"
+        llm = MagicMock()
+        llm.call.return_value = fenced
+
+        extensions = [SpecDiff(DiffType.EXTENSION, "auth", "New feature")]
+        updated = engine._process_extensions(extensions, engine._specs["auth"], llm)
+
+        assert updated == 1
+        written = (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text()
+        assert not written.startswith("```")
+        assert "### New" in written

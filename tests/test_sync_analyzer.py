@@ -368,3 +368,23 @@ class TestGenerateBaseSpec:
             analyzer.generate_base_spec("ctx")
 
         assert not (tmp_path / "se3" / "specs" / "base" / "spec.md").exists()
+
+    def test_strips_markdown_fences_from_response(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = "```markdown\n# Project — Base Specification\n\n## Purpose\nA test.\n```"
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        content = analyzer.generate_base_spec("ctx")
+
+        assert not content.startswith("```")
+        assert not content.endswith("```")
+        assert content == "# Project — Base Specification\n\n## Purpose\nA test."
+        written = (tmp_path / "se3" / "specs" / "base" / "spec.md").read_text(encoding="utf-8")
+        assert written == content
+
+    def test_no_fences_passthrough(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = "# Plain Spec\n\n## Purpose\nNo fences."
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        content = analyzer.generate_base_spec("ctx")
+
+        assert content == "# Plain Spec\n\n## Purpose\nNo fences."

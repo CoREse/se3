@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -18,6 +19,15 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 SYNC_TAGS = ["auto-discovered", "source:sync"]
+
+
+def strip_markdown_fences(text: str) -> str:
+    """Strip outermost markdown code fences if the text is wholly wrapped in them."""
+    stripped = text.strip()
+    m = re.match(r'^```[^\n]*\n(.*)\n```$', stripped, re.DOTALL)
+    if m:
+        return m.group(1)
+    return text
 
 
 class DiffType(Enum):
@@ -522,6 +532,7 @@ class SyncEngine:
         try:
             updated_content = llm_caller.call(prompt=prompt, json_mode="off")
             updated_content = updated_content.strip()
+            updated_content = strip_markdown_fences(updated_content)
 
             if not updated_content:
                 logger.warning("LLM returned empty content for spec '%s' update", spec_name)
@@ -689,9 +700,18 @@ class SyncEngine:
         try:
             updated_content = llm_caller.call(prompt=prompt, json_mode="off")
             updated_content = updated_content.strip()
+            updated_content = strip_markdown_fences(updated_content)
 
             if not updated_content:
                 logger.warning("LLM returned empty content for conflict spec update '%s'", conflict.spec_name)
+                return False
+
+            if len(updated_content) < len(spec_info["content"]) * 0.5:
+                logger.warning(
+                    "LLM returned suspiciously short content for conflict spec update '%s' "
+                    "(%d chars vs original %d chars), skipping update",
+                    conflict.spec_name, len(updated_content), len(spec_info["content"]),
+                )
                 return False
 
             Path(spec_info["path"]).write_text(updated_content, encoding="utf-8")

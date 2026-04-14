@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .llm_caller import LLMCaller, LLMCallError
-from .sync_engine import DiffType, SpecAnalysis, SpecDiff
+from .sync_engine import DiffType, SpecAnalysis, SpecDiff, strip_markdown_fences
 
 logger = logging.getLogger(__name__)
 
@@ -291,6 +291,7 @@ class SyncAnalyzer:
         )
 
         content = response.strip()
+        content = strip_markdown_fences(content)
 
         base_dir = self.project_root / "se3" / "specs" / "base"
         base_dir.mkdir(parents=True, exist_ok=True)
