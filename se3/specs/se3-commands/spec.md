@@ -177,6 +177,10 @@ Results are de-duplicated by `flow_id` and sorted by `updated_at` descending.
 - **WHEN** user runs `se3 history show <flow_id> --detailed`
 - **THEN** displays flow metadata and step table as usual
 - **AND** appends each step's LLM call details: prompt is shown as structured segments (auto-detected sections such as JSON Mode Instruction, Step Instructions, Available Specifications, Discovery Context, Read-Only Constraint, Language Instruction, Additional User Instruction, etc.) using Rich Panels with labeled titles
+- **AND** prompt segments containing embedded spec content are folded into compact reference annotations for readability:
+  - Segments titled "Relevant Specifications" or "Specifications (for context only)" fold each `### spec-name` subsection into `[spec] @spec-name  (折叠, size)` with `bold magenta` Rich styling on `@spec-name`
+  - Segments titled "Base Specification" fold the entire body into `[spec] @base  (折叠, size)`
+  - Segments that only list spec names (e.g., "Available Specifications") are NOT folded
 - **AND** response shows only the final assistant text block (skipping intermediate tool calls and tool results)
 - **AND** multiple attempts within a step are shown separately with attempt labels
 

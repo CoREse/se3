@@ -693,6 +693,8 @@ def _render_ndjson_for_human(raw_ndjson: Union[str, list[dict]]) -> str:
 # Pre-compiled segment patterns for prompt segmentation (module-level to avoid
 # recompilation on every call). Ordered list of (pattern, title_fn) — first
 # match wins for each line.
+_GENERIC_HEADING_RE = re.compile(r"^## (.+)")
+
 _SEGMENT_PATTERNS: list[tuple[re.Pattern, Any]] = [
     # JSON mode wrapper
     (re.compile(r"^CRITICAL:\s*You MUST respond with ONLY valid JSON"),
@@ -718,13 +720,31 @@ _SEGMENT_PATTERNS: list[tuple[re.Pattern, Any]] = [
     # Project context / summary
     (re.compile(r"^## Project (Context|Summary)"),
      lambda m: f"Project {m.group(1)}"),
+    # Base specification (specific pattern to avoid being swallowed by spec sections)
+    (re.compile(r"^## (Base Specification.*)"),
+     lambda m: m.group(1).strip()),
     # Additional user instruction
     (re.compile(r"^\[Additional user instruction\]"),
      lambda _: "Additional User Instruction"),
+    # Post-spec headings from SE3 step templates — recognized even inside spec
+    # sections (where the generic ## catch-all is suppressed).
+    (re.compile(
+        r"^## (Changes Made|Planned Spec Changes|Test Results|Fix Context|"
+        r"Instructions|Previous Verification|Previous (?:Task )?Plan(?:\s*\(.*?\))?|Reviewer Feedback|"
+        r"Implementation Notes|Task Type|Scope|Review Dimensions|Specifications \(for context only\))"
+    ), lambda m: m.group(1)),
+    (re.compile(r"^## (Part \d+:.+)"), lambda m: m.group(1).strip()),
     # Generic ## sections — capture the heading text
-    (re.compile(r"^## (.+)"),
+    (_GENERIC_HEADING_RE,
      lambda m: m.group(1).strip()),
 ]
+
+# Titles whose segments contain embedded spec content with internal ## headings;
+# the generic ## catch-all pattern is suppressed inside these sections.
+_SPEC_SECTION_TITLES = frozenset({
+    "Relevant Specifications",
+    "Specifications (for context only)",
+})
 
 
 def segment_prompt(prompt: str) -> list[dict[str, str]]:
@@ -752,7 +772,13 @@ def segment_prompt(prompt: str) -> list[dict[str, str]]:
     for line in lines:
         stripped = line.strip()
         matched = False
+        in_spec = (
+            current_title in _SPEC_SECTION_TITLES
+            or current_title.startswith("Base Specification")
+        )
         for pattern, title_fn in _SEGMENT_PATTERNS:
+            if in_spec and pattern is _GENERIC_HEADING_RE:
+                continue
             m = pattern.match(stripped)
             if m:
                 _flush()
@@ -765,6 +791,94 @@ def segment_prompt(prompt: str) -> list[dict[str, str]]:
 
     _flush()
     return segments
+
+
+def _format_size(size_bytes: int) -> str:
+    """Format byte count as human-readable size string."""
+    if size_bytes < 1024:
+        return f"{size_bytes}B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f}KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.1f}MB"
+
+
+_SPEC_SUBSECTION_RE = re.compile(r"^### ([a-z][a-z0-9-]*)\s*$", re.MULTILINE)
+
+
+def _fold_spec_subsections(content: str) -> Optional[list]:
+    """Fold ### spec-name subsections into compact reference lines.
+
+    Returns list of Rich Text objects, or None if no subsections found.
+    """
+    from rich.text import Text
+
+    matches = list(_SPEC_SUBSECTION_RE.finditer(content))
+    if not matches:
+        return None
+
+    result = []
+
+    preamble = content[: matches[0].start()].strip()
+    preamble_lines = [
+        ln for ln in preamble.splitlines()
+        if ln.strip() and not ln.strip().startswith("## ")
+    ]
+    if preamble_lines:
+        pre = Text()
+        pre.append("\n".join(preamble_lines), style="dim")
+        result.append(pre)
+
+    for i, match in enumerate(matches):
+        name = match.group(1)
+        start = match.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        sub_content = content[start:end].strip()
+        size = _format_size(len(sub_content.encode("utf-8")))
+        line = Text()
+        line.append("[spec] ")
+        line.append(f"@{name}", style="bold magenta")
+        line.append(f"  (折叠, {size})", style="dim")
+        result.append(line)
+    return result
+
+
+def _fold_base_spec(content: str) -> Optional[list]:
+    """Fold a Base Specification segment into a compact reference line.
+
+    Returns list of Rich Text objects, or None if content is empty/placeholder.
+    """
+    from rich.text import Text
+
+    lines = content.split("\n")
+    body_lines = []
+    for line in lines:
+        if line.strip().startswith("## Base Specification"):
+            continue
+        body_lines.append(line)
+    body = "\n".join(body_lines).strip()
+
+    if not body or "No base spec available" in body:
+        return None
+
+    size = _format_size(len(body.encode("utf-8")))
+    line = Text()
+    line.append("[spec] ")
+    line.append("@base", style="bold magenta")
+    line.append(f"  (折叠, {size})", style="dim")
+    return [line]
+
+
+def fold_spec_content(title: str, content: str) -> Optional[list]:
+    """Dispatch spec content folding based on segment title.
+
+    Returns list of Rich Text renderables, or None if no folding needed.
+    """
+    if title in ("Relevant Specifications", "Specifications (for context only)"):
+        return _fold_spec_subsections(content)
+    if title.startswith("Base Specification"):
+        return _fold_base_spec(content)
+    return None
 
 
 def render_session_detailed(
@@ -805,10 +919,13 @@ def render_session_detailed(
                 prompt_parts = []
                 for seg in segments:
                     header = Text(f"── {seg['title']} ──", style="bold cyan")
-                    # Show content as markdown for readability
-                    body = Markdown(seg["content"])
                     prompt_parts.append(header)
-                    prompt_parts.append(body)
+                    folded = fold_spec_content(seg["title"], seg["content"])
+                    if folded is not None:
+                        for line in folded:
+                            prompt_parts.append(line)
+                    else:
+                        prompt_parts.append(Markdown(seg["content"]))
                     prompt_parts.append(Text(""))  # spacer
 
                 title = "Prompt"

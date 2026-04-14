@@ -10,7 +10,11 @@ import pytest
 from se3.engine.chat_history import (
     ChatMessage,
     ChatSession,
+    _fold_base_spec,
+    _fold_spec_subsections,
+    _format_size,
     extract_assistant_text,
+    fold_spec_content,
     format_history_for_retry,
     get_detailed_json,
     get_flow_history,
@@ -902,3 +906,501 @@ class TestGetDetailedJson:
         asst_msg = step["messages"][1]
         assert asst_msg["role"] == "assistant"
         assert "raw_json" in asst_msg
+
+
+# --- Spec content folding ---
+
+class TestFormatSize:
+    def test_zero_bytes(self):
+        assert _format_size(0) == "0B"
+
+    def test_small_bytes(self):
+        assert _format_size(100) == "100B"
+
+    def test_boundary_1023(self):
+        assert _format_size(1023) == "1023B"
+
+    def test_exactly_1kb(self):
+        assert _format_size(1024) == "1.0KB"
+
+    def test_fractional_kb(self):
+        assert _format_size(1536) == "1.5KB"
+
+    def test_large_kb(self):
+        assert _format_size(8396) == "8.2KB"
+
+    def test_exactly_1mb(self):
+        assert _format_size(1048576) == "1.0MB"
+
+    def test_fractional_mb(self):
+        assert _format_size(1258291) == "1.2MB"
+
+
+class TestFoldSpecContent:
+    def test_relevant_specifications_dispatches(self):
+        content = "## Relevant Specifications\n### base\nSome content here."
+        result = fold_spec_content("Relevant Specifications", content)
+        assert result is not None
+        assert len(result) == 1
+
+    def test_base_specification_dispatches(self):
+        content = "## Base Specification (if available)\nSpec body content here."
+        result = fold_spec_content("Base Specification (if available)", content)
+        assert result is not None
+
+    def test_available_specifications_not_folded(self):
+        content = "## Available Specifications\nbase, flow-engine, se3-commands"
+        result = fold_spec_content("Available Specifications", content)
+        assert result is None
+
+    def test_other_title_not_folded(self):
+        assert fold_spec_content("Task Description", "Do something.") is None
+        assert fold_spec_content("Step Instructions", "You are an expert.") is None
+
+    def test_base_specification_exact_title(self):
+        content = "## Base Specification\nBody."
+        result = fold_spec_content("Base Specification", content)
+        assert result is not None
+
+
+class TestFoldSpecSubsections:
+    def test_single_spec(self):
+        content = "## Relevant Specifications\n### base\nThis is the base spec content."
+        result = _fold_spec_subsections(content)
+        assert result is not None
+        spec_lines = [r for r in result if "@base" in r.plain]
+        assert len(spec_lines) == 1
+        assert "折叠" in spec_lines[0].plain
+
+    def test_multiple_specs(self):
+        content = (
+            "## Relevant Specifications\n"
+            "### base\nBase spec content.\n"
+            "### se3-commands\nCommand spec content.\n"
+            "### flow-engine\nEngine spec content."
+        )
+        result = _fold_spec_subsections(content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert any("@se3-commands" in n for n in names)
+        assert any("@flow-engine" in n for n in names)
+
+    def test_no_subsections_returns_none(self):
+        content = "Just some text without any ### headers."
+        result = _fold_spec_subsections(content)
+        assert result is None
+
+    def test_utf8_size_calculation(self):
+        chinese_content = "这是中文内容" * 100
+        content = f"### test-spec\n{chinese_content}"
+        result = _fold_spec_subsections(content)
+        assert result is not None
+        plain = result[0].plain
+        utf8_size = len(chinese_content.encode("utf-8"))
+        expected_size = _format_size(utf8_size)
+        assert expected_size in plain
+
+    def test_rich_styling(self):
+        content = "### my-spec\nContent here."
+        result = _fold_spec_subsections(content)
+        assert result is not None
+        spans = result[0]._spans
+        has_bold_magenta = any("bold magenta" in str(s.style) for s in spans)
+        assert has_bold_magenta
+
+
+class TestFoldBaseSpec:
+    def test_normal_base_spec(self):
+        content = "## Base Specification\nThis is the full base spec body."
+        result = _fold_base_spec(content)
+        assert result is not None
+        assert len(result) == 1
+        plain = result[0].plain
+        assert "@base" in plain
+        assert "折叠" in plain
+
+    def test_placeholder_returns_none(self):
+        content = "## Base Specification\nNo base spec available"
+        result = _fold_base_spec(content)
+        assert result is None
+
+    def test_empty_body_returns_none(self):
+        content = "## Base Specification\n"
+        result = _fold_base_spec(content)
+        assert result is None
+
+    def test_size_in_output(self):
+        body = "A" * 2048
+        content = f"## Base Specification\n{body}"
+        result = _fold_base_spec(content)
+        assert result is not None
+        plain = result[0].plain
+        assert "2.0KB" in plain
+
+    def test_rich_styling(self):
+        content = "## Base Specification\nBody content."
+        result = _fold_base_spec(content)
+        assert result is not None
+        spans = result[0]._spans
+        has_bold_magenta = any("bold magenta" in str(s.style) for s in spans)
+        assert has_bold_magenta
+
+
+class TestRenderSessionDetailedSpecFolding:
+    _REALISTIC_BASE_SPEC = (
+        "# SE3 Framework — Base Specification\n\n"
+        "## Purpose\n"
+        "项目基础约定。此 spec 由 se3 init 生成，在所有 se3 run 流程中自动加载。\n\n"
+        "## Requirements\n\n"
+        "### Requirement: Project Identity\n"
+        "- 项目名称: SE3 Framework\n"
+        "- 简述: SE 3.0 规范驱动开发框架\n\n"
+        "### Requirement: Directory Structure\n"
+        "- src/se3/ — 框架源码\n"
+        "- se3/ — SE3 运行时目录\n"
+        "- .claude/ — 开发依赖\n\n"
+        "### Requirement: Coding Conventions\n"
+        "- Python 风格遵循标准 PEP 8\n"
+        "- CLI 命令使用 Typer 注册\n"
+        "- 日志使用 logging 模块\n"
+    )
+
+    _REALISTIC_COMMANDS_SPEC = (
+        "# se3-commands Specification\n\n"
+        "## Purpose\n"
+        "Define the command-line interface for SE3 core commands.\n\n"
+        "## Requirements\n\n"
+        "### Requirement: Unified Entry Point\n"
+        "The system SHALL provide se3 run as the primary entry point.\n\n"
+        "#### Scenario: New task execution\n"
+        "- WHEN user executes se3 run \"task\"\n"
+        "- THEN the flow engine creates a new flow instance\n\n"
+        "### Requirement: History Command\n"
+        "The se3 history command SHALL list all flow executions.\n"
+    )
+
+    def test_relevant_specs_folded_in_output(self):
+        from rich.console import Console
+        from io import StringIO
+
+        prompt = (
+            "## Task Description\nDo something.\n\n"
+            f"## Relevant Specifications\n### base\n{self._REALISTIC_BASE_SPEC}\n"
+            f"### se3-commands\n{self._REALISTIC_COMMANDS_SPEC}"
+        )
+        ndjson_dict = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Done."}]}
+        }
+        session = ChatSession(
+            flow_id="flow1", step_id="step1", step_type="plan",
+            messages=[
+                ChatMessage(
+                    role="user", content=prompt, raw_json=[],
+                    timestamp="2026-01-01T12:00:00", step_type="plan", attempt=0,
+                ),
+                ChatMessage(
+                    role="assistant", content="Done.",
+                    raw_json=[ndjson_dict], timestamp="2026-01-01T12:00:05",
+                    step_type="plan", attempt=0,
+                ),
+            ],
+        )
+        renderables = render_session_detailed(session, verbose=False)
+        buf = StringIO()
+        c = Console(file=buf, force_terminal=False, width=200)
+        for r in renderables:
+            c.print(r)
+        output = buf.getvalue()
+        assert "@base" in output
+        assert "@se3-commands" in output
+        assert "折叠" in output
+        # Spec internal headings must NOT leak as separate segments
+        assert "── Purpose ──" not in output
+        assert "── Requirements ──" not in output
+        # Actual spec body must be folded away
+        assert "项目基础约定" not in output
+        assert "Unified Entry Point" not in output
+
+    def test_base_spec_folded_in_output(self):
+        from rich.console import Console
+        from io import StringIO
+
+        prompt = (
+            "## Task Description\nDiscover.\n\n"
+            f"## Base Specification (if available)\n{self._REALISTIC_BASE_SPEC}"
+        )
+        ndjson_dict = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Discovered."}]}
+        }
+        session = ChatSession(
+            flow_id="flow1", step_id="step1", step_type="discovery",
+            messages=[
+                ChatMessage(
+                    role="user", content=prompt, raw_json=[],
+                    timestamp="2026-01-01T12:00:00", step_type="discovery", attempt=0,
+                ),
+                ChatMessage(
+                    role="assistant", content="Discovered.",
+                    raw_json=[ndjson_dict], timestamp="2026-01-01T12:00:05",
+                    step_type="discovery", attempt=0,
+                ),
+            ],
+        )
+        renderables = render_session_detailed(session, verbose=False)
+        buf = StringIO()
+        c = Console(file=buf, force_terminal=False, width=200)
+        for r in renderables:
+            c.print(r)
+        output = buf.getvalue()
+        assert "@base" in output
+        assert "折叠" in output
+        # Internal headings must NOT become separate segments
+        assert "── Purpose ──" not in output
+        assert "── Requirements ──" not in output
+        # Actual spec body must be folded away
+        assert "项目基础约定" not in output
+
+    def test_non_spec_segments_not_folded(self):
+        from rich.console import Console
+        from io import StringIO
+
+        prompt = (
+            "## Task Description\nDo something important.\n\n"
+            "## Available Specifications\nbase, flow-engine"
+        )
+        ndjson_dict = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "OK."}]}
+        }
+        session = ChatSession(
+            flow_id="flow1", step_id="step1", step_type="analyze",
+            messages=[
+                ChatMessage(
+                    role="user", content=prompt, raw_json=[],
+                    timestamp="2026-01-01T12:00:00", step_type="analyze", attempt=0,
+                ),
+                ChatMessage(
+                    role="assistant", content="OK.",
+                    raw_json=[ndjson_dict], timestamp="2026-01-01T12:00:05",
+                    step_type="analyze", attempt=0,
+                ),
+            ],
+        )
+        renderables = render_session_detailed(session, verbose=False)
+        buf = StringIO()
+        c = Console(file=buf, force_terminal=False, width=200)
+        for r in renderables:
+            c.print(r)
+        output = buf.getvalue()
+        assert "Do something important" in output
+        assert "base, flow-engine" in output
+        assert "折叠" not in output
+
+    def test_post_spec_headings_not_absorbed(self):
+        """Headings after Relevant Specifications must NOT be absorbed into
+        the spec segment — they must appear as separate segments.
+        Reproduces the verify_spec.py prompt structure."""
+        from rich.console import Console
+        from io import StringIO
+
+        prompt = (
+            "You are an expert software quality assurance engineer.\n\n"
+            "## Task Description\nVerify implementation.\n\n"
+            f"## Relevant Specifications\n### base\n{self._REALISTIC_BASE_SPEC}\n"
+            f"### se3-commands\n{self._REALISTIC_COMMANDS_SPEC}\n\n"
+            "## Changes Made\nModified src/handler.py\n\n"
+            "## Test Results\nAll 42 tests passed.\n\n"
+            "## Instructions\nVerify the implementation."
+        )
+        ndjson_dict = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Verified."}]}
+        }
+        session = ChatSession(
+            flow_id="flow1", step_id="step1", step_type="verify_spec",
+            messages=[
+                ChatMessage(
+                    role="user", content=prompt, raw_json=[],
+                    timestamp="2026-01-01T12:00:00", step_type="verify_spec",
+                    attempt=0,
+                ),
+                ChatMessage(
+                    role="assistant", content="Verified.",
+                    raw_json=[ndjson_dict], timestamp="2026-01-01T12:00:05",
+                    step_type="verify_spec", attempt=0,
+                ),
+            ],
+        )
+        renderables = render_session_detailed(session, verbose=False)
+        buf = StringIO()
+        c = Console(file=buf, force_terminal=False, width=200)
+        for r in renderables:
+            c.print(r)
+        output = buf.getvalue()
+        assert "@base" in output
+        assert "@se3-commands" in output
+        assert "折叠" in output
+        assert "── Changes Made ──" in output
+        assert "── Test Results ──" in output
+        assert "── Instructions ──" in output
+        assert "Modified src/handler.py" in output
+        assert "All 42 tests passed" in output
+
+
+class TestSegmentPromptSpecAbsorption:
+    """Tests for the critical bug: segment_prompt() must not absorb
+    ## headings after Relevant Specifications into the spec segment."""
+
+    def test_verify_spec_structure(self):
+        """Mirrors verify_spec.py prompt: ## Relevant Specifications followed
+        by ## Changes Made, ## Test Results, ## Instructions."""
+        prompt = (
+            "## Task Description\nVerify.\n\n"
+            "## Relevant Specifications\n### base\n# Base\n## Purpose\nP.\n\n"
+            "## Changes Made\nChanged files.\n\n"
+            "## Test Results\nPassed.\n\n"
+            "## Instructions\nCheck."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Relevant Specifications" in titles
+        assert "Changes Made" in titles
+        assert "Test Results" in titles
+        assert "Instructions" in titles
+
+    def test_plan_revision_structure(self):
+        """Mirrors plan.py revision mode: spec section followed by
+        ## Previous Plan, ## Reviewer Feedback."""
+        prompt = (
+            "## Relevant Specifications\n### base\nSpec content.\n\n"
+            "## Previous Plan\nOld plan.\n\n"
+            "## Reviewer Feedback\nNeeds work."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Relevant Specifications" in titles
+        assert "Previous Plan" in titles
+        assert "Reviewer Feedback" in titles
+
+    def test_plan_parts_not_absorbed(self):
+        """## Part N: headings after specs must become separate segments."""
+        prompt = (
+            "## Relevant Specifications\n### base\nSpec.\n\n"
+            "## Part 1: Proposal\nCreate proposal.\n\n"
+            "## Part 2: Design\nDesign details."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Relevant Specifications" in titles
+        assert "Part 1: Proposal" in titles
+        assert "Part 2: Design" in titles
+
+    def test_spec_internal_headings_absorbed(self):
+        """## Purpose, ## Requirements inside specs must NOT become
+        separate segments (they should be absorbed)."""
+        prompt = (
+            "## Relevant Specifications\n"
+            "### base\n# SE3 Framework\n## Purpose\nProject.\n"
+            "## Requirements\nReqs.\n"
+            "### se3-commands\n# Commands\n## Purpose\nCLI.\n\n"
+            "## Changes Made\nFiles."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Relevant Specifications" in titles
+        assert "Changes Made" in titles
+        assert "Purpose" not in titles
+        assert "Requirements" not in titles
+
+    def test_spec_subsection_re_trailing_whitespace(self):
+        """### spec-name with trailing whitespace should still be recognized."""
+        prompt = (
+            "## Relevant Specifications\n"
+            "### base  \n# SE3 Framework\n## Purpose\nP.\n\n"
+            "## Changes Made\nDone."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Relevant Specifications" in titles
+        assert "Changes Made" in titles
+
+    def test_plan_tasks_revision_with_spec(self):
+        """plan_tasks.py revision mode: ## Relevant Specifications followed by
+        ## Previous Task Plan (to revise) and ## Reviewer Feedback.
+        '## Previous Task Plan' must NOT be absorbed into the spec segment."""
+        prompt = (
+            "## Relevant Specifications\n"
+            "### base\n# SE3 Framework\n## Purpose\nProject.\n"
+            "## Requirements\nReqs.\n\n"
+            "## Previous Task Plan (to revise)\n"
+            '{"tasks": [{"id": "T1"}]}\n\n'
+            "## Reviewer Feedback\nNeeds work.\n\n"
+            "## Instructions\nRevise the plan."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Relevant Specifications" in titles
+        assert "Previous Task Plan (to revise)" in titles
+        assert "Reviewer Feedback" in titles
+        assert "Instructions" in titles
+        spec_seg = next(s for s in segments if s["title"] == "Relevant Specifications")
+        assert "Previous Task Plan" not in spec_seg["content"]
+
+    def test_self_check_specifications_for_context(self):
+        """self_check.py uses '## Specifications (for context only)' with ### spec
+        subsections containing internal ## headings. These internal headings must be
+        absorbed, not leak as separate segments."""
+        prompt = (
+            "## Task Description\nCheck.\n\n"
+            "## Changes Made\nFiles.\n\n"
+            "## Test Results\nPassed.\n\n"
+            "## Specifications (for context only)\n"
+            "### base\n# SE3 Framework\n## Purpose\nProject.\n"
+            "## Requirements\nReqs.\n"
+            "### se3-commands\n# Commands\n## Purpose\nCLI.\n\n"
+            "## Fix Context\nContext.\n\n"
+            "## Review Dimensions\nFocus."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Task Description" in titles
+        assert "Specifications (for context only)" in titles
+        assert "Fix Context" in titles
+        assert "Review Dimensions" in titles
+        assert "Purpose" not in titles
+        assert "Requirements" not in titles
+
+    def test_fold_spec_content_specifications_for_context(self):
+        """fold_spec_content() should fold '## Specifications (for context only)' title."""
+        content = (
+            "## Specifications (for context only)\n"
+            "### base\nSpec content here.\n"
+            "### se3-commands\nMore spec content."
+        )
+        result = fold_spec_content("Specifications (for context only)", content)
+        assert result is not None
+        assert any("@base" in r.plain for r in result)
+        assert any("@se3-commands" in r.plain for r in result)
+
+
+class TestFoldSpecSubsectionsPreamble:
+    """Tests for preamble handling in _fold_spec_subsections()."""
+
+    def test_preamble_text_preserved(self):
+        content = "Some preamble text\n### base\nSpec content."
+        result = _fold_spec_subsections(content)
+        assert result is not None
+        assert any("preamble" in r.plain.lower() for r in result)
+
+    def test_heading_only_preamble_dropped(self):
+        content = "## Relevant Specifications\n### base\nSpec content."
+        result = _fold_spec_subsections(content)
+        assert result is not None
+        spec_lines = [r for r in result if "@base" in r.plain]
+        assert len(spec_lines) == 1
+        non_spec = [r for r in result if "@base" not in r.plain]
+        for line in non_spec:
+            assert "Relevant Specifications" not in line.plain
