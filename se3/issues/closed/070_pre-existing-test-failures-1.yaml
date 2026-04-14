@@ -15,7 +15,7 @@ description: '**1 pre-existing test failure(s)** detected during flow execution.
 
 
   These tests should be investigated and fixed to prevent the broken-window effect.'
-status: open
+status: resolved
 priority: medium
 scope: in_scope
 type: bug
@@ -24,3 +24,7 @@ tags:
 - source:test-pre-existing
 created_at: '2026-04-14T10:34:36.190727'
 updated_at: '2026-04-14T10:34:36.190727'
+resolved_at: '2026-04-14'
+resolution: 'Fixed in commit 10d4fea. Test renamed from test_returns_completed_when_max_iterations_reached
+  to test_returns_revision_needed_at_max_iterations to match new behavior where self_check
+  always returns REVISION_NEEDED and exhaustion is handled by state_machine.'

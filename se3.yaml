@@ -69,3 +69,6 @@ e2e:
   diff_threshold: 0.1                 # Pixel difference threshold (0-1)
   default_viewport: "1280x720"        # Default browser viewport size
   test_paths: []                      # URL paths to test (e.g., ["/", "/login"])
+
+workflow:
+  max_fix_iterations: 20

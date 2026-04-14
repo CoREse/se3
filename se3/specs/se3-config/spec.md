@@ -28,6 +28,7 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: ["summarize"])
 - `conflict_resolver.strategy`: Merge conflict resolution strategy — `"human"` or `"llm"` (default: `"human"`)
 - `implement.group_loc_threshold`: LOC threshold for collapsing task groups into a single LLM call (default: 300)
+- `workflow.max_fix_iterations`: Max fix loop iterations before FAILED (default: 20)
 
 #### Scenario: Using default configuration
 - **WHEN** no se3.yaml file exists in the project
@@ -149,6 +150,29 @@ implement:
 - **GIVEN** `implement.group_loc_threshold: 500` in se3.yaml
 - **WHEN** `plan` produces groups with total estimated_loc = 400
 - **THEN** the implement step collapses all groups into a single LLM call
+
+### Requirement: Workflow Configuration
+
+The system SHALL support workflow-level configuration for the fix loop mechanism.
+
+**Workflow section options:**
+- `workflow.max_fix_iterations`: Maximum number of fix loop iterations before the flow is marked FAILED (default: 20). The fix loop counter is shared across TEST, SELF_CHECK, and VERIFY_SPEC steps. When exhausted, the state machine sets the flow to FAILED status, generates an A-class issue, and stops execution.
+
+**Example configuration:**
+```yaml
+workflow:
+  max_fix_iterations: 20  # Allow up to 20 fix loop iterations
+```
+
+#### Scenario: Default workflow configuration
+- **WHEN** no `workflow` section exists in se3.yaml
+- **THEN** the framework uses a default `max_fix_iterations` of 20
+
+#### Scenario: Custom max fix iterations
+- **GIVEN** `workflow.max_fix_iterations: 10` in se3.yaml
+- **WHEN** the fix loop reaches 10 iterations without resolving all issues
+- **THEN** the state machine sets the flow to FAILED status
+- **AND** an A-class issue is generated describing the unresolved problems
 
 ### Requirement: Language Configuration
 
