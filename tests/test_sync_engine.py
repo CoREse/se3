@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -926,3 +927,177 @@ class TestSyncEngineRunIntegration:
             assert result.specs_updated == 1
             assert result.conflicts == []
             assert result.call_file is None
+
+
+# ---------------------------------------------------------------------------
+# G3: _gather_all_conflicts populates spec_content
+# ---------------------------------------------------------------------------
+
+class TestGatherAllConflictsSpecContent:
+    def test_populates_spec_content_from_cache(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec content here")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        analyses = [SpecAnalysis(
+            spec_name="auth",
+            diffs=[SpecDiff(DiffType.CONFLICT, "auth", "Token mismatch", "src/a.py:10", "high")],
+        )]
+        conflicts = engine._gather_all_conflicts(analyses)
+
+        assert len(conflicts) == 1
+        assert conflicts[0].spec_content == "# Auth spec content here"
+
+    def test_empty_spec_content_when_spec_missing(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        engine._specs = {}
+
+        analyses = [SpecAnalysis(
+            spec_name="nonexistent",
+            diffs=[SpecDiff(DiffType.CONFLICT, "nonexistent", "Some conflict")],
+        )]
+        conflicts = engine._gather_all_conflicts(analyses)
+
+        assert len(conflicts) == 1
+        assert conflicts[0].spec_content == ""
+
+    def test_preserves_other_fields(self, tmp_path):
+        _create_spec(tmp_path, "cfg", "# Config")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        analyses = [SpecAnalysis(
+            spec_name="cfg",
+            diffs=[SpecDiff(DiffType.CONFLICT, "cfg", "Format issue", "src/cfg.py:5", "low")],
+        )]
+        conflicts = engine._gather_all_conflicts(analyses)
+
+        c = conflicts[0]
+        assert c.spec_name == "cfg"
+        assert c.description == "Format issue"
+        assert c.code_location == "src/cfg.py:5"
+        assert c.confidence == "low"
+
+
+# ---------------------------------------------------------------------------
+# G3: _generate_call_file includes spec_content
+# ---------------------------------------------------------------------------
+
+class TestGenerateCallFileSpecContent:
+    def test_call_file_contains_spec_content(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        conflicts = [Conflict(
+            spec_name="auth",
+            description="Mismatch",
+            spec_content="# Full spec content",
+            code_location="src/a.py:10",
+        )]
+        call_path = engine._generate_call_file(conflicts)
+
+        data = json.loads(call_path.read_text())
+        assert data["conflicts"][0]["spec_content"] == "# Full spec content"
+
+    def test_call_file_truncates_long_spec_content(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        long_content = "x" * 5000
+        conflicts = [Conflict(
+            spec_name="auth",
+            description="d",
+            spec_content=long_content,
+        )]
+        call_path = engine._generate_call_file(conflicts)
+
+        data = json.loads(call_path.read_text())
+        assert len(data["conflicts"][0]["spec_content"]) == 2000
+
+    def test_call_file_empty_spec_content(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        conflicts = [Conflict(spec_name="auth", description="d", spec_content="")]
+        call_path = engine._generate_call_file(conflicts)
+
+        data = json.loads(call_path.read_text())
+        assert data["conflicts"][0]["spec_content"] == ""
+
+
+# ---------------------------------------------------------------------------
+# G3: process_call_response skips unknown conflict_id
+# ---------------------------------------------------------------------------
+
+class TestProcessCallResponseUnknownConflictId:
+    def _setup_call_response(self, tmp_path, call_conflicts, response_decisions):
+        calls_dir = tmp_path / "se3" / "calls"
+        calls_dir.mkdir(parents=True, exist_ok=True)
+
+        call_file = calls_dir / "sync_conflicts_99999.json"
+        call_data = {
+            "type": "sync_conflicts",
+            "mode": "strict",
+            "timestamp": 99999,
+            "conflicts": call_conflicts,
+        }
+        call_file.write_text(json.dumps(call_data), encoding="utf-8")
+
+        response_file = calls_dir / "sync_conflicts_99999.json.response"
+        response_data = {"conflicts": response_decisions}
+        response_file.write_text(json.dumps(response_data), encoding="utf-8")
+
+        return call_file
+
+    def test_skips_unknown_id_and_logs_warning(self, tmp_path, caplog):
+        call_file = self._setup_call_response(
+            tmp_path,
+            [{"id": 1, "spec_name": "auth", "description": "Real", "code_location": ""}],
+            [{"id": 999, "decision": "create_issue"}],
+        )
+
+        engine = SyncEngine(tmp_path)
+        with caplog.at_level(logging.WARNING):
+            result = engine.process_call_response(call_file, MagicMock())
+
+        assert result["specs_updated"] == 0
+        assert result["issues_created"] == 0
+        assert "unknown conflict_id 999" in caplog.text.lower()
+
+    def test_known_id_still_processed(self, tmp_path):
+        call_file = self._setup_call_response(
+            tmp_path,
+            [{"id": 1, "spec_name": "auth", "description": "Real conflict", "code_location": ""}],
+            [{"id": 1, "decision": "create_issue"}],
+        )
+
+        engine = SyncEngine(tmp_path)
+        result = engine.process_call_response(call_file, MagicMock())
+
+        assert result["issues_created"] == 1
+
+    def test_mix_known_and_unknown_ids(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth")
+
+        call_file = self._setup_call_response(
+            tmp_path,
+            [{"id": 1, "spec_name": "auth", "description": "Real", "code_location": ""}],
+            [
+                {"id": 1, "decision": "create_issue"},
+                {"id": 42, "decision": "update_spec"},
+            ],
+        )
+
+        engine = SyncEngine(tmp_path)
+        result = engine.process_call_response(call_file, MagicMock())
+
+        assert result["issues_created"] == 1
+        assert result["specs_updated"] == 0
+
+    def test_no_empty_issue_created_for_unknown_id(self, tmp_path):
+        call_file = self._setup_call_response(
+            tmp_path,
+            [],
+            [{"id": 1, "decision": "create_issue"}],
+        )
+
+        engine = SyncEngine(tmp_path)
+        result = engine.process_call_response(call_file, MagicMock())
+
+        mgr = IssueManager(tmp_path)
+        assert len(mgr.list_issues()) == 0
+        assert result["issues_created"] == 0

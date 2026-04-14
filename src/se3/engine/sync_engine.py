@@ -585,9 +585,11 @@ class SyncEngine:
 
         for analysis in analyses:
             for diff in analysis.conflicts:
+                spec_content = self._specs.get(diff.spec_name, {}).get("content", "")
                 conflicts.append(Conflict(
                     spec_name=diff.spec_name,
                     description=diff.description,
+                    spec_content=spec_content,
                     code_location=diff.code_location,
                     confidence=diff.confidence,
                 ))
@@ -620,6 +622,7 @@ class SyncEngine:
                     "spec_name": c.spec_name,
                     "description": c.description,
                     "code_location": c.code_location,
+                    "spec_content": c.spec_content[:2000] if c.spec_content else "",
                     "options": ["update_spec", "create_issue"],
                     "decision": "pending",
                 }
@@ -874,6 +877,10 @@ class SyncEngine:
                 continue
 
             original = call_conflicts.get(conflict_id, {})
+            if not original:
+                logger.warning("Skipping unknown conflict_id %s in response", conflict_id)
+                continue
+
             conflict = Conflict(
                 spec_name=original.get("spec_name", ""),
                 description=original.get("description", ""),
