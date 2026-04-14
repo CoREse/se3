@@ -235,20 +235,27 @@ class TestSyncResult:
 # ---------------------------------------------------------------------------
 
 class TestIssueManagerFindOpenByTitle:
-    def test_finds_matching_issue(self, tmp_path):
+    def test_finds_exact_matching_issue(self, tmp_path):
         mgr = IssueManager(tmp_path)
         mgr.create("Fix login bug", "Login fails on submit")
         mgr.create("Add signup page", "Need registration form")
 
-        found = mgr.find_open_by_title("login")
+        found = mgr.find_open_by_title("Fix login bug")
         assert found is not None
         assert found.title == "Fix login bug"
+
+    def test_substring_no_longer_matches(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("Fix login bug", "Login fails on submit")
+
+        found = mgr.find_open_by_title("login")
+        assert found is None
 
     def test_case_insensitive(self, tmp_path):
         mgr = IssueManager(tmp_path)
         mgr.create("Fix LOGIN Bug", "desc")
 
-        found = mgr.find_open_by_title("login bug")
+        found = mgr.find_open_by_title("fix login bug")
         assert found is not None
         assert found.title == "Fix LOGIN Bug"
 
@@ -264,13 +271,13 @@ class TestIssueManagerFindOpenByTitle:
         mgr.create("Fix login bug", "desc")
         mgr.update_status("001", IssueStatus.WONT_FIX)
 
-        found = mgr.find_open_by_title("login")
+        found = mgr.find_open_by_title("Fix login bug")
         assert found is None
 
     def test_returns_first_match(self, tmp_path):
         mgr = IssueManager(tmp_path)
-        mgr.create("Login error A", "desc")
-        mgr.create("Login error B", "desc")
+        mgr.create("Login error", "desc")
+        mgr.create("Login error", "desc2")
 
         found = mgr.find_open_by_title("Login error")
         assert found is not None
@@ -279,6 +286,12 @@ class TestIssueManagerFindOpenByTitle:
     def test_empty_directory(self, tmp_path):
         mgr = IssueManager(tmp_path)
         found = mgr.find_open_by_title("anything")
+        assert found is None
+
+    def test_empty_title_returns_none(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("Some issue", "desc")
+        found = mgr.find_open_by_title("")
         assert found is None
 
 
@@ -388,32 +401,32 @@ class TestFindOpenByTitleBoundary:
         assert found is not None
         assert found.title == "[sync] auth: Missing login"
 
-    def test_partial_match_at_start(self, tmp_path):
+    def test_partial_match_at_start_no_longer_matches(self, tmp_path):
         mgr = IssueManager(tmp_path)
         mgr.create("[sync] auth: Missing login", "desc")
 
         found = mgr.find_open_by_title("[sync]")
-        assert found is not None
+        assert found is None
 
-    def test_partial_match_at_end(self, tmp_path):
+    def test_partial_match_at_end_no_longer_matches(self, tmp_path):
         mgr = IssueManager(tmp_path)
         mgr.create("[sync] auth: Missing login", "desc")
 
         found = mgr.find_open_by_title("Missing login")
-        assert found is not None
+        assert found is None
 
-    def test_special_characters_in_search(self, tmp_path):
+    def test_special_characters_exact_match(self, tmp_path):
         mgr = IssueManager(tmp_path)
         mgr.create("[sync-conflict] auth: Token (JWT)", "desc")
 
-        found = mgr.find_open_by_title("[sync-conflict]")
+        found = mgr.find_open_by_title("[sync-conflict] auth: Token (JWT)")
         assert found is not None
 
-    def test_unicode_in_title(self, tmp_path):
+    def test_unicode_exact_match(self, tmp_path):
         mgr = IssueManager(tmp_path)
         mgr.create("修复登录缺陷", "描述")
 
-        found = mgr.find_open_by_title("登录")
+        found = mgr.find_open_by_title("修复登录缺陷")
         assert found is not None
 
 
@@ -1121,7 +1134,7 @@ class TestSyncEngineIssueLifecycle:
             tags=["auto-discovered", "source:sync"],
         )
         mgr.create(
-            "[sync] auth: Missing signup",
+            "[sync] config: Missing validation",
             "desc",
             tags=["auto-discovered", "source:sync"],
         )

@@ -454,8 +454,45 @@ class SyncEngine:
         """Build a normalized title string for a gap issue."""
         return f"[sync] {gap.spec_name}: {gap.description}"
 
+    _SYNC_TITLE_RE = re.compile(
+        r"^\[sync(?:-conflict)?\]\s*([^:]+):\s*(.+)$", re.IGNORECASE
+    )
+
+    def _normalize_for_matching(self, title: str) -> str:
+        """Normalize a sync issue title for stable comparison.
+
+        For titles matching ``[sync] {spec_name}: {description}``:
+        - Extracts spec_name (lowered, stripped) and description.
+        - Description: lowered, articles (a/an/the) removed, punctuation
+          stripped, whitespace collapsed.
+        - Returns ``[sync] {spec_name}: {normalized_description}``.
+
+        Non-sync titles fall back to ``title.lower().strip()``.
+        """
+        if not title:
+            return ""
+        m = self._SYNC_TITLE_RE.match(title.strip())
+        if not m:
+            return title.lower().strip()
+        spec_name = m.group(1).strip().lower()
+        desc = m.group(2).strip().lower()
+        desc = re.sub(r"\b(?:a|an|the)\b", "", desc)
+        desc = re.sub(r"[^a-z0-9\s]", "", desc)
+        desc = re.sub(r"\s+", " ", desc).strip()
+        return f"[sync] {spec_name}: {desc}"
+
+    def _extract_spec_name_from_title(self, title: str) -> Optional[str]:
+        """Extract spec_name from a ``[sync] spec_name: ...`` title."""
+        m = self._SYNC_TITLE_RE.match(title.strip())
+        if m:
+            return m.group(1).strip().lower()
+        return None
+
     def _process_gaps(self, gaps: List[SpecDiff]) -> int:
         """Create issues for spec-leads-code gaps with idempotency.
+
+        Uses normalized matching against existing sync issues so that
+        minor LLM description variations don't create duplicates.
 
         Returns:
             Number of issues actually created.
@@ -468,12 +505,23 @@ class SyncEngine:
         mgr = IssueManager(self.project_root)
         created = 0
 
+        existing_normalized = {
+            self._normalize_for_matching(issue.title)
+            for issue in self._sync_issues
+        }
+
         for gap in gaps:
             title = self._normalize_gap_title(gap)
+            norm_title = self._normalize_for_matching(title)
+
+            if norm_title in existing_normalized:
+                logger.info("Skipping duplicate issue for gap: %s", title)
+                continue
 
             existing = mgr.find_open_by_title(title)
             if existing:
                 logger.info("Skipping duplicate issue for gap: %s", title)
+                existing_normalized.add(norm_title)
                 continue
 
             description = (
@@ -559,9 +607,10 @@ class SyncEngine:
     def _manage_issue_lifecycle(self, current_gap_titles: set[str]) -> int:
         """Auto-close sync issues whose gaps have disappeared.
 
-        Compares existing sync-tagged open issues against current analysis
-        results. If a sync issue's subject is no longer in the gap list,
-        it means the gap has been resolved — close it.
+        Uses a three-layer matching strategy to avoid false closures:
+        1. Normalized match: issue title normalizes to a current gap title.
+        2. Prefix fallback: the issue's spec still has gaps (conservative).
+        3. Only close when neither condition holds.
 
         Returns:
             Number of issues closed.
@@ -571,11 +620,30 @@ class SyncEngine:
         if not self._sync_issues:
             return 0
 
+        normalized_current = {
+            self._normalize_for_matching(t) for t in current_gap_titles
+        }
+
+        current_spec_names: set[str] = set()
+        for t in current_gap_titles:
+            sn = self._extract_spec_name_from_title(t)
+            if sn:
+                current_spec_names.add(sn)
+
         mgr = IssueManager(self.project_root)
         closed = 0
 
         for issue in self._sync_issues:
-            if issue.title in current_gap_titles:
+            norm_issue = self._normalize_for_matching(issue.title)
+            if norm_issue in normalized_current:
+                continue
+
+            issue_spec = self._extract_spec_name_from_title(issue.title)
+            if issue_spec and issue_spec in current_spec_names:
+                logger.debug(
+                    "Keeping issue %s (spec '%s' still has gaps): %s",
+                    issue.id, issue_spec, issue.title,
+                )
                 continue
 
             try:
@@ -585,7 +653,7 @@ class SyncEngine:
                 )
                 closed += 1
                 logger.info("Auto-closed issue %s: %s", issue.id, issue.title)
-            except ValueError as e:
+            except (ValueError, OSError) as e:
                 logger.warning("Failed to close issue %s: %s", issue.id, e)
 
         return closed
