@@ -31,12 +31,20 @@ The system SHALL support two classes of issue discovery:
 - **THEN** the sync engine creates a `medium` priority issue via `IssueManager.create()`
 - **AND** the issue title follows the format `[sync] {spec_name}: {description}`
 - **AND** the issue is tagged with `auto-discovered` and `source:sync`
-- **AND** if an open issue with the same title already exists, creation is skipped (idempotency)
+- **AND** idempotency uses normalized matching: titles are normalized by lowercasing, removing articles (a/an/the), stripping punctuation, and collapsing whitespace before comparison
+- **AND** if a normalized-matching open issue already exists, creation is skipped (idempotency)
+- **AND** `find_open_by_title` uses exact case-insensitive matching (not substring matching)
 
 #### Scenario: A-class trigger on sync gap resolution (auto-close)
 - **WHEN** `se3 sync` detects that a previously reported gap is no longer present in the analysis
 - **THEN** the sync engine automatically closes the corresponding sync-tagged issue via `IssueManager.close_issue()`
 - **AND** the close reason indicates the gap was resolved
+- **AND** a three-layer matching strategy prevents false closures:
+  1. Normalized match against current gap titles
+  2. Prefix fallback: if the issue's spec still has gaps, the issue is kept open
+  3. Close only when neither condition holds
+- **AND** only gap issues are processed (conflict-tagged issues are excluded)
+- **AND** `close_issue` raises `OSError` if the file move fails (rather than silently continuing)
 
 #### Scenario: B-class injection into whitelisted step
 - **WHEN** a whitelisted step (e.g., `summarize`) builds its LLM prompt

@@ -24,10 +24,18 @@ SYNC_TAGS = ["auto-discovered", "source:sync"]
 def strip_markdown_fences(text: str) -> str:
     """Strip outermost markdown code fences if the text is wholly wrapped in them."""
     stripped = text.strip()
-    m = re.match(r'^```[^\n]*\n(.*)\n```$', stripped, re.DOTALL)
-    if m:
-        return m.group(1)
-    return text
+    lines = stripped.split("\n")
+    if len(lines) < 2:
+        return text
+    if not lines[0].startswith("```"):
+        return text
+    if lines[-1].strip() != "```":
+        return text
+    inner = lines[1:-1]
+    fence_count = sum(1 for line in inner if line.startswith("```"))
+    if fence_count % 2 != 0:
+        return text
+    return "\n".join(inner)
 
 
 class DiffType(Enum):
@@ -605,7 +613,10 @@ class SyncEngine:
             return 0
 
     def _manage_issue_lifecycle(self, current_gap_titles: set[str]) -> int:
-        """Auto-close sync issues whose gaps have disappeared.
+        """Auto-close sync gap issues whose gaps have disappeared.
+
+        Only processes gap issues (excludes conflict issues which have
+        their own lifecycle via the conflict resolution flow).
 
         Uses a three-layer matching strategy to avoid false closures:
         1. Normalized match: issue title normalizes to a current gap title.
@@ -618,6 +629,14 @@ class SyncEngine:
         from .issue_manager import IssueManager
 
         if not self._sync_issues:
+            return 0
+
+        gap_issues = [
+            issue for issue in self._sync_issues
+            if "conflict" not in issue.tags
+        ]
+
+        if not gap_issues:
             return 0
 
         normalized_current = {
@@ -633,7 +652,7 @@ class SyncEngine:
         mgr = IssueManager(self.project_root)
         closed = 0
 
-        for issue in self._sync_issues:
+        for issue in gap_issues:
             norm_issue = self._normalize_for_matching(issue.title)
             if norm_issue in normalized_current:
                 continue

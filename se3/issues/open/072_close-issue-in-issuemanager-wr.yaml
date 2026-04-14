@@ -1,0 +1,23 @@
+id: '072'
+title: close_issue in IssueManager writes status=CLOSED to the file before attempting
+  shutil.move. If the move fails (OSError), the file status says 'closed' but remains
+  in open/ directory. The OSError is now re-raised and caught by _manage_issue_lifecycle,
+  so the count is correct, but the file has inconsistent state.
+description: 'close_issue in IssueManager writes status=CLOSED to the file before
+  attempting shutil.move. If the move fails (OSError), the file status says ''closed''
+  but remains in open/ directory. The OSError is now re-raised and caught by _manage_issue_lifecycle,
+  so the count is correct, but the file has inconsistent state.
+
+
+  Suggestion: Move the _write_issue call after the shutil.move, or revert the status
+  on move failure. Pre-existing issue not introduced by this change.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-14T12:31:41.285065'
+updated_at: '2026-04-14T12:31:41.285065'

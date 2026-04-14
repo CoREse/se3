@@ -233,13 +233,15 @@ se3 sync --mode=fast        # LLM handles all conflicts automatically
 - **WHEN** a spec describes a requirement that is NOT implemented in the code
 - **THEN** the engine creates an issue tagged `["auto-discovered", "source:sync"]`
 - **AND** the issue title follows the format `[sync] {spec_name}: {description}`
-- **AND** if an open issue with the same title already exists, it is NOT created (idempotency)
+- **AND** idempotency uses normalized matching: titles are normalized by extracting the description portion, lowercasing, removing articles (a/an/the), stripping punctuation, and collapsing whitespace before comparison
+- **AND** if a normalized-matching open issue already exists, it is NOT created (idempotency)
 
 #### Scenario: Extension detected (code extends spec)
 - **WHEN** the code contains functionality that the spec does NOT describe, with no contradiction
 - **THEN** the engine uses LLM to update the spec file to reflect the code's actual behavior
 - **AND** the update preserves all existing requirements (add-only)
 - **AND** a content length safety guard rejects suspiciously short LLM outputs (< 50% of original)
+- **AND** markdown code fences wrapping the LLM response are stripped before writing to spec files
 
 #### Scenario: Conflict detected in default mode
 - **WHEN** the code implements something differently from what the spec describes
@@ -257,15 +259,24 @@ se3 sync --mode=fast        # LLM handles all conflicts automatically
 - **THEN** LLM auto-resolves every conflict (deciding update_spec or create_issue)
 - **AND** no human intervention is triggered
 
+#### Scenario: Conflict spec update safety guards
+- **WHEN** a conflict is resolved by updating the spec (via LLM)
+- **THEN** a content length safety guard rejects LLM outputs shorter than 50% of the original spec content
+- **AND** markdown code fences wrapping the LLM response are stripped before writing to spec files
+
 #### Scenario: Issue lifecycle — auto-close resolved gaps
 - **WHEN** sync detects that a previously reported gap is no longer present
-- **THEN** the corresponding sync-tagged issue is automatically closed
+- **THEN** the corresponding sync-tagged issue is automatically closed using a three-layer matching strategy:
+  1. **Normalized match**: the issue title is normalized and compared against current gap titles
+  2. **Prefix fallback**: if normalized match fails but the issue's spec still has gaps, the issue is conservatively kept open
+  3. **Close**: only when neither condition holds is the issue closed
 - **AND** the close reason indicates the gap was resolved
+- **AND** only gap issues are processed (conflict issues have their own lifecycle)
 
 #### Scenario: MCP call file generation for human intervention
 - **WHEN** conflicts require human decision (default or strict mode)
 - **THEN** all pending conflicts are written to a single JSON file in `se3/calls/`
-- **AND** the file includes conflict ID, spec name, description, code location, and decision options
+- **AND** the file includes conflict ID, spec name, description, code location, spec content (truncated to 2000 chars), and decision options
 - **AND** the CLI displays the call file path and the `se3 sync-respond` command to process it
 
 ### Requirement: `se3 sync-respond` Command
@@ -284,6 +295,8 @@ se3 sync-respond <call-file-path>
 - **THEN** the engine reads each conflict decision from the response file
 - **AND** for `update_spec` decisions: uses LLM to update the spec to match the code
 - **AND** for `create_issue` decisions: creates an issue recording the discrepancy
+- **AND** responses with invalid decision values (not `update_spec` or `create_issue`) are skipped
+- **AND** responses referencing unknown conflict IDs (not present in the original call file) are skipped
 
 ### Requirement: Sync Operation Permission Limits
 

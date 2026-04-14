@@ -1445,3 +1445,85 @@ class TestProcessExtensionsFenceStripping:
         written = (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text()
         assert not written.startswith("```")
         assert "### New" in written
+
+
+# ---------------------------------------------------------------------------
+# Fix: _manage_issue_lifecycle excludes conflict issues
+# ---------------------------------------------------------------------------
+
+class TestManageIssueLifecycleConflictExclusion:
+    def test_does_not_close_conflict_issues(self, tmp_path):
+        """Conflict issues should not be managed by gap lifecycle."""
+        mgr = IssueManager(tmp_path)
+        mgr.create(
+            "[sync-conflict] auth: Token mismatch", "d",
+            tags=list(SYNC_TAGS) + ["conflict"],
+        )
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        closed = engine._manage_issue_lifecycle(set())
+        assert closed == 0
+        assert len(mgr.list_issues()) == 1
+
+    def test_closes_gap_but_keeps_conflict_for_same_spec(self, tmp_path):
+        """Gap issue gets closed when resolved, but conflict issue stays."""
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync] auth: Missing login", "d", tags=list(SYNC_TAGS))
+        mgr.create(
+            "[sync-conflict] auth: Token format", "d",
+            tags=list(SYNC_TAGS) + ["conflict"],
+        )
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        closed = engine._manage_issue_lifecycle(set())
+        assert closed == 1
+        remaining = mgr.list_issues()
+        assert len(remaining) == 1
+        assert "conflict" in remaining[0].tags
+
+    def test_only_conflict_issues_returns_zero(self, tmp_path):
+        """When all sync issues are conflicts, nothing is closed."""
+        mgr = IssueManager(tmp_path)
+        mgr.create(
+            "[sync-conflict] auth: A", "d",
+            tags=list(SYNC_TAGS) + ["conflict"],
+        )
+        mgr.create(
+            "[sync-conflict] cfg: B", "d",
+            tags=list(SYNC_TAGS) + ["conflict"],
+        )
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        closed = engine._manage_issue_lifecycle(set())
+        assert closed == 0
+        assert len(mgr.list_issues()) == 2
+
+
+# ---------------------------------------------------------------------------
+# Fix: strip_markdown_fences with unbalanced inner fences
+# ---------------------------------------------------------------------------
+
+class TestStripMarkdownFencesUnbalanced:
+    def test_no_strip_when_inner_fence_unbalanced(self):
+        """Content ending with a code block whose close looks like outer close."""
+        text = "```markdown\nSome content\n```python\ncode\n```"
+        result = strip_markdown_fences(text)
+        assert result == text
+
+    def test_strips_when_inner_fences_balanced(self):
+        """Properly nested inner block should be stripped correctly."""
+        text = "```markdown\n# Doc\n```python\ncode\n```\nMore.\n```"
+        result = strip_markdown_fences(text)
+        assert result == "# Doc\n```python\ncode\n```\nMore."
+
+    def test_no_strip_single_fence_at_end(self):
+        """Single inner opening fence with no matching close inside."""
+        text = "```md\n# Title\n```python\n```"
+        result = strip_markdown_fences(text)
+        assert result == text

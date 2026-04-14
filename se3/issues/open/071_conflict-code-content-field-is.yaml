@@ -1,0 +1,24 @@
+id: '071'
+title: 'Conflict.code_content field is never populated. _gather_all_conflicts populates
+  spec_content (fix for medium issue #4) but code_content remains empty. The MCP call
+  file and conflict resolution prompts don''t use it, so this has no functional impact,
+  but the field exists unused in the dataclass.'
+description: 'Conflict.code_content field is never populated. _gather_all_conflicts
+  populates spec_content (fix for medium issue #4) but code_content remains empty.
+  The MCP call file and conflict resolution prompts don''t use it, so this has no
+  functional impact, but the field exists unused in the dataclass.
+
+
+  Suggestion: Either remove the code_content field from the Conflict dataclass if
+  truly unused, or populate it in _gather_all_conflicts by reading the file at code_location
+  (if meaningful). Low priority since spec doesn''t require it.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-14T12:31:41.283525'
+updated_at: '2026-04-14T12:31:41.283525'
