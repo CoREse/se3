@@ -119,7 +119,7 @@ class TestIssueAutoClose:
     def test_closes_issue_when_gap_disappears(self, tmp_path):
         mgr = IssueManager(tmp_path)
         mgr.create("[sync] auth: Missing login", "d", tags=list(SYNC_TAGS))
-        mgr.create("[sync] auth: Missing signup", "d", tags=list(SYNC_TAGS))
+        mgr.create("[sync] config: Missing validation", "d", tags=list(SYNC_TAGS))
 
         engine = SyncEngine(tmp_path)
         engine._load_existing_issues()
@@ -926,3 +926,193 @@ class TestSyncEngineRunIntegration:
             assert result.specs_updated == 1
             assert result.conflicts == []
             assert result.call_file is None
+
+
+# ---------------------------------------------------------------------------
+# G2: _normalize_for_matching
+# ---------------------------------------------------------------------------
+
+class TestNormalizeForMatching:
+    def test_basic_sync_title(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        a = engine._normalize_for_matching("[sync] auth: Missing the Login Validation")
+        b = engine._normalize_for_matching("[sync] auth: missing login validation")
+        assert a == b
+
+    def test_removes_articles(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        a = engine._normalize_for_matching("[sync] auth: A missing login, validation.")
+        b = engine._normalize_for_matching("[sync] auth: missing login validation")
+        assert a == b
+
+    def test_removes_punctuation(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        result = engine._normalize_for_matching("[sync] cfg: Check (input) validation!")
+        assert "(" not in result
+        assert ")" not in result
+        assert "!" not in result
+
+    def test_non_sync_title_fallback(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        result = engine._normalize_for_matching("  Some Random Title  ")
+        assert result == "some random title"
+
+    def test_empty_string(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        assert engine._normalize_for_matching("") == ""
+
+    def test_preserves_spec_name(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        result = engine._normalize_for_matching("[sync] my-spec: The description")
+        assert result.startswith("[sync] my-spec:")
+
+    def test_sync_conflict_prefix(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        result = engine._normalize_for_matching("[sync-conflict] auth: Token mismatch")
+        assert "[sync] auth:" in result
+
+    def test_collapses_whitespace(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        result = engine._normalize_for_matching("[sync] auth:   multiple   spaces   here")
+        assert "  " not in result.split(": ", 1)[1]
+
+
+# ---------------------------------------------------------------------------
+# G2: _extract_spec_name_from_title
+# ---------------------------------------------------------------------------
+
+class TestExtractSpecNameFromTitle:
+    def test_extracts_from_sync_title(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        assert engine._extract_spec_name_from_title("[sync] auth: Missing login") == "auth"
+
+    def test_extracts_from_sync_conflict_title(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        assert engine._extract_spec_name_from_title("[sync-conflict] cfg: Mismatch") == "cfg"
+
+    def test_returns_none_for_non_sync(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        assert engine._extract_spec_name_from_title("Regular issue") is None
+
+    def test_returns_none_for_empty(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        assert engine._extract_spec_name_from_title("") is None
+
+
+# ---------------------------------------------------------------------------
+# G2: _process_gaps normalized idempotency
+# ---------------------------------------------------------------------------
+
+class TestProcessGapsNormalized:
+    def test_skips_when_normalized_title_matches(self, tmp_path):
+        """Existing issue with slightly different wording should block creation."""
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync] auth: Missing the Login Validation", "d", tags=list(SYNC_TAGS))
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        gaps = [SpecDiff(DiffType.GAP, "auth", "Missing Login Validation")]
+        created = engine._process_gaps(gaps)
+        assert created == 0
+
+    def test_creates_when_different_gap(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync] auth: Missing login", "d", tags=list(SYNC_TAGS))
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        gaps = [SpecDiff(DiffType.GAP, "auth", "Missing signup endpoint")]
+        created = engine._process_gaps(gaps)
+        assert created == 1
+
+    def test_empty_sync_issues_creates_all(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        engine._sync_issues = []
+
+        gaps = [
+            SpecDiff(DiffType.GAP, "auth", "A"),
+            SpecDiff(DiffType.GAP, "auth", "B"),
+        ]
+        created = engine._process_gaps(gaps)
+        assert created == 2
+
+
+# ---------------------------------------------------------------------------
+# G2: _manage_issue_lifecycle with three-layer matching
+# ---------------------------------------------------------------------------
+
+class TestManageIssueLifecycleNormalized:
+    def test_keeps_issue_with_exact_title(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync] auth: Missing login", "d", tags=list(SYNC_TAGS))
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        closed = engine._manage_issue_lifecycle({"[sync] auth: Missing login"})
+        assert closed == 0
+        assert len(mgr.list_issues()) == 1
+
+    def test_keeps_issue_with_normalized_match(self, tmp_path):
+        """Title differs in articles/punctuation/case but normalizes the same."""
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync] auth: The Missing Login!", "d", tags=list(SYNC_TAGS))
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        closed = engine._manage_issue_lifecycle({"[sync] auth: missing login"})
+        assert closed == 0
+        assert len(mgr.list_issues()) == 1
+
+    def test_keeps_issue_with_prefix_fallback(self, tmp_path):
+        """Description totally different but same spec still has gaps → keep."""
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync] auth: Old wording for some gap", "d", tags=list(SYNC_TAGS))
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        closed = engine._manage_issue_lifecycle(
+            {"[sync] auth: Completely different description"}
+        )
+        assert closed == 0
+        assert len(mgr.list_issues()) == 1
+
+    def test_closes_when_spec_has_no_gaps(self, tmp_path):
+        """Spec has zero current gaps → close its issues."""
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync] auth: Missing login", "d", tags=list(SYNC_TAGS))
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        closed = engine._manage_issue_lifecycle(
+            {"[sync] config: Some other gap"}
+        )
+        assert closed == 1
+        assert len(mgr.list_issues()) == 0
+
+    def test_non_sync_title_uses_fallback(self, tmp_path):
+        """Non-[sync] issue: only normalized exact match applies."""
+        mgr = IssueManager(tmp_path)
+        mgr.create("Manual bug report", "d", tags=list(SYNC_TAGS))
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        closed = engine._manage_issue_lifecycle(set())
+        assert closed == 1
+
+    def test_catches_os_error_on_close(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync] auth: Missing login", "d", tags=list(SYNC_TAGS))
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        with patch.object(IssueManager, "close_issue", side_effect=OSError("disk error")):
+            closed = engine._manage_issue_lifecycle(set())
+            assert closed == 0

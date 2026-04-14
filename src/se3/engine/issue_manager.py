@@ -321,18 +321,18 @@ class IssueManager:
 
         return self.update_status(issue_id, IssueStatus.OPEN)
 
-    def find_open_by_title(self, title_pattern: str) -> Optional[Issue]:
-        """Find an open issue whose title contains the pattern (case-insensitive).
+    def find_open_by_title(self, title: str) -> Optional[Issue]:
+        """Find an open issue whose title exactly matches (case-insensitive).
 
         Args:
-            title_pattern: Substring to search for within open issue titles.
+            title: Exact title to match against open issue titles.
         """
-        pattern_lower = title_pattern.lower()
-        if not self.open_dir.exists():
+        title_lower = title.lower()
+        if not title_lower or not self.open_dir.exists():
             return None
         for f in sorted(self.open_dir.glob("*.yaml")):
             issue = self._read_issue(f)
-            if issue and pattern_lower in issue.title.lower():
+            if issue and title_lower == issue.title.lower():
                 return issue
         return None
 
