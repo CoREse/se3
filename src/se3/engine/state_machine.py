@@ -401,10 +401,10 @@ class StateMachine:
             current_iteration = flow.state.get_fix_iteration()
 
             if current_iteration >= max_fix_iterations:
-                logger.warning(
-                    f"Max fix iterations ({max_fix_iterations}) reached, continuing to next step"
+                logger.error(
+                    f"Max fix iterations ({max_fix_iterations}) reached — stopping flow as FAILED"
                 )
-                print(f"\n⚠️  Max fix iterations ({max_fix_iterations}) reached, proceeding...\n")
+                print(f"\n❌  Fix loop exhausted after {max_fix_iterations} iterations. Flow stopped.\n")
                 # A-class trigger: create issue for fix loop exhaustion
                 try:
                     discovery = self._get_issue_discovery(flow)
@@ -412,7 +412,8 @@ class StateMachine:
                         discovery.create_from_fix_loop_exhaustion(flow, current_step)
                 except Exception as e:
                     logger.warning(f"Failed to create fix-loop exhaustion issue: {e}")
-                # Fall through to normal progression - will go to next step
+                flow.status = FlowStatus.FAILED
+                return None
             else:
                 fix_step = self._transition_to_fix(flow, current_step)
                 if fix_step:
@@ -679,14 +680,13 @@ class StateMachine:
         """Get the maximum number of fix iterations allowed.
 
         Returns:
-            Maximum fix iterations (default: 3)
+            Maximum fix iterations (default: 20)
         """
-        # Try to import from config, fallback to default
         try:
             from ..config import get_max_fix_iterations
             return get_max_fix_iterations(self.project_root)
         except ImportError:
-            return 3
+            return 20
 
     def _build_step_inputs(self, flow: FlowInstance, step_type: StepType) -> Dict[str, Any]:
         """Build inputs for a step based on previous outputs.

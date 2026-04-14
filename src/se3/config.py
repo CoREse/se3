@@ -644,7 +644,7 @@ class TestConfig:
     command: Optional[str] = None
     timeout: int = 1800
     phases: list[dict] = field(default_factory=list)
-    fix_loop_max_iterations: int = 3
+    fix_loop_max_iterations: int = 20
 
     @classmethod
     def load(cls, project_root: Path) -> "TestConfig":
@@ -663,7 +663,7 @@ class TestConfig:
                 command=test_data.get("command"),
                 timeout=test_data.get("timeout", 1800),
                 phases=test_data.get("phases", []),
-                fix_loop_max_iterations=fix_loop.get("max_iterations", 3),
+                fix_loop_max_iterations=fix_loop.get("max_iterations", 20),
             )
         except Exception:
             return cls()
@@ -798,7 +798,7 @@ def apply_step_config(steps: list, project_root: Optional[Path] = None) -> list:
 def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
     """Get the maximum number of fix iterations for the test-verify-fix loop.
 
-    Reads from se3.yaml workflow.max_fix_iterations, defaults to 3.
+    Reads from se3.yaml workflow.max_fix_iterations, defaults to 20.
 
     Args:
         project_root: Project root directory. If None, uses current working directory.
@@ -814,13 +814,13 @@ def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
     config_path = project_root / "se3.yaml"
 
     if not config_path.exists():
-        return 3
+        return 20
 
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
 
         workflow = data.get("workflow", {})
-        return workflow.get("max_fix_iterations", 3)
+        return workflow.get("max_fix_iterations", 20)
     except Exception:
-        return 3
+        return 20

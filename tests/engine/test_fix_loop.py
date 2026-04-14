@@ -151,9 +151,9 @@ class TestFixLoopIterations:
                     flow.state.add_step(verify_step)
                     flow.state.current_step_id = verify_step.step_id
                 else:
-                    # At max iterations, should continue to next step instead of fixing
-                    assert next_step is not None, "Max iteration: Should return next step"
-                    assert next_step.step_type == StepType.COMMIT, "Max iteration: Should continue to COMMIT"
+                    # At max iterations, flow should be FAILED and return None
+                    assert next_step is None, "Max iteration: Should return None (flow failed)"
+                    assert flow.status == FlowStatus.FAILED, "Max iteration: Flow should be FAILED"
 
     def test_fix_loop_exits_after_max_iterations(self, state_machine, flow_with_failed_tests):
         """Test that fix loop exits after max iterations reached.
@@ -168,9 +168,9 @@ class TestFixLoopIterations:
         with patch.object(state_machine, '_get_max_fix_iterations', return_value=3):
             next_step = state_machine.transition_to_next(flow)
 
-            # Should continue to COMMIT, not back to IMPLEMENT
-            assert next_step is not None
-            assert next_step.step_type == StepType.COMMIT
+            # Should return None and set flow to FAILED
+            assert next_step is None
+            assert flow.status == FlowStatus.FAILED
             assert flow.state.get_fix_iteration() == 3  # Should not increment
 
 
@@ -489,12 +489,19 @@ class TestTestStepFailureHandling:
 
 
 class TestMaxIterationEnforcement:
-    """Test cases for max iteration enforcement in verify_spec."""
+    """Test cases for max iteration enforcement.
 
-    def test_max_iterations_enforced_by_verify_spec(self):
-        """Test that verify_spec enforces max iterations and returns COMPLETED at max.
+    verify_spec and self_check always return REVISION_NEEDED when issues
+    are found. Exhaustion (max iterations) is enforced centrally by the
+    state machine's transition_to_next method, which creates the A-class
+    issue and sets the flow to FAILED.
+    """
 
-        Acceptance Criteria: Tests verify fix loop exits after max iterations
+    def test_verify_spec_returns_revision_needed_at_max_iterations(self):
+        """verify_spec returns REVISION_NEEDED even at max iterations.
+
+        The state machine is responsible for detecting exhaustion and
+        failing the flow — the handler never short-circuits to FAILED.
         """
         from se3.engine.steps.verify_spec import verify_spec_handler
 
@@ -542,9 +549,8 @@ class TestMaxIterationEnforcement:
 
             result = verify_spec_handler(step, flow)
 
-            # Should return COMPLETED when max iterations reached, not REVISION_NEEDED
-            assert result == StepStatus.COMPLETED
-            assert step.outputs.get("max_iterations_reached") is True
+            assert result == StepStatus.REVISION_NEEDED
+            assert step.outputs.get("fix_needed") is True
 
 
 class TestFixLoopIntegration:
@@ -652,7 +658,7 @@ workflow:
 
         result = get_max_fix_iterations(tmp_path)
 
-        assert result == 3
+        assert result == 20
 
     def test_max_fix_iterations_no_config_file(self, tmp_path):
         """Test default when se3.yaml doesn't exist."""
@@ -661,4 +667,4 @@ workflow:
         non_existent_path = tmp_path / "non_existent"
         result = get_max_fix_iterations(non_existent_path)
 
-        assert result == 3
+        assert result == 20

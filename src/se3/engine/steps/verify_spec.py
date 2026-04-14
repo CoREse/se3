@@ -30,7 +30,7 @@ from .test import _extract_failures_section
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_FIX_ITERATIONS = 3
+DEFAULT_MAX_FIX_ITERATIONS = 20
 
 
 VERIFY_PROMPT = """You are an expert software quality assurance engineer. Verify that the implementation matches the specifications.
@@ -248,65 +248,50 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Determine if we need to fix — tests failure path
         if not tests_passed:
             logger.warning(f"TESTS FAILED - fix iteration {fix_iteration}/{max_iterations}")
+            logger.info(f"Returning REVISION_NEEDED - will attempt fix (iteration {fix_iteration + 1})")
 
-            if fix_iteration < max_iterations:
-                logger.info(f"Returning REVISION_NEEDED - will attempt fix (iteration {fix_iteration + 1})")
+            step.outputs["fix_needed"] = True
+            step.outputs["fix_iteration"] = fix_iteration
+            step.outputs["max_fix_iterations"] = max_iterations
+            step.outputs["fix_context"] = {
+                "test_results": test_results,
+                "test_analysis": test_analysis,
+                "fix_instructions": fix_instructions,
+                "reason": "test_failure",
+                "iteration": fix_iteration + 1,
+            }
 
-                step.outputs["fix_needed"] = True
-                step.outputs["fix_iteration"] = fix_iteration
-                step.outputs["max_fix_iterations"] = max_iterations
-                step.outputs["fix_context"] = {
-                    "test_results": test_results,
-                    "test_analysis": test_analysis,
-                    "fix_instructions": fix_instructions,
-                    "reason": "test_failure",
-                    "iteration": fix_iteration + 1,
-                }
-
-                return StepStatus.REVISION_NEEDED
-            else:
-                logger.warning(f"Max fix iterations ({max_iterations}) reached - completing with test failures")
-                step.outputs["max_iterations_reached"] = True
-                step.outputs["warning"] = f"Tests still failing after {max_iterations} fix attempts"
-
-                return StepStatus.COMPLETED
+            return StepStatus.REVISION_NEEDED
 
         # Tests passed — check in-scope spec compliance issues
         if in_scope_count > 0:
             logger.warning(f"Spec verification failed: {in_scope_count} in-scope issue(s) found")
+            logger.info(f"Returning REVISION_NEEDED for spec compliance fix (iteration {fix_iteration + 1})")
 
-            if fix_iteration < max_iterations:
-                logger.info(f"Returning REVISION_NEEDED for spec compliance fix (iteration {fix_iteration + 1})")
+            # Build fix instructions if LLM didn't provide them
+            if not fix_instructions:
+                issue_details = "\n".join(
+                    f"- [{i.get('priority', 'high')}] {i.get('message', '')}"
+                    for i in in_scope_issues
+                )
+                fix_instructions = (
+                    f"Spec verification failed with {in_scope_count} in-scope issue(s):\n{issue_details}\n\n"
+                    "Fix the implementation to match the specifications."
+                )
 
-                # Build fix instructions if LLM didn't provide them
-                if not fix_instructions:
-                    issue_details = "\n".join(
-                        f"- [{i.get('priority', 'high')}] {i.get('message', '')}"
-                        for i in in_scope_issues
-                    )
-                    fix_instructions = (
-                        f"Spec verification failed with {in_scope_count} in-scope issue(s):\n{issue_details}\n\n"
-                        "Fix the implementation to match the specifications."
-                    )
+            step.outputs["fix_needed"] = True
+            step.outputs["fix_iteration"] = fix_iteration
+            step.outputs["max_fix_iterations"] = max_iterations
+            step.outputs["fix_instructions"] = fix_instructions
+            step.outputs["fix_context"] = {
+                "spec_issues": in_scope_issues,
+                "test_results": test_results,
+                "test_analysis": test_analysis,
+                "reason": "spec_compliance",
+                "iteration": fix_iteration + 1,
+            }
 
-                step.outputs["fix_needed"] = True
-                step.outputs["fix_iteration"] = fix_iteration
-                step.outputs["max_fix_iterations"] = max_iterations
-                step.outputs["fix_instructions"] = fix_instructions
-                step.outputs["fix_context"] = {
-                    "spec_issues": in_scope_issues,
-                    "test_results": test_results,
-                    "test_analysis": test_analysis,
-                    "reason": "spec_compliance",
-                    "iteration": fix_iteration + 1,
-                }
-
-                return StepStatus.REVISION_NEEDED
-
-            # Max iterations reached with in-scope issues
-            logger.warning(f"Max fix iterations ({max_iterations}) reached with {in_scope_count} in-scope issue(s)")
-            step.outputs["max_iterations_reached"] = True
-            step.outputs["warning"] = f"Spec verification still failing after {max_iterations} fix attempts"
+            return StepStatus.REVISION_NEEDED
 
         logger.info(f"Verification {'passed' if verified else 'completed'} ({len(issues)} issues: {in_scope_count} in-scope, {out_of_scope_count} out-of-scope)")
         return StepStatus.COMPLETED
@@ -535,7 +520,7 @@ def _format_fix_context(
     ]
 
     if fix_iteration >= max_iterations:
-        lines.append("WARNING: This is the final fix attempt. If tests still fail, the flow will complete with failures.")
+        lines.append("WARNING: This is the final fix attempt. If tests still fail, the flow will be marked as FAILED.")
 
     if fix_history:
         lines.append("")

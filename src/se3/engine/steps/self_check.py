@@ -81,9 +81,9 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     Performs LLM-based code review checking logic completeness,
     robustness, and test coverage gaps. Does NOT check spec compliance.
 
-    Returns REVISION_NEEDED when any issues are found and
-    fix iterations remain. Returns COMPLETED when no issues
-    exist or max iterations are exhausted.
+    Returns COMPLETED when no issues are found.
+    Returns REVISION_NEEDED when issues exist (regardless of iteration count),
+    letting the state machine handle exhaustion centrally.
     """
     task_description = step.inputs.get("task_description", "")
     changes_made = step.inputs.get("changes_made", {})
@@ -150,18 +150,6 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             f"Self-check found {len(issues)} issue(s) "
             f"(fix iteration {fix_iteration}/{max_iterations})"
         )
-
-        if fix_iteration >= max_iterations:
-            logger.warning(
-                f"Max fix iterations ({max_iterations}) reached — "
-                "completing with outstanding issues"
-            )
-            step.outputs["max_iterations_reached"] = True
-            step.outputs["warning"] = (
-                f"Self-check still has {len(issues)} issue(s) "
-                f"after {max_iterations} fix attempts"
-            )
-            return StepStatus.COMPLETED
 
         issue_details = "\n".join(
             f"- [{i.get('severity', 'high')}] {i.get('location', '?')}: "

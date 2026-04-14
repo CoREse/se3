@@ -285,12 +285,13 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 #### Scenario: SELF_CHECK 发现遗漏触发 fix loop
 - **WHEN** self_check 步骤完成 LLM 代码审查
 - **AND** 发现任何 severity（critical/high/medium/low）的遗漏
-- **AND** fix_iteration < max_fix_iterations
 - **THEN** self_check 返回 REVISION_NEEDED
 - **AND** 附带 fix_context（遗漏列表）和 fix_instructions
 - **AND** 触发现有 fix loop 机制回到 IMPLEMENT 步骤
 - **AND** 修复后重跑 TEST → SELF_CHECK 直到遗漏列表为空或达到 max_fix_iterations 上限
-- **NOTE** fix_iterations 是全局计数器，TEST、SELF_CHECK、VERIFY_SPEC 三者共享，总循环次数不超过 max_fix_iterations
+- **NOTE** fix_iterations 是全局计数器，TEST、SELF_CHECK、VERIFY_SPEC 三者共享，总循环次数不超过 max_fix_iterations（默认 20）
+- **NOTE** self_check handler 始终返回 REVISION_NEEDED（不在 handler 内判断耗尽），耗尽检测统一由 state_machine.transition_to_next() 处理
+- **NOTE** 当 fix loop 耗尽时，state_machine 将 flow 状态设为 FAILED 并停止执行，同时通过 A-class issue discovery 生成 issue
 
 ### Requirement: Deprecated Step Type Backward Compatibility
 
@@ -950,8 +951,8 @@ The `verify_spec` step SHALL use the unified issue priority system (`critical/hi
 
 **REVISION_NEEDED Logic:**
 - Triggered when `in_scope_count > 0` (spec compliance issues) OR `tests_passed == False` (test failures)
-- Only triggers if `fix_iteration < max_fix_iterations` (default 3)
-- When `max_fix_iterations` is exhausted, the step completes with a warning (behavior unchanged)
+- verify_spec handler always returns REVISION_NEEDED when issues are found (does not check exhaustion internally)
+- Exhaustion detection is centralized in `state_machine.transition_to_next()`: when `fix_iteration >= max_fix_iterations` (default 20), the flow is set to FAILED status, an A-class issue is generated, and execution stops
 
 **Out-of-Scope Issue Filing:**
 - Out-of-scope issues are deterministically filed via `IssueManager.create()` with the issue's priority, tagged with `auto-discovered`, `source:verify-spec`, and `out-of-scope`
@@ -970,9 +971,9 @@ The "Planned Spec Changes" section is formatted into the prompt using `_format_s
 
 #### Scenario: In-scope issue triggers REVISION_NEEDED
 - **GIVEN** verify_spec finds an issue classified as `in_scope` with priority `high`
-- **WHEN** `fix_iteration < max_fix_iterations`
 - **THEN** verify_spec returns REVISION_NEEDED
 - **AND** `verified` is computed as `False`
+- **NOTE** verify_spec no longer checks exhaustion internally; exhaustion is handled by the state machine
 
 #### Scenario: Out-of-scope issue does not block flow
 - **GIVEN** verify_spec finds an issue classified as `out_of_scope` with priority `medium`

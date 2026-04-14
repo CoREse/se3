@@ -369,8 +369,8 @@ class TestMaxFixIterationsForSelfCheck:
         with patch.object(sm, "_get_max_fix_iterations", return_value=3):
             next_step = sm.transition_to_next(flow)
 
-        assert next_step is not None
-        assert next_step.step_type == StepType.VERIFY_SPEC
+        assert next_step is None
+        assert flow.status == FlowStatus.FAILED
 
     def test_fix_iteration_not_incremented_at_max(self, sm, tmp_path):
         flow = _make_flow(

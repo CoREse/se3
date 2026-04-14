@@ -106,15 +106,15 @@ class TestSelfCheckTransitionToNext:
         assert implement_step.inputs["fix_context"]["reason"] == "self_check"
 
     def test_self_check_respects_max_fix_iterations(self, state_machine):
-        """When max iterations are exhausted, SELF_CHECK should not trigger fix loop."""
+        """When max iterations are exhausted, SELF_CHECK should fail the flow."""
         flow, _, self_check_step = self._make_flow_with_self_check()
         flow.state.fix_iterations = 3
 
         with patch.object(state_machine, '_get_max_fix_iterations', return_value=3):
             next_step = state_machine.transition_to_next(flow)
 
-        assert next_step is not None
-        assert next_step.step_type == StepType.VERIFY_SPEC
+        assert next_step is None
+        assert flow.status == FlowStatus.FAILED
 
     def test_self_check_completed_proceeds_to_verify_spec(self, state_machine):
         """SELF_CHECK returning COMPLETED should proceed to VERIFY_SPEC."""

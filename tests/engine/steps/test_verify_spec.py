@@ -229,8 +229,11 @@ class TestVerifySpecHandler:
             assert step.outputs["fix_instructions"] == "Fix the assertion in test.py line 10"
             assert step.outputs["fix_context"]["iteration"] == 1
 
-    def test_handler_returns_completed_when_max_iterations_reached(self, flow, step):
-        """Test that handler returns COMPLETED with warning when max iterations reached."""
+    def test_handler_returns_revision_needed_at_max_iterations(self, flow, step):
+        """Test that handler returns REVISION_NEEDED even at max iterations.
+
+        Exhaustion is handled centrally by state_machine.transition_to_next.
+        """
         step.inputs["test_results"] = {"passed": False, "returncode": 1, "stdout": "Test failed", "stderr": "AssertionError"}
         step.inputs["fix_iteration"] = 3  # At max iterations
 
@@ -247,13 +250,11 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._get_max_fix_iterations", return_value=3):
-                with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
-                    result = verify_spec_handler(step, flow)
+            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+                result = verify_spec_handler(step, flow)
 
-            assert result == StepStatus.COMPLETED
-            assert step.outputs.get("max_iterations_reached") is True
-            assert "3" in step.outputs.get("warning", "")
+            assert result == StepStatus.REVISION_NEEDED
+            assert step.outputs.get("fix_needed") is True
 
     def test_handler_reads_fix_iteration_from_inputs(self, flow, step):
         """Test that handler reads fix_iteration from step inputs."""
@@ -393,7 +394,10 @@ class TestVerifySpecHandler:
             assert step.outputs["in_scope_count"] == 1
 
     def test_max_iterations_reached_with_in_scope_issues(self, flow, step):
-        """Test that max iterations reached with in-scope issues completes with warning."""
+        """Test that handler returns REVISION_NEEDED with in-scope issues even at max iterations.
+
+        Exhaustion is handled centrally by state_machine.transition_to_next.
+        """
         step.inputs["fix_iteration"] = 3
 
         mock_response = json.dumps({
@@ -411,12 +415,11 @@ class TestVerifySpecHandler:
             mock_caller.call.return_value = mock_response
             mock_caller_class.return_value = mock_caller
 
-            with patch("se3.engine.steps.verify_spec._get_max_fix_iterations", return_value=3):
-                with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
-                    result = verify_spec_handler(step, flow)
+            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+                result = verify_spec_handler(step, flow)
 
-            assert result == StepStatus.COMPLETED
-            assert step.outputs.get("max_iterations_reached") is True
+            assert result == StepStatus.REVISION_NEEDED
+            assert step.outputs.get("fix_needed") is True
             assert step.outputs["in_scope_count"] == 1
 
 
@@ -638,7 +641,7 @@ class TestGetMaxFixIterations:
         flow.change_path = tmp_path / "nonexistent"
 
         result = _get_max_fix_iterations(flow)
-        assert result == 3  # Default
+        assert result == 20  # Default
 
     def test_from_config_file(self, tmp_path):
         # Create project root and change path

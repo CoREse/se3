@@ -139,7 +139,11 @@ class TestSelfCheckHandler:
         assert step.outputs["fix_instructions"]
         assert "Unhandled error path" in step.outputs["fix_instructions"]
 
-    def test_returns_completed_when_max_iterations_reached(self, flow, step):
+    def test_returns_revision_needed_at_max_iterations(self, flow, step):
+        """self_check returns REVISION_NEEDED even at max iterations.
+
+        Exhaustion is handled centrally by state_machine.transition_to_next.
+        """
         step.inputs["fix_iteration"] = 3
         response = json.dumps({
             "issues": [
@@ -156,9 +160,7 @@ class TestSelfCheckHandler:
             with patch("se3.engine.steps.self_check._get_max_fix_iterations", return_value=3):
                 result = self_check_handler(step, flow)
 
-        assert result == StepStatus.COMPLETED
-        assert step.outputs["max_iterations_reached"] is True
-        assert "3" in step.outputs["warning"]
+        assert result == StepStatus.REVISION_NEEDED
         assert step.outputs["actionable_count"] == 1
 
     def test_returns_failed_on_llm_error(self, flow, step):

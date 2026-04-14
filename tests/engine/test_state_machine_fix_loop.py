@@ -302,9 +302,9 @@ class TestTransitionToNextWithFixLoop:
         with patch.object(state_machine, '_get_max_fix_iterations', return_value=3):
             next_step = state_machine.transition_to_next(flow)
 
-        # Should continue to next step (COMMIT) instead of going back to IMPLEMENT
-        assert next_step is not None
-        assert next_step.step_type == StepType.COMMIT
+        # Should fail the flow instead of continuing
+        assert next_step is None
+        assert flow.status == FlowStatus.FAILED
 
     def test_transition_to_next_increments_iteration_on_fix(self, state_machine, flow_with_verify_revision):
         """Test that transition_to_next increments fix iteration when transitioning to fix."""
@@ -779,12 +779,12 @@ class TestMaxFixIterations:
     """Test cases for max fix iterations configuration."""
 
     def test_get_max_fix_iterations_default(self, tmp_path):
-        """Test that default max fix iterations is 3."""
+        """Test that default max fix iterations is 20."""
         state_machine = StateMachine(project_root=tmp_path)
 
         result = state_machine._get_max_fix_iterations()
 
-        assert result == 3
+        assert result == 20
 
     def test_get_max_fix_iterations_from_config(self, tmp_path):
         """Test that max fix iterations can be loaded from config."""
