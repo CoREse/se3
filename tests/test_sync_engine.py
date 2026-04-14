@@ -177,6 +177,19 @@ class TestIssueAutoClose:
         closed = engine._manage_issue_lifecycle(set())
         assert closed == 0
 
+    def test_close_failure_does_not_increment_count(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("[sync] auth: Missing login", "d", tags=list(SYNC_TAGS))
+        mgr.create("[sync] auth: Missing signup", "d", tags=list(SYNC_TAGS))
+
+        engine = SyncEngine(tmp_path)
+        engine._load_existing_issues()
+
+        with patch("se3.engine.issue_manager.shutil.move", side_effect=OSError("disk full")):
+            closed = engine._manage_issue_lifecycle(set())
+
+        assert closed == 0
+
 
 # ---------------------------------------------------------------------------
 # Three modes — fast / strict / default

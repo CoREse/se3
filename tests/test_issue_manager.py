@@ -403,3 +403,24 @@ class TestIssueType:
         data = {"id": "001", "title": "Test"}
         issue = Issue.from_dict(data)
         assert issue.type == "bug"
+
+
+class TestCloseIssueOSError:
+    """Tests that close_issue re-raises OSError on file move failure."""
+
+    def test_close_issue_raises_oserror_on_move_failure(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("Closable", "desc")
+
+        with patch("shutil.move", side_effect=OSError("Permission denied")):
+            with pytest.raises(OSError, match="Permission denied"):
+                mgr.close_issue("001", reason="test close")
+
+    def test_close_issue_normal_flow_unaffected(self, tmp_path):
+        mgr = IssueManager(tmp_path)
+        mgr.create("Closable", "desc")
+
+        closed = mgr.close_issue("001", reason="done")
+        assert closed.status in (IssueStatus.CLOSED, IssueStatus.RESOLVED)
+        assert len(list(mgr.closed_dir.glob("001_*"))) == 1
+        assert len(list(mgr.open_dir.glob("001_*"))) == 0

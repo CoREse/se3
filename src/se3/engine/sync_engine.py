@@ -574,7 +574,7 @@ class SyncEngine:
                 )
                 closed += 1
                 logger.info("Auto-closed issue %s: %s", issue.id, issue.title)
-            except ValueError as e:
+            except (ValueError, OSError) as e:
                 logger.warning("Failed to close issue %s: %s", issue.id, e)
 
         return closed
