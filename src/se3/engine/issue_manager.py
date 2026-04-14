@@ -382,6 +382,7 @@ class IssueManager:
                 logger.info("Closed issue %s: %s", issue_id, reason)
             except OSError as e:
                 logger.warning("Failed to move issue file %s -> %s: %s", filepath, target_path, e)
+                raise
 
         return issue
 

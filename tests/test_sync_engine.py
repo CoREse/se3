@@ -1,6 +1,12 @@
-Let me read the full conflict file and the source files to understand what needs to be merged.I need to find the G1 and G2 test additions that are missing from both sides of the conflict. Let me check the branch history.Now I have everything. The resolved file needs:
-- G1's imports (adding `strip_markdown_fences` + `logging`)
-- All base test classes (shared across all branches)  
-- G1 additions: TestStripMarkdownFences, TestApplyConflictSpecUpdateLengthGuard, TestProcessExtensionsFenceStripping
-- G2 additions: TestNormalizeForMatching, TestExtractSpecNameFromTitle, TestProcessGapsNormalized, TestManageIssueLifecycleNormalized
-- G3 additions: TestGatherAllConflictsSpecContent, TestGenerateCallFileSpecContent, TestProcessCallResponseUnknownConflictIdNow let me verify no conflict markers remain and run the tests.One test fails because the G2 three-layer matching is more conservative — it keeps issues open when their spec still has gaps. Let me fix the test to match the new behavior.All 106 tests pass. Conflict resolved — merged G1 tests (strip_markdown_fences, length guard, fence stripping), G2 tests (normalize_for_matching, extract_spec_name, normalized idempotency, lifecycle three-layer matching), and G3 tests (gather_all_conflicts spec_content, call file spec_content, unknown conflict_id). Fixed one pre-existing test (`test_closes_issue_when_gap_disappears`) that assumed the old substring matching behavior — updated to use different specs so the G2 three-layer matching logic works correctly.
+Let me read the conflicted file and the source files to understand what needs to be merged.Now let me read the test file in sections to see the full conflict.Let me check the individual group branches for their test additions.The G1 branch's test file is corrupted (just text, not code). Let me check the individual commit diffs to get the actual test additions.Now I have all the diffs. Let me also check the test_issue_manager.py changes.Good. Now I have all the information needed. Let me also check the test_closes_issue_when_gap_disappears test — G2 changed it to use different specs ("config" instead of "auth") to work with the three-layer matching. I need to incorporate that change.
+
+Now I'll write the fully resolved file. The resolution is:
+1. Take G4's base (which is the same as the original + G4's close_failure test)
+2. Apply G2's fix to `test_closes_issue_when_gap_disappears` (different spec names)
+3. Add G1's imports (`strip_markdown_fences`) and `logging` from G3
+4. Add all new test classes from G1, G2, G3 at the endNow let me verify no conflict markers remain and run the tests.All 152 tests pass, no conflict markers remain. The merge resolves the conflict by:
+
+- Taking G4's base file (with `test_close_failure_does_not_increment_count`)
+- Applying G2's fix to `test_closes_issue_when_gap_disappears` (using `[sync] config: Missing validation` instead of `[sync] auth: Missing signup` to work with three-layer matching)
+- Adding G1's `strip_markdown_fences` import and G3's `logging` import
+- Appending all new test classes: G1 (TestStripMarkdownFences, TestApplyConflictSpecUpdateLengthGuard, TestProcessExtensionsFenceStripping), G2 (TestNormalizeForMatching, TestExtractSpecNameFromTitle, TestProcessGapsNormalized, TestManageIssueLifecycleNormalized), G3 (TestGatherAllConflictsSpecContent, TestGenerateCallFileSpecContent, TestProcessCallResponseUnknownConflictId)
