@@ -254,7 +254,7 @@ class SyncAnalyzer:
 
             confidence = ""
             if diff_type == DiffType.CONFLICT:
-                confidence = item.get("confidence", "low")
+                confidence = item.get("confidence", "low").lower()
 
             diffs.append(
                 SpecDiff(

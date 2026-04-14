@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -526,7 +527,17 @@ class SyncEngine:
                 logger.warning("LLM returned empty content for spec '%s' update", spec_name)
                 return 0
 
+            if len(updated_content) < len(spec_content) * 0.5:
+                logger.warning(
+                    "LLM returned suspiciously short content for spec '%s' "
+                    "(%d chars vs original %d chars), skipping update",
+                    spec_name, len(updated_content), len(spec_content),
+                )
+                return 0
+
             Path(spec_path).write_text(updated_content, encoding="utf-8")
+            if spec_name in self._specs:
+                self._specs[spec_name]["content"] = updated_content
             logger.info("Updated spec '%s' with %d extensions", spec_name, len(extensions))
             return 1
 
@@ -596,7 +607,8 @@ class SyncEngine:
         calls_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = int(datetime.now().timestamp())
-        call_file = calls_dir / f"sync_conflicts_{timestamp}.json"
+        unique_id = uuid.uuid4().hex[:8]
+        call_file = calls_dir / f"sync_conflicts_{timestamp}_{unique_id}.json"
 
         call_data = {
             "type": "sync_conflicts",
@@ -683,6 +695,7 @@ class SyncEngine:
                 return False
 
             Path(spec_info["path"]).write_text(updated_content, encoding="utf-8")
+            spec_info["content"] = updated_content
             logger.info("Updated spec '%s' for conflict resolution", conflict.spec_name)
             return True
         except Exception as e:
@@ -780,7 +793,7 @@ class SyncEngine:
         unresolved: List[Conflict] = []
 
         for conflict in conflicts:
-            if conflict.confidence == "high":
+            if conflict.confidence.lower() == "high":
                 decision = self._resolve_conflict_via_llm(conflict, llm_caller)
                 if decision == "update_spec":
                     if self._apply_conflict_spec_update(conflict, llm_caller):

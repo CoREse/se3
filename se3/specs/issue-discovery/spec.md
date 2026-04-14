@@ -25,6 +25,18 @@ The system SHALL support two classes of issue discovery:
 - **AND** the issue is tagged with `auto-discovered` and `source:test-pre-existing`
 - **AND** duplicate issues are suppressed within the same flow execution
 
+#### Scenario: A-class trigger on sync gap detection
+- **WHEN** `se3 sync` detects that a spec describes a requirement not implemented in code (gap)
+- **THEN** the sync engine creates a `medium` priority issue via `IssueManager.create()`
+- **AND** the issue title follows the format `[sync] {spec_name}: {description}`
+- **AND** the issue is tagged with `auto-discovered` and `source:sync`
+- **AND** if an open issue with the same title already exists, creation is skipped (idempotency)
+
+#### Scenario: A-class trigger on sync gap resolution (auto-close)
+- **WHEN** `se3 sync` detects that a previously reported gap is no longer present in the analysis
+- **THEN** the sync engine automatically closes the corresponding sync-tagged issue via `IssueManager.close_issue()`
+- **AND** the close reason indicates the gap was resolved
+
 #### Scenario: B-class injection into whitelisted step
 - **WHEN** a whitelisted step (e.g., `summarize`) builds its LLM prompt
 - **THEN** the issue discovery prompt fragment is appended to the prompt

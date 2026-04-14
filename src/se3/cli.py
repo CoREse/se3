@@ -461,6 +461,23 @@ def sync_cmd(
     sync_command(mode=sync_mode)
 
 
+@app.command(name="sync-respond")
+def sync_respond_cmd(
+    call_file: Path = typer.Argument(..., help="Path to the sync call file"),
+):
+    """Process an MCP call response file for sync conflicts.
+
+    After editing the .response file for a sync call, run this command
+    to execute the conflict decisions (update spec or create issue).
+
+    Example:
+        se3 sync-respond se3/calls/sync_conflicts_12345.json
+    """
+    from .commands.sync import process_call_response
+
+    process_call_response(call_file)
+
+
 @app.command(name="salvage")
 def salvage_cmd(
     project_root: Optional[str] = typer.Option(None, "--project-root", "-p", help="Project root directory"),

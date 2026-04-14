@@ -86,7 +86,7 @@ def _render_sync_results(result) -> None:
     if result.call_file:
         summary_text += (
             f"\n\nMCP call file created: {result.call_file}"
-            f"\nRespond via: se3 sync-respond {result.call_file}"
+            f"\nRespond via: se3 sync-respond '{result.call_file}'"
         )
 
     console.print(Panel(summary_text, title=title, border_style=border_style))

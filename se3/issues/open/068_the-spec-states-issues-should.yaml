@@ -1,0 +1,26 @@
+id: 068
+title: The spec states issues should be read once ('一次读取') to serve both idempotency
+  and lifecycle management. The implementation reads _existing_issues and _sync_issues
+  once via _load_existing_issues(), but _process_gaps() creates new IssueManager instances
+  and calls find_open_by_title() which re-reads the filesystem. This is correct for
+  idempotency (newly created files are visible) but not strictly 'one read'.
+description: 'The spec states issues should be read once (''一次读取'') to serve both
+  idempotency and lifecycle management. The implementation reads _existing_issues
+  and _sync_issues once via _load_existing_issues(), but _process_gaps() creates new
+  IssueManager instances and calls find_open_by_title() which re-reads the filesystem.
+  This is correct for idempotency (newly created files are visible) but not strictly
+  ''one read''.
+
+
+  Suggestion: Acceptable trade-off — filesystem re-reads provide stronger consistency.
+  No change needed.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-14T09:00:30.394629'
+updated_at: '2026-04-14T09:00:30.394629'

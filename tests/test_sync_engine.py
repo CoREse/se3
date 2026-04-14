@@ -773,3 +773,156 @@ class TestApplyConflictSpecUpdate:
 
         conflict = Conflict(spec_name="auth", description="d")
         assert engine._apply_conflict_spec_update(conflict, llm) is False
+
+
+# ---------------------------------------------------------------------------
+# _process_extensions — LLM spec update flow
+# ---------------------------------------------------------------------------
+
+class TestProcessExtensions:
+    def test_updates_spec_file_on_disk(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth\n## Purpose\nOriginal auth spec content.")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = "# Auth\n## Purpose\nOriginal auth spec content.\n\n### Requirement: New Feature\nNew feature description."
+
+        extensions = [SpecDiff(DiffType.EXTENSION, "auth", "New feature found", "src/auth.py:50")]
+        spec_info = engine._specs["auth"]
+        updated = engine._process_extensions(extensions, spec_info, llm)
+
+        assert updated == 1
+        content = (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text()
+        assert "New Feature" in content
+
+    def test_prompt_includes_extension_descriptions(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = "# Auth spec\n\n### New stuff added"
+
+        extensions = [
+            SpecDiff(DiffType.EXTENSION, "auth", "Token refresh logic", "src/auth.py:100"),
+            SpecDiff(DiffType.EXTENSION, "auth", "Rate limiting", "src/middleware.py:20"),
+        ]
+        engine._process_extensions(extensions, engine._specs["auth"], llm)
+
+        prompt = llm.call.call_args.kwargs.get("prompt", "")
+        assert "Token refresh logic" in prompt
+        assert "Rate limiting" in prompt
+        assert "src/auth.py:100" in prompt
+
+    def test_updates_specs_cache_after_write(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Old content")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        new_content = "# Updated content with extensions"
+        llm = MagicMock()
+        llm.call.return_value = new_content
+
+        extensions = [SpecDiff(DiffType.EXTENSION, "auth", "New")]
+        engine._process_extensions(extensions, engine._specs["auth"], llm)
+
+        assert engine._specs["auth"]["content"] == new_content
+
+    def test_rejects_suspiciously_short_update(self, tmp_path):
+        original = "# Auth Spec\n\n## Purpose\nDetailed auth specification with many requirements.\n" * 5
+        _create_spec(tmp_path, "auth", original)
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = "# Short"
+
+        extensions = [SpecDiff(DiffType.EXTENSION, "auth", "New")]
+        updated = engine._process_extensions(extensions, engine._specs["auth"], llm)
+
+        assert updated == 0
+        assert (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text() == original
+
+    def test_empty_extensions_returns_zero(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        result = engine._process_extensions([], {}, MagicMock())
+        assert result == 0
+
+    def test_handles_llm_error(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.side_effect = RuntimeError("LLM failed")
+
+        extensions = [SpecDiff(DiffType.EXTENSION, "auth", "New")]
+        updated = engine._process_extensions(extensions, engine._specs["auth"], llm)
+
+        assert updated == 0
+        assert (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text() == "# Auth"
+
+
+# ---------------------------------------------------------------------------
+# Integration: run() with extensions + issue lifecycle
+# ---------------------------------------------------------------------------
+
+class TestSyncEngineRunIntegration:
+    def test_extensions_and_lifecycle_together(self, tmp_path):
+        """End-to-end: spec gets extended, then conflict resolution uses fresh cache."""
+        _create_spec(tmp_path, "auth", "# Auth spec\n## Purpose\nAuth module.")
+
+        with patch("se3.engine.sync_engine.SyncEngine._load_existing_issues", return_value=[]), \
+             patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None), \
+             patch("se3.engine.llm_caller.LLMCaller.call") as mock_llm_call, \
+             patch("se3.engine.project_context.ProjectContextCollector.collect",
+                   return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
+             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze:
+
+            mock_analyze.return_value = SpecAnalysis(
+                spec_name="auth",
+                diffs=[
+                    SpecDiff(DiffType.EXTENSION, "auth", "New helper function"),
+                ],
+            )
+
+            mock_llm_call.return_value = "# Auth spec\n## Purpose\nAuth module.\n\n### Requirement: Helper\nNew helper."
+
+            engine = SyncEngine(tmp_path)
+            engine._sync_issues = []
+            result = engine.run()
+
+            assert result.specs_updated == 1
+            assert engine._specs["auth"]["content"] == mock_llm_call.return_value
+
+    def test_confidence_case_insensitive_in_full_run(self, tmp_path):
+        """Verify that 'High' confidence (mixed case) is auto-resolved in default mode."""
+        _create_spec(tmp_path, "auth", "# Auth")
+
+        with patch("se3.engine.sync_engine.SyncEngine._load_existing_issues", return_value=[]), \
+             patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None), \
+             patch("se3.engine.llm_caller.LLMCaller.call") as mock_llm_call, \
+             patch("se3.engine.project_context.ProjectContextCollector.collect",
+                   return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
+             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze:
+
+            mock_analyze.return_value = SpecAnalysis(
+                spec_name="auth",
+                diffs=[
+                    SpecDiff(DiffType.CONFLICT, "auth", "Mismatch", confidence="High"),
+                ],
+            )
+
+            mock_llm_call.side_effect = [
+                json.dumps({"decision": "update_spec"}),
+                "# Updated auth",
+            ]
+
+            engine = SyncEngine(tmp_path, mode="default")
+            engine._sync_issues = []
+            result = engine.run()
+
+            assert result.specs_updated == 1
+            assert result.conflicts == []
+            assert result.call_file is None

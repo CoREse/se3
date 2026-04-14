@@ -321,21 +321,18 @@ class IssueManager:
 
         return self.update_status(issue_id, IssueStatus.OPEN)
 
-    def find_open_by_title(self, title_keywords: str) -> Optional[Issue]:
-        """Find an open issue whose title contains the given keywords.
-
-        Performs case-insensitive substring matching on issue titles.
-        Returns the first match, or None if no open issue matches.
+    def find_open_by_title(self, title_pattern: str) -> Optional[Issue]:
+        """Find an open issue whose title contains the pattern (case-insensitive).
 
         Args:
-            title_keywords: Keywords to search for in issue titles.
+            title_pattern: Substring to search for within open issue titles.
         """
-        keywords_lower = title_keywords.lower()
+        pattern_lower = title_pattern.lower()
         if not self.open_dir.exists():
             return None
         for f in sorted(self.open_dir.glob("*.yaml")):
             issue = self._read_issue(f)
-            if issue and keywords_lower in issue.title.lower():
+            if issue and pattern_lower in issue.title.lower():
                 return issue
         return None
 

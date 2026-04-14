@@ -197,6 +197,98 @@ Results are de-duplicated by `flow_id` and sorted by `updated_at` descending.
 - **WHEN** user runs `se3 history restore <flow_id>`
 - **THEN** delegates to `se3 run --resume --flow-id <flow_id>`
 
+### Requirement: `se3 sync` Command
+
+The `se3 sync` command SHALL check and synchronize `se3/specs/` with project code, identifying gaps, extensions, and conflicts between specifications and the actual codebase.
+
+**Interface:**
+```bash
+se3 sync                    # Sync with default mode
+se3 sync --mode=default     # Same as above (explicit)
+se3 sync --mode=strict      # All conflicts require human decision
+se3 sync --mode=fast        # LLM handles all conflicts automatically
+```
+
+**Mode Parameter:**
+| Mode | Behavior |
+|------|----------|
+| `default` | LLM auto-resolves high-confidence conflicts; low-confidence conflicts are batched into an MCP call file for human decision |
+| `strict` | All conflicts are batched into a single MCP call file for human decision |
+| `fast` | LLM fully auto-resolves all conflicts; no human intervention |
+
+#### Scenario: Sync with existing base spec
+- **GIVEN** the project has a base spec at `se3/specs/base/`
+- **WHEN** user runs `se3 sync`
+- **THEN** the engine loads all specs starting from base
+- **AND** performs LLM-driven comparison of each spec against project code
+- **AND** classifies each difference as gap, extension, or conflict
+
+#### Scenario: Sync without base spec (SE3 bootstrapping)
+- **GIVEN** the project has no `se3/specs/base/` directory
+- **WHEN** user runs `se3 sync`
+- **THEN** the engine first explores the project codebase and generates a base spec
+- **AND** then proceeds with the iterative sync flow
+
+#### Scenario: Gap detected (spec leads code)
+- **WHEN** a spec describes a requirement that is NOT implemented in the code
+- **THEN** the engine creates an issue tagged `["auto-discovered", "source:sync"]`
+- **AND** the issue title follows the format `[sync] {spec_name}: {description}`
+- **AND** if an open issue with the same title already exists, it is NOT created (idempotency)
+
+#### Scenario: Extension detected (code extends spec)
+- **WHEN** the code contains functionality that the spec does NOT describe, with no contradiction
+- **THEN** the engine uses LLM to update the spec file to reflect the code's actual behavior
+- **AND** the update preserves all existing requirements (add-only)
+- **AND** a content length safety guard rejects suspiciously short LLM outputs (< 50% of original)
+
+#### Scenario: Conflict detected in default mode
+- **WHEN** the code implements something differently from what the spec describes
+- **AND** mode is `default`
+- **THEN** high-confidence conflicts are auto-resolved by LLM (update spec or create issue)
+- **AND** low-confidence conflicts are collected for human decision
+
+#### Scenario: Conflict detected in strict mode
+- **WHEN** a conflict is detected and mode is `strict`
+- **THEN** all conflicts are batched into a single MCP call file in `se3/calls/`
+- **AND** flow pauses, awaiting human input
+
+#### Scenario: Conflict detected in fast mode
+- **WHEN** a conflict is detected and mode is `fast`
+- **THEN** LLM auto-resolves every conflict (deciding update_spec or create_issue)
+- **AND** no human intervention is triggered
+
+#### Scenario: Issue lifecycle — auto-close resolved gaps
+- **WHEN** sync detects that a previously reported gap is no longer present
+- **THEN** the corresponding sync-tagged issue is automatically closed
+- **AND** the close reason indicates the gap was resolved
+
+#### Scenario: MCP call file generation for human intervention
+- **WHEN** conflicts require human decision (default or strict mode)
+- **THEN** all pending conflicts are written to a single JSON file in `se3/calls/`
+- **AND** the file includes conflict ID, spec name, description, code location, and decision options
+- **AND** the CLI displays the call file path and the `se3 sync-respond` command to process it
+
+### Requirement: `se3 sync-respond` Command
+
+The `se3 sync-respond` command SHALL process an MCP call response file for sync conflicts.
+
+**Interface:**
+```bash
+se3 sync-respond <call-file-path>
+```
+
+#### Scenario: Process call response
+- **GIVEN** an MCP call file has been created by `se3 sync`
+- **AND** the user has filled in the `.response` file with decisions for each conflict
+- **WHEN** user runs `se3 sync-respond <call-file-path>`
+- **THEN** the engine reads each conflict decision from the response file
+- **AND** for `update_spec` decisions: uses LLM to update the spec to match the code
+- **AND** for `create_issue` decisions: creates an issue recording the discrepancy
+
+### Requirement: Sync Operation Permission Limits
+
+`se3 sync` SHALL only directly modify spec files (`se3/specs/`) and issue files (`se3/issues/`). All situations requiring code changes SHALL be recorded as issues, never applied directly to project source code.
+
 ## Command Summary
 
 | Command | Purpose | Status |
@@ -205,6 +297,8 @@ Results are de-duplicated by `flow_id` and sorted by `updated_at` descending.
 | `se3 init` | Initialize SE3 project structure | **Required** |
 | `se3 guardrails` | Check spec against guardrails | **Required** |
 | `se3 history` | View and manage flow history | **Required** |
+| `se3 sync` | Check and synchronize specs with project code | **Required** |
+| `se3 sync-respond` | Process MCP call response for sync conflicts | **Required** |
 
 ### Requirement: Loop Mode CLI Options
 
