@@ -662,13 +662,14 @@ class TestSyncEngineRun:
             assert result.call_file is None
             mock_fast.assert_called_once()
 
+    @patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs", return_value=[])
     @patch("se3.engine.sync_engine.SyncEngine._load_specs")
     @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
     @patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec")
     @patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None)
     @patch("se3.engine.project_context.ProjectContextCollector.collect")
     def test_run_calls_progress_callback(
-        self, mock_collect, mock_llm_init, mock_analyze, mock_load_issues, mock_load_specs, tmp_path
+        self, mock_collect, mock_llm_init, mock_analyze, mock_load_issues, mock_load_specs, mock_discover, tmp_path
     ):
         mock_collect.return_value = {"git": {}, "flow_engine": None, "backlog": [], "specs": []}
         mock_load_specs.return_value = {
@@ -686,11 +687,12 @@ class TestSyncEngineRun:
         engine._sync_issues = []
         engine.run(progress_callback=lambda *args: calls.append(args))
 
-        assert len(calls) == 4
-        assert calls[0][0] == "analyzing"
-        assert calls[1][0] == "analyzed"
-        assert calls[2][0] == "analyzing"
-        assert calls[3][0] == "analyzed"
+        assert len(calls) == 5
+        assert calls[0][0] == "discovering"
+        assert calls[1][0] == "analyzing"
+        assert calls[2][0] == "analyzed"
+        assert calls[3][0] == "analyzing"
+        assert calls[4][0] == "analyzed"
 
 
 # ---------------------------------------------------------------------------
@@ -897,7 +899,8 @@ class TestSyncEngineRunIntegration:
              patch("se3.engine.llm_caller.LLMCaller.call") as mock_llm_call, \
              patch("se3.engine.project_context.ProjectContextCollector.collect",
                    return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
-             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze:
+             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
+             patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs", return_value=[]):
 
             mock_analyze.return_value = SpecAnalysis(
                 spec_name="auth",
@@ -924,7 +927,8 @@ class TestSyncEngineRunIntegration:
              patch("se3.engine.llm_caller.LLMCaller.call") as mock_llm_call, \
              patch("se3.engine.project_context.ProjectContextCollector.collect",
                    return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
-             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze:
+             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
+             patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs", return_value=[]):
 
             mock_analyze.return_value = SpecAnalysis(
                 spec_name="auth",

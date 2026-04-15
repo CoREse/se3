@@ -1944,13 +1944,14 @@ class TestSyncCLIProcessCallResponse:
 # ---------------------------------------------------------------------------
 
 class TestSyncEngineProgressCallback:
+    @patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs", return_value=[])
     @patch("se3.engine.sync_engine.SyncEngine._load_specs")
     @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
     @patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec")
     @patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None)
     @patch("se3.engine.project_context.ProjectContextCollector.collect")
     def test_progress_callback_called_for_each_spec(
-        self, mock_collect, mock_llm_init, mock_analyze, mock_load_issues, mock_load_specs, tmp_path
+        self, mock_collect, mock_llm_init, mock_analyze, mock_load_issues, mock_load_specs, mock_discover, tmp_path
     ):
         mock_collect.return_value = {"git": {}, "flow_engine": None, "backlog": [], "specs": []}
         mock_load_specs.return_value = {
@@ -1974,19 +1975,21 @@ class TestSyncEngineProgressCallback:
         engine._sync_issues = []
         engine.run(progress_callback=callback)
 
-        assert len(calls) == 4
-        assert calls[0] == ("analyzing", "base", 0, 2)
-        assert calls[1] == ("analyzed", "base", 0, 2)
-        assert calls[2] == ("analyzing", "auth", 1, 2)
-        assert calls[3] == ("analyzed", "auth", 1, 2)
+        assert len(calls) == 5
+        assert calls[0] == ("discovering", None, 0, 0)
+        assert calls[1] == ("analyzing", "base", 0, 2)
+        assert calls[2] == ("analyzed", "base", 0, 2)
+        assert calls[3] == ("analyzing", "auth", 1, 2)
+        assert calls[4] == ("analyzed", "auth", 1, 2)
 
+    @patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs", return_value=[])
     @patch("se3.engine.sync_engine.SyncEngine._load_specs")
     @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
     @patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec")
     @patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None)
     @patch("se3.engine.project_context.ProjectContextCollector.collect")
     def test_progress_callback_receives_analysis_on_analyzed(
-        self, mock_collect, mock_llm_init, mock_analyze, mock_load_issues, mock_load_specs, tmp_path
+        self, mock_collect, mock_llm_init, mock_analyze, mock_load_issues, mock_load_specs, mock_discover, tmp_path
     ):
         mock_collect.return_value = {"git": {}, "flow_engine": None, "backlog": [], "specs": []}
         mock_load_specs.return_value = {
@@ -2005,10 +2008,11 @@ class TestSyncEngineProgressCallback:
         engine._sync_issues = []
         engine.run(progress_callback=callback)
 
-        assert received[0] == ("analyzing", None)
-        assert received[1][0] == "analyzed"
-        assert received[1][1] is not None
-        assert received[1][1].spec_name == "base"
+        assert received[0] == ("discovering", None)
+        assert received[1] == ("analyzing", None)
+        assert received[2][0] == "analyzed"
+        assert received[2][1] is not None
+        assert received[2][1].spec_name == "base"
 
     @patch("se3.engine.sync_engine.SyncEngine._load_specs")
     @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")

@@ -483,16 +483,17 @@ class SyncEngine:
     def run(self, progress_callback: Any = None) -> SyncResult:
         """Execute the full sync workflow.
 
-        1. Load specs (generate base if missing)
-        2. Load existing issues
-        3. Analyze each spec
-        4. Process results by diff type
-        5. Manage issue lifecycle
-        6. Handle conflicts based on mode
+        1. Discover missing specs (scan codebase for uncovered subsystems)
+        2. Load specs (generate base if missing)
+        3. Load existing issues
+        4. Analyze each spec
+        5. Process results by diff type
+        6. Manage issue lifecycle
+        7. Handle conflicts based on mode
 
         Args:
             progress_callback: Optional callback(phase, spec_name, index, total, analysis).
-                phase is "analyzing" (before) or "analyzed" (after).
+                phase is "analyzing"/"analyzed" or "discovering".
 
         Returns:
             SyncResult with all analysis results and actions taken.
@@ -500,6 +501,7 @@ class SyncEngine:
         from .llm_caller import LLMCaller
         from .project_context import ProjectContextCollector
         from .sync_analyzer import SyncAnalyzer
+        from .sync_discovery import SpecDiscovery
 
         result = SyncResult()
         llm_caller = LLMCaller(project_root=self.project_root)
@@ -515,6 +517,27 @@ class SyncEngine:
             logger.info("No specs found, generating base spec")
             analyzer.generate_base_spec(project_context)
             specs = self._load_specs()
+
+        if progress_callback:
+            progress_callback("discovering", None, 0, 0, None)
+
+        try:
+            discovery = SpecDiscovery(self.project_root, llm_caller)
+            discovered = discovery.discover_missing_specs(specs)
+
+            for subsystem in discovered:
+                spec_path = discovery.generate_spec_for_subsystem(subsystem)
+                if spec_path:
+                    name = subsystem["name"]
+                    result.specs_created.append(name)
+                    try:
+                        content = spec_path.read_text(encoding="utf-8")
+                        specs[name] = {"name": name, "path": spec_path, "content": content}
+                        self._specs[name] = specs[name]
+                    except OSError as e:
+                        logger.warning("Failed to read newly created spec '%s': %s", name, e)
+        except Exception as e:
+            logger.error("Spec discovery failed, continuing with existing specs: %s", e)
 
         self._load_existing_issues()
 
