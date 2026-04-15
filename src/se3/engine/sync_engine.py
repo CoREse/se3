@@ -433,9 +433,15 @@ class SyncEngine:
     decision.
     """
 
-    def __init__(self, project_root: Path, mode: str = "default") -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        mode: str = "default",
+        interactive: bool = True,
+    ) -> None:
         self.project_root = Path(project_root)
         self.mode = mode
+        self.interactive = interactive
         self._specs: Dict[str, Any] = {}
         self._existing_issues: List[Any] = []
         self._sync_issues: List[Any] = []
@@ -568,6 +574,16 @@ class SyncEngine:
                 result.call_file = cr["call_file"]
 
         result.pending_decisions = self._collect_pending_decisions(result)
+
+        if result.pending_decisions and self.interactive:
+            import sys
+            if sys.stdin.isatty():
+                resolved = self._interact_for_decisions(result.pending_decisions, llm_caller)
+                result.specs_updated += resolved.get("specs_updated", 0)
+                result.issues_created += resolved.get("issues_created", 0)
+            else:
+                call_path = self._generate_pending_call_file(result.pending_decisions)
+                result.call_file = str(call_path)
 
         return result
 
@@ -967,6 +983,98 @@ class SyncEngine:
         the already-accumulated pending_decisions list.
         """
         return [pd for pd in result.pending_decisions if pd.decision == "pending"]
+
+    def _generate_pending_call_file(
+        self, pending: List[PendingDecision]
+    ) -> Path:
+        """Generate an MCP call file for pending decisions (non-interactive fallback)."""
+        from .sync_interaction import SyncInteractionHandler
+
+        handler = SyncInteractionHandler(self.project_root, pending)
+        return handler._generate_pending_call_file()
+
+    def _interact_for_decisions(
+        self,
+        pending: List[PendingDecision],
+        llm_caller: Any,
+    ) -> Dict[str, int]:
+        """Launch SyncInteractionHandler and execute resolved decisions.
+
+        Returns:
+            Dict with specs_updated and issues_created counts.
+        """
+        from .sync_interaction import SyncInteractionHandler
+
+        handler = SyncInteractionHandler(self.project_root, pending)
+        try:
+            decisions = handler.collect_decisions()
+        except KeyboardInterrupt:
+            logger.info("Decision collection interrupted")
+            return {"specs_updated": 0, "issues_created": 0}
+
+        return self._execute_decisions(pending, decisions, llm_caller)
+
+    def _execute_decisions(
+        self,
+        pending: List[PendingDecision],
+        decisions: Dict[str, str],
+        llm_caller: Any,
+    ) -> Dict[str, int]:
+        """Execute resolved decisions (update_spec or create_issue).
+
+        Returns:
+            Dict with specs_updated and issues_created counts.
+        """
+        specs_updated = 0
+        issues_created = 0
+
+        item_map = {pd.item_id: pd for pd in pending}
+
+        for item_id, decision in decisions.items():
+            pd = item_map.get(item_id)
+            if pd is None:
+                continue
+
+            pd.decision = decision
+
+            if decision == "update_spec":
+                if pd.type == "gap":
+                    gap_diff = SpecDiff(
+                        diff_type=DiffType.GAP,
+                        spec_name=pd.spec_name,
+                        description=pd.description,
+                        code_location=pd.diff,
+                    )
+                    if self._apply_gap_spec_update(gap_diff, llm_caller):
+                        specs_updated += 1
+                else:
+                    conflict = Conflict(
+                        spec_name=pd.spec_name,
+                        description=pd.description,
+                        code_location=pd.diff,
+                    )
+                    if self._apply_conflict_spec_update(conflict, llm_caller):
+                        specs_updated += 1
+            elif decision == "create_issue":
+                if pd.type == "gap":
+                    gap_diff = SpecDiff(
+                        diff_type=DiffType.GAP,
+                        spec_name=pd.spec_name,
+                        description=pd.description,
+                        code_location=pd.diff,
+                    )
+                    if self._create_gap_issue(gap_diff):
+                        issues_created += 1
+                else:
+                    conflict = Conflict(
+                        spec_name=pd.spec_name,
+                        description=pd.description,
+                        code_location=pd.diff,
+                    )
+                    if self._apply_conflict_create_issue(conflict):
+                        issues_created += 1
+
+        return {"specs_updated": specs_updated, "issues_created": issues_created}
 
     def _generate_call_file(self, conflicts: List[Conflict]) -> Path:
         """Generate a single MCP call file for all pending conflicts.
