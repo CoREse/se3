@@ -388,3 +388,51 @@ class TestGenerateBaseSpec:
         content = analyzer.generate_base_spec("ctx")
 
         assert content == "# Plain Spec\n\n## Purpose\nNo fences."
+
+
+# ---------------------------------------------------------------------------
+# G1: Prompt code browsing instructions
+# ---------------------------------------------------------------------------
+
+class TestPromptCodeBrowsingInstructions:
+    def _build(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        return analyzer._build_analysis_prompt("auth", "spec", "ctx")
+
+    def test_prompt_contains_read_tool_instruction(self, tmp_path):
+        prompt = self._build(tmp_path)
+        assert "Read" in prompt
+
+    def test_prompt_contains_grep_tool_instruction(self, tmp_path):
+        prompt = self._build(tmp_path)
+        assert "Grep" in prompt
+
+    def test_prompt_contains_glob_tool_instruction(self, tmp_path):
+        prompt = self._build(tmp_path)
+        assert "Glob" in prompt
+
+    def test_prompt_instructs_active_code_reading(self, tmp_path):
+        prompt = self._build(tmp_path)
+        assert "source code" in prompt.lower()
+
+    def test_prompt_instructs_verification(self, tmp_path):
+        prompt = self._build(tmp_path)
+        assert "verify" in prompt.lower()
+
+    def test_prompt_warns_against_assumptions(self, tmp_path):
+        prompt = self._build(tmp_path)
+        assert "assumption" in prompt.lower() or "assume" in prompt.lower()
+
+    def test_json_schema_unchanged(self, tmp_path):
+        prompt = self._build(tmp_path)
+        assert '"diffs"' in prompt
+        assert '"type"' in prompt
+        assert '"confidence"' in prompt
+
+    def test_analyze_spec_interface_unchanged(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = json.dumps({"diffs": []})
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        result = analyzer.analyze_spec("auth", "spec content", "project context")
+        assert result.spec_name == "auth"
+        assert result.is_in_sync

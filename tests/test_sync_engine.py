@@ -620,6 +620,7 @@ class TestSyncEngineRun:
 
         with patch("se3.engine.sync_engine.SyncEngine._load_existing_issues", return_value=[]), \
              patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None), \
+             patch("se3.engine.llm_caller.LLMCaller.call") as mock_llm_call, \
              patch("se3.engine.project_context.ProjectContextCollector.collect",
                    return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
              patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze:
@@ -628,6 +629,9 @@ class TestSyncEngineRun:
                 spec_name="auth",
                 diffs=[SpecDiff(DiffType.GAP, "auth", "Missing login")],
             )
+            mock_llm_call.return_value = json.dumps({
+                "decision": "create_issue", "confidence": "high", "reasoning": "needed"
+            })
 
             engine = SyncEngine(tmp_path)
             engine._sync_issues = []
@@ -1527,3 +1531,554 @@ class TestStripMarkdownFencesUnbalanced:
         text = "```md\n# Title\n```python\n```"
         result = strip_markdown_fences(text)
         assert result == text
+
+
+# ---------------------------------------------------------------------------
+# G1: PendingDecision data model
+# ---------------------------------------------------------------------------
+
+from se3.engine.sync_engine import PendingDecision
+
+
+class TestPendingDecision:
+    def test_to_dict_roundtrip(self):
+        pd = PendingDecision(
+            type="gap",
+            item_id="gap_auth_abc12345",
+            spec_name="auth",
+            description="Missing login",
+            diff="src/auth.py:10",
+            confidence="high",
+            decision="pending",
+        )
+        data = pd.to_dict()
+        restored = PendingDecision.from_dict(data)
+
+        assert restored.type == "gap"
+        assert restored.item_id == "gap_auth_abc12345"
+        assert restored.spec_name == "auth"
+        assert restored.description == "Missing login"
+        assert restored.diff == "src/auth.py:10"
+        assert restored.confidence == "high"
+        assert restored.decision == "pending"
+
+    def test_from_dict_defaults(self):
+        data = {"type": "conflict"}
+        pd = PendingDecision.from_dict(data)
+        assert pd.item_id == ""
+        assert pd.spec_name == ""
+        assert pd.description == ""
+        assert pd.diff == ""
+        assert pd.confidence == ""
+        assert pd.decision == "pending"
+
+    def test_default_decision_is_pending(self):
+        pd = PendingDecision(type="gap", spec_name="auth", description="d")
+        assert pd.decision == "pending"
+
+    def test_conflict_type(self):
+        pd = PendingDecision(type="conflict", spec_name="cfg", description="d")
+        data = pd.to_dict()
+        assert data["type"] == "conflict"
+        assert PendingDecision.from_dict(data).type == "conflict"
+
+    def test_decision_values(self):
+        for decision in ("pending", "update_spec", "create_issue"):
+            pd = PendingDecision(type="gap", decision=decision)
+            assert pd.to_dict()["decision"] == decision
+
+
+# ---------------------------------------------------------------------------
+# G1: SyncResult new fields serialization
+# ---------------------------------------------------------------------------
+
+class TestSyncResultNewFields:
+    def test_new_fields_default_to_empty(self):
+        result = SyncResult()
+        assert result.specs_created == []
+        assert result.gap_resolutions == []
+        assert result.detailed_changes == []
+        assert result.pending_decisions == []
+
+    def test_new_fields_to_dict(self):
+        result = SyncResult(
+            specs_created=["new-spec"],
+            gap_resolutions=[{"spec_name": "auth", "action": "update_spec", "description": "removed"}],
+            detailed_changes=[{"spec_name": "auth", "changes": "added section"}],
+            pending_decisions=[PendingDecision(type="gap", spec_name="auth", description="d")],
+        )
+        data = result.to_dict()
+        assert data["specs_created"] == ["new-spec"]
+        assert len(data["gap_resolutions"]) == 1
+        assert data["gap_resolutions"][0]["action"] == "update_spec"
+        assert len(data["detailed_changes"]) == 1
+        assert len(data["pending_decisions"]) == 1
+        assert data["pending_decisions"][0]["type"] == "gap"
+
+    def test_new_fields_from_dict_backward_compatible(self):
+        old_data = {
+            "analyses": [],
+            "issues_created": 2,
+            "issues_closed": 1,
+            "specs_updated": 3,
+            "conflicts": [],
+            "call_file": None,
+            "completed_at": "2025-01-01T00:00:00",
+        }
+        result = SyncResult.from_dict(old_data)
+        assert result.specs_created == []
+        assert result.gap_resolutions == []
+        assert result.detailed_changes == []
+        assert result.pending_decisions == []
+        assert result.issues_created == 2
+        assert result.specs_updated == 3
+
+    def test_new_fields_roundtrip(self):
+        pd = PendingDecision(type="conflict", item_id="c1", spec_name="cfg", description="d")
+        result = SyncResult(
+            specs_created=["a", "b"],
+            gap_resolutions=[{"spec_name": "a", "action": "create_issue", "description": "gap"}],
+            detailed_changes=[{"spec_name": "a", "changes": "added"}],
+            pending_decisions=[pd],
+        )
+        data = result.to_dict()
+        restored = SyncResult.from_dict(data)
+        assert restored.specs_created == ["a", "b"]
+        assert len(restored.gap_resolutions) == 1
+        assert len(restored.detailed_changes) == 1
+        assert len(restored.pending_decisions) == 1
+        assert restored.pending_decisions[0].type == "conflict"
+        assert restored.pending_decisions[0].item_id == "c1"
+
+
+# ---------------------------------------------------------------------------
+# G1: Gap decision flow tests
+# ---------------------------------------------------------------------------
+
+class TestResolveGapViaLLM:
+    def test_returns_update_spec(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({
+            "decision": "update_spec", "confidence": "high", "reasoning": "outdated"
+        })
+
+        gap = SpecDiff(DiffType.GAP, "auth", "Old requirement")
+        result = engine._resolve_gap_via_llm(gap, llm)
+        assert result["decision"] == "update_spec"
+        assert result["confidence"] == "high"
+
+    def test_returns_create_issue(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({
+            "decision": "create_issue", "confidence": "high", "reasoning": "needed"
+        })
+
+        gap = SpecDiff(DiffType.GAP, "auth", "Missing feature")
+        result = engine._resolve_gap_via_llm(gap, llm)
+        assert result["decision"] == "create_issue"
+
+    def test_defaults_on_unknown_decision(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({"decision": "ignore"})
+
+        gap = SpecDiff(DiffType.GAP, "auth", "d")
+        result = engine._resolve_gap_via_llm(gap, llm)
+        assert result["decision"] == "create_issue"
+
+    def test_defaults_on_llm_error(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+
+        llm = MagicMock()
+        llm.call.side_effect = RuntimeError("fail")
+
+        gap = SpecDiff(DiffType.GAP, "auth", "d")
+        result = engine._resolve_gap_via_llm(gap, llm)
+        assert result["decision"] == "create_issue"
+        assert result["confidence"] == "low"
+
+    def test_prompt_includes_spec_content(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth with JWT tokens")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({"decision": "create_issue", "confidence": "high"})
+
+        gap = SpecDiff(DiffType.GAP, "auth", "Token mismatch")
+        engine._resolve_gap_via_llm(gap, llm)
+
+        prompt = llm.call.call_args.kwargs.get("prompt") or llm.call.call_args[0][0]
+        assert "Auth with JWT tokens" in prompt
+
+    def test_prompt_contains_guiding_principle(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({"decision": "create_issue", "confidence": "high"})
+
+        gap = SpecDiff(DiffType.GAP, "auth", "d")
+        engine._resolve_gap_via_llm(gap, llm)
+
+        prompt = llm.call.call_args.kwargs.get("prompt") or llm.call.call_args[0][0]
+        assert "implementation standard" in prompt.lower()
+
+
+class TestApplyGapSpecUpdate:
+    def test_updates_spec_file(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Old spec content")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = "# Updated spec content"
+
+        gap = SpecDiff(DiffType.GAP, "auth", "Remove outdated req")
+        assert engine._apply_gap_spec_update(gap, llm) is True
+        assert (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text() == "# Updated spec content"
+
+    def test_returns_false_for_missing_spec(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        gap = SpecDiff(DiffType.GAP, "nonexistent", "d")
+        assert engine._apply_gap_spec_update(gap, MagicMock()) is False
+
+    def test_returns_false_on_empty_response(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Original")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = "   "
+
+        gap = SpecDiff(DiffType.GAP, "auth", "d")
+        assert engine._apply_gap_spec_update(gap, llm) is False
+        assert (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text() == "# Original"
+
+    def test_rejects_suspiciously_short_response(self, tmp_path):
+        original = "# Auth Spec\n\n## Purpose\nDetailed spec.\n" * 5
+        _create_spec(tmp_path, "auth", original)
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = "# Short"
+
+        gap = SpecDiff(DiffType.GAP, "auth", "d")
+        assert engine._apply_gap_spec_update(gap, llm) is False
+        assert (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text() == original
+
+    def test_strips_markdown_fences(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec content")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = "```markdown\n# Auth spec content updated\n```"
+
+        gap = SpecDiff(DiffType.GAP, "auth", "d")
+        assert engine._apply_gap_spec_update(gap, llm) is True
+        written = (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text()
+        assert not written.startswith("```")
+
+    def test_boundary_at_fifty_percent(self, tmp_path):
+        original = "x" * 100
+        _create_spec(tmp_path, "auth", original)
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.return_value = "x" * 49
+        gap = SpecDiff(DiffType.GAP, "auth", "d")
+        assert engine._apply_gap_spec_update(gap, llm) is False
+
+        llm.call.return_value = "x" * 50
+        assert engine._apply_gap_spec_update(gap, llm) is True
+
+    def test_returns_false_on_llm_error(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Original")
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        llm = MagicMock()
+        llm.call.side_effect = RuntimeError("fail")
+
+        gap = SpecDiff(DiffType.GAP, "auth", "d")
+        assert engine._apply_gap_spec_update(gap, llm) is False
+
+
+# ---------------------------------------------------------------------------
+# G1: Gap processing with modes
+# ---------------------------------------------------------------------------
+
+class TestProcessGapsFastMode:
+    def test_auto_decides_and_creates_issue(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="fast")
+        sync_result = SyncResult()
+
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({
+            "decision": "create_issue", "confidence": "high", "reasoning": "needed"
+        })
+
+        gaps = [SpecDiff(DiffType.GAP, "auth", "Missing login")]
+        created = engine._process_gaps(gaps, llm, sync_result)
+
+        assert created == 1
+        assert len(sync_result.gap_resolutions) == 1
+        assert sync_result.gap_resolutions[0]["action"] == "create_issue"
+
+    def test_auto_decides_and_updates_spec(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth spec content")
+        engine = SyncEngine(tmp_path, mode="fast")
+        engine._load_specs()
+        sync_result = SyncResult()
+
+        llm = MagicMock()
+        llm.call.side_effect = [
+            json.dumps({"decision": "update_spec", "confidence": "high", "reasoning": "outdated"}),
+            "# Auth updated content",
+        ]
+
+        gaps = [SpecDiff(DiffType.GAP, "auth", "Old requirement")]
+        created = engine._process_gaps(gaps, llm, sync_result)
+
+        assert created == 0
+        assert sync_result.specs_updated == 1
+        assert len(sync_result.gap_resolutions) == 1
+        assert sync_result.gap_resolutions[0]["action"] == "update_spec"
+
+    def test_no_pending_decisions_in_fast_mode(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="fast")
+        sync_result = SyncResult()
+
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({
+            "decision": "create_issue", "confidence": "low", "reasoning": "needed"
+        })
+
+        gaps = [SpecDiff(DiffType.GAP, "auth", "Missing")]
+        engine._process_gaps(gaps, llm, sync_result)
+
+        assert len(sync_result.pending_decisions) == 0
+
+
+class TestProcessGapsDefaultMode:
+    def test_high_confidence_auto_executes(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="default")
+        sync_result = SyncResult()
+
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({
+            "decision": "create_issue", "confidence": "high", "reasoning": "needed"
+        })
+
+        gaps = [SpecDiff(DiffType.GAP, "auth", "Missing login")]
+        created = engine._process_gaps(gaps, llm, sync_result)
+
+        assert created == 1
+        assert len(sync_result.pending_decisions) == 0
+
+    def test_low_confidence_marks_pending(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="default")
+        sync_result = SyncResult()
+
+        llm = MagicMock()
+        llm.call.return_value = json.dumps({
+            "decision": "create_issue", "confidence": "low", "reasoning": "unsure"
+        })
+
+        gaps = [SpecDiff(DiffType.GAP, "auth", "Missing login")]
+        created = engine._process_gaps(gaps, llm, sync_result)
+
+        assert created == 0
+        assert len(sync_result.pending_decisions) == 1
+        pd = sync_result.pending_decisions[0]
+        assert pd.type == "gap"
+        assert pd.spec_name == "auth"
+        assert pd.decision == "pending"
+
+    def test_mixed_confidence_gaps(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="default")
+        sync_result = SyncResult()
+
+        llm = MagicMock()
+        llm.call.side_effect = [
+            json.dumps({"decision": "create_issue", "confidence": "high"}),
+            json.dumps({"decision": "update_spec", "confidence": "low"}),
+        ]
+
+        gaps = [
+            SpecDiff(DiffType.GAP, "auth", "Missing A"),
+            SpecDiff(DiffType.GAP, "auth", "Missing B"),
+        ]
+        created = engine._process_gaps(gaps, llm, sync_result)
+
+        assert created == 1
+        assert len(sync_result.pending_decisions) == 1
+
+
+class TestProcessGapsStrictMode:
+    def test_all_gaps_marked_pending(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="strict")
+        sync_result = SyncResult()
+
+        gaps = [
+            SpecDiff(DiffType.GAP, "auth", "Missing A"),
+            SpecDiff(DiffType.GAP, "auth", "Missing B"),
+        ]
+        created = engine._process_gaps(gaps, MagicMock(), sync_result)
+
+        assert created == 0
+        assert len(sync_result.pending_decisions) == 2
+        assert all(pd.type == "gap" for pd in sync_result.pending_decisions)
+        assert all(pd.decision == "pending" for pd in sync_result.pending_decisions)
+
+    def test_no_llm_calls_in_strict_mode(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="strict")
+        sync_result = SyncResult()
+
+        llm = MagicMock()
+        gaps = [SpecDiff(DiffType.GAP, "auth", "Missing")]
+        engine._process_gaps(gaps, llm, sync_result)
+
+        llm.call.assert_not_called()
+
+    def test_no_issues_created_in_strict_mode(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="strict")
+        sync_result = SyncResult()
+
+        gaps = [SpecDiff(DiffType.GAP, "auth", "Missing")]
+        created = engine._process_gaps(gaps, MagicMock(), sync_result)
+
+        assert created == 0
+        from se3.engine.issue_manager import IssueManager
+        mgr = IssueManager(tmp_path)
+        assert len(mgr.list_issues()) == 0
+
+
+# ---------------------------------------------------------------------------
+# G1: Conflict handling with PendingDecision
+# ---------------------------------------------------------------------------
+
+class TestHandleConflictsStrictPendingDecision:
+    def test_strict_marks_all_as_pending_decisions(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="strict")
+        sync_result = SyncResult()
+
+        conflicts = [
+            Conflict(spec_name="auth", description="A", confidence="high"),
+            Conflict(spec_name="config", description="B", confidence="low"),
+        ]
+        cr = engine._handle_conflicts_strict(conflicts, result=sync_result)
+
+        assert len(sync_result.pending_decisions) == 2
+        assert all(pd.type == "conflict" for pd in sync_result.pending_decisions)
+        assert all(pd.decision == "pending" for pd in sync_result.pending_decisions)
+        assert cr["call_file"] is None
+
+    def test_strict_no_call_file_with_result(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="strict")
+        sync_result = SyncResult()
+
+        conflicts = [Conflict(spec_name="auth", description="A")]
+        cr = engine._handle_conflicts_strict(conflicts, result=sync_result)
+
+        assert cr["call_file"] is None
+
+    def test_strict_backward_compat_without_result(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="strict")
+
+        conflicts = [Conflict(spec_name="auth", description="A")]
+        cr = engine._handle_conflicts_strict(conflicts)
+
+        assert cr["call_file"] is not None
+
+
+class TestHandleConflictsDefaultPendingDecision:
+    def test_low_confidence_creates_pending_decision(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="default")
+        sync_result = SyncResult()
+
+        conflicts = [Conflict(spec_name="auth", description="A", confidence="low")]
+        cr = engine._handle_conflicts_default(conflicts, MagicMock(), result=sync_result)
+
+        assert len(sync_result.pending_decisions) == 1
+        pd = sync_result.pending_decisions[0]
+        assert pd.type == "conflict"
+        assert pd.spec_name == "auth"
+        assert pd.decision == "pending"
+
+    def test_no_call_file_when_result_provided(self, tmp_path):
+        engine = SyncEngine(tmp_path, mode="default")
+        sync_result = SyncResult()
+
+        conflicts = [Conflict(spec_name="auth", description="A", confidence="low")]
+        cr = engine._handle_conflicts_default(conflicts, MagicMock(), result=sync_result)
+
+        assert cr["call_file"] is None
+
+    def test_high_confidence_still_auto_resolves(self, tmp_path):
+        _create_spec(tmp_path, "auth", "# Auth")
+        engine = SyncEngine(tmp_path, mode="default")
+        engine._load_specs()
+        sync_result = SyncResult()
+
+        llm = MagicMock()
+        llm.call.side_effect = [
+            json.dumps({"decision": "update_spec"}),
+            "# Updated",
+        ]
+
+        conflicts = [Conflict(spec_name="auth", description="A", confidence="high")]
+        cr = engine._handle_conflicts_default(conflicts, llm, result=sync_result)
+
+        assert cr["specs_updated"] == 1
+        assert len(sync_result.pending_decisions) == 0
+
+
+# ---------------------------------------------------------------------------
+# G1: _collect_pending_decisions
+# ---------------------------------------------------------------------------
+
+class TestCollectPendingDecisions:
+    def test_collects_pending_from_gaps_and_conflicts(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        sync_result = SyncResult(
+            pending_decisions=[
+                PendingDecision(type="gap", spec_name="auth", description="g1", decision="pending"),
+                PendingDecision(type="conflict", spec_name="cfg", description="c1", decision="pending"),
+                PendingDecision(type="gap", spec_name="auth", description="g2", decision="update_spec"),
+            ],
+        )
+
+        collected = engine._collect_pending_decisions(sync_result)
+        assert len(collected) == 2
+        assert all(pd.decision == "pending" for pd in collected)
+
+    def test_empty_when_all_resolved(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        sync_result = SyncResult(
+            pending_decisions=[
+                PendingDecision(type="gap", decision="update_spec"),
+                PendingDecision(type="conflict", decision="create_issue"),
+            ],
+        )
+
+        collected = engine._collect_pending_decisions(sync_result)
+        assert collected == []
+
+    def test_empty_when_no_pending(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        sync_result = SyncResult()
+
+        collected = engine._collect_pending_decisions(sync_result)
+        assert collected == []

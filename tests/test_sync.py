@@ -1327,6 +1327,7 @@ class TestSyncEngineRun:
 
         with patch("se3.engine.sync_engine.SyncEngine._load_existing_issues", return_value=[]), \
              patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None), \
+             patch("se3.engine.llm_caller.LLMCaller.call") as mock_llm_call, \
              patch("se3.engine.project_context.ProjectContextCollector.collect",
                    return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
              patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze:
@@ -1335,6 +1336,9 @@ class TestSyncEngineRun:
                 spec_name="auth",
                 diffs=[SpecDiff(DiffType.GAP, "auth", "Missing login endpoint")],
             )
+            mock_llm_call.return_value = json.dumps({
+                "decision": "create_issue", "confidence": "high", "reasoning": "needed"
+            })
 
             engine = SyncEngine(tmp_path)
             engine._sync_issues = []

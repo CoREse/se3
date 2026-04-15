@@ -133,6 +133,42 @@ class SpecAnalysis:
 
 
 @dataclass
+class PendingDecision:
+    """A gap or conflict requiring human decision."""
+
+    type: str  # "gap" or "conflict"
+    item_id: str = ""
+    spec_name: str = ""
+    description: str = ""
+    diff: str = ""
+    confidence: str = ""
+    decision: str = "pending"  # "pending", "update_spec", "create_issue"
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type,
+            "item_id": self.item_id,
+            "spec_name": self.spec_name,
+            "description": self.description,
+            "diff": self.diff,
+            "confidence": self.confidence,
+            "decision": self.decision,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> PendingDecision:
+        return cls(
+            type=data.get("type", "gap"),
+            item_id=data.get("item_id", ""),
+            spec_name=data.get("spec_name", ""),
+            description=data.get("description", ""),
+            diff=data.get("diff", ""),
+            confidence=data.get("confidence", ""),
+            decision=data.get("decision", "pending"),
+        )
+
+
+@dataclass
 class Conflict:
     """A conflict requiring human decision."""
 
@@ -181,6 +217,10 @@ class SyncResult:
     conflicts: List[Conflict] = field(default_factory=list)
     call_file: Optional[str] = None
     completed_at: datetime = field(default_factory=datetime.now)
+    specs_created: List[str] = field(default_factory=list)
+    gap_resolutions: List[Dict[str, Any]] = field(default_factory=list)
+    detailed_changes: List[Dict[str, Any]] = field(default_factory=list)
+    pending_decisions: List[PendingDecision] = field(default_factory=list)
 
     @property
     def total_gaps(self) -> int:
@@ -207,6 +247,10 @@ class SyncResult:
             "conflicts": [c.to_dict() for c in self.conflicts],
             "call_file": self.call_file,
             "completed_at": self.completed_at.isoformat(),
+            "specs_created": self.specs_created,
+            "gap_resolutions": self.gap_resolutions,
+            "detailed_changes": self.detailed_changes,
+            "pending_decisions": [p.to_dict() for p in self.pending_decisions],
         }
 
     @classmethod
@@ -225,6 +269,12 @@ class SyncResult:
             conflicts=[Conflict.from_dict(c) for c in data.get("conflicts", [])],
             call_file=data.get("call_file"),
             completed_at=completed_at,
+            specs_created=data.get("specs_created", []),
+            gap_resolutions=data.get("gap_resolutions", []),
+            detailed_changes=data.get("detailed_changes", []),
+            pending_decisions=[
+                PendingDecision.from_dict(p) for p in data.get("pending_decisions", [])
+            ],
         )
 
     def to_json(self) -> str:
@@ -283,6 +333,67 @@ Code location: {code_location}
 Return the complete updated spec content (the full markdown document).
 Modify only the parts that conflict with the code's behavior.
 Keep all other existing requirements intact.
+"""
+
+_GAP_RESOLUTION_PROMPT = """\
+You are an expert software engineer analyzing a spec-code gap.
+
+## Gap Details
+
+**Spec:** {spec_name}
+**Gap description:** {description}
+**Code location:** {code_location}
+
+## Current Spec Content
+
+{spec_content}
+
+## Task
+
+A gap was found: the spec describes a requirement that is NOT implemented in the code.
+Determine whether this gap represents:
+
+1. **update_spec** — The spec requirement is outdated or no longer relevant. The code has
+   evolved past this requirement, or the requirement was intentionally not implemented because
+   a better approach was taken. The spec should be updated to remove the outdated requirement.
+2. **create_issue** — The spec requirement is still valid and important. The code genuinely
+   needs to implement this requirement. Create an issue to track this work.
+
+## Guiding Principle
+
+Code is the implementation standard. If the code demonstrates a clear, progressive improvement
+over what the spec describes, the spec should be updated to reflect reality. Only choose
+create_issue when the missing implementation represents a genuine deficiency.
+
+Return a JSON object:
+{{"decision": "update_spec" or "create_issue", "confidence": "high" or "low", "reasoning": "Brief explanation"}}
+"""
+
+_GAP_SPEC_UPDATE_PROMPT = """\
+You are an expert software engineer updating a specification document.
+
+## Task
+
+A gap was found between the spec and project code. The decision is to update the spec
+by removing the outdated requirement, since the code has evolved past it.
+
+## Gap
+
+{description}
+Code location: {code_location}
+
+## Spec: {spec_name}
+
+### Current Spec Content
+
+{spec_content}
+
+## Instructions
+
+Precisely locate and remove the outdated requirement described in the gap.
+Keep ALL other existing requirements intact — only remove the specific outdated content.
+Return the complete updated spec content (the full markdown document).
+Do NOT remove any requirements that are still valid.
 """
 
 _SPEC_UPDATE_PROMPT_TEMPLATE = """\
@@ -423,7 +534,7 @@ class SyncEngine:
             if progress_callback:
                 progress_callback("analyzed", spec_name, i, total, analysis)
 
-            gaps_created = self._process_gaps(analysis.gaps)
+            gaps_created = self._process_gaps(analysis.gaps, llm_caller, result)
             result.issues_created += gaps_created
 
             for gap in analysis.gaps:
@@ -444,17 +555,19 @@ class SyncEngine:
             result.specs_updated += cr["specs_updated"]
             result.issues_created += cr["issues_created"]
         elif self.mode == "strict":
-            cr = self._handle_conflicts_strict(all_conflicts)
+            cr = self._handle_conflicts_strict(all_conflicts, result=result)
             result.conflicts = cr["conflicts"]
             if cr["call_file"]:
                 result.call_file = cr["call_file"]
         else:
-            cr = self._handle_conflicts_default(all_conflicts, llm_caller)
+            cr = self._handle_conflicts_default(all_conflicts, llm_caller, result=result)
             result.specs_updated += cr["specs_updated"]
             result.issues_created += cr["issues_created"]
             result.conflicts = cr["unresolved"]
             if cr["call_file"]:
                 result.call_file = cr["call_file"]
+
+        result.pending_decisions = self._collect_pending_decisions(result)
 
         return result
 
@@ -496,62 +609,214 @@ class SyncEngine:
             return m.group(1).strip().lower()
         return None
 
-    def _process_gaps(self, gaps: List[SpecDiff]) -> int:
-        """Create issues for spec-leads-code gaps with idempotency.
+    def _process_gaps(
+        self,
+        gaps: List[SpecDiff],
+        llm_caller: Any = None,
+        result: Optional[SyncResult] = None,
+    ) -> int:
+        """Process spec-leads-code gaps based on the current mode.
 
-        Uses normalized matching against existing sync issues so that
-        minor LLM description variations don't create duplicates.
+        - **fast**: LLM decides every gap (update_spec or create_issue), auto-executes.
+        - **default**: LLM decides; high-confidence auto-executes, low-confidence
+          marks as PendingDecision.
+        - **strict**: All gaps marked as PendingDecision, no auto-execution.
+
+        Falls back to legacy behavior (create issues for all gaps) when
+        llm_caller or result is not provided.
 
         Returns:
             Number of issues actually created.
         """
-        from .issue_manager import IssueManager
-
         if not gaps:
             return 0
 
-        mgr = IssueManager(self.project_root)
+        if llm_caller is None or result is None or self.mode == "default" and llm_caller is None:
+            return self._process_gaps_legacy(gaps)
+
+        if self.mode == "strict":
+            for gap in gaps:
+                pd = PendingDecision(
+                    type="gap",
+                    item_id=f"gap_{gap.spec_name}_{uuid.uuid4().hex[:8]}",
+                    spec_name=gap.spec_name,
+                    description=gap.description,
+                    diff=gap.code_location,
+                    decision="pending",
+                )
+                result.pending_decisions.append(pd)
+            return 0
+
         created = 0
+        for gap in gaps:
+            resolution = self._resolve_gap_via_llm(gap, llm_caller)
+            decision = resolution.get("decision", "create_issue")
+            confidence = resolution.get("confidence", "low")
+
+            if self.mode == "fast" or (self.mode == "default" and confidence == "high"):
+                if decision == "update_spec":
+                    updated = self._apply_gap_spec_update(gap, llm_caller)
+                    if updated:
+                        result.specs_updated += 1
+                        result.gap_resolutions.append({
+                            "spec_name": gap.spec_name,
+                            "action": "update_spec",
+                            "description": gap.description,
+                            "reasoning": resolution.get("reasoning", ""),
+                        })
+                else:
+                    if self._create_gap_issue(gap):
+                        created += 1
+                        result.gap_resolutions.append({
+                            "spec_name": gap.spec_name,
+                            "action": "create_issue",
+                            "description": gap.description,
+                            "reasoning": resolution.get("reasoning", ""),
+                        })
+            else:
+                pd = PendingDecision(
+                    type="gap",
+                    item_id=f"gap_{gap.spec_name}_{uuid.uuid4().hex[:8]}",
+                    spec_name=gap.spec_name,
+                    description=gap.description,
+                    diff=gap.code_location,
+                    confidence=confidence,
+                    decision="pending",
+                )
+                result.pending_decisions.append(pd)
+
+        return created
+
+    def _process_gaps_legacy(self, gaps: List[SpecDiff]) -> int:
+        """Legacy gap processing: create issues for all gaps with idempotency."""
+        if not gaps:
+            return 0
+
+        created = 0
+        for gap in gaps:
+            if self._create_gap_issue(gap):
+                created += 1
+        return created
+
+    def _create_gap_issue(self, gap: SpecDiff) -> bool:
+        """Create a single gap issue with idempotency. Returns True if created."""
+        from .issue_manager import IssueManager
+
+        mgr = IssueManager(self.project_root)
 
         existing_normalized = {
             self._normalize_for_matching(issue.title)
             for issue in self._sync_issues
         }
 
-        for gap in gaps:
-            title = self._normalize_gap_title(gap)
-            norm_title = self._normalize_for_matching(title)
+        title = self._normalize_gap_title(gap)
+        norm_title = self._normalize_for_matching(title)
 
-            if norm_title in existing_normalized:
-                logger.info("Skipping duplicate issue for gap: %s", title)
-                continue
+        if norm_title in existing_normalized:
+            logger.info("Skipping duplicate issue for gap: %s", title)
+            return False
 
-            existing = mgr.find_open_by_title(title)
-            if existing:
-                logger.info("Skipping duplicate issue for gap: %s", title)
-                existing_normalized.add(norm_title)
-                continue
+        existing = mgr.find_open_by_title(title)
+        if existing:
+            logger.info("Skipping duplicate issue for gap: %s", title)
+            return False
 
-            description = (
-                f"Spec '{gap.spec_name}' describes a requirement that is not "
-                f"implemented in the code.\n\n"
-                f"**Gap:** {gap.description}\n"
-            )
-            if gap.code_location:
-                description += f"**Expected location:** {gap.code_location}\n"
+        description = (
+            f"Spec '{gap.spec_name}' describes a requirement that is not "
+            f"implemented in the code.\n\n"
+            f"**Gap:** {gap.description}\n"
+        )
+        if gap.code_location:
+            description += f"**Expected location:** {gap.code_location}\n"
 
-            mgr.create(
-                title=title,
-                description=description,
-                priority="medium",
-                scope="in_scope",
-                tags=list(SYNC_TAGS),
-                type="task",
-            )
-            created += 1
-            logger.info("Created issue for gap: %s", title)
+        mgr.create(
+            title=title,
+            description=description,
+            priority="medium",
+            scope="in_scope",
+            tags=list(SYNC_TAGS),
+            type="task",
+        )
+        logger.info("Created issue for gap: %s", title)
+        return True
 
-        return created
+    def _resolve_gap_via_llm(
+        self, gap: SpecDiff, llm_caller: Any
+    ) -> Dict[str, str]:
+        """Call LLM to decide how to handle a gap.
+
+        Returns:
+            Dict with 'decision' ('update_spec' or 'create_issue'),
+            'confidence' ('high' or 'low'), and 'reasoning'.
+        """
+        spec_content = self._specs.get(gap.spec_name, {}).get("content", "")
+
+        prompt = _GAP_RESOLUTION_PROMPT.format(
+            spec_name=gap.spec_name,
+            description=gap.description,
+            code_location=gap.code_location or "(not specified)",
+            spec_content=spec_content or "(not available)",
+        )
+
+        try:
+            response = llm_caller.call(prompt=prompt, json_mode="extract")
+            data = json.loads(response)
+            decision = data.get("decision", "create_issue")
+            if decision not in ("update_spec", "create_issue"):
+                decision = "create_issue"
+            return {
+                "decision": decision,
+                "confidence": data.get("confidence", "low").lower(),
+                "reasoning": data.get("reasoning", ""),
+            }
+        except Exception as e:
+            logger.error("LLM gap resolution failed for '%s': %s", gap.spec_name, e)
+            return {"decision": "create_issue", "confidence": "low", "reasoning": str(e)}
+
+    def _apply_gap_spec_update(
+        self, gap: SpecDiff, llm_caller: Any
+    ) -> bool:
+        """Use LLM to remove an outdated requirement from a spec.
+
+        Returns:
+            True if the spec was updated successfully.
+        """
+        spec_info = self._specs.get(gap.spec_name)
+        if not spec_info:
+            logger.warning("Spec '%s' not found for gap update", gap.spec_name)
+            return False
+
+        prompt = _GAP_SPEC_UPDATE_PROMPT.format(
+            spec_name=gap.spec_name,
+            description=gap.description,
+            code_location=gap.code_location or "(not specified)",
+            spec_content=spec_info["content"],
+        )
+
+        try:
+            updated_content = llm_caller.call(prompt=prompt, json_mode="off")
+            updated_content = updated_content.strip()
+            updated_content = strip_markdown_fences(updated_content)
+
+            if not updated_content:
+                logger.warning("LLM returned empty content for gap spec update '%s'", gap.spec_name)
+                return False
+
+            if len(updated_content) < len(spec_info["content"]) * 0.5:
+                logger.warning(
+                    "LLM returned suspiciously short content for gap spec update '%s' "
+                    "(%d chars vs original %d chars), skipping update",
+                    gap.spec_name, len(updated_content), len(spec_info["content"]),
+                )
+                return False
+
+            Path(spec_info["path"]).write_text(updated_content, encoding="utf-8")
+            spec_info["content"] = updated_content
+            logger.info("Updated spec '%s' for gap resolution (removed outdated requirement)", gap.spec_name)
+            return True
+        except Exception as e:
+            logger.error("Failed to update spec '%s' for gap: %s", gap.spec_name, e)
+            return False
 
     def _process_extensions(
         self,
@@ -693,6 +958,15 @@ class SyncEngine:
                 ))
 
         return conflicts
+
+    def _collect_pending_decisions(self, result: SyncResult) -> List[PendingDecision]:
+        """Collect all pending decisions (gap + conflict) from the result.
+
+        Returns the unified list of PendingDecision items that need
+        human resolution. This is a consolidation step that returns
+        the already-accumulated pending_decisions list.
+        """
+        return [pd for pd in result.pending_decisions if pd.decision == "pending"]
 
     def _generate_call_file(self, conflicts: List[Conflict]) -> Path:
         """Generate a single MCP call file for all pending conflicts.
@@ -873,9 +1147,9 @@ class SyncEngine:
         return {"specs_updated": specs_updated, "issues_created": issues_created}
 
     def _handle_conflicts_strict(
-        self, conflicts: List[Conflict]
+        self, conflicts: List[Conflict], result: Optional[SyncResult] = None,
     ) -> Dict[str, Any]:
-        """Strict mode: all conflicts collected into one MCP call file.
+        """Strict mode: all conflicts marked as PendingDecision.
 
         Returns:
             Dict with conflicts list and optional call_file path.
@@ -883,17 +1157,32 @@ class SyncEngine:
         if not conflicts:
             return {"conflicts": [], "call_file": None}
 
+        if result is not None:
+            for conflict in conflicts:
+                pd = PendingDecision(
+                    type="conflict",
+                    item_id=f"conflict_{conflict.spec_name}_{uuid.uuid4().hex[:8]}",
+                    spec_name=conflict.spec_name,
+                    description=conflict.description,
+                    diff=conflict.code_location,
+                    confidence=conflict.confidence,
+                    decision="pending",
+                )
+                result.pending_decisions.append(pd)
+            return {"conflicts": conflicts, "call_file": None}
+
         call_path = self._generate_call_file(conflicts)
         return {"conflicts": conflicts, "call_file": str(call_path)}
 
     def _handle_conflicts_default(
-        self, conflicts: List[Conflict], llm_caller: Any
+        self, conflicts: List[Conflict], llm_caller: Any,
+        result: Optional[SyncResult] = None,
     ) -> Dict[str, Any]:
         """Default mode: LLM auto-handles high-confidence, collects low-confidence.
 
         High-confidence conflicts are resolved automatically by LLM.
-        Low-confidence conflicts are batched into an MCP call file for
-        human decision.
+        Low-confidence conflicts are marked as PendingDecision (or batched
+        into an MCP call file for backward compatibility).
 
         Returns:
             Dict with specs_updated, issues_created, unresolved list, and call_file.
@@ -913,9 +1202,20 @@ class SyncEngine:
                         issues_created += 1
             else:
                 unresolved.append(conflict)
+                if result is not None:
+                    pd = PendingDecision(
+                        type="conflict",
+                        item_id=f"conflict_{conflict.spec_name}_{uuid.uuid4().hex[:8]}",
+                        spec_name=conflict.spec_name,
+                        description=conflict.description,
+                        diff=conflict.code_location,
+                        confidence=conflict.confidence,
+                        decision="pending",
+                    )
+                    result.pending_decisions.append(pd)
 
         call_file: Optional[str] = None
-        if unresolved:
+        if unresolved and result is None:
             call_path = self._generate_call_file(unresolved)
             call_file = str(call_path)
 

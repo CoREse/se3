@@ -64,6 +64,18 @@ Classify each difference into exactly one of these three types:
      - "high" — You are confident about which side (spec or code) is correct and how to resolve it.
      - "low" — The resolution is ambiguous and requires human judgment.
 
+## Code Browsing Instructions
+
+You MUST actively read and examine the project's source code to perform accurate analysis.
+Do NOT rely on assumptions or the project context alone — verify every finding against real code.
+
+- Use the **Read** tool to read relevant source files and check implementations.
+- Use the **Grep** tool to search for specific functions, classes, or patterns mentioned in the spec.
+- Use the **Glob** tool to discover files related to the spec's domain.
+
+For each spec requirement, locate the corresponding code and verify whether it is implemented correctly.
+Base your gap/extension/conflict analysis on what the code actually does, not on what you assume it does.
+
 ## Rules
 
 - Be thorough: check every requirement and scenario in the spec.
