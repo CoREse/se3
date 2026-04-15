@@ -508,9 +508,17 @@ class SyncEngine:
         from .project_context import ProjectContextCollector
         from .sync_analyzer import SyncAnalyzer
         from .sync_discovery import SpecDiscovery
+        from .sync_history import SyncFlowContext
 
         result = SyncResult()
-        llm_caller = LLMCaller(project_root=self.project_root)
+
+        flow_ctx = SyncFlowContext(self.project_root)
+        flow_ctx.write_meta()
+
+        llm_caller = LLMCaller(
+            project_root=self.project_root,
+            flow_id=flow_ctx.flow_id,
+        )
         analyzer = SyncAnalyzer(self.project_root, llm_caller)
 
         collector = ProjectContextCollector(self.project_root)
@@ -528,6 +536,9 @@ class SyncEngine:
             progress_callback("discovering", None, 0, 0, None)
 
         try:
+            step_id = flow_ctx.make_step_id("sync_scan")
+            llm_caller.step_id = step_id
+            llm_caller.step_type = "sync_scan"
             discovery = SpecDiscovery(self.project_root, llm_caller)
             discovered = discovery.discover_missing_specs(specs)
 
@@ -555,6 +566,10 @@ class SyncEngine:
             if progress_callback:
                 progress_callback("analyzing", spec_name, i, total, None)
 
+            step_id = flow_ctx.make_step_id("sync_analyze", spec_name)
+            llm_caller.step_id = step_id
+            llm_caller.step_type = "sync_analyze"
+
             analysis = analyzer.analyze_spec(
                 spec_name, spec_info["content"], project_context
             )
@@ -579,16 +594,21 @@ class SyncEngine:
 
         all_conflicts = self._gather_all_conflicts(result.analyses)
 
+        llm_caller.step_type = "sync_resolve"
+
         if self.mode == "fast":
+            llm_caller.step_id = flow_ctx.make_step_id("sync_resolve", "conflicts_fast")
             cr = self._handle_conflicts_fast(all_conflicts, llm_caller)
             result.specs_updated += cr["specs_updated"]
             result.issues_created += cr["issues_created"]
         elif self.mode == "strict":
+            llm_caller.step_id = flow_ctx.make_step_id("sync_resolve", "conflicts_strict")
             cr = self._handle_conflicts_strict(all_conflicts, result=result)
             result.conflicts = cr["conflicts"]
             if cr["call_file"]:
                 result.call_file = cr["call_file"]
         else:
+            llm_caller.step_id = flow_ctx.make_step_id("sync_resolve", "conflicts_default")
             cr = self._handle_conflicts_default(all_conflicts, llm_caller, result=result)
             result.specs_updated += cr["specs_updated"]
             result.issues_created += cr["issues_created"]
@@ -600,6 +620,7 @@ class SyncEngine:
 
         if result.pending_decisions and self.interactive:
             import sys
+            llm_caller.step_id = flow_ctx.make_step_id("sync_resolve", "interactive")
             if sys.stdin.isatty():
                 resolved = self._interact_for_decisions(result.pending_decisions, llm_caller)
                 result.specs_updated += resolved.get("specs_updated", 0)

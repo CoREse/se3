@@ -18,6 +18,7 @@ import typer
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
+from rich.tree import Tree
 
 from ..engine.display import get_console, render_text
 
@@ -65,11 +66,58 @@ def _render_sync_results(result) -> None:
 
     console.print(table)
 
+    if result.detailed_changes:
+        changes_tree = Tree("[bold]Spec Changes[/bold]")
+        for change in result.detailed_changes:
+            spec_name = change.get("spec_name", "unknown")
+            action = change.get("action", "updated")
+            desc = change.get("description", "")
+            label = f"[cyan]{spec_name}[/cyan] — {action}"
+            if desc:
+                label += f": {desc}"
+            changes_tree.add(label)
+        console.print(Panel(changes_tree, title="Detailed Changes", border_style="cyan"))
+
+    if result.specs_created:
+        specs_tree = Tree("[bold]New Specs Created[/bold]")
+        for name in result.specs_created:
+            specs_tree.add(f"[green]{name}[/green]")
+        console.print(Panel(specs_tree, title="New Specs", border_style="green"))
+
+    if result.gap_resolutions:
+        gap_tree = Tree("[bold]Gap Resolutions[/bold]")
+        for res in result.gap_resolutions:
+            spec_name = res.get("spec_name", "unknown")
+            action = res.get("action", "unknown")
+            desc = res.get("description", "")
+            if action == "update_spec":
+                label = f"[yellow]{spec_name}[/yellow] — removed outdated requirement"
+            else:
+                label = f"[blue]{spec_name}[/blue] — created issue"
+            if desc:
+                label += f": {desc}"
+            gap_tree.add(label)
+        console.print(Panel(gap_tree, title="Gap Decisions", border_style="yellow"))
+
+    if hasattr(result, "issues_created") and result.issues_created > 0:
+        issues_from_gaps = [
+            r for r in result.gap_resolutions if r.get("action") == "create_issue"
+        ]
+        if issues_from_gaps:
+            issue_tree = Tree("[bold]Issues Created[/bold]")
+            for r in issues_from_gaps:
+                issue_tree.add(
+                    f"[sync] {r.get('spec_name', '?')}: {r.get('description', '')}"
+                )
+            console.print(Panel(issue_tree, title="Issues", border_style="red"))
+
     summary_parts = []
     summary_parts.append(f"Issues created: {result.issues_created}")
     summary_parts.append(f"Issues closed:  {result.issues_closed}")
     summary_parts.append(f"Specs updated:  {result.specs_updated}")
     summary_parts.append(f"Conflicts pending: {len(result.conflicts)}")
+    if result.specs_created:
+        summary_parts.append(f"New specs:      {len(result.specs_created)}")
 
     if result.all_in_sync and not result.conflicts:
         border_style = "green"
