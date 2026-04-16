@@ -410,6 +410,7 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
             prompt=prompt,
             json_mode="two_phase",
             json_schema_hint='{"plan": {"proposal": {"summary": "..."}, "design": {"overview": "..."}}, "task_groups": [{"group_id": "G1", "name": "...", "tasks": [{"id": 1, "description": "..."}]}], "total_complexity": "..."}',
+            required_keys=["task_groups"],
         )
 
         # Parse JSON response

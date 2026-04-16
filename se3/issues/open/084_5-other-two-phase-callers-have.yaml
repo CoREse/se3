@@ -1,0 +1,26 @@
+id: 084
+title: '5 other two_phase callers have the same latent bug: verify_spec.py, version_analyze.py,
+  analyze.py, plan_tasks.py, read_spec.py, and confirm.py all pass required_keys to
+  parse_json_response() but NOT to caller.call(). This means the two_phase fast path
+  can still skip Phase 2 for valid JSON missing required keys in those callers.'
+description: '5 other two_phase callers have the same latent bug: verify_spec.py,
+  version_analyze.py, analyze.py, plan_tasks.py, read_spec.py, and confirm.py all
+  pass required_keys to parse_json_response() but NOT to caller.call(). This means
+  the two_phase fast path can still skip Phase 2 for valid JSON missing required keys
+  in those callers.
+
+
+  Suggestion: Add required_keys to caller.call() in all callers that use parse_json_response
+  with required_keys: verify_spec.py (required_keys=[''issues'']), version_analyze.py
+  ([''bump_type'']), analyze.py ([''task_type'']), plan_tasks.py ([''task_groups'']),
+  read_spec.py ([''selected_specs'']), confirm.py ([''approved'']).'
+status: open
+priority: medium
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-16T13:53:52.177853'
+updated_at: '2026-04-16T13:53:52.177853'

@@ -372,6 +372,7 @@ class LLMCaller:
         json_mode: Optional[str] = None,
         two_phase_json: bool = False,
         json_schema_hint: Optional[str] = None,
+        required_keys: Optional[List[str]] = None,
         **kwargs,
     ) -> str:
         """Call LLM with prompt and return output text.
@@ -403,6 +404,8 @@ class LLMCaller:
             json_mode: Explicit mode selection - "strict", "extract", "two_phase", or "off"
             two_phase_json: Legacy flag for TWO_PHASE mode (kept for compatibility)
             json_schema_hint: Optional hint about expected JSON schema for extraction
+            required_keys: Optional list of keys that must be present in the parsed JSON.
+                          Used by TWO_PHASE mode to validate the fast path result.
             **kwargs: Ignored (accepts model, max_tokens, temperature
                       for forward-compatibility but they don't apply
                       to claude -p subprocess calls)
@@ -445,6 +448,7 @@ class LLMCaller:
                 context_files=context_files,
                 on_output=on_output,
                 json_schema_hint=json_schema_hint,
+                required_keys=required_keys,
             )
         elif mode == "extract":
             return self._call_extract(
@@ -596,6 +600,7 @@ class LLMCaller:
         context_files: Optional[List[Path]],
         on_output: Optional[Callable[[str], None]],
         json_schema_hint: Optional[str],
+        required_keys: Optional[List[str]] = None,
     ) -> str:
         """Mode 3: TWO_PHASE - Natural generation + LLM extraction.
 
@@ -646,17 +651,21 @@ class LLMCaller:
 
         # Check if phase 1 output already contains valid JSON (skip phase 2)
         if self._contains_valid_json(phase1_output):
-            logger.info("Two-phase: phase 1 output contained valid JSON, skipping phase 2")
-            print(f"  {self.stream_prefix}[llm-caller] ✅ Phase 1 output contained valid JSON, phase 2 skipped")
-            # Step fully done — delete cache
-            if cache_path and cache_path.exists():
-                try:
-                    cache_path.unlink()
-                except OSError as e:
-                    logger.warning(f"Failed to delete Phase 1 cache: {e}")
             from .utils.json_parser import parse_json_response
-            result = parse_json_response(phase1_output)
-            return json.dumps(result, ensure_ascii=False, indent=2)
+            result = parse_json_response(phase1_output, required_keys=required_keys)
+            if result is not None:
+                logger.info("Two-phase: phase 1 output contained valid JSON with required keys, skipping phase 2")
+                print(f"  {self.stream_prefix}[llm-caller] ✅ Phase 1 output contained valid JSON, phase 2 skipped")
+                # Step fully done — delete cache
+                if cache_path and cache_path.exists():
+                    try:
+                        cache_path.unlink()
+                    except OSError as e:
+                        logger.warning(f"Failed to delete Phase 1 cache: {e}")
+                return json.dumps(result, ensure_ascii=False, indent=2)
+            else:
+                logger.info("Two-phase: phase 1 JSON missing required keys %s, falling back to phase 2", required_keys)
+                print(f"  {self.stream_prefix}[llm-caller] ⚠️  Phase 1 JSON missing required keys, falling back to phase 2")
 
         # Phase 2: Extract JSON via LLM
         print(f"  {self.stream_prefix}[llm-caller] 🔍 Phase 2: Extracting JSON from output...")
@@ -671,6 +680,7 @@ class LLMCaller:
         result = extractor.extract(
             raw_output=phase1_output,
             schema_hint=json_schema_hint,
+            required_keys=required_keys,
         )
 
         if result is None:

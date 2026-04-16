@@ -128,6 +128,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             prompt=prompt,
             json_mode="two_phase",
             json_schema_hint='{"issues": [{"severity": "critical|high|medium|low", "description": "...", "location": "..."}], "summary": "..."}',
+            required_keys=["issues"],
         )
 
         result = parse_json_response(response, required_keys=["issues"])

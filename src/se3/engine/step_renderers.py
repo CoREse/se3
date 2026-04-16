@@ -489,7 +489,9 @@ def _render_self_check(step: Step) -> None:
     # ── Status line ───────────────────────────────────────────────
     actionable_count = outputs.get("actionable_count", 0)
     issues = outputs.get("issues", [])
-    if actionable_count == 0:
+    if step.status == StepStatus.FAILED:
+        lines.append("[bold red]✗ FAILED[/bold red]")
+    elif actionable_count == 0:
         lines.append("[bold green]✓ PASSED[/bold green]")
     else:
         lines.append(f"[bold red]✗ {actionable_count} actionable issue(s)[/bold red]")

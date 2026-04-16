@@ -461,6 +461,15 @@ The injected prompt SHALL:
 - **AND** 第二次 LLM 调用从自然输出中提取 JSON
 - **AND** 避免提示词污染，更好地处理截断
 
+#### Scenario: TWO_PHASE fast path with required_keys validation
+- **GIVEN** a step uses TWO_PHASE mode and passes `required_keys` to `LLMCaller.call()`
+- **WHEN** Phase 1 output contains valid JSON
+- **THEN** the fast path validates the parsed JSON against `required_keys` via `parse_json_response(output, required_keys=required_keys)`
+- **AND** if all required keys are present, Phase 2 is skipped and the validated JSON is returned
+- **AND** if any required key is missing, the fast path falls back to Phase 2 extraction instead of returning incomplete data
+- **AND** Phase 2 extraction also receives `required_keys` for end-to-end validation consistency
+- **NOTE** `required_keys` is an optional parameter (default `None`) on both `call()` and `_call_two_phase()`, preserving backward compatibility for callers that do not need key validation
+
 ### Requirement: 聊天记录系统（Chat History）
 
 流程引擎 SHALL 记录每次 LLM 调用的 prompt 和回应，支持重试时注入对话上下文，并提供人类浏览接口。工具调用事件（tool_use / tool_result）SHALL 使用 per-tool 语义化格式渲染人类可读预览，格式化逻辑集中在 `tool_formatters` 模块中。
@@ -1439,6 +1448,7 @@ The `analyze` step renderer SHALL display a top-line status bar followed by reas
 The `self_check` step renderer SHALL display review status and issues grouped by severity.
 
 **Status Line:**
+- `✗ FAILED` in red when `step.status` is `FAILED` (takes precedence over all other conditions)
 - `✓ PASSED` in green when no actionable issues found; `✗ ISSUES FOUND` in red when any actionable issues exist (all severity levels are actionable).
 
 **Sections (displayed in order when data is present):**
@@ -1447,8 +1457,13 @@ The `self_check` step renderer SHALL display review status and issues grouped by
 **Output keys consumed by the renderer:**
 - `status`, `issues`
 
+##### Scenario: Self check step failed rendering
+- **WHEN** the self_check step has `step.status == FAILED` (e.g., LLM call failed before producing outputs)
+- **THEN** the renderer displays a red `✗ FAILED` status
+- **AND** does not display `✓ PASSED` regardless of `actionable_count` defaulting to 0
+
 ##### Scenario: Self check passed rendering
-- **WHEN** the self_check step completes with no issues
+- **WHEN** the self_check step completes successfully with no issues
 - **THEN** the renderer displays a green `✓ PASSED` status
 
 ##### Scenario: Self check found issues rendering

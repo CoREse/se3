@@ -12,9 +12,14 @@ import pytest
 from se3.engine.models import Step, StepStatus, StepType
 
 
-def _make_step(step_type: StepType, outputs: dict, error_message: str | None = None) -> Step:
+def _make_step(
+    step_type: StepType,
+    outputs: dict,
+    error_message: str | None = None,
+    status: StepStatus = StepStatus.COMPLETED,
+) -> Step:
     """Create a Step with given type and outputs."""
-    step = Step(step_type=step_type, status=StepStatus.COMPLETED)
+    step = Step(step_type=step_type, status=status)
     step.outputs = outputs
     step.error_message = error_message
     return step
@@ -421,3 +426,82 @@ class TestRenderCommit:
 
         content = mock_render_full.call_args[0][0]
         assert "No changes to commit" in content
+
+
+# ---------------------------------------------------------------------------
+# _render_self_check
+# ---------------------------------------------------------------------------
+
+
+class TestRenderSelfCheck:
+    @patch("se3.engine.step_renderers.render_full")
+    def test_failed_status_with_zero_actionable_shows_failed(self, mock_render_full):
+        """FAILED status with actionable_count=0 should show FAILED, not PASSED."""
+        step = _make_step(
+            StepType.SELF_CHECK,
+            outputs={"actionable_count": 0},
+            status=StepStatus.FAILED,
+            error_message="Failed to parse self-check result from LLM response",
+        )
+
+        from se3.engine.step_renderers import _render_self_check
+        _render_self_check(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "FAILED" in content
+        assert "PASSED" not in content
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_completed_status_with_zero_actionable_shows_passed(self, mock_render_full):
+        """COMPLETED status with no issues should show PASSED."""
+        step = _make_step(
+            StepType.SELF_CHECK,
+            outputs={"actionable_count": 0, "issues": [], "self_check_result": {"summary": "All good"}},
+            status=StepStatus.COMPLETED,
+        )
+
+        from se3.engine.step_renderers import _render_self_check
+        _render_self_check(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "PASSED" in content
+        assert "FAILED" not in content
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_failed_status_with_actionable_issues_shows_failed(self, mock_render_full):
+        """FAILED status with actionable issues should show FAILED."""
+        step = _make_step(
+            StepType.SELF_CHECK,
+            outputs={
+                "actionable_count": 2,
+                "issues": [
+                    {"severity": "high", "description": "Bug A", "location": "file.py"},
+                    {"severity": "medium", "description": "Bug B", "location": "file2.py"},
+                ],
+            },
+            status=StepStatus.FAILED,
+        )
+
+        from se3.engine.step_renderers import _render_self_check
+        _render_self_check(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "FAILED" in content
+        assert "PASSED" not in content
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_failed_status_no_outputs_shows_failed(self, mock_render_full):
+        """FAILED status with empty outputs (pre-failure) should show FAILED."""
+        step = _make_step(
+            StepType.SELF_CHECK,
+            outputs={},
+            status=StepStatus.FAILED,
+            error_message="Self-check failed: LLM call error",
+        )
+
+        from se3.engine.step_renderers import _render_self_check
+        _render_self_check(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "FAILED" in content
+        assert "PASSED" not in content
