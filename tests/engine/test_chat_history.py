@@ -110,8 +110,8 @@ class TestFormatHistoryForRetryMode:
         assert "Continue from where" not in result
 
     @patch("se3.engine.chat_history.get_step_history")
-    def test_continue_mode_user_prompt_4000_limit(self, mock_get):
-        """In continue mode, user prompts should be truncated at 4000 chars."""
+    def test_continue_mode_user_prompt_not_truncated(self, mock_get):
+        """In continue mode, user prompts should NOT be truncated."""
         long_prompt = "x" * 5000
         mock_get.return_value = _make_session([
             _make_user_message(long_prompt),
@@ -119,14 +119,13 @@ class TestFormatHistoryForRetryMode:
         ])
         result = format_history_for_retry(Path("/tmp"), "flow", "step", mode="continue")
         assert result is not None
-        # The prompt should be truncated at 4000
-        assert "x" * 4000 in result
-        assert "x" * 4001 not in result
-        assert "[truncated]" in result
+        # Full prompt should be preserved
+        assert "x" * 5000 in result
+        assert "[truncated]" not in result
 
     @patch("se3.engine.chat_history.get_step_history")
-    def test_retry_mode_user_prompt_2000_limit(self, mock_get):
-        """In retry mode, user prompts should be truncated at 2000 chars."""
+    def test_retry_mode_user_prompt_not_truncated(self, mock_get):
+        """In retry mode, user prompts should NOT be truncated."""
         long_prompt = "x" * 3000
         mock_get.return_value = _make_session([
             _make_user_message(long_prompt),
@@ -134,9 +133,9 @@ class TestFormatHistoryForRetryMode:
         ])
         result = format_history_for_retry(Path("/tmp"), "flow", "step", mode="retry")
         assert result is not None
-        assert "x" * 2000 in result
-        assert "x" * 2001 not in result
-        assert "[truncated]" in result
+        # Full prompt should be preserved
+        assert "x" * 3000 in result
+        assert "[truncated]" not in result
 
     @patch("se3.engine.chat_history.get_step_history")
     def test_continue_mode_preserves_tool_call_responses(self, mock_get):
@@ -192,3 +191,33 @@ class TestFormatHistoryForRetryMode:
         assert result is not None
         assert "Short prompt" in result
         assert "[truncated]" not in result
+
+    @patch("se3.engine.chat_history.get_step_history")
+    def test_user_prompt_exceeding_50k_safety_limit_truncated(self, mock_get):
+        """User prompts exceeding 50K chars should be truncated for safety."""
+        huge_prompt = "x" * 60_000
+        mock_get.return_value = _make_session([
+            _make_user_message(huge_prompt),
+            _make_assistant_message("response"),
+        ])
+        result = format_history_for_retry(Path("/tmp"), "flow", "step", mode="continue")
+        assert result is not None
+        # Should be truncated to 50K
+        assert "user prompt truncated for retry context safety" in result
+        # The full 60K content should NOT be present
+        assert "x" * 60_000 not in result
+        # But the first 50K should be present
+        assert "x" * 50_000 in result
+
+    @patch("se3.engine.chat_history.get_step_history")
+    def test_user_prompt_at_50k_not_truncated(self, mock_get):
+        """User prompts exactly at 50K chars should NOT be truncated."""
+        exact_prompt = "y" * 50_000
+        mock_get.return_value = _make_session([
+            _make_user_message(exact_prompt),
+            _make_assistant_message("response"),
+        ])
+        result = format_history_for_retry(Path("/tmp"), "flow", "step", mode="retry")
+        assert result is not None
+        assert "y" * 50_000 in result
+        assert "truncated for retry context safety" not in result

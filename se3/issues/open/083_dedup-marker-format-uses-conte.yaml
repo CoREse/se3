@@ -1,0 +1,30 @@
+id: 083
+title: 'Dedup marker format uses content-based hash instead of line numbers. The spec
+  says markers should be like ''[DUPLICATED CONTENT: same as original lines X-Y]''
+  with line numbers, but the implementation uses ''[DUPLICATED CONTENT: N lines #HASH,
+  from "first" to "last"]''. This is a reasonable engineering decision (line numbers
+  become stale across retries when history is prepended), and the spec uses ''类似''
+  (similar to), indicating the format is suggestive rather than prescriptive. This
+  is also covered by the planned spec change ''[add_requirement] flow-engine :: Requirement:
+  Prompt 行级去重预处理''.'
+description: 'Dedup marker format uses content-based hash instead of line numbers.
+  The spec says markers should be like ''[DUPLICATED CONTENT: same as original lines
+  X-Y]'' with line numbers, but the implementation uses ''[DUPLICATED CONTENT: N lines
+  #HASH, from "first" to "last"]''. This is a reasonable engineering decision (line
+  numbers become stale across retries when history is prepended), and the spec uses
+  ''类似'' (similar to), indicating the format is suggestive rather than prescriptive.
+  This is also covered by the planned spec change ''[add_requirement] flow-engine
+  :: Requirement: Prompt 行级去重预处理''.
+
+
+  Suggestion: Update the spec to reflect the actual content-based marker format.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-16T12:42:11.898622'
+updated_at: '2026-04-16T12:42:11.898622'

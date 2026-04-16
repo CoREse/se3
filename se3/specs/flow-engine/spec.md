@@ -620,7 +620,7 @@ The flow engine SHALL apply content-aware truncation when feeding diagnostic out
 - **Error content** (stderr, error tool_results): tail-truncate (`content[-N:]`) — error root causes and tracebacks appear at the end
 - **Non-error content** (stdout, normal tool_results): head-truncate (`content[:N]`) — context and setup appear at the start
 - **Assistant responses** in retry/continue context: head+tail truncate (head 1000 chars + tail for remainder) — preserves initial step instructions and schema definitions at the start, plus final conclusions and tool results at the end
-- **User prompts** in retry/continue context: head-truncate — instructions and intent are at the start
+- **User prompts** in retry/continue context: not truncated (line-level deduplication controls size); a 50K-char safety cap prevents unbounded growth
 
 **Minimum Truncation Limits for LLM-consumed content:**
 
@@ -653,7 +653,7 @@ Truncation limits consumed by step handlers (test, self_check, verify_spec) SHAL
 #### Scenario: Assistant response uses head+tail truncation in retry context
 - **WHEN** `format_history_for_retry()` truncates a previous assistant response
 - **THEN** head+tail truncation is used: head (1000 chars) preserves step instructions and schema definitions, tail (remainder of budget) preserves final conclusions and tool results
-- **AND** user prompts use head truncation to preserve instructions
+- **AND** user prompts are preserved in full (with a 50K safety cap); repeated content is handled by `deduplicate_prompt_lines()` in LLMCaller
 
 #### Scenario: Loop iteration summaries use FIFO eviction
 - **WHEN** accumulated iteration summaries exceed the total character limit
@@ -664,6 +664,45 @@ Truncation limits consumed by step handlers (test, self_check, verify_spec) SHAL
 - **WHEN** a step handler (test, self_check, verify_spec) truncates stdout or stderr content
 - **THEN** the truncation limit is imported from the shared `truncation.py` module
 - **AND** all handlers sharing the same truncation context use the same constant value
+
+### Requirement: Prompt Line-Level Deduplication
+
+The flow engine SHALL deduplicate repeated contiguous line blocks within a prompt before sending it to the LLM, to reclaim context window space wasted by spec content repeated across retry attempts.
+
+**Deduplication Rules:**
+
+- **Exact match**: Only lines that are character-for-character identical qualify — no fuzzy matching or lossy compression
+- **Contiguous blocks**: Only contiguous blocks of >= `min_block_lines` (default 3) identical lines are deduplicated
+- **First-occurrence preserved**: The first occurrence of a block in the prompt is kept verbatim; subsequent occurrences are replaced with a marker of the form `[DUPLICATED CONTENT: N lines #HASH, from "FIRST_LINE" to "LAST_LINE"]`, where HASH is a short content hash for disambiguation
+- **Per-call independence**: Deduplication is performed independently for each LLM call; no cross-call state is maintained
+- **Pure string operation**: The function operates on raw line text without understanding prompt structure or semantics
+- **Blank-line exclusion**: Blocks consisting entirely of blank lines are not deduplicated
+- **Marker passthrough**: Lines that are existing dedup markers (from prior dedup passes) are skipped during matching
+
+**Integration Point:**
+
+- The `deduplicate_prompt_lines(prompt, min_block_lines=3)` function is defined in an independent module (`se3/engine/prompt_dedup.py`), decoupled from retry logic, chat history, or any specific step handler
+- Called in `LLMCaller._call_with_retry()` after `effective_prompt` is fully assembled (including retry context, extra prompt, read-only constraints) and before subprocess arguments are built
+- Only applied on retries (`is_retry=True`); first calls have no internal repetition by definition
+- `_record_prompt` records the deduped prompt, keeping history consistent with actual LLM input
+- Failures in deduplication are caught and logged as warnings; the original prompt is used as fallback
+
+**Design rationale:** Character-count truncation of user prompts (the prior approach) discards unique content that appears after repeated spec blocks (e.g., task-specific instructions following embedded specs). Line-level deduplication is a lossless alternative: it removes only provably identical content while preserving all unique portions of the prompt.
+
+#### Scenario: First LLM call is a no-op
+- **WHEN** `_call_with_retry()` makes the first call for a step (not a retry)
+- **THEN** `deduplicate_prompt_lines()` is not invoked
+- **AND** the prompt is passed to the LLM unchanged
+
+#### Scenario: Retry deduplicates repeated spec content
+- **WHEN** `_call_with_retry()` retries an LLM call and `effective_prompt` contains spec content repeated across retry context entries
+- **THEN** `deduplicate_prompt_lines()` replaces subsequent occurrences of repeated blocks with dedup markers
+- **AND** the first occurrence of each block is preserved verbatim
+- **AND** all unique content (task instructions, error diagnostics) is preserved regardless of position
+
+#### Scenario: Recorded prompt matches LLM input
+- **WHEN** `_record_prompt()` saves the prompt to history after a retry call
+- **THEN** the recorded prompt is the deduped version (same as what the LLM received)
 
 ### Requirement: 状态持久化与恢复
 

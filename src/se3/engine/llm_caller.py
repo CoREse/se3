@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..agent_runner import AgentRunner, InfraErrorType
 from ..claude_runner import ClaudeCodeRunner, ClaudeRunner
+from .prompt_dedup import deduplicate_prompt_lines
 
 logger = logging.getLogger(__name__)
 
@@ -773,12 +774,10 @@ class LLMCaller:
         last_error = ""
 
         for internal_attempt in range(self.max_retries):
-            # Combine external attempt (from caller) with internal attempt (network retries)
-            # to determine if we should inject history context
-            total_attempt = self.external_attempt * self.max_retries + internal_attempt
+            is_retry = self.external_attempt > 0 or internal_attempt > 0
 
             # On retry (either external or internal), inject previous conversation context
-            if total_attempt > 0:
+            if is_retry:
                 retry_context = self._get_retry_context()
                 if retry_context:
                     if self.retry_mode == "continue":
@@ -796,6 +795,14 @@ class LLMCaller:
                     effective_prompt = original_prompt
             else:
                 effective_prompt = prompt
+
+            # Deduplicate repeated line blocks (e.g. spec content repeated across retry attempts).
+            # Only on retries — first call has no internal repetition by definition.
+            if is_retry:
+                try:
+                    effective_prompt = deduplicate_prompt_lines(effective_prompt)
+                except Exception:
+                    logger.warning("deduplicate_prompt_lines failed, using original prompt", exc_info=True)
 
             args = ["--output-format", "stream-json", "--verbose", "-p", effective_prompt]
 

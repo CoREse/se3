@@ -1149,3 +1149,364 @@ class TestExtraPromptThreadSafety:
             t.join(timeout=10)
 
         assert not errors, f"Thread safety errors: {errors}"
+
+
+class TestCallWithRetryDedup:
+    """Integration test: _call_with_retry invokes deduplicate_prompt_lines."""
+
+    def test_call_with_retry_skips_dedup_on_first_call(self, tmp_path):
+        """Verify that _call_with_retry does NOT call deduplicate_prompt_lines
+        on the first call (total_attempt == 0) since there is no internal repetition."""
+        from unittest.mock import patch, MagicMock
+        from se3.engine.prompt_dedup import deduplicate_prompt_lines as real_dedup
+
+        caller = LLMCaller(
+            project_root=tmp_path,
+            flow_id="test-flow",
+            step_id="test-step",
+            step_type="implement",
+            agents=[{"name": "test", "type": "claude-code", "cmd": "echo"}],
+        )
+
+        with patch("se3.engine.llm_caller.deduplicate_prompt_lines", wraps=real_dedup) as mock_dedup, \
+             patch.object(caller, "_get_current_runner") as mock_get_runner:
+            runner_inst = MagicMock()
+            result_obj = MagicMock()
+            result_obj.success = True
+            result_obj.output = "test output"
+            result_obj.interrupted = False
+            runner_inst.run_with_monitor.return_value = result_obj
+            mock_get_runner.return_value = runner_inst
+
+            # Use a simple on_output callback to avoid StreamJSONTracker setup
+            output_lines = []
+            caller._call_with_retry(
+                prompt="test prompt",
+                timeout=30,
+                context_files=None,
+                on_output=lambda line: output_lines.append(line),
+                require_json=False,
+                json_retry_count=0,
+            )
+
+            # Dedup should NOT be called on first call (no repetition possible)
+            mock_dedup.assert_not_called()
+
+            # Verify the original prompt was passed to run_with_monitor unchanged
+            call_kwargs = runner_inst.run_with_monitor.call_args
+            passed_args = call_kwargs[1]["args"] if "args" in (call_kwargs[1] or {}) else call_kwargs[0][0]
+            prompt_idx = passed_args.index("-p")
+            assert passed_args[prompt_idx + 1] == "test prompt"
+
+    def test_record_prompt_receives_deduped_prompt(self, tmp_path):
+        """Verify _record_prompt is called with the deduped prompt on retry,
+        not the raw duplicate."""
+        from unittest.mock import patch, MagicMock, call
+
+        # A prompt that will actually change after dedup
+        spec_block = "spec A\nspec B\nspec C"
+        original_prompt = f"header\n{spec_block}\nmiddle\n{spec_block}\nfooter"
+
+        caller = LLMCaller(
+            project_root=tmp_path,
+            flow_id="test-flow",
+            step_id="test-step",
+            step_type="implement",
+            agents=[{"name": "test", "type": "claude-code", "cmd": "echo"}],
+        )
+        # Simulate a retry so total_attempt > 0 and dedup is invoked
+        caller.external_attempt = 1
+
+        with patch.object(caller, "_record_prompt") as mock_record, \
+             patch.object(caller, "_get_current_runner") as mock_get_runner, \
+             patch.object(caller, "_get_retry_context", return_value=None):
+            runner_inst = MagicMock()
+            result_obj = MagicMock()
+            result_obj.success = True
+            result_obj.output = "test output"
+            result_obj.interrupted = False
+            runner_inst.run_with_monitor.return_value = result_obj
+            mock_get_runner.return_value = runner_inst
+
+            output_lines = []
+            caller._call_with_retry(
+                prompt=original_prompt,
+                timeout=30,
+                context_files=None,
+                on_output=lambda line: output_lines.append(line),
+                require_json=False,
+                json_retry_count=0,
+            )
+
+            mock_record.assert_called_once()
+            recorded_prompt = mock_record.call_args[0][0]
+            # The recorded prompt should contain the dedup marker, not the raw duplicate
+            assert "DUPLICATED CONTENT" in recorded_prompt
+            # The second occurrence of spec_block should be replaced — check standalone lines
+            standalone_count = sum(1 for l in recorded_prompt.split("\n") if l == "spec A")
+            assert standalone_count == 1
+
+    def test_dedup_with_continue_mode_retry_context(self, tmp_path):
+        """Verify dedup works correctly in continue mode where retry context
+        is combined with a continuation instruction (not the full original prompt)."""
+        from unittest.mock import patch, MagicMock
+
+        spec_block = "spec line 1\nspec line 2\nspec line 3"
+        original_prompt = f"Task: implement\n{spec_block}\nBegin work."
+
+        # Simulate retry context containing the same spec block
+        retry_context = (
+            "[Previous conversation context for this step]:\n"
+            "\n=== Attempt 1 ===\n"
+            "\n[User Prompt]:\n"
+            f"Task: implement\n{spec_block}\nBegin work.\n"
+            "\n[Assistant Response]:\n"
+            "I started but hit an error.\n"
+            "\n========================================\n"
+            "[Continue from where the previous attempt stopped. "
+            "Do NOT redo completed work — pick up from the breakpoint.]"
+        )
+
+        caller = LLMCaller(
+            project_root=tmp_path,
+            flow_id="test-flow",
+            step_id="test-step",
+            step_type="implement",
+            agents=[{"name": "test", "type": "claude-code", "cmd": "echo"}],
+        )
+        # Simulate external_attempt > 0 to trigger retry path
+        caller.external_attempt = 1
+        caller.retry_mode = "continue"
+
+        with patch.object(caller, "_get_retry_context", return_value=retry_context), \
+             patch.object(caller, "_record_prompt") as mock_record, \
+             patch.object(caller, "_get_current_runner") as mock_get_runner:
+            runner_inst = MagicMock()
+            result_obj = MagicMock()
+            result_obj.success = True
+            result_obj.output = "test output"
+            result_obj.interrupted = False
+            runner_inst.run_with_monitor.return_value = result_obj
+            mock_get_runner.return_value = runner_inst
+
+            output_lines = []
+            caller._call_with_retry(
+                prompt=original_prompt,
+                timeout=30,
+                context_files=None,
+                on_output=lambda line: output_lines.append(line),
+                require_json=False,
+                json_retry_count=0,
+            )
+
+            mock_record.assert_called_once()
+            recorded_prompt = mock_record.call_args[0][0]
+            # In continue mode, the effective_prompt is retry_context + continuation instruction.
+            # Verify the continue-mode structure: retry context header and continuation instruction.
+            assert "[Previous conversation context for this step]:" in recorded_prompt
+            assert "Continue the task from where you left off" in recorded_prompt
+            # The original prompt should NOT be re-appended after the retry context.
+            # "Begin work." appears once inside the retry context's historical user prompt,
+            # but NOT a second time as a re-appended original prompt.
+            assert recorded_prompt.count("Begin work.") == 1
+            # Spec content appears once (in the retry context's user prompt), no duplication
+            assert recorded_prompt.count("spec line 1") == 1
+            # Continue mode does not re-append the original prompt, so there is no
+            # duplicated content to deduplicate — no dedup markers should be present.
+            assert "DUPLICATED CONTENT" not in recorded_prompt
+
+    def test_dedup_with_retry_mode_deduplicates_spec(self, tmp_path):
+        """Verify dedup removes repeated spec content in retry mode where
+        retry context + original prompt produces duplication."""
+        from unittest.mock import patch, MagicMock
+
+        spec_block = "spec line 1\nspec line 2\nspec line 3"
+        original_prompt = f"Task: implement\n{spec_block}\nBegin work."
+
+        # Simulate retry context containing the same spec block (retry mode re-prepends original)
+        retry_context = (
+            "[Previous conversation context for this step]:\n"
+            "\n=== Attempt 1 ===\n"
+            "\n[User Prompt]:\n"
+            f"Task: implement\n{spec_block}\nBegin work.\n"
+            "\n[Assistant Response]:\n"
+            "I started but hit an error.\n"
+            "\n========================================\n"
+            "[The above attempt(s) failed. Please try again with the same task.]"
+        )
+
+        caller = LLMCaller(
+            project_root=tmp_path,
+            flow_id="test-flow",
+            step_id="test-step",
+            step_type="implement",
+            agents=[{"name": "test", "type": "claude-code", "cmd": "echo"}],
+        )
+        caller.external_attempt = 1
+        caller.retry_mode = "retry"
+
+        with patch.object(caller, "_get_retry_context", return_value=retry_context), \
+             patch.object(caller, "_record_prompt") as mock_record, \
+             patch.object(caller, "_get_current_runner") as mock_get_runner:
+            runner_inst = MagicMock()
+            result_obj = MagicMock()
+            result_obj.success = True
+            result_obj.output = "test output"
+            result_obj.interrupted = False
+            runner_inst.run_with_monitor.return_value = result_obj
+            mock_get_runner.return_value = runner_inst
+
+            output_lines = []
+            caller._call_with_retry(
+                prompt=original_prompt,
+                timeout=30,
+                context_files=None,
+                on_output=lambda line: output_lines.append(line),
+                require_json=False,
+                json_retry_count=0,
+            )
+
+            mock_record.assert_called_once()
+            recorded_prompt = mock_record.call_args[0][0]
+            # In retry mode, effective_prompt = retry_context + "\n" + original_prompt
+            # This means the spec block appears twice — dedup should replace the second
+            assert "DUPLICATED CONTENT" in recorded_prompt
+            # The spec block text should appear only once (in its original position)
+            assert recorded_prompt.count("spec line 1") == 1
+
+    def test_internal_retry_triggers_dedup(self, tmp_path):
+        """Verify dedup runs on internal retry (external_attempt=0, internal_attempt=1).
+
+        When a network-level retry happens within the first external call,
+        total_attempt = 0 * max_retries + 1 = 1, which triggers dedup.
+        This tests the interaction between dedup and retry context generated
+        from only the current call's first attempt (just recorded moments before).
+        """
+        from unittest.mock import patch, MagicMock
+
+        spec_block = "spec line 1\nspec line 2\nspec line 3"
+        original_prompt = f"Task: implement\n{spec_block}\nBegin work."
+
+        # Retry context simulating what would be recorded from the first internal attempt
+        retry_context = (
+            "[Previous conversation context for this step]:\n"
+            "\n=== Attempt 1 ===\n"
+            "\n[User Prompt]:\n"
+            f"Task: implement\n{spec_block}\nBegin work.\n"
+            "\n[Assistant Response]:\n"
+            "Started but network error.\n"
+            "\n========================================\n"
+            "[The above attempt(s) failed. Please try again with the same task.]"
+        )
+
+        caller = LLMCaller(
+            project_root=tmp_path,
+            flow_id="test-flow",
+            step_id="test-step",
+            step_type="implement",
+            agents=[{"name": "test", "type": "claude-code", "cmd": "echo"}],
+        )
+        # external_attempt=0: this is the first external call
+        caller.external_attempt = 0
+        caller.retry_mode = "retry"
+
+        # We need to simulate the internal retry loop: first attempt fails, second succeeds.
+        # On internal_attempt=0: total_attempt=0, no dedup (first call)
+        # On internal_attempt=1: total_attempt=1, dedup runs
+        call_count = [0]
+        recorded_prompts = []
+
+        def fake_record_prompt(prompt_text, attempt):
+            recorded_prompts.append(prompt_text)
+
+        def fake_get_retry_context():
+            # Only return retry context on the second internal attempt
+            if call_count[0] > 0:
+                return retry_context
+            return None
+
+        def fake_run_with_monitor(**kwargs):
+            call_count[0] += 1
+            result_obj = MagicMock()
+            if call_count[0] == 1:
+                # First internal attempt fails
+                result_obj.success = False
+                result_obj.output = ""
+                result_obj.interrupted = False
+                raise RuntimeError("Network error")
+            # Second internal attempt succeeds
+            result_obj.success = True
+            result_obj.output = "test output"
+            result_obj.interrupted = False
+            return result_obj
+
+        with patch.object(caller, "_record_prompt", side_effect=fake_record_prompt), \
+             patch.object(caller, "_get_retry_context", side_effect=fake_get_retry_context), \
+             patch.object(caller, "_get_current_runner") as mock_get_runner, \
+             patch.object(caller, "_rotate_agent"):
+            runner_inst = MagicMock()
+            runner_inst.run_with_monitor.side_effect = fake_run_with_monitor
+            mock_get_runner.return_value = runner_inst
+
+            output_lines = []
+            caller._call_with_retry(
+                prompt=original_prompt,
+                timeout=30,
+                context_files=None,
+                on_output=lambda line: output_lines.append(line),
+                require_json=False,
+                json_retry_count=0,
+            )
+
+            # Should have two recorded prompts (one per internal attempt)
+            assert len(recorded_prompts) == 2
+            # First prompt: no dedup (total_attempt=0)
+            assert "DUPLICATED CONTENT" not in recorded_prompts[0]
+            # Second prompt: dedup applied (total_attempt=1), spec block deduplicated
+            assert "DUPLICATED CONTENT" in recorded_prompts[1]
+            assert recorded_prompts[1].count("spec line 1") == 1
+
+    def test_dedup_runs_as_noop_when_retry_context_is_none(self, tmp_path):
+        """When total_attempt > 0 but _get_retry_context() returns None,
+        dedup still runs on the original prompt (as a no-op since there
+        is no internal repetition). Verifies the code path is exercised."""
+        from unittest.mock import patch, MagicMock
+        from se3.engine.prompt_dedup import deduplicate_prompt_lines as real_dedup
+
+        caller = LLMCaller(
+            project_root=tmp_path,
+            flow_id="test-flow",
+            step_id="test-step",
+            step_type="implement",
+            agents=[{"name": "test", "type": "claude-code", "cmd": "echo"}],
+        )
+        # Simulate a retry (external_attempt=1) so total_attempt > 0
+        caller.external_attempt = 1
+
+        with patch("se3.engine.llm_caller.deduplicate_prompt_lines", wraps=real_dedup) as mock_dedup, \
+             patch.object(caller, "_get_current_runner") as mock_get_runner, \
+             patch.object(caller, "_get_retry_context", return_value=None):
+            runner_inst = MagicMock()
+            result_obj = MagicMock()
+            result_obj.success = True
+            result_obj.output = "test output"
+            result_obj.raw_lines = []
+            runner_inst.run_with_monitor.return_value = result_obj
+            mock_get_runner.return_value = runner_inst
+
+            caller._call_with_retry(
+                prompt="unique prompt without repetition",
+                timeout=30,
+                context_files=None,
+                on_output=lambda x: None,
+                require_json=False,
+                json_retry_count=0,
+            )
+
+            # Dedup should be called (total_attempt > 0) even though retry context is None
+            mock_dedup.assert_called_once()
+            # The prompt has no internal repetition, so dedup is a no-op
+            passed_args = runner_inst.run_with_monitor.call_args
+            call_args = passed_args[1]["args"] if "args" in (passed_args[1] or {}) else passed_args[0][0]
+            prompt_idx = call_args.index("-p")
+            assert call_args[prompt_idx + 1] == "unique prompt without repetition"

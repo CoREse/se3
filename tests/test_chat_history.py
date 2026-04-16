@@ -425,14 +425,15 @@ class TestFormatHistoryForRetry:
         context = format_history_for_retry(tmp_project, "flow1", "nonexistent")
         assert context is None
 
-    def test_format_truncates_long_content(self, tmp_project):
+    def test_format_preserves_long_user_prompt(self, tmp_project):
         long_prompt = "x" * 5000
         record_prompt(tmp_project, "flow1", "step1", "analyze", long_prompt, 0)
 
         context = format_history_for_retry(tmp_project, "flow1", "step1")
         assert context is not None
-        assert "[truncated]" in context
-        assert len(context) < 5000
+        # User prompts are no longer truncated (dedup handles repeated content)
+        assert "x" * 5000 in context
+        assert "[truncated]" not in context
 
 
 # --- Human-readable rendering ---

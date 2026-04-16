@@ -28,6 +28,15 @@ from .tool_formatters import (
 
 # Default project root for history storage
 _SE3_DIR = "se3"
+
+# Safety cap for user prompts in retry context (replaces the old 2000/4000 char
+# truncation limits that were removed to enable prompt-level dedup).  Primary
+# dedup happens in LLMCaller._call_with_retry() via deduplicate_prompt_lines()
+# after combining retry context with the original prompt; this limit is a
+# defensive fallback preventing unbounded growth when dedup has no effect
+# (e.g. first retry with no repeated blocks).
+_USER_PROMPT_SAFETY_LIMIT = 50_000
+
 _HISTORY_DIR = "history"
 
 
@@ -434,9 +443,11 @@ def format_history_for_retry(
         flow_id: Flow instance ID
         step_id: Step instance ID
         mode: 'continue' (default) to resume from breakpoint, or 'retry' to restart.
-              In 'continue' mode: higher truncation limits (4000 chars for user prompts),
-              assistant responses with tool calls are not truncated, and a continuation
-              instruction is appended. In 'retry' mode: preserves original behavior.
+              User prompts are preserved in full (with a 50K safety cap); repeated
+              content is handled by deduplicate_prompt_lines() in LLMCaller.
+              In 'continue' mode: assistant responses with tool calls are not
+              truncated, and a continuation instruction is appended.
+              In 'retry' mode: preserves original behavior.
 
     Returns a string to prepend to the retry prompt, or None if no history.
     """
@@ -453,7 +464,6 @@ def format_history_for_retry(
         return None
 
     # Set truncation limits based on mode
-    user_prompt_limit = 4000 if mode == "continue" else 2000
     assistant_fallback_limit = 4000 if mode == "continue" else 2000
 
     parts = ["[Previous conversation context for this step]:"]
@@ -464,11 +474,15 @@ def format_history_for_retry(
 
         for msg in msgs:
             if msg.role == "user":
-                # Truncate very long prompts in context
-                content = msg.content
-                if len(content) > user_prompt_limit:
-                    content = content[:user_prompt_limit] + "\n... [truncated]"
                 parts.append(f"\n[User Prompt]:")
+                content = msg.content
+                prompt_len = len(content)
+                if prompt_len > _USER_PROMPT_SAFETY_LIMIT:
+                    logger.warning(
+                        f"User prompt in retry context hit safety limit "
+                        f"({prompt_len} chars > {_USER_PROMPT_SAFETY_LIMIT}), truncating"
+                    )
+                    content = content[:_USER_PROMPT_SAFETY_LIMIT] + "\n... [user prompt truncated for retry context safety]"
                 parts.append(content)
 
             elif msg.role == "assistant":
