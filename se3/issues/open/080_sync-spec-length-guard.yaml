@@ -1,0 +1,19 @@
+id: '080'
+title: '[sync] spec 更新的 50% 长度守卫阈值硬编码，可能拦截合法精简'
+description: >
+  spec 更新时有一个 50% 长度检查防止 LLM 截断 spec 内容。
+  但合法的精简（删除过时需求）也会被拦住。
+
+  问题：
+  1. 阈值硬编码为 50%，没有配置项
+  2. 没有 bypass 机制让用户明确确认大幅缩减
+  3. 被拦住后没有清晰的错误信息说明原因和如何处理
+status: open
+priority: low
+scope: in_scope
+type: enhancement
+tags:
+- sync
+- config
+created_at: '2026-04-16T10:00:00.000000'
+updated_at: '2026-04-16T10:00:00.000000'

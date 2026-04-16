@@ -1,0 +1,20 @@
+id: '079'
+title: '[sync] discover_missing_specs 静默失败，用户无法区分"无缺失"和"发现出错"'
+description: >
+  discover_missing_specs() LLM 调用失败时返回空列表，仅设 discovery_failed 标志。
+  CLI 输出没有明确区分 "没有发现缺失 spec" 和 "发现过程出错了"，
+  用户会产生虚假的安全感。
+
+  建议：
+  1. discovery 失败时在 CLI 输出中明确警告
+  2. 考虑 discovery 的重试机制（当前没有）
+  3. 在 SyncResult 的最终输出中单独列出 discovery 状态
+status: open
+priority: high
+scope: in_scope
+type: bug
+tags:
+- sync
+- reliability
+created_at: '2026-04-16T10:00:00.000000'
+updated_at: '2026-04-16T10:00:00.000000'

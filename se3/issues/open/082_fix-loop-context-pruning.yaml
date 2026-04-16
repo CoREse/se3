@@ -1,0 +1,24 @@
+id: '082'
+title: '[engine] fix loop 上下文膨胀：implement prompt 从 150KB 增长到 943KB 导致 LLM 幻觉'
+description: >
+  test→self_check→implement 的 fix loop 没有做上下文裁剪。
+  每轮 self_check 产出的 issues + 前几轮修复记录被全量灌入下一轮 implement prompt，
+  9 轮之后从 150KB 膨胀到 943KB，导致 LLM 产生幻觉 Edit 而 step 失败。
+
+  实际案例：session 20260415-091336_14d298cc，
+  implement entry 18 从 148KB 跳到 745KB，最终 entry 30 达到 943KB。
+
+  建议：
+  1. fix loop 的 implement prompt 只传递当前轮的 fix_instructions
+  2. 截断或摘要化更早的修复历史
+  3. 或者在 context builder 中设置硬上限，超限时裁剪旧上下文
+status: open
+priority: high
+scope: in_scope
+type: bug
+tags:
+- engine
+- fix-loop
+- context
+created_at: '2026-04-16T10:00:00.000000'
+updated_at: '2026-04-16T10:00:00.000000'

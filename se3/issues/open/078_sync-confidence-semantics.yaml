@@ -1,0 +1,20 @@
+id: '078'
+title: '[sync] confidence 语义混淆：LLM certainty 与 action risk 未分离'
+description: >
+  当前 confidence 字段同时表示 "LLM 对判断的把握度" 和 "是否自动执行" 的门控。
+  但 LLM 高置信度不等于低风险 — 一个 LLM 很确信的 update_spec 可能恰恰删掉关键需求。
+
+  应拆分为两个维度：
+  1. LLM certainty — LLM 对自己分析结论的确定程度
+  2. Action risk — 这个操作的潜在影响（如删除需求 vs 补充文档）
+
+  default 模式的自动执行门控应同时考虑两者，而不是只看 confidence。
+status: open
+priority: high
+scope: in_scope
+type: enhancement
+tags:
+- sync
+- design
+created_at: '2026-04-16T10:00:00.000000'
+updated_at: '2026-04-16T10:00:00.000000'
