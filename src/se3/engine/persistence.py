@@ -391,7 +391,7 @@ class PersistenceManager:
                 except Exception:
                     updated_at = ""
 
-                task_description = self._extract_history_summary(flow_dir)
+                task_description = self.extract_history_summary(flow_dir)
                 flows.append({
                     "flow_id": flow_id,
                     "status": "history",
@@ -406,7 +406,7 @@ class PersistenceManager:
         return flows
 
     @staticmethod
-    def _extract_history_summary(flow_dir: "Path") -> str:
+    def extract_history_summary(flow_dir: "Path") -> str:
         """Extract a short task description from the first JSONL file in a history dir."""
         import re
 

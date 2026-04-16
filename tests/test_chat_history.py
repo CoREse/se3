@@ -954,6 +954,14 @@ class TestFoldSpecContent:
         result = fold_spec_content("Available Specifications", content)
         assert result is None
 
+    def test_project_conventions_dispatches(self):
+        content = "## Project Conventions\n### base\nBase spec content.\n### se3-commands\nCommand spec."
+        result = fold_spec_content("Project Conventions", content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert any("@se3-commands" in n for n in names)
+
     def test_other_title_not_folded(self):
         assert fold_spec_content("Task Description", "Do something.") is None
         assert fold_spec_content("Step Instructions", "You are an expert.") is None
@@ -1382,6 +1390,36 @@ class TestSegmentPromptSpecAbsorption:
             "### se3-commands\nMore spec content."
         )
         result = fold_spec_content("Specifications (for context only)", content)
+        assert result is not None
+        assert any("@base" in r.plain for r in result)
+        assert any("@se3-commands" in r.plain for r in result)
+
+    def test_project_conventions_internal_headings_absorbed(self):
+        """## Purpose, ## Requirements inside '## Project Conventions' must NOT
+        become separate segments (they should be absorbed)."""
+        prompt = (
+            "## Task Description\nImplement feature.\n\n"
+            "## Project Conventions\n"
+            "### base\n# SE3 Framework\n## Purpose\nProject.\n"
+            "## Requirements\nReqs.\n"
+            "### se3-commands\n# Commands\n## Purpose\nCLI.\n\n"
+            "## Instructions\nDo stuff."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Project Conventions" in titles
+        assert "Instructions" in titles
+        assert "Purpose" not in titles
+        assert "Requirements" not in titles
+
+    def test_fold_spec_content_project_conventions(self):
+        """fold_spec_content() should fold '## Project Conventions' title."""
+        content = (
+            "## Project Conventions\n"
+            "### base\nSpec content here.\n"
+            "### se3-commands\nMore spec content."
+        )
+        result = fold_spec_content("Project Conventions", content)
         assert result is not None
         assert any("@base" in r.plain for r in result)
         assert any("@se3-commands" in r.plain for r in result)

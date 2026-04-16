@@ -745,7 +745,7 @@ _SEGMENT_PATTERNS: list[tuple[re.Pattern, Any]] = [
     (re.compile(
         r"^## (Changes Made|Planned Spec Changes|Test Results|Fix Context|"
         r"Instructions|Previous Verification|Previous (?:Task )?Plan(?:\s*\(.*?\))?|Reviewer Feedback|"
-        r"Implementation Notes|Task Type|Scope|Review Dimensions|Specifications \(for context only\))"
+        r"Implementation Notes|Task Type|Scope|Review Dimensions|Specifications \(for context only\)|Project Conventions)"
     ), lambda m: m.group(1)),
     (re.compile(r"^## (Part \d+:.+)"), lambda m: m.group(1).strip()),
     # Generic ## sections — capture the heading text
@@ -758,6 +758,7 @@ _SEGMENT_PATTERNS: list[tuple[re.Pattern, Any]] = [
 _SPEC_SECTION_TITLES = frozenset({
     "Relevant Specifications",
     "Specifications (for context only)",
+    "Project Conventions",
 })
 
 
@@ -888,7 +889,8 @@ def fold_spec_content(title: str, content: str) -> Optional[list]:
 
     Returns list of Rich Text renderables, or None if no folding needed.
     """
-    if title in ("Relevant Specifications", "Specifications (for context only)"):
+    if title in ("Relevant Specifications", "Specifications (for context only)",
+                  "Project Conventions"):
         return _fold_spec_subsections(content)
     if title.startswith("Base Specification"):
         return _fold_base_spec(content)

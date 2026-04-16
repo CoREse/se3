@@ -77,12 +77,6 @@ def format_duration(created: str, updated: str) -> str:
         return "unknown"
 
 
-def list_active_flows(project_root: Path) -> List[Dict[str, Any]]:
-    """List all active flows from persistence manager."""
-    persistence = PersistenceManager(project_root)
-    return persistence.list_active_flows()
-
-
 def list_all_flows(project_root: Path) -> List[Dict[str, Any]]:
     """List all flows from all data sources."""
     persistence = PersistenceManager(project_root)
@@ -120,26 +114,16 @@ def list_archived_flows_from_disk(project_root: Path) -> List[Dict[str, Any]]:
     return archived
 
 
-def get_flow_detail(project_root: Path, flow_id: str) -> Optional[Dict[str, Any]]:
-    """Get detailed information about a specific flow."""
-    persistence = PersistenceManager(project_root)
+def _detail_from_flow(project_root: Path, flow: Any) -> Dict[str, Any]:
+    """Build detail dict from a FlowInstance object."""
+    chat_sessions = get_flow_history(project_root, flow.flow_id)
 
-    # Load the flow
-    flow = persistence.load_flow()
-    if not flow or flow.flow_id != flow_id:
-        return None
-
-    # Get chat history for this flow
-    chat_sessions = get_flow_history(project_root, flow_id)
-
-    # Build step details
     step_details = []
     for step_id in flow.state.step_history:
         step = flow.state.steps.get(step_id)
         if not step:
             continue
-
-        step_info = {
+        step_details.append({
             "step_id": step.step_id,
             "step_type": step.step_type.value,
             "status": step.status.value,
@@ -147,10 +131,8 @@ def get_flow_detail(project_root: Path, flow_id: str) -> Optional[Dict[str, Any]
             "completed_at": step.completed_at.isoformat() if step.completed_at else None,
             "retry_count": step.retry_count,
             "error_message": step.error_message,
-        }
-        step_details.append(step_info)
+        })
 
-    # Calculate progress
     completed, total = flow.get_progress()
 
     return {
@@ -168,6 +150,113 @@ def get_flow_detail(project_root: Path, flow_id: str) -> Optional[Dict[str, Any]
         "steps": step_details,
         "chat_sessions": len(chat_sessions),
     }
+
+
+def _load_archived_flow(project_root: Path, flow_id: str) -> Optional[Any]:
+    """Try to load a FlowInstance from archive files matching flow_id."""
+    from ..engine.models import FlowInstance
+
+    archive_dir = project_root / "se3" / "state" / "archive"
+    if not archive_dir.exists():
+        return None
+
+    for archive_file in archive_dir.glob("engine_*.json"):
+        try:
+            data = json.loads(archive_file.read_text(encoding="utf-8"))
+            if data.get("flow_id") == flow_id:
+                return FlowInstance.from_dict(data)
+        except (json.JSONDecodeError, KeyError, ValueError, IOError):
+            continue
+    return None
+
+
+def _detail_from_history(project_root: Path, flow_id: str) -> Optional[Dict[str, Any]]:
+    """Build a minimal detail dict from history-only data."""
+    history_dir = project_root / "se3" / "history" / flow_id
+    if not history_dir.is_dir():
+        return None
+
+    chat_sessions = get_flow_history(project_root, flow_id)
+
+    # Try to read _meta.json for timestamps
+    meta_path = history_dir / "_meta.json"
+    created_at = ""
+    task_type = None
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            created_at = meta.get("created_at", "")
+            task_type = meta.get("type")
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    # Derive updated_at from latest file mtime
+    try:
+        latest_mtime = max(
+            (f.stat().st_mtime for f in history_dir.iterdir() if f.is_file()),
+            default=0,
+        )
+        updated_at = (
+            datetime.fromtimestamp(latest_mtime).isoformat() if latest_mtime else ""
+        )
+    except Exception:
+        updated_at = ""
+
+    # Extract task description from chat history
+    task_description = PersistenceManager.extract_history_summary(history_dir)
+
+    # Build step list from chat session step IDs
+    step_details = []
+    for session in chat_sessions:
+        step_details.append({
+            "step_id": session.step_id,
+            "step_type": session.step_type,
+            "status": "completed",
+            "started_at": None,
+            "completed_at": None,
+            "retry_count": 0,
+            "error_message": None,
+        })
+
+    return {
+        "flow_id": flow_id,
+        "status": "history",
+        "task_description": task_description,
+        "task_type": task_type,
+        "change_name": None,
+        "created_at": created_at,
+        "updated_at": updated_at,
+        "completed_at": None,
+        "is_loop_mode": False,
+        "progress": {"completed": len(step_details), "total": len(step_details)},
+        "current_step_id": None,
+        "steps": step_details,
+        "chat_sessions": len(chat_sessions),
+    }
+
+
+def get_flow_detail(project_root: Path, flow_id: str) -> Optional[Dict[str, Any]]:
+    """Get detailed information about a specific flow.
+
+    Searches across three data sources in order:
+    1. Active flow (se3/state/engine.json)
+    2. Archived flows (se3/state/archive/engine_*.json)
+    3. History-only flows (se3/history/{flow_id}/)
+    """
+    persistence = PersistenceManager(project_root)
+
+    # 1. Active flow
+    flow = persistence.load_flow()
+    if flow and flow.flow_id == flow_id:
+        return _detail_from_flow(project_root, flow)
+
+    # 2. Archived flow
+    archived_flow = _load_archived_flow(project_root, flow_id)
+    if archived_flow:
+        return _detail_from_flow(project_root, archived_flow)
+
+    # 3. History-only flow
+    return _detail_from_history(project_root, flow_id)
 
 
 def _status_color(status: str) -> str:
@@ -319,8 +408,8 @@ def show_cmd(
     detail = get_flow_detail(project_root, flow_id)
 
     if not detail:
-        # Try to find partial matches
-        all_flows = list_active_flows(project_root)
+        # Try to find partial matches across all sources
+        all_flows = list_all_flows(project_root)
         matches = [f for f in all_flows if f.get("flow_id", "").startswith(flow_id)]
 
         if len(matches) == 1:
@@ -439,13 +528,12 @@ def restore_cmd(
     """
     project_root = get_project_root()
 
-    # Validate flow exists
-    persistence = PersistenceManager(project_root)
-    flow = persistence.load_flow()
+    # Validate flow exists across all sources (active, archived, history)
+    all_flows = list_all_flows(project_root)
+    exact = [f for f in all_flows if f.get("flow_id") == flow_id]
 
-    if not flow or flow.flow_id != flow_id:
+    if not exact:
         # Try to find by prefix
-        all_flows = list_active_flows(project_root)
         matches = [f for f in all_flows if f.get("flow_id", "").startswith(flow_id)]
 
         if len(matches) == 1:
