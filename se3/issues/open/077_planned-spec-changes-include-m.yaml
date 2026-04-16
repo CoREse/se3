@@ -1,0 +1,21 @@
+id: '077'
+title: Planned spec changes include modifications to issue-discovery spec's Two-class
+  Discovery Model (extending A-class trigger for sync gap detection). The actual spec
+  file modifications are deferred to the spec update phase and not verified here.
+description: 'Planned spec changes include modifications to issue-discovery spec''s
+  Two-class Discovery Model (extending A-class trigger for sync gap detection). The
+  actual spec file modifications are deferred to the spec update phase and not verified
+  here.
+
+
+  Suggestion: No action needed — spec updates will be applied in a subsequent step.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-15T14:48:40.176216'
+updated_at: '2026-04-15T14:48:40.176216'

@@ -99,6 +99,21 @@ def _render_sync_results(result) -> None:
             gap_tree.add(label)
         console.print(Panel(gap_tree, title="Gap Decisions", border_style="yellow"))
 
+    if hasattr(result, "conflict_resolutions") and result.conflict_resolutions:
+        conflict_tree = Tree("[bold]Conflict Resolutions[/bold]")
+        for res in result.conflict_resolutions:
+            spec_name = res.get("spec_name", "unknown")
+            action = res.get("action", "unknown")
+            desc = res.get("description", "")
+            if action == "update_spec":
+                label = f"[yellow]{spec_name}[/yellow] — updated spec to match code"
+            else:
+                label = f"[blue]{spec_name}[/blue] — created issue"
+            if desc:
+                label += f": {desc}"
+            conflict_tree.add(label)
+        console.print(Panel(conflict_tree, title="Conflict Decisions", border_style="magenta"))
+
     if hasattr(result, "issues_created") and result.issues_created > 0:
         issues_from_gaps = [
             r for r in result.gap_resolutions if r.get("action") == "create_issue"
@@ -118,6 +133,8 @@ def _render_sync_results(result) -> None:
     summary_parts.append(f"Conflicts pending: {len(result.conflicts)}")
     if result.specs_created:
         summary_parts.append(f"New specs:      {len(result.specs_created)}")
+    if result.discovery_failed:
+        summary_parts.append("[yellow]Warning: spec discovery failed, results may be incomplete[/yellow]")
 
     if result.all_in_sync and not result.conflicts:
         border_style = "green"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import threading
 import time
@@ -49,7 +50,7 @@ class TestCallFileGeneration:
     def test_generates_call_file(self, tmp_path):
         items = _make_pending(2)
         handler = SyncInteractionHandler(tmp_path, items)
-        call_file = handler._generate_pending_call_file()
+        call_file = handler.generate_pending_call_file()
 
         assert call_file.exists()
         data = json.loads(call_file.read_text())
@@ -60,7 +61,7 @@ class TestCallFileGeneration:
 
     def test_call_file_in_calls_dir(self, tmp_path):
         handler = SyncInteractionHandler(tmp_path, _make_pending(1))
-        call_file = handler._generate_pending_call_file()
+        call_file = handler.generate_pending_call_file()
 
         assert "se3/calls" in str(call_file)
         assert call_file.name.startswith("sync_pending_")
@@ -68,7 +69,7 @@ class TestCallFileGeneration:
     def test_parse_response_by_item_id(self, tmp_path):
         items = _make_pending(2)
         handler = SyncInteractionHandler(tmp_path, items)
-        call_file = handler._generate_pending_call_file()
+        call_file = handler.generate_pending_call_file()
 
         response_data = {
             "items": [
@@ -85,7 +86,7 @@ class TestCallFileGeneration:
     def test_parse_response_by_numeric_id(self, tmp_path):
         items = _make_pending(2)
         handler = SyncInteractionHandler(tmp_path, items)
-        handler._generate_pending_call_file()
+        handler.generate_pending_call_file()
 
         response_data = {
             "items": [
@@ -102,7 +103,7 @@ class TestCallFileGeneration:
     def test_parse_response_skips_invalid_decision(self, tmp_path):
         items = _make_pending(2)
         handler = SyncInteractionHandler(tmp_path, items)
-        handler._generate_pending_call_file()
+        handler.generate_pending_call_file()
 
         response_data = {
             "items": [
@@ -113,8 +114,26 @@ class TestCallFileGeneration:
         response_path = tmp_path / "resp.json"
         response_path.write_text(json.dumps(response_data))
 
+        # item_0 has invalid decision -> defaults to create_issue (matching terminal path)
         decisions = handler._parse_response_file(response_path)
-        assert decisions == {"item_1": "update_spec"}
+        assert decisions == {"item_0": "create_issue", "item_1": "update_spec"}
+
+    def test_parse_response_returns_all_when_complete(self, tmp_path):
+        items = _make_pending(2)
+        handler = SyncInteractionHandler(tmp_path, items)
+        handler.generate_pending_call_file()
+
+        response_data = {
+            "items": [
+                {"item_id": "item_0", "decision": "update_spec"},
+                {"item_id": "item_1", "decision": "update_spec"},
+            ]
+        }
+        response_path = tmp_path / "resp.json"
+        response_path.write_text(json.dumps(response_data))
+
+        decisions = handler._parse_response_file(response_path)
+        assert decisions == {"item_0": "update_spec", "item_1": "update_spec"}
 
     def test_parse_response_returns_none_for_empty(self, tmp_path):
         items = _make_pending(1)
@@ -256,7 +275,7 @@ class TestFilePollingPath:
     def test_detects_new_response_file(self, tmp_path):
         items = _make_pending(2)
         handler = SyncInteractionHandler(tmp_path, items)
-        call_file = handler._generate_pending_call_file()
+        call_file = handler.generate_pending_call_file()
         handler._call_file_path = call_file
 
         response_data = {
@@ -266,16 +285,19 @@ class TestFilePollingPath:
             ]
         }
 
-        def write_response_after_delay():
-            time.sleep(0.3)
+        ready_event = threading.Event()
+
+        def write_response_when_ready():
+            ready_event.wait(timeout=5)
             response_path = Path(str(call_file) + ".response")
             response_path.write_text(json.dumps(response_data))
 
-        writer = threading.Thread(target=write_response_after_delay)
+        writer = threading.Thread(target=write_response_when_ready)
         writer.start()
+        ready_event.set()
 
         handler._file_watch_path(call_file)
-        writer.join()
+        writer.join(timeout=5)
 
         assert handler._done_event.is_set()
         assert handler._decisions == {"item_0": "update_spec", "item_1": "create_issue"}
@@ -283,32 +305,60 @@ class TestFilePollingPath:
     def test_stops_on_stop_event(self, tmp_path):
         items = _make_pending(1)
         handler = SyncInteractionHandler(tmp_path, items)
-        call_file = handler._generate_pending_call_file()
+        call_file = handler.generate_pending_call_file()
 
-        def stop_after_delay():
-            time.sleep(0.3)
+        ready_event = threading.Event()
+
+        def stop_when_ready():
+            ready_event.wait(timeout=5)
             handler._stop_event.set()
 
-        stopper = threading.Thread(target=stop_after_delay)
+        stopper = threading.Thread(target=stop_when_ready)
         stopper.start()
+        ready_event.set()
 
         handler._file_watch_path(call_file)
-        stopper.join()
+        stopper.join(timeout=5)
 
         assert not handler._done_event.is_set()
 
-    def test_detects_preexisting_response(self, tmp_path):
+    def test_ignores_stale_preexisting_response(self, tmp_path):
         items = _make_pending(1)
         handler = SyncInteractionHandler(tmp_path, items)
-        call_file = handler._generate_pending_call_file()
+        call_file = handler.generate_pending_call_file()
 
         response_path = Path(str(call_file) + ".response")
-        response_path.write_text(json.dumps({"items": [{"item_id": "item_0", "decision": "update_spec"}]}))
+        stale_content = json.dumps({"items": [{"item_id": "item_0", "decision": "update_spec"}]})
+        response_path.write_text(stale_content)
+        stale_hash = hashlib.sha256(stale_content.encode("utf-8")).hexdigest()
+
+        handler._stop_event.set()
+        handler._file_watch_path(call_file, initial_hash=stale_hash)
+
+        assert not handler._done_event.is_set()
+
+    def test_detects_new_content_over_stale_response(self, tmp_path):
+        items = _make_pending(1)
+        handler = SyncInteractionHandler(tmp_path, items)
+        call_file = handler.generate_pending_call_file()
+
+        response_path = Path(str(call_file) + ".response")
+        response_path.write_text(json.dumps({"items": []}))
+
+        def write_new_response():
+            time.sleep(0.3)
+            response_path.write_text(
+                json.dumps({"items": [{"item_id": "item_0", "decision": "create_issue"}]})
+            )
+
+        writer = threading.Thread(target=write_new_response)
+        writer.start()
 
         handler._file_watch_path(call_file)
+        writer.join(timeout=5)
 
         assert handler._done_event.is_set()
-        assert handler._decisions.get("item_0") == "update_spec"
+        assert handler._decisions.get("item_0") == "create_issue"
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +368,7 @@ class TestFilePollingPath:
 class TestConcurrentCoordination:
     def test_terminal_path_wins(self, tmp_path):
         items = _make_pending(2)
-        handler = SyncInteractionHandler(tmp_path, items)
+        handler = SyncInteractionHandler(tmp_path, items, use_terminal=True)
 
         with patch("builtins.input", side_effect=["all:1"]):
             with patch.object(handler, "_render_pending_items"):
@@ -329,7 +379,7 @@ class TestConcurrentCoordination:
 
     def test_file_path_wins(self, tmp_path):
         items = _make_pending(2)
-        handler = SyncInteractionHandler(tmp_path, items)
+        handler = SyncInteractionHandler(tmp_path, items, use_terminal=True)
 
         def block_terminal():
             handler._stop_event.wait()
@@ -338,6 +388,8 @@ class TestConcurrentCoordination:
             with patch.object(handler, "_render_pending_items"):
 
                 def write_response():
+                    while handler._call_file_path is None:
+                        time.sleep(0.01)
                     time.sleep(0.3)
                     call_file = handler._call_file_path
                     response_path = Path(str(call_file) + ".response")
@@ -352,7 +404,7 @@ class TestConcurrentCoordination:
                 writer = threading.Thread(target=write_response)
                 writer.start()
                 decisions = handler.collect_decisions()
-                writer.join()
+                writer.join(timeout=5)
 
         assert decisions == {"item_0": "create_issue", "item_1": "create_issue"}
 
@@ -363,7 +415,7 @@ class TestConcurrentCoordination:
 
     def test_keyboard_interrupt_handled(self, tmp_path):
         items = _make_pending(1)
-        handler = SyncInteractionHandler(tmp_path, items)
+        handler = SyncInteractionHandler(tmp_path, items, use_terminal=True)
 
         with patch.object(handler, "_render_pending_items"):
             with patch.object(
@@ -396,7 +448,7 @@ class TestConcurrentCoordination:
             decisions_a = handler_a._collect_terminal_input()
 
         handler_b = SyncInteractionHandler(tmp_path, items)
-        call_file = handler_b._generate_pending_call_file()
+        call_file = handler_b.generate_pending_call_file()
         response_data = {
             "items": [
                 {"item_id": "item_0", "decision": "update_spec"},
@@ -412,7 +464,7 @@ class TestConcurrentCoordination:
 
     def test_response_file_written_on_terminal_completion(self, tmp_path):
         items = _make_pending(2)
-        handler = SyncInteractionHandler(tmp_path, items)
+        handler = SyncInteractionHandler(tmp_path, items, use_terminal=True)
 
         with patch("builtins.input", side_effect=["all:2"]):
             with patch.object(handler, "_render_pending_items"):
@@ -466,6 +518,26 @@ class TestSyncEngineIntegration:
         assert result["specs_updated"] == 0
         assert result["issues_created"] == 0
 
+    def test_interact_handles_keyboard_interrupt(self, tmp_path):
+        """KeyboardInterrupt during collect_decisions returns zero counts."""
+        engine = SyncEngine(tmp_path)
+        pending = [
+            PendingDecision(
+                type="gap",
+                item_id="gap_1",
+                spec_name="auth",
+                description="Missing feature",
+                decision="pending",
+            )
+        ]
+
+        with patch("se3.engine.sync_interaction.SyncInteractionHandler") as mock_cls:
+            mock_cls.return_value.collect_decisions.side_effect = KeyboardInterrupt
+            result = engine._interact_for_decisions(pending, MagicMock())
+
+        assert result["specs_updated"] == 0
+        assert result["issues_created"] == 0
+
     def test_run_integrates_pending_decisions(self, tmp_path):
         """Full run() with pending decisions calls _interact_for_decisions when tty."""
         spec_dir = tmp_path / "se3" / "specs" / "test_spec"
@@ -516,29 +588,31 @@ class TestSyncEngineIntegration:
 
         mock_interact.assert_not_called()
 
-    def test_run_generates_call_file_when_not_tty(self, tmp_path):
-        """run() with pending decisions generates call file when stdin is not a tty."""
+    def test_run_uses_interact_when_not_tty(self, tmp_path):
+        """run() with pending decisions calls _interact_for_decisions even when stdin is not a tty."""
         spec_dir = tmp_path / "se3" / "specs" / "test_spec"
         spec_dir.mkdir(parents=True, exist_ok=True)
         (spec_dir / "spec.md").write_text("# Spec\n## Purpose\nTest.")
 
         engine = SyncEngine(tmp_path, mode="strict")
 
-        with patch("sys.stdin") as mock_stdin:
-            mock_stdin.isatty.return_value = False
-            with patch("se3.engine.llm_caller.LLMCaller"):
-                with patch("se3.engine.project_context.ProjectContextCollector") as mock_ctx:
-                    mock_ctx.return_value.collect.return_value = {}
-                    with patch("se3.engine.sync_analyzer.SyncAnalyzer") as mock_analyzer:
-                        mock_analysis = SpecAnalysis(
-                            spec_name="test_spec",
-                            diffs=[SpecDiff(DiffType.GAP, "test_spec", "Missing feature")],
-                        )
-                        mock_analyzer.return_value.analyze_spec.return_value = mock_analysis
-                        result = engine.run()
+        mock_interact = MagicMock(return_value={"specs_updated": 0, "issues_created": 1})
 
-        assert result.call_file is not None
-        assert "sync_pending_" in result.call_file
+        with patch.object(engine, "_interact_for_decisions", mock_interact):
+            with patch("sys.stdin") as mock_stdin:
+                mock_stdin.isatty.return_value = False
+                with patch("se3.engine.llm_caller.LLMCaller"):
+                    with patch("se3.engine.project_context.ProjectContextCollector") as mock_ctx:
+                        mock_ctx.return_value.collect.return_value = {}
+                        with patch("se3.engine.sync_analyzer.SyncAnalyzer") as mock_analyzer:
+                            mock_analysis = SpecAnalysis(
+                                spec_name="test_spec",
+                                diffs=[SpecDiff(DiffType.GAP, "test_spec", "Missing feature")],
+                            )
+                            mock_analyzer.return_value.analyze_spec.return_value = mock_analysis
+                            result = engine.run()
+
+        mock_interact.assert_called_once()
 
     def test_execute_decisions_gap_update_spec(self, tmp_path):
         spec_dir = tmp_path / "se3" / "specs" / "auth"
@@ -624,7 +698,7 @@ class TestDictItems:
             }
         ]
         handler = SyncInteractionHandler(tmp_path, items)
-        call_file = handler._generate_pending_call_file()
+        call_file = handler.generate_pending_call_file()
 
         data = json.loads(call_file.read_text())
         assert data["items"][0]["item_id"] == "dict_item_0"
@@ -649,7 +723,7 @@ class TestWriteResponseFile:
     def test_writes_response_file(self, tmp_path):
         items = _make_pending(2)
         handler = SyncInteractionHandler(tmp_path, items)
-        call_file = handler._generate_pending_call_file()
+        call_file = handler.generate_pending_call_file()
         handler._call_file_path = call_file
 
         handler._write_response_file({"item_0": "update_spec", "item_1": "create_issue"})

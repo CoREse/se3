@@ -1,0 +1,24 @@
+id: '075'
+title: '[sync-conflict] flow-engine: Verify spec renderer groups issues by scope (in_scope/out_of_scope)
+  with priority sub-levels, but the spec requires grouping into error/warning/info
+  sections'
+description: 'Spec ''flow-engine'' conflicts with the code implementation.
+
+
+  **Conflict:** Verify spec renderer groups issues by scope (in_scope/out_of_scope)
+  with priority sub-levels, but the spec requires grouping into error/warning/info
+  sections
+
+  **Code location:** step_renderers.py:567-602
+
+  '
+status: open
+priority: high
+scope: in_scope
+type: task
+tags:
+- auto-discovered
+- source:sync
+- conflict
+created_at: '2026-04-14T16:58:45.440375'
+updated_at: '2026-04-14T16:58:45.440375'

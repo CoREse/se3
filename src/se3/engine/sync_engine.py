@@ -219,8 +219,10 @@ class SyncResult:
     completed_at: datetime = field(default_factory=datetime.now)
     specs_created: List[str] = field(default_factory=list)
     gap_resolutions: List[Dict[str, Any]] = field(default_factory=list)
+    conflict_resolutions: List[Dict[str, Any]] = field(default_factory=list)
     detailed_changes: List[Dict[str, Any]] = field(default_factory=list)
     pending_decisions: List[PendingDecision] = field(default_factory=list)
+    discovery_failed: bool = False
 
     @property
     def total_gaps(self) -> int:
@@ -249,8 +251,10 @@ class SyncResult:
             "completed_at": self.completed_at.isoformat(),
             "specs_created": self.specs_created,
             "gap_resolutions": self.gap_resolutions,
+            "conflict_resolutions": self.conflict_resolutions,
             "detailed_changes": self.detailed_changes,
             "pending_decisions": [p.to_dict() for p in self.pending_decisions],
+            "discovery_failed": self.discovery_failed,
         }
 
     @classmethod
@@ -271,10 +275,12 @@ class SyncResult:
             completed_at=completed_at,
             specs_created=data.get("specs_created", []),
             gap_resolutions=data.get("gap_resolutions", []),
+            conflict_resolutions=data.get("conflict_resolutions", []),
             detailed_changes=data.get("detailed_changes", []),
             pending_decisions=[
                 PendingDecision.from_dict(p) for p in data.get("pending_decisions", [])
             ],
+            discovery_failed=data.get("discovery_failed", False),
         )
 
     def to_json(self) -> str:
@@ -433,6 +439,8 @@ class SyncEngine:
     decision.
     """
 
+    VALID_MODES = {"default", "strict", "fast"}
+
     def __init__(
         self,
         project_root: Path,
@@ -440,11 +448,23 @@ class SyncEngine:
         interactive: bool = True,
     ) -> None:
         self.project_root = Path(project_root)
+        if mode not in self.VALID_MODES:
+            raise ValueError(
+                f"Invalid sync mode '{mode}'. Must be one of: {', '.join(sorted(self.VALID_MODES))}"
+            )
         self.mode = mode
         self.interactive = interactive
         self._specs: Dict[str, Any] = {}
         self._existing_issues: List[Any] = []
         self._sync_issues: List[Any] = []
+        self._issue_manager: Optional[Any] = None
+        self._normalized_issue_titles: Optional[set] = None
+
+    def _get_issue_manager(self) -> Any:
+        if self._issue_manager is None:
+            from .issue_manager import IssueManager
+            self._issue_manager = IssueManager(self.project_root)
+        return self._issue_manager
 
     def _load_specs(self) -> Dict[str, Any]:
         """Load all specs via SpecIndex, base spec first.
@@ -484,6 +504,10 @@ class SyncEngine:
         mgr = IssueManager(self.project_root)
         self._existing_issues = mgr.list_issues(include_closed=False)
         self._sync_issues = mgr.list_by_tags(SYNC_TAGS, include_closed=False)
+        self._normalized_issue_titles = {
+            self._normalize_for_matching(issue.title)
+            for issue in self._sync_issues
+        }
         return self._existing_issues
 
     def run(self, progress_callback: Any = None) -> SyncResult:
@@ -553,8 +577,15 @@ class SyncEngine:
                         self._specs[name] = specs[name]
                     except OSError as e:
                         logger.warning("Failed to read newly created spec '%s': %s", name, e)
+
+            if result.specs_created:
+                context_dict = collector.collect()
+                project_context = json.dumps(
+                    context_dict, indent=2, ensure_ascii=False, default=str
+                )
         except Exception as e:
             logger.error("Spec discovery failed, continuing with existing specs: %s", e)
+            result.discovery_failed = True
 
         self._load_existing_issues()
 
@@ -578,8 +609,11 @@ class SyncEngine:
             if progress_callback:
                 progress_callback("analyzed", spec_name, i, total, analysis)
 
-            gaps_created = self._process_gaps(analysis.gaps, llm_caller, result)
-            result.issues_created += gaps_created
+            gap_result = self._process_gaps(analysis.gaps, llm_caller)
+            result.issues_created += gap_result["issues_created"]
+            result.specs_updated += gap_result["specs_updated"]
+            result.pending_decisions.extend(gap_result["pending_decisions"])
+            result.gap_resolutions.extend(gap_result["gap_resolutions"])
 
             for gap in analysis.gaps:
                 all_gap_titles.add(self._normalize_gap_title(gap))
@@ -588,6 +622,13 @@ class SyncEngine:
                 analysis.extensions, spec_info, llm_caller
             )
             result.specs_updated += exts_updated
+            if exts_updated > 0:
+                for ext in analysis.extensions:
+                    result.detailed_changes.append({
+                        "spec_name": spec_name,
+                        "action": "extension_added",
+                        "description": ext.description,
+                    })
 
         closed = self._manage_issue_lifecycle(all_gap_titles)
         result.issues_closed += closed
@@ -601,33 +642,33 @@ class SyncEngine:
             cr = self._handle_conflicts_fast(all_conflicts, llm_caller)
             result.specs_updated += cr["specs_updated"]
             result.issues_created += cr["issues_created"]
+            result.conflict_resolutions.extend(cr.get("conflict_resolutions", []))
         elif self.mode == "strict":
             llm_caller.step_id = flow_ctx.make_step_id("sync_resolve", "conflicts_strict")
-            cr = self._handle_conflicts_strict(all_conflicts, result=result)
+            cr = self._handle_conflicts_strict(all_conflicts)
             result.conflicts = cr["conflicts"]
-            if cr["call_file"]:
-                result.call_file = cr["call_file"]
+            result.pending_decisions.extend(cr["pending_decisions"])
         else:
             llm_caller.step_id = flow_ctx.make_step_id("sync_resolve", "conflicts_default")
-            cr = self._handle_conflicts_default(all_conflicts, llm_caller, result=result)
+            cr = self._handle_conflicts_default(all_conflicts, llm_caller)
             result.specs_updated += cr["specs_updated"]
             result.issues_created += cr["issues_created"]
             result.conflicts = cr["unresolved"]
-            if cr["call_file"]:
-                result.call_file = cr["call_file"]
-
-        result.pending_decisions = self._collect_pending_decisions(result)
+            result.pending_decisions.extend(cr["pending_decisions"])
+            result.conflict_resolutions.extend(cr.get("conflict_resolutions", []))
 
         if result.pending_decisions and self.interactive:
-            import sys
             llm_caller.step_id = flow_ctx.make_step_id("sync_resolve", "interactive")
-            if sys.stdin.isatty():
-                resolved = self._interact_for_decisions(result.pending_decisions, llm_caller)
-                result.specs_updated += resolved.get("specs_updated", 0)
-                result.issues_created += resolved.get("issues_created", 0)
-            else:
-                call_path = self._generate_pending_call_file(result.pending_decisions)
-                result.call_file = str(call_path)
+            resolved = self._interact_for_decisions(result.pending_decisions, llm_caller)
+            result.specs_updated += resolved.get("specs_updated", 0)
+            result.issues_created += resolved.get("issues_created", 0)
+
+        for cr_item in result.conflict_resolutions:
+            result.detailed_changes.append({
+                "spec_name": cr_item.get("spec_name", ""),
+                "action": f"conflict_{cr_item.get('action', '')}",
+                "description": cr_item.get("description", ""),
+            })
 
         return result
 
@@ -673,8 +714,7 @@ class SyncEngine:
         self,
         gaps: List[SpecDiff],
         llm_caller: Any = None,
-        result: Optional[SyncResult] = None,
-    ) -> int:
+    ) -> Dict[str, Any]:
         """Process spec-leads-code gaps based on the current mode.
 
         - **fast**: LLM decides every gap (update_spec or create_issue), auto-executes.
@@ -683,18 +723,24 @@ class SyncEngine:
         - **strict**: All gaps marked as PendingDecision, no auto-execution.
 
         Falls back to legacy behavior (create issues for all gaps) when
-        llm_caller or result is not provided.
+        llm_caller is not provided.
 
         Returns:
-            Number of issues actually created.
+            Dict with issues_created, specs_updated, pending_decisions, and
+            gap_resolutions counts/lists.
         """
+        empty = {"issues_created": 0, "specs_updated": 0,
+                 "pending_decisions": [], "gap_resolutions": []}
         if not gaps:
-            return 0
+            return empty
 
-        if llm_caller is None or result is None or self.mode == "default" and llm_caller is None:
-            return self._process_gaps_legacy(gaps)
+        if llm_caller is None:
+            return {"issues_created": self._process_gaps_legacy(gaps),
+                    "specs_updated": 0, "pending_decisions": [],
+                    "gap_resolutions": []}
 
         if self.mode == "strict":
+            pending = []
             for gap in gaps:
                 pd = PendingDecision(
                     type="gap",
@@ -704,10 +750,14 @@ class SyncEngine:
                     diff=gap.code_location,
                     decision="pending",
                 )
-                result.pending_decisions.append(pd)
-            return 0
+                pending.append(pd)
+            return {"issues_created": 0, "specs_updated": 0,
+                    "pending_decisions": pending, "gap_resolutions": []}
 
         created = 0
+        updated = 0
+        pending = []
+        resolutions = []
         for gap in gaps:
             resolution = self._resolve_gap_via_llm(gap, llm_caller)
             decision = resolution.get("decision", "create_issue")
@@ -715,24 +765,36 @@ class SyncEngine:
 
             if self.mode == "fast" or (self.mode == "default" and confidence == "high"):
                 if decision == "update_spec":
-                    updated = self._apply_gap_spec_update(gap, llm_caller)
-                    if updated:
-                        result.specs_updated += 1
-                        result.gap_resolutions.append({
+                    if self._apply_gap_spec_update(gap, llm_caller):
+                        updated += 1
+                        resolutions.append({
                             "spec_name": gap.spec_name,
                             "action": "update_spec",
                             "description": gap.description,
                             "reasoning": resolution.get("reasoning", ""),
                         })
-                else:
-                    if self._create_gap_issue(gap):
-                        created += 1
-                        result.gap_resolutions.append({
+                    else:
+                        logger.warning(
+                            "Gap update_spec failed for '%s', falling back to create_issue",
+                            gap.spec_name,
+                        )
+                        if self._create_gap_issue(gap):
+                            created += 1
+                        resolutions.append({
                             "spec_name": gap.spec_name,
                             "action": "create_issue",
                             "description": gap.description,
-                            "reasoning": resolution.get("reasoning", ""),
+                            "reasoning": "update_spec failed, fell back to create_issue",
                         })
+                else:
+                    if self._create_gap_issue(gap):
+                        created += 1
+                    resolutions.append({
+                        "spec_name": gap.spec_name,
+                        "action": "create_issue",
+                        "description": gap.description,
+                        "reasoning": resolution.get("reasoning", ""),
+                    })
             else:
                 pd = PendingDecision(
                     type="gap",
@@ -743,9 +805,10 @@ class SyncEngine:
                     confidence=confidence,
                     decision="pending",
                 )
-                result.pending_decisions.append(pd)
+                pending.append(pd)
 
-        return created
+        return {"issues_created": created, "specs_updated": updated,
+                "pending_decisions": pending, "gap_resolutions": resolutions}
 
     def _process_gaps_legacy(self, gaps: List[SpecDiff]) -> int:
         """Legacy gap processing: create issues for all gaps with idempotency."""
@@ -760,19 +823,18 @@ class SyncEngine:
 
     def _create_gap_issue(self, gap: SpecDiff) -> bool:
         """Create a single gap issue with idempotency. Returns True if created."""
-        from .issue_manager import IssueManager
+        mgr = self._get_issue_manager()
 
-        mgr = IssueManager(self.project_root)
-
-        existing_normalized = {
-            self._normalize_for_matching(issue.title)
-            for issue in self._sync_issues
-        }
+        if self._normalized_issue_titles is None:
+            self._normalized_issue_titles = {
+                self._normalize_for_matching(issue.title)
+                for issue in self._sync_issues
+            }
 
         title = self._normalize_gap_title(gap)
         norm_title = self._normalize_for_matching(title)
 
-        if norm_title in existing_normalized:
+        if norm_title in self._normalized_issue_titles:
             logger.info("Skipping duplicate issue for gap: %s", title)
             return False
 
@@ -797,8 +859,39 @@ class SyncEngine:
             tags=list(SYNC_TAGS),
             type="task",
         )
+        self._normalized_issue_titles.add(norm_title)
         logger.info("Created issue for gap: %s", title)
         return True
+
+    def _resolve_via_llm(
+        self,
+        llm_caller: Any,
+        prompt: str,
+        label: str,
+        spec_name: str,
+        default_confidence: str = "low",
+    ) -> Dict[str, str]:
+        """Shared LLM resolution for gaps and conflicts.
+
+        Returns:
+            Dict with 'decision' ('update_spec' or 'create_issue'),
+            'confidence', and 'reasoning'.
+        """
+        try:
+            response = llm_caller.call(prompt=prompt, json_mode="extract")
+            data = json.loads(response)
+            decision = data.get("decision", "create_issue")
+            if decision not in ("update_spec", "create_issue"):
+                logger.warning("Unknown LLM decision '%s' for %s, defaulting to create_issue", decision, label)
+                decision = "create_issue"
+            return {
+                "decision": decision,
+                "confidence": data.get("confidence", default_confidence).lower(),
+                "reasoning": data.get("reasoning", ""),
+            }
+        except Exception as e:
+            logger.error("LLM %s resolution failed for '%s': %s", label, spec_name, e)
+            return {"decision": "create_issue", "confidence": "low", "reasoning": str(e)}
 
     def _resolve_gap_via_llm(
         self, gap: SpecDiff, llm_caller: Any
@@ -818,40 +911,29 @@ class SyncEngine:
             spec_content=spec_content or "(not available)",
         )
 
-        try:
-            response = llm_caller.call(prompt=prompt, json_mode="extract")
-            data = json.loads(response)
-            decision = data.get("decision", "create_issue")
-            if decision not in ("update_spec", "create_issue"):
-                decision = "create_issue"
-            return {
-                "decision": decision,
-                "confidence": data.get("confidence", "low").lower(),
-                "reasoning": data.get("reasoning", ""),
-            }
-        except Exception as e:
-            logger.error("LLM gap resolution failed for '%s': %s", gap.spec_name, e)
-            return {"decision": "create_issue", "confidence": "low", "reasoning": str(e)}
+        return self._resolve_via_llm(llm_caller, prompt, "gap", gap.spec_name)
 
-    def _apply_gap_spec_update(
-        self, gap: SpecDiff, llm_caller: Any
+    def _update_spec_via_llm(
+        self, spec_name: str, prompt: str, llm_caller: Any, label: str
     ) -> bool:
-        """Use LLM to remove an outdated requirement from a spec.
+        """Shared helper: call LLM to update a spec file with safety guards.
+
+        Performs: LLM call -> strip -> strip_markdown_fences -> empty check
+        -> 50% length check -> write to disk -> update in-memory cache.
+
+        Args:
+            spec_name: Name of the spec to update.
+            prompt: Full prompt for the LLM call.
+            llm_caller: LLMCaller instance.
+            label: Human-readable label for log messages (e.g. "gap", "extension", "conflict").
 
         Returns:
             True if the spec was updated successfully.
         """
-        spec_info = self._specs.get(gap.spec_name)
+        spec_info = self._specs.get(spec_name)
         if not spec_info:
-            logger.warning("Spec '%s' not found for gap update", gap.spec_name)
+            logger.warning("Spec '%s' not found for %s update", spec_name, label)
             return False
-
-        prompt = _GAP_SPEC_UPDATE_PROMPT.format(
-            spec_name=gap.spec_name,
-            description=gap.description,
-            code_location=gap.code_location or "(not specified)",
-            spec_content=spec_info["content"],
-        )
 
         try:
             updated_content = llm_caller.call(prompt=prompt, json_mode="off")
@@ -859,24 +941,39 @@ class SyncEngine:
             updated_content = strip_markdown_fences(updated_content)
 
             if not updated_content:
-                logger.warning("LLM returned empty content for gap spec update '%s'", gap.spec_name)
+                logger.warning("LLM returned empty content for %s spec update '%s'", label, spec_name)
                 return False
 
             if len(updated_content) < len(spec_info["content"]) * 0.5:
                 logger.warning(
-                    "LLM returned suspiciously short content for gap spec update '%s' "
+                    "LLM returned suspiciously short content for %s spec update '%s' "
                     "(%d chars vs original %d chars), skipping update",
-                    gap.spec_name, len(updated_content), len(spec_info["content"]),
+                    label, spec_name, len(updated_content), len(spec_info["content"]),
                 )
                 return False
 
             Path(spec_info["path"]).write_text(updated_content, encoding="utf-8")
             spec_info["content"] = updated_content
-            logger.info("Updated spec '%s' for gap resolution (removed outdated requirement)", gap.spec_name)
+            logger.info("Updated spec '%s' for %s resolution", spec_name, label)
             return True
         except Exception as e:
-            logger.error("Failed to update spec '%s' for gap: %s", gap.spec_name, e)
+            logger.error("Failed to update spec '%s' for %s: %s", spec_name, label, e)
             return False
+
+    def _apply_gap_spec_update(
+        self, gap: SpecDiff, llm_caller: Any
+    ) -> bool:
+        """Use LLM to remove an outdated requirement from a spec."""
+        if gap.spec_name not in self._specs:
+            logger.warning("Spec '%s' not found for gap update", gap.spec_name)
+            return False
+        prompt = _GAP_SPEC_UPDATE_PROMPT.format(
+            spec_name=gap.spec_name,
+            description=gap.description,
+            code_location=gap.code_location or "(not specified)",
+            spec_content=self._specs[gap.spec_name].get("content", ""),
+        )
+        return self._update_spec_via_llm(gap.spec_name, prompt, llm_caller, "gap")
 
     def _process_extensions(
         self,
@@ -886,9 +983,6 @@ class SyncEngine:
     ) -> int:
         """Update spec files for code-extends-spec differences.
 
-        Uses LLM to generate updated spec content that includes the
-        extensions found in the code.
-
         Returns:
             Number of specs updated (0 or 1).
         """
@@ -896,8 +990,9 @@ class SyncEngine:
             return 0
 
         spec_name = spec_info["name"]
-        spec_content = spec_info["content"]
-        spec_path = spec_info["path"]
+
+        if spec_name not in self._specs:
+            self._specs[spec_name] = spec_info
 
         extensions_desc = "\n".join(
             f"- {ext.description}" + (f" (at {ext.code_location})" if ext.code_location else "")
@@ -906,36 +1001,11 @@ class SyncEngine:
 
         prompt = _SPEC_UPDATE_PROMPT_TEMPLATE.format(
             spec_name=spec_name,
-            spec_content=spec_content,
+            spec_content=spec_info["content"],
             extensions_description=extensions_desc,
         )
 
-        try:
-            updated_content = llm_caller.call(prompt=prompt, json_mode="off")
-            updated_content = updated_content.strip()
-            updated_content = strip_markdown_fences(updated_content)
-
-            if not updated_content:
-                logger.warning("LLM returned empty content for spec '%s' update", spec_name)
-                return 0
-
-            if len(updated_content) < len(spec_content) * 0.5:
-                logger.warning(
-                    "LLM returned suspiciously short content for spec '%s' "
-                    "(%d chars vs original %d chars), skipping update",
-                    spec_name, len(updated_content), len(spec_content),
-                )
-                return 0
-
-            Path(spec_path).write_text(updated_content, encoding="utf-8")
-            if spec_name in self._specs:
-                self._specs[spec_name]["content"] = updated_content
-            logger.info("Updated spec '%s' with %d extensions", spec_name, len(extensions))
-            return 1
-
-        except Exception as e:
-            logger.error("Failed to update spec '%s': %s", spec_name, e)
-            return 0
+        return 1 if self._update_spec_via_llm(spec_name, prompt, llm_caller, "extension") else 0
 
     def _manage_issue_lifecycle(self, current_gap_titles: set[str]) -> int:
         """Auto-close sync gap issues whose gaps have disappeared.
@@ -1019,15 +1089,6 @@ class SyncEngine:
 
         return conflicts
 
-    def _collect_pending_decisions(self, result: SyncResult) -> List[PendingDecision]:
-        """Collect all pending decisions (gap + conflict) from the result.
-
-        Returns the unified list of PendingDecision items that need
-        human resolution. This is a consolidation step that returns
-        the already-accumulated pending_decisions list.
-        """
-        return [pd for pd in result.pending_decisions if pd.decision == "pending"]
-
     def _generate_pending_call_file(
         self, pending: List[PendingDecision]
     ) -> Path:
@@ -1035,7 +1096,7 @@ class SyncEngine:
         from .sync_interaction import SyncInteractionHandler
 
         handler = SyncInteractionHandler(self.project_root, pending)
-        return handler._generate_pending_call_file()
+        return handler.generate_pending_call_file()
 
     def _interact_for_decisions(
         self,
@@ -1120,55 +1181,14 @@ class SyncEngine:
 
         return {"specs_updated": specs_updated, "issues_created": issues_created}
 
-    def _generate_call_file(self, conflicts: List[Conflict]) -> Path:
-        """Generate a single MCP call file for all pending conflicts.
-
-        Creates a JSON file in se3/calls/ with all conflicts listed,
-        awaiting human decision on each.
-
-        Returns:
-            Path to the generated call file.
-        """
-        calls_dir = self.project_root / "se3" / "calls"
-        calls_dir.mkdir(parents=True, exist_ok=True)
-
-        timestamp = int(datetime.now().timestamp())
-        unique_id = uuid.uuid4().hex[:8]
-        call_file = calls_dir / f"sync_conflicts_{timestamp}_{unique_id}.json"
-
-        call_data = {
-            "type": "sync_conflicts",
-            "mode": self.mode,
-            "timestamp": timestamp,
-            "conflicts": [
-                {
-                    "id": i + 1,
-                    "spec_name": c.spec_name,
-                    "description": c.description,
-                    "code_location": c.code_location,
-                    "spec_content": c.spec_content[:2000] if c.spec_content else "",
-                    "options": ["update_spec", "create_issue"],
-                    "decision": "pending",
-                }
-                for i, c in enumerate(conflicts)
-            ],
-        }
-
-        call_file.write_text(
-            json.dumps(call_data, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-
-        logger.info("Generated sync call file: %s", call_file)
-        return call_file
-
     def _resolve_conflict_via_llm(
         self, conflict: Conflict, llm_caller: Any
-    ) -> str:
+    ) -> Dict[str, str]:
         """Call LLM to decide how to resolve a conflict.
 
         Returns:
-            'update_spec' or 'create_issue'.
+            Dict with 'decision' ('update_spec' or 'create_issue'),
+            'reasoning', and 'confidence'.
         """
         spec_content = ""
         if conflict.spec_name in self._specs:
@@ -1181,62 +1201,27 @@ class SyncEngine:
             spec_content=spec_content or "(not available)",
         )
 
-        try:
-            response = llm_caller.call(prompt=prompt, json_mode="extract")
-            data = json.loads(response)
-            decision = data.get("decision", "create_issue")
-            if decision in ("update_spec", "create_issue"):
-                return decision
-            logger.warning("Unknown LLM decision '%s', defaulting to create_issue", decision)
-            return "create_issue"
-        except Exception as e:
-            logger.error("LLM conflict resolution failed for '%s': %s", conflict.spec_name, e)
-            return "create_issue"
+        result = self._resolve_via_llm(
+            llm_caller, prompt, "conflict", conflict.spec_name,
+            default_confidence=conflict.confidence or "medium",
+        )
+        # Pre-assigned confidence from the analyzer takes precedence;
+        # unset (None/"") defers to the LLM's assessment.
+        if conflict.confidence:
+            result["confidence"] = conflict.confidence
+        return result
 
     def _apply_conflict_spec_update(
         self, conflict: Conflict, llm_caller: Any
     ) -> bool:
-        """Use LLM to update a spec file based on a conflict resolution.
-
-        Returns:
-            True if the spec was updated successfully.
-        """
-        spec_info = self._specs.get(conflict.spec_name)
-        if not spec_info:
-            logger.warning("Spec '%s' not found for conflict update", conflict.spec_name)
-            return False
-
+        """Use LLM to update a spec file based on a conflict resolution."""
         prompt = _CONFLICT_SPEC_UPDATE_PROMPT.format(
             spec_name=conflict.spec_name,
             description=conflict.description,
             code_location=conflict.code_location or "(not specified)",
-            spec_content=spec_info["content"],
+            spec_content=self._specs.get(conflict.spec_name, {}).get("content", ""),
         )
-
-        try:
-            updated_content = llm_caller.call(prompt=prompt, json_mode="off")
-            updated_content = updated_content.strip()
-            updated_content = strip_markdown_fences(updated_content)
-
-            if not updated_content:
-                logger.warning("LLM returned empty content for conflict spec update '%s'", conflict.spec_name)
-                return False
-
-            if len(updated_content) < len(spec_info["content"]) * 0.5:
-                logger.warning(
-                    "LLM returned suspiciously short content for conflict spec update '%s' "
-                    "(%d chars vs original %d chars), skipping update",
-                    conflict.spec_name, len(updated_content), len(spec_info["content"]),
-                )
-                return False
-
-            Path(spec_info["path"]).write_text(updated_content, encoding="utf-8")
-            spec_info["content"] = updated_content
-            logger.info("Updated spec '%s' for conflict resolution", conflict.spec_name)
-            return True
-        except Exception as e:
-            logger.error("Failed to update spec '%s' for conflict: %s", conflict.spec_name, e)
-            return False
+        return self._update_spec_via_llm(conflict.spec_name, prompt, llm_caller, "conflict")
 
     def _apply_conflict_create_issue(self, conflict: Conflict) -> bool:
         """Create an issue for a conflict.
@@ -1244,9 +1229,7 @@ class SyncEngine:
         Returns:
             True if the issue was created successfully.
         """
-        from .issue_manager import IssueManager
-
-        mgr = IssueManager(self.project_root)
+        mgr = self._get_issue_manager()
         title = f"[sync-conflict] {conflict.spec_name}: {conflict.description}"
 
         existing = mgr.find_open_by_title(title)
@@ -1281,36 +1264,126 @@ class SyncEngine:
         or create an issue, then executes the decision.
 
         Returns:
-            Dict with specs_updated and issues_created counts.
+            Dict with specs_updated, issues_created, and conflict_resolutions.
         """
         specs_updated = 0
         issues_created = 0
+        resolutions: List[Dict[str, Any]] = []
 
         for conflict in conflicts:
-            decision = self._resolve_conflict_via_llm(conflict, llm_caller)
+            resolution = self._resolve_conflict_via_llm(conflict, llm_caller)
+            decision = resolution["decision"]
+            logger.info(
+                "Auto-resolved conflict '%s': %s (confidence=%s, reasoning=%s)",
+                conflict.spec_name, decision,
+                resolution.get("confidence", ""),
+                resolution.get("reasoning", "")[:200],
+            )
 
+            actual_action = decision
             if decision == "update_spec":
                 if self._apply_conflict_spec_update(conflict, llm_caller):
                     specs_updated += 1
+                else:
+                    logger.warning(
+                        "Conflict update_spec failed for '%s', falling back to create_issue",
+                        conflict.spec_name,
+                    )
+                    actual_action = "create_issue"
+                    if self._apply_conflict_create_issue(conflict):
+                        issues_created += 1
             else:
                 if self._apply_conflict_create_issue(conflict):
                     issues_created += 1
 
-        return {"specs_updated": specs_updated, "issues_created": issues_created}
+            resolutions.append({
+                "spec_name": conflict.spec_name,
+                "action": actual_action,
+                "description": conflict.description,
+                "reasoning": resolution.get("reasoning", ""),
+            })
+
+        return {
+            "specs_updated": specs_updated,
+            "issues_created": issues_created,
+            "conflict_resolutions": resolutions,
+        }
 
     def _handle_conflicts_strict(
-        self, conflicts: List[Conflict], result: Optional[SyncResult] = None,
+        self, conflicts: List[Conflict],
     ) -> Dict[str, Any]:
         """Strict mode: all conflicts marked as PendingDecision.
 
         Returns:
-            Dict with conflicts list and optional call_file path.
+            Dict with conflicts list and pending_decisions.
         """
         if not conflicts:
-            return {"conflicts": [], "call_file": None}
+            return {"conflicts": [], "pending_decisions": []}
 
-        if result is not None:
-            for conflict in conflicts:
+        pending: List[PendingDecision] = []
+        for conflict in conflicts:
+            pd = PendingDecision(
+                type="conflict",
+                item_id=f"conflict_{conflict.spec_name}_{uuid.uuid4().hex[:8]}",
+                spec_name=conflict.spec_name,
+                description=conflict.description,
+                diff=conflict.code_location,
+                confidence=conflict.confidence,
+                decision="pending",
+            )
+            pending.append(pd)
+        return {"conflicts": conflicts, "pending_decisions": pending}
+
+    def _handle_conflicts_default(
+        self, conflicts: List[Conflict], llm_caller: Any,
+    ) -> Dict[str, Any]:
+        """Default mode: LLM auto-handles high-confidence, collects low-confidence.
+
+        High-confidence conflicts are resolved automatically by LLM.
+        Low-confidence conflicts are marked as PendingDecision.
+
+        Returns:
+            Dict with specs_updated, issues_created, unresolved list, and pending_decisions.
+        """
+        specs_updated = 0
+        issues_created = 0
+        unresolved: List[Conflict] = []
+        pending: List[PendingDecision] = []
+        resolutions: List[Dict[str, Any]] = []
+
+        for conflict in conflicts:
+            if conflict.confidence and conflict.confidence.lower() == "high":
+                resolution = self._resolve_conflict_via_llm(conflict, llm_caller)
+                decision = resolution["decision"]
+                logger.info(
+                    "Auto-resolved conflict '%s': %s (confidence=%s, reasoning=%s)",
+                    conflict.spec_name, decision,
+                    resolution.get("confidence", ""),
+                    resolution.get("reasoning", "")[:200],
+                )
+                actual_action = decision
+                if decision == "update_spec":
+                    if self._apply_conflict_spec_update(conflict, llm_caller):
+                        specs_updated += 1
+                    else:
+                        logger.warning(
+                            "Conflict update_spec failed for '%s', falling back to create_issue",
+                            conflict.spec_name,
+                        )
+                        actual_action = "create_issue"
+                        if self._apply_conflict_create_issue(conflict):
+                            issues_created += 1
+                else:
+                    if self._apply_conflict_create_issue(conflict):
+                        issues_created += 1
+                resolutions.append({
+                    "spec_name": conflict.spec_name,
+                    "action": actual_action,
+                    "description": conflict.description,
+                    "reasoning": resolution.get("reasoning", ""),
+                })
+            else:
+                unresolved.append(conflict)
                 pd = PendingDecision(
                     type="conflict",
                     item_id=f"conflict_{conflict.spec_name}_{uuid.uuid4().hex[:8]}",
@@ -1320,71 +1393,24 @@ class SyncEngine:
                     confidence=conflict.confidence,
                     decision="pending",
                 )
-                result.pending_decisions.append(pd)
-            return {"conflicts": conflicts, "call_file": None}
-
-        call_path = self._generate_call_file(conflicts)
-        return {"conflicts": conflicts, "call_file": str(call_path)}
-
-    def _handle_conflicts_default(
-        self, conflicts: List[Conflict], llm_caller: Any,
-        result: Optional[SyncResult] = None,
-    ) -> Dict[str, Any]:
-        """Default mode: LLM auto-handles high-confidence, collects low-confidence.
-
-        High-confidence conflicts are resolved automatically by LLM.
-        Low-confidence conflicts are marked as PendingDecision (or batched
-        into an MCP call file for backward compatibility).
-
-        Returns:
-            Dict with specs_updated, issues_created, unresolved list, and call_file.
-        """
-        specs_updated = 0
-        issues_created = 0
-        unresolved: List[Conflict] = []
-
-        for conflict in conflicts:
-            if conflict.confidence.lower() == "high":
-                decision = self._resolve_conflict_via_llm(conflict, llm_caller)
-                if decision == "update_spec":
-                    if self._apply_conflict_spec_update(conflict, llm_caller):
-                        specs_updated += 1
-                else:
-                    if self._apply_conflict_create_issue(conflict):
-                        issues_created += 1
-            else:
-                unresolved.append(conflict)
-                if result is not None:
-                    pd = PendingDecision(
-                        type="conflict",
-                        item_id=f"conflict_{conflict.spec_name}_{uuid.uuid4().hex[:8]}",
-                        spec_name=conflict.spec_name,
-                        description=conflict.description,
-                        diff=conflict.code_location,
-                        confidence=conflict.confidence,
-                        decision="pending",
-                    )
-                    result.pending_decisions.append(pd)
-
-        call_file: Optional[str] = None
-        if unresolved and result is None:
-            call_path = self._generate_call_file(unresolved)
-            call_file = str(call_path)
+                pending.append(pd)
 
         return {
             "specs_updated": specs_updated,
             "issues_created": issues_created,
             "unresolved": unresolved,
-            "call_file": call_file,
+            "pending_decisions": pending,
+            "conflict_resolutions": resolutions,
         }
 
     def process_call_response(
         self, call_file_path: Path, llm_caller: Any = None
     ) -> Dict[str, Any]:
-        """Process an MCP call response file for sync conflicts.
+        """Process an MCP call response file for sync decisions.
 
-        Reads the response file, parses each conflict's decision, and
-        executes the corresponding action (update spec or create issue).
+        Supports both the legacy conflict-only format (``"conflicts"`` key)
+        and the new unified pending-decisions format (``"items"`` key with
+        ``type: "sync_pending_decisions"``).
 
         Args:
             call_file_path: Path to the original call file (response file
@@ -1411,7 +1437,14 @@ class SyncEngine:
 
         if llm_caller is None:
             from .llm_caller import LLMCaller
-            llm_caller = LLMCaller(project_root=self.project_root)
+            from .sync_history import SyncFlowContext
+            flow_ctx = SyncFlowContext(self.project_root)
+            llm_caller = LLMCaller(
+                project_root=self.project_root,
+                flow_id=flow_ctx.flow_id,
+                step_id="sync_respond",
+                step_type="sync_respond",
+            )
 
         call_data: Dict[str, Any] = {}
         try:
@@ -1420,6 +1453,67 @@ class SyncEngine:
             logger.error("Failed to read call file '%s': %s", call_file_path, e)
             return {"specs_updated": 0, "issues_created": 0}
 
+        if call_data.get("type") == "sync_pending_decisions":
+            return self._process_pending_call_response(
+                call_data, response_data, llm_caller
+            )
+
+        return self._process_legacy_call_response(
+            call_data, response_data, llm_caller
+        )
+
+    def _process_pending_call_response(
+        self,
+        call_data: Dict[str, Any],
+        response_data: Dict[str, Any],
+        llm_caller: Any,
+    ) -> Dict[str, Any]:
+        """Handle the ``sync_pending_decisions`` call file format."""
+        call_items = {
+            item.get("item_id", ""): item
+            for item in call_data.get("items", [])
+            if item.get("item_id")
+        }
+
+        pending = []
+        for item in call_data.get("items", []):
+            item_id = item.get("item_id", "")
+            if item_id:
+                pending.append(PendingDecision(
+                    type=item.get("type", "gap"),
+                    item_id=item_id,
+                    spec_name=item.get("spec_name", ""),
+                    description=item.get("description", ""),
+                    diff=item.get("diff", ""),
+                    confidence=item.get("confidence", ""),
+                ))
+
+        decisions: Dict[str, str] = {}
+        for resp_item in response_data.get("items", []):
+            decision = resp_item.get("decision", "")
+            if decision not in ("update_spec", "create_issue"):
+                continue
+
+            item_id = resp_item.get("item_id", "")
+            if item_id and item_id in call_items:
+                decisions[item_id] = decision
+            else:
+                num_id = resp_item.get("id")
+                call_list = call_data.get("items", [])
+                if isinstance(num_id, int) and 1 <= num_id <= len(call_list):
+                    resolved_id = call_list[num_id - 1].get("item_id", "")
+                    if resolved_id:
+                        decisions[resolved_id] = decision
+
+        return self._execute_decisions(pending, decisions, llm_caller)
+
+    def _process_legacy_call_response(
+        self,
+        call_data: Dict[str, Any],
+        response_data: Dict[str, Any],
+        llm_caller: Any,
+    ) -> Dict[str, Any]:
+        """Handle the legacy conflict-only call file format."""
         call_conflicts = {
             c["id"]: c for c in call_data.get("conflicts", [])
         }

@@ -1,0 +1,23 @@
+id: '073'
+title: '[sync] flow-engine: Loop task reselection avoidance is not implemented. The
+  LoopController uses Ralph Loop mode (repeat user prompt) with no task discovery
+  or failure tracking'
+description: 'Spec ''flow-engine'' describes a requirement that is not implemented
+  in the code.
+
+
+  **Gap:** Loop task reselection avoidance is not implemented. The LoopController
+  uses Ralph Loop mode (repeat user prompt) with no task discovery or failure tracking
+
+  **Expected location:** LoopController implementation
+
+  '
+status: open
+priority: medium
+scope: in_scope
+type: task
+tags:
+- auto-discovered
+- source:sync
+created_at: '2026-04-14T16:09:54.731747'
+updated_at: '2026-04-14T16:09:54.731747'

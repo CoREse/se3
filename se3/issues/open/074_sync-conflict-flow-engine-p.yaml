@@ -1,0 +1,22 @@
+id: '074'
+title: '[sync-conflict] flow-engine: PLAN_TASKS handler uses the original full plan_tasks_handler
+  instead of a stub forwarding to plan_handler like PROPOSE and DESIGN do'
+description: 'Spec ''flow-engine'' conflicts with the code implementation.
+
+
+  **Conflict:** PLAN_TASKS handler uses the original full plan_tasks_handler instead
+  of a stub forwarding to plan_handler like PROPOSE and DESIGN do
+
+  **Code location:** steps/__init__.py:90
+
+  '
+status: open
+priority: high
+scope: in_scope
+type: task
+tags:
+- auto-discovered
+- source:sync
+- conflict
+created_at: '2026-04-14T16:57:35.648205'
+updated_at: '2026-04-14T16:57:35.648205'

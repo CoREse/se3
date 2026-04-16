@@ -9,9 +9,13 @@ Either path completing first satisfies the request; the other is stopped.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import select
+import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -22,6 +26,8 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
+_THREAD_JOIN_TIMEOUT = 5
+
 class SyncInteractionHandler:
     """Collect human decisions for pending sync items via dual concurrent paths.
 
@@ -30,9 +36,15 @@ class SyncInteractionHandler:
         pending_items: List of PendingDecision dicts/objects to resolve.
     """
 
-    def __init__(self, project_root: Path, pending_items: Optional[List[Any]] = None):
+    def __init__(
+        self,
+        project_root: Path,
+        pending_items: Optional[List[Any]] = None,
+        use_terminal: Optional[bool] = None,
+    ):
         self.project_root = project_root
         self._pending_items: List[Any] = pending_items or []
+        self._use_terminal = use_terminal if use_terminal is not None else sys.stdin.isatty()
 
         self._decisions: Dict[str, str] = {}
         self._done_event = threading.Event()
@@ -45,8 +57,10 @@ class SyncInteractionHandler:
     ) -> Dict[str, str]:
         """Collect decisions for all pending items via dual concurrent paths.
 
-        Starts both terminal interaction and file polling threads.
-        Blocks until one path completes or KeyboardInterrupt.
+        When stdin is a TTY, starts both terminal interaction and file polling
+        threads.  When stdin is not a TTY (e.g. piped or in a CI environment),
+        only the file-polling path is started — the process blocks until the
+        response file is written.
 
         Args:
             pending_items: Override the pending items list.
@@ -64,21 +78,43 @@ class SyncInteractionHandler:
         self._done_event.clear()
         self._stop_event.clear()
 
-        call_file = self._generate_pending_call_file()
+        call_file = self.generate_pending_call_file()
         self._call_file_path = call_file
 
-        terminal_thread = threading.Thread(
-            target=self._terminal_path, name="sync-terminal", daemon=True
-        )
+        response_path = Path(str(call_file) + ".response")
+        initial_hash: Optional[str] = None
+        try:
+            if response_path.exists():
+                existing = response_path.read_text(encoding="utf-8")
+                initial_hash = hashlib.sha256(existing.encode("utf-8")).hexdigest()
+        except OSError:
+            pass
+
+        threads: list[threading.Thread] = []
+
+        if self._use_terminal:
+            terminal_thread = threading.Thread(
+                target=self._terminal_path, name="sync-terminal", daemon=True
+            )
+            threads.append(terminal_thread)
+
         poll_thread = threading.Thread(
             target=self._file_watch_path,
             args=(call_file,),
+            kwargs={"initial_hash": initial_hash},
             name="sync-poll",
             daemon=True,
         )
+        threads.append(poll_thread)
 
-        terminal_thread.start()
-        poll_thread.start()
+        if not self._use_terminal:
+            logger.info(
+                "stdin is not a TTY — waiting for response file: %s.response",
+                call_file,
+            )
+
+        for t in threads:
+            t.start()
 
         try:
             while not self._done_event.is_set():
@@ -86,13 +122,13 @@ class SyncInteractionHandler:
         except KeyboardInterrupt:
             logger.info("Sync interaction interrupted by user")
             self._stop_event.set()
-            terminal_thread.join(timeout=3)
-            poll_thread.join(timeout=3)
+            for t in threads:
+                t.join(timeout=_THREAD_JOIN_TIMEOUT)
             raise
 
         self._stop_event.set()
-        terminal_thread.join(timeout=3)
-        poll_thread.join(timeout=3)
+        for t in threads:
+            t.join(timeout=_THREAD_JOIN_TIMEOUT)
 
         return dict(self._decisions)
 
@@ -157,6 +193,34 @@ class SyncInteractionHandler:
             )
         )
 
+    def _read_line_interruptible(self) -> Optional[str]:
+        """Read a line from stdin, checking stop/done events periodically.
+
+        Uses select() on real ttys so the thread can be interrupted when the
+        file-watch path wins.  Falls back to blocking input() when stdin is
+        redirected or mocked (e.g. in tests).
+
+        Returns None if interrupted by stop/done events or EOF.
+        """
+        try:
+            fileno = sys.stdin.fileno()
+        except (AttributeError, ValueError, OSError):
+            if self._stop_event.is_set() or self._done_event.is_set():
+                return None
+            try:
+                return input("")
+            except (EOFError, KeyboardInterrupt):
+                return None
+
+        while not self._stop_event.is_set() and not self._done_event.is_set():
+            ready, _, _ = select.select([fileno], [], [], 0.5)
+            if ready:
+                line = sys.stdin.readline()
+                if not line:
+                    raise EOFError
+                return line.rstrip("\n")
+        return None
+
     def _collect_terminal_input(self) -> Optional[Dict[str, str]]:
         """Read decisions from stdin. Returns None if stopped."""
         decisions: Dict[str, str] = {}
@@ -168,7 +232,13 @@ class SyncInteractionHandler:
                 return None
 
             try:
-                line = input(f"Decision ({len(decisions)}/{total} resolved)> ").strip()
+                prompt = f"Decision ({len(decisions)}/{total} resolved)> "
+                sys.stdout.write(prompt)
+                sys.stdout.flush()
+                line = self._read_line_interruptible()
+                if line is None:
+                    return None
+                line = line.strip()
             except EOFError:
                 return None
 
@@ -230,10 +300,12 @@ class SyncInteractionHandler:
     # Path B: File polling
     # ------------------------------------------------------------------
 
-    def _file_watch_path(self, call_file: Path) -> None:
+    def _file_watch_path(
+        self, call_file: Path, *, initial_hash: Optional[str] = None,
+    ) -> None:
         """Path B: Poll for .response file creation/modification."""
         response_path = Path(str(call_file) + ".response")
-        last_mtime: Optional[float] = None
+        last_content_hash = initial_hash
 
         while not self._stop_event.is_set():
             if self._done_event.is_set():
@@ -241,22 +313,23 @@ class SyncInteractionHandler:
 
             try:
                 if response_path.exists():
-                    current_mtime = os.path.getmtime(str(response_path))
-                    if last_mtime is None or current_mtime > last_mtime:
-                        decisions = self._parse_response_file(response_path)
+                    content = response_path.read_text(encoding="utf-8")
+                    content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                    if content_hash != last_content_hash:
+                        last_content_hash = content_hash
+                        decisions = self._parse_response_file(response_path, content=content)
                         if decisions is not None:
                             with self._lock:
                                 if not self._done_event.is_set():
                                     self._decisions = decisions
                                     self._done_event.set()
                             return
-                        last_mtime = current_mtime
             except OSError:
                 pass
 
             self._stop_event.wait(timeout=1.0)
 
-    def _generate_pending_call_file(self) -> Path:
+    def generate_pending_call_file(self) -> Path:
         """Generate an MCP call file for all pending decisions."""
         calls_dir = self.project_root / "se3" / "calls"
         calls_dir.mkdir(parents=True, exist_ok=True)
@@ -293,7 +366,9 @@ class SyncInteractionHandler:
         logger.info("Generated pending decisions call file: %s", call_file)
         return call_file
 
-    def _parse_response_file(self, response_path: Path) -> Optional[Dict[str, str]]:
+    def _parse_response_file(
+        self, response_path: Path, *, content: Optional[str] = None,
+    ) -> Optional[Dict[str, str]]:
         """Parse a .response file into a decisions dict.
 
         Expected format::
@@ -305,10 +380,16 @@ class SyncInteractionHandler:
               ]
             }
 
+        Args:
+            response_path: Path to the response file.
+            content: Pre-read file content. If provided, the file is not re-read.
+
         Returns None if parsing fails or file is incomplete.
+        Unresolved items default to create_issue (matching terminal path behavior).
         """
         try:
-            data = json.loads(response_path.read_text(encoding="utf-8"))
+            raw = content if content is not None else response_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
         except (json.JSONDecodeError, OSError):
             return None
 
@@ -318,8 +399,11 @@ class SyncInteractionHandler:
 
         decisions: Dict[str, str] = {}
         id_to_item_id = {}
+        expected_item_ids: set[str] = set()
         for idx, item in enumerate(self._pending_items, 1):
-            id_to_item_id[idx] = self._get_field(item, "item_id", str(idx - 1))
+            item_id = self._get_field(item, "item_id", str(idx - 1))
+            id_to_item_id[idx] = item_id
+            expected_item_ids.add(item_id)
 
         for resp in resp_items:
             decision = resp.get("decision", "")
@@ -337,10 +421,23 @@ class SyncInteractionHandler:
         if not decisions:
             return None
 
+        missing = expected_item_ids - decisions.keys()
+        if missing:
+            logger.debug(
+                "Response file missing item_ids (defaulting to create_issue): %s",
+                missing,
+            )
+            for item_id in missing:
+                decisions[item_id] = "create_issue"
+
         return decisions
 
     def _write_response_file(self, decisions: Dict[str, str]) -> None:
-        """Write decisions back to the .response file for consistency."""
+        """Write decisions back to the .response file atomically.
+
+        Uses write-to-temp-then-rename to prevent the file poll thread
+        from reading a partially written file.
+        """
         if self._call_file_path is None:
             return
 
@@ -358,10 +455,20 @@ class SyncInteractionHandler:
         response_data = {"items": items}
 
         try:
-            response_path.write_text(
-                json.dumps(response_data, indent=2, ensure_ascii=False),
-                encoding="utf-8",
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(response_path.parent),
+                suffix=".tmp",
             )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(response_data, f, indent=2, ensure_ascii=False)
+                os.replace(tmp_path, str(response_path))
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
         except OSError as e:
             logger.warning("Failed to write response file: %s", e)
 

@@ -966,9 +966,9 @@ class TestSyncEngineProcessGaps:
             SpecDiff(DiffType.GAP, "auth", "Missing signup endpoint"),
         ]
 
-        created = engine._process_gaps(gaps)
+        gap_result = engine._process_gaps(gaps)
 
-        assert created == 2
+        assert gap_result["issues_created"] == 2
         mgr = IssueManager(tmp_path)
         issues = mgr.list_issues()
         assert len(issues) == 2
@@ -981,16 +981,16 @@ class TestSyncEngineProcessGaps:
         gaps = [SpecDiff(DiffType.GAP, "auth", "Missing login endpoint")]
 
         engine._process_gaps(gaps)
-        created = engine._process_gaps(gaps)
+        gap_result = engine._process_gaps(gaps)
 
-        assert created == 0
+        assert gap_result["issues_created"] == 0
         mgr = IssueManager(tmp_path)
         assert len(mgr.list_issues()) == 1
 
     def test_empty_gaps(self, tmp_path):
         engine = SyncEngine(tmp_path)
-        created = engine._process_gaps([])
-        assert created == 0
+        gap_result = engine._process_gaps([])
+        assert gap_result["issues_created"] == 0
 
     def test_issue_description_includes_gap_details(self, tmp_path):
         engine = SyncEngine(tmp_path)
@@ -1229,45 +1229,6 @@ class TestSyncEngineGatherAllConflicts:
         assert conflicts == []
 
 
-class TestSyncEngineGenerateCallFile:
-    def test_generates_call_file(self, tmp_path):
-        engine = SyncEngine(tmp_path, mode="default")
-        conflicts = [
-            Conflict(spec_name="auth", description="Token mismatch", code_location="src/a.py"),
-            Conflict(spec_name="config", description="Format mismatch"),
-        ]
-
-        call_path = engine._generate_call_file(conflicts)
-
-        assert call_path.exists()
-        assert call_path.parent == tmp_path / "se3" / "calls"
-
-        data = json.loads(call_path.read_text())
-        assert data["type"] == "sync_conflicts"
-        assert data["mode"] == "default"
-        assert len(data["conflicts"]) == 2
-        assert data["conflicts"][0]["id"] == 1
-        assert data["conflicts"][0]["spec_name"] == "auth"
-        assert data["conflicts"][0]["decision"] == "pending"
-        assert data["conflicts"][1]["id"] == 2
-
-    def test_creates_calls_directory(self, tmp_path):
-        engine = SyncEngine(tmp_path)
-        conflicts = [Conflict(spec_name="x", description="d")]
-
-        call_path = engine._generate_call_file(conflicts)
-        assert (tmp_path / "se3" / "calls").is_dir()
-
-    def test_call_file_contains_options(self, tmp_path):
-        engine = SyncEngine(tmp_path)
-        conflicts = [Conflict(spec_name="x", description="d")]
-
-        call_path = engine._generate_call_file(conflicts)
-        data = json.loads(call_path.read_text())
-
-        assert data["conflicts"][0]["options"] == ["update_spec", "create_issue"]
-
-
 class TestSyncEngineRun:
     @patch("se3.engine.sync_engine.SyncEngine._load_specs")
     @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
@@ -1479,9 +1440,10 @@ class TestResolveConflictViaLLM:
         llm.call.return_value = json.dumps({"decision": "update_spec", "reasoning": "code is correct"})
 
         conflict = Conflict(spec_name="auth", description="Token mismatch")
-        decision = engine._resolve_conflict_via_llm(conflict, llm)
+        result = engine._resolve_conflict_via_llm(conflict, llm)
 
-        assert decision == "update_spec"
+        assert result["decision"] == "update_spec"
+        assert result["reasoning"] == "code is correct"
 
     def test_returns_create_issue(self, tmp_path):
         _create_spec(tmp_path, "auth", "# Auth spec")
@@ -1492,9 +1454,9 @@ class TestResolveConflictViaLLM:
         llm.call.return_value = json.dumps({"decision": "create_issue", "reasoning": "spec is correct"})
 
         conflict = Conflict(spec_name="auth", description="Token mismatch")
-        decision = engine._resolve_conflict_via_llm(conflict, llm)
+        result = engine._resolve_conflict_via_llm(conflict, llm)
 
-        assert decision == "create_issue"
+        assert result["decision"] == "create_issue"
 
     def test_defaults_to_create_issue_on_unknown(self, tmp_path):
         engine = SyncEngine(tmp_path)
@@ -1502,19 +1464,30 @@ class TestResolveConflictViaLLM:
         llm.call.return_value = json.dumps({"decision": "unknown"})
 
         conflict = Conflict(spec_name="x", description="d")
-        decision = engine._resolve_conflict_via_llm(conflict, llm)
+        result = engine._resolve_conflict_via_llm(conflict, llm)
 
-        assert decision == "create_issue"
+        assert result["decision"] == "create_issue"
 
-    def test_defaults_to_create_issue_on_error(self, tmp_path):
+    def test_defaults_to_create_issue_on_json_error(self, tmp_path):
+        engine = SyncEngine(tmp_path)
+        llm = MagicMock()
+        llm.call.return_value = "not json"
+
+        conflict = Conflict(spec_name="x", description="d")
+        result = engine._resolve_conflict_via_llm(conflict, llm)
+
+        assert result["decision"] == "create_issue"
+
+    def test_returns_fallback_on_unexpected_error(self, tmp_path):
         engine = SyncEngine(tmp_path)
         llm = MagicMock()
         llm.call.side_effect = RuntimeError("LLM fail")
 
         conflict = Conflict(spec_name="x", description="d")
-        decision = engine._resolve_conflict_via_llm(conflict, llm)
+        result = engine._resolve_conflict_via_llm(conflict, llm)
 
-        assert decision == "create_issue"
+        assert result["decision"] == "create_issue"
+        assert "LLM fail" in result["reasoning"]
 
     def test_prompt_includes_spec_content(self, tmp_path):
         _create_spec(tmp_path, "auth", "# Auth spec with JWT")
@@ -1641,7 +1614,9 @@ class TestHandleConflictsFast:
         engine = SyncEngine(tmp_path, mode="fast")
         result = engine._handle_conflicts_fast([], MagicMock())
 
-        assert result == {"specs_updated": 0, "issues_created": 0}
+        assert result["specs_updated"] == 0
+        assert result["issues_created"] == 0
+        assert result["conflict_resolutions"] == []
         assert not (tmp_path / "se3" / "calls").exists()
 
     def test_empty_conflicts(self, tmp_path):
@@ -1656,7 +1631,7 @@ class TestHandleConflictsFast:
 # ---------------------------------------------------------------------------
 
 class TestHandleConflictsStrict:
-    def test_generates_call_file_for_all(self, tmp_path):
+    def test_marks_all_as_pending_decisions(self, tmp_path):
         engine = SyncEngine(tmp_path, mode="strict")
         conflicts = [
             Conflict(spec_name="auth", description="Conflict A"),
@@ -1666,21 +1641,15 @@ class TestHandleConflictsStrict:
         result = engine._handle_conflicts_strict(conflicts)
 
         assert len(result["conflicts"]) == 2
-        assert result["call_file"] is not None
-        call_path = Path(result["call_file"])
-        assert call_path.exists()
+        assert len(result["pending_decisions"]) == 2
+        assert all(pd.type == "conflict" for pd in result["pending_decisions"])
 
-        data = json.loads(call_path.read_text())
-        assert data["type"] == "sync_conflicts"
-        assert len(data["conflicts"]) == 2
-        assert data["conflicts"][0]["options"] == ["update_spec", "create_issue"]
-
-    def test_no_conflicts_no_call_file(self, tmp_path):
+    def test_no_conflicts_no_pending(self, tmp_path):
         engine = SyncEngine(tmp_path, mode="strict")
         result = engine._handle_conflicts_strict([])
 
         assert result["conflicts"] == []
-        assert result["call_file"] is None
+        assert len(result["pending_decisions"]) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1708,9 +1677,8 @@ class TestHandleConflictsDefault:
         assert result["specs_updated"] == 1
         assert result["issues_created"] == 0
         assert result["unresolved"] == []
-        assert result["call_file"] is None
 
-    def test_collects_low_confidence(self, tmp_path):
+    def test_collects_low_confidence_as_pending(self, tmp_path):
         engine = SyncEngine(tmp_path, mode="default")
 
         conflicts = [
@@ -1723,7 +1691,7 @@ class TestHandleConflictsDefault:
         assert result["specs_updated"] == 0
         assert result["issues_created"] == 0
         assert len(result["unresolved"]) == 2
-        assert result["call_file"] is not None
+        assert len(result["pending_decisions"]) == 2
 
     def test_mixed_confidence(self, tmp_path):
         _create_spec(tmp_path, "auth", "# Auth spec")
@@ -1745,9 +1713,9 @@ class TestHandleConflictsDefault:
         assert result["issues_created"] == 1
         assert len(result["unresolved"]) == 1
         assert result["unresolved"][0].description == "Low conf"
-        assert result["call_file"] is not None
+        assert len(result["pending_decisions"]) == 1
 
-    def test_no_low_confidence_no_call_file(self, tmp_path):
+    def test_no_low_confidence_no_pending(self, tmp_path):
         _create_spec(tmp_path, "auth", "# Auth spec")
         engine = SyncEngine(tmp_path, mode="default")
         engine._load_specs()
@@ -1764,8 +1732,8 @@ class TestHandleConflictsDefault:
 
         result = engine._handle_conflicts_default(conflicts, llm)
 
-        assert result["call_file"] is None
         assert result["unresolved"] == []
+        assert len(result["pending_decisions"]) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -1971,7 +1939,7 @@ class TestSyncEngineProgressCallback:
         def callback(phase, spec_name, index, total, analysis):
             calls.append((phase, spec_name, index, total))
 
-        engine = SyncEngine(tmp_path)
+        engine = SyncEngine(tmp_path, interactive=False)
         engine._sync_issues = []
         engine.run(progress_callback=callback)
 

@@ -1,0 +1,26 @@
+id: '076'
+title: 'LLM code visibility improvement (task priority #1) — the gap/conflict resolution
+  prompts in sync_engine.py provide gap descriptions and code locations but do NOT
+  include actual source code or instruct the LLM to read source files. This would
+  be in SyncAnalyzer (sync_analyzer.py), which is not in the changed files for this
+  implementation group.'
+description: 'LLM code visibility improvement (task priority #1) — the gap/conflict
+  resolution prompts in sync_engine.py provide gap descriptions and code locations
+  but do NOT include actual source code or instruct the LLM to read source files.
+  This would be in SyncAnalyzer (sync_analyzer.py), which is not in the changed files
+  for this implementation group.
+
+
+  Suggestion: If not already addressed in sync_analyzer.py, a future task should ensure
+  the SyncAnalyzer prompt instructs the LLM to browse relevant source code files during
+  analysis.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-15T14:48:40.172780'
+updated_at: '2026-04-15T14:48:40.172780'
