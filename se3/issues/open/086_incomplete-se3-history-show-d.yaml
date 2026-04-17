@@ -1,0 +1,134 @@
+id: 086
+title: 'Incomplete: se3 history show detailed 并不是所有 spec 都折叠了，你可以尝试se3s history show
+  20260416-135721'
+description: 'Session interrupted while working on: se3 history show detailed 并不是所有
+  spec 都折叠了，你可以尝试se3s history show 20260416-135721_025bb296 --detailed查看。保证所有的spec在history
+  detailed显示中都被正确折叠了
+
+
+  **Step history:**
+
+  - analyze: completed
+
+  - plan: completed
+
+  - confirm: completed
+
+  - implement: completed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: completed
+
+  - verify_spec: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+  - test: completed
+
+  - self_check: revision_needed
+
+
+  **Interrupted at step:** self_check
+
+
+  **Changed files:**
+
+  - e3.yaml
+
+  - se3/issues/.next_id
+
+  - src/se3/config.py
+
+  - src/se3/engine/chat_history.py
+
+  - src/se3/engine/steps/implement.py
+
+  - tests/test_chat_history.py
+
+  - tests/test_implement.py
+
+  - se3/issues/open/085_fix-loop-exhausted-se3-histor.yaml'
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:salvage
+created_at: '2026-04-17T09:12:18.087260'
+updated_at: '2026-04-17T09:12:18.087260'

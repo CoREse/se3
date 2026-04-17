@@ -847,7 +847,7 @@ _SPEC_SUBSECTION_RE = re.compile(r"^### ([\w-]+)\s*$", re.MULTILINE)
 
 _SPEC_BLOCK_RE = re.compile(
     r"(?i)^### [\w-]+[ \t]*\r?\n"
-    r"(?:[ \t]*\r?\n){0,5}"
+    r"(?:[ \t]*\r?\n)*"
     r"# (?!todo\b|fixme\b|hack\b|note\b|bug\b|issue\b|warn\b|xxx\b|"
     r"config\b|import\b|from\b|def\b|class\b|return\b|if\b|for\b|while\b|"
     r"print\b|test\b)[^\s].{2,}",
@@ -1047,14 +1047,20 @@ def fold_spec_content(title: str, content: str) -> Optional[list]:
         }
         if strict_starts:
             return _fold_spec_subsections(content, strict_starts=strict_starts)
-        if _SPEC_BLOCK_RE.search(content):
-            # All _SPEC_BLOCK_RE matches are inside code fences, but there may still
-            # be real ### subsections outside fences (e.g., malformed spec H1).
-            for m in _SPEC_SUBSECTION_RE.finditer(content):
-                if not _match_in_code_fence(content, m.start()):
-                    return _fold_spec_subsections(content)
-            return None
-        return _fold_spec_subsections(content)
+        # Permissive fallback: under known spec titles the SE3 prompt builder
+        # owns the segment and always emits proper spec structure, so any
+        # `### name` subsection outside code fences is treated as a spec fold
+        # even without a '# Title' H1 marker. This is intentionally asymmetric
+        # with the unknown-title path below (which gates on _SPEC_BLOCK_RE.search)
+        # because a benign user-authored segment would not bear these reserved
+        # titles. Pinned by test_known_title_permissive_fold_no_fences_no_h1.
+        outside_starts = {
+            m.start() for m in _SPEC_SUBSECTION_RE.finditer(content)
+            if not _match_in_code_fence(content, m.start())
+        }
+        if outside_starts:
+            return _fold_spec_subsections(content, strict_starts=outside_starts)
+        return None
     if title.startswith("Base Specification"):
         return _fold_base_spec(content)
     if title == "Current Spec Content" or title.startswith("Spec:"):
@@ -1067,12 +1073,12 @@ def fold_spec_content(title: str, content: str) -> Optional[list]:
         }
         if strict_starts:
             return _fold_spec_subsections(content, strict_starts=strict_starts)
-        # All _SPEC_BLOCK_RE matches are inside code fences, but there may still
-        # be real ### subsections outside fences (e.g., malformed spec H1).
-        # Fall back to folding any ### subsections found outside code fences.
-        for m in _SPEC_SUBSECTION_RE.finditer(content):
-            if not _match_in_code_fence(content, m.start()):
-                return _fold_spec_subsections(content)
+        outside_starts = {
+            m.start() for m in _SPEC_SUBSECTION_RE.finditer(content)
+            if not _match_in_code_fence(content, m.start())
+        }
+        if outside_starts:
+            return _fold_spec_subsections(content, strict_starts=outside_starts)
         return None
     return None
 

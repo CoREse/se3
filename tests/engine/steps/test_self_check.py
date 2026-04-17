@@ -14,6 +14,8 @@ from se3.engine.steps.self_check import (
     _format_test_results,
     _format_spec_content,
     _format_fix_context,
+    _issue_signature,
+    _issues_converged,
     SELF_CHECK_PROMPT,
 )
 
@@ -340,3 +342,219 @@ class TestFormatFixContext:
         result = _format_fix_context(3, 3)
         assert "WARNING" in result
         assert "final fix attempt" in result
+
+
+class TestIssueSignature:
+    def test_empty_list(self):
+        assert _issue_signature([]) == set()
+
+    def test_single_issue(self):
+        sig = _issue_signature([
+            {"severity": "low", "location": "a.py:1", "description": "x"},
+        ])
+        assert sig == {("a.py:1", "x")}
+
+    def test_ignores_severity(self):
+        """Severity is not part of the signature — re-reporting the same issue
+        with a different severity still counts as convergence."""
+        a = _issue_signature([{"severity": "low", "location": "a", "description": "x"}])
+        b = _issue_signature([{"severity": "high", "location": "a", "description": "x"}])
+        assert a == b
+
+    def test_skips_non_dict(self):
+        sig = _issue_signature(["not-a-dict", {"location": "a", "description": "x"}])
+        assert sig == {("a", "x")}
+
+    def test_skips_empty_signature(self):
+        sig = _issue_signature([{"location": "", "description": ""}])
+        assert sig == set()
+
+
+class TestIssuesConverged:
+    def test_empty_current_returns_false(self):
+        assert _issues_converged([], [{"location": "a", "description": "x"}]) is False
+
+    def test_empty_prev_returns_false(self):
+        assert _issues_converged([{"location": "a", "description": "x"}], []) is False
+
+    def test_none_prev_returns_false(self):
+        assert _issues_converged([{"location": "a", "description": "x"}], None) is False
+
+    def test_identical_issues_converges(self):
+        issues = [{"severity": "low", "location": "a.py:1", "description": "x"}]
+        assert _issues_converged(issues, issues) is True
+
+    def test_subset_converges(self):
+        """If current is a subset of prev (LLM only re-reports old issues), converged."""
+        prev = [
+            {"location": "a", "description": "x"},
+            {"location": "b", "description": "y"},
+        ]
+        current = [{"location": "a", "description": "x"}]
+        assert _issues_converged(current, prev) is True
+
+    def test_new_issue_not_converged(self):
+        """A new issue not in prev means progress — not converged."""
+        prev = [{"location": "a", "description": "x"}]
+        current = [
+            {"location": "a", "description": "x"},
+            {"location": "new.py:42", "description": "new issue"},
+        ]
+        assert _issues_converged(current, prev) is False
+
+    def test_paraphrased_description_same_location_converges(self):
+        """LLMs routinely paraphrase the same logical issue differently across
+        iterations. When the location is identical and descriptions share
+        the same tokens after normalization, convergence must still fire."""
+        prev = [
+            {"location": "src/foo.py:42",
+             "description": "Missing null check on user input"},
+        ]
+        current = [
+            {"location": "src/foo.py:42",
+             "description": "missing null check, on user input!"},
+        ]
+        assert _issues_converged(current, prev) is True
+
+    def test_location_only_convergence_when_descriptions_fully_differ(self):
+        """Location-only fallback catches heavier paraphrases: if every current
+        issue lives at a previously-flagged location, treat as converged even
+        when the free-text descriptions use entirely different wording."""
+        prev = [
+            {"location": "src/foo.py:42",
+             "description": "Missing null check on user input"},
+        ]
+        current = [
+            {"location": "src/foo.py:42",
+             "description": "User input not validated for None"},
+        ]
+        assert _issues_converged(current, prev) is True
+
+    def test_new_location_defeats_location_only_convergence(self):
+        """If current introduces a location never seen in prev, even the
+        lenient location-only layer must report not-converged — a genuinely
+        new issue has been discovered."""
+        prev = [
+            {"location": "src/foo.py:42",
+             "description": "Missing null check"},
+        ]
+        current = [
+            {"location": "src/foo.py:42", "description": "Null check missing"},
+            {"location": "src/bar.py:10", "description": "Leaked handle"},
+        ]
+        assert _issues_converged(current, prev) is False
+
+
+class TestSelfCheckConvergence:
+    """Tests that self_check short-circuits when the LLM re-reports the same issues."""
+
+    @pytest.fixture
+    def flow(self, tmp_path):
+        flow = FlowInstance(
+            flow_id="test-flow-conv",
+            task_description="Fix bug",
+            task_type="bugfix",
+            status=FlowStatus.RUNNING,
+            change_path=tmp_path / "changes" / "test-change",
+        )
+        flow.state.selected_steps = [
+            StepType.IMPLEMENT,
+            StepType.TEST,
+            StepType.SELF_CHECK,
+        ]
+        return flow
+
+    def test_converges_when_issues_repeat(self, flow):
+        prev_issues = [
+            {"severity": "low", "location": "a.py:1", "description": "x"},
+            {"severity": "medium", "location": "b.py:2", "description": "y"},
+        ]
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs={
+                "task_description": "Fix bug",
+                "changes_made": {},
+                "test_results": {"passed": True, "returncode": 0},
+                "spec_content": {},
+                "fix_iteration": 2,
+                "max_fix_iterations": 10,
+                "prev_self_check_issues": prev_issues,
+            },
+        )
+        response = json.dumps({"issues": prev_issues, "summary": "same"})
+
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+
+            result = self_check_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        assert step.outputs.get("converged") is True
+        assert "convergence_reason" in step.outputs
+        # Unresolved issues must still be surfaced to downstream steps
+        # even when the loop short-circuits.
+        assert step.outputs.get("unresolved_issues") == prev_issues
+
+    def test_does_not_converge_on_first_iteration(self, flow):
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs={
+                "task_description": "Fix bug",
+                "changes_made": {},
+                "test_results": {"passed": True, "returncode": 0},
+                "spec_content": {},
+                "fix_iteration": 0,
+                "max_fix_iterations": 10,
+            },
+        )
+        response = json.dumps({
+            "issues": [{"severity": "low", "location": "a", "description": "x"}],
+            "summary": "first",
+        })
+
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+
+            result = self_check_handler(step, flow)
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert not step.outputs.get("converged")
+
+    def test_does_not_converge_when_new_issue_appears(self, flow):
+        prev_issues = [{"severity": "low", "location": "a", "description": "x"}]
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs={
+                "task_description": "Fix bug",
+                "changes_made": {},
+                "test_results": {"passed": True, "returncode": 0},
+                "spec_content": {},
+                "fix_iteration": 2,
+                "max_fix_iterations": 10,
+                "prev_self_check_issues": prev_issues,
+            },
+        )
+        response = json.dumps({
+            "issues": [
+                {"severity": "low", "location": "a", "description": "x"},
+                {"severity": "medium", "location": "new.py", "description": "new"},
+            ],
+            "summary": "new issue found",
+        })
+
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+
+            result = self_check_handler(step, flow)
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert not step.outputs.get("converged")

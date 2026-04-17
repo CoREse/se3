@@ -8,6 +8,7 @@ robustness, and test coverage gaps — explicitly excludes spec compliance
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -147,6 +148,19 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             logger.info("Self-check passed (no issues found)")
             return StepStatus.COMPLETED
 
+        if _issues_converged(issues, prev_issues):
+            logger.warning(
+                f"Self-check converged: {len(issues)} issue(s) match previous "
+                f"iteration's signatures — stopping fix loop to avoid re-flagging "
+                f"already-fixed or not-real issues"
+            )
+            step.outputs["converged"] = True
+            step.outputs["convergence_reason"] = (
+                f"Same {len(issues)} issue signature(s) reported in consecutive iterations"
+            )
+            step.outputs["unresolved_issues"] = list(issues)
+            return StepStatus.COMPLETED
+
         logger.warning(
             f"Self-check found {len(issues)} issue(s) "
             f"(fix iteration {fix_iteration}/{max_iterations})"
@@ -179,6 +193,81 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.exception("Self-check step failed")
         step.error_message = f"Self-check failed: {str(e)}"
         return StepStatus.FAILED
+
+
+_DESC_STOPWORDS = frozenset({
+    "a", "an", "the", "of", "on", "in", "at", "to", "for", "from",
+    "is", "are", "be", "been", "by", "with", "and", "or", "not",
+    "was", "were", "has", "have", "had", "this", "that", "these", "those",
+    "can", "could", "should", "would", "may", "might", "will", "shall",
+    "as", "but", "so", "if", "it", "its", "do", "does", "did", "no",
+})
+_DESC_PUNCT_RE = re.compile(r"[^\w\s]+")
+
+
+def _normalize_description(text: str) -> str:
+    """Normalize free-text issue descriptions for fuzzy convergence comparison.
+
+    Lowercases, strips punctuation, drops common English stopwords, and sorts
+    the remaining tokens. This makes minor LLM paraphrasing (different word
+    order, inserted punctuation, added articles) compare equal, so the
+    convergence check isn't defeated by trivial wording changes.
+    """
+    lower = text.lower()
+    cleaned = _DESC_PUNCT_RE.sub(" ", lower)
+    tokens = [t for t in cleaned.split() if t and t not in _DESC_STOPWORDS]
+    tokens.sort()
+    return " ".join(tokens)
+
+
+def _issue_signature(issues: list) -> set:
+    """Compute a set of (location, normalized_description) tuples for convergence detection.
+
+    Location is stripped and lowercased. Description is token-normalized via
+    _normalize_description so LLM paraphrasing of the same logical issue still
+    hashes to the same signature.
+    """
+    sigs = set()
+    for i in issues:
+        if not isinstance(i, dict):
+            continue
+        loc = str(i.get("location", "")).strip().lower()
+        desc = _normalize_description(str(i.get("description", "")))
+        if loc or desc:
+            sigs.add((loc, desc))
+    return sigs
+
+
+def _issues_converged(current_issues: list, prev_issues: list | None) -> bool:
+    """Return True if the current issues appear to repeat the previous set.
+
+    Signals the LLM is re-reporting the same issues after a fix attempt, meaning
+    the fix loop has stalled. Requires at least one issue on each side.
+
+    Detection is deliberately lenient — subset (not equality) semantics are
+    intentional: when prev=[A,B,C] and current=[A], issue A has survived a
+    full fix attempt and further iterations are unlikely to resolve it, so we
+    stop. step.outputs["issues"] still carries the remaining issue list so
+    downstream steps can react.
+
+    A location-only second layer catches paraphrase-heavy convergence: if every
+    current issue lives at a location already flagged by prev (regardless of
+    wording), treat as converged. LLMs routinely rewrite descriptions for the
+    same underlying problem.
+    """
+    if not prev_issues or not current_issues:
+        return False
+    current_sig = _issue_signature(current_issues)
+    prev_sig = _issue_signature(prev_issues)
+    if not current_sig or not prev_sig:
+        return False
+    if current_sig.issubset(prev_sig):
+        return True
+    current_locs = {loc for loc, _ in current_sig if loc}
+    prev_locs = {loc for loc, _ in prev_sig if loc}
+    if current_locs and prev_locs and current_locs.issubset(prev_locs):
+        return True
+    return False
 
 
 def _format_changes(changes_made: dict[str, Any]) -> str:

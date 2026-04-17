@@ -183,6 +183,8 @@ Results are de-duplicated by `flow_id` and sorted by `updated_at` descending.
   - Segments titled "Relevant Specifications", "Specifications (for context only)", or "Project Conventions" fold each `### spec-name` subsection into `[spec] @spec-name  (折叠, size)` with `bold magenta` Rich styling on `@spec-name`
   - Segments titled "Base Specification" fold the entire body into `[spec] @base  (折叠, size)`
   - Segments that only list spec names (e.g., "Available Specifications") are NOT folded
+  - `### name` headings that appear inside fenced code blocks (``` or ~~~) or indented code blocks are NOT treated as spec subsections and are preserved as-is; only `### name` headings outside code contexts qualify for folding
+  - Spec recognition tolerates arbitrary blank lines between the `### spec-name` marker and its following `# Title` H1 heading, so unusually formatted specs are still folded via the primary recognition path
 - **AND** response shows only the final assistant text block (skipping intermediate tool calls and tool results)
 - **AND** multiple attempts within a step are shown separately with attempt labels
 

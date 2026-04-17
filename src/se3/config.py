@@ -636,7 +636,7 @@ def load_conflict_resolver_config(project_root: Optional[Path] = None) -> Confli
         project_root = Path.cwd()
     return ConflictResolverConfig.load(project_root)
 
-DEFAULT_MAX_FIX_ITERATIONS = 30
+DEFAULT_MAX_FIX_ITERATIONS = 20
 @dataclass
 class TestConfig:
     """Test step configuration loaded from se3.yaml test: section."""

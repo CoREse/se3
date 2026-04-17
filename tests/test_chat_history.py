@@ -1957,6 +1957,30 @@ class TestFoldSpecContentFallback:
         se3_line = next(r for r in result if "@se3-commands" in r.plain)
         assert "折叠" in se3_line.plain
 
+    def test_trailing_fenced_subsection_silently_absorbed(self):
+        """A fenced code block trailing after the last strict spec is silently
+        absorbed into the preceding spec's fold size — its ### fake-spec line
+        does NOT surface as a separate fold, and the fenced text is not rendered
+        as a separate gap segment. Pins the known UX trade-off noted in
+        _fold_spec_subsections: when strict_starts truncates the spec list,
+        `end = len(content)` on the final iteration swallows any trailing noise."""
+        content = (
+            "### base\n# SE3 Framework\nBase spec content.\n\n"
+            "```python\n"
+            "### fake-spec\n"
+            "# Not a real title\n"
+            "print('hello')\n"
+            "```"
+        )
+        result = fold_spec_content("Task Description", content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        # Fenced ### is absorbed into @base's fold — not rendered as its own
+        # fold, and the fenced body is not emitted as a separate gap block.
+        assert not any("@fake-spec" in n for n in names)
+        assert not any("print('hello')" in n for n in names)
+
     def test_leading_nonspec_subsection_with_heading_preserved(self):
         """A non-spec ### block before the first verified spec must be
         preserved as gap content, including any ## subheadings inside it."""
@@ -2095,6 +2119,103 @@ class TestFoldSpecContentFallback:
         assert result is not None
         assert any("@spec" in r.plain for r in result)
         assert "折叠" in result[0].plain
+
+    def test_known_title_fenced_spec_not_folded_real_spec_folded(self):
+        """Known title 'Relevant Specifications' with ### inside fence
+        (fake spec) and ### outside fence (real spec without H1) must
+        fold only the real one, never the fenced example."""
+        content = (
+            "## Relevant Specifications\n\n"
+            "```python\n"
+            "### fake-spec\n"
+            "# Pretend H1\n"
+            "print('hello')\n"
+            "```\n\n"
+            "### base\nBase spec without H1.\n"
+            "### se3-commands\nCommand spec without H1."
+        )
+        result = fold_spec_content("Relevant Specifications", content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert any("@se3-commands" in n for n in names)
+        assert not any("@fake-spec" in n for n in names)
+        # Fenced example text must be preserved intact somewhere in output
+        assert any("print('hello')" in n for n in names)
+
+    def test_unknown_title_fenced_spec_not_folded_real_spec_folded(self):
+        """Unknown title ('Task Description') fallback with ### inside fence
+        (fake spec) and ### outside fence (real spec without H1) must
+        fold only the real one and leave the fenced example alone."""
+        content = (
+            "## Task Description\nFix the bug.\n\n"
+            "```python\n"
+            "### fake-spec\n"
+            "# Pretend H1\n"
+            "print('hello')\n"
+            "```\n\n"
+            "### base\nBase spec without H1.\n"
+            "### se3-commands\nCommand spec without H1."
+        )
+        result = fold_spec_content("Task Description", content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert any("@se3-commands" in n for n in names)
+        assert not any("@fake-spec" in n for n in names)
+        assert any("print('hello')" in n for n in names)
+
+    def test_spec_block_re_tolerates_many_blank_lines(self):
+        """### spec-name followed by 6-20 blank lines before # H1 title must
+        still be recognized as a real spec block via _SPEC_BLOCK_RE, so the
+        strict_starts-based code-fence filtering engages even for unusually
+        formatted specs."""
+        from se3.engine.chat_history import _SPEC_BLOCK_RE
+        content = (
+            "### base\n"
+            + ("\n" * 8)
+            + "# Base Title\n"
+            "Base spec body."
+        )
+        # _SPEC_BLOCK_RE must recognize this as a real spec block
+        assert _SPEC_BLOCK_RE.search(content) is not None
+
+        # fold_spec_content must still fold it under a known spec title
+        wrapped = "## Relevant Specifications\n" + content
+        result = fold_spec_content("Relevant Specifications", wrapped)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+
+    def test_spec_block_re_tolerates_unbounded_blank_lines(self):
+        """### spec-name followed by 21+ blank lines before # H1 title must
+        still be recognized as a real spec block after lifting the `{0,20}`
+        upper bound to `*` (unbounded)."""
+        from se3.engine.chat_history import _SPEC_BLOCK_RE
+        content = (
+            "### base\n"
+            + ("\n" * 50)
+            + "# Base Title\n"
+            "Base spec body."
+        )
+        assert _SPEC_BLOCK_RE.search(content) is not None
+
+    def test_known_title_permissive_fold_no_fences_no_h1(self):
+        """Known spec title with no code fences and no '# Title' H1 anywhere —
+        just plain '### name\\ncontent' subsections — pins the intentional
+        permissive behavior: under known titles SE3 prompt builders always
+        emit proper spec structure, so ### subsections are folded even
+        without strict spec-block markers."""
+        content = (
+            "## Relevant Specifications\n"
+            "### base\nBase content only, no H1 title.\n"
+            "### flow-engine\nFlow engine content, no H1 either."
+        )
+        result = fold_spec_content("Relevant Specifications", content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert any("@flow-engine" in n for n in names)
 
 
 class TestSegmentPromptIndentedCodeBlock:
