@@ -206,10 +206,19 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         fix_context=fix_context_text,
     )
 
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+
+    # Append available-specs names injection if applicable
+    from ..context_builder import get_spec_names_injection
+    spec_names = get_spec_names_injection(
+        "self_check", project_root, step.inputs.get("relevant_specs"),
+    )
+    if spec_names:
+        prompt += spec_names
+
     logger.info(f"Running self-check code review (fix iteration: {fix_iteration})...")
 
     try:
-        project_root = flow.change_path.parent if flow.change_path else Path.cwd()
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(
             project_root,

@@ -106,7 +106,11 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
 
     # Append language instruction if configured
-    from ..context_builder import get_step_language_instruction, get_issue_discovery_injection
+    from ..context_builder import (
+        get_step_language_instruction,
+        get_issue_discovery_injection,
+        get_spec_names_injection,
+    )
     lang_instruction = get_step_language_instruction("update_spec", project_root)
     if lang_instruction:
         prompt += lang_instruction
@@ -115,6 +119,13 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     injection = get_issue_discovery_injection("update_spec", project_root)
     if injection:
         prompt += injection
+
+    # Append available-specs names injection if applicable
+    spec_names = get_spec_names_injection(
+        "update_spec", project_root, step.inputs.get("relevant_specs"),
+    )
+    if spec_names:
+        prompt += spec_names
 
     logger.info("Updating specs to reflect implementation...")
 

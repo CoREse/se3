@@ -171,11 +171,18 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
 
     # Append issue discovery injection if applicable
-    from ..context_builder import get_issue_discovery_injection
+    from ..context_builder import get_issue_discovery_injection, get_spec_names_injection
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     injection = get_issue_discovery_injection("verify_spec", project_root)
     if injection:
         prompt += injection
+
+    # Append available-specs names injection if applicable
+    spec_names = get_spec_names_injection(
+        "verify_spec", project_root, step.inputs.get("relevant_specs"),
+    )
+    if spec_names:
+        prompt += spec_names
 
     logger.info(f"Verifying implementation against specifications (fix iteration: {fix_iteration})...")
 
