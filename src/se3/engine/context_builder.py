@@ -69,6 +69,20 @@ ISSUE_DISCOVERY_FORBIDDEN_STEPS = {"implement", "test"}
 # Default steps that receive issue discovery prompt injection
 ISSUE_DISCOVERY_DEFAULT_STEPS = ["summarize"]
 
+# Steps explicitly forbidden from spec names injection
+SPEC_NAMES_INJECTION_FORBIDDEN_STEPS = frozenset({"summarize", "commit"})
+
+# Default steps that receive the available-specs names injection
+SPEC_NAMES_INJECTION_DEFAULT_STEPS = [
+    "plan",
+    "plan_tasks",
+    "implement",
+    "verify_spec",
+    "update_spec",
+    "self_check",
+    "design",
+]
+
 
 def get_issue_discovery_injection(step_type: str, project_root: Path) -> str:
     """Get the issue discovery prompt injection for a step.
@@ -112,6 +126,76 @@ def get_issue_discovery_injection(step_type: str, project_root: Path) -> str:
     # which has its own hardcoded whitelist. The configurable whitelist here is authoritative.
     from .issue_discovery import ISSUE_DISCOVERY_PROMPT
     return ISSUE_DISCOVERY_PROMPT
+
+
+def get_spec_names_injection(
+    step_type: str,
+    project_root: Path,
+    relevant_specs: list[str] | None = None,
+) -> str:
+    """Get the available-specs names prompt injection for a step.
+
+    Lists all available specs under ``se3/specs/`` and declares which are already
+    loaded into the prompt (from ``relevant_specs``), so the LLM can optionally
+    read additional specs via the Read tool if the analyze step missed them.
+
+    Args:
+        step_type: Current step type name (e.g., "plan", "implement").
+        project_root: Project root directory for loading config and specs.
+        relevant_specs: Spec names already loaded into the prompt. May be ``None``
+            or empty; treated as "no specs loaded" in that case.
+
+    Returns:
+        Spec-names injection string to append to prompt, or empty string when the
+        step is not in the whitelist.
+    """
+    # Forbidden steps never get injection — short-circuit before any I/O
+    if step_type in SPEC_NAMES_INJECTION_FORBIDDEN_STEPS:
+        return ""
+
+    # Read whitelist from se3.yaml config (mirror of issue_discovery loader)
+    whitelist = SPEC_NAMES_INJECTION_DEFAULT_STEPS
+    try:
+        config_path = project_root / "se3.yaml"
+        if config_path.exists():
+            import yaml
+            with open(config_path) as f:
+                config = yaml.safe_load(f) or {}
+            configured_steps = config.get("spec_names_injection", {}).get("steps")
+            if configured_steps is not None:
+                whitelist = configured_steps
+    except Exception:
+        pass  # Use defaults on any config error
+
+    if step_type not in whitelist:
+        return ""
+
+    # Forbidden list takes precedence even if yaml adds the step
+    if step_type in SPEC_NAMES_INJECTION_FORBIDDEN_STEPS:
+        return ""
+
+    # Scan project_root/se3/specs/*/spec.md for available spec names
+    specs_dir = project_root / "se3" / "specs"
+    all_spec_names: list[str] = []
+    if specs_dir.exists():
+        for entry in specs_dir.iterdir():
+            if entry.is_dir() and (entry / "spec.md").exists():
+                all_spec_names.append(entry.name)
+    all_spec_names.sort()
+
+    loaded_spec_names = sorted(relevant_specs) if relevant_specs else []
+    loaded_display = ", ".join(loaded_spec_names) if loaded_spec_names else "none"
+    all_display = ", ".join(all_spec_names) if all_spec_names else "(none found)"
+
+    return (
+        "\n\n## Available Specifications\n"
+        f"All available specs in this project: {all_display}.\n\n"
+        f"Specs already loaded above: {loaded_display}.\n\n"
+        "If a spec above is not yet included but you believe it is relevant to "
+        "the current task, you MAY read it using the Read tool at "
+        "`se3/specs/<name>/spec.md`. Only consult specs that directly help the "
+        "task — avoid reading broadly."
+    )
 
 
 def get_read_only_injection(step_type: str) -> str:
