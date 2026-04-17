@@ -29,6 +29,7 @@ from ..engine.chat_history import (
     list_flows as list_chat_flows,
     get_flow_history,
     get_detailed_json,
+    interleave_sessions_for_display,
     render_session_detailed,
 )
 
@@ -497,6 +498,8 @@ def _show_detailed_sessions(
     if not sessions:
         console.print("\n[dim]No chat history available for this flow.[/dim]")
         return
+
+    sessions = interleave_sessions_for_display(sessions)
 
     console.print(f"\n[bold]LLM Call Details:[/bold]")
 

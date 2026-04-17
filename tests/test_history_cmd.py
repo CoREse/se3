@@ -18,10 +18,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from se3.commands import history_cmd
 from se3.commands.history_cmd import (
     get_flow_detail,
     _load_archived_flow,
     _detail_from_history,
+    _show_detailed_sessions,
 )
 
 
@@ -198,3 +200,183 @@ class TestDetailFromHistory:
         assert detail["flow_id"] == flow_id
         assert detail["steps"] == []
         assert detail["chat_sessions"] == 0
+
+
+def _write_jsonl(path: Path, messages: list[dict]) -> None:
+    lines = [json.dumps(m, ensure_ascii=False) for m in messages]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _mk_msg(
+    role: str,
+    step_type: str,
+    timestamp: str,
+    attempt: int = 0,
+    content: str = "",
+) -> dict:
+    return {
+        "role": role,
+        "content": content or f"{role} at {timestamp}",
+        "raw_json": [],
+        "timestamp": timestamp,
+        "step_type": step_type,
+        "attempt": attempt,
+    }
+
+
+class TestShowDetailedSessionsInterleaving:
+    """`_show_detailed_sessions` renders implement iterations interleaved
+    with test / self_check sessions via `interleave_sessions_for_display`.
+
+    Uses a spy on ``render_session_detailed`` to capture the rendered
+    session order — avoids coupling to Rich console output formatting.
+    """
+
+    @staticmethod
+    def _spy_renderables(monkeypatch):
+        """Patch render_session_detailed to record calls and return nothing."""
+        calls: list = []
+
+        def fake(session, verbose=False):
+            calls.append((session.step_id, session.step_type, len(session.messages)))
+            return []
+
+        monkeypatch.setattr(history_cmd, "render_session_detailed", fake)
+        return calls
+
+    def test_fix_loop_renders_iter_sessions_in_order(self, project, monkeypatch):
+        flow_id = "flow-fix-loop"
+        history_dir = project / "se3" / "history" / flow_id
+        history_dir.mkdir(parents=True)
+
+        # Multi-round implement: 3 iterations, each with a user prompt
+        # separated by test session timestamps.
+        _write_jsonl(
+            history_dir / "04_implement_c.jsonl",
+            [
+                _mk_msg("user", "implement", "2026-04-17T10:00:00", attempt=0),
+                _mk_msg("assistant", "implement", "2026-04-17T10:00:30", attempt=0),
+                _mk_msg("user", "implement", "2026-04-17T10:06:00", attempt=1),
+                _mk_msg("assistant", "implement", "2026-04-17T10:06:30", attempt=1),
+                _mk_msg("user", "implement", "2026-04-17T10:12:00", attempt=2),
+            ],
+        )
+        _write_jsonl(
+            history_dir / "05_test_d.jsonl",
+            [_mk_msg("user", "test", "2026-04-17T10:03:00")],
+        )
+        _write_jsonl(
+            history_dir / "06_self_check_e.jsonl",
+            [_mk_msg("user", "self_check", "2026-04-17T10:04:00")],
+        )
+        _write_jsonl(
+            history_dir / "07_test_f.jsonl",
+            [_mk_msg("user", "test", "2026-04-17T10:09:00")],
+        )
+        _write_jsonl(
+            history_dir / "08_self_check_g.jsonl",
+            [_mk_msg("user", "self_check", "2026-04-17T10:10:00")],
+        )
+        _write_jsonl(
+            history_dir / "09_test_h.jsonl",
+            [_mk_msg("user", "test", "2026-04-17T10:15:00")],
+        )
+
+        calls = self._spy_renderables(monkeypatch)
+
+        _show_detailed_sessions(project, flow_id)
+
+        rendered_ids = [c[0] for c in calls]
+        assert rendered_ids == [
+            "04_implement_c-iter1",
+            "05_test_d",
+            "06_self_check_e",
+            "04_implement_c-iter2",
+            "07_test_f",
+            "08_self_check_g",
+            "04_implement_c-iter3",
+            "09_test_h",
+        ]
+        # Each virtual implement slice gets its own message subset.
+        iter_counts = {
+            step_id: msg_count
+            for step_id, _type, msg_count in calls
+            if step_id.startswith("04_implement_c-iter")
+        }
+        assert iter_counts == {
+            "04_implement_c-iter1": 2,
+            "04_implement_c-iter2": 2,
+            "04_implement_c-iter3": 1,
+        }
+
+    def test_single_round_flow_renders_unchanged(self, project, monkeypatch):
+        """A flow without fix-loop iterations keeps the original step_ids
+        and renders the same set of sessions as before the G2 change.
+        """
+        flow_id = "flow-single-round"
+        history_dir = project / "se3" / "history" / flow_id
+        history_dir.mkdir(parents=True)
+
+        _write_jsonl(
+            history_dir / "01_analyze_a.jsonl",
+            [_mk_msg("user", "analyze", "2026-04-17T09:00:00")],
+        )
+        _write_jsonl(
+            history_dir / "04_implement_c.jsonl",
+            [
+                _mk_msg("user", "implement", "2026-04-17T10:00:00"),
+                _mk_msg("assistant", "implement", "2026-04-17T10:00:30"),
+            ],
+        )
+        _write_jsonl(
+            history_dir / "05_test_d.jsonl",
+            [_mk_msg("user", "test", "2026-04-17T10:05:00")],
+        )
+
+        calls = self._spy_renderables(monkeypatch)
+
+        _show_detailed_sessions(project, flow_id)
+
+        rendered_ids = [c[0] for c in calls]
+        # No -iter suffix: single-iteration implement sessions pass through
+        # unchanged (backward-compatible with pre-G2 rendering).
+        assert rendered_ids == [
+            "01_analyze_a",
+            "04_implement_c",
+            "05_test_d",
+        ]
+
+    def test_no_history_prints_notice(self, project, monkeypatch, capsys):
+        flow_id = "no-history-flow"
+        # Never create the history directory.
+
+        calls = self._spy_renderables(monkeypatch)
+
+        _show_detailed_sessions(project, flow_id)
+
+        # Nothing rendered.
+        assert calls == []
+
+    def test_empty_implement_session_dropped(self, project, monkeypatch):
+        """An empty implement jsonl produces no virtual sessions, and only
+        the surviving non-implement sessions render.
+        """
+        flow_id = "flow-empty-impl"
+        history_dir = project / "se3" / "history" / flow_id
+        history_dir.mkdir(parents=True)
+
+        # Empty-but-present implement file (zero messages after strip).
+        (history_dir / "04_implement_empty.jsonl").write_text(
+            "", encoding="utf-8"
+        )
+        _write_jsonl(
+            history_dir / "05_test_d.jsonl",
+            [_mk_msg("user", "test", "2026-04-17T10:05:00")],
+        )
+
+        calls = self._spy_renderables(monkeypatch)
+
+        _show_detailed_sessions(project, flow_id)
+
+        rendered_ids = [c[0] for c in calls]
+        assert rendered_ids == ["05_test_d"]
