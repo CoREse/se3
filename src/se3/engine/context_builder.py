@@ -72,7 +72,11 @@ ISSUE_DISCOVERY_DEFAULT_STEPS = ["summarize"]
 # Steps explicitly forbidden from spec names injection
 SPEC_NAMES_INJECTION_FORBIDDEN_STEPS = frozenset({"summarize", "commit"})
 
-# Default steps that receive the available-specs names injection
+# Default steps that receive the available-specs names injection.
+# Note: deprecated step types (propose/design) are NOT listed here — their
+# stub handlers forward to the unified plan_handler, which keys its injection
+# on "plan". There is therefore no code path that would lookup "design" or
+# "propose" against this whitelist.
 SPEC_NAMES_INJECTION_DEFAULT_STEPS = [
     "plan",
     "plan_tasks",
@@ -80,7 +84,6 @@ SPEC_NAMES_INJECTION_DEFAULT_STEPS = [
     "verify_spec",
     "update_spec",
     "self_check",
-    "design",
 ]
 
 
@@ -149,7 +152,9 @@ def get_spec_names_injection(
         Spec-names injection string to append to prompt, or empty string when the
         step is not in the whitelist.
     """
-    # Forbidden steps never get injection — short-circuit before any I/O
+    # Forbidden steps never get injection — short-circuit before any I/O.
+    # This also makes a later re-check unnecessary: yaml cannot re-enable a
+    # forbidden step because the early return fires first.
     if step_type in SPEC_NAMES_INJECTION_FORBIDDEN_STEPS:
         return ""
 
@@ -161,21 +166,32 @@ def get_spec_names_injection(
             import yaml
             with open(config_path) as f:
                 config = yaml.safe_load(f) or {}
-            configured_steps = config.get("spec_names_injection", {}).get("steps")
-            if configured_steps is not None:
+            # Use `or {}` rather than the default arg so that an explicit
+            # `spec_names_injection: null` (common when users "disable" a key)
+            # falls through to defaults instead of raising AttributeError
+            # on the subsequent .get("steps") call.
+            section = config.get("spec_names_injection") or {}
+            configured_steps = section.get("steps")
+            # Only accept list overrides; silently ignore malformed values
+            # (e.g. a bare string / dict from a user typo) which would
+            # otherwise turn the `in` check into surprising substring or
+            # key-lookup semantics.
+            if isinstance(configured_steps, list):
                 whitelist = configured_steps
     except Exception:
-        pass  # Use defaults on any config error
+        pass  # Use defaults on any config error (malformed YAML, I/O, etc.)
 
     if step_type not in whitelist:
         return ""
 
-    # Forbidden list takes precedence even if yaml adds the step
-    if step_type in SPEC_NAMES_INJECTION_FORBIDDEN_STEPS:
-        return ""
-
-    # Scan project_root/se3/specs/*/spec.md for available spec names
-    specs_dir = project_root / "se3" / "specs"
+    # Scan the resolved specs dir (se3/specs preferred, specs/ fallback,
+    # openspec/specs legacy) so projects using the fallback layout get the
+    # correct listing and the prompt points at a real path.
+    specs_dir = ContextBuilder._resolve_specs_dir(project_root)
+    try:
+        specs_rel = specs_dir.relative_to(project_root).as_posix()
+    except ValueError:
+        specs_rel = specs_dir.as_posix()
     all_spec_names: list[str] = []
     if specs_dir.exists():
         for entry in specs_dir.iterdir():
@@ -183,7 +199,15 @@ def get_spec_names_injection(
                 all_spec_names.append(entry.name)
     all_spec_names.sort()
 
-    loaded_spec_names = sorted(relevant_specs) if relevant_specs else []
+    # Defensive filter: upstream inputs can occasionally contain non-string
+    # entries (e.g. dicts from a malformed analyze output). `sorted()` on a
+    # mixed-type list would raise TypeError — silently drop non-strings.
+    # The `isinstance(list)` guard also prevents a bare string from being
+    # iterated character-by-character (yielding bogus per-letter entries).
+    if isinstance(relevant_specs, list):
+        loaded_spec_names = sorted(s for s in relevant_specs if isinstance(s, str))
+    else:
+        loaded_spec_names = []
     loaded_display = ", ".join(loaded_spec_names) if loaded_spec_names else "none"
     all_display = ", ".join(all_spec_names) if all_spec_names else "(none found)"
 
@@ -193,8 +217,8 @@ def get_spec_names_injection(
         f"Specs already loaded above: {loaded_display}.\n\n"
         "If a spec above is not yet included but you believe it is relevant to "
         "the current task, you MAY read it using the Read tool at "
-        "`se3/specs/<name>/spec.md`. Only consult specs that directly help the "
-        "task — avoid reading broadly."
+        f"`{specs_rel}/<name>/spec.md`. Only consult specs that directly help "
+        "the task — avoid reading broadly."
     )
 
 

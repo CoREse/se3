@@ -396,6 +396,10 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         get_spec_names_injection,
     )
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+    # All three injections key off "plan": this handler is the unified planning
+    # step, and deprecated stubs (PROPOSE/DESIGN/PLAN_TASKS) forward here to do
+    # plan work. Using "plan" keeps injection semantics consistent regardless
+    # of which deprecated step type triggered the forward.
     lang_instruction = get_step_language_instruction("plan", project_root)
     if lang_instruction:
         prompt += lang_instruction

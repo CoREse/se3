@@ -460,18 +460,19 @@ Returns the injection prompt fragment, or an empty string when the step is not i
 **Three-tier whitelist (mirrors `issue_discovery`):**
 
 1. `SPEC_NAMES_INJECTION_FORBIDDEN_STEPS = {"summarize", "commit"}` — hard block; always returns empty even if `se3.yaml` lists the step.
-2. `SPEC_NAMES_INJECTION_DEFAULT_STEPS = ["plan", "plan_tasks", "implement", "verify_spec", "update_spec", "self_check", "design"]` — default whitelist applied when `se3.yaml` has no override.
-3. `se3.yaml` override key `spec_names_injection.steps` — replaces the default list when present. FORBIDDEN still takes precedence.
+2. `SPEC_NAMES_INJECTION_DEFAULT_STEPS = ["plan", "plan_tasks", "implement", "verify_spec", "update_spec", "self_check"]` — default whitelist applied when `se3.yaml` has no override. Deprecated step types (`propose`, `design`) are intentionally absent: their stub handlers forward to the unified `plan_handler`, which looks up injection under `"plan"`, so listing them would be dead code.
+3. `se3.yaml` override key `spec_names_injection.steps` — replaces the default list when present. FORBIDDEN still takes precedence. Non-list override values (bare string, dict, etc.) are silently ignored in favor of the defaults.
 
 **Covered steps by default:**
 
 | Step | Injected | Rationale |
 |------|----------|-----------|
-| `plan`, `plan_tasks`, `design` | yes | Task decomposition benefits from whole-spec-set awareness |
+| `plan`, `plan_tasks` | yes | Task decomposition benefits from whole-spec-set awareness |
 | `implement` | yes | Implementation may discover need for additional specs (e.g., versioning) |
 | `verify_spec` | yes | Verification needs full spec set to judge compliance |
 | `update_spec` | yes | Already prompted to use Read; spec-names list makes it more reliable |
 | `self_check` | yes | Self-review may touch unpreselected specs |
+| `design`, `propose` (deprecated) | yes, via forwarding | Deprecated stub handlers forward to `plan_handler`, which looks up the injection under `"plan"`. They are therefore covered transitively and are **not** listed in `SPEC_NAMES_INJECTION_DEFAULT_STEPS` themselves. |
 | `analyze`, `discovery`, `read_spec` | no | Already natively list specs via their own prompt templates |
 | `summarize`, `commit` | no (FORBIDDEN) | No spec awareness needed for summary/commit |
 | `confirm_llm_review` | no (initial) | Review output aligns with task_description; conservative default |
