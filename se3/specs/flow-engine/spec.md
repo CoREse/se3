@@ -441,6 +441,72 @@ The injected prompt SHALL:
 - **THEN** the read-only constraint prompt is appended to the LLM prompt
 - **AND** the self_check step cannot modify files, consistent with its sole responsibility of reviewing code for logic completeness and robustness
 
+### Requirement: Spec Names Injection for Downstream Steps
+
+The flow engine SHALL extend spec awareness beyond the `analyze` step's predetermined selection by injecting "the list of all available specs + a soft hint to read on demand" into designated downstream LLM sub-process steps. This gives those steps whole-spec-set awareness and lets them supplement their context via the Read/Glob tools (reading `se3/specs/<name>/spec.md`) when `analyze` missed a relevant spec.
+
+**Helper API:**
+
+```python
+get_spec_names_injection(
+    step_type: str,
+    project_root: Path,
+    relevant_specs: list[str] | None = None,
+) -> str
+```
+
+Returns the injection prompt fragment, or an empty string when the step is not in the whitelist. Handlers call the helper at prompt-build time and append the return value to their prompt, mirroring the existing `get_issue_discovery_injection` / `get_step_language_instruction` call sites.
+
+**Three-tier whitelist (mirrors `issue_discovery`):**
+
+1. `SPEC_NAMES_INJECTION_FORBIDDEN_STEPS = {"summarize", "commit"}` — hard block; always returns empty even if `se3.yaml` lists the step.
+2. `SPEC_NAMES_INJECTION_DEFAULT_STEPS = ["plan", "plan_tasks", "implement", "verify_spec", "update_spec", "self_check", "design"]` — default whitelist applied when `se3.yaml` has no override.
+3. `se3.yaml` override key `spec_names_injection.steps` — replaces the default list when present. FORBIDDEN still takes precedence.
+
+**Covered steps by default:**
+
+| Step | Injected | Rationale |
+|------|----------|-----------|
+| `plan`, `plan_tasks`, `design` | yes | Task decomposition benefits from whole-spec-set awareness |
+| `implement` | yes | Implementation may discover need for additional specs (e.g., versioning) |
+| `verify_spec` | yes | Verification needs full spec set to judge compliance |
+| `update_spec` | yes | Already prompted to use Read; spec-names list makes it more reliable |
+| `self_check` | yes | Self-review may touch unpreselected specs |
+| `analyze`, `discovery`, `read_spec` | no | Already natively list specs via their own prompt templates |
+| `summarize`, `commit` | no (FORBIDDEN) | No spec awareness needed for summary/commit |
+| `confirm_llm_review` | no (initial) | Review output aligns with task_description; conservative default |
+
+**Injection prompt content (soft constraint):**
+
+- Begins with heading `## Available Specifications`.
+- Line `All available specs in this project: <sorted names>.` — sourced by scanning `project_root/se3/specs/*/spec.md`, sorted alphabetically.
+- Line `Specs already loaded above: <loaded names or "none">.` — derived from `relevant_specs` argument so the LLM does not re-read specs already embedded in the prompt.
+- Soft guidance: the LLM **MAY** (not MUST) read additional specs via `Read` at path pattern `se3/specs/<name>/spec.md`.
+- Anti-abuse wording: "Only consult specs that directly help the task — avoid reading broadly."
+
+**Abuse prevention:**
+
+- The MAY phrasing discourages blanket reads that would inflate token usage.
+- The already-loaded list prevents duplicate reads of specs `analyze` already embedded.
+- `SPEC_NAMES_INJECTION_FORBIDDEN_STEPS` hard-blocks steps with no spec-awareness need.
+- Errors in loading `se3.yaml` fall back to defaults (no crash).
+
+**Compatibility:**
+
+- The existing `spec_content` and `relevant_specs` input fields are unchanged; the injection is purely additive to the prompt suffix.
+- `analyze`'s pre-selection logic is untouched — this mechanism is a safety net, not a replacement.
+
+#### Scenario: Default whitelist receives spec names injection
+- **WHEN** a default whitelisted step (e.g., `plan`, `implement`, `verify_spec`, `update_spec`, `self_check`) builds its LLM prompt
+- **AND** `se3.yaml` has no `spec_names_injection.steps` override
+- **THEN** `get_spec_names_injection(step_type, project_root, relevant_specs)` returns a non-empty prompt fragment containing `## Available Specifications`, the sorted `All available specs in this project:` line, and a `Specs already loaded above:` line derived from `relevant_specs`
+- **AND** the handler appends the fragment to its prompt suffix
+
+#### Scenario: FORBIDDEN steps never receive injection
+- **WHEN** the step type is `summarize` or `commit`
+- **THEN** `get_spec_names_injection(step_type, project_root, relevant_specs)` returns an empty string
+- **AND** even when `se3.yaml` explicitly lists the step in `spec_names_injection.steps`, the FORBIDDEN set takes precedence and the return remains empty
+
 ### Requirement: JSON 提取模式
 
 流程引擎 SHALL 支持三种 JSON 提取模式，根据步骤特性选择最优策略：
