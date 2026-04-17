@@ -71,4 +71,4 @@ e2e:
   test_paths: []                      # URL paths to test (e.g., ["/", "/login"])
 
 workflow:
-  max_fix_iterations: 20
+  max_fix_iterations: 30

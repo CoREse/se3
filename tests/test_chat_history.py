@@ -11,8 +11,10 @@ from se3.engine.chat_history import (
     ChatMessage,
     ChatSession,
     _fold_base_spec,
+    _fold_raw_spec,
     _fold_spec_subsections,
     _format_size,
+    _match_in_code_fence,
     extract_assistant_text,
     fold_spec_content,
     format_history_for_retry,
@@ -1018,6 +1020,46 @@ class TestFoldSpecSubsections:
         has_bold_magenta = any("bold magenta" in str(s.style) for s in spans)
         assert has_bold_magenta
 
+    def test_strict_starts_filters_fake_subsections(self):
+        """strict_starts must prevent non-spec ### headings from creating fake folds."""
+        content = (
+            "### base\n# SE3 Framework\nBase spec content.\n"
+            "### my-notes\nJust some notes.\n"
+            "### se3-commands\n# Commands Spec\nCommand content."
+        )
+        # Only base and se3-commands have H1 titles that mark real spec blocks.
+        base_pos = content.find("### base")
+        se3_pos = content.find("### se3-commands")
+        strict_starts = {base_pos, se3_pos}
+        result = _fold_spec_subsections(content, strict_starts=strict_starts)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert any("@se3-commands" in n for n in names)
+        assert not any("@my-notes" in n for n in names)
+
+    def test_strict_starts_empty_returns_none(self):
+        """When strict_starts is empty, no subsections should be folded."""
+        result = _fold_spec_subsections("### base\nContent.", strict_starts=set())
+        assert result is None
+
+    def test_strict_starts_partial_filter(self):
+        """strict_starts should only fold matched subsections, leaving others untouched."""
+        content = (
+            "### real-spec\n# Real Spec Title\nReal content.\n"
+            "### fake-spec\nNo H1 here.\n"
+            "### another-real\n# Another Real\nMore content."
+        )
+        real_pos = content.find("### real-spec")
+        another_pos = content.find("### another-real")
+        strict_starts = {real_pos, another_pos}
+        result = _fold_spec_subsections(content, strict_starts=strict_starts)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@real-spec" in n for n in names)
+        assert any("@another-real" in n for n in names)
+        assert not any("@fake-spec" in n for n in names)
+
 
 class TestFoldBaseSpec:
     def test_normal_base_spec(self):
@@ -1054,6 +1096,51 @@ class TestFoldBaseSpec:
         spans = result[0]._spans
         has_bold_magenta = any("bold magenta" in str(s.style) for s in spans)
         assert has_bold_magenta
+
+    def test_no_base_spec_in_legitimate_content_still_folds(self):
+        """Regression: 'No base spec available' inside real base spec body must not prevent folding."""
+        content = (
+            "## Base Specification\n"
+            "# SE3 Framework\n\n"
+            "## Requirements\n\n"
+            "### Requirement: Documentation\n"
+            "Document what to do when no base spec available for a module."
+        )
+        result = _fold_base_spec(content)
+        assert result is not None
+        assert "@base" in result[0].plain
+        assert "折叠" in result[0].plain
+
+
+class TestFoldRawSpec:
+    def test_normal_raw_spec(self):
+        content = "## Current Spec Content\n# SE3 Framework\nBody here."
+        result = _fold_raw_spec(content, label="spec")
+        assert result is not None
+        assert "@spec" in result[0].plain
+        assert "折叠" in result[0].plain
+
+    def test_placeholder_not_available_returns_none(self):
+        content = "## Current Spec Content\n(not available)"
+        result = _fold_raw_spec(content, label="spec")
+        assert result is None
+
+    def test_not_available_string_returns_none(self):
+        content = "## Current Spec Content\nNot available"
+        result = _fold_raw_spec(content, label="spec")
+        assert result is None
+
+    def test_not_available_in_legitimate_content_still_folds(self):
+        """Regression: 'not available' inside real spec body must not prevent folding."""
+        content = (
+            "## Current Spec Content\n"
+            "# SE3 Framework\n"
+            "When the service is not available, retry the request."
+        )
+        result = _fold_raw_spec(content, label="spec")
+        assert result is not None
+        assert "@spec" in result[0].plain
+        assert "折叠" in result[0].plain
 
 
 class TestRenderSessionDetailedSpecFolding:
@@ -1258,6 +1345,131 @@ class TestRenderSessionDetailedSpecFolding:
         assert "Modified src/handler.py" in output
         assert "All 42 tests passed" in output
 
+    def test_fix_prompt_specs_folded_end_to_end(self):
+        """FIX_PROMPT layout with ## Project Conventions wrapping specs must
+        fold all spec content correctly through the full rendering path."""
+        from rich.console import Console
+        from io import StringIO
+
+        prompt = (
+            "You are an expert software engineer. Fix the issues.\n\n"
+            "## Task Description\nFix the bug.\n\n"
+            "## Project Conventions\n"
+            f"### base\n{self._REALISTIC_BASE_SPEC}\n"
+            f"### se3-commands\n{self._REALISTIC_COMMANDS_SPEC}\n\n"
+            "## Design Document\n{\"overview\": \"fix plan\"}\n\n"
+            "## Fix Instructions\nFix the broken test.\n\n"
+            "## Fix Context\nReason: test failure.\n\n"
+            "## Fix History\nNo previous fix attempts.\n\n"
+            "## Fix Iteration\nThis is fix iteration 1.\n\n"
+            "## Instructions\nRead the errors carefully."
+        )
+        ndjson_dict = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Fixed."}]}
+        }
+        session = ChatSession(
+            flow_id="flow1", step_id="step1", step_type="implement",
+            messages=[
+                ChatMessage(
+                    role="user", content=prompt, raw_json=[],
+                    timestamp="2026-01-01T12:00:00", step_type="implement",
+                    attempt=0,
+                ),
+                ChatMessage(
+                    role="assistant", content="Fixed.",
+                    raw_json=[ndjson_dict], timestamp="2026-01-01T12:00:05",
+                    step_type="implement", attempt=0,
+                ),
+            ],
+        )
+        renderables = render_session_detailed(session, verbose=False)
+        buf = StringIO()
+        c = Console(file=buf, force_terminal=False, width=200)
+        for r in renderables:
+            c.print(r)
+        output = buf.getvalue()
+        # Specs must be folded
+        assert "@base" in output
+        assert "@se3-commands" in output
+        assert "折叠" in output
+        # Spec internal headings must NOT leak as separate segments
+        assert "── Purpose ──" not in output
+        assert "── Requirements ──" not in output
+        # Actual spec body must be folded away
+        assert "项目基础约定" not in output
+        assert "Unified Entry Point" not in output
+        # Post-spec sections must appear as separate segments
+        assert "── Design Document ──" in output
+        assert "── Fix Instructions ──" in output
+        assert "── Fix Context ──" in output
+        assert "── Instructions ──" in output
+
+    def test_old_format_specs_folded_via_autodetect_and_fallback(self):
+        """Old-format history entries (specs under a non-spec title like
+        'Task Description', without '## Project Conventions') must fold
+        correctly through both segment_prompt() auto-detection AND
+        fold_spec_content() fallback together via render_session_detailed().
+
+        This exercises the backward-compatible code path end-to-end:
+        1. segment_prompt() auto-detects ### spec-name lines and sets
+           in_spec_override to absorb internal ## headings
+        2. The resulting segment has a generic title (e.g. 'Task Description')
+        3. fold_spec_content() falls back to _SPEC_BLOCK_RE content check
+        4. Specs are folded via _fold_spec_subsections()
+        """
+        from rich.console import Console
+        from io import StringIO
+
+        # Simulate an old-format FIX_PROMPT where specs appear directly
+        # under "## Task Description" without a "## Project Conventions" wrapper
+        prompt = (
+            "You are an expert software engineer. Fix the issues.\n\n"
+            "## Task Description\nFix the bug.\n\n"
+            f"### base\n{self._REALISTIC_BASE_SPEC}\n"
+            f"### se3-commands\n{self._REALISTIC_COMMANDS_SPEC}\n\n"
+            "## Design Document\n{\"overview\": \"fix plan\"}\n\n"
+            "## Instructions\nRead the errors carefully."
+        )
+        ndjson_dict = {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "Fixed."}]}
+        }
+        session = ChatSession(
+            flow_id="flow1", step_id="step1", step_type="implement",
+            messages=[
+                ChatMessage(
+                    role="user", content=prompt, raw_json=[],
+                    timestamp="2026-01-01T12:00:00", step_type="implement",
+                    attempt=0,
+                ),
+                ChatMessage(
+                    role="assistant", content="Fixed.",
+                    raw_json=[ndjson_dict], timestamp="2026-01-01T12:00:05",
+                    step_type="implement", attempt=0,
+                ),
+            ],
+        )
+        renderables = render_session_detailed(session, verbose=False)
+        buf = StringIO()
+        c = Console(file=buf, force_terminal=False, width=200)
+        for r in renderables:
+            c.print(r)
+        output = buf.getvalue()
+        # Specs must be folded even without ## Project Conventions wrapper
+        assert "@base" in output
+        assert "@se3-commands" in output
+        assert "折叠" in output
+        # Spec internal headings must NOT leak as separate segments
+        assert "── Purpose ──" not in output
+        assert "── Requirements ──" not in output
+        # Actual spec body must be folded away
+        assert "项目基础约定" not in output
+        assert "Unified Entry Point" not in output
+        # Post-spec sections must still appear as separate segments
+        assert "── Design Document ──" in output
+        assert "── Instructions ──" in output
+
 
 class TestSegmentPromptSpecAbsorption:
     """Tests for the critical bug: segment_prompt() must not absorb
@@ -1443,3 +1655,463 @@ class TestFoldSpecSubsectionsPreamble:
         non_spec = [r for r in result if "@base" not in r.plain]
         for line in non_spec:
             assert "Relevant Specifications" not in line.plain
+
+
+class TestSegmentPromptAutoDetection:
+    """Tests for in_spec_override auto-detection in segment_prompt().
+
+    Covers FIX_PROMPT-style prompts where ### spec-name lines appear without
+    a wrapping ## Project Conventions / ## Relevant Specifications header.
+    """
+
+    def test_fix_prompt_spec_not_fragmented(self):
+        """FIX_PROMPT format: spec content follows ## Task Description directly.
+        Internal ## Purpose / ## Requirements must NOT become separate segments."""
+        prompt = (
+            "## Task Description\nFix the bug.\n\n"
+            "### base\n# SE3 Framework — Base Specification\n## Purpose\nProject.\n"
+            "## Requirements\nReqs.\n"
+            "### se3-commands\n# se3-commands Specification\n## Purpose\nCLI.\n\n"
+            "## Design Document\nDesign here.\n\n"
+            "## Fix Instructions\nFix this."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Task Description" in titles
+        assert "Design Document" in titles
+        assert "Fix Instructions" in titles
+        # Internal spec headings must NOT leak
+        assert "Purpose" not in titles
+        assert "Requirements" not in titles
+
+    def test_post_spec_headings_break_override(self):
+        """Design Document, Fix Instructions, Fix History, Fix Iteration
+        must break out of auto-detected spec regions."""
+        prompt = (
+            "## Task Description\nFix.\n"
+            "### base\n# SE3 Framework\nSpec content.\n## Purpose\nP.\n"
+            "### se3-commands\n# Commands Spec\nCommands.\n## Purpose\nCLI.\n\n"
+            "## Fix History\nPrevious fixes.\n\n"
+            "## Fix Iteration\nIteration 2."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Task Description" in titles
+        assert "Fix History" in titles
+        assert "Fix Iteration" in titles
+        assert "Purpose" not in titles
+
+    def test_standard_format_unaffected(self):
+        """Standard ## Relevant Specifications format must still work correctly."""
+        prompt = (
+            "## Task Description\nDo something.\n\n"
+            "## Relevant Specifications\n"
+            "### base\n# SE3 Framework\n## Purpose\nProject.\n"
+            "## Requirements\nReqs.\n\n"
+            "## Changes Made\nFiles."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Relevant Specifications" in titles
+        assert "Changes Made" in titles
+        assert "Purpose" not in titles
+        assert "Requirements" not in titles
+
+    def test_override_resets_after_post_spec_heading(self):
+        """After a post-spec heading resets the override, subsequent ## headings
+        should be recognized normally (not absorbed)."""
+        prompt = (
+            "## Task Description\nFix.\n"
+            "### base\n# SE3 Framework\nSpec.\n## Purpose\nP.\n"
+            "### se3-commands\n# Commands Spec\nCmds.\n## Purpose\nCLI.\n\n"
+            "## Fix Instructions\nDo this.\n\n"
+            "## Some Other Section\nContent."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Fix Instructions" in titles
+        assert "Some Other Section" in titles
+
+    def test_single_spec_subsection_no_override(self):
+        """A single ### lowercase-name line must NOT trigger auto-detection.
+        This prevents false positives on non-spec prompts that use ### sub-headings."""
+        prompt = (
+            "## Task Description\nFix.\n"
+            "### my-section\nSome content.\n## Purpose\nP.\n\n"
+            "## Instructions\nDo stuff."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        # ## Purpose should become its own segment (not absorbed)
+        assert "Purpose" in titles
+        assert "Instructions" in titles
+
+    def test_multiple_non_spec_subsections_no_override(self):
+        """Two ### lowercase-name lines WITHOUT H1 titles must NOT trigger override.
+        This is the key false-positive scenario: non-spec content using ### sub-headings."""
+        prompt = (
+            "## Task Description\nFix.\n"
+            "### my-config\nConfig content.\n"
+            "### my-rules\nRule content.\n"
+            "## Purpose\nPurpose here.\n\n"
+            "## Instructions\nDo stuff."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        # ## Purpose should become its own segment (not absorbed)
+        assert "Purpose" in titles
+        assert "Instructions" in titles
+
+    def test_non_spec_subsection_after_real_spec_no_override(self):
+        """A ### lowercase-name line after a post-spec heading must NOT re-trigger
+        override, even though real spec blocks exist earlier in the prompt.
+
+        This is the position-specific guard scenario: the prompt has real spec
+        blocks (### base + # H1) so the old global _allow_spec_override would
+        be True, but a later ### lowercase-name (without H1) should not
+        re-trigger in_spec_override after it was reset."""
+        prompt = (
+            "## Task Description\nFix the bug.\n"
+            "### base\n# SE3 Framework\nSpec content.\n## Purpose\nP.\n"
+            "### se3-commands\n# Commands Spec\nCmds.\n\n"
+            "## Fix Instructions\nDo this.\n\n"
+            "### my-notes\nSome notes.\n"
+            "## Some Other Section\nContent."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Fix Instructions" in titles
+        # ## Some Other Section must NOT be absorbed by in_spec_override
+        assert "Some Other Section" in titles
+
+    def test_code_block_does_not_cause_false_positive_spec_override(self):
+        """Code examples with ### name and # comment inside a markdown fence
+        must NOT trigger in_spec_override, so subsequent generic ## headings
+        are recognized normally."""
+        prompt = (
+            "## Task Description\nFix the bug.\n\n"
+            "```python\n"
+            "### name\n"
+            "# This is a comment\n"
+            "print('hello')\n"
+            "```\n\n"
+            "## Instructions\nDo stuff."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Instructions" in titles
+        # Purpose must NOT be incorrectly absorbed
+        assert "Purpose" not in titles
+
+    def test_real_spec_block_after_post_spec_heading_no_override(self):
+        """A real spec block after a post-spec heading must NOT cause
+        subsequent generic ## headings to be absorbed."""
+        prompt = (
+            "## Task Description\nFix the bug.\n"
+            "### base\n# SE3 Framework\nSpec content.\n## Purpose\nP.\n"
+            "### se3-commands\n# Commands Spec\nCmds.\n\n"
+            "## Fix Instructions\nDo this.\n\n"
+            "### other-spec\n# Other Title\nOther spec content.\n\n"
+            "## Some Other Section\nContent."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Fix Instructions" in titles
+        assert "Some Other Section" in titles
+        assert "Purpose" not in titles
+
+
+class TestMatchInCodeFence:
+    """Tests for _match_in_code_fence()."""
+
+    def test_nested_fence_with_fewer_backticks(self):
+        """A nested fence with fewer backticks inside an outer fence must NOT
+        prematurely close it."""
+        text = (
+            "````markdown\n"
+            "Some text\n"
+            "```python\n"
+            "print('hello')\n"
+            "```\n"
+            "### base\n# Title\n"
+            "````\n"
+        )
+        match_start = text.find("### base")
+        assert _match_in_code_fence(text, match_start) is True
+
+    def test_nested_fence_same_length_closes(self):
+        """A nested fence with the same length as the outer fence DOES close it."""
+        text = (
+            "```markdown\n"
+            "Some text\n"
+            "```\n"
+            "### base\n# Title\n"
+        )
+        match_start = text.find("### base")
+        assert _match_in_code_fence(text, match_start) is False
+
+    def test_longer_fence_closes(self):
+        """A closing fence longer than the opening fence is valid."""
+        text = (
+            "```markdown\n"
+            "Some text\n"
+            "````\n"
+            "### base\n# Title\n"
+        )
+        match_start = text.find("### base")
+        assert _match_in_code_fence(text, match_start) is False
+
+
+class TestFoldSpecContentFallback:
+    """Tests for fold_spec_content() content-based fallback."""
+
+    def test_task_description_with_spec_content_folded(self):
+        """Title is 'Task Description' but content has ### spec-name subsections
+        with H1 titles (actual SE3 spec format)."""
+        content = (
+            "## Task Description\nFix the bug.\n"
+            "### base\n# SE3 Framework\nBase spec content here.\n"
+            "### se3-commands\n# Commands Spec\nCommand spec content."
+        )
+        result = fold_spec_content("Task Description", content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert any("@se3-commands" in n for n in names)
+
+    def test_task_description_without_spec_not_folded(self):
+        """Title is 'Task Description' with no spec content — should return None."""
+        content = "## Task Description\nJust a plain task description."
+        result = fold_spec_content("Task Description", content)
+        assert result is None
+
+    def test_standard_titles_still_work(self):
+        """Standard spec titles (Relevant Specifications, Project Conventions) still fold."""
+        content = "## Relevant Specifications\n### base\nContent.\n### flow-engine\nMore."
+        result = fold_spec_content("Relevant Specifications", content)
+        assert result is not None
+        assert any("@base" in r.plain for r in result)
+        assert any("@flow-engine" in r.plain for r in result)
+
+    def test_preamble_preserved_in_fallback(self):
+        """When fallback folding is used, non-spec preamble text is preserved."""
+        content = "Fix the critical bug.\n### base\n# SE3 Framework\nSpec content.\n### se3-commands\n# Commands Spec\nMore."
+        result = fold_spec_content("Task Description", content)
+        assert result is not None
+        assert any("critical bug" in r.plain.lower() for r in result)
+        assert any("@base" in r.plain for r in result)
+
+    def test_single_spec_subsection_no_fallback(self):
+        """A single ### lowercase-name in non-spec content must NOT trigger fallback.
+        Prevents false positives on segments with ordinary ### sub-headings."""
+        content = "## Instructions\nDo stuff.\n### my-section\nSome content."
+        result = fold_spec_content("Instructions", content)
+        assert result is None
+
+    def test_multiple_non_spec_subsections_no_fallback(self):
+        """Content with 2+ ### lowercase-name lines but no H1 titles must NOT be folded.
+        This is the key false-positive scenario from the self-check."""
+        content = "Some task.\n### my-config\nConfig content.\n### my-rules\nRule content."
+        result = fold_spec_content("Task Description", content)
+        assert result is None
+
+    def test_mixed_spec_and_nonspec_subsections(self):
+        """Only real spec blocks (### name + # H1) should be folded; non-spec
+        ### lowercase-name headings in the same segment are absorbed into the
+        preceding spec fold when strict_starts is active, preventing internal
+        fake headings from truncating spec content."""
+        content = (
+            "Some preamble.\n"
+            "### base\n# SE3 Framework\nBase spec content.\n"
+            "### my-notes\nJust some notes.\n"
+            "### se3-commands\n# Commands Spec\nCommand content."
+        )
+        result = fold_spec_content("Task Description", content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert any("@se3-commands" in n for n in names)
+        assert not any("@my-notes" in n for n in names)
+        # Non-spec content between strict spec starts is folded into the first
+        # spec so that internal fake ### headings do not truncate spec folds.
+        base_line = next(r for r in result if "@base" in r.plain)
+        assert "折叠" in base_line.plain
+
+    def test_trailing_nonspec_subsection_absorbed(self):
+        """A non-spec ### block after the last verified spec is folded into
+        the last spec when strict_starts is active, ensuring internal fake
+        headings never truncate spec folds."""
+        content = (
+            "Some preamble.\n"
+            "### base\n# SE3 Framework\nBase spec content.\n"
+            "### se3-commands\n# Commands Spec\nCommand content.\n"
+            "### my-notes\nJust some notes."
+        )
+        result = fold_spec_content("Task Description", content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert any("@se3-commands" in n for n in names)
+        assert not any("@my-notes" in n for n in names)
+        # Trailing non-spec content is folded into the last spec fold.
+        se3_line = next(r for r in result if "@se3-commands" in r.plain)
+        assert "折叠" in se3_line.plain
+
+    def test_leading_nonspec_subsection_with_heading_preserved(self):
+        """A non-spec ### block before the first verified spec must be
+        preserved as gap content, including any ## subheadings inside it."""
+        content = (
+            "### my-notes\n## Notes heading\nJust some notes.\n"
+            "### base\n# SE3 Framework\nBase spec content."
+        )
+        result = fold_spec_content("Task Description", content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert not any("@my-notes" in n for n in names)
+        # Ensure leading non-spec content is preserved, including ## headings
+        assert any("Just some notes." in n for n in names)
+        assert any("Notes heading" in n for n in names)
+
+    def test_code_block_not_folded_in_fallback(self):
+        """Code blocks containing ### name + # comment must NOT be treated as
+        spec blocks in fold_spec_content() fallback. Only real spec blocks
+        outside the fence should be folded."""
+        content = (
+            "## Task Description\nFix the bug.\n\n"
+            "```python\n"
+            "### name\n"
+            "# This is a comment\n"
+            "print('hello')\n"
+            "```\n\n"
+            "### base\n# SE3 Framework — Base Specification\n"
+            "## Purpose\nProject."
+        )
+        result = fold_spec_content("Task Description", content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert not any("@name" in n for n in names)
+
+    def test_indented_code_block_not_folded_in_fallback(self):
+        """Indented code blocks (4-space) containing ### name + # comment must
+        NOT be treated as spec blocks in fold_spec_content() fallback."""
+        content = (
+            "## Task Description\nFix the bug.\n\n"
+            "    ### name\n"
+            "    # This is a comment\n"
+            "    print('hello')\n\n"
+            "### base\n# SE3 Framework — Base Specification\n"
+            "## Purpose\nProject."
+        )
+        result = fold_spec_content("Task Description", content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert not any("@name" in n for n in names)
+
+    def test_known_title_all_matches_in_fences_returns_none(self):
+        """Known spec title with all _SPEC_BLOCK_RE matches inside code fences
+        must return None, not incorrectly fold fenced ### headings."""
+        content = (
+            "## Relevant Specifications\n"
+            "```python\n"
+            "### name\n"
+            "# This is a comment\n"
+            "print('hello')\n"
+            "```\n\n"
+            "No real specs here."
+        )
+        result = fold_spec_content("Relevant Specifications", content)
+        assert result is None
+
+    def test_fallback_returns_none_when_all_matches_in_fences(self):
+        """When _SPEC_BLOCK_RE finds matches but ALL are inside code fences,
+        fold_spec_content() fallback must return None instead of folding
+        everything without strict_starts."""
+        content = (
+            "## Task Description\nFix the bug.\n\n"
+            "```python\n"
+            "### config\n"
+            "# TODO: fix this\n"
+            "print('hello')\n"
+            "```\n\n"
+            "No real specs here."
+        )
+        result = fold_spec_content("Task Description", content)
+        assert result is None
+
+    def test_fallback_when_all_strict_matches_in_fences_but_subsections_outside(self):
+        """When all _SPEC_BLOCK_RE matches are inside code fences but there are
+        real ### subsections outside, fold_spec_content() should still fold them."""
+        content = (
+            "## Task Description\nFix the bug.\n\n"
+            "```python\n"
+            "### valid-spec\n"
+            "# This is a title\n"
+            "print('hello')\n"
+            "```\n\n"
+            "### base\nBase spec without H1.\n"
+            "### se3-commands\nCommand spec without H1."
+        )
+        result = fold_spec_content("Task Description", content)
+        assert result is not None
+        names = [r.plain for r in result]
+        assert any("@base" in n for n in names)
+        assert any("@se3-commands" in n for n in names)
+
+    def test_common_comment_keywords_not_matched_as_spec_block(self):
+        """_SPEC_BLOCK_RE must NOT match common code comment keywords after
+        ### name headings outside of code blocks either."""
+        content = (
+            "## Task Description\nFix.\n"
+            "### config\n# TODO: fix this\n"
+            "### mylib\n# import os\n"
+            "## Purpose\nP."
+        )
+        result = fold_spec_content("Task Description", content)
+        assert result is None
+
+    def test_current_spec_content_folded(self):
+        """fold_spec_content() should fold 'Current Spec Content' segments."""
+        content = (
+            "## Current Spec Content\n"
+            "# SE3 Framework — Base Specification\n\n"
+            "## Purpose\nProject base conventions.\n"
+        )
+        result = fold_spec_content("Current Spec Content", content)
+        assert result is not None
+        assert any("@spec" in r.plain for r in result)
+        assert "折叠" in result[0].plain
+
+    def test_spec_colon_segment_folded(self):
+        """fold_spec_content() should fold segments titled 'Spec: {name}'."""
+        content = (
+            "### Current Spec Content\n\n"
+            "# se3-commands Specification\n\n"
+            "## Purpose\nDefine CLI.\n"
+        )
+        result = fold_spec_content("Spec: se3-commands", content)
+        assert result is not None
+        assert any("@spec" in r.plain for r in result)
+        assert "折叠" in result[0].plain
+
+
+class TestSegmentPromptIndentedCodeBlock:
+    """Tests that indented code blocks don't trigger false positives."""
+
+    def test_indented_code_block_does_not_cause_spec_override(self):
+        """Indented code examples with ### name and # comment must NOT
+        trigger in_spec_override, so subsequent generic ## headings are
+        recognized normally."""
+        prompt = (
+            "## Task Description\nFix the bug.\n\n"
+            "    ### name\n"
+            "    # This is a comment\n"
+            "    print('hello')\n\n"
+            "## Instructions\nDo stuff."
+        )
+        segments = segment_prompt(prompt)
+        titles = [s["title"] for s in segments]
+        assert "Instructions" in titles
+        assert "Purpose" not in titles

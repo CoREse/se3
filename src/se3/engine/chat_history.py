@@ -709,6 +709,13 @@ def _render_ndjson_for_human(raw_ndjson: Union[str, list[dict]]) -> str:
 # match wins for each line.
 _GENERIC_HEADING_RE = re.compile(r"^## (.+)")
 
+_POST_SPEC_HEADING_RE = re.compile(
+    r"^## (Changes Made|Planned Spec Changes|Test Results|Fix Context|Fix Instructions|Fix History|Fix Iteration|"
+    r"Instructions|Previous Verification|Previous (?:Task )?Plan(?:\s*\(.*?\))?|Reviewer Feedback|"
+    r"Implementation Notes|Task Type|Scope|Review Dimensions|Specifications \(for context only\)|Project Conventions|"
+    r"Conflicting File.*|Design Document)"
+)
+
 _SEGMENT_PATTERNS: list[tuple[re.Pattern, Any]] = [
     # JSON mode wrapper
     (re.compile(r"^CRITICAL:\s*You MUST respond with ONLY valid JSON"),
@@ -742,11 +749,8 @@ _SEGMENT_PATTERNS: list[tuple[re.Pattern, Any]] = [
      lambda _: "Additional User Instruction"),
     # Post-spec headings from SE3 step templates — recognized even inside spec
     # sections (where the generic ## catch-all is suppressed).
-    (re.compile(
-        r"^## (Changes Made|Planned Spec Changes|Test Results|Fix Context|"
-        r"Instructions|Previous Verification|Previous (?:Task )?Plan(?:\s*\(.*?\))?|Reviewer Feedback|"
-        r"Implementation Notes|Task Type|Scope|Review Dimensions|Specifications \(for context only\)|Project Conventions)"
-    ), lambda m: m.group(1)),
+    (_POST_SPEC_HEADING_RE,
+     lambda m: m.group(1)),
     (re.compile(r"^## (Part \d+:.+)"), lambda m: m.group(1).strip()),
     # Generic ## sections — capture the heading text
     (_GENERIC_HEADING_RE,
@@ -779,17 +783,35 @@ def segment_prompt(prompt: str) -> list[dict[str, str]]:
     current_title = "Prompt"
     current_lines: list[str] = []
 
+    # Pre-compute which ### lines are real spec block starts (for auto-detection)
+    _spec_block_start_lines = set()
+    for m in _SPEC_BLOCK_RE.finditer(prompt):
+        if _match_in_code_fence(prompt, m.start()):
+            continue
+        line_num = prompt[:m.start()].count("\n")
+        _spec_block_start_lines.add(line_num)
+
+    in_spec_override = False
+    post_spec_seen = False
+
     def _flush():
         text = "\n".join(current_lines).strip()
         if text:
             segments.append({"title": current_title, "content": text})
 
-    for line in lines:
+    for line_idx, line in enumerate(lines):
         stripped = line.strip()
         matched = False
+
+        # Auto-detect when we enter real spec content via a ### spec-name block
+        if stripped.startswith("### ") and stripped[4:].strip():
+            if line_idx in _spec_block_start_lines and not post_spec_seen:
+                in_spec_override = True
+
         in_spec = (
             current_title in _SPEC_SECTION_TITLES
             or current_title.startswith("Base Specification")
+            or in_spec_override
         )
         for pattern, title_fn in _SEGMENT_PATTERNS:
             if in_spec and pattern is _GENERIC_HEADING_RE:
@@ -800,6 +822,9 @@ def segment_prompt(prompt: str) -> list[dict[str, str]]:
                 current_title = title_fn(m)
                 current_lines = [line]
                 matched = True
+                in_spec_override = False
+                if pattern is _POST_SPEC_HEADING_RE:
+                    post_spec_seen = True
                 break
         if not matched:
             current_lines.append(line)
@@ -818,36 +843,120 @@ def _format_size(size_bytes: int) -> str:
         return f"{size_bytes / (1024 * 1024):.1f}MB"
 
 
-_SPEC_SUBSECTION_RE = re.compile(r"^### ([a-z][a-z0-9-]*)\s*$", re.MULTILINE)
+_SPEC_SUBSECTION_RE = re.compile(r"^### ([\w-]+)\s*$", re.MULTILINE)
+
+_SPEC_BLOCK_RE = re.compile(
+    r"(?i)^### [\w-]+[ \t]*\r?\n"
+    r"(?:[ \t]*\r?\n){0,5}"
+    r"# (?!todo\b|fixme\b|hack\b|note\b|bug\b|issue\b|warn\b|xxx\b|"
+    r"config\b|import\b|from\b|def\b|class\b|return\b|if\b|for\b|while\b|"
+    r"print\b|test\b)[^\s].{2,}",
+    re.MULTILINE,
+)
 
 
-def _fold_spec_subsections(content: str) -> Optional[list]:
+def _match_in_code_fence(text: str, match_start: int) -> bool:
+    """Return True if match_start is inside an unclosed markdown code fence or indented code block."""
+    before = text[:match_start]
+    in_fence = False
+    fence_char = None
+    fence_len = 0
+    for line in before.splitlines():
+        stripped = line.lstrip()
+        if not in_fence:
+            if stripped.startswith("```") or stripped.startswith("~~~"):
+                in_fence = True
+                fence_char = stripped[0]
+                fence_len = 0
+                for ch in stripped:
+                    if ch == fence_char:
+                        fence_len += 1
+                    else:
+                        break
+        else:
+            if stripped.startswith(fence_char * fence_len):
+                close_len = 0
+                for ch in stripped:
+                    if ch == fence_char:
+                        close_len += 1
+                    else:
+                        break
+                # A valid closing fence must consist only of fence chars followed by whitespace
+                if close_len >= fence_len and stripped[close_len:].strip() == "":
+                    in_fence = False
+                    fence_char = None
+                    fence_len = 0
+    if in_fence:
+        return True
+
+    # Check if the line containing match_start is indented by 4+ spaces or a tab,
+    # indicating an indented code block per CommonMark.
+    line_start = text.rfind("\n", 0, match_start)
+    if line_start == -1:
+        line_start = 0
+    else:
+        line_start += 1
+    line_prefix = text[line_start:match_start]
+    return line_prefix.startswith("    ") or line_prefix.startswith("\t")
+
+
+def _fold_spec_subsections(
+    content: str,
+    strict_starts: Optional[set] = None,
+) -> Optional[list]:
     """Fold ### spec-name subsections into compact reference lines.
 
     Returns list of Rich Text objects, or None if no subsections found.
     """
     from rich.text import Text
 
-    matches = list(_SPEC_SUBSECTION_RE.finditer(content))
+    all_matches = list(_SPEC_SUBSECTION_RE.finditer(content))
+    if not all_matches:
+        return None
+
+    if strict_starts is not None:
+        matches = [m for m in all_matches if m.start() in strict_starts]
+    else:
+        matches = all_matches
+
     if not matches:
         return None
 
     result = []
 
-    preamble = content[: matches[0].start()].strip()
-    preamble_lines = [
-        ln for ln in preamble.splitlines()
-        if ln.strip() and not ln.strip().startswith("## ")
-    ]
+    first_match = matches[0]
+    preamble = content[:first_match.start()].strip()
+    preamble_lines = []
+    for ln in preamble.splitlines():
+        stripped = ln.strip()
+        if not stripped:
+            continue
+        # Only drop the segment title line at the very beginning;
+        # preserve legitimate ## subheadings that appear later.
+        if stripped.startswith("## ") and not preamble_lines:
+            continue
+        preamble_lines.append(ln)
     if preamble_lines:
         pre = Text()
         pre.append("\n".join(preamble_lines), style="dim")
         result.append(pre)
 
+    last_pos = first_match.start()
     for i, match in enumerate(matches):
+        if match.start() > last_pos:
+            gap = content[last_pos:match.start()].strip()
+            if gap:
+                gap_lines = [
+                    ln for ln in gap.splitlines()
+                    if ln.strip()
+                ]
+                if gap_lines:
+                    result.append(Text("\n".join(gap_lines), style="dim"))
+
         name = match.group(1)
         start = match.end()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(content)
+        next_match = matches[i + 1] if i + 1 < len(matches) else None
+        end = next_match.start() if next_match else len(content)
         sub_content = content[start:end].strip()
         size = _format_size(len(sub_content.encode("utf-8")))
         line = Text()
@@ -855,6 +964,18 @@ def _fold_spec_subsections(content: str) -> Optional[list]:
         line.append(f"@{name}", style="bold magenta")
         line.append(f"  (折叠, {size})", style="dim")
         result.append(line)
+        last_pos = end
+
+    if last_pos < len(content):
+        trailing = content[last_pos:].strip()
+        if trailing:
+            trailing_lines = [
+                ln for ln in trailing.splitlines()
+                if ln.strip()
+            ]
+            if trailing_lines:
+                result.append(Text("\n".join(trailing_lines), style="dim"))
+
     return result
 
 
@@ -873,13 +994,42 @@ def _fold_base_spec(content: str) -> Optional[list]:
         body_lines.append(line)
     body = "\n".join(body_lines).strip()
 
-    if not body or "No base spec available" in body:
+    if not body or body.strip().lower() == "no base spec available":
         return None
 
     size = _format_size(len(body.encode("utf-8")))
     line = Text()
     line.append("[spec] ")
     line.append("@base", style="bold magenta")
+    line.append(f"  (折叠, {size})", style="dim")
+    return [line]
+
+
+def _fold_raw_spec(content: str, label: str = "spec") -> Optional[list]:
+    """Fold raw spec markdown (e.g., from sync prompts) into a compact reference line.
+
+    Strips wrapper headings like '## Current Spec Content' or '### Current Spec Content'
+    and folds the remaining body.
+    """
+    from rich.text import Text
+
+    lines = content.split("\n")
+    body_lines = []
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("## Current Spec Content") or stripped.startswith("### Current Spec Content"):
+            continue
+        body_lines.append(line)
+    body = "\n".join(body_lines).strip()
+
+    lower_body = body.strip().lower()
+    if not lower_body or lower_body in ("not available", "(not available)"):
+        return None
+
+    size = _format_size(len(body.encode("utf-8")))
+    line = Text()
+    line.append("[spec] ")
+    line.append(f"@{label}", style="bold magenta")
     line.append(f"  (折叠, {size})", style="dim")
     return [line]
 
@@ -891,9 +1041,39 @@ def fold_spec_content(title: str, content: str) -> Optional[list]:
     """
     if title in ("Relevant Specifications", "Specifications (for context only)",
                   "Project Conventions"):
+        strict_starts = {
+            m.start() for m in _SPEC_BLOCK_RE.finditer(content)
+            if not _match_in_code_fence(content, m.start())
+        }
+        if strict_starts:
+            return _fold_spec_subsections(content, strict_starts=strict_starts)
+        if _SPEC_BLOCK_RE.search(content):
+            # All _SPEC_BLOCK_RE matches are inside code fences, but there may still
+            # be real ### subsections outside fences (e.g., malformed spec H1).
+            for m in _SPEC_SUBSECTION_RE.finditer(content):
+                if not _match_in_code_fence(content, m.start()):
+                    return _fold_spec_subsections(content)
+            return None
         return _fold_spec_subsections(content)
     if title.startswith("Base Specification"):
         return _fold_base_spec(content)
+    if title == "Current Spec Content" or title.startswith("Spec:"):
+        return _fold_raw_spec(content, label="spec")
+    # Fallback for old-format prompts where specs appear under non-spec titles
+    if _SPEC_BLOCK_RE.search(content):
+        strict_starts = {
+            m.start() for m in _SPEC_BLOCK_RE.finditer(content)
+            if not _match_in_code_fence(content, m.start())
+        }
+        if strict_starts:
+            return _fold_spec_subsections(content, strict_starts=strict_starts)
+        # All _SPEC_BLOCK_RE matches are inside code fences, but there may still
+        # be real ### subsections outside fences (e.g., malformed spec H1).
+        # Fall back to folding any ### subsections found outside code fences.
+        for m in _SPEC_SUBSECTION_RE.finditer(content):
+            if not _match_in_code_fence(content, m.start()):
+                return _fold_spec_subsections(content)
+        return None
     return None
 
 

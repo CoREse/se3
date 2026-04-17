@@ -1,0 +1,55 @@
+id: 085
+title: 'Fix loop exhausted: se3 history show detailed 并不是所有 spec 都折叠了，你可以尝试se3s history
+  show 20260416-135721_025bb296 --detailed'
+description: 'The fix loop reached maximum iterations while working on: se3 history
+  show detailed 并不是所有 spec 都折叠了，你可以尝试se3s history show 20260416-135721_025bb296 --detailed查看。保证所有的spec在history
+  detailed显示中都被正确折叠了
+
+
+  **Trigger step:** self_check
+
+  **Fix iterations:** 20
+
+
+  **Fix attempt history:**
+
+  - Iteration 16: self_check
+
+  - Iteration 17: self_check
+
+  - Iteration 18: self_check
+
+  - Iteration 19: self_check
+
+  - Iteration 20: self_check
+
+
+  **Last fix instructions:**
+
+  Self-check found 2 issue(s) that need fixing:
+
+  - [medium] src/se3/engine/chat_history.py:fold_spec_content() lines ~1050-1056 (known
+  titles) and ~1068-1075 (unknown titles fallback): In fold_spec_content(), the fallback
+  paths for both known and unknown spec titles call _fold_spec_subsections(content)
+  without strict_starts when all _SPEC_BLOCK_RE matches are inside code fences but
+  real ### subsections exist outside fences. This causes any fenced ### headings to
+  be incorrectly folded as specs too. The fallback should compute strict_starts from
+  _SPEC_SUBSECTION_RE matches that are outside code fences and pass them to _fold_spec_subsections().
+
+  - [low] src/se3/engine/chat_history.py:_SPEC_BLOCK_RE definition lines ~848-855:
+  _SPEC_BLOCK_RE allows at most 5 blank lines between ''### spec-name'' and the ''#
+  Title'' H1 heading. A malformed or unusually formatted spec with 6+ blank lines
+  will not be recognized as a real spec block, which can prevent the strict_starts-based
+  code-fence filtering from engaging for that subsection.
+
+
+  Fix the issues listed above and ensure the logic is correct.'
+status: open
+priority: high
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:fix-loop
+created_at: '2026-04-16T21:21:59.744842'
+updated_at: '2026-04-16T21:21:59.744842'

@@ -130,8 +130,8 @@ FIX_PROMPT = """You are an expert software engineer. Fix the issues found in the
 ## Task Description
 {task_description}
 
+## Project Conventions
 {spec_summary}
-
 {design_section}
 
 ## Fix Instructions
@@ -229,6 +229,9 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         fix_history = step.inputs.get("fix_history", [])
         fix_history_text = _format_fix_history(fix_history)
         fix_context_text = _format_fix_context_structured(fix_context)
+        # For FIX_PROMPT, design_section needs self-contained spacing:
+        # non-empty → "\n{content}\n", empty → "\n" (single blank line).
+        fix_design = f"\n{design_section}" if design_section else ""
         prompt = FIX_PROMPT.format(
             task_description=task_description,
             fix_instructions=fix_instructions,
@@ -236,7 +239,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             fix_iteration=fix_iteration,
             fix_history=fix_history_text,
             spec_summary=spec_summary,
-            design_section=design_section,
+            design_section=fix_design,
         )
         if injection:
             prompt += injection
@@ -1781,13 +1784,17 @@ def _format_fix_context_structured(fix_context: dict | str | None) -> str:
     return "\n".join(lines) if lines else "No additional context."
 
 
-def _format_spec_brief(spec_content: dict[str, str]) -> str:
+def _format_spec_brief(spec_content: dict[str, str] | None) -> str:
     """Format spec content for the implement prompt."""
     if not spec_content:
         return "No project conventions specified."
 
     parts = []
-    for name, content in spec_content.items():
-        parts.append(f"### {name}\n{content}")
+    for name, content in (spec_content or {}).items():
+        if content is None:
+            content = ""
+        parts.append(f"### {name}")
+        parts.append(content)
+        parts.append("")
 
     return "\n".join(parts) if parts else "No project conventions specified."
