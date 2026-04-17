@@ -193,6 +193,105 @@ def list_flows(project_root: Path) -> List[str]:
     )
 
 
+def split_implement_session_by_iterations(
+    session: ChatSession, test_timestamps: List[str]
+) -> List[ChatSession]:
+    """Split an implement ChatSession into virtual per-iteration sessions.
+
+    Fix loops re-use the same implement Step (status reset, not a new step),
+    so multi-iteration implement prompts accumulate in a single jsonl file.
+    For display purposes, partition the messages using test session
+    timestamps as fences: messages before the first test belong to iter1,
+    messages between test[i-1] and test[i] belong to iter{i+1}, etc.
+
+    Args:
+        session: The implement ChatSession to split.
+        test_timestamps: ISO-formatted timestamps of test sessions in the
+            same flow. Order does not matter; internally sorted.
+
+    Returns:
+        A list of virtual ChatSessions. Each virtual session's step_id
+        equals the original step_id plus a ``-iter{N}`` suffix (N starts
+        at 1). Returns ``[session]`` unchanged when only one iteration is
+        present (single iteration means the original session already
+        represents iter1 exactly). Returns ``[]`` when the input session
+        has no messages.
+    """
+    if not session.messages:
+        return []
+
+    sorted_fences = sorted(t for t in test_timestamps if t)
+
+    # Assign each message to an iteration index (1-based): count of test
+    # fences at or before the message timestamp, plus one.
+    import bisect
+
+    iteration_buckets: Dict[int, List[ChatMessage]] = {}
+    for msg in session.messages:
+        idx = bisect.bisect_right(sorted_fences, msg.timestamp) + 1
+        iteration_buckets.setdefault(idx, []).append(msg)
+
+    if len(iteration_buckets) <= 1:
+        return [session]
+
+    virtual_sessions: List[ChatSession] = []
+    for iter_idx in sorted(iteration_buckets):
+        virtual_sessions.append(
+            ChatSession(
+                flow_id=session.flow_id,
+                step_id=f"{session.step_id}-iter{iter_idx}",
+                step_type=session.step_type,
+                messages=iteration_buckets[iter_idx],
+            )
+        )
+    return virtual_sessions
+
+
+def interleave_sessions_for_display(
+    sessions: List[ChatSession],
+) -> List[ChatSession]:
+    """Reorder sessions so virtual-split implement iterations interleave
+    with test/self_check by timestamp.
+
+    Identifies implement sessions (``step_type == "implement"``), splits
+    each via :func:`split_implement_session_by_iterations` using the
+    first-message timestamps of test sessions as fences, then stable-sorts
+    the resulting sessions by each session's first message timestamp
+    (tiebreaker: ``step_id``). Non-implement sessions pass through
+    unchanged.
+
+    Args:
+        sessions: All ChatSessions for a single flow (as returned by
+            :func:`get_flow_history`).
+
+    Returns:
+        Sessions reordered so that ``implement-iter1 → test-1 →
+        self_check-1 → implement-iter2 → ...`` appears in chronological
+        order. Empty implement sessions are dropped (they carry no
+        useful display content).
+    """
+    test_timestamps = [
+        s.messages[0].timestamp
+        for s in sessions
+        if s.step_type == "test" and s.messages
+    ]
+
+    expanded: List[ChatSession] = []
+    for session in sessions:
+        if session.step_type == "implement":
+            expanded.extend(
+                split_implement_session_by_iterations(session, test_timestamps)
+            )
+        else:
+            expanded.append(session)
+
+    def sort_key(s: ChatSession) -> tuple:
+        first_ts = s.messages[0].timestamp if s.messages else ""
+        return (first_ts, s.step_id)
+
+    return sorted(expanded, key=sort_key)
+
+
 @dataclass
 class ConversationMessage:
     """A single message in a conversation for LLM context."""
