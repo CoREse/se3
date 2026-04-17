@@ -250,7 +250,7 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 | `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type, project_summary | plan{proposal,design}, task_groups, spec_changes |
 | `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed |
 | `test` | 运行测试验证 | 否（程序执行） | - | 否 | - | test_results, tests_passed |
-| `self_check` | LLM 代码审查：逻辑完整性、代码健壮性、功能遗漏、测试未覆盖区域（不检查 spec 合规性） | 是 | TWO_PHASE | **是** | test_results, changes_made, spec_content, fix_iteration | issues (structured list with description, severity, location), status |
+| `self_check` | LLM 代码审查：逻辑完整性、代码健壮性、功能遗漏、测试未覆盖区域（不检查 spec 合规性） | 是 | TWO_PHASE | **是** | test_results, changes_made, spec_content, task_groups, fix_iteration | issues (structured list with description, severity, location), status |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, fix_needed, fix_instructions, fix_context |
 | `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | 否 | changes_made, verification_result, spec_changes, design_doc | updated_specs |
 | `version_analyze` | 分析变更确定版本类型 + 生成 commit message | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning, commit_message |
@@ -292,6 +292,19 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 - **NOTE** fix_iterations 是全局计数器，TEST、SELF_CHECK、VERIFY_SPEC 三者共享，总循环次数不超过 max_fix_iterations（默认 20）
 - **NOTE** self_check handler 始终返回 REVISION_NEEDED（不在 handler 内判断耗尽），耗尽检测统一由 state_machine.transition_to_next() 处理
 - **NOTE** 当 fix loop 耗尽时，state_machine 将 flow 状态设为 FAILED 并停止执行，同时通过 A-class issue discovery 生成 issue
+
+#### Scenario: SELF_CHECK prompt injects plan task_groups as scope reference
+- **WHEN** the `self_check` step builds its LLM prompt
+- **AND** `step.inputs["task_groups"]` is a non-empty list (forwarded by state_machine from the plan step)
+- **THEN** the prompt includes a `## Plan Task Groups (Scope Reference)` section summarizing each group's tasks and acceptance criteria
+- **AND** the section body is head-truncated at `SELF_CHECK_TASK_GROUPS_MAX_CHARS` (default 2000) to bound prompt size
+- **AND** the section wording explicitly states that task_groups is a **scope reference, NOT a strict specification**, that reasonable deviations (logic correct, functionality covered, quality acceptable) do NOT count as issues, and that self_check MUST NOT flag missing-plan-compliance as an issue — this is self_check, not a plan-conformance audit
+- **AND** the LLM is instructed to use task_groups to cross-check the **Functional Gaps** review dimension (verifying each planned task's deliverables appear in the implementation), weighing it together with the original Task Description
+- **WHEN** `task_groups` is absent, `None`, empty, or not a list (e.g., `small` / `bugfix` flows without a plan step)
+- **THEN** the entire `## Plan Task Groups` section is omitted from the prompt — no orphan heading, no placeholder
+- **AND** self_check still runs with its remaining inputs (task_description, changes_made, test_results, spec_content, fix_context)
+- **NOTE** task_groups is intentionally the ONLY plan artifact injected into self_check — `proposal` is redundant with `design`, full `design` is withheld to preserve the verify_spec / self_check responsibility boundary, and neither is added
+- **NOTE** `SELF_CHECK_TASK_GROUPS_MAX_CHARS` lives in `se3/engine/truncation.py` alongside the other shared self_check truncation constants
 
 ### Requirement: Deprecated Step Type Backward Compatibility
 
@@ -494,6 +507,8 @@ The injected prompt SHALL:
 - `render_session_detailed()` — 渲染带结构化 prompt 和 response 的 Rich 可视输出
 - `get_detailed_json()` — 获取包含分段 prompt 和完整 response 的结构化 JSON
 - `_extract_final_text()` — 从 raw_json 中提取最后一个 assistant text block
+- `split_implement_session_by_iterations()` — 将一个 implement ChatSession 按 test 会话时间戳切分为多个虚拟 per-iteration ChatSession（仅展示层，不落盘）
+- `interleave_sessions_for_display()` — 将一个 flow 的所有 ChatSessions 重新排序，使虚拟 implement 分片与 test/self_check 按时间顺序穿插
 
 **工具调用格式化（tool_formatters 模块）：**
 
@@ -621,6 +636,17 @@ The injected prompt SHALL:
 - **AND** user 消息包含 `segments`（`segment_prompt()` 分段结果）和原始 `content`
 - **AND** assistant 消息包含 `content`（提取的文本）和 `raw_json`（原始 NDJSON 数据）
 
+#### Scenario: Fix-loop implement iterations rendered as virtual per-iteration sessions
+- **GIVEN** the state machine re-uses the same `implement` Step object across fix loop iterations (resetting `status=PENDING` rather than allocating a new step)
+- **AND** this causes multi-iteration implement prompts to accumulate in a single on-disk history file (`se3/history/{flow_id}/04_implement_{id}.jsonl`), while each `test` / `self_check` iteration writes to its own file (05, 07, 09, 11, …)
+- **WHEN** the display layer reads history for a flow via `interleave_sessions_for_display(sessions)` (used by both the Rich renderer in `history_cmd._show_detailed_sessions` and the programmatic `chat_history.get_detailed_json`)
+- **THEN** each `implement` ChatSession is passed to `split_implement_session_by_iterations(session, test_timestamps)`, which partitions its messages into virtual per-iteration sessions using the first-message `timestamp` of each `test` session as a fence (iter1 = messages before the first test; iter{i+1} = messages between test[i-1] and test[i])
+- **AND** each virtual session's `step_id` is the original implement step_id with a `-iter{N}` suffix appended (N starts at 1), for display titling only
+- **AND** when the implement session has only one iteration (≤1 bucket), it is returned unchanged (no `-iter1` suffix injected) so non-fix-loop flows are unaffected
+- **AND** all sessions (virtual implement splits plus untouched test/self_check/other sessions) are stable-sorted by first-message timestamp (tiebreaker: `step_id`), producing a chronological `implement-iter1 → test-1 → self_check-1 → implement-iter2 → test-2 → …` timeline
+- **AND** on-disk history files are NOT rewritten, renamed, or split — this is a pure render-layer transformation, preserving backward compatibility with existing `engine.json` / `se3/history/` directories
+- **NOTE** The underlying state-machine step-reuse behavior (`_transition_to_fix`) and the persistence file-naming convention are intentionally unchanged; the virtual split lives entirely in `chat_history` helpers consumed only by display paths
+
 ### Requirement: LLM Content Truncation Strategy
 
 The flow engine SHALL apply content-aware truncation when feeding diagnostic output (stderr, stdout, tool results, step summaries) into LLM prompts, to maximize the LLM's ability to diagnose and fix issues within token constraints.
@@ -648,10 +674,11 @@ The flow engine SHALL apply content-aware truncation when feeding diagnostic out
 | Context.json step output values | string values | 1000 | head |
 | Iteration summary diff (run.py) | git diff | 5000 | head |
 | Salvage diff summary | git diff | 4000 | head |
+| self_check prompt task_groups summary | plan task_groups markdown | 2000 | head |
 
 **Shared Truncation Constants Module:**
 
-Truncation limits consumed by step handlers (test, self_check, verify_spec) SHALL be defined as named constants in a shared `truncation.py` module (`se3/engine/truncation.py`), rather than hardcoded in each handler. This ensures consistency across handlers and provides a single location to adjust limits. Constants include `PHASE_STDOUT_TAIL_CHARS`, `PHASE_STDERR_TAIL_CHARS`, `TEST_HISTORY_STDOUT_TAIL_CHARS`, `TEST_HISTORY_STDERR_TAIL_CHARS`, `FIX_STDERR_TAIL_CHARS`, and `FAILURES_SECTION_MAX_CHARS`.
+Truncation limits consumed by step handlers (test, self_check, verify_spec) SHALL be defined as named constants in a shared `truncation.py` module (`se3/engine/truncation.py`), rather than hardcoded in each handler. This ensures consistency across handlers and provides a single location to adjust limits. Constants include `PHASE_STDOUT_TAIL_CHARS`, `PHASE_STDERR_TAIL_CHARS`, `TEST_HISTORY_STDOUT_TAIL_CHARS`, `TEST_HISTORY_STDERR_TAIL_CHARS`, `FIX_STDERR_TAIL_CHARS`, `FAILURES_SECTION_MAX_CHARS`, and `SELF_CHECK_TASK_GROUPS_MAX_CHARS`.
 
 **Design rationale:** Stderr is the primary source of traceback and error diagnostics for LLM-driven fix loops. Previous limits (300-500 chars) were insufficient for a single Python traceback. The limits above ensure at least one complete error chain is preserved in all diagnostic contexts.
 
@@ -754,7 +781,7 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - `analyze` 输出 `task_type`、`scope`、`complexity`、`reasoning`、`project_summary`、`relevant_specs`、`spec_content`、`selected_specs`；其中 `project_summary` 由 `ProjectContextCollector.collect()` 程序化生成（非 LLM），`spec_content` 由后处理程序化加载（base spec 自动附加 + LLM 选择的 spec）
 - `plan` 接收 `spec_content`（从 analyze）、`task_type`、`scope`、`project_summary`（从 analyze），输出 `plan`（含 proposal + design）、`task_groups` 和 `spec_changes`（仅 full depth）
 - `implement` 接收 `design_doc`（从 plan.design 映射）、`task_groups`、`spec_content`（从 analyze）、`project_summary`（从 analyze）
-- `self_check` 接收 `test_results`（从 test）、`changes_made`（从 implement）、`spec_content`（从 analyze）、`fix_iteration`（当前 fix loop 迭代次数）
+- `self_check` 接收 `test_results`（从 test）、`changes_made`（从 implement）、`spec_content`（从 analyze）、`task_groups`（从 plan，用作「功能遗漏」维度的 scope 参考）、`fix_iteration`（当前 fix loop 迭代次数）
 - `verify_spec` 接收 `changes_made`、`spec_content`（从 analyze）、`test_results`、`fix_iteration`、`spec_changes`（从 plan 步骤传递，用于区分有意变更与回归）和 `relevant_specs`（从 analyze）
 - `update_spec` 接收 `changes_made`、`verification_result`、`spec_changes`（从 plan 步骤传递，作为变更指引清单）和 `design_doc`（从 plan.design 映射，提供架构上下文）
 - `commit` 接收 `changes_made`、`commit_message`（from version_analyze）、`bump_type`（from version_analyze）

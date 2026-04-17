@@ -234,14 +234,18 @@ def split_implement_session_by_iterations(
     if len(iteration_buckets) <= 1:
         return [session]
 
+    # Renumber labels 1..N in bucket-order so gaps caused by empty fence
+    # intervals (e.g. a fix iteration whose implement re-entry produced no
+    # new assistant messages in that window) do not surface as
+    # non-consecutive -iter labels.
     virtual_sessions: List[ChatSession] = []
-    for iter_idx in sorted(iteration_buckets):
+    for display_idx, bucket_idx in enumerate(sorted(iteration_buckets), start=1):
         virtual_sessions.append(
             ChatSession(
                 flow_id=session.flow_id,
-                step_id=f"{session.step_id}-iter{iter_idx}",
+                step_id=f"{session.step_id}-iter{display_idx}",
                 step_type=session.step_type,
-                messages=iteration_buckets[iter_idx],
+                messages=iteration_buckets[bucket_idx],
             )
         )
     return virtual_sessions
@@ -282,11 +286,20 @@ def interleave_sessions_for_display(
             expanded.extend(
                 split_implement_session_by_iterations(session, test_timestamps)
             )
-        else:
+        elif session.messages:
+            # Drop empty non-implement sessions uniformly. Disk loaders
+            # already skip empty jsonl files, but in-memory callers (tests,
+            # future code paths) can construct empty sessions whose
+            # fallback sort key would place them at the very beginning of
+            # the timeline.
             expanded.append(session)
 
     def sort_key(s: ChatSession) -> tuple:
-        first_ts = s.messages[0].timestamp if s.messages else ""
+        # After the filter above, non-implement sessions always have
+        # messages. Implement-split sessions may rarely produce an empty
+        # bucket; guard with a trailing sentinel so they sink rather than
+        # float to the top.
+        first_ts = s.messages[0].timestamp if s.messages else "\uffff"
         return (first_ts, s.step_id)
 
     return sorted(expanded, key=sort_key)
@@ -1313,9 +1326,13 @@ def get_detailed_json(
     """Get detailed chat history data as structured JSON for a flow.
 
     Returns a list of step entries, each containing segmented prompt
-    and full response data.
+    and full response data. Applies the same virtual-split /
+    chronological interleave as the Rich display path so programmatic
+    consumers see ``implement-iter{N}`` entries interleaved with
+    test/self_check rather than a monolithic implement session.
     """
     sessions = get_flow_history(project_root, flow_id)
+    sessions = interleave_sessions_for_display(sessions)
     result = []
     for session in sessions:
         step_data = {

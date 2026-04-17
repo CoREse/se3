@@ -143,10 +143,14 @@ def _format_task_groups(task_groups: Any) -> str:
         return ""
 
     if len(summary) > SELF_CHECK_TASK_GROUPS_MAX_CHARS:
-        summary = (
-            summary[:SELF_CHECK_TASK_GROUPS_MAX_CHARS].rstrip()
-            + "\n… (truncated)"
-        )
+        cut = summary[:SELF_CHECK_TASK_GROUPS_MAX_CHARS]
+        # Prefer cutting at the last newline so we don't split a markdown
+        # bullet or `### Group` header mid-line. Fall back to the raw slice
+        # if no newline exists within the window.
+        nl = cut.rfind("\n")
+        if nl > 0:
+            cut = cut[:nl]
+        summary = cut.rstrip() + "\n… (truncated)"
     return summary
 
 

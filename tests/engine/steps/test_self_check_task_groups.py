@@ -262,6 +262,13 @@ class TestHandlerPromptInjection:
         assert "Add login endpoint" in prompt
         assert "AC: Returns 200 on valid creds" in prompt
         assert "scope reference" in prompt.lower()
+        # Guard the load-bearing disclaimer phrasing: self_check must not
+        # become a plan-conformance audit. These lines must reach the
+        # final prompt verbatim — future edits to _TASK_GROUPS_SECTION_INTRO
+        # that weaken the disclaimer should fail here.
+        assert "NOT a strict specification" in prompt
+        assert "Reasonable deviations from the plan" in prompt
+        assert "do NOT count as issues" in prompt
 
     def test_prompt_omits_section_when_task_groups_absent(self, flow):
         step = _make_step(task_groups=None)

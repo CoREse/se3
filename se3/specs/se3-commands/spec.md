@@ -178,6 +178,7 @@ Results are de-duplicated by `flow_id` and sorted by `updated_at` descending.
 - **GIVEN** a valid flow_id with chat history
 - **WHEN** user runs `se3 history show <flow_id> --detailed`
 - **THEN** displays flow metadata and step table as usual
+- **AND** sessions are passed through `interleave_sessions_for_display()` before rendering so that fix-loop `implement` sessions are split into virtual `-iter{N}` sub-sessions and chronologically interleaved with `test` / `self_check` sessions (see the Chat History interleave scenario in `flow-engine` spec)
 - **AND** appends each step's LLM call details: prompt is shown as structured segments (auto-detected sections such as JSON Mode Instruction, Step Instructions, Available Specifications, Discovery Context, Read-Only Constraint, Language Instruction, Additional User Instruction, etc.) using Rich Panels with labeled titles
 - **AND** prompt segments containing embedded spec content are folded into compact reference annotations for readability:
   - Segments titled "Relevant Specifications", "Specifications (for context only)", or "Project Conventions" fold each `### spec-name` subsection into `[spec] @spec-name  (折叠, size)` with `bold magenta` Rich styling on `@spec-name`
@@ -200,6 +201,7 @@ Results are de-duplicated by `flow_id` and sorted by `updated_at` descending.
 - **AND** each entry in `chat_history` includes `step_id`, `step_type`, and `messages`
 - **AND** user messages include `segments` (auto-segmented prompt sections) and full `content`
 - **AND** assistant messages include `content`, and `raw_json` (original NDJSON data)
+- **AND** the array order matches the Rich display path: fix-loop implement sessions are virtually split into `-iter{N}` entries and interleaved chronologically with test/self_check entries (via the same `interleave_sessions_for_display()` applied in `get_detailed_json`)
 
 #### Scenario: Restore a flow
 - **WHEN** user runs `se3 history restore <flow_id>`
