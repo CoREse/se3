@@ -14,7 +14,11 @@ from typing import Any
 
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
-from ..truncation import PHASE_STDERR_TAIL_CHARS, PHASE_STDOUT_TAIL_CHARS
+from ..truncation import (
+    PHASE_STDERR_TAIL_CHARS,
+    PHASE_STDOUT_TAIL_CHARS,
+    SELF_CHECK_TASK_GROUPS_MAX_CHARS,
+)
 from ..utils.json_parser import parse_json_response
 from .verify_spec import _get_max_fix_iterations
 
@@ -34,7 +38,7 @@ SELF_CHECK_PROMPT = """You are an expert code reviewer. Review the implementatio
 
 ## Specifications (for context only)
 {spec_content}
-
+{task_groups_section}
 ## Fix Context
 {fix_context}
 
@@ -76,6 +80,88 @@ If the implementation is solid with no issues found, return an empty issues arra
 """
 
 
+_TASK_GROUPS_SECTION_INTRO = (
+    "## Plan Task Groups (Scope Reference)\n\n"
+    "The following is the plan's task breakdown (task_groups). It is a "
+    "**scope reference**, NOT a strict specification:\n"
+    "- Use it to help judge the **Functional Gaps** dimension: cross-check that "
+    "each planned task's deliverables appear in the implementation.\n"
+    "- Reasonable deviations from the plan (logic correct, functionality covered, "
+    "quality acceptable) do NOT count as issues.\n"
+    "- Do NOT flag missing-plan-compliance as an issue — this is self_check, not a "
+    "plan-conformance audit. Functional-gap judgments should weigh the original "
+    "Task Description together with this list.\n\n"
+)
+
+
+def _format_task_groups(task_groups: Any) -> str:
+    """Render plan task_groups as a compact Markdown summary for self_check.
+
+    Returns an empty string when input is missing, None, empty, or not a list —
+    the caller omits the whole prompt section in that case.
+
+    Output is head-truncated to SELF_CHECK_TASK_GROUPS_MAX_CHARS with an
+    explicit ellipsis marker appended when truncation occurs.
+    """
+    if not task_groups or not isinstance(task_groups, list):
+        return ""
+
+    lines: list[str] = []
+    for group in task_groups:
+        if not isinstance(group, dict):
+            continue
+        group_id = group.get("group_id") or ""
+        group_name = group.get("name") or ""
+        header_bits = [b for b in (group_id, group_name) if b]
+        header = " — ".join(header_bits) if header_bits else "(unnamed group)"
+        lines.append(f"### {header}")
+
+        tasks = group.get("tasks") or []
+        if not isinstance(tasks, list) or not tasks:
+            lines.append("_(no tasks)_")
+            lines.append("")
+            continue
+
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            task_id = task.get("id")
+            desc = (task.get("description") or "").strip()
+            id_prefix = f"[{task_id}] " if task_id is not None else ""
+            lines.append(f"- {id_prefix}{desc}" if desc else f"- {id_prefix}(no description)")
+
+            criteria = task.get("acceptance_criteria") or []
+            if isinstance(criteria, list) and criteria:
+                for c in criteria:
+                    c_text = str(c).strip()
+                    if c_text:
+                        lines.append(f"  - AC: {c_text}")
+        lines.append("")
+
+    summary = "\n".join(lines).rstrip()
+    if not summary:
+        return ""
+
+    if len(summary) > SELF_CHECK_TASK_GROUPS_MAX_CHARS:
+        summary = (
+            summary[:SELF_CHECK_TASK_GROUPS_MAX_CHARS].rstrip()
+            + "\n… (truncated)"
+        )
+    return summary
+
+
+def _build_task_groups_section(task_groups: Any) -> str:
+    """Build the full `## Plan Task Groups` prompt section, or empty string.
+
+    When task_groups is absent/empty, returns "" so the caller can inline it
+    without producing an orphan heading or blank lines in the prompt.
+    """
+    summary = _format_task_groups(task_groups)
+    if not summary:
+        return ""
+    return "\n" + _TASK_GROUPS_SECTION_INTRO + summary + "\n"
+
+
 def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the self_check step.
 
@@ -90,6 +176,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     changes_made = step.inputs.get("changes_made", {})
     test_results = step.inputs.get("test_results", {})
     spec_content = step.inputs.get("spec_content", {})
+    task_groups = step.inputs.get("task_groups")
 
     fix_iteration = step.inputs.get("fix_iteration", 0)
     max_iterations = step.inputs.get("max_fix_iterations") or _get_max_fix_iterations(flow)
@@ -99,6 +186,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     changes_text = _format_changes(changes_made)
     test_text = _format_test_results(test_results)
     spec_text = _format_spec_content(spec_content)
+    task_groups_section = _build_task_groups_section(task_groups)
     fix_context_text = _format_fix_context(
         fix_iteration, max_iterations,
         prev_issues=prev_issues,
@@ -110,6 +198,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         changes_made=changes_text,
         test_results=test_text,
         spec_content=spec_text,
+        task_groups_section=task_groups_section,
         fix_context=fix_context_text,
     )
 
