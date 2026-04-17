@@ -18,8 +18,11 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
+from typer.testing import CliRunner
+
 from se3.commands import history_cmd
 from se3.commands.history_cmd import (
+    app,
     get_flow_detail,
     _load_archived_flow,
     _detail_from_history,
@@ -380,3 +383,99 @@ class TestShowDetailedSessionsInterleaving:
 
         rendered_ids = [c[0] for c in calls]
         assert rendered_ids == ["05_test_d"]
+
+
+class TestHistoryShowDetailedCliFixLoop:
+    """End-to-end smoke test for the `se3 history show --detailed` CLI on a
+    fix-loop flow.
+
+    Builds a fixture flow with ``fix_iterations >= 2`` (engine.json +
+    history directory) and invokes the CLI via ``CliRunner``. Asserts the
+    rendered stdout contains each implement iteration as its own section,
+    interleaved with test / self_check sections in timestamp order.
+    """
+
+    def test_fix_loop_cli_renders_iter_sessions_in_order(
+        self, project, monkeypatch
+    ):
+        flow_id = "flow-cli-fix-loop"
+
+        # Active-flow engine.json (so `history show` finds the flow via
+        # get_flow_detail's first lookup path).
+        flow_data = _make_flow_dict(
+            flow_id, task="Fix something", status="completed"
+        )
+        state_file = project / "se3" / "state" / "engine.json"
+        state_file.write_text(json.dumps(flow_data), encoding="utf-8")
+
+        # history dir — 2 implement iterations, interleaved test/self_check.
+        history_dir = project / "se3" / "history" / flow_id
+        history_dir.mkdir(parents=True)
+
+        _write_jsonl(
+            history_dir / "04_implement_abc.jsonl",
+            [
+                _mk_msg("user", "implement", "2026-04-17T10:00:00", attempt=0),
+                _mk_msg(
+                    "assistant", "implement", "2026-04-17T10:00:30", attempt=0
+                ),
+                _mk_msg("user", "implement", "2026-04-17T10:06:00", attempt=1),
+                _mk_msg(
+                    "assistant", "implement", "2026-04-17T10:06:30", attempt=1
+                ),
+            ],
+        )
+        _write_jsonl(
+            history_dir / "05_test_def.jsonl",
+            [_mk_msg("user", "test", "2026-04-17T10:03:00")],
+        )
+        _write_jsonl(
+            history_dir / "06_self_check_ghi.jsonl",
+            [_mk_msg("user", "self_check", "2026-04-17T10:04:00")],
+        )
+        _write_jsonl(
+            history_dir / "07_test_jkl.jsonl",
+            [_mk_msg("user", "test", "2026-04-17T10:09:00")],
+        )
+
+        monkeypatch.setattr(
+            history_cmd, "get_project_root", lambda: project
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(
+            app,
+            ["show", flow_id, "--detailed"],
+            env={"COLUMNS": "200"},
+        )
+
+        assert result.exit_code == 0, result.output
+
+        out = result.output
+
+        # Both iteration headers appear, plus interleaved test/self_check.
+        idx_iter1 = out.find("04_implement_abc-iter1")
+        idx_test1 = out.find("05_test_def")
+        idx_selfcheck = out.find("06_self_check_ghi")
+        idx_iter2 = out.find("04_implement_abc-iter2")
+        idx_test2 = out.find("07_test_jkl")
+
+        assert idx_iter1 != -1, f"iter1 header missing:\n{out}"
+        assert idx_iter2 != -1, f"iter2 header missing:\n{out}"
+        assert idx_test1 != -1
+        assert idx_selfcheck != -1
+        assert idx_test2 != -1
+
+        # Chronological order: iter1 → test1 → self_check → iter2 → test2.
+        assert (
+            idx_iter1 < idx_test1 < idx_selfcheck < idx_iter2 < idx_test2
+        ), (
+            f"Unexpected ordering (iter1={idx_iter1}, test1={idx_test1}, "
+            f"self_check={idx_selfcheck}, iter2={idx_iter2}, "
+            f"test2={idx_test2}) in output:\n{out}"
+        )
+
+        # Unsplit implement step_id must not leak through as its own section.
+        assert "id: 04_implement_abc)" not in out, (
+            "Un-split implement section leaked into output; split did not run."
+        )
