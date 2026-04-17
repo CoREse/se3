@@ -37,3 +37,11 @@ FIX_STDERR_TAIL_CHARS = 2000
 # Spec minimum: 3000
 # ---------------------------------------------------------------------------
 FAILURES_SECTION_MAX_CHARS = 3000
+
+# ---------------------------------------------------------------------------
+# self_check — task_groups summary max chars
+# Used by: self_check._format_task_groups
+# Bounds the plan task_groups reference section injected into the LLM prompt
+# so long plans don't balloon prompt size.
+# ---------------------------------------------------------------------------
+SELF_CHECK_TASK_GROUPS_MAX_CHARS = 2000
