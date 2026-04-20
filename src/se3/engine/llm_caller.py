@@ -15,8 +15,134 @@ from typing import Any, Callable, Dict, List, Optional
 from ..agent_runner import AgentRunner, InfraErrorType
 from ..claude_runner import ClaudeCodeRunner, ClaudeRunner
 from .prompt_dedup import deduplicate_prompt_lines
+from .retry_context import (
+    POST_DEDUP_SAFETY_LIMIT,
+    RETRY_HISTORY_MARKER,
+    RETRY_HISTORY_SEPARATOR,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _post_dedup_safety_cap(
+    effective_prompt: str, limit: int = POST_DEDUP_SAFETY_LIMIT
+) -> str:
+    """Defensive fallback: if dedup left the prompt above ``limit``, truncate
+    the *head* of the retry-history section so the current new prompt (which
+    lives at the tail after the separator) is preserved in full.
+
+    Anchoring rules:
+      * The retry-history marker MUST appear at position 0 (the current call
+        site passes the marker-prefixed retry_context as the leading segment).
+        A stray prefix would be silently discarded by the rebuild; assert to
+        catch such a wiring change before it corrupts prompts.
+      * The separator is located via ``rfind`` so that, in retry-of-retry
+        chains where a prior ``effective_prompt`` (containing an inner
+        marker+separator) is stored as a user message and replayed verbatim,
+        the cap still resolves to the OUTER separator — the inner one
+        cannot outrank it.
+
+    No-op when ``effective_prompt`` is under ``limit`` or when no retry-history
+    marker is found (first-call / non-retry path).
+    """
+    if len(effective_prompt) <= limit:
+        return effective_prompt
+
+    marker_idx = effective_prompt.find(RETRY_HISTORY_MARKER)
+    if marker_idx < 0:
+        # Not a retry context; refuse to truncate.  This shouldn't happen in
+        # practice because only retry prompts exceed the limit, but stay safe.
+        return effective_prompt
+
+    # Current wiring always puts the marker at position 0 (retry_context is
+    # the first segment of effective_prompt). Any prefix would be silently
+    # discarded by the header+kept_body+tail rebuild below; fail loud if a
+    # future caller prepends content before retry_context.
+    assert marker_idx == 0, (
+        f"_post_dedup_safety_cap expects retry_context at position 0, "
+        f"got marker at {marker_idx} (prefix would be lost)"
+    )
+
+    # rfind: defense in depth against retry-of-retry chains where the stored
+    # user content includes an inner separator. The outer separator is always
+    # last in the emitted retry context (format_history_for_retry() appends
+    # it immediately before the continuation notice).
+    sep_idx = effective_prompt.rfind(RETRY_HISTORY_SEPARATOR)
+    if sep_idx < marker_idx + len(RETRY_HISTORY_MARKER):
+        # Marker present but no separator appears after it — structural
+        # invariant violated (e.g. format_history_for_retry() returned early
+        # or dedup collapsed the separator line). Cap cannot act without
+        # knowing where the tail starts; log so the failure mode is
+        # observable rather than silent.
+        logger.warning(
+            "Post-dedup safety cap could not act: effective_prompt %d chars > %d, "
+            "retry-history marker found but separator missing; returning prompt unchanged.",
+            len(effective_prompt),
+            limit,
+        )
+        return effective_prompt
+
+    # Include the separator INSIDE the tail so that the rebuilt output always
+    # contains exactly one marker and exactly one separator (the structural
+    # invariant the cap itself relies on for recursive anchoring on a next
+    # retry). history_body is the content strictly between marker and
+    # separator — it does not include either.
+    tail = effective_prompt[sep_idx:]
+    history_body = effective_prompt[marker_idx + len(RETRY_HISTORY_MARKER) : sep_idx]
+
+    header = f"{RETRY_HISTORY_MARKER}\n[... retry history truncated (head) to stay under safety limit ...]\n"
+    budget = limit - len(header) - len(tail)
+    if budget <= 0:
+        # Tail alone is too large — keep it intact (semantic priority) and
+        # drop history_body entirely. Output still satisfies the invariant
+        # because the separator lives inside tail. Dedicated warning
+        # distinguishes this pathological branch from a normal cap trigger.
+        truncated = header + tail
+        logger.warning(
+            "Post-dedup safety cap could not bound size (tail exceeds limit): "
+            "effective_prompt %d chars > %d; tail alone is %d chars, kept intact. "
+            "Output length %d chars still exceeds limit.",
+            len(effective_prompt),
+            limit,
+            len(tail),
+            len(truncated),
+        )
+        return truncated
+    if budget < len(RETRY_HISTORY_SEPARATOR):
+        # Budget is positive but too small to contain a whole history line;
+        # skip kept_body entirely to avoid emitting a partial-line fragment.
+        # The separator inside `tail` remains the only anchor. Output fits
+        # under ``limit`` (budget > 0 ⇒ len(header) + len(tail) < limit).
+        truncated = header + tail
+        logger.warning(
+            "Post-dedup safety cap triggered: effective_prompt %d chars > %d; "
+            "truncated retry-history head to %d chars (kept_body skipped — budget too small).",
+            len(effective_prompt),
+            limit,
+            len(truncated),
+        )
+        return truncated
+
+    if budget < len(history_body):
+        # Slice by character count, then round forward to the next newline so
+        # the kept body always begins at a clean line boundary (avoids a half
+        # `[User Prompt]:` header at the start).  If no newline exists in the
+        # sliced region, fall back to the raw slice.
+        raw_slice = history_body[-budget:]
+        nl_idx = raw_slice.find("\n")
+        kept_body = raw_slice[nl_idx + 1 :] if nl_idx >= 0 else raw_slice
+    else:
+        kept_body = history_body
+    truncated = header + kept_body + tail
+
+    logger.warning(
+        "Post-dedup safety cap triggered: effective_prompt %d chars > %d; "
+        "truncated retry-history head to %d chars.",
+        len(effective_prompt),
+        limit,
+        len(truncated),
+    )
+    return truncated
 
 # Module-level extra prompt state for Ctrl+C injection (transient, consumed after one use)
 _extra_prompt: Optional[str] = None
@@ -813,6 +939,7 @@ class LLMCaller:
                     effective_prompt = deduplicate_prompt_lines(effective_prompt)
                 except Exception:
                     logger.warning("deduplicate_prompt_lines failed, using original prompt", exc_info=True)
+                effective_prompt = _post_dedup_safety_cap(effective_prompt)
 
             args = ["--output-format", "stream-json", "--verbose", "-p", effective_prompt]
 

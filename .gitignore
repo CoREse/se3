@@ -12,6 +12,7 @@ human-calls/
 issues.md
 prompts/
 e2e
+materials
 
 # SE3: ignore runtime content, whitelist specs/issues/scripts
 /se3/*

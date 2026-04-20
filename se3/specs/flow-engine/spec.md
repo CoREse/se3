@@ -722,7 +722,7 @@ The flow engine SHALL apply content-aware truncation when feeding diagnostic out
 - **Error content** (stderr, error tool_results): tail-truncate (`content[-N:]`) — error root causes and tracebacks appear at the end
 - **Non-error content** (stdout, normal tool_results): head-truncate (`content[:N]`) — context and setup appear at the start
 - **Assistant responses** in retry/continue context: head+tail truncate (head 1000 chars + tail for remainder) — preserves initial step instructions and schema definitions at the start, plus final conclusions and tool results at the end
-- **User prompts** in retry/continue context: not truncated (line-level deduplication controls size); a 50K-char safety cap prevents unbounded growth
+- **User prompts** in retry/continue context: not truncated per-entry (line-level deduplication controls size); a post-dedup whole-prompt safety cap prevents unbounded growth after deduplication runs
 
 **Minimum Truncation Limits for LLM-consumed content:**
 
@@ -756,7 +756,7 @@ Truncation limits consumed by step handlers (test, self_check, verify_spec) SHAL
 #### Scenario: Assistant response uses head+tail truncation in retry context
 - **WHEN** `format_history_for_retry()` truncates a previous assistant response
 - **THEN** head+tail truncation is used: head (1000 chars) preserves step instructions and schema definitions, tail (remainder of budget) preserves final conclusions and tool results
-- **AND** user prompts are preserved in full (with a 50K safety cap); repeated content is handled by `deduplicate_prompt_lines()` in LLMCaller
+- **AND** user prompts are preserved in full by `format_history_for_retry()` — no per-entry character cap is applied; repeated content is handled by `deduplicate_prompt_lines()` in LLMCaller, and a separate post-dedup whole-prompt safety cap (see Prompt Line-Level Deduplication) provides bounded-growth fallback
 
 #### Scenario: Loop iteration summaries use FIFO eviction
 - **WHEN** accumulated iteration summaries exceed the total character limit
@@ -790,7 +790,16 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - `_record_prompt` records the deduped prompt, keeping history consistent with actual LLM input
 - Failures in deduplication are caught and logged as warnings; the original prompt is used as fallback
 
-**Design rationale:** Character-count truncation of user prompts (the prior approach) discards unique content that appears after repeated spec blocks (e.g., task-specific instructions following embedded specs). Line-level deduplication is a lossless alternative: it removes only provably identical content while preserving all unique portions of the prompt.
+**Post-Dedup Whole-Prompt Safety Cap:**
+
+- After `deduplicate_prompt_lines()` runs, `LLMCaller._call_with_retry()` applies a single whole-prompt length check against `POST_DEDUP_SAFETY_LIMIT` (default 500,000 characters; env-overridable for testing and operational tuning)
+- The cap operates on the deduped `effective_prompt` as a whole, NOT on each history entry individually — this ensures repeated spec content is collapsed by dedup before the cap decides whether truncation is necessary
+- When the deduped prompt exceeds the cap, the cap locates the retry-history region using shared marker/separator constants (defined in a neutral module `se3/engine/retry_context.py` and consumed by both `chat_history.py` and `llm_caller.py`) via a trailing `rfind` of the separator (robust to retry-of-retry replays where multiple history regions may appear), and truncates the **head of the history region** while preserving the **new prompt tail** in full — the semantically most important portion for the model's current task
+- Kept body is rounded to line boundaries to avoid mid-line cuts
+- Distinct warnings are emitted for each observable branch: no-op (under limit), normal trigger (history head trimmed), tail-alone exceeds the limit, and separator-missing (defensive fallback)
+- Shared constants `RETRY_HISTORY_MARKER`, `RETRY_HISTORY_SEPARATOR`, and `POST_DEDUP_SAFETY_LIMIT` live in `retry_context.py` so that `chat_history.format_history_for_retry()` and `llm_caller._call_with_retry()` reference the same symbols without cross-module underscore-prefixed imports
+
+**Design rationale:** Character-count truncation of individual user prompts (the prior approach) discarded unique content that appears after repeated spec blocks (e.g., task-specific instructions following embedded specs), and — critically — fired *before* `deduplicate_prompt_lines()` had a chance to collapse those repeated specs, so content that would have been removed as duplicates was instead prematurely truncated. Line-level deduplication is a lossless alternative: it removes only provably identical content while preserving all unique portions of the prompt. The post-dedup whole-prompt cap serves as the bounded-growth fallback for the degenerate case where dedup is ineffective and the prompt is genuinely unbounded — it runs after dedup, measures the whole prompt, and preserves the current-task tail.
 
 #### Scenario: First LLM call is a no-op
 - **WHEN** `_call_with_retry()` makes the first call for a step (not a retry)
@@ -806,6 +815,21 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 #### Scenario: Recorded prompt matches LLM input
 - **WHEN** `_record_prompt()` saves the prompt to history after a retry call
 - **THEN** the recorded prompt is the deduped version (same as what the LLM received)
+
+#### Scenario: Post-dedup cap is a no-op when dedup reclaims space
+- **GIVEN** a retry where prior user prompts contain large spec blocks that are also present in the new prompt
+- **WHEN** `_call_with_retry()` runs `deduplicate_prompt_lines()` and then the post-dedup whole-prompt cap
+- **THEN** the deduped prompt is below `POST_DEDUP_SAFETY_LIMIT`
+- **AND** no truncation is performed and no `User prompt in retry context hit safety limit` style warning is emitted
+
+#### Scenario: Post-dedup cap trims history head when prompt genuinely exceeds limit
+- **GIVEN** a retry where prior user prompts contain large non-repeating content that dedup cannot collapse
+- **AND** the deduped `effective_prompt` length still exceeds `POST_DEDUP_SAFETY_LIMIT`
+- **WHEN** the post-dedup cap runs
+- **THEN** the retry-history region is located via trailing `rfind` of the shared separator (robust to retry-of-retry replays)
+- **AND** the **head** of the history region is truncated while the **new prompt tail** is preserved in full
+- **AND** the kept body boundary is rounded to a line boundary (no mid-line cuts)
+- **AND** a warning is logged describing that the cap was triggered
 
 ### Requirement: 状态持久化与恢复
 

@@ -193,8 +193,13 @@ class TestFormatHistoryForRetryMode:
         assert "[truncated]" not in result
 
     @patch("se3.engine.chat_history.get_step_history")
-    def test_user_prompt_exceeding_50k_safety_limit_truncated(self, mock_get):
-        """User prompts exceeding 50K chars should be truncated for safety."""
+    def test_user_prompt_preserved_verbatim_regardless_of_size(self, mock_get):
+        """User prompts are no longer truncated per-message in format_history_for_retry.
+
+        The per-prompt 50K hard cap was removed because it fired before
+        deduplicate_prompt_lines() had a chance to eliminate repeated spec text
+        across attempts.  Post-dedup safety is enforced in LLMCaller.
+        """
         huge_prompt = "x" * 60_000
         mock_get.return_value = _make_session([
             _make_user_message(huge_prompt),
@@ -202,16 +207,13 @@ class TestFormatHistoryForRetryMode:
         ])
         result = format_history_for_retry(Path("/tmp"), "flow", "step", mode="continue")
         assert result is not None
-        # Should be truncated to 50K
-        assert "user prompt truncated for retry context safety" in result
-        # The full 60K content should NOT be present
-        assert "x" * 60_000 not in result
-        # But the first 50K should be present
-        assert "x" * 50_000 in result
+        assert "x" * 60_000 in result
+        assert "user prompt truncated for retry context safety" not in result
+        assert "hit safety limit" not in result
 
     @patch("se3.engine.chat_history.get_step_history")
     def test_user_prompt_at_50k_not_truncated(self, mock_get):
-        """User prompts exactly at 50K chars should NOT be truncated."""
+        """User prompts at 50K chars pass through unchanged (regression guard)."""
         exact_prompt = "y" * 50_000
         mock_get.return_value = _make_session([
             _make_user_message(exact_prompt),

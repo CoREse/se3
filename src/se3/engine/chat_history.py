@@ -19,6 +19,11 @@ from typing import Any, Dict, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
+from .retry_context import (
+    POST_DEDUP_SAFETY_LIMIT,
+    RETRY_HISTORY_MARKER,
+    RETRY_HISTORY_SEPARATOR,
+)
 from .tool_formatters import (
     format_tool_result_preview,
     format_tool_use_preview,
@@ -28,14 +33,6 @@ from .tool_formatters import (
 
 # Default project root for history storage
 _SE3_DIR = "se3"
-
-# Safety cap for user prompts in retry context (replaces the old 2000/4000 char
-# truncation limits that were removed to enable prompt-level dedup).  Primary
-# dedup happens in LLMCaller._call_with_retry() via deduplicate_prompt_lines()
-# after combining retry context with the original prompt; this limit is a
-# defensive fallback preventing unbounded growth when dedup has no effect
-# (e.g. first retry with no repeated blocks).
-_USER_PROMPT_SAFETY_LIMIT = 50_000
 
 _HISTORY_DIR = "history"
 
@@ -555,8 +552,10 @@ def format_history_for_retry(
         flow_id: Flow instance ID
         step_id: Step instance ID
         mode: 'continue' (default) to resume from breakpoint, or 'retry' to restart.
-              User prompts are preserved in full (with a 50K safety cap); repeated
-              content is handled by deduplicate_prompt_lines() in LLMCaller.
+              User prompts are preserved verbatim; repeated content (e.g. spec text
+              repeated across attempts) is eliminated by deduplicate_prompt_lines()
+              in LLMCaller, and an overall post-dedup safety cap is enforced there
+              as a defensive fallback.
               In 'continue' mode: assistant responses with tool calls are not
               truncated, and a continuation instruction is appended.
               In 'retry' mode: preserves original behavior.
@@ -578,7 +577,10 @@ def format_history_for_retry(
     # Set truncation limits based on mode
     assistant_fallback_limit = 4000 if mode == "continue" else 2000
 
-    parts = ["[Previous conversation context for this step]:"]
+    # INVARIANT: emit exactly one RETRY_HISTORY_MARKER per retry-context block.
+    # LLMCaller._post_dedup_safety_cap() anchors on this marker; reusing it as
+    # a section divider or emitting it twice will silently break the cap.
+    parts = [RETRY_HISTORY_MARKER]
 
     for attempt_num in sorted(attempts.keys()):
         msgs = attempts[attempt_num]
@@ -587,15 +589,7 @@ def format_history_for_retry(
         for msg in msgs:
             if msg.role == "user":
                 parts.append(f"\n[User Prompt]:")
-                content = msg.content
-                prompt_len = len(content)
-                if prompt_len > _USER_PROMPT_SAFETY_LIMIT:
-                    logger.warning(
-                        f"User prompt in retry context hit safety limit "
-                        f"({prompt_len} chars > {_USER_PROMPT_SAFETY_LIMIT}), truncating"
-                    )
-                    content = content[:_USER_PROMPT_SAFETY_LIMIT] + "\n... [user prompt truncated for retry context safety]"
-                parts.append(content)
+                parts.append(msg.content)
 
             elif msg.role == "assistant":
                 # Extract full conversation from raw_json
@@ -640,7 +634,13 @@ def format_history_for_retry(
                     parts.append(f"\n[Assistant Response]:")
                     parts.append(content)
 
-    parts.append("\n" + "=" * 40)
+    # INVARIANT: emit exactly one RETRY_HISTORY_SEPARATOR per retry-context
+    # block, immediately before the continuation notice. The cap locates the
+    # tail of the retry history by rfind()-ing this sentinel; reusing it
+    # elsewhere (e.g. inside [User Prompt]: content) will still resolve via
+    # rfind because the outer occurrence is strictly last, but removing it
+    # under any code path here will silently disable the cap.
+    parts.append("\n" + RETRY_HISTORY_SEPARATOR)
     if mode == "continue":
         parts.append(
             "[Continue from where the previous attempt stopped. "
