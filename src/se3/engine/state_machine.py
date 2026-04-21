@@ -749,6 +749,7 @@ class StateMachine:
                     # Forward implement-test contract
                     inputs["tests_added"] = step.outputs.get("tests_added", [])
                     inputs["test_mapping"] = step.outputs.get("test_mapping", {})
+                    inputs["estimated_test_duration"] = step.outputs.get("estimated_test_duration")
                     # Forward completion status and summary for downstream steps
                     inputs["implement_summary"] = step.outputs.get("summary", "")
                     inputs["completion_status"] = step.outputs.get("completion_status", "complete")

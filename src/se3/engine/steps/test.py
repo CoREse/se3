@@ -27,6 +27,7 @@ from typing import Any, Dict, List
 
 from ..models import FlowInstance, Step, StepStatus
 from ..truncation import FAILURES_SECTION_MAX_CHARS, FIX_STDERR_TAIL_CHARS, TEST_HISTORY_STDERR_TAIL_CHARS, TEST_HISTORY_STDOUT_TAIL_CHARS
+from .implement import _sanitize_estimated_test_duration
 
 logger = logging.getLogger(__name__)
 
@@ -164,6 +165,20 @@ def _save_known_failures(project_root: Path, failures: Dict[str, Any]) -> None:
         logger.warning(f"Failed to save known_test_failures.json: {e}")
 
 
+def _render_estimate(value: float | int | None) -> str:
+    """Render an estimated_test_duration for display.
+
+    The LLM is asked to output an integer; sanitation stores it as a float
+    for numeric consistency. When whole-valued, render as int to avoid
+    echoing '300.0' back where the LLM wrote '300'.
+    """
+    if value is None:
+        return "not set"
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
 def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the test step.
 
@@ -186,13 +201,48 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     tests_added = step.inputs.get("tests_added", [])
     is_fix_iteration = step.inputs.get("is_fix_iteration", False)
 
+    # Compute dynamic timeout for primary test command.
+    # - Minimum floor prevents instantaneous timeouts if the LLM returns a
+    #   nonsense estimate (e.g. 0 or 1 second).
+    # - Maximum cap prevents runaway compounding in the fix loop: without
+    #   it, repeated timeouts cause the LLM to escalate estimated_test_duration
+    #   each iteration, which the multiplier then scales further — a hung
+    #   test could end up with an hours-long timeout.
+    raw_estimated_test_duration = step.inputs.get("estimated_test_duration")
+    # Reuse the implement-side sanitizer so the "valid estimate" contract is
+    # defined once: any future tightening (NaN, upper sanity bound, …) stays
+    # consistent between the producer (implement) and the consumer (test).
+    sanitized_estimated_duration = _sanitize_estimated_test_duration(
+        raw_estimated_test_duration
+    )
+    if sanitized_estimated_duration is not None:
+        computed = int(sanitized_estimated_duration * config.timeout_multiplier)
+        floored = max(computed, config.min_dynamic_timeout)
+        primary_timeout = min(floored, config.max_dynamic_timeout)
+        # Signal whether the cap clamped the computed value — raising the
+        # estimate further would not produce a larger timeout.
+        primary_timeout_at_cap = computed > config.max_dynamic_timeout
+        logger.info(
+            "Using dynamic timeout: %ds (estimated_test_duration=%s, multiplier=%.1f, floor=%ds, cap=%ds%s)",
+            primary_timeout,
+            sanitized_estimated_duration,
+            config.timeout_multiplier,
+            config.min_dynamic_timeout,
+            config.max_dynamic_timeout,
+            ", clamped at cap" if primary_timeout_at_cap else "",
+        )
+    else:
+        primary_timeout = config.timeout
+        primary_timeout_at_cap = False
+        logger.info("Using fallback timeout: %ds (no usable estimated_test_duration)", primary_timeout)
+
     # 1. Run primary test command
     primary_command = (
         shlex.split(config.command) if config.command
         else _detect_test_command(project_root)
     )
     primary_result = _run_command(
-        primary_command, project_root, config.timeout,
+        primary_command, project_root, primary_timeout,
     )
 
     # 2. Classify primary results
@@ -231,6 +281,12 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
     pre_existing_ids = [
         tid for tid in regression["failed"] if tid in known_ids
     ]
+
+    # Detect timeout in primary test result via the structured flag set by
+    # _run_command. Previously this matched a stderr substring, which would
+    # misclassify the exception-fallback path if its error message ever
+    # happened to contain the same text.
+    primary_timed_out = bool(primary_result.get("timed_out"))
 
     # Fix loop triggers on:
     # 1. New test failures
@@ -331,14 +387,69 @@ Error output:
 """
 
         # Store fix context in outputs for the fix loop
-        step.outputs["fix_needed"] = True
-        step.outputs["fix_instructions"] = fix_instructions
-        step.outputs["fix_context"] = {
+        fix_context: dict[str, Any] = {
             "test_failed": True,
             "test_results": step.outputs["test_results"],
             "reason": "test_failure",
             "iteration": step.inputs.get("fix_iteration", 0) + 1,
         }
+
+        # If primary test timed out, include timeout info so implement can
+        # provide a higher estimated_test_duration next iteration.
+        # Report the *sanitized* estimate (i.e. what was actually used to
+        # compute primary_timeout) rather than the raw input, so the LLM's
+        # reasoning input matches the actual behavior when the state machine
+        # forwards a malformed value that falls through to config.timeout.
+        if primary_timed_out:
+            reported_estimate = (
+                _render_estimate(sanitized_estimated_duration)
+                if sanitized_estimated_duration is not None
+                else "not set"
+            )
+            cap_note = (
+                " The computed timeout was clamped at the max_dynamic_timeout "
+                f"cap ({config.max_dynamic_timeout}s), so raising the estimate "
+                "further will not produce a larger timeout — investigate "
+                "splitting the suite or fixing a slow/hung test instead."
+                if primary_timeout_at_cap
+                else ""
+            )
+            fix_context["timeout_reason"] = (
+                f"Tests timed out after {primary_timeout}s. "
+                f"Previous estimated_test_duration was {reported_estimate}. "
+                f"The timeout_multiplier is {config.timeout_multiplier}. "
+                f"Please provide a significantly higher estimated_test_duration to avoid repeated timeouts."
+                f"{cap_note}"
+            )
+            fix_context["previous_timeout"] = primary_timeout
+            fix_context["previous_estimated_test_duration"] = sanitized_estimated_duration
+            fix_context["timeout_multiplier"] = config.timeout_multiplier
+            fix_context["timeout_at_cap"] = primary_timeout_at_cap
+            logger.warning(
+                "Test timed out (timeout=%ds, estimated=%s, at_cap=%s). Including timeout info in fix_context.",
+                primary_timeout, sanitized_estimated_duration, primary_timeout_at_cap,
+            )
+
+        # Phase-level timeout hint: dynamic timeout applies only to the
+        # primary command, but a hung required phase should still be flagged
+        # to the LLM so it can diagnose the hang (even though the fix is not
+        # to raise estimated_test_duration).
+        phase_timeouts = [
+            pr["name"] for pr in phase_results[1:]
+            if pr.get("timed_out")
+        ]
+        if phase_timeouts:
+            phase_list = ", ".join(phase_timeouts)
+            fix_instructions += (
+                f"\nNote: the following test phase(s) timed out: {phase_list}. "
+                "Dynamic timeout applies only to the primary test command; "
+                "investigate whether these phases are hanging or need their "
+                "phase-level `timeout` raised in se3.yaml.\n"
+            )
+
+        step.outputs["fix_needed"] = True
+        step.outputs["fix_instructions"] = fix_instructions
+        step.outputs["fix_context"] = fix_context
 
         return StepStatus.REVISION_NEEDED
 
@@ -409,6 +520,7 @@ def _run_command(
                 "stdout": "Skipped: recursive test invocation detected (SE3_TEST_RUNNING set)",
                 "stderr": "",
                 "passed": True,
+                "timed_out": False,
             }
         env["SE3_TEST_RUNNING"] = "1"
 
@@ -453,6 +565,7 @@ def _run_command(
                             "stdout": stdout or "",
                             "stderr": (stderr or "") + f"\nTimeout after {timeout}s",
                             "passed": False,
+                            "timed_out": True,
                         }
                     continue
 
@@ -465,6 +578,7 @@ def _run_command(
                 "stdout": stdout,
                 "stderr": stderr,
                 "passed": process.returncode == 0,
+                "timed_out": False,
             }
 
         except KeyboardInterrupt:
@@ -483,6 +597,7 @@ def _run_command(
             "stdout": "",
             "stderr": str(e),
             "passed": False,
+            "timed_out": False,
         }
 
 

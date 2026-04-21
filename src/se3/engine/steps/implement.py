@@ -65,6 +65,7 @@ When you are done, output a JSON summary of what you did:
 {{
     "files_changed": ["path/to/file1.py", "path/to/file2.py"],
     "tests_added": ["tests/test_new.py"],
+    "estimated_test_duration": 120,
     "test_mapping": {{}},
     "summary": "Brief description of changes made",
     "completion_status": "complete",
@@ -75,6 +76,7 @@ When you are done, output a JSON summary of what you did:
 
 ### Response field notes:
 - **completion_status**: Set to "complete" if all tasks were done, "partial" if some tasks could not be completed (e.g., permission restrictions on sensitive files), or "failed" if no meaningful progress was made.
+- **estimated_test_duration**: Integer, estimated number of seconds the project's full test suite will take to run (ALL tests in the project, not only the new ones you added). The test runner executes the whole suite with one command, so this estimate must cover every test that will run. Consider existing tests in the repo plus any you added. This helps the test runner allocate appropriate time.
 - **incomplete_tasks**: An array of strings, each describing a task that could not be completed and why. Only populate when completion_status is "partial" or "failed".
 - **restricted_edits**: An array of edits you attempted but could NOT perform due to file permission/protection restrictions (e.g., files under `.claude/` directory). Each entry must be: {{"file_path": "path/to/file", "old_string": "text to replace", "new_string": "replacement text"}}. Always attempt edits normally first — only use this field for edits that were rejected by the permission system.
 """
@@ -111,6 +113,7 @@ When you are done, output a JSON summary of what you did:
 {{
     "files_changed": ["path/to/file1.py", "path/to/file2.py"],
     "tests_added": ["tests/test_new.py"],
+    "estimated_test_duration": 120,
     "test_mapping": {{}},
     "summary": "Brief description of changes made",
     "completion_status": "complete",
@@ -121,6 +124,7 @@ When you are done, output a JSON summary of what you did:
 
 ### Response field notes:
 - **completion_status**: Set to "complete" if all tasks were done, "partial" if some tasks could not be completed (e.g., permission restrictions on sensitive files), or "failed" if no meaningful progress was made.
+- **estimated_test_duration**: Integer, estimated number of seconds the project's full test suite will take to run (ALL tests in the project, not only this group's new ones). The test runner executes one command over the whole suite regardless of how many groups there are, so every group must report a whole-suite estimate, not a per-group delta. This helps the test runner allocate appropriate time.
 - **incomplete_tasks**: An array of strings, each describing a task that could not be completed and why. Only populate when completion_status is "partial" or "failed".
 - **restricted_edits**: An array of edits you attempted but could NOT perform due to file permission/protection restrictions (e.g., files under `.claude/` directory). Each entry must be: {{"file_path": "path/to/file", "old_string": "text to replace", "new_string": "replacement text"}}. Always attempt edits normally first — only use this field for edits that were rejected by the permission system.
 """
@@ -158,6 +162,7 @@ When you are done, output a JSON summary of what you did:
 {{
     "files_changed": ["path/to/file1.py"],
     "tests_added": [],
+    "estimated_test_duration": 120,
     "test_mapping": {{}},
     "summary": "Brief description of fix",
     "completion_status": "complete",
@@ -168,8 +173,12 @@ When you are done, output a JSON summary of what you did:
 
 ### Response field notes:
 - **completion_status**: Set to "complete" if all issues were fixed, "partial" if some fixes could not be applied (e.g., permission restrictions on sensitive files), or "failed" if no meaningful progress was made.
+- **estimated_test_duration**: Integer, estimated number of seconds the project's full test suite will take to run (ALL tests in the project, not only the new ones you added). This helps the test runner allocate appropriate time.
 - **incomplete_tasks**: An array of strings, each describing a fix that could not be applied and why.
 - **restricted_edits**: An array of edits you attempted but could NOT perform due to file permission/protection restrictions (e.g., files under `.claude/` directory). Each entry must be: {{"file_path": "path/to/file", "old_string": "text to replace", "new_string": "replacement text"}}. Always attempt edits normally first — only use this field for edits that were rejected by the permission system.
+
+### Timeout guidance:
+If the fix context indicates that tests previously timed out (timeout_reason is present), first investigate whether the timeout reflects a real hang or infinite loop in the code you changed — the test runner caps computed timeouts at its configured maximum, so simply increasing the estimate cannot rescue a runaway test. If the prior timeout looks like a genuine under-estimate (the suite really does take that long), provide a meaningfully higher `estimated_test_duration` (roughly 1.5–2× the previous value is usually enough; don't blindly multiply without bound). If the fix context indicates `Timeout at cap: true`, raising `estimated_test_duration` will NOT produce a larger timeout — the prior run was already at the cap, so focus on splitting the suite or fixing the slow/hung test instead.
 """
 
 
@@ -449,6 +458,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     all_restricted_failed: list[dict] = []
     all_completion_statuses: list[str] = []
     all_incomplete_tasks: list[str] = []
+    group_estimated_durations: list[float] = []
 
     # Check for resume state
     completed_groups = set()
@@ -460,6 +470,13 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         all_files_changed = list(step.outputs.get("files_changed", []))
         all_tests_added = list(step.outputs.get("tests_added", []))
         merged_test_mapping = dict(step.outputs.get("test_mapping", {}))
+        # `estimated_test_duration` is persisted as the whole-suite estimate
+        # (max across groups, see aggregation below). Seeding it as a single
+        # element preserves the invariant: max(prior_max, new_group) ==
+        # max(all_groups_so_far). Do not treat this as a per-group value.
+        prior_est = step.outputs.get("estimated_test_duration")
+        if prior_est is not None:
+            group_estimated_durations.append(float(prior_est))
         # Carry forward previously-completed group IDs so they survive
         # across multiple retries (Bug fix: was starting empty, losing
         # completed groups on subsequent retries)
@@ -510,7 +527,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             response = caller.call(
                 prompt=prompt,
                 json_mode="two_phase",
-                json_schema_hint='{"files_changed": [], "tests_added": [], "test_mapping": {}, "summary": "...", "completion_status": "complete|partial|failed", "incomplete_tasks": [], "restricted_edits": [{"file_path": "...", "old_string": "...", "new_string": "..."}]}',
+                json_schema_hint='{"files_changed": [], "tests_added": [], "estimated_test_duration": 120, "test_mapping": {}, "summary": "...", "completion_status": "complete|partial|failed", "incomplete_tasks": [], "restricted_edits": [{"file_path": "...", "old_string": "...", "new_string": "..."}]}',
             )
             result = parse_json_response(response, required_keys=[])
         except LLMCallError as e:
@@ -526,6 +543,9 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         group_tests = result.get("tests_added", []) if result else []
         group_mapping = result.get("test_mapping", {}) if result else {}
         group_summary = result.get("summary", "") if result else ""
+        group_estimated_duration = _sanitize_estimated_test_duration(
+            result.get("estimated_test_duration") if result else None
+        )
 
         # Apply restricted edits for this group (Bug A)
         restricted_edits = result.get("restricted_edits", []) if result else []
@@ -552,6 +572,8 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         all_tests_added.extend(group_tests)
         merged_test_mapping.update(group_mapping)
         implemented_group_ids.append(group_id)
+        if group_estimated_duration is not None:
+            group_estimated_durations.append(group_estimated_duration)
 
         previous_results.append({
             "group_id": group_id,
@@ -559,17 +581,26 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             "summary": group_summary,
         })
 
-        # Persist incremental progress
+        # Persist incremental progress.
+        # Use max() across groups: each group reports a whole-suite estimate
+        # (see IMPLEMENT_GROUP_PROMPT), so sum()-ing would inflate the
+        # timeout by N× for N groups.
         step.outputs["files_changed"] = all_files_changed
         step.outputs["tests_added"] = all_tests_added
         step.outputs["test_mapping"] = merged_test_mapping
         step.outputs["implemented_groups"] = implemented_group_ids
+        step.outputs["estimated_test_duration"] = (
+            max(group_estimated_durations) if group_estimated_durations else None
+        )
 
     # Final outputs
     step.outputs["files_changed"] = all_files_changed
     step.outputs["tests_added"] = all_tests_added
     step.outputs["test_mapping"] = merged_test_mapping
     step.outputs["implemented_groups"] = implemented_group_ids
+    step.outputs["estimated_test_duration"] = (
+        max(group_estimated_durations) if group_estimated_durations else None
+    )
 
     # Restricted edits aggregation
     if all_restricted_applied:
@@ -868,7 +899,7 @@ def _make_execute_fn(
             response = caller.call(
                 prompt=prompt,
                 json_mode="two_phase",
-                json_schema_hint='{"files_changed": [], "tests_added": [], "test_mapping": {}, "summary": "...", "completion_status": "complete|partial|failed", "incomplete_tasks": [], "restricted_edits": [{"file_path": "...", "old_string": "...", "new_string": "..."}]}',
+                json_schema_hint='{"files_changed": [], "tests_added": [], "estimated_test_duration": 120, "test_mapping": {}, "summary": "...", "completion_status": "complete|partial|failed", "incomplete_tasks": [], "restricted_edits": [{"file_path": "...", "old_string": "...", "new_string": "..."}]}',
             )
             result = parse_json_response(response, required_keys=[])
 
@@ -899,6 +930,9 @@ def _make_execute_fn(
             completion_status = result.get("completion_status", "complete") if result else "complete"
             incomplete_tasks = result.get("incomplete_tasks", []) if result else []
             restricted_edits = result.get("restricted_edits", []) if result else []
+            estimated_test_duration = _sanitize_estimated_test_duration(
+                result.get("estimated_test_duration") if result else None
+            )
 
             # For relay/fork nodes, always preserve the branch name so downstream
             # groups and leaf merge can locate the accumulated commits.
@@ -921,6 +955,7 @@ def _make_execute_fn(
                 completion_status=completion_status,
                 incomplete_tasks=incomplete_tasks,
                 restricted_edits=restricted_edits,
+                estimated_test_duration=estimated_test_duration,
             )
 
         except subprocess.TimeoutExpired as e:
@@ -1214,6 +1249,9 @@ def _run_dag_parallel(
         step.outputs["summary"] = "Recovered from previous run"
         step.outputs["completion_status"] = "complete"
         step.outputs["incomplete_tasks"] = []
+        step.outputs["estimated_test_duration"] = (
+            prior_outputs.get("estimated_test_duration") if prior_outputs else None
+        )
         return StepStatus.COMPLETED
 
     # Transitive reduction: remove redundant dependency edges
@@ -1348,6 +1386,9 @@ def _run_dag_parallel(
     all_incomplete_tasks: list[str] = []
     implemented_group_ids: list[str] = list(prior_outputs.get("implemented_groups", [])) if prior_outputs else []
     summaries: list[str] = []
+    estimated_durations: list[float] = []
+    if prior_outputs and prior_outputs.get("estimated_test_duration") is not None:
+        estimated_durations.append(float(prior_outputs["estimated_test_duration"]))
 
     for r in results:
         if r.status == "completed":
@@ -1359,6 +1400,8 @@ def _run_dag_parallel(
             all_incomplete_tasks.extend(r.incomplete_tasks)
             if r.summary:
                 summaries.append(r.summary)
+            if r.estimated_test_duration is not None:
+                estimated_durations.append(float(r.estimated_test_duration))
         elif r.status == "failed":
             all_completion_statuses.append("failed")
             if r.error:
@@ -1378,6 +1421,11 @@ def _run_dag_parallel(
     step.outputs["test_mapping"] = merged_test_mapping
     step.outputs["implemented_groups"] = implemented_group_ids
     step.outputs["summary"] = "; ".join(summaries)
+    # Each group reports a whole-suite estimate, so take the max; see
+    # IMPLEMENT_GROUP_PROMPT response field notes.
+    step.outputs["estimated_test_duration"] = (
+        max(estimated_durations) if estimated_durations else None
+    )
 
     if all_restricted_applied:
         step.outputs["restricted_edits_applied"] = all_restricted_applied
@@ -1438,7 +1486,7 @@ def _run_single_llm_call(
         response = caller.call(
             prompt=prompt,
             json_mode="two_phase",
-            json_schema_hint='{"files_changed": [], "tests_added": [], "test_mapping": {}, "summary": "...", "completion_status": "complete|partial|failed", "incomplete_tasks": [], "restricted_edits": [{"file_path": "...", "old_string": "...", "new_string": "..."}]}',
+            json_schema_hint='{"files_changed": [], "tests_added": [], "estimated_test_duration": 120, "test_mapping": {}, "summary": "...", "completion_status": "complete|partial|failed", "incomplete_tasks": [], "restricted_edits": [{"file_path": "...", "old_string": "...", "new_string": "..."}]}',
         )
 
         result = parse_json_response(response, required_keys=[])
@@ -1467,6 +1515,9 @@ def _run_single_llm_call(
             step.outputs["test_mapping"] = result.get("test_mapping", {})
             step.outputs["implemented_groups"] = task_groups
             step.outputs["summary"] = result.get("summary", "")
+            step.outputs["estimated_test_duration"] = _sanitize_estimated_test_duration(
+                result.get("estimated_test_duration")
+            )
 
             # Completion status detection (Bug B)
             completion_status = result.get("completion_status", "complete")
@@ -1491,6 +1542,7 @@ def _run_single_llm_call(
             step.outputs["tests_added"] = []
             step.outputs["test_mapping"] = {}
             step.outputs["implemented_groups"] = task_groups
+            step.outputs["estimated_test_duration"] = None
 
         return StepStatus.COMPLETED
 
@@ -1645,6 +1697,22 @@ def _restore_history_to_worktree(main_repo_root: Path, worktree_path: Path, flow
         logger.debug("Restored %d history file(s) to worktree %s", copied, worktree_path)
 
 
+def _sanitize_estimated_test_duration(value: Any) -> float | None:
+    """Coerce an LLM-reported estimated_test_duration to a positive float.
+
+    Rejects bool (a subclass of int) and non-positive values so the caller
+    falls back to the fixed config.timeout rather than computing an
+    unreasonably small dynamic timeout.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if not isinstance(value, (int, float)):
+        return None
+    if value <= 0:
+        return None
+    return float(value)
+
+
 def _get_head_hash(project_root: Path) -> str | None:
     """Get current HEAD commit hash, or None for empty repos."""
     result = _run_git(project_root, "rev-parse", "HEAD", check=False)
@@ -1755,6 +1823,34 @@ def _format_fix_context_structured(fix_context: dict | str | None) -> str:
     lines.append(f"Reason: {reason}")
 
     if reason == "test_failure" or fix_context.get("test_failed"):
+        timeout_reason = fix_context.get("timeout_reason")
+        if timeout_reason:
+            lines.append(f"Timeout reason: {timeout_reason}")
+            previous_timeout = fix_context.get("previous_timeout")
+            if previous_timeout is not None:
+                lines.append(f"Previous timeout: {previous_timeout}s")
+            previous_estimate = fix_context.get("previous_estimated_test_duration")
+            # Whole-valued floats render as int — the LLM emits integers,
+            # so echoing '300.0' back when it wrote '300' can induce drift.
+            if isinstance(previous_estimate, float) and previous_estimate.is_integer():
+                previous_estimate_display: str = str(int(previous_estimate))
+            elif previous_estimate is None:
+                previous_estimate_display = "not set"
+            else:
+                previous_estimate_display = str(previous_estimate)
+            lines.append(
+                f"Previous estimated_test_duration: {previous_estimate_display}"
+            )
+            timeout_multiplier = fix_context.get("timeout_multiplier")
+            if timeout_multiplier is not None:
+                lines.append(f"Timeout multiplier: {timeout_multiplier}")
+            if fix_context.get("timeout_at_cap"):
+                lines.append(
+                    "Timeout at cap: true — raising estimated_test_duration "
+                    "further will not increase the timeout; investigate "
+                    "splitting the suite or fixing a slow/hung test."
+                )
+
         test_analysis = fix_context.get("test_analysis", {})
         if test_analysis:
             summary = test_analysis.get("failure_summary", "")

@@ -29,6 +29,12 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - `conflict_resolver.strategy`: Merge conflict resolution strategy — `"human"` or `"llm"` (default: `"human"`)
 - `implement.group_loc_threshold`: LOC threshold for collapsing task groups into a single LLM call (default: 300)
 - `workflow.max_fix_iterations`: Max fix loop iterations before FAILED (default: 20)
+- `test.command`: Primary test command override (default: null = auto-detect)
+- `test.timeout`: Fallback timeout (seconds) when dynamic timeout is unavailable (default: 1800)
+- `test.timeout_multiplier`: Multiplier applied to implement's `estimated_test_duration` to compute the dynamic timeout for the primary test command (default: 2.0, clamped to >= 1.0)
+- `test.min_dynamic_timeout`: Lower bound (seconds) on the computed dynamic timeout (default: 30)
+- `test.max_dynamic_timeout`: Upper bound (seconds) on the computed dynamic timeout, preventing runaway escalation in the timeout fix loop (default: 14400)
+- `test.phases`: Additional test phases (list of phase configs; each phase's own `timeout` is always used and is NOT affected by the dynamic timeout)
 
 #### Scenario: Using default configuration
 - **WHEN** no se3.yaml file exists in the project
@@ -173,6 +179,60 @@ workflow:
 - **WHEN** the fix loop reaches 10 iterations without resolving all issues
 - **THEN** the state machine sets the flow to FAILED status
 - **AND** an A-class issue is generated describing the unresolved problems
+
+### Requirement: Test Configuration
+
+The system SHALL support configuration for the test step's execution, including a dynamic timeout mechanism driven by the implement step's estimate of the test suite runtime.
+
+**Test section options:**
+- `command`: Primary test command (default: null = auto-detect)
+- `timeout`: Fallback timeout in seconds, used when `estimated_test_duration` from the implement step is missing or invalid (default: 1800)
+- `timeout_multiplier`: Multiplier applied to implement's `estimated_test_duration` to derive the actual timeout for the primary test command (default: 2.0). Values below 1.0 are clamped up to 1.0 at load time so a typo cannot silently disable the feature.
+- `min_dynamic_timeout`: Lower bound in seconds on the computed dynamic timeout (default: 30)
+- `max_dynamic_timeout`: Upper bound in seconds on the computed dynamic timeout (default: 14400). When the user's `test.timeout` is larger than the default ceiling, the framework raises the ceiling to at least `test.timeout` so an explicit high fallback is never silently capped.
+- `phases`: List of additional test phases. Each phase's own `timeout` is always used; the dynamic timeout mechanism does NOT apply to phases.
+- `fix_loop.max_iterations`: Per-step override for the fix loop iteration budget (defaults to `workflow.max_fix_iterations`)
+
+**Example configuration:**
+```yaml
+test:
+  command: null
+  timeout: 1800
+  timeout_multiplier: 2.0
+  min_dynamic_timeout: 30
+  max_dynamic_timeout: 14400
+  phases:
+    - name: "e2e"
+      command: "python -m pytest tests/e2e -v"
+      timeout: 600
+      required: false
+      in_fix_loop: false
+```
+
+#### Scenario: Default test configuration
+- **WHEN** no `test` section exists in se3.yaml
+- **THEN** the framework uses `timeout=1800`, `timeout_multiplier=2.0`, `min_dynamic_timeout=30`, `max_dynamic_timeout=14400`
+
+#### Scenario: Dynamic timeout from implement estimate
+- **GIVEN** implement produced `estimated_test_duration: 180`
+- **AND** `test.timeout_multiplier: 2.0` in se3.yaml
+- **WHEN** the test step runs the primary command
+- **THEN** the primary command's timeout is `180 * 2.0 = 360` seconds (within min/max bounds)
+
+#### Scenario: Fallback when implement estimate missing
+- **GIVEN** `estimated_test_duration` is missing or non-positive in implement's output
+- **WHEN** the test step runs the primary command
+- **THEN** the primary command uses `test.timeout` (default 1800 seconds)
+
+#### Scenario: Invalid timeout_multiplier is clamped
+- **GIVEN** `test.timeout_multiplier: 0.1` in se3.yaml (or a non-numeric value)
+- **WHEN** TestConfig is loaded
+- **THEN** the value is normalized (clamped to >= 1.0 or reset to the default 2.0) and a warning is logged
+
+#### Scenario: max_dynamic_timeout respects user's fallback timeout
+- **GIVEN** `test.timeout: 20000` in se3.yaml (legitimately slow suite) with no explicit `max_dynamic_timeout`
+- **WHEN** TestConfig is loaded
+- **THEN** `max_dynamic_timeout` defaults to at least `test.timeout` (20000), not the built-in 14400 ceiling
 
 ### Requirement: Language Configuration
 

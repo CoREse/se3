@@ -199,6 +199,7 @@ class GroupResult:
     completion_status: str = "complete"  # 'complete' | 'partial' | 'failed'
     incomplete_tasks: list[str] = field(default_factory=list)
     restricted_edits: list[dict] = field(default_factory=list)
+    estimated_test_duration: Optional[float] = None
     error: Optional[str] = None
 
     @classmethod

@@ -25,7 +25,7 @@ confirmation:
 # Multiple commands with priority-based fallback on usage limit / timeout
 # Higher priority = tried first. Project-level overrides global (~/.se3/config.yaml)
 claude_commands:
-  - cmd: "kclaude"
+  - cmd: "claude"
     priority: 10
   # - cmd: "kclaude"
   #   priority: 5

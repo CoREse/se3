@@ -259,7 +259,7 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 | `analyze` | 分析任务类型和范围；收集项目上下文；选择并加载 spec | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content, selected_specs |
 | ~~`read_spec`~~ | ~~读取相关 spec 文件~~ (deprecated — merged into analyze) | 否（程序自动） | - | **是** | scope | relevant_specs, spec_content |
 | `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type, project_summary | plan{proposal,design}, task_groups, spec_changes |
-| `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed |
+| `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed, estimated_test_duration |
 | `test` | 运行测试验证 | 否（程序执行） | - | 否 | - | test_results, tests_passed |
 | `self_check` | LLM 代码审查：逻辑完整性、代码健壮性、功能遗漏、测试未覆盖区域（不检查 spec 合规性） | 是 | TWO_PHASE | **是** | test_results, changes_made, spec_content, task_groups, fix_iteration | issues (structured list with description, severity, location), status |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, fix_needed, fix_instructions, fix_context |
@@ -1425,11 +1425,12 @@ The worktree cleanup subsystem SHALL be resilient to cascading failures. `force_
 
 ### Requirement: Implement-Test 契约
 
-implement 步骤 SHALL 在输出中声明 `tests_added` 和 `test_mapping`，形成与 test 步骤的显式契约。
+implement 步骤 SHALL 在输出中声明 `tests_added`、`test_mapping` 和 `estimated_test_duration`，形成与 test 步骤的显式契约。
 
 **输出字段：**
 - `tests_added`: 列表，本次新增的测试文件路径（相对于项目根目录）
 - `test_mapping`: 字典，键为测试 ID，值为 spec scenario 标识（`{spec_name}::{scenario_name}`）
+- `estimated_test_duration`: 整数，预估测试套件运行秒数。LLM 基于 `tests_added` 的数量与复杂度估算。test 步骤据此计算动态 timeout（详见 "Test Dynamic Timeout" 需求）。未提供或无效时，test 步骤回退至 `se3.yaml` 中配置的 `test.timeout`。
 
 **测试 ID 格式（语言相关）：**
 | 语言 | 格式 | 示例 |
@@ -1451,6 +1452,17 @@ implement 步骤 SHALL 在输出中声明 `tests_added` 和 `test_mapping`，形
 - **WHEN** implement 步骤完成但未新增测试文件
 - **THEN** `tests_added` 为空列表
 - **AND** `test_mapping` 为空字典
+
+#### Scenario: implement 提供测试时长预估
+- **WHEN** implement 步骤完成实现
+- **THEN** 输出包含 `estimated_test_duration` 整数字段
+- **AND** 状态机将该字段从 implement.outputs 转发到 test.inputs，供 test 步骤计算动态 timeout
+
+#### Scenario: 超时后的预估修正
+- **WHEN** test 步骤因动态 timeout 超时触发 fix loop
+- **AND** implement 在 fix iteration 中收到包含 `timeout_reason`、`previous_timeout`、`previous_estimated_test_duration`、`timeout_multiplier` 的 `fix_context`
+- **THEN** implement 在新的 JSON 输出中提供一个更大的 `estimated_test_duration`
+- **AND** 下次 test 执行基于更新后的预估计算 timeout，避免反复超时的死循环
 
 ### Requirement: Implement Step Output Rendering
 
@@ -1681,7 +1693,10 @@ test 步骤 SHALL 支持通过 `se3.yaml` 的 `test:` 配置段进行多阶段�
 ```yaml
 test:
   command: null                # 主测试命令（null=自动检测）
-  timeout: 1800                # 秒
+  timeout: 1800                # 秒（动态 timeout 不可用时的回退值）
+  timeout_multiplier: 2.0      # 动态 timeout 乘数（与 implement 的 estimated_test_duration 相乘）
+  min_dynamic_timeout: 30      # 动态 timeout 下限（秒）
+  max_dynamic_timeout: 14400   # 动态 timeout 上限（秒，防止预估失控）
   phases:                      # 额外测试阶段
     - name: "e2e"
       command: "python -m pytest tests/e2e -v"
@@ -1807,6 +1822,86 @@ When the state machine records a fix loop iteration in `fix_history`, each entry
 - **WHEN** verify_spec 接收到 `test_mapping`
 - **THEN** 检查 spec scenario 的测试覆盖
 - **AND** 未覆盖的 scenario 记为 warning
+
+### Requirement: Test Dynamic Timeout
+
+test 步骤的主测试命令 SHALL 支持基于 implement 步骤预估的动态 timeout 机制，避免对所有项目使用同一个固定 timeout 值。
+
+**计算公式：**
+```
+effective_timeout = clamp(
+    estimated_test_duration * timeout_multiplier,
+    min = test.min_dynamic_timeout,
+    max = test.max_dynamic_timeout,
+)
+```
+
+**参数来源：**
+- `estimated_test_duration`: 来自 implement 步骤的 JSON 输出（经由状态机从 implement.outputs 转发到 test.inputs）
+- `timeout_multiplier`: 来自 `se3.yaml` 的 `test.timeout_multiplier`（默认 2.0，加载时被 clamp 到 >= 1.0）
+- `min_dynamic_timeout` / `max_dynamic_timeout`: 来自 `se3.yaml`（默认 30 / 14400 秒），防止预估过小或在超时修复循环中失控放大
+
+**Fallback 规则：**
+- 当 `estimated_test_duration` 缺失、非整数、或 <= 0 时，主命令的 timeout 回退为 `se3.yaml` 中配置的 `test.timeout`（默认 1800 秒）
+- 这确保了旧项目（implement 未提供该字段）或 LLM 遗漏该字段时的向后兼容
+
+**作用范围：**
+- 动态 timeout **仅作用于** test 步骤执行的主测试命令
+- `phases` 中显式配置的阶段 **不受影响**，继续使用各自 phase 配置中的 `timeout` 值
+
+**超时检测与 fix loop：**
+
+当主命令因动态 timeout 被终止时（例如 Python subprocess 返回 returncode == -1，或 stderr 包含 `Timeout after` 标记），test 步骤 SHALL：
+
+1. 将失败作为普通 test failure 处理，返回 `REVISION_NEEDED` 触发 fix loop
+2. 在 `fix_context` 中附加以下超时元数据：
+   - `timeout_reason`: 人类可读的超时原因文本
+   - `previous_timeout`: 本次实际使用的 timeout 秒数
+   - `previous_estimated_test_duration`: 本次使用的预估值（若有）
+   - `timeout_multiplier`: 本次使用的乘数
+   - `timeout_at_cap`: 布尔值，指示本次 timeout 是否已触及 `max_dynamic_timeout` 上限
+
+implement 步骤的 FIX_PROMPT SHALL 识别 `fix_context` 中的超时元数据，并在新一轮 JSON 输出中提供一个严格大于 `previous_estimated_test_duration` 的 `estimated_test_duration` 值。这使得下一次 test 执行具有更大的 timeout，打破「估算不足 → 超时 → 再次估算不足」的死循环。
+
+#### Scenario: 主命令使用动态 timeout
+- **GIVEN** implement 输出 `estimated_test_duration: 120`
+- **AND** `se3.yaml` 中 `test.timeout_multiplier: 2.0`
+- **WHEN** test 步骤运行主命令
+- **THEN** 主命令使用的 timeout 为 240 秒（120 × 2.0，在 min/max 范围内）
+
+#### Scenario: estimated_test_duration 缺失时的回退
+- **GIVEN** implement 输出中不包含 `estimated_test_duration`（或值无效）
+- **WHEN** test 步骤运行主命令
+- **THEN** 主命令使用 `se3.yaml` 中的 `test.timeout`（默认 1800 秒）
+
+#### Scenario: 动态 timeout 下限钳制
+- **GIVEN** implement 输出 `estimated_test_duration: 5`
+- **AND** `se3.yaml` 中 `test.timeout_multiplier: 2.0` 且 `test.min_dynamic_timeout: 30`
+- **WHEN** test 步骤运行主命令
+- **THEN** 主命令使用的 timeout 被钳制到 30 秒（而非 10 秒）
+
+#### Scenario: 动态 timeout 上限钳制
+- **GIVEN** implement 输出了极大的 `estimated_test_duration`
+- **WHEN** 计算结果超过 `test.max_dynamic_timeout`
+- **THEN** 实际 timeout 被钳制到 `max_dynamic_timeout`
+- **AND** 传递给 implement 的 `fix_context` 中 `timeout_at_cap` 为 true
+
+#### Scenario: phases 不受动态 timeout 影响
+- **GIVEN** implement 输出 `estimated_test_duration: 120`
+- **AND** `se3.yaml` 中一个 phase 显式配置 `timeout: 600`
+- **WHEN** test 步骤执行该 phase
+- **THEN** 该 phase 仍然使用其自身配置的 600 秒 timeout，不应用动态计算
+
+#### Scenario: 主命令超时触发 timeout-aware fix loop
+- **WHEN** 主命令因动态 timeout 被终止
+- **THEN** test 步骤返回 `REVISION_NEEDED`
+- **AND** `fix_context` 包含 `timeout_reason`、`previous_timeout`、`previous_estimated_test_duration`、`timeout_multiplier` 和 `timeout_at_cap`
+
+#### Scenario: implement 在 fix iteration 中提升预估
+- **GIVEN** test 步骤因超时失败并在 `fix_context` 中附带超时元数据
+- **WHEN** implement 在 fix iteration 中重新执行
+- **THEN** implement 的 JSON 输出中 `estimated_test_duration` 严格大于 `previous_estimated_test_duration`
+- **AND** 下一次 test 执行使用更新后的预估计算更大的 timeout
 
 #### Scenario: verify_spec 代码可达性验证
 - **WHEN** verify_spec 检查新增代码

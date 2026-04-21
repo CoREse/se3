@@ -1,10 +1,13 @@
 """SE3 configuration management."""
 
+import logging
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 class BumpType(Enum):
@@ -645,6 +648,12 @@ class TestConfig:
     timeout: int = 1800
     phases: list[dict] = field(default_factory=list)
     fix_loop_max_iterations: int = DEFAULT_MAX_FIX_ITERATIONS
+    timeout_multiplier: float = 2.0
+    min_dynamic_timeout: int = 30
+    # Upper sanity cap on computed dynamic timeout. Without this, repeated
+    # timeouts in the fix loop can compound the LLM's estimated duration
+    # beyond any reasonable bound, masking a hung test as "just slow".
+    max_dynamic_timeout: int = 14400  # 4 hours
 
     @classmethod
     def load(cls, project_root: Path) -> "TestConfig":
@@ -659,13 +668,77 @@ class TestConfig:
             if not test_data:
                 return cls()
             fix_loop = test_data.get("fix_loop", {})
+
+            # Validate timeout_multiplier: clamp to >= 1.0 so a typo like
+            # 0 / negative / 0.1 does not silently disable the feature.
+            raw_multiplier = test_data.get("timeout_multiplier", 2.0)
+            try:
+                multiplier = float(raw_multiplier)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid timeout_multiplier %r in se3.yaml; using default 2.0",
+                    raw_multiplier,
+                )
+                multiplier = 2.0
+            if multiplier < 1.0:
+                logger.warning(
+                    "timeout_multiplier=%.3f is below the minimum of 1.0; clamping",
+                    multiplier,
+                )
+                multiplier = 1.0
+
+            timeout = int(test_data.get("timeout", 1800))
+
+            # Parse min_dynamic_timeout with validation.
+            raw_min = test_data.get("min_dynamic_timeout", 30)
+            try:
+                min_dyn = int(raw_min)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid min_dynamic_timeout %r in se3.yaml; using default 30",
+                    raw_min,
+                )
+                min_dyn = 30
+            if min_dyn < 1:
+                logger.warning(
+                    "min_dynamic_timeout=%d is below the minimum of 1; clamping",
+                    min_dyn,
+                )
+                min_dyn = 1
+
+            # Default max_dynamic_timeout respects the user's fallback timeout:
+            # a project that deliberately sets test.timeout above 14400s (e.g.
+            # a legitimately slow suite) should not have dynamic timeouts
+            # silently capped below that explicit intent.
+            default_max = max(14400, timeout)
+            raw_max = test_data.get("max_dynamic_timeout", default_max)
+            try:
+                max_dyn = int(raw_max)
+            except (TypeError, ValueError):
+                logger.warning(
+                    "Invalid max_dynamic_timeout %r in se3.yaml; using default %d",
+                    raw_max, default_max,
+                )
+                max_dyn = default_max
+            if max_dyn < min_dyn:
+                logger.warning(
+                    "max_dynamic_timeout=%d is below min_dynamic_timeout=%d; "
+                    "raising max to match min",
+                    max_dyn, min_dyn,
+                )
+                max_dyn = min_dyn
+
             return cls(
                 command=test_data.get("command"),
-                timeout=test_data.get("timeout", 1800),
+                timeout=timeout,
                 phases=test_data.get("phases", []),
                 fix_loop_max_iterations=fix_loop.get("max_iterations", DEFAULT_MAX_FIX_ITERATIONS),
+                timeout_multiplier=multiplier,
+                min_dynamic_timeout=min_dyn,
+                max_dynamic_timeout=max_dyn,
             )
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to load TestConfig from se3.yaml, using defaults: %s", e)
             return cls()
 
     def get_phases_for_run(self, is_fix_iteration: bool = False) -> list[dict]:
