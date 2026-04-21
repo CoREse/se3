@@ -134,6 +134,17 @@ se3 run --discover "我想做一个用户管理功能"
 - **THEN** 恢复到 discovery 步骤
 - **AND** 继续第 3 轮对话
 
+#### Scenario: Discovery 确认阶段恢复显示
+- **GIVEN** discovery 步骤在 confirmation 模式下暂停
+- **AND** `awaiting_programmatic_confirm=True`
+- **AND** `step.outputs["refined_description"]` 包含精炼描述
+- **AND** `step.outputs` 中不存在 `proposed_description`
+- **WHEN** 用户执行 `se3 run --resume`
+- **THEN** `_restore_discovery_display()` 从 `step.outputs` 读取描述时优先取 `proposed_description`
+- **AND** 当 `proposed_description` 不存在时，回退到 `refined_description`
+- **AND** `refined_description` 作为 markdown 正确渲染
+- **AND** 向用户展示确认选项
+
 #### Scenario: 程序化确认门控 — 用户确认继续
 - **GIVEN** LLM 在 confirmation 模式下判定需求已明确
 - **AND** discovery 步骤返回 PAUSED 且 `awaiting_programmatic_confirm=True`
