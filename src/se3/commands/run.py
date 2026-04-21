@@ -397,9 +397,14 @@ def _restore_discovery_display(current_step: Any) -> None:
         # NOT history content (which is the full raw LLM result text for context).
         content = current_step.outputs.get("message", last_assistant.get("content", ""))
         # Re-display proposed_description if it was set
-        proposed = current_step.outputs.get("proposed_description", "")
-        questions = current_step.outputs.get("questions", [])
-        _display_discovery_message(content, proposed or None, questions or None)
+        # (confirmation mode stores refined_description instead)
+        proposed = current_step.outputs.get("proposed_description") \
+            or current_step.outputs.get("refined_description") \
+            or None
+        questions = current_step.outputs.get("questions") or None
+        # Detect confirmation mode for proper rendering
+        is_confirmation = current_step.outputs.get("awaiting_programmatic_confirm", False)
+        _display_discovery_message(content, proposed, questions, is_confirmation=is_confirmation)
     else:
         # No history yet — show generic resume notice
         get_console().print("[dim]Resuming discovery — please respond to continue.[/dim]")

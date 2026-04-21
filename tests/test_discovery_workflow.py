@@ -497,5 +497,138 @@ class TestDiscoveryLLMCallErrorHandling:
         assert "unexpected internal error" in step.error_message
 
 
+class TestRestoreDiscoveryDisplay:
+    """Test _restore_discovery_display re-renders discovery content correctly on resume."""
+
+    @patch("se3.engine.steps.discovery._display_discovery_message")
+    def test_restore_confirmation_mode_passes_is_confirmation(self, mock_display):
+        """On resume from confirmation phase, is_confirmation=True must be passed."""
+        from se3.commands.run import _restore_discovery_display
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={
+                "task_description": "I want auth",
+                "discovery_state": {
+                    "round": 3,
+                    "history": [
+                        {"role": "assistant", "content": '{"mode":"confirmation"}', "round": 2},
+                    ],
+                },
+            },
+        )
+        step.outputs["message"] = "Confirmed! Let's proceed."
+        step.outputs["refined_description"] = "Build a user authentication system"
+        step.outputs["awaiting_programmatic_confirm"] = True
+
+        _restore_discovery_display(step)
+
+        mock_display.assert_called_once()
+        args, kwargs = mock_display.call_args
+        assert kwargs.get("is_confirmation") is True
+        assert args[1] == "Build a user authentication system"  # refined_description
+        assert args[2] is None  # questions
+
+    @patch("se3.engine.steps.discovery._display_discovery_message")
+    def test_restore_synthesis_mode_shows_proposed_description(self, mock_display):
+        """On resume from synthesis phase, proposed_description must be displayed."""
+        from se3.commands.run import _restore_discovery_display
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={
+                "task_description": "I want auth",
+                "discovery_state": {
+                    "round": 2,
+                    "history": [
+                        {"role": "assistant", "content": '{"mode":"synthesis"}', "round": 1},
+                    ],
+                },
+            },
+        )
+        step.outputs["message"] = "Here's what I understand..."
+        step.outputs["proposed_description"] = "Build a user authentication system"
+
+        _restore_discovery_display(step)
+
+        mock_display.assert_called_once()
+        args, kwargs = mock_display.call_args
+        assert kwargs.get("is_confirmation") is False
+        assert args[1] == "Build a user authentication system"
+
+    @patch("se3.engine.steps.discovery._display_discovery_message")
+    def test_restore_question_mode_shows_questions(self, mock_display):
+        """On resume from question phase, questions must be displayed."""
+        from se3.commands.run import _restore_discovery_display
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={
+                "task_description": "I want auth",
+                "discovery_state": {
+                    "round": 1,
+                    "history": [
+                        {"role": "assistant", "content": '{"mode":"question"}', "round": 0},
+                    ],
+                },
+            },
+        )
+        step.outputs["message"] = "What problem are you trying to solve?"
+        step.outputs["questions"] = ["Who is the target user?", "What are the key features?"]
+
+        _restore_discovery_display(step)
+
+        mock_display.assert_called_once()
+        args, kwargs = mock_display.call_args
+        assert args[2] == ["Who is the target user?", "What are the key features?"]
+        assert kwargs.get("is_confirmation") is False
+
+    @patch("se3.engine.steps.discovery._display_discovery_message")
+    def test_restore_falls_back_to_history_content_when_no_message(self, mock_display):
+        """When message is not in outputs, fall back to last assistant history content."""
+        from se3.commands.run import _restore_discovery_display
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={
+                "task_description": "I want auth",
+                "discovery_state": {
+                    "round": 1,
+                    "history": [
+                        {"role": "assistant", "content": "Fallback content", "round": 0},
+                    ],
+                },
+            },
+        )
+        step.outputs["proposed_description"] = "Proposed desc"
+
+        _restore_discovery_display(step)
+
+        mock_display.assert_called_once()
+        args, kwargs = mock_display.call_args
+        assert args[0] == "Fallback content"
+
+    @patch("se3.commands.run.get_console")
+    def test_restore_no_history_shows_generic_notice(self, mock_console):
+        """When no assistant history exists, show generic resume notice."""
+        from se3.commands.run import _restore_discovery_display
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={
+                "task_description": "I want auth",
+                "discovery_state": {
+                    "round": 0,
+                    "history": [],
+                },
+            },
+        )
+
+        _restore_discovery_display(step)
+
+        mock_console.return_value.print.assert_called_once()
+        assert "Resuming discovery" in mock_console.return_value.print.call_args[0][0]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
