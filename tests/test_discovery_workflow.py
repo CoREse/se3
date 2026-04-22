@@ -497,6 +497,125 @@ class TestDiscoveryLLMCallErrorHandling:
         assert "unexpected internal error" in step.error_message
 
 
+class TestDiscoveryEmptyResponseRejection:
+    """LLM responses with no user-visible fields must be rejected, not rendered as a blank panel."""
+
+    @patch("se3.engine.output.render_full")
+    @patch("se3.engine.steps.discovery.LLMCaller")
+    def test_all_empty_fields_raise_llm_error(self, mock_caller_class, mock_render):
+        """content=='' AND refined_description=='' AND questions==[] → LLMCallError → FAILED with JSON-style friendly message."""
+        mock_caller = Mock()
+        mock_caller_class.return_value = mock_caller
+        mock_caller.call.return_value = json.dumps({
+            "mode": "question",
+            "content": "",
+            "refined_description": "",
+            "questions": [],
+        })
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={"task_description": "I want something"},
+        )
+        flow = FlowInstance(task_description="I want something")
+
+        result = discovery_handler(step, flow)
+
+        assert result == StepStatus.FAILED
+        # Friendly JSON-extraction-style message (our new LLMCallError has the
+        # word "empty" in it, which flows through the LLMCallError branch).
+        assert step.error_message  # non-empty
+        mock_render.assert_called_once()
+
+    @patch("se3.engine.steps.discovery.LLMCaller")
+    def test_content_only_is_accepted(self, mock_caller_class):
+        """content non-empty with empty refined/questions is still a valid response."""
+        mock_caller = Mock()
+        mock_caller_class.return_value = mock_caller
+        mock_caller.call.return_value = json.dumps({
+            "mode": "question",
+            "content": "Let me clarify something first.",
+            "refined_description": "",
+            "questions": [],
+        })
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={"task_description": "I want something"},
+        )
+        flow = FlowInstance(task_description="I want something")
+
+        with patch("se3.engine.steps.discovery._display_discovery_message"):
+            result = discovery_handler(step, flow)
+
+        assert result == StepStatus.PAUSED
+        assert step.outputs.get("message") == "Let me clarify something first."
+
+    @patch("se3.engine.steps.discovery.LLMCaller")
+    def test_questions_only_is_accepted(self, mock_caller_class):
+        """Empty content but with questions is a valid response."""
+        mock_caller = Mock()
+        mock_caller_class.return_value = mock_caller
+        mock_caller.call.return_value = json.dumps({
+            "mode": "question",
+            "content": "",
+            "refined_description": "",
+            "questions": ["What platform?", "Which language?"],
+        })
+
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={"task_description": "I want something"},
+        )
+        flow = FlowInstance(task_description="I want something")
+
+        with patch("se3.engine.steps.discovery._display_discovery_message"):
+            result = discovery_handler(step, flow)
+
+        assert result == StepStatus.PAUSED
+        assert step.outputs.get("questions") == ["What platform?", "Which language?"]
+
+
+class TestExtractionPromptSynthesis:
+    """EXTRACTION_PROMPT must frame Phase 2 as a re-structuring task over raw
+    content (not conditional "extract if JSON else synthesize" logic), since
+    by the time Phase 2 runs, Phase 1's JSON has already been judged unusable."""
+
+    def test_prompt_is_structuring_task_not_extraction(self):
+        """Prompt must NOT instruct the LLM to copy/prefer embedded JSON when
+        present — that's exactly the behavior that fails on thin-but-valid
+        Phase 1 JSON."""
+        from se3.engine.json_extractor import EXTRACTION_PROMPT
+
+        rendered = EXTRACTION_PROMPT.format(content="x", schema_hint="y").lower()
+        # Anti-pattern: prompt must not say "use that JSON" / "preferred source".
+        # These were the phrases that caused thin JSON to be copied verbatim.
+        assert "use that json" not in rendered
+        assert "preferred source" not in rendered
+
+    def test_prompt_requires_schema_complete_output(self):
+        """Prompt must explicitly ask for schema-complete output, not just "some JSON"."""
+        from se3.engine.json_extractor import EXTRACTION_PROMPT
+
+        rendered = EXTRACTION_PROMPT.format(content="x", schema_hint="y").lower()
+        assert "schema-complete" in rendered or "matches the expected schema" in rendered
+
+    def test_prompt_forbids_empty_object(self):
+        from se3.engine.json_extractor import EXTRACTION_PROMPT
+
+        rendered = EXTRACTION_PROMPT.format(content="x", schema_hint="y").lower()
+        assert "empty object" in rendered or "{}" in rendered
+
+    def test_prompt_renders_without_format_errors(self):
+        """Sanity: prompt template must .format() with both placeholders without KeyError."""
+        from se3.engine.json_extractor import EXTRACTION_PROMPT
+
+        # Should not raise KeyError or IndexError.
+        out = EXTRACTION_PROMPT.format(content="x", schema_hint="y")
+        assert "x" in out
+        assert "y" in out
+
+
 class TestRestoreDiscoveryDisplay:
     """Test _restore_discovery_display re-renders discovery content correctly on resume."""
 

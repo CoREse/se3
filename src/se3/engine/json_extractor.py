@@ -12,22 +12,34 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-# Lightweight extraction prompt - minimal, clear instructions
-EXTRACTION_PROMPT = """Extract valid JSON from the following content.
+# Two-phase extraction prompt.
+#
+# Phase 2 is invoked only after Phase 1's output has been judged unusable as
+# JSON — either there is no JSON, the JSON is malformed, or the JSON is
+# structurally valid but incomplete (missing required_keys). In every one of
+# those cases the work is the same: re-express the content's meaning as a
+# schema-complete JSON object. The prompt is therefore phrased as a
+# summarization/structuring task over the raw content, not as a conditional
+# "extract if JSON else synthesize" branch — that branching belongs to the
+# upstream fast-path, not to the LLM.
+EXTRACTION_PROMPT = """You are given a raw LLM output. Re-express its meaning as a single valid JSON object that matches the expected output schema shown below.
+
+The content may contain prose, reasoning, tool-call traces, partial or complete JSON, code snippets, or any combination. Treat all of it as source material describing what the final JSON should say — not as something to copy verbatim.
 
 Rules:
-1. Return ONLY the JSON object/array, no markdown, no explanations
-2. If content contains markdown code blocks (```json), extract from them
-3. If content is truncated or incomplete, complete it reasonably
-4. Ensure valid JSON syntax: double quotes, no trailing commas
-5. Preserve all data faithfully, don't modify values
+1. Return ONLY the JSON object — no markdown fences, no commentary, no preamble.
+2. Produce a schema-complete JSON object that conveys everything the content describes, mapped onto the fields defined in the "Expected output schema" section below. Put the main user-facing message into the primary text field (typically `content`, `message`, or `summary` — whichever the schema defines); populate list fields (`questions`, `items`, etc.) from whatever enumeration the content implies.
+3. Never return an empty object `{{}}`. If a field has no information in the source, use `null` or `[]` for that field — but at least one user-visible text field must be populated whenever the source has any meaningful content.
+4. Preserve meaning faithfully. Do not invent facts or paraphrase away information.
+5. JSON must be syntactically valid: double quotes on all keys and string values, no trailing commas, no unescaped newlines inside strings.
 
-Content to extract from:
----
+===== Source content =====
 {content}
----
+===== End of source content =====
 
+===== Expected output schema =====
 {schema_hint}
+===== End of expected output schema =====
 
 Respond with valid JSON only:"""
 
@@ -149,7 +161,14 @@ class JSONExtractor:
         if len(content) < len(raw_output):
             logger.info(f"Extracted {len(content)} chars of text from {len(raw_output)} chars of raw output")
 
-        schema_section = f"Expected schema: {schema_hint}" if schema_hint else "Ensure all relevant data is included in the JSON."
+        # The EXTRACTION_PROMPT already wraps this value in a labeled
+        # "Expected output schema" section, so we pass the raw hint (or a
+        # generic fallback) without any additional prefix here.
+        schema_section = (
+            schema_hint
+            if schema_hint
+            else "No specific schema provided. Structure the output to include every meaningful piece of information from the source content, using descriptive field names."
+        )
 
         prompt = EXTRACTION_PROMPT.format(
             content=content,

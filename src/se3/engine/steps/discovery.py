@@ -493,7 +493,23 @@ def _run_discovery_round(
     result = parse_json_response(response)
 
     if not result:
-        raise ValueError("Failed to parse LLM response")
+        raise LLMCallError(
+            "Discovery: LLM response could not be parsed as JSON."
+        )
+
+    # Reject outputs where every user-visible field is empty. This would
+    # otherwise render as a blank Discovery panel (no content, no questions,
+    # no proposed description), which is worse than failing cleanly.
+    content = (result.get("content") or "").strip()
+    refined = (result.get("refined_description") or "").strip()
+    questions = result.get("questions") or []
+    if not content and not refined and not questions:
+        raise LLMCallError(
+            "Discovery: LLM returned a structurally valid but empty response "
+            "(no content, refined_description, or questions). This usually means "
+            "Phase 1 output was pure prose and Phase 2 extraction did not recover "
+            "any user-visible fields."
+        )
 
     # Get raw result text for context preservation
     raw_result_text = caller.last_raw_result or response
