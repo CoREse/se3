@@ -19,12 +19,11 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - `version.file_path`: Path to version file (auto-detect if null)
 - `version.bump_rules`: Map task types to bump types
 - `version.auto_bump`: Auto-apply version bump without confirmation (default: true)
-- `confirmation.enabled`: Enable CONFIRM steps (default: false)
-- `confirmation.steps`: Steps after which to insert CONFIRM (default: [plan])
-- `confirmation.reviewer`: Who reviews — "human" or "llm" (default: "human")
-- `agents`: List of agent configs `{name, type, cmd, priority}` (authoritative)
-- `claude_commands`: Legacy alias for `agents`, auto-converted at load time (deprecated — use `agents`)
-- `llm_caller.steps.<step_name>`: Per-step agent override (optional, hard override)
+- `agents`: Top-level dict registry `{name: {type, cmd, priority?}}` (authoritative identity layer; see Agent Registry requirement)
+- `claude_commands`: Legacy alias for `agents`, auto-migrated at load time (deprecated — use `agents` + `llm_caller.defaults`)
+- `llm_caller.defaults`: Default caller chain as a list of agent names referencing `agents` (default: built-in `[claude]` fallback)
+- `llm_caller.steps.<step_name>`: Per-step hard override as a list of agent names (optional)
+- `confirmation.steps`: Per-step confirmation dict `{<step_name>: {reviewer?, max_iterations?}}` — steps not listed are NOT confirmed (there is no global `enabled` switch; see Confirmation Configuration requirement)
 - `language.language`: Language for human-facing steps (default: null)
 - `language.spec_language`: Language for spec writing (default: null)
 - `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: ["summarize"])
@@ -47,12 +46,13 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - **THEN** the framework uses those rules for version bumping
 
 #### Scenario: Global configuration
-- **WHEN** `~/.se3/config.yaml` exists with `claude_commands`
+- **WHEN** `~/.se3/config.yaml` defines top-level `agents` entries
 - **THEN** the framework uses the global config as fallback
 
 #### Scenario: Project overrides global
-- **WHEN** both global and project configs define the same key
+- **WHEN** both global and project configs define the same top-level key
 - **THEN** the project-level config takes precedence
+- **AND** `agents` dict and `confirmation.steps` dict merge entry-level (by name / step_name), while `llm_caller.defaults` and `llm_caller.steps.<step>` are whole-replaced
 
 ### Requirement: Version Configuration
 
@@ -82,37 +82,179 @@ The system SHALL support version management configuration.
 
 ### Requirement: Confirmation Configuration
 
-The system SHALL support confirmation step configuration.
+The system SHALL support confirmation (review) step configuration
+through a **per-step dict model**. There is no global on/off switch —
+the presence of a step in `confirmation.steps` is itself the signal
+that the step should be confirmed. Steps not listed are not confirmed.
 
-**Confirmation section options:**
-- `enabled`: Whether to insert CONFIRM steps (default: false)
-- `steps`: List of steps after which to insert CONFIRM (default: [plan])
-- `reviewer`: Who performs the review — "human" or "llm" (default: "human")
-- `llm_reviewer.model`: LLM model for review (default: null = default model)
-- `llm_reviewer.max_iterations`: Max review-modify cycles (default: 3)
+**Schema:**
 
-**Human review response mechanism:**
+```yaml
+confirmation:
+  steps:                      # dict[step_name, step_config]
+    plan:    { reviewer: human }
+    design:  { reviewer: reviewer_bot, max_iterations: 3 }
+    propose: {}               # reviewer omitted → falls back to llm_caller.defaults
+```
 
-The CONFIRM step supports two response pathways:
-1. **Interactive**: When `se3 run` is running, the run loop displays the reviewed step's outputs and prompts the user to approve or request changes directly in the terminal.
-2. **File-based**: A call file is created at `se3/calls/confirm_{step_id}_{timestamp}.json`. A response file with `.response` suffix containing `{"approved": bool, "feedback": string}` can be placed alongside it. On resume, the confirm step detects and processes the response file.
+Each `step_config` accepts:
 
-The interactive pathway writes the `.response` file automatically, so both pathways converge on the same mechanism.
+- `reviewer`: either
+  - `"human"` — route review through the MCP call file / interactive
+    pathway (never looked up in the agent registry), or
+  - an agent name registered in top-level `agents` — build a
+    single-agent `LLMCaller` for that agent and run LLM review, or
+  - omitted or `null` — run LLM review using the chain defined by
+    `llm_caller.defaults`.
+- `max_iterations`: positive integer bound on the review ↔ revise
+  cycle. Applied only when `reviewer` resolves to an LLM path (never
+  for `reviewer: human`). Omitted values use the built-in default.
 
-#### Scenario: Enable confirmation
-- **GIVEN** se3.yaml has `confirmation.enabled: true`
-- **WHEN** flow reaches a configured step
+**No global toggle:**
+
+The old fields `confirmation.enabled`, the global `confirmation.reviewer`,
+the `confirmation.llm_reviewer` subtree (including `llm_reviewer.model`
+and `llm_reviewer.max_iterations`), and the list-form
+`confirmation.steps: [step, step]` are all **removed**. When present in
+a legacy config, each is logged once as a deprecation warning and
+ignored — the framework does NOT auto-map them to the new schema.
+Temporary global-off workflows are intentionally left to a future CLI
+flag / environment variable; they are NOT covered by the config.
+
+**Name resolution and fail-fast:**
+
+A string `reviewer` value other than `"human"` MUST resolve to an entry
+in the agent registry. Unknown names produce a startup-time error (see
+Agent Registry requirement for the error-message format; the reference
+location is `confirmation.steps.<step>.reviewer`).
+
+**Global + project merge:**
+
+`confirmation.steps` is merged **entry-level** by step name: a project
+entry for `plan` overrides a global entry for `plan`; a global entry
+for `design` without a project counterpart remains in effect.
+
+**Human review response mechanism (unchanged):**
+
+The CONFIRM step for a `reviewer: human` config supports two response
+pathways:
+
+1. **Interactive**: When `se3 run` is running, the run loop displays
+   the reviewed step's outputs and prompts the user to approve or
+   request changes directly in the terminal.
+2. **File-based**: A call file is created at
+   `se3/calls/confirm_{step_id}_{timestamp}.json`. A response file
+   with `.response` suffix containing
+   `{"approved": bool, "feedback": string}` can be placed alongside
+   it. On resume, the confirm step detects and processes the response
+   file.
+
+The interactive pathway writes the `.response` file automatically, so
+both pathways converge on the same mechanism.
+
+#### Scenario: Steps not listed are not confirmed
+- **GIVEN** `confirmation.steps: { plan: { reviewer: human } }`
+- **WHEN** the flow completes `design`, `implement`, or any step other
+  than `plan`
+- **THEN** no CONFIRM step is inserted after it
+
+#### Scenario: Listed step triggers CONFIRM insertion
+- **GIVEN** `confirmation.steps: { plan: { reviewer: human } }`
+- **WHEN** the flow completes `plan`
 - **THEN** a CONFIRM step is inserted after it
-- **AND** the step pauses and prompts the user for review
+
+#### Scenario: reviewer 'human' uses MCP call pathway
+- **GIVEN** a step's config is `{ reviewer: human }`
+- **WHEN** the CONFIRM step executes
+- **THEN** a call file is created at
+  `se3/calls/confirm_{step_id}_{timestamp}.json`
+- **AND** the flow pauses awaiting interactive approval or a
+  `.response` file
+
+#### Scenario: reviewer = agent name uses single-agent LLM review
+- **GIVEN** `agents.reviewer_bot` is registered
+- **AND** a step's config is `{ reviewer: reviewer_bot, max_iterations: 3 }`
+- **WHEN** the CONFIRM step executes
+- **THEN** the framework constructs an `LLMCaller` whose chain is just
+  `[reviewer_bot]` and performs LLM review
+- **AND** the review ↔ revise loop honours `max_iterations: 3`
+
+#### Scenario: reviewer omitted falls back to llm_caller.defaults
+- **GIVEN** `llm_caller.defaults: [primary, backup]`
+- **AND** a step's config is `{}` (no `reviewer` field) or
+  `{ reviewer: null }`
+- **WHEN** the CONFIRM step executes
+- **THEN** the framework constructs an `LLMCaller` whose chain is the
+  resolved `llm_caller.defaults` list and performs LLM review
+
+#### Scenario: max_iterations ignored for reviewer 'human'
+- **GIVEN** a step's config is `{ reviewer: human, max_iterations: 5 }`
+- **WHEN** the CONFIRM step executes
+- **THEN** `max_iterations` has no effect — the human MCP call pathway
+  waits on the user with no iteration cap
+
+#### Scenario: Unknown reviewer name fails fast
+- **GIVEN** `confirmation.steps.plan: { reviewer: ghost }` and `ghost`
+  is not in the agent registry
+- **THEN** the framework raises a configuration error at startup
+- **AND** the error message names the reference location
+  (`confirmation.steps.plan.reviewer`) and lists registered agent names
+
+#### Scenario: Deprecated confirmation.enabled is ignored with warning
+- **GIVEN** a legacy config sets `confirmation.enabled: false`
+- **WHEN** the framework loads confirmation config
+- **THEN** a deprecation warning is logged
+- **AND** `enabled` has no effect — step membership in
+  `confirmation.steps` alone determines whether CONFIRM is inserted
+
+#### Scenario: Deprecated list-form steps is ignored with warning
+- **GIVEN** a legacy config sets `confirmation.steps: [plan, design]`
+- **WHEN** the framework loads confirmation config
+- **THEN** a deprecation warning is logged
+- **AND** no steps are confirmed (the list is not auto-mapped to the
+  new dict form)
+
+#### Scenario: Deprecated global reviewer is ignored with warning
+- **GIVEN** a legacy config sets top-level `confirmation.reviewer: human`
+- **WHEN** the framework loads confirmation config
+- **THEN** a deprecation warning is logged
+- **AND** the field has no effect — reviewers are read per step from
+  `confirmation.steps.<step>.reviewer`
+
+#### Scenario: Deprecated llm_reviewer subtree is ignored with warning
+- **GIVEN** a legacy config sets `confirmation.llm_reviewer.model: …`
+  and/or `confirmation.llm_reviewer.max_iterations: …`
+- **WHEN** the framework loads confirmation config
+- **THEN** a deprecation warning is logged for the subtree
+- **AND** the fields have no effect — `max_iterations` is configured
+  per step and the model is chosen via the agent registry
+
+#### Scenario: Entry-level merge of confirmation.steps
+- **GIVEN** global config declares
+  `confirmation.steps: { plan: { reviewer: human } }`
+- **AND** project config declares
+  `confirmation.steps: { design: { reviewer: reviewer_bot } }`
+- **THEN** the merged config confirms BOTH `plan` (with `human`, from
+  global) AND `design` (with `reviewer_bot`, from project)
+
+#### Scenario: Project overrides global entry for same step
+- **GIVEN** global config declares
+  `confirmation.steps.plan: { reviewer: human }`
+- **AND** project config declares
+  `confirmation.steps.plan: { reviewer: reviewer_bot, max_iterations: 2 }`
+- **THEN** the merged config confirms `plan` with reviewer
+  `reviewer_bot` and `max_iterations: 2`; the global entry is replaced
+  entirely
 
 #### Scenario: Interactive approval
-- **GIVEN** a CONFIRM step is paused
+- **GIVEN** a CONFIRM step for a `reviewer: human` config is paused
 - **WHEN** the run loop detects the pause
 - **THEN** it displays the reviewed step's outputs
 - **AND** prompts the user to approve, request changes, or exit
 
 #### Scenario: File-based approval
-- **GIVEN** a CONFIRM step created a call file
+- **GIVEN** a CONFIRM step for a `reviewer: human` config created a
+  call file
 - **WHEN** a `.response` file is placed alongside it
 - **AND** user runs `se3 run --resume`
 - **THEN** the confirm step reads the response and continues
@@ -249,7 +391,7 @@ When a language is set, a language instruction is appended to the LLM prompt for
 **Affected steps by `language.language`:**
 - `summarize` — always affected
 - `discovery` — always affected
-- Steps configured in `confirmation.steps` when `confirmation.enabled: true` and `confirmation.reviewer: "human"` (e.g., `plan`)
+- Steps listed in `confirmation.steps` whose per-step `reviewer` is `"human"` (e.g., `plan`)
 
 **Affected steps by `language.spec_language`:**
 - `update_spec` — always affected
@@ -280,7 +422,7 @@ language:
 - **THEN** the LLM prompt includes a language instruction to respond in English
 
 #### Scenario: Confirmed steps use general language
-- **GIVEN** `language.language: zh-CN` and `confirmation.enabled: true` with `confirmation.reviewer: "human"` and `confirmation.steps: ["plan"]`
+- **GIVEN** `language.language: zh-CN` and `confirmation.steps: { plan: { reviewer: human } }`
 - **WHEN** the plan step runs
 - **THEN** the LLM prompt includes a language instruction to respond in zh-CN
 
@@ -290,136 +432,229 @@ language:
 - **AND** when update_spec step runs, it uses English
 - **AND** when implement step runs, no language instruction is added
 
-### Requirement: Claude Commands Configuration
+### Requirement: Agent Registry
 
-The system SHALL support Claude CLI command resolution. The authoritative
-field is `agents`; `claude_commands` is a **legacy alias** retained for
-backward compatibility and is auto-converted to an `agents` list at load
-time with `type: "claude-code"`. When both fields exist in the same config
-file, `agents` takes priority and `claude_commands` is ignored.
+The system SHALL maintain a top-level **agent registry** at the `agents`
+key of `se3.yaml` (and `~/.se3/config.yaml`). The registry is the sole
+identity layer for agents: every other part of the configuration that
+needs an agent (`llm_caller.defaults`, `llm_caller.steps.<step>`,
+`confirmation.steps.<step>.reviewer`) references it **by name**.
 
-**Authoritative (`agents`) format:**
+**Registry shape:**
+
+`agents` MUST be a dict whose keys are unique agent names and whose
+values are `AgentDef` dicts. Each `AgentDef` has:
+
+- `type`: agent type identifier (default `"claude-code"`)
+- `cmd`: CLI command invoked when the agent is selected (required)
+- `priority`: integer used to order a chain; higher priority is tried
+  first (default `0`)
+
+Name uniqueness is inherent to the dict form: duplicate names in the
+same YAML are resolved by YAML itself (last wins). Across global +
+project configs, `agents` is merged **entry-level by name**: a project
+entry overrides a global entry with the same name; non-conflicting
+entries coexist.
+
+**Example:**
 ```yaml
 agents:
-  - name: "primary"
-    type: "claude-code"
-    cmd: "claude"
-    priority: 10
-  - name: "backup"
-    type: "claude-code"
-    cmd: "claude-dev"
-    priority: 1
+  primary:      { type: claude-code, cmd: claude,      priority: 10 }
+  backup:       { type: claude-code, cmd: claude-dev,  priority: 5 }
+  opus:         { type: claude-code, cmd: claude-opus, priority: 20 }
+  reviewer_bot: { type: claude-code, cmd: claude-opus }
 ```
 
-**Legacy (`claude_commands`) format — still accepted:**
-```yaml
-claude_commands:
-  - cmd: "claude"
-    priority: 0
-  - cmd: "claude-dev"
-    priority: 1
-```
+**Legacy compatibility:**
 
-#### Scenario: Command fallback
-- **GIVEN** multiple claude_commands configured
-- **WHEN** first command fails or hits rate limit
-- **THEN** the framework tries the next command in priority order
+- **Top-level list form `agents: [...]`** — removed. Detected at load
+  time, emits a warning, and is **silently ignored**. The default caller
+  chain then falls back to the built-in `[claude]`.
+- **`claude_commands: [...]`** — legacy alias. Auto-migrated at load
+  time when (and only when) the same source does NOT also set the new
+  dict-form `agents`:
+  - Each entry's `cmd` is slugified to produce a registry name;
+    collisions append `_2`, `_3`, etc.
+  - Migrated entries are registered in the top-level `agents` dict.
+  - The original entry order is also copied into `llm_caller.defaults`
+    so the default chain semantics survive.
+  - A `DeprecationWarning` is emitted showing the equivalent new
+    config snippet.
+  - When the source already sets a dict-form `agents`, `claude_commands`
+    is ignored with a warning (no migration).
 
-#### Scenario: Agents field takes priority over claude_commands
-- **GIVEN** a config declaring both `agents` and `claude_commands`
-- **WHEN** the framework loads the default caller chain
-- **THEN** it uses the `agents` list and ignores `claude_commands`
+**Reference integrity (fail-fast):**
 
-### Requirement: Per-Step LLM Caller Override
+Any reference to an agent name from `llm_caller.defaults`,
+`llm_caller.steps.<step>`, or `confirmation.steps.<step>.reviewer` that
+does not resolve to a registry entry is a startup-time configuration
+error. The error message SHALL include the reference location and a
+sorted list of registered agent names. The special `reviewer: human`
+value is not looked up in the registry.
 
-The system SHALL support overriding the LLM caller chain on a per-step
-basis via `llm_caller.steps.<step_name>`, where `<step_name>` is a
-`StepType` value (e.g. `analyze`, `plan`, `implement`, `summarize`,
-`verify_spec`).
+#### Scenario: Registry loaded from dict form
+- **WHEN** `agents` is a dict at the top level
+- **THEN** each entry is parsed into an `AgentDef` with the given
+  `type`, `cmd`, and `priority`
+- **AND** the name is taken from the dict key
 
-The per-step list uses the same normalized entry shape as the top-level
-`agents` list: each entry is a string (treated as `cmd` with default type
-`claude-code`) or a dict `{name?, type?, cmd, priority?}`. Entries are
-sorted by `priority` descending at load time.
+#### Scenario: Top-level list form is ignored with warning
+- **WHEN** `agents` is a list at the top level
+- **THEN** the framework emits a warning
+- **AND** the registry is built without those entries
+- **AND** the default caller chain falls back to the built-in `[claude]`
 
-**Override semantics (hard override, no fallback to default chain):**
-- When `llm_caller.steps.<step>` is declared with a non-empty valid list,
-  the step uses **only** that list as its caller chain. The default chain
-  from top-level `agents` / `claude_commands` is **not** appended as a
-  fallback — users who want a default-claude tail MUST list it explicitly
-  in the step's override.
+#### Scenario: Legacy claude_commands auto-migrates
+- **GIVEN** a config sets `claude_commands` but not `agents`
+- **WHEN** the framework loads the registry
+- **THEN** each `claude_commands` entry is registered in the top-level
+  `agents` dict under a name slugified from `cmd` (with `_2`, `_3`
+  suffixes on collision)
+- **AND** the original order is replicated in `llm_caller.defaults`
+- **AND** a `DeprecationWarning` is emitted showing the equivalent
+  new-schema YAML
+
+#### Scenario: claude_commands ignored when agents is present
+- **GIVEN** a config sets both top-level `agents` (dict) and
+  `claude_commands`
+- **WHEN** the framework loads the registry
+- **THEN** `claude_commands` is ignored
+- **AND** a warning is logged indicating the alias was discarded
+
+#### Scenario: Global + project entry-level merge
+- **GIVEN** global config declares `agents.primary` and `agents.backup`
+- **AND** project config declares `agents.primary` and `agents.opus`
+- **THEN** the merged registry contains `primary` (project version),
+  `backup` (from global), and `opus` (from project)
+
+#### Scenario: Unknown agent name fails fast
+- **GIVEN** any reference location (`llm_caller.defaults`,
+  `llm_caller.steps.<step>`, or `confirmation.steps.<step>.reviewer`)
+  names an agent absent from the registry
+- **THEN** the framework raises a configuration error at startup
+- **AND** the error message includes the reference location and a
+  sorted list of registered agent names
+
+### Requirement: LLM Caller Configuration
+
+The system SHALL drive Claude CLI invocation through the `llm_caller`
+section, which references the agent registry by name. `llm_caller`
+contains two keys:
+
+- `defaults`: a list of agent names forming the default caller chain
+- `steps.<step_name>`: a list of agent names forming a hard per-step
+  override chain
+
+Both lists accept **only** registered agent names — anonymous / inline
+`{cmd: ...}` entries are rejected. Entries are invoked in the list's
+written order (name list is authoritative; the registry's `priority`
+field provides the ordering for any internal chain that needs it).
+
+**Default chain (`defaults`):**
+
+- When `llm_caller.defaults` is declared, the framework uses it as the
+  default caller chain for any step without a per-step override.
+- When absent, the chain falls back to built-in `[claude]` (or to the
+  chain produced by legacy `claude_commands` auto-migration).
+- Global + project merge: **whole replace** — if project config sets
+  `llm_caller.defaults`, it fully replaces the global `defaults`.
+
+**Per-step hard override (`steps.<step>`):**
+
+- A step with a declaration under `llm_caller.steps.<step>` uses
+  **only** that list as its chain. The `defaults` chain is NOT
+  appended as a fallback — users who want a default tail MUST list
+  those agents explicitly in the step's override.
 - Agent rotation on infrastructure errors happens strictly within the
   step's override list. When exhausted, the call fails rather than
-  silently falling back to the default chain.
+  silently falling back to `defaults`.
 - When `agents` is explicitly passed to the `LLMCaller` constructor
   (e.g. by internal helpers such as the JSON extractor), that argument
-  takes the highest priority and bypasses both the per-step override and
-  the default chain.
-- Steps with no declaration under `llm_caller.steps` continue to use the
-  default chain via `load_agents`. Other config keys are unaffected —
-  `llm_caller.steps` is orthogonal to `confirmation.llm_reviewer.model`
-  and similar step-specific settings.
+  takes the highest priority and bypasses both the per-step override
+  and `defaults`.
+- Steps with no declaration under `llm_caller.steps` continue to use
+  `defaults`.
+- Global + project merge: **whole replace per step** — if project
+  config sets `llm_caller.steps.<step>`, it fully replaces the global
+  declaration for that step; other step overrides remain from global.
 
-**Invalid declarations are ignored (warn + fall back to default):**
-- Missing key, empty list, non-list value, or entries that are neither
-  string nor dict produce a warning and are treated as "no override" —
-  the step uses the default chain rather than raising an error, matching
-  the clamp-and-warn policy used elsewhere (e.g. `TestConfig`).
+**Fail-fast on unknown names:**
+
+Any name in `llm_caller.defaults` or `llm_caller.steps.<step>` that is
+absent from the agent registry is a startup-time error (see the Agent
+Registry requirement for the error-message format).
 
 **Example configuration:**
 ```yaml
+agents:
+  primary: { type: claude-code, cmd: claude,      priority: 10 }
+  backup:  { type: claude-code, cmd: claude-dev,  priority: 5 }
+  opus:    { type: claude-code, cmd: claude-opus, priority: 20 }
+
 llm_caller:
+  defaults: [primary, backup]
   steps:
-    # Expensive step — use a higher-capability agent only
-    implement:
-      - name: "big-claude"
-        type: "claude-code"
-        cmd: "claude-opus"
-        priority: 10
-    # Cheap step — use a smaller agent; default claude NOT appended
-    summarize:
-      - name: "small-claude"
-        type: "claude-code"
-        cmd: "hclaude"
-        priority: 10
+    # Expensive step — opus first, then primary as tail
+    implement: [opus, primary]
+    # Cheap step — primary only; backup NOT appended
+    summarize: [primary]
 ```
+
+#### Scenario: Default chain from llm_caller.defaults
+- **GIVEN** `llm_caller.defaults: [primary, backup]` and a registry
+  containing both names
+- **WHEN** `load_agents()` builds the default chain
+- **THEN** the returned list contains the agent dicts for `primary`
+  followed by `backup`
 
 #### Scenario: No per-step override declared
 - **WHEN** `llm_caller.steps` has no entry for the current step
-- **THEN** the step uses the default caller chain from `load_agents`
+- **THEN** the step uses `llm_caller.defaults` (or the built-in fallback)
 
 #### Scenario: Per-step override used
-- **GIVEN** `llm_caller.steps.implement` declares a non-empty list
+- **GIVEN** `llm_caller.steps.implement: [opus, primary]`
 - **WHEN** the implement step constructs its LLMCaller
-- **THEN** the caller uses the declared list as its complete chain
-- **AND** the default chain is NOT appended as a fallback
-
-#### Scenario: Project overrides global per-step declaration
-- **GIVEN** global config declares `llm_caller.steps.implement`
-- **AND** project config also declares `llm_caller.steps.implement`
-- **WHEN** the implement step runs in the project
-- **THEN** the project declaration fully replaces the global declaration
+- **THEN** the caller uses `[opus, primary]` as its complete chain
+- **AND** `llm_caller.defaults` is NOT appended as a fallback
 
 #### Scenario: Exhaustion does not fall back to default chain
-- **GIVEN** `llm_caller.steps.analyze` lists two agents A and B
+- **GIVEN** `llm_caller.steps.analyze: [A, B]`
 - **WHEN** both A and B fail with infrastructure errors
-- **THEN** the LLM call fails rather than rotating to the default chain
+- **THEN** the LLM call fails rather than rotating to `defaults`
 
 #### Scenario: Explicit agents argument wins over per-step override
 - **GIVEN** `llm_caller.steps.analyze` declares an override list
 - **WHEN** LLMCaller is constructed with an explicit `agents=[...]`
 - **THEN** the explicit argument is used and both the per-step override
-  and the default chain are bypassed
-
-#### Scenario: Empty or malformed override ignored
-- **GIVEN** `llm_caller.steps.implement: []` (or a non-list value, or
-  entries that are neither string nor dict)
-- **WHEN** the implement step constructs its LLMCaller
-- **THEN** a warning is logged
-- **AND** the step falls back to the default caller chain
+  and `defaults` are bypassed
 
 #### Scenario: Other steps unaffected by a single override
 - **GIVEN** `llm_caller.steps.implement` is declared but `plan` is not
 - **WHEN** the plan step runs
-- **THEN** it uses the default caller chain, unaffected by the implement
+- **THEN** it uses `llm_caller.defaults`, unaffected by the implement
   override
+
+#### Scenario: Unknown name in defaults fails fast
+- **GIVEN** `llm_caller.defaults: [primary, ghost]` and `ghost` is not
+  in the agent registry
+- **THEN** the framework raises a configuration error at startup
+- **AND** the error message names the reference location
+  (`llm_caller.defaults`) and lists registered agent names
+
+#### Scenario: Unknown name in per-step override fails fast
+- **GIVEN** `llm_caller.steps.implement: [nonexistent]`
+- **THEN** the framework raises a configuration error at startup
+- **AND** the error message names the reference location
+  (`llm_caller.steps.implement`) and lists registered agent names
+
+#### Scenario: Global defaults replaced by project
+- **GIVEN** global config declares `llm_caller.defaults: [g1, g2]`
+- **AND** project config declares `llm_caller.defaults: [p1]`
+- **WHEN** the framework builds the default chain
+- **THEN** the chain is exactly `[p1]` — the global list is not merged
+
+#### Scenario: Project overrides global per-step declaration
+- **GIVEN** global config declares `llm_caller.steps.implement: [a, b]`
+- **AND** project config declares `llm_caller.steps.implement: [c]`
+- **WHEN** the implement step runs in the project
+- **THEN** the chain is exactly `[c]` — the global list is not merged

@@ -10,50 +10,39 @@ session:
   progress_file: progress.md
   max_progress_entries: 20
 
+# Agent Registry (top-level identity layer)
+# Every `llm_caller.*` or `confirmation.steps.*.reviewer` reference is
+# resolved by name against this dict. Unknown names fail fast at startup.
+# Global + project merge is entry-level: project entries override global
+# entries with the same name; non-conflicting entries coexist.
+agents:
+  primary: { type: claude-code, cmd: claude, priority: 10 }
+  # backup: { type: claude-code, cmd: kclaude, priority: 5 }
+  # low:    { type: claude-code, cmd: hclaude, priority: 1 }
+
+# LLM Caller Configuration
+# `defaults` is the default caller chain by agent name (referencing
+# entries in `agents` above). `steps.<step>` declares a HARD per-step
+# override — there is no silent fallback to `defaults`, so if you want a
+# default tail you must list it explicitly. Rotation on infrastructure
+# errors happens strictly within the step's list.
+llm_caller:
+  defaults: [primary]
+  # steps:
+  #   implement: [opus, primary]
+  #   summarize: [primary]
+
 # Confirmation (Review) Configuration
-# Controls the confirmation step that reviews plan outputs
+# Per-step dict: a step is confirmed iff it appears as a key here.
+# There is NO global on/off switch. Per-step `reviewer` accepts:
+#   - "human"        → MCP call file / interactive approval pathway
+#   - <agent name>   → single-agent LLM review against that agent
+#   - omitted / null → LLM review via `llm_caller.defaults`
 confirmation:
-  enabled: true                       # Enable confirmation steps
-  steps: ["plan"]                     # Steps after which to insert confirmation
-  reviewer: "llm"                   # Default reviewer: "human" or "llm"
-  # LLM reviewer configuration (used when reviewer="llm")
-  llm_reviewer:
-    model: null                       # Model to use (null = default)
-    max_iterations: 3                 # Max review-modify cycles per step
-
-# Claude command resolution (optional)
-# Multiple commands with priority-based fallback on usage limit / timeout
-# Higher priority = tried first. Project-level overrides global (~/.se3/config.yaml)
-#
-# NOTE: `claude_commands` is a legacy alias for the authoritative `agents`
-# field; it is auto-converted at load time. New configs should prefer
-# `agents:` directly.
-claude_commands:
-  - cmd: "claude"
-    priority: 10
-  # - cmd: "kclaude"
-  #   priority: 5
-  # - cmd: "hclaude"
-  #   priority: 1
-
-# Per-step LLM caller override (optional)
-# Override the default caller chain for specific steps. The declared list
-# is a HARD override — there is no silent fallback to the default chain,
-# so if you want the default claude as a tail you must list it explicitly.
-# Rotation on infrastructure errors happens strictly within the step's
-# list. Steps with no entry here continue to use the default chain above.
-# llm_caller:
-#   steps:
-#     implement:
-#       - name: "big-claude"
-#         type: "claude-code"
-#         cmd: "claude-opus"
-#         priority: 10
-#     summarize:
-#       - name: "small-claude"
-#         type: "claude-code"
-#         cmd: "hclaude"
-#         priority: 10
+  steps:
+    plan:
+      # reviewer omitted → LLM review via llm_caller.defaults
+      max_iterations: 3
 
 # Version Bumping Configuration
 # Automatically bump version on commit step based on task type
@@ -61,13 +50,13 @@ version:
   enabled: true                       # Enable automatic version bumping
   file_path: null                     # Explicit version file path (null = auto-detect)
   include_in_commit_message: true     # Include version in commit message
-  
+
   # Smart Version Analysis (NEW)
   # Uses LLM to analyze actual changes and determine appropriate SemVer bump
   smart_version_analysis: true        # Enable intelligent version analysis
   auto_bump: true                     # Auto-apply bump without human confirmation
   confidence_threshold: null          # Confidence threshold for confirmation (null=never ask, low, medium, high)
-  
+
   # Fallback bump rules (used when smart_version_analysis is disabled or fails)
   bump_rules:
     feature: minor                    # Feature tasks bump minor version
