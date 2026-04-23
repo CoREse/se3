@@ -1,11 +1,16 @@
 """Tests for per-step agent override loading (load_step_agents).
 
-Covers:
+Covers the new schema: ``llm_caller.steps.<step>`` is a list of agent
+name references into the top-level ``agents`` registry. Inline dict
+entries are deprecated — they warn and are treated as "no override".
+
 - Missing declaration returns None (fall back to default chain).
-- Legal declaration returns normalized+sorted list.
+- Legal declaration (name list) returns normalized+sorted list.
 - Project-level declaration fully replaces global declaration.
 - Empty list returns None + warning.
 - Structurally invalid values return None + warning.
+- Inline dict entries warn + are skipped (breaking change).
+- Unknown agent names raise ValueError with helpful message.
 - A declaration for one step does not affect other (unaffected) steps.
 """
 
@@ -18,19 +23,33 @@ from se3.config import load_step_agents
 
 
 @pytest.fixture(autouse=True)
-def _reset_unknown_step_key_dedup_cache():
-    """Clear the module-level typo-warning dedup cache before each test.
+def _reset_module_caches():
+    """Clear module-level dedup caches before + after each test.
 
-    Without this, the first test to log a typo warning for a given
+    Without this, the first test to log a warning for a given
     ``(source_label, unknown_keys)`` tuple poisons every subsequent test
     that expects to observe the same warning — producing an
     ordering-dependent false pass.
     """
     _cfg._warned_unknown_step_keys_for.clear()
     _cfg._warned_non_dict_llm_caller_for.clear()
+    _cfg._warned_list_agents_for.clear()
+    _cfg._warned_claude_commands_ignored_for.clear()
+    _cfg._warned_claude_commands_deprecated_for.clear()
     yield
     _cfg._warned_unknown_step_keys_for.clear()
     _cfg._warned_non_dict_llm_caller_for.clear()
+    _cfg._warned_list_agents_for.clear()
+    _cfg._warned_claude_commands_ignored_for.clear()
+    _cfg._warned_claude_commands_deprecated_for.clear()
+
+
+_REGISTRY_YAML = """agents:
+  primary: {cmd: claude, priority: 10}
+  backup: {cmd: claude-dev, priority: 5}
+  opus: {cmd: claude-opus, priority: 20}
+  small: {cmd: hclaude, priority: 1}
+"""
 
 
 class TestLoadStepAgentsNoConfig:
@@ -39,12 +58,12 @@ class TestLoadStepAgentsNoConfig:
             assert load_step_agents(tmp_path, "implement") is None
 
     def test_returns_none_when_step_not_declared(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("""llm_caller:
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
   steps:
-    implement:
-      - cmd: big-claude
-        priority: 10
-""")
+    implement: [opus, primary]
+"""
+        )
         with patch("se3.config.Path.home", return_value=tmp_path):
             # 'plan' is not declared; should return None even though
             # 'implement' is.
@@ -57,97 +76,98 @@ class TestLoadStepAgentsNoConfig:
 
 
 class TestLoadStepAgentsLegalDeclaration:
-    def test_dict_entries_normalized_and_sorted(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("""llm_caller:
+    def test_name_list_resolves_and_sorts_by_priority(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
   steps:
-    implement:
-      - name: low
-        cmd: low-claude
-        priority: 1
-      - name: high
-        cmd: high-claude
-        priority: 10
-      - name: mid
-        cmd: mid-claude
-        priority: 5
-""")
+    implement: [small, opus, primary]
+"""
+        )
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_step_agents(tmp_path, "implement")
 
         assert agents is not None
-        assert [a["name"] for a in agents] == ["high", "mid", "low"]
-        # Type defaulted to claude-code
+        # Sorted by priority descending: opus(20) > primary(10) > small(1).
+        assert [a["name"] for a in agents] == ["opus", "primary", "small"]
         assert all(a["type"] == "claude-code" for a in agents)
 
-    def test_string_entries_normalized(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("""llm_caller:
+    def test_single_name_reference(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
   steps:
-    summarize:
-      - claude
-      - kclaude
-""")
+    summarize: [small]
+"""
+        )
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_step_agents(tmp_path, "summarize")
 
         assert agents is not None
-        assert len(agents) == 2
-        assert agents[0]["name"] == "claude"
-        assert agents[0]["cmd"] == "claude"
-        assert agents[0]["type"] == "claude-code"
+        assert len(agents) == 1
+        assert agents[0]["name"] == "small"
+        assert agents[0]["cmd"] == "hclaude"
 
 
 class TestProjectOverridesGlobal:
     def test_project_replaces_global_for_same_step(self, tmp_path):
-        # Global declares an override for implement.
+        # Global declares an override for implement using its own agents.
         global_dir = tmp_path / ".se3"
         global_dir.mkdir()
-        (global_dir / "config.yaml").write_text("""llm_caller:
+        (global_dir / "config.yaml").write_text(
+            """agents:
+  global_agent: {cmd: global-claude, priority: 10}
+llm_caller:
   steps:
-    implement:
-      - name: global-agent
-        cmd: global-claude
-        priority: 10
-""")
-        # Project also declares an override for implement.
-        (tmp_path / "se3.yaml").write_text("""llm_caller:
+    implement: [global_agent]
+"""
+        )
+        # Project also declares an override for implement using its own agents.
+        (tmp_path / "se3.yaml").write_text(
+            """agents:
+  project_agent: {cmd: project-claude, priority: 5}
+llm_caller:
   steps:
-    implement:
-      - name: project-agent
-        cmd: project-claude
-        priority: 5
-""")
+    implement: [project_agent]
+"""
+        )
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_step_agents(tmp_path, "implement")
 
         assert agents is not None
         assert len(agents) == 1
-        assert agents[0]["name"] == "project-agent"
+        assert agents[0]["name"] == "project_agent"
 
     def test_global_used_when_project_does_not_declare_step(self, tmp_path):
         global_dir = tmp_path / ".se3"
         global_dir.mkdir()
-        (global_dir / "config.yaml").write_text("""llm_caller:
+        (global_dir / "config.yaml").write_text(
+            """agents:
+  global_agent: {cmd: global-claude, priority: 10}
+llm_caller:
   steps:
-    implement:
-      - name: global-agent
-        cmd: global-claude
-        priority: 10
-""")
+    implement: [global_agent]
+"""
+        )
         # Project declares nothing under llm_caller.
-        (tmp_path / "se3.yaml").write_text("claude_commands:\n  - cmd: claude\n")
+        (tmp_path / "se3.yaml").write_text(
+            """agents:
+  foo: {cmd: claude}
+"""
+        )
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_step_agents(tmp_path, "implement")
 
         assert agents is not None
-        assert agents[0]["name"] == "global-agent"
+        assert agents[0]["name"] == "global_agent"
 
 
 class TestInvalidDeclarations:
     def test_empty_list_returns_none(self, tmp_path, caplog):
-        (tmp_path / "se3.yaml").write_text("""llm_caller:
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
   steps:
     implement: []
-""")
+"""
+        )
         with patch("se3.config.Path.home", return_value=tmp_path):
             import logging
             with caplog.at_level(logging.WARNING, logger="se3.config"):
@@ -159,10 +179,12 @@ class TestInvalidDeclarations:
 
     def test_non_list_returns_none(self, tmp_path, caplog):
         # A bare string instead of a list.
-        (tmp_path / "se3.yaml").write_text("""llm_caller:
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
   steps:
     implement: "claude"
-""")
+"""
+        )
         with patch("se3.config.Path.home", return_value=tmp_path):
             import logging
             with caplog.at_level(logging.WARNING, logger="se3.config"):
@@ -171,76 +193,63 @@ class TestInvalidDeclarations:
         assert agents is None
         assert any("not a list" in rec.message for rec in caplog.records)
 
-    def test_entries_of_wrong_type_filtered(self, tmp_path, caplog):
-        # Mixed list: one valid dict, one integer (junk).
-        (tmp_path / "se3.yaml").write_text("""llm_caller:
+    def test_non_string_entries_filtered(self, tmp_path, caplog):
+        # Mixed list: one valid name, one integer (junk).
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
   steps:
     implement:
-      - name: good
-        cmd: good-claude
-        priority: 5
+      - opus
       - 42
-""")
+"""
+        )
         with patch("se3.config.Path.home", return_value=tmp_path):
             import logging
             with caplog.at_level(logging.WARNING, logger="se3.config"):
                 agents = load_step_agents(tmp_path, "implement")
 
-        # Valid entry survives; junk entry is dropped with a warning.
+        # Valid name survives; junk entry dropped with warning.
         assert agents is not None
         assert len(agents) == 1
-        assert agents[0]["name"] == "good"
-        assert any("non-str/dict" in rec.message for rec in caplog.records)
+        assert agents[0]["name"] == "opus"
+        assert any("non-str entry" in rec.message for rec in caplog.records)
 
 
-class TestOtherStepsUnaffected:
-    def test_other_steps_return_none(self, tmp_path):
-        (tmp_path / "se3.yaml").write_text("""llm_caller:
+class TestInlineDictEntriesDeprecated:
+    """Inline dict form is a breaking change — entries are skipped and
+    warned. The whole override becomes 'no override' when no valid name
+    entries remain.
+    """
+
+    def test_inline_dict_entry_is_tolerated_with_warning(self, tmp_path, caplog):
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
   steps:
     implement:
-      - name: big
-        cmd: big-claude
+      - cmd: big-claude
         priority: 10
-""")
-        with patch("se3.config.Path.home", return_value=tmp_path):
-            # Only 'implement' is declared.
-            assert load_step_agents(tmp_path, "implement") is not None
-            assert load_step_agents(tmp_path, "plan") is None
-            assert load_step_agents(tmp_path, "analyze") is None
-            assert load_step_agents(tmp_path, "summarize") is None
-
-
-class TestMalformedDictEntries:
-    def test_dict_without_cmd_is_rejected(self, tmp_path, caplog):
-        # Entries missing 'cmd' must not silently default to a plain
-        # 'claude' agent — the hard-override contract requires the user's
-        # declared list to be exactly what runs, so typos should fail
-        # loudly (warning) rather than silently succeed.
-        (tmp_path / "se3.yaml").write_text("""llm_caller:
-  steps:
-    implement:
-      - priority: 10
-      - name: big
-""")
+"""
+        )
         with patch("se3.config.Path.home", return_value=tmp_path):
             import logging
             with caplog.at_level(logging.WARNING, logger="se3.config"):
                 agents = load_step_agents(tmp_path, "implement")
 
         assert agents is None
-        assert any("no usable 'cmd'" in rec.message for rec in caplog.records)
+        assert any(
+            "inline dict entry" in rec.message for rec in caplog.records
+        )
 
-    def test_mixed_valid_and_invalid_dicts(self, tmp_path, caplog):
-        # A valid entry alongside an invalid one — valid survives,
-        # invalid is dropped with a warning.
-        (tmp_path / "se3.yaml").write_text("""llm_caller:
+    def test_mixed_inline_dict_and_name(self, tmp_path, caplog):
+        # Inline dict skipped + warned; valid name survives.
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
   steps:
     implement:
-      - name: good
-        cmd: good-claude
-        priority: 5
-      - priority: 99
-""")
+      - opus
+      - cmd: big-claude
+"""
+        )
         with patch("se3.config.Path.home", return_value=tmp_path):
             import logging
             with caplog.at_level(logging.WARNING, logger="se3.config"):
@@ -248,8 +257,46 @@ class TestMalformedDictEntries:
 
         assert agents is not None
         assert len(agents) == 1
-        assert agents[0]["name"] == "good"
-        assert any("no usable 'cmd'" in rec.message for rec in caplog.records)
+        assert agents[0]["name"] == "opus"
+        assert any(
+            "inline dict entry" in rec.message for rec in caplog.records
+        )
+
+
+class TestUnknownAgentNameFailsFast:
+    def test_unknown_name_raises_value_error(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
+  steps:
+    implement: [primary, doesnotexist]
+"""
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            with pytest.raises(ValueError) as exc_info:
+                load_step_agents(tmp_path, "implement")
+
+        msg = str(exc_info.value)
+        assert "llm_caller.steps.implement" in msg
+        assert "doesnotexist" in msg
+        # Available agent names should be listed sorted.
+        for name in ("backup", "opus", "primary", "small"):
+            assert name in msg
+
+
+class TestOtherStepsUnaffected:
+    def test_other_steps_return_none(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
+  steps:
+    implement: [opus]
+"""
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            # Only 'implement' is declared.
+            assert load_step_agents(tmp_path, "implement") is not None
+            assert load_step_agents(tmp_path, "plan") is None
+            assert load_step_agents(tmp_path, "analyze") is None
+            assert load_step_agents(tmp_path, "summarize") is None
 
 
 class TestMalformedTopLevelLlmCaller:
@@ -288,11 +335,14 @@ class TestMalformedTopLevelLlmCaller:
     def test_resolve_agents_falls_back_on_malformed_llm_caller(
         self, tmp_path, caplog,
     ):
-        # Even with malformed llm_caller at top level, resolve_agents must
-        # not raise; it should return the default chain and set the
+        # Even with malformed llm_caller at top level, resolve_agents
+        # must not raise; it should return the default chain and set the
         # override flag to False.
         (tmp_path / "se3.yaml").write_text(
-            "llm_caller: claude\nclaude_commands:\n  - cmd: my-claude\n    priority: 5\n"
+            "llm_caller: claude\n"
+            "claude_commands:\n"
+            "  - cmd: my-claude\n"
+            "    priority: 5\n"
         )
         with patch("se3.config.Path.home", return_value=tmp_path):
             import logging
@@ -316,12 +366,12 @@ class TestUnknownStepKey:
         # step returns None (no declaration), and a warning is logged so
         # the user can debug their yaml rather than silently get the
         # default chain.
-        (tmp_path / "se3.yaml").write_text("""llm_caller:
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
   steps:
-    inplement:
-      - cmd: big-claude
-        priority: 10
-""")
+    inplement: [opus]
+"""
+        )
         with patch("se3.config.Path.home", return_value=tmp_path):
             import logging
             with caplog.at_level(logging.WARNING, logger="se3.config"):
@@ -340,11 +390,11 @@ class TestUnknownStepKey:
         # silently falls back to None — same as the "no declaration"
         # path. This codifies that LLMCaller's unknown step_type behaves
         # identically to a declared-but-different step.
-        (tmp_path / "se3.yaml").write_text("""llm_caller:
+        (tmp_path / "se3.yaml").write_text(
+            _REGISTRY_YAML + """llm_caller:
   steps:
-    implement:
-      - cmd: big-claude
-        priority: 10
-""")
+    implement: [opus]
+"""
+        )
         with patch("se3.config.Path.home", return_value=tmp_path):
             assert load_step_agents(tmp_path, "not_a_real_step") is None

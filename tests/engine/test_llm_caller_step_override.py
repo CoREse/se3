@@ -40,14 +40,23 @@ def _make_success_result(output="ok"):
     return result
 
 
-def _write_override(tmp_path, step, agents_yaml):
-    """Helper to write se3.yaml with llm_caller.steps.<step> override.
+def _write_override(tmp_path, step, agents_yaml, registry=None):
+    """Helper to write se3.yaml with a registry + step override.
 
-    ``agents_yaml`` is the YAML body below the step key (properly
-    indented).
+    ``agents_yaml`` is the YAML body below the step key (a list of
+    agent name references). ``registry`` defines the top-level agents
+    dict; when None, a default registry with ``override-a``,
+    ``override-b``, and ``solo-override`` is written.
     """
+    if registry is None:
+        registry = (
+            "agents:\n"
+            "  override-a: {cmd: claude-a, priority: 10}\n"
+            "  override-b: {cmd: claude-b, priority: 5}\n"
+            "  solo-override: {cmd: override-claude, priority: 10}\n"
+        )
     (tmp_path / "se3.yaml").write_text(
-        f"llm_caller:\n  steps:\n    {step}:\n{agents_yaml}"
+        f"{registry}llm_caller:\n  steps:\n    {step}:\n{agents_yaml}"
     )
 
 
@@ -55,12 +64,8 @@ class TestStepOverrideChain:
     def test_override_used_when_declared(self, tmp_path):
         _write_override(
             tmp_path, "implement",
-            "      - name: override-a\n"
-            "        cmd: claude-a\n"
-            "        priority: 10\n"
-            "      - name: override-b\n"
-            "        cmd: claude-b\n"
-            "        priority: 5\n",
+            "      - override-a\n"
+            "      - override-b\n",
         )
         with patch("se3.config.Path.home", return_value=tmp_path):
             caller = LLMCaller(
@@ -78,9 +83,7 @@ class TestStepOverrideChain:
         # Only 'implement' has an override.
         _write_override(
             tmp_path, "implement",
-            "      - name: override-a\n"
-            "        cmd: claude-a\n"
-            "        priority: 10\n",
+            "      - override-a\n",
         )
         with patch("se3.config.Path.home", return_value=tmp_path):
             # Running the 'plan' step — no override declared — gets the
@@ -116,9 +119,7 @@ class TestExhaustionDoesNotFallBack:
         # NOT silently fall through to the default chain's 'claude'.
         _write_override(
             tmp_path, "implement",
-            "      - name: solo-override\n"
-            "        cmd: override-claude\n"
-            "        priority: 10\n",
+            "      - solo-override\n",
         )
 
         mock_runner = MagicMock()
@@ -158,9 +159,7 @@ class TestExplicitAgentsArgHighestPriority:
         """
         _write_override(
             tmp_path, "implement",
-            "      - name: override-a\n"
-            "        cmd: claude-a\n"
-            "        priority: 10\n",
+            "      - override-a\n",
         )
         explicit = [
             {

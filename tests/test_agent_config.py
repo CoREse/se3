@@ -1,7 +1,9 @@
 """Tests for agent configuration loading (load_agents).
 
-Covers new agents format, legacy claude_commands fallback,
-mixed scenarios, priority sorting, and backward compatibility.
+Covers the new dict-form ``agents`` registry + ``llm_caller.defaults``
+schema, legacy ``claude_commands`` auto-migration, priority sorting,
+global/project merge, and backward compatibility of
+``load_claude_commands``.
 """
 
 from pathlib import Path
@@ -9,14 +11,30 @@ from unittest.mock import patch
 
 import pytest
 
+import se3.config as _cfg
 from se3.config import load_agents, load_claude_commands
+
+
+@pytest.fixture(autouse=True)
+def _reset_module_caches():
+    _cfg._warned_unknown_step_keys_for.clear()
+    _cfg._warned_non_dict_llm_caller_for.clear()
+    _cfg._warned_list_agents_for.clear()
+    _cfg._warned_claude_commands_ignored_for.clear()
+    _cfg._warned_claude_commands_deprecated_for.clear()
+    yield
+    _cfg._warned_unknown_step_keys_for.clear()
+    _cfg._warned_non_dict_llm_caller_for.clear()
+    _cfg._warned_list_agents_for.clear()
+    _cfg._warned_claude_commands_ignored_for.clear()
+    _cfg._warned_claude_commands_deprecated_for.clear()
 
 
 class TestLoadAgents:
     """Test load_agents() function."""
 
     def test_default_when_no_config(self, tmp_path):
-        """Should return default agent when no config exists."""
+        """Should return built-in default agent when no config exists."""
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
         assert len(agents) == 1
@@ -25,18 +43,14 @@ class TestLoadAgents:
         assert agents[0]["cmd"] == "claude"
         assert agents[0]["priority"] == 0
 
-    def test_agents_field_parsed(self, tmp_path):
-        """Should parse agents field with type attribute."""
+    def test_registry_with_explicit_defaults(self, tmp_path):
+        """Parse registry + explicit llm_caller.defaults name list."""
         config = tmp_path / "se3.yaml"
         config.write_text("""agents:
-  - name: main-claude
-    type: claude-code
-    cmd: claude
-    priority: 10
-  - name: backup-claude
-    type: claude-code
-    cmd: kclaude
-    priority: 5
+  main-claude: {cmd: claude, priority: 10}
+  backup-claude: {cmd: kclaude, priority: 5}
+llm_caller:
+  defaults: [main-claude, backup-claude]
 """)
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
@@ -50,7 +64,7 @@ class TestLoadAgents:
         assert agents[1]["cmd"] == "kclaude"
 
     def test_claude_commands_fallback(self, tmp_path):
-        """Should fallback to claude_commands and auto-add type."""
+        """Should auto-migrate claude_commands to registry + implicit defaults."""
         config = tmp_path / "se3.yaml"
         config.write_text("""claude_commands:
   - cmd: claude
@@ -69,12 +83,12 @@ class TestLoadAgents:
         assert agents[1]["cmd"] == "kclaude"
 
     def test_agents_takes_priority_over_claude_commands(self, tmp_path):
-        """When both agents and claude_commands exist, agents wins."""
+        """When both agents and claude_commands exist, agents wins + warning."""
         config = tmp_path / "se3.yaml"
         config.write_text("""agents:
-  - name: agent-claude
-    cmd: claude
-    priority: 10
+  agent-claude: {cmd: claude, priority: 10}
+llm_caller:
+  defaults: [agent-claude]
 claude_commands:
   - cmd: legacy-claude
     priority: 5
@@ -86,20 +100,20 @@ claude_commands:
         assert agents[0]["name"] == "agent-claude"
 
     def test_project_overrides_global(self, tmp_path):
-        """Project config should override global config."""
+        """Project defaults fully replace global defaults."""
         # Global config
         global_dir = tmp_path / ".se3"
         global_dir.mkdir()
         (global_dir / "config.yaml").write_text("""agents:
-  - name: global-agent
-    cmd: global-claude
-    priority: 10
+  global-agent: {cmd: global-claude, priority: 10}
+llm_caller:
+  defaults: [global-agent]
 """)
         # Project config
         (tmp_path / "se3.yaml").write_text("""agents:
-  - name: project-agent
-    cmd: project-claude
-    priority: 5
+  project-agent: {cmd: project-claude, priority: 5}
+llm_caller:
+  defaults: [project-agent]
 """)
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
@@ -108,13 +122,13 @@ claude_commands:
         assert agents[0]["name"] == "project-agent"
 
     def test_global_used_when_no_project(self, tmp_path):
-        """Global config used when no project config."""
+        """Global defaults used when no project config."""
         global_dir = tmp_path / ".se3"
         global_dir.mkdir()
         (global_dir / "config.yaml").write_text("""agents:
-  - name: global-agent
-    cmd: global-claude
-    priority: 10
+  global-agent: {cmd: global-claude, priority: 10}
+llm_caller:
+  defaults: [global-agent]
 """)
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
@@ -125,42 +139,42 @@ claude_commands:
         """Agents should be sorted by priority descending."""
         config = tmp_path / "se3.yaml"
         config.write_text("""agents:
-  - name: low
-    cmd: low-claude
-    priority: 1
-  - name: high
-    cmd: high-claude
-    priority: 10
-  - name: mid
-    cmd: mid-claude
-    priority: 5
+  low: {cmd: low-claude, priority: 1}
+  high: {cmd: high-claude, priority: 10}
+  mid: {cmd: mid-claude, priority: 5}
+llm_caller:
+  defaults: [low, high, mid]
 """)
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert [a["name"] for a in agents] == ["high", "mid", "low"]
 
-    def test_string_agents_normalized(self, tmp_path):
-        """String entries in agents should be normalized."""
+    def test_string_entries_normalized(self, tmp_path):
+        """Bare string entries in agents dict should be normalized to cmd."""
         config = tmp_path / "se3.yaml"
         config.write_text("""agents:
-  - claude
-  - kclaude
+  primary: claude
+  backup: kclaude
+llm_caller:
+  defaults: [primary, backup]
 """)
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
 
         assert len(agents) == 2
-        assert agents[0]["name"] == "claude"
-        assert agents[0]["type"] == "claude-code"
-        assert agents[0]["cmd"] == "claude"
+        by_name = {a["name"]: a for a in agents}
+        assert by_name["primary"]["cmd"] == "claude"
+        assert by_name["primary"]["type"] == "claude-code"
+        assert by_name["backup"]["cmd"] == "kclaude"
 
     def test_default_type_is_claude_code(self, tmp_path):
         """Agents without type should default to claude-code."""
         config = tmp_path / "se3.yaml"
         config.write_text("""agents:
-  - name: no-type
-    cmd: claude
+  no-type: {cmd: claude}
+llm_caller:
+  defaults: [no-type]
 """)
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_agents(tmp_path)
@@ -168,14 +182,13 @@ claude_commands:
         assert agents[0]["type"] == "claude-code"
 
     def test_global_agents_field(self, tmp_path):
-        """Global config with agents field works."""
+        """Global config with registry + defaults works."""
         global_dir = tmp_path / ".se3"
         global_dir.mkdir()
         (global_dir / "config.yaml").write_text("""agents:
-  - name: global-agent
-    type: claude-code
-    cmd: claude
-    priority: 5
+  global-agent: {cmd: claude, priority: 5}
+llm_caller:
+  defaults: [global-agent]
 """)
         with patch("se3.config.Path.home", return_value=tmp_path):
             agents = load_agents(None)
@@ -196,6 +209,34 @@ claude_commands:
         assert agents[0]["type"] == "claude-code"
         assert agents[0]["cmd"] == "global-claude"
 
+    def test_registry_without_defaults_uses_built_in(self, tmp_path):
+        """A registry with no explicit defaults falls back to built-in claude."""
+        (tmp_path / "se3.yaml").write_text("""agents:
+  extra: {cmd: extra-claude}
+""")
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            agents = load_agents(tmp_path)
+
+        # Without explicit llm_caller.defaults and without legacy
+        # claude_commands, we fall back to the built-in claude chain.
+        assert len(agents) == 1
+        assert agents[0]["name"] == "claude"
+        assert agents[0]["cmd"] == "claude"
+
+    def test_unknown_name_in_defaults_raises(self, tmp_path):
+        """Unknown agent name in llm_caller.defaults raises ValueError."""
+        (tmp_path / "se3.yaml").write_text("""agents:
+  a: {cmd: claude}
+llm_caller:
+  defaults: [a, doesnotexist]
+""")
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            with pytest.raises(ValueError) as exc_info:
+                load_agents(tmp_path)
+        msg = str(exc_info.value)
+        assert "doesnotexist" in msg
+        assert "llm_caller.defaults" in msg
+
 
 class TestLoadClaudeCommandsBackwardCompat:
     """Test that load_claude_commands still works via delegation."""
@@ -204,10 +245,9 @@ class TestLoadClaudeCommandsBackwardCompat:
         """load_claude_commands should return {cmd, priority} dicts."""
         config = tmp_path / "se3.yaml"
         config.write_text("""agents:
-  - name: test
-    type: claude-code
-    cmd: my-claude
-    priority: 10
+  test: {cmd: my-claude, priority: 10}
+llm_caller:
+  defaults: [test]
 """)
         with patch("se3.config.Path.home", return_value=tmp_path):
             commands = load_claude_commands(tmp_path)

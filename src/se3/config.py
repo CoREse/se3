@@ -328,6 +328,31 @@ def insert_confirmation_steps(
 
 _GLOBAL_CONFIG_PATH_SUFFIX = (".se3", "config.yaml")
 
+_BUILTIN_DEFAULT_AGENT_NAME = "claude"
+
+
+@dataclass
+class AgentDef:
+    """Typed representation of an agent entry in the top-level registry.
+
+    ``agents`` in the new schema is a dict ``{name: AgentDef}``; the key
+    is the name, and the value carries ``type`` / ``cmd`` / ``priority``.
+    """
+
+    name: str
+    type: str = "claude-code"
+    cmd: str = ""
+    priority: int = 0
+
+    def to_agent_dict(self) -> dict:
+        """Return the legacy ``list[dict]`` shape consumed by LLMCaller."""
+        return {
+            "name": self.name,
+            "type": self.type,
+            "cmd": self.cmd,
+            "priority": self.priority,
+        }
+
 
 def _read_yaml(path: Path) -> Optional[dict]:
     """Read and parse a YAML file; log on parse error and return None.
@@ -367,31 +392,352 @@ def _load_agent_configs(
     return global_data, project_data
 
 
+_warned_list_agents_for: set[str] = set()
+_warned_claude_commands_ignored_for: set[str] = set()
+_warned_claude_commands_deprecated_for: set[str] = set()
+
+
+def _slugify_cmd(cmd: str) -> str:
+    """Slugify a cmd string to form an agent name.
+
+    Letters, digits, hyphens, and underscores are preserved. Everything
+    else becomes ``_``. Empty result defaults to ``agent``.
+    """
+    import re
+
+    if not cmd:
+        return "agent"
+    slug = re.sub(r"[^A-Za-z0-9_\-]", "_", cmd)
+    return slug or "agent"
+
+
+def _unique_name(base: str, existing: set[str]) -> str:
+    """Return ``base`` if unused, else ``base_2`` / ``base_3`` …"""
+    if base not in existing:
+        return base
+    i = 2
+    while f"{base}_{i}" in existing:
+        i += 1
+    return f"{base}_{i}"
+
+
+def _migrate_claude_commands(
+    source_label: str,
+    commands: list,
+) -> tuple[dict[str, AgentDef], list[str]]:
+    """Convert legacy ``claude_commands`` list to a registry + defaults.
+
+    Returns ``(registry_entries, default_names)`` — ``registry_entries``
+    is a mapping of ``name -> AgentDef`` synthesized from each legacy
+    entry, and ``default_names`` is the name list in the original order
+    to be used as an implicit ``llm_caller.defaults`` fallback.
+
+    Name generation: each cmd is slugified; collisions append
+    ``_2`` / ``_3`` / …. Emits a single DeprecationWarning per source
+    showing the equivalent new-schema YAML snippet.
+    """
+    normalized = _normalize_commands(commands)
+    if not normalized:
+        return {}, []
+
+    registry: dict[str, AgentDef] = {}
+    defaults: list[str] = []
+    for entry in normalized:
+        cmd = entry["cmd"]
+        priority = entry.get("priority", 0)
+        base = _slugify_cmd(cmd)
+        name = _unique_name(base, set(registry))
+        registry[name] = AgentDef(
+            name=name, type="claude-code", cmd=cmd, priority=priority,
+        )
+        defaults.append(name)
+
+    if source_label not in _warned_claude_commands_deprecated_for:
+        _warned_claude_commands_deprecated_for.add(source_label)
+        lines = ["agents:"]
+        for name, agent in registry.items():
+            parts = [f"type: {agent.type}", f"cmd: {agent.cmd}"]
+            if agent.priority:
+                parts.append(f"priority: {agent.priority}")
+            lines.append(f"  {name}: {{{', '.join(parts)}}}")
+        lines.append("llm_caller:")
+        lines.append(f"  defaults: [{', '.join(defaults)}]")
+        snippet = "\n".join(lines)
+        logger.warning(
+            "%s: 'claude_commands' is deprecated; converting to top-level "
+            "'agents' registry + 'llm_caller.defaults'. Equivalent new "
+            "config:\n%s",
+            source_label, snippet,
+        )
+
+    return registry, defaults
+
+
+def _agents_dict_from_source(
+    source_label: str, raw: Any,
+) -> Optional[dict[str, AgentDef]]:
+    """Parse a single source's top-level ``agents`` field.
+
+    Returns the parsed registry, or ``None`` when the field is absent.
+    Invalid shapes (list, scalar, non-dict) log a warning and return
+    ``None`` so the caller can decide how to fall back.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, list):
+        # Legacy list form is removed. Warn and ignore.
+        if source_label not in _warned_list_agents_for:
+            _warned_list_agents_for.add(source_label)
+            logger.warning(
+                "%s: top-level 'agents' is a list — this legacy form is "
+                "no longer supported. Use a dict keyed by agent name "
+                "instead, e.g. `agents:\\n  primary: {cmd: claude}`. "
+                "Ignoring the entire agents field for this source.",
+                source_label,
+            )
+        return None
+    if not isinstance(raw, dict):
+        logger.warning(
+            "%s: top-level 'agents' is not a mapping (got %s); ignoring",
+            source_label, type(raw).__name__,
+        )
+        return None
+
+    registry: dict[str, AgentDef] = {}
+    for name, entry in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            logger.warning(
+                "%s: agents registry key %r is not a non-empty string; "
+                "skipping",
+                source_label, name,
+            )
+            continue
+        if isinstance(entry, str):
+            registry[name] = AgentDef(
+                name=name, type="claude-code", cmd=entry, priority=0,
+            )
+            continue
+        if not isinstance(entry, dict):
+            logger.warning(
+                "%s: agents.%s is not a mapping (got %s); skipping",
+                source_label, name, type(entry).__name__,
+            )
+            continue
+        cmd = entry.get("cmd", "")
+        if not (isinstance(cmd, str) and cmd.strip()):
+            logger.warning(
+                "%s: agents.%s has no usable 'cmd'; skipping",
+                source_label, name,
+            )
+            continue
+        registry[name] = AgentDef(
+            name=name,
+            type=entry.get("type", "claude-code"),
+            cmd=cmd,
+            priority=entry.get("priority", 0),
+        )
+    return registry
+
+
+def _agent_registry_from_data(
+    global_data: dict, project_data: dict,
+) -> tuple[dict[str, AgentDef], list[str]]:
+    """Build the agent registry from global + project YAML data.
+
+    Returns ``(registry, legacy_defaults)`` — the registry is the
+    entry-level merged agent directory (project overrides global by
+    name); ``legacy_defaults`` is an implicit default chain (list of
+    names) derived from ``claude_commands`` when either source omits
+    ``agents`` (project legacy defaults win over global).
+    """
+    sources = [
+        ("~/.se3/config.yaml", global_data),
+        ("se3.yaml", project_data),
+    ]
+
+    merged: dict[str, AgentDef] = {}
+    legacy_defaults: list[str] = []
+
+    for source_label, data in sources:
+        raw_agents = data.get("agents")
+        parsed = _agents_dict_from_source(source_label, raw_agents)
+
+        has_explicit_agents = parsed is not None and raw_agents is not None and isinstance(raw_agents, dict)
+
+        if parsed:
+            # Merge entry-level — later source (project) overrides by
+            # name; non-conflicting entries from either side coexist.
+            for name, agent in parsed.items():
+                merged[name] = agent
+
+        claude_commands = data.get("claude_commands")
+        if claude_commands:
+            if has_explicit_agents:
+                # Both set: ignore claude_commands with warning.
+                if source_label not in _warned_claude_commands_ignored_for:
+                    _warned_claude_commands_ignored_for.add(source_label)
+                    logger.warning(
+                        "%s: both 'agents' and 'claude_commands' are "
+                        "set; ignoring legacy 'claude_commands'",
+                        source_label,
+                    )
+            else:
+                migrated, defaults = _migrate_claude_commands(
+                    source_label, claude_commands,
+                )
+                # Merge migrated entries, not overriding an already-merged
+                # name (so project claude_commands can still add to a
+                # registry built from global agents).
+                for name, agent in migrated.items():
+                    if name not in merged:
+                        merged[name] = agent
+                # Project's legacy defaults take precedence over global's.
+                legacy_defaults = defaults
+
+    return merged, legacy_defaults
+
+
+def _registry_to_sorted_list(
+    registry: dict[str, AgentDef], names: list[str],
+) -> list[dict]:
+    """Resolve a name list against the registry and sort by priority.
+
+    Caller is responsible for validating that all names are registered.
+    """
+    resolved = [registry[n].to_agent_dict() for n in names]
+    resolved.sort(key=lambda x: x.get("priority", 0), reverse=True)
+    return resolved
+
+
+def load_agent_registry(
+    project_root: Optional[Path] = None,
+) -> dict[str, AgentDef]:
+    """Load the top-level agent registry from global + project configs.
+
+    Returns a merged ``{name: AgentDef}`` mapping. Legacy
+    ``claude_commands`` in either source is auto-migrated when that
+    source omits ``agents``. Invalid top-level forms (list, scalar)
+    produce a warning and are ignored.
+    """
+    global_data, project_data = _load_agent_configs(project_root)
+    registry, _ = _agent_registry_from_data(global_data, project_data)
+    return registry
+
+
+def _resolve_name_list(
+    reference_location: str,
+    names: list[str],
+    registry: dict[str, AgentDef],
+) -> list[dict]:
+    """Resolve a list of names against the registry.
+
+    Raises ``ValueError`` on any unknown name, with a message containing
+    the reference location and the sorted list of registered names.
+    """
+    missing = [n for n in names if n not in registry]
+    if missing:
+        available = sorted(registry.keys())
+        raise ValueError(
+            f"{reference_location}: unknown agent name(s) {missing!r}; "
+            f"registered agents: {available}"
+        )
+    return _registry_to_sorted_list(registry, names)
+
+
+def _read_llm_caller_section(
+    data: dict, source_label: str,
+) -> Optional[dict]:
+    """Read and validate the ``llm_caller`` section of a source."""
+    llm_caller = data.get("llm_caller")
+    if llm_caller is None:
+        return None
+    if not isinstance(llm_caller, dict):
+        if source_label not in _warned_non_dict_llm_caller_for:
+            _warned_non_dict_llm_caller_for.add(source_label)
+            logger.warning(
+                "%s: top-level 'llm_caller' is not a mapping (got %s); "
+                "ignoring",
+                source_label, type(llm_caller).__name__,
+            )
+        return None
+    return llm_caller
+
+
+def _explicit_defaults(
+    data: dict, source_label: str,
+) -> Optional[list[str]]:
+    """Read ``llm_caller.defaults`` from a source as a list of names.
+
+    Returns ``None`` when absent; warns + returns ``None`` for malformed
+    values (non-list, or list with non-string entries after filtering).
+    """
+    llm_caller = _read_llm_caller_section(data, source_label)
+    if llm_caller is None:
+        return None
+    raw = llm_caller.get("defaults")
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        logger.warning(
+            "%s: llm_caller.defaults is not a list (got %s); ignoring",
+            source_label, type(raw).__name__,
+        )
+        return None
+    names: list[str] = []
+    for entry in raw:
+        if isinstance(entry, str) and entry.strip():
+            names.append(entry)
+        else:
+            logger.warning(
+                "%s: llm_caller.defaults entry %r is not a non-empty "
+                "string; skipping",
+                source_label, entry,
+            )
+    return names if names else None
+
+
 def _default_chain_from_data(global_data: dict, project_data: dict) -> list[dict]:
-    """Build the default agent chain from already-parsed YAML data."""
-    agents: list[dict] = []
+    """Build the default agent chain from already-parsed YAML data.
 
-    global_agents_raw = global_data.get("agents")
-    if global_agents_raw:
-        agents = _normalize_agents(global_agents_raw)
-    else:
-        global_commands = global_data.get("claude_commands", [])
-        if global_commands:
-            agents = _commands_to_agents(_normalize_commands(global_commands))
+    Priority (first non-empty wins):
+      1. ``project.llm_caller.defaults`` (explicit, name list)
+      2. ``global.llm_caller.defaults`` (explicit, name list)
+      3. Implicit defaults from legacy ``claude_commands`` (project > global)
+      4. Built-in ``[claude]``.
 
-    project_agents_raw = project_data.get("agents")
-    if project_agents_raw:
-        agents = _normalize_agents(project_agents_raw)
-    else:
-        project_commands = project_data.get("claude_commands", [])
-        if project_commands:
-            agents = _commands_to_agents(_normalize_commands(project_commands))
+    Unknown names at the selected level raise ``ValueError``.
+    """
+    registry, legacy_defaults = _agent_registry_from_data(
+        global_data, project_data,
+    )
 
-    if not agents:
-        agents = [{"name": "claude", "type": "claude-code", "cmd": "claude", "priority": 0}]
+    # 1 & 2: explicit defaults.
+    project_names = _explicit_defaults(project_data, "se3.yaml")
+    if project_names is not None:
+        return _resolve_name_list(
+            "se3.yaml: llm_caller.defaults", project_names, registry,
+        )
+    global_names = _explicit_defaults(global_data, "~/.se3/config.yaml")
+    if global_names is not None:
+        return _resolve_name_list(
+            "~/.se3/config.yaml: llm_caller.defaults", global_names, registry,
+        )
 
-    agents.sort(key=lambda x: x.get("priority", 0), reverse=True)
-    return agents
+    # 3: implicit from legacy claude_commands.
+    if legacy_defaults:
+        return _resolve_name_list(
+            "legacy claude_commands migration", legacy_defaults, registry,
+        )
+
+    # 4: built-in.
+    return [
+        {
+            "name": _BUILTIN_DEFAULT_AGENT_NAME,
+            "type": "claude-code",
+            "cmd": _BUILTIN_DEFAULT_AGENT_NAME,
+            "priority": 0,
+        }
+    ]
 
 
 def _valid_step_keys() -> set[str]:
@@ -433,22 +779,20 @@ def _warn_on_unknown_step_keys(
 def _step_override_from_data(
     global_data: dict, project_data: dict, step_type: str,
 ) -> Optional[list[dict]]:
-    """Extract and validate per-step override from already-parsed YAML data.
+    """Extract and validate a per-step override from already-parsed YAML.
 
-    Returns normalized+sorted agent dicts, or None if no valid override is
-    declared for ``step_type``. Warns on unknown step keys in either
-    source (typo detection).
+    New schema: ``llm_caller.steps.<step>`` is a list of name strings
+    that refer to entries in the top-level ``agents`` registry. Legacy
+    inline-dict entries (``- cmd: claude-opus``) are rejected with a
+    warning and treated as "no override"; an unknown agent name raises
+    ``ValueError`` at startup so typos fail loudly.
+
+    Returns normalized+sorted agent dicts, or ``None`` if no valid
+    override is declared for ``step_type``.
     """
     def _section(data: dict, source_label: str) -> dict:
-        llm_caller = data.get("llm_caller", {})
-        if not isinstance(llm_caller, dict):
-            if source_label not in _warned_non_dict_llm_caller_for:
-                _warned_non_dict_llm_caller_for.add(source_label)
-                logger.warning(
-                    "%s: top-level 'llm_caller' is not a mapping (got %s); "
-                    "ignoring per-step overrides",
-                    source_label, type(llm_caller).__name__,
-                )
+        llm_caller = _read_llm_caller_section(data, source_label)
+        if llm_caller is None:
             return {}
         section = llm_caller.get("steps", {})
         return section if isinstance(section, dict) else {}
@@ -459,68 +803,72 @@ def _step_override_from_data(
     _warn_on_unknown_step_keys("~/.se3/config.yaml", global_steps)
     _warn_on_unknown_step_keys("se3.yaml", project_steps)
 
-    raw: Any = project_steps.get(step_type)
-    if raw is None:
-        raw = global_steps.get(step_type)
-    if raw is None:
+    # Source label is tracked so ValueError messages point the user to
+    # the exact YAML file where the typo lives.
+    if step_type in project_steps:
+        raw = project_steps[step_type]
+        source_label = "se3.yaml"
+    elif step_type in global_steps:
+        raw = global_steps[step_type]
+        source_label = "~/.se3/config.yaml"
+    else:
         return None
 
     if not isinstance(raw, list):
         logger.warning(
-            "llm_caller.steps.%s is not a list (got %s); ignoring override",
-            step_type, type(raw).__name__,
+            "%s: llm_caller.steps.%s is not a list (got %s); ignoring "
+            "override",
+            source_label, step_type, type(raw).__name__,
         )
         return None
 
     per_entry_warned = False
-
-    valid_entries = [e for e in raw if isinstance(e, (str, dict))]
-    if len(valid_entries) != len(raw):
-        logger.warning(
-            "llm_caller.steps.%s contains non-str/dict entries; skipping them",
-            step_type,
-        )
-        per_entry_warned = True
-
-    # Hard-override semantics mean a typo like ``- priority: 10`` (no cmd)
-    # must not silently become a default ``claude`` agent — reject both
-    # dict entries without a usable cmd AND blank string entries before
-    # normalization, so the user-declared chain never contains an agent
-    # with an empty cmd.
-    filtered: list = []
-    for e in valid_entries:
-        if isinstance(e, str):
-            if not e.strip():
+    names: list[str] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            if entry.strip():
+                names.append(entry)
+            else:
                 logger.warning(
-                    "llm_caller.steps.%s entry %r is a blank string; skipping",
-                    step_type, e,
+                    "%s: llm_caller.steps.%s entry %r is a blank string; "
+                    "skipping",
+                    source_label, step_type, entry,
                 )
                 per_entry_warned = True
-                continue
-        elif isinstance(e, dict):
-            if not (isinstance(e.get("cmd"), str) and e.get("cmd").strip()):
-                logger.warning(
-                    "llm_caller.steps.%s entry %r has no usable 'cmd'; skipping",
-                    step_type, e,
-                )
-                per_entry_warned = True
-                continue
-        filtered.append(e)
+        elif isinstance(entry, dict):
+            # New schema uses name references only; inline dict form is
+            # a breaking change → warn and skip this entry.
+            logger.warning(
+                "%s: llm_caller.steps.%s contains an inline dict entry "
+                "%r — the new schema requires agent name references "
+                "(list of str). Define the agent under top-level "
+                "'agents' and reference it by name. Skipping this entry.",
+                source_label, step_type, entry,
+            )
+            per_entry_warned = True
+        else:
+            logger.warning(
+                "%s: llm_caller.steps.%s contains non-str entry %r; "
+                "skipping",
+                source_label, step_type, entry,
+            )
+            per_entry_warned = True
 
-    if not filtered:
-        # Suppress the aggregate warning when a more specific per-entry
-        # warning has already been emitted for this same mistake.
+    if not names:
         if not per_entry_warned:
             logger.warning(
-                "llm_caller.steps.%s is empty or has no valid entries; "
-                "ignoring override (falling back to default chain)",
-                step_type,
+                "%s: llm_caller.steps.%s is empty or has no valid "
+                "entries; ignoring override",
+                source_label, step_type,
             )
         return None
 
-    agents = _normalize_agents(filtered)
-    agents.sort(key=lambda x: x.get("priority", 0), reverse=True)
-    return agents
+    registry, _ = _agent_registry_from_data(global_data, project_data)
+    return _resolve_name_list(
+        f"{source_label}: llm_caller.steps.{step_type}",
+        names,
+        registry,
+    )
 
 
 def load_agents(project_root: Optional[Path] = None) -> list[dict]:
@@ -617,45 +965,6 @@ def load_claude_commands(project_root: Optional[Path] = None) -> list[dict]:
     """
     agents = load_agents(project_root)
     return _agents_to_commands(agents)
-
-
-def _normalize_agents(agents_raw: list) -> list[dict]:
-    """Normalize agent entries from config to standard dicts.
-
-    Each entry can be a dict with keys ``name``, ``type``, ``cmd``, ``priority``.
-    Strings are treated as cmd values with defaults for everything else.
-    """
-    normalized = []
-    for i, entry in enumerate(agents_raw):
-        if isinstance(entry, str):
-            normalized.append({
-                "name": entry,
-                "type": "claude-code",
-                "cmd": entry,
-                "priority": 0,
-            })
-        elif isinstance(entry, dict):
-            cmd = entry.get("cmd", "claude")
-            normalized.append({
-                "name": entry.get("name", cmd),
-                "type": entry.get("type", "claude-code"),
-                "cmd": cmd,
-                "priority": entry.get("priority", 0),
-            })
-    return normalized
-
-
-def _commands_to_agents(commands: list[dict]) -> list[dict]:
-    """Convert legacy command dicts to agent dicts."""
-    return [
-        {
-            "name": cmd.get("cmd", "claude"),
-            "type": "claude-code",
-            "cmd": cmd.get("cmd", "claude"),
-            "priority": cmd.get("priority", 0),
-        }
-        for cmd in commands
-    ]
 
 
 def _agents_to_commands(agents: list[dict]) -> list[dict]:
