@@ -353,127 +353,114 @@ class TestHelperMethods:
 # _resolve_args() — Auto-file large prompts
 # =============================================================================
 
-class TestResolveArgsAutoFile:
-    """Test automatic filing of large prompt arguments in _resolve_args()."""
+class TestResolveArgsStdinPath:
+    """``_resolve_args`` rewrites oversized ``-p <text>`` to stdin.
 
-    def test_short_prompt_passes_directly(self, tmp_path):
-        """Prompts below the threshold are passed as-is."""
+    This replaces the old ``-p @tmpfile`` fallback, which made Claude Code
+    treat the prompt as a *referenced* file (bounded by the Read tool's
+    25k-token ceiling) rather than as the actual user message.
+    """
+
+    def test_short_prompt_stays_in_argv(self, tmp_path):
         prompt = "short prompt"
-        result = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
-        assert result == ["-p", prompt]
+        args, stdin_prompt = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
+        assert args == ["-p", prompt]
+        assert stdin_prompt is None
 
-    def test_large_prompt_auto_filed(self, tmp_path):
-        """Prompts exceeding _MAX_ARG_BYTES are written to a temp file."""
-        # Use ASCII so 1 char == 1 byte
+    def test_large_prompt_routed_to_stdin(self, tmp_path):
+        """Oversized prompt drops its argv value; stdin carries the payload."""
         prompt = "x" * (_MAX_ARG_BYTES + 1)
-        result = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
+        args, stdin_prompt = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
+        assert args == ["-p"]
+        assert stdin_prompt == prompt
+        tmp_dir = tmp_path / "se3" / "tmp"
+        if tmp_dir.exists():
+            assert list(tmp_dir.glob("*.prompt")) == []
 
-        assert result[0] == "-p"
-        assert result[1].startswith("@")
-        temp_path = Path(result[1][1:])
-        assert temp_path.exists()
-        assert temp_path.suffix == ".prompt"
-        assert temp_path.parent == tmp_path / "se3" / "tmp"
-        assert temp_path.read_text(encoding="utf-8") == prompt
-        temp_path.unlink()
-
-    def test_boundary_exact_threshold_passes_directly(self, tmp_path):
-        """A prompt whose byte length == _MAX_ARG_BYTES is NOT filed."""
+    def test_boundary_exact_threshold_stays_in_argv(self, tmp_path):
         prompt = "a" * _MAX_ARG_BYTES
         assert len(prompt.encode("utf-8")) == _MAX_ARG_BYTES
-        result = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
-        assert result == ["-p", prompt]
+        args, stdin_prompt = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
+        assert args == ["-p", prompt]
+        assert stdin_prompt is None
 
-    def test_boundary_one_over_threshold_is_filed(self, tmp_path):
-        """A prompt whose byte length == _MAX_ARG_BYTES + 1 IS filed."""
+    def test_boundary_one_over_threshold_uses_stdin(self, tmp_path):
         prompt = "a" * (_MAX_ARG_BYTES + 1)
-        result = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
-        assert result[1].startswith("@")
-        Path(result[1][1:]).unlink()
+        args, stdin_prompt = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
+        assert args == ["-p"]
+        assert stdin_prompt == prompt
 
     def test_multibyte_utf8_counted_correctly(self, tmp_path):
-        """Multi-byte chars push byte length past the threshold even when
-        char count is below it."""
-        # U+4E00 (一) is 3 bytes in UTF-8
         char_count = (_MAX_ARG_BYTES // 3) + 1
-        prompt = "\u4e00" * char_count
-        assert len(prompt) < _MAX_ARG_BYTES  # char count below threshold
-        assert len(prompt.encode("utf-8")) > _MAX_ARG_BYTES  # byte count above
-        result = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
-        assert result[1].startswith("@")
-        temp_path = Path(result[1][1:])
-        assert temp_path.read_text(encoding="utf-8") == prompt
-        temp_path.unlink()
+        prompt = "一" * char_count
+        assert len(prompt) < _MAX_ARG_BYTES
+        assert len(prompt.encode("utf-8")) > _MAX_ARG_BYTES
+        args, stdin_prompt = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
+        assert args == ["-p"]
+        assert stdin_prompt == prompt
 
-    def test_existing_at_file_syntax_unchanged(self, tmp_path):
-        """Existing @file prompt syntax still works and is unaffected."""
-        prompt_file = tmp_path / "my_prompt.txt"
-        prompt_file.write_text("hello from file", encoding="utf-8")
-        result = ClaudeCodeRunner._resolve_args(
-            ["-p", f"@{prompt_file}"], cwd=tmp_path,
-        )
-        assert result[0] == "-p"
-        # Should have been re-written to a temp file via the @file branch
-        assert result[1].startswith("@")
-        temp_path = Path(result[1][1:])
-        assert temp_path.read_text(encoding="utf-8") == "hello from file"
-        temp_path.unlink()
-
-    def test_temp_file_content_matches_original(self, tmp_path):
-        """The temp file contains the exact original prompt, byte-for-byte."""
+    def test_prompt_payload_preserved_byte_for_byte(self, tmp_path):
         prompt = "mixed: ascii + 中文 + émojis 🎉" * 5000
         assert len(prompt.encode("utf-8")) > _MAX_ARG_BYTES
-        result = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
-        temp_path = Path(result[1][1:])
-        assert temp_path.read_text(encoding="utf-8") == prompt
-        temp_path.unlink()
+        args, stdin_prompt = ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
+        assert stdin_prompt == prompt
+
+    def test_existing_at_file_syntax_passes_through(self, tmp_path):
+        """``-p @file`` is Claude CLI's own file-reference syntax, left as-is."""
+        prompt_file = tmp_path / "my_prompt.txt"
+        prompt_file.write_text("hello from file", encoding="utf-8")
+        args, stdin_prompt = ClaudeCodeRunner._resolve_args(
+            ["-p", f"@{prompt_file}"], cwd=tmp_path,
+        )
+        assert args == ["-p", f"@{prompt_file}"]
+        assert stdin_prompt is None
+
+    def test_bare_at_arg_passes_through(self, tmp_path):
+        args, stdin_prompt = ClaudeCodeRunner._resolve_args(
+            ["@/some/path.txt"], cwd=tmp_path,
+        )
+        assert args == ["@/some/path.txt"]
+        assert stdin_prompt is None
 
     def test_non_prompt_args_unaffected(self, tmp_path):
-        """Other arguments are passed through unchanged regardless of length."""
         long_arg = "x" * (_MAX_ARG_BYTES + 100)
-        result = ClaudeCodeRunner._resolve_args(
+        args, stdin_prompt = ClaudeCodeRunner._resolve_args(
             ["--model", "opus", "--verbose", long_arg], cwd=tmp_path,
         )
-        assert result == ["--model", "opus", "--verbose", long_arg]
+        assert args == ["--model", "opus", "--verbose", long_arg]
+        assert stdin_prompt is None
 
-    def test_write_failure_cleans_up_temp_file(self, tmp_path):
-        """If writing to the temp file fails, the orphan file is removed."""
-        prompt = "x" * (_MAX_ARG_BYTES + 1)
-        with patch("tempfile.NamedTemporaryFile") as mock_ntf:
-            mock_file = MagicMock()
-            mock_file.__enter__ = MagicMock(return_value=mock_file)
-            mock_file.__exit__ = MagicMock(return_value=False)
-            # Create a real temp file path so unlink can be verified
-            real_tmp = tmp_path / "se3" / "tmp" / "fake.prompt"
-            real_tmp.parent.mkdir(parents=True, exist_ok=True)
-            real_tmp.write_text("placeholder")
-            mock_file.name = str(real_tmp)
-            mock_file.write.side_effect = OSError("disk full")
-            mock_ntf.return_value = mock_file
-
-            with pytest.raises(OSError, match="disk full"):
-                ClaudeCodeRunner._resolve_args(["-p", prompt], cwd=tmp_path)
-
-            # Orphan temp file should have been cleaned up
-            assert not real_tmp.exists()
+    def test_multiple_oversized_prompts_last_wins_with_warning(self, tmp_path):
+        """Pathological pattern — two oversized ``-p`` in one invocation.
+        Last one wins (only one stdin stream), warning emitted."""
+        p1 = "x" * (_MAX_ARG_BYTES + 1)
+        p2 = "y" * (_MAX_ARG_BYTES + 1)
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            args, stdin_prompt = ClaudeCodeRunner._resolve_args(
+                ["-p", p1, "-p", p2], cwd=tmp_path,
+            )
+        assert stdin_prompt == p2
+        assert args == ["-p", "-p"]
+        assert any("Multiple oversized -p" in str(w.message) for w in captured)
 
 
 # =============================================================================
-# Auto-file lifecycle — end-to-end through run()/popen()
+# Stdin lifecycle — end-to-end through run()/popen()
 # =============================================================================
 
-class TestAutoFileLifecycle:
-    """End-to-end tests for temp file lifecycle through run() and popen()."""
+class TestStdinLifecycle:
+    """End-to-end: an oversized ``-p`` prompt reaches the child via stdin."""
 
-    def test_run_passes_at_file_and_cleans_up(self, tmp_path):
-        """run() passes @file arg to subprocess and cleans up temp file after."""
+    def test_run_pipes_large_prompt_via_stdin(self, tmp_path):
         prompt = "x" * (_MAX_ARG_BYTES + 1)
         runner = ClaudeCodeRunner(command={"cmd": "echo", "priority": 0})
-
-        captured_cmd = []
+        captured_cmd: list = []
+        captured_input = {}
 
         def mock_run(cmd, **kwargs):
             captured_cmd.extend(cmd)
+            captured_input["input"] = kwargs.get("input")
             return subprocess.CompletedProcess(
                 args=cmd, returncode=0, stdout="ok", stderr="",
             )
@@ -481,84 +468,68 @@ class TestAutoFileLifecycle:
         with patch("subprocess.run", side_effect=mock_run):
             result = runner.run(["-p", prompt], cwd=tmp_path)
 
-        # Subprocess should have received an @file arg
-        at_args = [a for a in captured_cmd if a.startswith("@")]
-        assert len(at_args) == 1
-        temp_path = Path(at_args[0][1:])
-
-        # Temp file should be cleaned up after run() returns
-        assert not temp_path.exists()
+        # Argv must not carry an @file tempfile reference.
+        assert not any(a.startswith("@") for a in captured_cmd)
+        # stdin carries the full prompt.
+        assert captured_input["input"] == prompt
         assert result.returncode == 0
+        tmp_dir = tmp_path / "se3" / "tmp"
+        assert not tmp_dir.exists() or list(tmp_dir.glob("*.prompt")) == []
 
-    def test_run_cleans_up_on_subprocess_failure(self, tmp_path):
-        """run() cleans up temp files even when subprocess fails."""
-        prompt = "x" * (_MAX_ARG_BYTES + 1)
+    def test_run_small_prompt_no_stdin_input(self, tmp_path):
         runner = ClaudeCodeRunner(command={"cmd": "echo", "priority": 0})
-
-        captured_cmd = []
+        captured_input = {}
 
         def mock_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
+            captured_input["input"] = kwargs.get("input")
             return subprocess.CompletedProcess(
-                args=cmd, returncode=1, stdout="", stderr="error",
+                args=cmd, returncode=0, stdout="ok", stderr="",
             )
 
         with patch("subprocess.run", side_effect=mock_run):
-            runner.run(["-p", prompt], cwd=tmp_path)
+            runner.run(["-p", "small"], cwd=tmp_path)
+        assert captured_input["input"] is None
 
-        at_args = [a for a in captured_cmd if a.startswith("@")]
-        assert len(at_args) == 1
-        assert not Path(at_args[0][1:]).exists()
-
-    def test_run_cleans_up_on_timeout(self, tmp_path):
-        """run() cleans up temp files on timeout."""
+    def test_run_large_prompt_timeout_no_tmp_files(self, tmp_path):
         prompt = "x" * (_MAX_ARG_BYTES + 1)
         runner = ClaudeCodeRunner(command={"cmd": "echo", "priority": 0})
 
-        captured_cmd = []
-
         def mock_run(cmd, **kwargs):
-            captured_cmd.extend(cmd)
             raise subprocess.TimeoutExpired(cmd="echo", timeout=30)
 
         with patch("subprocess.run", side_effect=mock_run):
             result = runner.run(["-p", prompt], timeout=30, cwd=tmp_path)
-
-        at_args = [a for a in captured_cmd if a.startswith("@")]
-        assert len(at_args) == 1
-        assert not Path(at_args[0][1:]).exists()
         assert result.returncode == 124
-
-    def test_popen_attaches_temp_files_for_caller_cleanup(self, tmp_path):
-        """popen() attaches temp files to the process for caller cleanup."""
-        prompt = "x" * (_MAX_ARG_BYTES + 1)
-        runner = ClaudeCodeRunner(command={"cmd": "echo", "priority": 0})
-
-        mock_proc = MagicMock(spec=subprocess.Popen)
-        with patch("subprocess.Popen", return_value=mock_proc):
-            proc, idx = runner.popen(["-p", prompt], cwd=tmp_path)
-
-        assert hasattr(proc, "_se3_temp_files")
-        assert len(proc._se3_temp_files) == 1
-        temp_path = proc._se3_temp_files[0]
-        assert temp_path.exists()
-        assert temp_path.suffix == ".prompt"
-
-        # Simulate caller cleanup
-        for tf in proc._se3_temp_files:
-            tf.unlink(missing_ok=True)
-        assert not temp_path.exists()
-
-    def test_popen_cleans_up_on_popen_failure(self, tmp_path):
-        """popen() cleans up temp files if Popen creation fails."""
-        prompt = "x" * (_MAX_ARG_BYTES + 1)
-        runner = ClaudeCodeRunner(command={"cmd": "echo", "priority": 0})
-
-        with patch("subprocess.Popen", side_effect=OSError("spawn failed")):
-            with pytest.raises(OSError, match="spawn failed"):
-                runner.popen(["-p", prompt], cwd=tmp_path)
-
-        # No orphan temp files should remain
         tmp_dir = tmp_path / "se3" / "tmp"
-        remaining = list(tmp_dir.glob("*.prompt"))
-        assert len(remaining) == 0
+        assert not tmp_dir.exists() or list(tmp_dir.glob("*.prompt")) == []
+
+    def test_popen_forces_stdin_pipe_for_large_prompt(self, tmp_path):
+        prompt = "x" * (_MAX_ARG_BYTES + 1)
+        runner = ClaudeCodeRunner(command={"cmd": "echo", "priority": 0})
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        mock_proc.stdin = MagicMock()
+        captured_kwargs = {}
+
+        def mock_popen_ctor(cmd, **kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_proc
+
+        with patch("subprocess.Popen", side_effect=mock_popen_ctor):
+            proc, _ = runner.popen(["-p", prompt], cwd=tmp_path)
+
+        assert captured_kwargs.get("stdin") == subprocess.PIPE
+        assert proc._se3_temp_files == []
+
+    def test_popen_small_prompt_does_not_override_stdin(self, tmp_path):
+        """Small prompt — caller's stdin kwarg should be respected."""
+        runner = ClaudeCodeRunner(command={"cmd": "echo", "priority": 0})
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        captured_kwargs = {}
+
+        def mock_popen_ctor(cmd, **kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_proc
+
+        with patch("subprocess.Popen", side_effect=mock_popen_ctor):
+            runner.popen(["-p", "small"], cwd=tmp_path, stdin=subprocess.DEVNULL)
+        assert captured_kwargs.get("stdin") == subprocess.DEVNULL

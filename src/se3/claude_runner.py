@@ -38,6 +38,39 @@ except ImportError:
 # Linux MAX_ARG_STRLEN is 128 KB; 100 KB leaves ~28 KB safety margin.
 _MAX_ARG_BYTES = 102400
 
+def _spawn_stdin_writer(proc: subprocess.Popen, payload: str) -> threading.Thread:
+    """Write ``payload`` to ``proc.stdin`` in a daemon thread and close it.
+
+    Used for the large-prompt path where the prompt is piped to Claude Code
+    via stdin. Writing inline would deadlock once the pipe buffer (typically
+    64KB) fills and the child has not drained enough to make room — the
+    child can't drain aggressively because it's waiting for EOF on stdin
+    before starting its work. Doing the write from a background thread lets
+    the main thread continue reading stdout in parallel.
+
+    The stream is closed after the payload is flushed so Claude sees EOF
+    and proceeds. Failures are swallowed; they'll surface as a subprocess
+    error via stdout/returncode.
+    """
+    def _writer() -> None:
+        try:
+            assert proc.stdin is not None
+            proc.stdin.write(payload)
+            proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            try:
+                if proc.stdin is not None:
+                    proc.stdin.close()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_writer, name="claude-stdin-writer", daemon=True)
+    t.start()
+    return t
+
+
 USAGE_LIMIT_KEYWORDS = [
     "usage limit",
     "rate limit",
@@ -91,118 +124,73 @@ class ClaudeCodeRunner(AgentRunner):
             self.commands = [self.command]
 
     @staticmethod
-    def _resolve_args(args: List[str], cwd: Optional[Path] = None) -> List[str]:
-        """Resolve arguments, handling @file syntax for prompt files.
+    def _resolve_args(
+        args: List[str], cwd: Optional[Path] = None
+    ) -> Tuple[List[str], Optional[str]]:
+        """Resolve arguments, rewriting oversized `-p` values to stdin.
 
-        If an argument starts with "@", treat it as a file path and read the
-        contents. This handles cases where prompt content is too long for
-        command-line arguments.
+        Behavior:
+        - Arguments starting with ``@`` and ``-p @file`` are left alone: that
+          is Claude CLI's documented file-reference syntax and callers that
+          use it have asked for that semantic explicitly.
+        - ``-p <text>`` / ``--prompt <text>`` where ``<text>`` is too large
+          to safely pass via argv (``> _MAX_ARG_BYTES``) has its value moved
+          to stdin. The second element of the return tuple carries that
+          stdin content; the returned argv keeps ``-p`` with no following
+          value. This avoids the older ``-p @tmpfile`` fallback that caused
+          Claude Code to *read the file as a referenced file* (subject to
+          the Read tool's 25k-token ceiling) rather than treating it as the
+          user message.
 
         Args:
-            args: Original arguments list
-            cwd: Working directory for relative paths
+            args: Original arguments list.
+            cwd: Working directory for resolving relative ``@file`` paths.
 
         Returns:
-            Resolved arguments list with @file syntax replaced
+            ``(resolved_args, stdin_prompt)``. ``stdin_prompt`` is ``None``
+            unless a large ``-p`` value was rerouted to stdin.
         """
-        resolved = []
+        resolved: List[str] = []
+        stdin_prompt: Optional[str] = None
         i = 0
-
-        # Use se3/tmp/ for temp files (visible, auto-cleaned by se3 done)
-        project_root = cwd or Path.cwd()
-        temp_dir = project_root / "se3" / "tmp"
-        temp_dir.mkdir(parents=True, exist_ok=True)
 
         while i < len(args):
             arg = args[i]
 
-            # Handle @file syntax
             if arg.startswith("@"):
-                file_path = Path(arg[1:])
-                # If path is relative, use cwd if provided
-                if not file_path.is_absolute() and cwd:
-                    file_path = cwd / file_path
-
-                if file_path.exists():
-                    # Write content to temp file and use @ syntax
-                    # This avoids command line length limitations
-                    import tempfile
-                    with tempfile.NamedTemporaryFile(mode='w', suffix='.prompt',
-                                                   dir=temp_dir, delete=False,
-                                                   encoding='utf-8') as f:
-                        temp_file = Path(f.name)
-                        try:
-                            f.write(file_path.read_text(encoding='utf-8'))
-                        except Exception:
-                            try:
-                                temp_file.unlink(missing_ok=True)
-                            except Exception:
-                                pass
-                            raise
-                    resolved.append(f"@{temp_file}")
-                else:
-                    # If file not found, keep original arg
-                    resolved.append(arg)
+                # Explicit file reference — pass through unchanged so Claude
+                # Code can apply its own @file semantics.
+                resolved.append(arg)
             elif arg in ["-p", "--prompt"] and (i + 1) < len(args):
-                # Handle -p/--prompt with file content
                 i += 1
                 prompt_arg = args[i]
 
                 if prompt_arg.startswith("@"):
-                    file_path = Path(prompt_arg[1:])
-                    if not file_path.is_absolute() and cwd:
-                        file_path = cwd / file_path
-
-                    if file_path.exists():
-                        # Write content to temp file and use @ syntax
-                        import tempfile
-                        with tempfile.NamedTemporaryFile(mode='w', suffix='.prompt',
-                                                       dir=temp_dir, delete=False,
-                                                       encoding='utf-8') as f:
-                            temp_file = Path(f.name)
-                            try:
-                                f.write(file_path.read_text(encoding='utf-8'))
-                            except Exception:
-                                try:
-                                    temp_file.unlink(missing_ok=True)
-                                except Exception:
-                                    pass
-                                raise
-                        resolved.append(arg)
-                        resolved.append(f"@{temp_file}")
-                    else:
-                        resolved.append(arg)
-                        resolved.append(prompt_arg)
+                    # Explicit @file reference following -p — pass through.
+                    resolved.append(arg)
+                    resolved.append(prompt_arg)
+                elif len(prompt_arg.encode("utf-8")) > _MAX_ARG_BYTES:
+                    # Too large for argv. Keep the flag, drop the value, and
+                    # route the prompt via stdin.
+                    if stdin_prompt is not None:
+                        # Multiple oversized -p values in one invocation is
+                        # not a supported pattern; last one wins.
+                        warnings.warn(
+                            "Multiple oversized -p prompts in a single claude "
+                            "invocation; only the last one is routed to stdin.",
+                            stacklevel=2,
+                        )
+                    resolved.append(arg)
+                    stdin_prompt = prompt_arg
                 else:
-                    # Regular prompt text — check if it exceeds the safe
-                    # execve() argument size and auto-file when necessary.
-                    if len(prompt_arg.encode('utf-8')) > _MAX_ARG_BYTES:
-                        import tempfile
-                        with tempfile.NamedTemporaryFile(
-                            mode='w', suffix='.prompt',
-                            dir=temp_dir, delete=False,
-                            encoding='utf-8',
-                        ) as f:
-                            temp_file = Path(f.name)
-                            try:
-                                f.write(prompt_arg)
-                            except Exception:
-                                try:
-                                    temp_file.unlink(missing_ok=True)
-                                except Exception:
-                                    pass
-                                raise
-                        resolved.append(arg)
-                        resolved.append(f"@{temp_file}")
-                    else:
-                        resolved.append(arg)
-                        resolved.append(prompt_arg)
+                    resolved.append(arg)
+                    resolved.append(prompt_arg)
             else:
                 resolved.append(arg)
 
             i += 1
 
-        return resolved
+        return resolved, stdin_prompt
 
     def run(
         self,
@@ -225,43 +213,31 @@ class ClaudeCodeRunner(AgentRunner):
             subprocess.CompletedProcess from the attempt.
         """
         cmd_name = self.command["cmd"]
-        temp_files = []
+
+        resolved_args, stdin_prompt = self._resolve_args(args, cwd)
+        full_cmd = [cmd_name, "--dangerously-skip-permissions"] + resolved_args
+
+        run_env = env
+        if run_env is None:
+            run_env = dict(os.environ)
+        run_env.pop("CLAUDECODE", None)
 
         try:
-            # Resolve arguments (handle @file syntax)
-            resolved_args = self._resolve_args(args, cwd)
-            for arg in resolved_args:
-                if arg.startswith("@"):
-                    temp_files.append(Path(arg[1:]))
+            result = subprocess.run(
+                full_cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                cwd=cwd,
+                env=run_env,
+                input=stdin_prompt,
+            )
+            return result
 
-            full_cmd = [cmd_name, "--dangerously-skip-permissions"] + resolved_args
-
-            run_env = env
-            if run_env is None:
-                run_env = dict(os.environ)
-            run_env.pop("CLAUDECODE", None)
-
-            try:
-                result = subprocess.run(
-                    full_cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=cwd,
-                    env=run_env,
-                )
-                return result
-
-            except subprocess.TimeoutExpired:
-                return subprocess.CompletedProcess(
-                    args=full_cmd, returncode=124, stdout="", stderr="timeout"
-                )
-        finally:
-            for temp_file in temp_files:
-                try:
-                    temp_file.unlink(missing_ok=True)
-                except Exception:
-                    pass
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(
+                args=full_cmd, returncode=124, stdout="", stderr="timeout"
+            )
 
     def popen(
         self,
@@ -296,36 +272,32 @@ class ClaudeCodeRunner(AgentRunner):
             cmd_index = len(self.commands) - 1
 
         cmd_entry = self.commands[cmd_index]
-        # Resolve arguments (handle @file syntax)
-        resolved_args = self._resolve_args(args, cwd)
-
-        # Track temp files created by _resolve_args for cleanup
-        temp_files: List[Path] = []
-        for arg in resolved_args:
-            if arg.startswith("@"):
-                temp_files.append(Path(arg[1:]))
+        resolved_args, stdin_prompt = self._resolve_args(args, cwd)
 
         full_cmd = [cmd_entry["cmd"], "--dangerously-skip-permissions"] + resolved_args
 
-        try:
-            proc = subprocess.Popen(
-                full_cmd,
-                cwd=cwd,
-                env=env,
-                stdout=stdout,
-                stderr=stderr,
-                **kwargs,
-            )
-        except Exception:
-            for tf in temp_files:
-                try:
-                    tf.unlink(missing_ok=True)
-                except Exception:
-                    pass
-            raise
+        # If we need to feed a prompt via stdin, force stdin=PIPE regardless
+        # of what the caller passed in kwargs, and write the prompt in a
+        # background thread so we don't deadlock on a full pipe buffer.
+        if stdin_prompt is not None:
+            kwargs = dict(kwargs)
+            kwargs["stdin"] = subprocess.PIPE
 
-        # Attach temp files to process for caller cleanup after process finishes
-        proc._se3_temp_files = temp_files
+        proc = subprocess.Popen(
+            full_cmd,
+            cwd=cwd,
+            env=env,
+            stdout=stdout,
+            stderr=stderr,
+            **kwargs,
+        )
+
+        if stdin_prompt is not None:
+            _spawn_stdin_writer(proc, stdin_prompt)
+
+        # Temp-file cleanup remains a no-op field for backward compat with
+        # callers that iterate over it.
+        proc._se3_temp_files = []
         return proc, cmd_index
 
     def retry_with_next(
@@ -489,14 +461,8 @@ class ClaudeCodeRunner(AgentRunner):
             run_env = dict(os.environ)
         run_env.pop("CLAUDECODE", None)
 
-        temp_files = []
         try:
-            # Resolve arguments (handle @file syntax)
-            resolved_args = self._resolve_args(args, cwd)
-            for arg in resolved_args:
-                if arg.startswith("@"):
-                    temp_files.append(Path(arg[1:]))
-
+            resolved_args, stdin_prompt = self._resolve_args(args, cwd)
             full_cmd = [cmd_name, "--dangerously-skip-permissions"] + resolved_args
 
             print(
@@ -516,6 +482,7 @@ class ClaudeCodeRunner(AgentRunner):
                 on_output=on_output,
                 on_activity=on_activity,
                 start_time=start_time,
+                stdin_prompt=stdin_prompt,
             )
 
             output = f"=== Command: {cmd_name} ===\n{result.output}"
@@ -555,13 +522,6 @@ class ClaudeCodeRunner(AgentRunner):
                 was_retry=False,
             )
 
-        finally:
-            for temp_file in temp_files:
-                try:
-                    temp_file.unlink(missing_ok=True)
-                except Exception:
-                    pass
-
     def _run_single_with_monitor(
         self,
         full_cmd: List[str],
@@ -575,6 +535,7 @@ class ClaudeCodeRunner(AgentRunner):
         on_output: Optional[Callable[[str], None]],
         on_activity: Optional[Callable[[], None]],
         start_time: float,
+        stdin_prompt: Optional[str] = None,
     ) -> "_SingleRunResult":
         """Run a single command with monitoring and enhanced hang detection."""
 
@@ -593,10 +554,17 @@ class ClaudeCodeRunner(AgentRunner):
                 should_retry=True,
             )
 
-        # Use stdin=None when in interactive terminal to support proper
-        # Unicode input (e.g., Chinese character deletion). Use DEVNULL
-        # in non-interactive mode to prevent hanging.
-        stdin_arg = None if sys.stdin.isatty() else subprocess.DEVNULL
+        # If we need to feed a prompt via stdin (large-prompt path), open a
+        # PIPE and write the prompt in a background thread so the monitor
+        # loop can concurrently drain stdout without deadlocking on a full
+        # pipe buffer.
+        # Otherwise: stdin=None in interactive terminal to support proper
+        # Unicode input (e.g., Chinese character deletion); DEVNULL in
+        # non-interactive mode to prevent hanging.
+        if stdin_prompt is not None:
+            stdin_arg = subprocess.PIPE
+        else:
+            stdin_arg = None if sys.stdin.isatty() else subprocess.DEVNULL
 
         proc = subprocess.Popen(
             full_cmd,
@@ -608,6 +576,9 @@ class ClaudeCodeRunner(AgentRunner):
             bufsize=1,
             universal_newlines=True,
         )
+
+        if stdin_prompt is not None:
+            _spawn_stdin_writer(proc, stdin_prompt)
 
         output_buffer = []
         last_activity = time.time()
