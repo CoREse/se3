@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import yaml
@@ -326,6 +326,203 @@ def insert_confirmation_steps(
     return result
 
 
+_GLOBAL_CONFIG_PATH_SUFFIX = (".se3", "config.yaml")
+
+
+def _read_yaml(path: Path) -> Optional[dict]:
+    """Read and parse a YAML file; log on parse error and return None.
+
+    Returns the parsed dict, an empty dict if the file is empty/yaml-null,
+    or None if the file does not exist or failed to parse.
+    """
+    if not path.exists():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+        if not isinstance(data, dict):
+            logger.warning(
+                "expected a YAML mapping at top of %s; got %s — ignoring",
+                path, type(data).__name__,
+            )
+            return None
+        return data
+    except Exception as exc:
+        logger.warning("failed to parse %s: %s", path, exc)
+        return None
+
+
+def _load_agent_configs(
+    project_root: Optional[Path],
+) -> tuple[dict, dict]:
+    """Read global and project YAML configs in one pass.
+
+    Returns ``(global_data, project_data)``; missing/invalid files are
+    returned as empty dicts so callers can uniformly use ``.get(...)``.
+    """
+    global_data = _read_yaml(Path.home() / _GLOBAL_CONFIG_PATH_SUFFIX[0] / _GLOBAL_CONFIG_PATH_SUFFIX[1]) or {}
+    project_data: dict = {}
+    if project_root is not None:
+        project_data = _read_yaml(Path(project_root) / "se3.yaml") or {}
+    return global_data, project_data
+
+
+def _default_chain_from_data(global_data: dict, project_data: dict) -> list[dict]:
+    """Build the default agent chain from already-parsed YAML data."""
+    agents: list[dict] = []
+
+    global_agents_raw = global_data.get("agents")
+    if global_agents_raw:
+        agents = _normalize_agents(global_agents_raw)
+    else:
+        global_commands = global_data.get("claude_commands", [])
+        if global_commands:
+            agents = _commands_to_agents(_normalize_commands(global_commands))
+
+    project_agents_raw = project_data.get("agents")
+    if project_agents_raw:
+        agents = _normalize_agents(project_agents_raw)
+    else:
+        project_commands = project_data.get("claude_commands", [])
+        if project_commands:
+            agents = _commands_to_agents(_normalize_commands(project_commands))
+
+    if not agents:
+        agents = [{"name": "claude", "type": "claude-code", "cmd": "claude", "priority": 0}]
+
+    agents.sort(key=lambda x: x.get("priority", 0), reverse=True)
+    return agents
+
+
+def _valid_step_keys() -> set[str]:
+    """Return the set of known StepType value strings (for typo detection)."""
+    # Import locally to avoid circular import at module load.
+    from .engine.models import StepType
+
+    return {s.value for s in StepType}
+
+
+_warned_unknown_step_keys_for: set[tuple[str, ...]] = set()
+_warned_non_dict_llm_caller_for: set[str] = set()
+
+
+def _warn_on_unknown_step_keys(
+    source_label: str, steps_dict: dict,
+) -> None:
+    """Log a warning when ``llm_caller.steps`` contains keys that are not
+    valid StepType values. Idempotent per (source, keyset) pair to avoid
+    flooding logs when resolve_agents is called many times per flow.
+    """
+    if not steps_dict:
+        return
+    valid = _valid_step_keys()
+    unknown = sorted(k for k in steps_dict.keys() if k not in valid)
+    if not unknown:
+        return
+    dedup_key = (source_label, *unknown)
+    if dedup_key in _warned_unknown_step_keys_for:
+        return
+    _warned_unknown_step_keys_for.add(dedup_key)
+    logger.warning(
+        "%s: llm_caller.steps has unknown step key(s) %s — likely a typo; "
+        "these declarations will be ignored",
+        source_label, unknown,
+    )
+
+
+def _step_override_from_data(
+    global_data: dict, project_data: dict, step_type: str,
+) -> Optional[list[dict]]:
+    """Extract and validate per-step override from already-parsed YAML data.
+
+    Returns normalized+sorted agent dicts, or None if no valid override is
+    declared for ``step_type``. Warns on unknown step keys in either
+    source (typo detection).
+    """
+    def _section(data: dict, source_label: str) -> dict:
+        llm_caller = data.get("llm_caller", {})
+        if not isinstance(llm_caller, dict):
+            if source_label not in _warned_non_dict_llm_caller_for:
+                _warned_non_dict_llm_caller_for.add(source_label)
+                logger.warning(
+                    "%s: top-level 'llm_caller' is not a mapping (got %s); "
+                    "ignoring per-step overrides",
+                    source_label, type(llm_caller).__name__,
+                )
+            return {}
+        section = llm_caller.get("steps", {})
+        return section if isinstance(section, dict) else {}
+
+    global_steps = _section(global_data, "~/.se3/config.yaml")
+    project_steps = _section(project_data, "se3.yaml")
+
+    _warn_on_unknown_step_keys("~/.se3/config.yaml", global_steps)
+    _warn_on_unknown_step_keys("se3.yaml", project_steps)
+
+    raw: Any = project_steps.get(step_type)
+    if raw is None:
+        raw = global_steps.get(step_type)
+    if raw is None:
+        return None
+
+    if not isinstance(raw, list):
+        logger.warning(
+            "llm_caller.steps.%s is not a list (got %s); ignoring override",
+            step_type, type(raw).__name__,
+        )
+        return None
+
+    per_entry_warned = False
+
+    valid_entries = [e for e in raw if isinstance(e, (str, dict))]
+    if len(valid_entries) != len(raw):
+        logger.warning(
+            "llm_caller.steps.%s contains non-str/dict entries; skipping them",
+            step_type,
+        )
+        per_entry_warned = True
+
+    # Hard-override semantics mean a typo like ``- priority: 10`` (no cmd)
+    # must not silently become a default ``claude`` agent — reject both
+    # dict entries without a usable cmd AND blank string entries before
+    # normalization, so the user-declared chain never contains an agent
+    # with an empty cmd.
+    filtered: list = []
+    for e in valid_entries:
+        if isinstance(e, str):
+            if not e.strip():
+                logger.warning(
+                    "llm_caller.steps.%s entry %r is a blank string; skipping",
+                    step_type, e,
+                )
+                per_entry_warned = True
+                continue
+        elif isinstance(e, dict):
+            if not (isinstance(e.get("cmd"), str) and e.get("cmd").strip()):
+                logger.warning(
+                    "llm_caller.steps.%s entry %r has no usable 'cmd'; skipping",
+                    step_type, e,
+                )
+                per_entry_warned = True
+                continue
+        filtered.append(e)
+
+    if not filtered:
+        # Suppress the aggregate warning when a more specific per-entry
+        # warning has already been emitted for this same mistake.
+        if not per_entry_warned:
+            logger.warning(
+                "llm_caller.steps.%s is empty or has no valid entries; "
+                "ignoring override (falling back to default chain)",
+                step_type,
+            )
+        return None
+
+    agents = _normalize_agents(filtered)
+    agents.sort(key=lambda x: x.get("priority", 0), reverse=True)
+    return agents
+
+
 def load_agents(project_root: Optional[Path] = None) -> list[dict]:
     """Load agent configurations from project and global configuration.
 
@@ -342,53 +539,66 @@ def load_agents(project_root: Optional[Path] = None) -> list[dict]:
         List of agent config dicts ``{name, type, cmd, priority}`` sorted by
         priority descending.
     """
-    agents: list[dict] = []
+    global_data, project_data = _load_agent_configs(project_root)
+    return _default_chain_from_data(global_data, project_data)
 
-    # --- Load global config ---
-    global_config_path = Path.home() / ".se3" / "config.yaml"
-    global_data: dict = {}
-    if global_config_path.exists():
-        try:
-            with open(global_config_path, "r", encoding="utf-8") as f:
-                global_data = yaml.safe_load(f) or {}
-        except Exception:
-            pass
 
-    global_agents_raw = global_data.get("agents")
-    if global_agents_raw:
-        agents = _normalize_agents(global_agents_raw)
-    else:
-        global_commands = global_data.get("claude_commands", [])
-        if global_commands:
-            agents = _commands_to_agents(_normalize_commands(global_commands))
+def load_step_agents(
+    project_root: Optional[Path],
+    step_type: Optional[str],
+) -> Optional[list[dict]]:
+    """Load per-step agent override from ``llm_caller.steps.<step_type>``.
 
-    # --- Load project config (overrides global) ---
-    if project_root is not None:
-        project_root = Path(project_root)
-        project_config_path = project_root / "se3.yaml"
-        if project_config_path.exists():
-            try:
-                with open(project_config_path, "r", encoding="utf-8") as f:
-                    project_data = yaml.safe_load(f) or {}
-            except Exception:
-                project_data = {}
+    Reads ``llm_caller.steps.<step_type>`` from project-level se3.yaml with
+    fallback to the global ``~/.se3/config.yaml`` entry of the same shape.
+    Project-level declaration of a given step fully replaces the global
+    declaration for that step (no deep merge), mirroring ``load_agents``.
 
-            project_agents_raw = project_data.get("agents")
-            if project_agents_raw:
-                agents = _normalize_agents(project_agents_raw)
-            else:
-                project_commands = project_data.get("claude_commands", [])
-                if project_commands:
-                    agents = _commands_to_agents(_normalize_commands(project_commands))
+    When the step has no declaration, returns None so callers can fall back
+    to the default chain from :func:`load_agents`. Empty lists and
+    structurally invalid values (not a list, entries not str/dict, dict
+    entries lacking a usable ``cmd``) are treated as "no declaration" — a
+    warning is logged but no exception is raised, matching the
+    clamp-and-warn policy used elsewhere (e.g. :class:`TestConfig`).
 
-    # Default: single claude agent
-    if not agents:
-        agents = [{"name": "claude", "type": "claude-code", "cmd": "claude", "priority": 0}]
+    Args:
+        project_root: Project root directory, or None to use global config
+            only.
+        step_type: StepType value string (e.g. ``"implement"``, ``"plan"``).
+            None or empty string short-circuits to None.
 
-    # Sort by priority (higher first)
-    agents.sort(key=lambda x: x.get("priority", 0), reverse=True)
+    Returns:
+        Normalized agent dicts sorted by ``priority`` descending, or None
+        when no override is declared for this step.
+    """
+    if not step_type:
+        return None
+    global_data, project_data = _load_agent_configs(project_root)
+    return _step_override_from_data(global_data, project_data, step_type)
 
-    return agents
+
+def resolve_agents(
+    project_root: Optional[Path],
+    step_type: Optional[str],
+) -> tuple[list[dict], bool]:
+    """Resolve the effective agent chain for a step in a single YAML read.
+
+    Returns ``(agents, is_step_override)``. When ``step_type`` declares a
+    valid ``llm_caller.steps.<step_type>`` override, that list is returned
+    verbatim (no fallback to the default chain) and the flag is True.
+    Otherwise the default chain from the top-level ``agents`` /
+    ``claude_commands`` (or built-in default) is returned and the flag is
+    False.
+
+    Used by :class:`LLMCaller` to avoid the cost of reading the same YAML
+    files twice (once via ``load_step_agents``, once via ``load_agents``).
+    """
+    global_data, project_data = _load_agent_configs(project_root)
+    if step_type:
+        override = _step_override_from_data(global_data, project_data, step_type)
+        if override:
+            return override, True
+    return _default_chain_from_data(global_data, project_data), False
 
 
 def load_claude_commands(project_root: Optional[Path] = None) -> list[dict]:

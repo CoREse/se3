@@ -24,13 +24,36 @@ confirmation:
 # Claude command resolution (optional)
 # Multiple commands with priority-based fallback on usage limit / timeout
 # Higher priority = tried first. Project-level overrides global (~/.se3/config.yaml)
+#
+# NOTE: `claude_commands` is a legacy alias for the authoritative `agents`
+# field; it is auto-converted at load time. New configs should prefer
+# `agents:` directly.
 claude_commands:
-  - cmd: "kclaude"
+  - cmd: "claude"
     priority: 10
   # - cmd: "kclaude"
   #   priority: 5
   # - cmd: "hclaude"
   #   priority: 1
+
+# Per-step LLM caller override (optional)
+# Override the default caller chain for specific steps. The declared list
+# is a HARD override — there is no silent fallback to the default chain,
+# so if you want the default claude as a tail you must list it explicitly.
+# Rotation on infrastructure errors happens strictly within the step's
+# list. Steps with no entry here continue to use the default chain above.
+# llm_caller:
+#   steps:
+#     implement:
+#       - name: "big-claude"
+#         type: "claude-code"
+#         cmd: "claude-opus"
+#         priority: 10
+#     summarize:
+#       - name: "small-claude"
+#         type: "claude-code"
+#         cmd: "hclaude"
+#         priority: 10
 
 # Version Bumping Configuration
 # Automatically bump version on commit step based on task type

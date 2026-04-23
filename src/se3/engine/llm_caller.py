@@ -435,11 +435,25 @@ class LLMCaller:
         self.last_raw_result: Optional[str] = None
 
         # Agent management
+        # Resolution order when ``agents`` is not explicitly provided:
+        #   1. Per-step override from ``llm_caller.steps.<step_type>`` — if
+        #      declared, it is a HARD override with no fallback to the
+        #      default chain. Exhausting it fails the call; users who want
+        #      a default-claude tail must list it explicitly in the step's
+        #      override.
+        #   2. Otherwise, the default chain from ``load_agents`` (top-level
+        #      ``agents`` / legacy ``claude_commands`` / built-in default).
         if agents is not None:
             self._agents = agents
         else:
-            from ..config import load_agents
-            self._agents = load_agents(self.project_root)
+            from ..config import resolve_agents
+            resolved, is_override = resolve_agents(self.project_root, self.step_type)
+            if is_override:
+                logger.info(
+                    "Using per-step agent override for step '%s' (%d agent(s))",
+                    self.step_type, len(resolved),
+                )
+            self._agents = resolved
         self._current_agent_index = 0
         self._runner_cache: Dict[str, AgentRunner] = {}
 

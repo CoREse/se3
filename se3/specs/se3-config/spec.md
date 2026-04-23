@@ -22,7 +22,9 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - `confirmation.enabled`: Enable CONFIRM steps (default: false)
 - `confirmation.steps`: Steps after which to insert CONFIRM (default: [plan])
 - `confirmation.reviewer`: Who reviews — "human" or "llm" (default: "human")
-- `claude_commands`: List of `{cmd, priority}` for Claude CLI resolution
+- `agents`: List of agent configs `{name, type, cmd, priority}` (authoritative)
+- `claude_commands`: Legacy alias for `agents`, auto-converted at load time (deprecated — use `agents`)
+- `llm_caller.steps.<step_name>`: Per-step agent override (optional, hard override)
 - `language.language`: Language for human-facing steps (default: null)
 - `language.spec_language`: Language for spec writing (default: null)
 - `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: ["summarize"])
@@ -290,9 +292,26 @@ language:
 
 ### Requirement: Claude Commands Configuration
 
-The system SHALL support Claude CLI command resolution.
+The system SHALL support Claude CLI command resolution. The authoritative
+field is `agents`; `claude_commands` is a **legacy alias** retained for
+backward compatibility and is auto-converted to an `agents` list at load
+time with `type: "claude-code"`. When both fields exist in the same config
+file, `agents` takes priority and `claude_commands` is ignored.
 
-**Claude commands format:**
+**Authoritative (`agents`) format:**
+```yaml
+agents:
+  - name: "primary"
+    type: "claude-code"
+    cmd: "claude"
+    priority: 10
+  - name: "backup"
+    type: "claude-code"
+    cmd: "claude-dev"
+    priority: 1
+```
+
+**Legacy (`claude_commands`) format — still accepted:**
 ```yaml
 claude_commands:
   - cmd: "claude"
@@ -305,3 +324,102 @@ claude_commands:
 - **GIVEN** multiple claude_commands configured
 - **WHEN** first command fails or hits rate limit
 - **THEN** the framework tries the next command in priority order
+
+#### Scenario: Agents field takes priority over claude_commands
+- **GIVEN** a config declaring both `agents` and `claude_commands`
+- **WHEN** the framework loads the default caller chain
+- **THEN** it uses the `agents` list and ignores `claude_commands`
+
+### Requirement: Per-Step LLM Caller Override
+
+The system SHALL support overriding the LLM caller chain on a per-step
+basis via `llm_caller.steps.<step_name>`, where `<step_name>` is a
+`StepType` value (e.g. `analyze`, `plan`, `implement`, `summarize`,
+`verify_spec`).
+
+The per-step list uses the same normalized entry shape as the top-level
+`agents` list: each entry is a string (treated as `cmd` with default type
+`claude-code`) or a dict `{name?, type?, cmd, priority?}`. Entries are
+sorted by `priority` descending at load time.
+
+**Override semantics (hard override, no fallback to default chain):**
+- When `llm_caller.steps.<step>` is declared with a non-empty valid list,
+  the step uses **only** that list as its caller chain. The default chain
+  from top-level `agents` / `claude_commands` is **not** appended as a
+  fallback — users who want a default-claude tail MUST list it explicitly
+  in the step's override.
+- Agent rotation on infrastructure errors happens strictly within the
+  step's override list. When exhausted, the call fails rather than
+  silently falling back to the default chain.
+- When `agents` is explicitly passed to the `LLMCaller` constructor
+  (e.g. by internal helpers such as the JSON extractor), that argument
+  takes the highest priority and bypasses both the per-step override and
+  the default chain.
+- Steps with no declaration under `llm_caller.steps` continue to use the
+  default chain via `load_agents`. Other config keys are unaffected —
+  `llm_caller.steps` is orthogonal to `confirmation.llm_reviewer.model`
+  and similar step-specific settings.
+
+**Invalid declarations are ignored (warn + fall back to default):**
+- Missing key, empty list, non-list value, or entries that are neither
+  string nor dict produce a warning and are treated as "no override" —
+  the step uses the default chain rather than raising an error, matching
+  the clamp-and-warn policy used elsewhere (e.g. `TestConfig`).
+
+**Example configuration:**
+```yaml
+llm_caller:
+  steps:
+    # Expensive step — use a higher-capability agent only
+    implement:
+      - name: "big-claude"
+        type: "claude-code"
+        cmd: "claude-opus"
+        priority: 10
+    # Cheap step — use a smaller agent; default claude NOT appended
+    summarize:
+      - name: "small-claude"
+        type: "claude-code"
+        cmd: "hclaude"
+        priority: 10
+```
+
+#### Scenario: No per-step override declared
+- **WHEN** `llm_caller.steps` has no entry for the current step
+- **THEN** the step uses the default caller chain from `load_agents`
+
+#### Scenario: Per-step override used
+- **GIVEN** `llm_caller.steps.implement` declares a non-empty list
+- **WHEN** the implement step constructs its LLMCaller
+- **THEN** the caller uses the declared list as its complete chain
+- **AND** the default chain is NOT appended as a fallback
+
+#### Scenario: Project overrides global per-step declaration
+- **GIVEN** global config declares `llm_caller.steps.implement`
+- **AND** project config also declares `llm_caller.steps.implement`
+- **WHEN** the implement step runs in the project
+- **THEN** the project declaration fully replaces the global declaration
+
+#### Scenario: Exhaustion does not fall back to default chain
+- **GIVEN** `llm_caller.steps.analyze` lists two agents A and B
+- **WHEN** both A and B fail with infrastructure errors
+- **THEN** the LLM call fails rather than rotating to the default chain
+
+#### Scenario: Explicit agents argument wins over per-step override
+- **GIVEN** `llm_caller.steps.analyze` declares an override list
+- **WHEN** LLMCaller is constructed with an explicit `agents=[...]`
+- **THEN** the explicit argument is used and both the per-step override
+  and the default chain are bypassed
+
+#### Scenario: Empty or malformed override ignored
+- **GIVEN** `llm_caller.steps.implement: []` (or a non-list value, or
+  entries that are neither string nor dict)
+- **WHEN** the implement step constructs its LLMCaller
+- **THEN** a warning is logged
+- **AND** the step falls back to the default caller chain
+
+#### Scenario: Other steps unaffected by a single override
+- **GIVEN** `llm_caller.steps.implement` is declared but `plan` is not
+- **WHEN** the plan step runs
+- **THEN** it uses the default caller chain, unaffected by the implement
+  override
