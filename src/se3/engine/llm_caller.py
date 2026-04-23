@@ -454,6 +454,12 @@ class LLMCaller:
                     self.step_type, len(resolved),
                 )
             self._agents = resolved
+        if not self._agents:
+            raise ValueError(
+                "LLMCaller requires a non-empty agents list; got empty. "
+                "Check llm_caller.defaults / llm_caller.steps override "
+                "or the explicit agents argument."
+            )
         self._current_agent_index = 0
         self._runner_cache: Dict[str, AgentRunner] = {}
 

@@ -76,9 +76,10 @@ The system SHALL support configuring framework behavior via `se3.yaml`.
 **Configuration options:**
 - `version.enabled`: Enable automatic version bumping (default: true)
 - `version.bump_rules`: Map task types to bump types (feature→minor, bugfix→patch, etc.)
-- `confirmation.enabled`: Enable confirmation steps (default: false)
-- `confirmation.steps`: Steps after which to insert CONFIRM (default: [plan])
-- `claude_commands`: List of Claude CLI commands with priorities
+- `agents`: Top-level dict registry `{name: {type, cmd, priority?}}` — see the `se3-config` Agent Registry requirement
+- `llm_caller.defaults`: Default caller chain as a list of agent names referencing `agents` (optional)
+- `llm_caller.steps.<step_name>`: Per-step hard override as a list of agent names (optional)
+- `confirmation.steps`: Per-step confirmation dict `{<step_name>: {reviewer?, max_iterations?}}` — steps not listed are NOT confirmed
 
 #### Scenario: Using default configuration
 - **WHEN** no se3.yaml file exists in the project

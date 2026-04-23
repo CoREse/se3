@@ -408,8 +408,59 @@ class TestBuildStepInputsConfirm:
         assert next_step is not None
         assert next_step.step_type == StepType.CONFIRM
         assert next_step.inputs["reviewer"] == "human"
-        # Human path doesn't get an agents list
+        # Human path doesn't get an agents list (it goes through MCP call path).
         assert "agents" not in next_step.inputs
+        # max_iterations is propagated uniformly across reviewer branches so
+        # downstream code can read inputs["max_iterations"] unconditionally,
+        # even though confirm_handler ignores it on the human path.
+        assert "max_iterations" in next_step.inputs
+
+    def test_defensive_guard_unknown_reviewer_registry(
+        self, tmp_path, isolated_global_home, monkeypatch,
+    ):
+        """When the CONFIRM helper's post-parse invariant breaks (e.g. an
+        agent disappears from the registry between parsing and resolution),
+        _build_step_inputs must surface this as ``StateMachineError`` rather
+        than letting the flow silently proceed with an empty agent chain.
+
+        This simulates the drift by monkeypatching ``resolve_confirm_inputs``
+        to return a payload that names an agent but omits the resolved
+        agent list — an internal invariant violation that can only happen if
+        the helper's contract is broken (e.g. by a buggy refactor or by a
+        concurrent edit of the YAML between parsing and agent resolution).
+        """
+        from se3.engine.models import StepType
+        from se3.engine.state_machine import StateMachineError
+        from se3 import config as config_module
+
+        (tmp_path / "se3.yaml").write_text(
+            "agents:\n"
+            "  reviewer_bot: {cmd: claude-opus}\n"
+            "confirmation:\n"
+            "  steps:\n"
+            "    plan: {reviewer: reviewer_bot}\n"
+        )
+        sm = self._make_state_machine(tmp_path)
+        flow = self._make_flow_with_plan(tmp_path)
+
+        def broken_resolve(project_root, reviewed_type):
+            return {
+                "reviewer": "reviewer_bot",
+                "max_iterations": None,
+                # Missing / empty 'agents' list — invariant violation.
+                "agents": [],
+            }
+
+        # Patch where the name is looked up (state_machine imports it).
+        from se3.engine import state_machine as sm_module
+        monkeypatch.setattr(sm_module, "resolve_confirm_inputs", broken_resolve)
+
+        with pytest.raises(StateMachineError) as excinfo:
+            sm.transition_to_next(flow)
+
+        msg = str(excinfo.value)
+        assert "reviewer_bot" in msg
+        assert "plan" in msg
 
     def test_agent_name_reviewer_path(self, tmp_path, isolated_global_home):
         from se3.engine.models import StepType

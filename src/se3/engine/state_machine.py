@@ -31,9 +31,7 @@ from .issue_manager import IssueManager
 from .persistence import PersistenceManager
 from ..config import (
     insert_confirmation_steps,
-    load_agent_registry,
-    load_agents,
-    load_confirmation_config,
+    resolve_confirm_inputs,
 )
 from .. import __version__ as se3_version
 
@@ -706,9 +704,6 @@ class StateMachine:
             "flow_id": flow.flow_id,
         }
 
-        # Load confirmation config for reviewer settings
-        config = load_confirmation_config(self.project_root)
-
         # Gather outputs from previous steps
         for step_id in flow.state.step_history:
             step = flow.state.steps.get(step_id)
@@ -814,42 +809,72 @@ class StateMachine:
                 inputs["step_to_review_id"] = last_non_confirm_step.step_id
                 inputs["step_to_review_type"] = reviewed_type
 
-                step_cfg = config.get("steps", {}).get(reviewed_type)
-                if step_cfg is None:
-                    # Defensive fallback — insert_confirmation_steps is the
-                    # only path that puts CONFIRM into the sequence, and it
-                    # gates on this same dict, so reaching here implies a
-                    # config drift between dict snapshots. Behave as 'human'
-                    # so the user can decide what to do.
+                # Single YAML read for the entire CONFIRM resolution —
+                # consolidates what used to be three separate config
+                # reads (load_confirmation_config + load_agent_registry
+                # + load_agents) per step transition.
+                resolved = resolve_confirm_inputs(
+                    self.project_root, reviewed_type,
+                )
+
+                if resolved is None:
+                    # Defensive fallback — insert_confirmation_steps is
+                    # the only path that puts CONFIRM into the sequence
+                    # and it gates on this same dict, so reaching here
+                    # implies config drift between dict snapshots (e.g.
+                    # YAML edited mid-flow). Behave as 'human' so the
+                    # user can decide what to do. max_iterations is
+                    # carried as None for schema uniformity across
+                    # branches even though confirm_handler ignores it
+                    # on the human path.
                     logger.warning(
                         "CONFIRM step inserted for %s but no entry under "
                         "confirmation.steps; defaulting to human reviewer",
                         reviewed_type,
                     )
                     inputs["reviewer"] = "human"
+                    inputs["max_iterations"] = None
                 else:
-                    reviewer = step_cfg.get("reviewer")
-                    max_iters = step_cfg.get("max_iterations") or 3
+                    # Use explicit 'is not None' so a persisted 0 from
+                    # an older engine build surfaces loudly instead of
+                    # being silently replaced by the default. The
+                    # current parser rejects 0/negative → None, so the
+                    # 'or 3' form works in practice, but a strict check
+                    # keeps resume-path behavior predictable across
+                    # schema revisions.
+                    raw_iters = resolved.get("max_iterations")
+                    max_iters = raw_iters if raw_iters is not None else 3
+
+                    reviewer = resolved.get("reviewer")
                     if reviewer == "human":
                         inputs["reviewer"] = "human"
-                    elif reviewer:
-                        # Agent name reference — resolve against registry.
-                        registry = load_agent_registry(self.project_root)
-                        agent = registry.get(reviewer)
-                        if agent is None:
-                            # load_confirmation_config already fail-fasts on
-                            # this; keep a defensive guard for completeness.
-                            raise StateMachineError(
-                                f"confirmation.steps.{reviewed_type}.reviewer "
-                                f"references unknown agent {reviewer!r}"
-                            )
-                        inputs["reviewer"] = reviewer
-                        inputs["agents"] = [agent.to_agent_dict()]
+                        # Carry max_iterations uniformly so callers
+                        # that read step.inputs['max_iterations']
+                        # unconditionally don't trip on a KeyError.
+                        # confirm_handler ignores it on this path.
+                        inputs["max_iterations"] = max_iters
+                    elif reviewer is None:
+                        inputs["reviewer"] = None
+                        inputs["agents"] = resolved["agents"]
                         inputs["max_iterations"] = max_iters
                     else:
-                        # Reviewer omitted — fall back to llm_caller.defaults.
-                        inputs["reviewer"] = None
-                        inputs["agents"] = load_agents(self.project_root)
+                        # Agent-name reference. resolve_confirm_inputs
+                        # already performed the registry lookup and
+                        # either returned the resolved agent list or
+                        # raised ValueError. Guard against 'agents'
+                        # being unexpectedly absent — this would only
+                        # happen if the helper contract breaks and is
+                        # treated as a StateMachineError.
+                        agents = resolved.get("agents")
+                        if not agents:
+                            raise StateMachineError(
+                                f"confirmation.steps.{reviewed_type}.reviewer "
+                                f"references agent {reviewer!r} but no "
+                                f"agent dict was resolved; this is an "
+                                f"internal invariant violation"
+                            )
+                        inputs["reviewer"] = reviewer
+                        inputs["agents"] = agents
                         inputs["max_iterations"] = max_iters
 
         # Special handling for TEST step when in fix iteration

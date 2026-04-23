@@ -34,18 +34,28 @@
 
 ## 确认步骤配置（可选）
 
-在 `se3.yaml` 中配置确认/审阅步骤：
+在 `se3.yaml` 中按步骤配置确认/审阅（per-step dict 模型）：仅列出的 step 会被确认，没有全局总开关。
 
 ```yaml
+agents:
+  primary:      { type: claude-code, cmd: claude,      priority: 10 }
+  reviewer_bot: { type: claude-code, cmd: claude-opus }
+
+llm_caller:
+  defaults: [primary]              # LLM 审阅省略 reviewer 时回落到这条链
+
 confirmation:
-  enabled: true                    # 启用确认步骤
-  steps: ["propose", "design"]     # 在哪些步骤后插入确认
-  reviewer: "human"                # 审阅者：human 或 llm
-  llm_reviewer:
-    model: null                    # LLM 模型（null=默认）
-    max_iterations: 3              # 最大审阅-修改循环次数
+  steps:                           # 未列出的 step = 不确认
+    plan:    { reviewer: human }                           # 走 MCP call 人工确认
+    design:  { reviewer: reviewer_bot, max_iterations: 3 } # 指定 agent 做 LLM 审阅
+    propose: {}                                            # 省略 reviewer → 回落 llm_caller.defaults
 ```
 
-审阅模式：
-- `human` — 创建 MCP call 文件，等待人工确认
-- `llm` — 自动 LLM 审阅，根据配置可能循环修改
+每个 step 配置字段：
+- `reviewer`:
+  - `"human"` — 创建 MCP call 文件，等待人工确认
+  - agent name（在顶层 `agents` 中注册） — 用该 agent 做单 agent LLM 审阅
+  - 省略或 `null` — 使用 `llm_caller.defaults` 的链做 LLM 审阅
+- `max_iterations` — LLM 审阅的最大修改循环次数（仅对非 `human` reviewer 生效）
+
+引用未注册的 agent name 将在启动阶段 fail-fast。

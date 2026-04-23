@@ -75,37 +75,37 @@ class TestBuildStepInputsAnalyzeMapping:
         })
         return flow
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_analyze_forwards_project_summary(self, _cfg, sm, flow_with_analyze):
         inputs = sm._build_step_inputs(flow_with_analyze, StepType.PLAN)
         assert inputs["project_summary"] == "Project: SE3 Framework, branch: main"
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_analyze_forwards_relevant_specs(self, _cfg, sm, flow_with_analyze):
         inputs = sm._build_step_inputs(flow_with_analyze, StepType.PLAN)
         assert inputs["relevant_specs"] == ["flow-engine", "base"]
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_analyze_forwards_spec_content(self, _cfg, sm, flow_with_analyze):
         inputs = sm._build_step_inputs(flow_with_analyze, StepType.PLAN)
         assert inputs["spec_content"]["base"] == "# Base spec content"
         assert inputs["spec_content"]["flow-engine"] == "# Flow engine spec content"
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_analyze_forwards_task_type_and_scope(self, _cfg, sm, flow_with_analyze):
         """Original ANALYZE outputs still forwarded."""
         inputs = sm._build_step_inputs(flow_with_analyze, StepType.PLAN)
         assert inputs["task_type"] == "feature"
         assert inputs["scope"] == "engine module"
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_verify_spec_gets_spec_content_from_analyze(self, _cfg, sm, flow_with_analyze):
         """verify_spec (direct consumer in review flow) gets spec_content from analyze."""
         inputs = sm._build_step_inputs(flow_with_analyze, StepType.VERIFY_SPEC)
         assert "spec_content" in inputs
         assert inputs["spec_content"]["flow-engine"] == "# Flow engine spec content"
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_implement_gets_spec_content_from_analyze(self, _cfg, sm, flow_with_analyze):
         """implement gets spec_content from analyze (via inputs passthrough)."""
         inputs = sm._build_step_inputs(flow_with_analyze, StepType.IMPLEMENT)
@@ -119,7 +119,7 @@ class TestBuildStepInputsDeprecatedBackwardCompat:
     def sm(self, tmp_path):
         return StateMachine(tmp_path)
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_old_project_summary_step_still_forwards(self, _cfg, sm, tmp_path):
         """Old persisted flow with PROJECT_SUMMARY step should still forward project_summary."""
         flow = _make_flow(tmp_path)
@@ -129,7 +129,7 @@ class TestBuildStepInputsDeprecatedBackwardCompat:
         inputs = sm._build_step_inputs(flow, StepType.PLAN)
         assert inputs["project_summary"] == "Old-style project summary"
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_old_read_spec_step_still_forwards(self, _cfg, sm, tmp_path):
         """Old persisted flow with READ_SPEC step should still forward spec data."""
         flow = _make_flow(tmp_path)
@@ -290,7 +290,7 @@ class TestDownstreamSpecContentAccess:
         })
         return flow
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_plan_receives_spec_content(self, _cfg, sm, tmp_path):
         flow = _make_flow(tmp_path)
         _add_completed_step(flow, StepType.ANALYZE, {
@@ -303,13 +303,13 @@ class TestDownstreamSpecContentAccess:
         inputs = sm._build_step_inputs(flow, StepType.PLAN)
         assert inputs["spec_content"] == {"base": "# Base"}
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_implement_receives_spec_content(self, _cfg, sm, tmp_path):
         flow = self._flow_with_analyze_and_plan(tmp_path)
         inputs = sm._build_step_inputs(flow, StepType.IMPLEMENT)
         assert inputs["spec_content"] == {"flow-engine": "# FE spec", "base": "# Base spec"}
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_verify_spec_receives_spec_content_in_review_flow(self, _cfg, sm, tmp_path):
         """In review flow, verify_spec is the direct consumer of analyze's spec_content."""
         flow = _make_flow(tmp_path, task_type="review")

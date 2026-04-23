@@ -359,39 +359,24 @@ def _warn_deprecated_confirmation_fields(source_label: str, section: dict) -> No
         )
 
 
-def load_confirmation_config(project_root: Optional[Path] = None) -> dict:
-    """Load per-step confirmation configuration from global + project YAML.
+def _merge_confirmation_steps(
+    global_data: dict, project_data: dict,
+) -> dict[str, dict]:
+    """Merge ``confirmation.steps`` from global + project YAML.
 
-    Returns a dict shaped as::
+    Shared by :func:`load_confirmation_config` and
+    :func:`resolve_confirm_inputs` so schema handling (deprecated-field
+    warnings, list-form legacy warning, non-dict warning, per-entry
+    normalization) lives in one place.
 
-        {"steps": {step_name: {"reviewer": Optional[str],
-                                "max_iterations": Optional[int]}}}
+    Returns an entry-level-merged dict ``{step_name: {"reviewer": ...,
+    "max_iterations": ...}}``. Project entries override global entries
+    with the same key; non-conflicting entries coexist.
 
-    A step is confirmed iff it appears as a key in ``steps``. The
-    legacy global ``enabled`` switch has been removed — there is no
-    other on/off control.
-
-    ``reviewer`` semantics inside each step entry:
-    - ``'human'``   → MCP call file + interactive resume path
-    - agent name   → LLM review using that registered agent (fail-fast
-      at startup if the name is not in the top-level ``agents`` registry)
-    - ``None``     → LLM review using the default ``llm_caller.defaults``
-      chain (resolved by ``state_machine`` at step build time)
-
-    Deprecated fields (``confirmation.enabled``, top-level
-    ``confirmation.reviewer``, ``confirmation.llm_reviewer``, list-form
-    ``confirmation.steps``) are detected, warned about once per source,
-    and ignored.
-
-    Global + project ``confirmation.steps`` are merged at the entry
-    level: same step key in project overrides global; non-conflicting
-    entries from either side coexist.
+    This helper does NOT perform agent-name validation — callers must
+    invoke :func:`_validate_confirmation_reviewer_names` to fail-fast on
+    unknown references.
     """
-    if project_root is None:
-        project_root = Path.cwd()
-
-    global_data, project_data = _load_agent_configs(project_root)
-
     sources = [
         ("~/.se3/config.yaml", global_data),
         ("se3.yaml", project_data),
@@ -451,24 +436,75 @@ def load_confirmation_config(project_root: Optional[Path] = None) -> dict:
             if normalized is not None:
                 merged_steps[step_name] = normalized
 
-    # Fail-fast on unknown agent name references. Resolve the registry
-    # lazily so configs without any agent-name reviewers do not pay the
-    # cost of building it.
-    if merged_steps:
-        registry: Optional[dict[str, AgentDef]] = None
-        for step_name, cfg in merged_steps.items():
-            reviewer = cfg.get("reviewer")
-            if reviewer in (None, "human"):
-                continue
-            if registry is None:
-                registry, _ = _agent_registry_from_data(global_data, project_data)
-            if reviewer not in registry:
-                available = sorted(registry.keys())
-                raise ValueError(
-                    f"confirmation.steps.{step_name}.reviewer: unknown "
-                    f"agent name {reviewer!r}; registered agents: {available}"
-                )
+    return merged_steps
 
+
+def _validate_confirmation_reviewer_names(
+    merged_steps: dict[str, dict],
+    global_data: dict,
+    project_data: dict,
+) -> None:
+    """Fail-fast if any ``confirmation.steps.<step>.reviewer`` is an
+    unknown agent name.
+
+    Walks every entry in ``merged_steps`` (not just a single target) so
+    all typos surface at startup regardless of which step is about to
+    run. The registry is built lazily, so configs with no agent-name
+    reviewers pay no cost.
+    """
+    if not merged_steps:
+        return
+    registry: Optional[dict[str, AgentDef]] = None
+    for step_name, cfg in merged_steps.items():
+        reviewer = cfg.get("reviewer")
+        if reviewer in (None, "human"):
+            continue
+        if registry is None:
+            registry, _ = _agent_registry_from_data(global_data, project_data)
+        if reviewer not in registry:
+            available = sorted(registry.keys())
+            raise ValueError(
+                f"confirmation.steps.{step_name}.reviewer: unknown "
+                f"agent name {reviewer!r}; registered agents: {available}"
+            )
+
+
+def load_confirmation_config(project_root: Optional[Path] = None) -> dict:
+    """Load per-step confirmation configuration from global + project YAML.
+
+    Returns a dict shaped as::
+
+        {"steps": {step_name: {"reviewer": Optional[str],
+                                "max_iterations": Optional[int]}}}
+
+    A step is confirmed iff it appears as a key in ``steps``. The
+    legacy global ``enabled`` switch has been removed — there is no
+    other on/off control.
+
+    ``reviewer`` semantics inside each step entry:
+    - ``'human'``   → MCP call file + interactive resume path
+    - agent name   → LLM review using that registered agent (fail-fast
+      at startup if the name is not in the top-level ``agents`` registry)
+    - ``None``     → LLM review using the default ``llm_caller.defaults``
+      chain (resolved by ``state_machine`` at step build time)
+
+    Deprecated fields (``confirmation.enabled``, top-level
+    ``confirmation.reviewer``, ``confirmation.llm_reviewer``, list-form
+    ``confirmation.steps``) are detected, warned about once per source,
+    and ignored.
+
+    Global + project ``confirmation.steps`` are merged at the entry
+    level: same step key in project overrides global; non-conflicting
+    entries from either side coexist.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+
+    global_data, project_data = _load_agent_configs(project_root)
+    merged_steps = _merge_confirmation_steps(global_data, project_data)
+    _validate_confirmation_reviewer_names(
+        merged_steps, global_data, project_data,
+    )
     return {"steps": merged_steps}
 
 
@@ -1108,6 +1144,75 @@ def load_step_agents(
         return None
     global_data, project_data = _load_agent_configs(project_root)
     return _step_override_from_data(global_data, project_data, step_type)
+
+
+def resolve_confirm_inputs(
+    project_root: Optional[Path],
+    reviewed_step_type: str,
+) -> Optional[dict]:
+    """Resolve all data a CONFIRM step needs in a single YAML read.
+
+    Returns ``None`` when ``reviewed_step_type`` is not configured for
+    confirmation (i.e. absent from ``confirmation.steps``), so the caller
+    can defensively fall back without an extra read.
+
+    Otherwise returns ``{"reviewer": str|None, "max_iterations": int|None,
+    "agents": list[dict]|None}``:
+    - ``reviewer == 'human'``   → ``agents`` is ``None``; caller routes
+      to the MCP-call path.
+    - ``reviewer`` is an agent name → ``agents`` is a single-element list
+      holding that agent's resolved dict form. Unknown names raise
+      ``ValueError`` via the shared registry check.
+    - ``reviewer is None``        → ``agents`` is the resolved
+      ``llm_caller.defaults`` chain.
+
+    Consolidates three prior reads (``load_confirmation_config`` +
+    ``load_agent_registry`` + ``load_agents``) into one
+    ``_load_agent_configs`` call, to keep CONFIRM transitions cheap.
+
+    Reuses :func:`_merge_confirmation_steps` and
+    :func:`_validate_confirmation_reviewer_names` so that every entry in
+    ``confirmation.steps`` is fail-fast validated — not only the
+    ``reviewed_step_type``. This protects resumed flows whose persisted
+    step sequence may bypass :func:`insert_confirmation_steps`, since
+    any unknown agent-name reference under a different step key would
+    otherwise slip past unnoticed.
+    """
+    global_data, project_data = _load_agent_configs(project_root)
+    merged_steps = _merge_confirmation_steps(global_data, project_data)
+    _validate_confirmation_reviewer_names(
+        merged_steps, global_data, project_data,
+    )
+
+    step_cfg = merged_steps.get(reviewed_step_type)
+    if step_cfg is None:
+        return None
+
+    reviewer = step_cfg.get("reviewer")
+    max_iterations = step_cfg.get("max_iterations")
+
+    if reviewer == "human":
+        return {
+            "reviewer": "human",
+            "max_iterations": max_iterations,
+            "agents": None,
+        }
+
+    if reviewer is None:
+        agents = _default_chain_from_data(global_data, project_data)
+        return {
+            "reviewer": None,
+            "max_iterations": max_iterations,
+            "agents": agents,
+        }
+
+    # Name already validated above; resolve against registry.
+    registry, _ = _agent_registry_from_data(global_data, project_data)
+    return {
+        "reviewer": reviewer,
+        "max_iterations": max_iterations,
+        "agents": [registry[reviewer].to_agent_dict()],
+    }
 
 
 def resolve_agents(

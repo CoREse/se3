@@ -82,7 +82,7 @@ class TestSpecChangesForwarding:
         })
         return flow
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_verify_spec_receives_spec_changes(self, _cfg, sm, flow_with_plan):
         inputs = sm._build_step_inputs(flow_with_plan, StepType.VERIFY_SPEC)
         assert "spec_changes" in inputs
@@ -90,14 +90,14 @@ class TestSpecChangesForwarding:
         assert inputs["spec_changes"][0]["spec_name"] == "flow-engine"
         assert inputs["spec_changes"][0]["change_type"] == "add_requirement"
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_update_spec_receives_spec_changes(self, _cfg, sm, flow_with_plan):
         inputs = sm._build_step_inputs(flow_with_plan, StepType.UPDATE_SPEC)
         assert "spec_changes" in inputs
         assert len(inputs["spec_changes"]) == 1
         assert inputs["spec_changes"][0]["target"] == "Requirement: New Feature"
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_update_spec_receives_design_doc(self, _cfg, sm, flow_with_plan):
         inputs = sm._build_step_inputs(flow_with_plan, StepType.UPDATE_SPEC)
         assert "design_doc" in inputs
@@ -127,22 +127,22 @@ class TestNoSpecChanges:
         })
         return flow
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_verify_spec_gets_empty_list_when_no_spec_changes(self, _cfg, sm, flow_without_spec_changes):
         inputs = sm._build_step_inputs(flow_without_spec_changes, StepType.VERIFY_SPEC)
         assert inputs["spec_changes"] == []
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_update_spec_gets_empty_list_when_no_spec_changes(self, _cfg, sm, flow_without_spec_changes):
         inputs = sm._build_step_inputs(flow_without_spec_changes, StepType.UPDATE_SPEC)
         assert inputs["spec_changes"] == []
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_design_doc_still_forwarded_without_spec_changes(self, _cfg, sm, flow_without_spec_changes):
         inputs = sm._build_step_inputs(flow_without_spec_changes, StepType.UPDATE_SPEC)
         assert inputs["design_doc"]["overview"] == "Fix approach"
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_other_plan_outputs_unaffected(self, _cfg, sm, flow_without_spec_changes):
         """task_groups and proposal still forwarded normally."""
         inputs = sm._build_step_inputs(flow_without_spec_changes, StepType.IMPLEMENT)
@@ -157,7 +157,7 @@ class TestEmptyDesignDoc:
     def sm(self, tmp_path):
         return StateMachine(tmp_path)
 
-    @patch("se3.engine.state_machine.load_confirmation_config", return_value={})
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_empty_design_forwarded_as_empty_dict(self, _cfg, sm, tmp_path):
         flow = _make_flow(tmp_path)
         _add_completed_step(flow, StepType.PLAN, {
