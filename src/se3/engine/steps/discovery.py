@@ -371,6 +371,7 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 refined_description,
                 questions=None,
                 is_confirmation=True,
+                raw_result_text=raw_result_text,
             )
 
             return StepStatus.PAUSED
@@ -380,7 +381,7 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
             # Have a refined description - ask for user confirmation before proceeding.
             # Also catches LLM prematurely returning "confirmation" before any user interaction.
             step.outputs["proposed_description"] = refined_description
-            _display_discovery_message(content, refined_description, questions=None)
+            _display_discovery_message(content, refined_description, questions=None, raw_result_text=raw_result_text)
             return StepStatus.PAUSED
 
         else:
@@ -388,7 +389,7 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step.outputs["questions"] = questions
             if refined_description:
                 step.outputs["proposed_description"] = refined_description
-            _display_discovery_message(content, refined_description, questions)
+            _display_discovery_message(content, refined_description, questions, raw_result_text=raw_result_text)
             return StepStatus.PAUSED
 
     except LLMCallError as e:
@@ -553,19 +554,77 @@ def _generate_summary(history: List[Dict[str, str]]) -> str:
     return f"Discovery completed in {rounds} rounds with {user_inputs} user inputs"
 
 
+def _extract_narrative_from_raw(raw_text: Optional[str]) -> str:
+    """Extract narrative text outside JSON code blocks from raw LLM result.
+
+    Args:
+        raw_text: The raw LLM result text (potentially containing JSON code blocks).
+
+    Returns:
+        Narrative text stripped of JSON code blocks, or empty string if none.
+    """
+    if not raw_text or not isinstance(raw_text, str):
+        return ""
+
+    import re
+
+    # Pattern: ```json ... ``` or ``` ... ``` containing JSON
+    # We remove fenced JSON blocks and keep everything else.
+    text = raw_text
+
+    # Find all fenced code blocks
+    fence_pattern = r"```(?:json)?\s*\n(.*?)\n```"
+    parts = []
+    last_end = 0
+
+    for match in re.finditer(fence_pattern, text, re.DOTALL):
+        # Check if the block content looks like JSON
+        block_content = match.group(1).strip()
+        is_json = False
+        try:
+            json.loads(block_content)
+            is_json = True
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+        if is_json:
+            # Keep the text before this JSON block
+            before = text[last_end:match.start()].strip()
+            if before:
+                parts.append(before)
+            last_end = match.end()
+        # If not JSON, keep it (will be included in the trailing text)
+
+    # Add any remaining text after the last JSON block
+    remaining = text[last_end:].strip()
+    if remaining:
+        # Check if remaining is bare JSON (not in fences)
+        try:
+            json.loads(remaining)
+            # It's pure JSON, don't add to narrative
+            pass
+        except (json.JSONDecodeError, ValueError):
+            parts.append(remaining)
+
+    return "\n\n".join(parts)
+
+
 def _display_discovery_message(
     content: str,
     refined_description: Optional[str],
     questions: Optional[List[str]] = None,
     is_confirmation: bool = False,
+    *,
+    raw_result_text: Optional[str] = None,
 ) -> None:
     """Display discovery message to user.
 
     Args:
-        content: Message content from assistant
+        content: Message content from assistant (parsed from JSON)
         refined_description: Proposed refined description (if in synthesis mode)
         questions: List of questions (if in question mode)
         is_confirmation: If True, this is a final confirmation display (not asking for input)
+        raw_result_text: The raw LLM result text (may contain narrative outside JSON)
     """
     from rich.console import Group
     from rich.markdown import Markdown
@@ -574,6 +633,12 @@ def _display_discovery_message(
     from ..display import get_console
 
     renderables = []
+
+    # If there's narrative text outside JSON blocks in the raw result, show it first
+    narrative = _extract_narrative_from_raw(raw_result_text) if raw_result_text else ""
+    if narrative:
+        renderables.append(Markdown(narrative))
+        renderables.append(Text(""))
 
     if refined_description and is_confirmation:
         # Final confirmation - show LLM content as markdown, then refined description

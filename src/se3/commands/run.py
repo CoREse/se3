@@ -404,7 +404,13 @@ def _restore_discovery_display(current_step: Any) -> None:
         questions = current_step.outputs.get("questions") or None
         # Detect confirmation mode for proper rendering
         is_confirmation = current_step.outputs.get("awaiting_programmatic_confirm", False)
-        _display_discovery_message(content, proposed, questions, is_confirmation=is_confirmation)
+        # Pass the raw result text so narrative outside JSON blocks is rendered
+        raw_result_text = last_assistant.get("content", "")
+        _display_discovery_message(
+            content, proposed, questions,
+            is_confirmation=is_confirmation,
+            raw_result_text=raw_result_text,
+        )
     else:
         # No history yet — show generic resume notice
         get_console().print("[dim]Resuming discovery — please respond to continue.[/dim]")

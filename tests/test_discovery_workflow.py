@@ -20,6 +20,8 @@ from se3.engine.steps.discovery import (
     parse_user_response,
     _format_conversation_history,
     _generate_summary,
+    _extract_narrative_from_raw,
+    _display_discovery_message,
     INITIAL_DISCOVERY_PROMPT,
     CONTINUE_DISCOVERY_PROMPT,
 )
@@ -747,6 +749,155 @@ class TestRestoreDiscoveryDisplay:
 
         mock_console.return_value.print.assert_called_once()
         assert "Resuming discovery" in mock_console.return_value.print.call_args[0][0]
+
+
+class TestExtractNarrativeFromRaw:
+    """Test narrative extraction from raw LLM responses."""
+
+    def test_fenced_json_block_removed(self):
+        """Text outside ```json block should be extracted."""
+        raw = "Here's some analysis.\n\n```json\n{\"mode\": \"question\", \"content\": \"hi\"}\n```\n\nMore text."
+        result = _extract_narrative_from_raw(raw)
+        assert "Here's some analysis." in result
+        assert "More text." in result
+        assert "```json" not in result
+        assert "mode" not in result
+
+    def test_bare_fenced_json_removed(self):
+        """JSON in ``` block (without json tag) should also be removed."""
+        raw = "Before.\n```\n{\"a\": 1}\n```\nAfter."
+        result = _extract_narrative_from_raw(raw)
+        assert "Before." in result
+        assert "After." in result
+        assert "```" not in result
+        assert "a" not in result
+
+    def test_pure_json_returns_empty(self):
+        """Pure JSON with no narrative returns empty string."""
+        raw = '{"mode": "question", "content": "hello"}'
+        result = _extract_narrative_from_raw(raw)
+        assert result == ""
+
+    def test_pure_text_with_no_json_returned_as_is(self):
+        """Text with no JSON blocks is returned as-is."""
+        raw = "Just some narrative text without any code blocks."
+        result = _extract_narrative_from_raw(raw)
+        assert result == raw
+
+    def test_multiple_json_blocks(self):
+        """Multiple JSON code blocks should all be stripped."""
+        raw = "Intro.\n```json\n{\"a\": 1}\n```\nMiddle.\n```json\n{\"b\": 2}\n```\nOutro."
+        result = _extract_narrative_from_raw(raw)
+        assert "Intro." in result
+        assert "Middle." in result
+        assert "Outro." in result
+        assert "```json" not in result
+        assert "a" not in result
+        assert "b" not in result
+
+    def test_non_json_code_block_preserved(self):
+        """Fenced code blocks that are NOT valid JSON should be preserved."""
+        raw = "Here's some code:\n```python\nprint('hello')\n```\nEnd."
+        result = _extract_narrative_from_raw(raw)
+        assert "Here's some code:" in result
+        assert "```python" in result
+        assert "print('hello')" in result
+        assert "End." in result
+
+    def test_none_returns_empty(self):
+        """None input returns empty string."""
+        assert _extract_narrative_from_raw(None) == ""
+
+    def test_empty_string_returns_empty(self):
+        """Empty string returns empty string."""
+        assert _extract_narrative_from_raw("") == ""
+
+
+class TestDisplayDiscoveryMessageWithNarrative:
+    """Test _display_discovery_message renders narrative from raw_result_text."""
+
+    @patch("se3.engine.display.get_console")
+    def test_narrative_rendered_first_when_present(self, mock_console):
+        """When raw_result_text contains narrative, it should be first renderable."""
+        from rich.console import Group
+        from rich.markdown import Markdown
+
+        raw = "Additional narrative text.\n\n```json\n{\"mode\": \"question\"}\n```"
+        _display_discovery_message("content", None, questions=None, raw_result_text=raw)
+
+        mock_console.return_value.print.assert_called_once()
+        panel = mock_console.return_value.print.call_args[0][0]
+        group = panel.renderable
+        assert isinstance(group, Group)
+        # First renderable should be the narrative Markdown
+        assert isinstance(group.renderables[0], Markdown)
+        assert "Additional narrative text." in str(group.renderables[0].markup)
+
+    @patch("se3.engine.display.get_console")
+    def test_no_narrative_when_raw_is_none(self, mock_console):
+        """When raw_result_text is None, Group should match current behavior."""
+        from rich.console import Group
+        from rich.markdown import Markdown
+
+        _display_discovery_message("Hello", None, questions=None, raw_result_text=None)
+
+        mock_console.return_value.print.assert_called_once()
+        panel = mock_console.return_value.print.call_args[0][0]
+        group = panel.renderable
+        assert isinstance(group, Group)
+        # First renderable should be Markdown("Hello"), no extra narrative
+        assert isinstance(group.renderables[0], Markdown)
+        assert "Hello" in str(group.renderables[0].markup)
+
+    @patch("se3.engine.display.get_console")
+    def test_no_narrative_when_raw_is_pure_json(self, mock_console):
+        """When raw_result_text is pure JSON, no extra narrative renderable."""
+        from rich.console import Group
+        from rich.markdown import Markdown
+
+        raw = '{"mode": "question", "content": "Hello"}'
+        _display_discovery_message("Hello", None, questions=None, raw_result_text=raw)
+
+        mock_console.return_value.print.assert_called_once()
+        panel = mock_console.return_value.print.call_args[0][0]
+        group = panel.renderable
+        assert isinstance(group, Group)
+        # First renderable should be Markdown("Hello"), no narrative prefix
+        assert isinstance(group.renderables[0], Markdown)
+        assert "Hello" in str(group.renderables[0].markup)
+
+
+class TestRestoreDiscoveryDisplayWithRawText:
+    """Test _restore_discovery_display passes raw_result_text from history."""
+
+    @patch("se3.engine.steps.discovery._display_discovery_message")
+    def test_restore_passes_raw_result_text_from_history(self, mock_display):
+        """Resume should pass last assistant's content as raw_result_text."""
+        from se3.commands.run import _restore_discovery_display
+
+        raw_text = "Narrative here.\n```json\n{\"mode\":\"confirmation\"}\n```"
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={
+                "task_description": "I want auth",
+                "discovery_state": {
+                    "round": 3,
+                    "history": [
+                        {"role": "assistant", "content": raw_text, "round": 2},
+                    ],
+                },
+            },
+        )
+        step.outputs["message"] = "Confirmed!"
+        step.outputs["refined_description"] = "Build auth"
+        step.outputs["awaiting_programmatic_confirm"] = True
+
+        _restore_discovery_display(step)
+
+        mock_display.assert_called_once()
+        kwargs = mock_display.call_args.kwargs
+        assert kwargs.get("raw_result_text") == raw_text
+        assert kwargs.get("is_confirmation") is True
 
 
 if __name__ == "__main__":

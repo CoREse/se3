@@ -183,6 +183,10 @@ se3 run --discover "我想做一个用户管理功能"
 
 The `_display_discovery_message()` function SHALL render LLM-generated content fields (`content` and `refined_description`) as markdown using `rich.markdown.Markdown`, while structural UI elements (section titles, numbered question lists, confirmation prompts) use Rich `Text` with appropriate styling. Multiple renderables are combined via `rich.console.Group` and displayed inside a Rich `Panel` titled "Discovery".
 
+**Narrative prefix from raw LLM output:**
+
+When `raw_result_text` is provided (the raw LLM output from which JSON was extracted), `_display_discovery_message()` SHALL strip all fenced JSON code blocks (code fences whose first non-whitespace character inside is `{` or `[`) from the raw text. If the remaining narrative text is non-empty after stripping whitespace, it SHALL be rendered as `rich.markdown.Markdown` and placed before all other renderables in the Panel, separated by a blank line. If the remaining text is empty (e.g., Phase 2 pure-JSON output), the Panel renders exactly as before, with no additional prefix. This rule applies uniformly across all five rendering modes.
+
 **Rendering rules by mode:**
 
 | Mode | `content` field | `refined_description` field | Structural elements |
@@ -210,6 +214,19 @@ When the discovery step enters the confirmation phase (`is_confirmation=True`), 
 - **THEN** the full `content` from the LLM response is displayed as markdown
 - **AND** the `refined_description` is displayed as markdown below it
 - **AND** the user can review the complete analysis before choosing to confirm or continue exploration
+
+##### Scenario: Narrative text from raw LLM output prefixed to Panel
+- **GIVEN** `last_raw_result` contains narrative text outside any JSON code block (e.g., Phase 1 LLM output with analysis followed by a fenced JSON object)
+- **WHEN** `_display_discovery_message()` renders the message with `raw_result_text` provided
+- **THEN** the narrative text (after stripping all JSON code blocks) is rendered as `Markdown` and appears as the first renderable in the Panel
+- **AND** a blank line separates the narrative prefix from the existing renderables (`content`, `refined_description`, structural elements)
+- **AND** all subsequent renderables follow their existing mode-specific rules unchanged
+
+##### Scenario: Pure JSON raw output renders unchanged
+- **GIVEN** `last_raw_result` is pure JSON (e.g., Phase 2 output) or empty, so stripping JSON code blocks leaves no remaining text
+- **WHEN** `_display_discovery_message()` renders the message with `raw_result_text` provided
+- **THEN** the Panel renders identically to the behavior before this change, with no additional prefix renderable
+- **AND** the `content` and other fields follow their existing mode-specific rules
 
 ### Requirement: 状态机驱动流程
 
