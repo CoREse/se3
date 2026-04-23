@@ -236,8 +236,9 @@ class TestLLMReviewMaxIterations:
             inputs={
                 "step_to_review_id": "plan-001",
                 "step_to_review_type": "plan",
-                "reviewer": "llm",
-                "llm_reviewer": {"model": None, "max_iterations": 2},
+                "reviewer": "reviewer_bot",
+                "agents": [{"name": "reviewer_bot", "type": "claude-code", "cmd": "claude", "priority": 0}],
+                "max_iterations": 2,
                 "_llm_review_iteration": 2,
             },
         )
@@ -261,8 +262,9 @@ class TestLLMReviewMaxIterations:
             inputs={
                 "step_to_review_id": "plan-001",
                 "step_to_review_type": "plan",
-                "reviewer": "llm",
-                "llm_reviewer": {"model": None, "max_iterations": 3},
+                "reviewer": "reviewer_bot",
+                "agents": [{"name": "reviewer_bot", "type": "claude-code", "cmd": "claude", "priority": 0}],
+                "max_iterations": 3,
                 "_llm_review_iteration": 3,
             },
         )
@@ -431,22 +433,20 @@ class TestLLMReviewerConfigPropagation:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_config_propagation_with_llm_reviewer(self):
-        """llm_reviewer dict should be in step.inputs when reviewer is 'llm'."""
+        """When reviewer points at a registered agent, agents+max_iterations
+        propagate into step.inputs."""
         from se3.engine.state_machine import StateMachine
         from se3.engine.persistence import PersistenceManager
 
-        # Create se3.yaml with LLM reviewer config
         (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
         (self.project_root / "se3" / "specs").mkdir(parents=True, exist_ok=True)
         config_path = self.project_root / "se3.yaml"
         config_path.write_text(
+            "agents:\n"
+            "  reviewer_bot: {type: claude-code, cmd: claude-sonnet}\n"
             "confirmation:\n"
-            "  enabled: true\n"
-            "  steps: [plan]\n"
-            "  reviewer: llm\n"
-            "  llm_reviewer:\n"
-            "    model: claude-sonnet\n"
-            "    max_iterations: 5\n"
+            "  steps:\n"
+            "    plan: {reviewer: reviewer_bot, max_iterations: 5}\n"
         )
 
         persistence = PersistenceManager(self.project_root)
@@ -460,7 +460,6 @@ class TestLLMReviewerConfigPropagation:
         )
         flow.state.selected_steps = [StepType.PLAN, StepType.CONFIRM]
 
-        # Create a completed PLAN step
         plan_step = Step(
             step_type=StepType.PLAN,
             status=StepStatus.COMPLETED,
@@ -471,18 +470,19 @@ class TestLLMReviewerConfigPropagation:
         flow.state.current_step_id = "plan-001"
         flow.state.current_step_index = 0
 
-        # Transition to CONFIRM step
         next_step = sm.transition_to_next(flow)
 
         assert next_step is not None
         assert next_step.step_type == StepType.CONFIRM
-        assert next_step.inputs.get("reviewer") == "llm"
-        assert "llm_reviewer" in next_step.inputs
-        assert next_step.inputs["llm_reviewer"]["model"] == "claude-sonnet"
-        assert next_step.inputs["llm_reviewer"]["max_iterations"] == 5
+        assert next_step.inputs.get("reviewer") == "reviewer_bot"
+        assert next_step.inputs.get("max_iterations") == 5
+        agents = next_step.inputs.get("agents")
+        assert isinstance(agents, list) and len(agents) == 1
+        assert agents[0]["cmd"] == "claude-sonnet"
 
     def test_config_default_max_iterations(self):
-        """Default max_iterations should be 3 when not specified."""
+        """Reviewer omitted → falls back to llm_caller.defaults chain;
+        max_iterations defaults to 3."""
         from se3.engine.state_machine import StateMachine
         from se3.engine.persistence import PersistenceManager
 
@@ -491,9 +491,8 @@ class TestLLMReviewerConfigPropagation:
         config_path = self.project_root / "se3.yaml"
         config_path.write_text(
             "confirmation:\n"
-            "  enabled: true\n"
-            "  steps: [plan]\n"
-            "  reviewer: llm\n"
+            "  steps:\n"
+            "    plan: {}\n"
         )
 
         persistence = PersistenceManager(self.project_root)
@@ -519,8 +518,12 @@ class TestLLMReviewerConfigPropagation:
 
         next_step = sm.transition_to_next(flow)
 
-        assert next_step.inputs["llm_reviewer"]["max_iterations"] == 3
-        assert next_step.inputs["llm_reviewer"]["model"] is None
+        assert next_step.inputs.get("reviewer") is None
+        assert next_step.inputs.get("max_iterations") == 3
+        # agents falls back to load_agents() — at minimum the built-in
+        # 'claude' default chain is present.
+        agents = next_step.inputs.get("agents")
+        assert isinstance(agents, list) and len(agents) >= 1
 
 
 class TestLLMReviewPrompt:

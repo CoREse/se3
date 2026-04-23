@@ -133,6 +133,12 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
     Retrieves the reviewed step's output, builds a review prompt, calls the LLM,
     and returns the appropriate status and review result.
 
+    Reads ``step.inputs['agents']`` (resolved by ``state_machine`` from
+    either the per-step ``reviewer: <agent_name>`` reference or the
+    ``llm_caller.defaults`` fallback chain) and passes it to
+    ``LLMCaller`` explicitly so this handler does not re-resolve the
+    chain on its own.
+
     Args:
         step: The current CONFIRM step
         flow: The flow instance
@@ -142,9 +148,8 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
     """
     step_to_review_id = step.inputs.get('step_to_review_id')
     step_to_review_type = step.inputs.get('step_to_review_type', 'unknown')
-    llm_config = step.inputs.get('llm_reviewer', {})
-    max_iterations = llm_config.get('max_iterations', 3)
-    model = llm_config.get('model')
+    max_iterations = step.inputs.get('max_iterations', 3) or 3
+    agents = step.inputs.get('agents')
 
     # Track iteration count
     review_iteration = step.inputs.get('_llm_review_iteration', 0)
@@ -190,6 +195,7 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
             flow_id=flow.flow_id,
             step_id=step.step_id,
             step_type="confirm_llm_review",
+            agents=agents,
         )
         response = caller.call(prompt=prompt, json_mode="two_phase")
 
@@ -247,8 +253,11 @@ def confirm_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """
     logger.info(f"Executing CONFIRM step: {step.step_id}")
 
-    # LLM reviewer path — synchronous, no call file, no PAUSED
-    if step.inputs.get('reviewer') == 'llm':
+    # LLM reviewer path — any reviewer other than 'human' (a specific
+    # agent name, or None for the llm_caller.defaults fallback) goes
+    # through synchronous LLM review with no call file and no PAUSED.
+    reviewer = step.inputs.get('reviewer')
+    if reviewer != 'human':
         status, review_result = _llm_review(step, flow)
         step.outputs['review_result'] = review_result
         step.outputs['revision_feedback'] = review_result.get('feedback', '')

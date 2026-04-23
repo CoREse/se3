@@ -133,17 +133,27 @@ class TestGetStepLanguageInstruction:
     def _write_config(self, tmp_path, language=None, spec_language=None,
                       confirmation_enabled=False, confirmation_steps=None,
                       reviewer="human"):
-        """Helper to write se3.yaml with given config."""
+        """Helper to write se3.yaml using the per-step confirmation schema.
+
+        ``confirmation_enabled`` retains the old keyword for test
+        readability, but maps to the new schema by listing the steps in
+        ``confirmation.steps`` only when enabled.
+        """
         lines = []
         lines.append("language:")
         lines.append(f"  language: {language}" if language else "  language: null")
         lines.append(f"  spec_language: {spec_language}" if spec_language else "  spec_language: null")
-        lines.append("confirmation:")
-        lines.append(f"  enabled: {'true' if confirmation_enabled else 'false'}")
-        if confirmation_steps:
-            steps_str = "[" + ", ".join(f'"{s}"' for s in confirmation_steps) + "]"
-            lines.append(f"  steps: {steps_str}")
-        lines.append(f'  reviewer: "{reviewer}"')
+        if confirmation_enabled and confirmation_steps:
+            lines.append("confirmation:")
+            lines.append("  steps:")
+            for s in confirmation_steps:
+                if reviewer == "human":
+                    lines.append(f"    {s}: {{reviewer: human}}")
+                else:
+                    # Non-human reviewer falls back to llm_caller.defaults
+                    # when omitted; explicit None keeps the test focused
+                    # on the language-injection behavior.
+                    lines.append(f"    {s}: {{}}")
         (tmp_path / "se3.yaml").write_text("\n".join(lines) + "\n")
 
     def test_summarize_uses_general_language(self, tmp_path):

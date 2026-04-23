@@ -29,7 +29,12 @@ from .llm_caller import clear_phase1_cache
 from .issue_discovery import IssueDiscovery
 from .issue_manager import IssueManager
 from .persistence import PersistenceManager
-from ..config import insert_confirmation_steps, load_confirmation_config
+from ..config import (
+    insert_confirmation_steps,
+    load_agent_registry,
+    load_agents,
+    load_confirmation_config,
+)
 from .. import __version__ as se3_version
 
 logger = logging.getLogger(__name__)
@@ -260,16 +265,14 @@ class StateMachine:
             Modified step sequence with CONFIRM steps inserted
         """
         result = insert_confirmation_steps(steps, self.project_root)
-        
+
         # Log inserted steps for debugging
-        config = load_confirmation_config(self.project_root)
-        if config.get("enabled", True):
-            for i, step in enumerate(result):
-                if step == StepType.CONFIRM:
-                    prev_step = result[i-1] if i > 0 else None
-                    if prev_step:
-                        logger.debug(f"Inserted CONFIRM step after {prev_step.value}")
-        
+        for i, step in enumerate(result):
+            if step == StepType.CONFIRM:
+                prev_step = result[i-1] if i > 0 else None
+                if prev_step:
+                    logger.debug(f"Inserted CONFIRM step after {prev_step.value}")
+
         return result
 
     def load_or_create_flow(
@@ -807,16 +810,47 @@ class StateMachine:
                         break
 
             if last_non_confirm_step:
+                reviewed_type = last_non_confirm_step.step_type.value
                 inputs["step_to_review_id"] = last_non_confirm_step.step_id
-                inputs["step_to_review_type"] = last_non_confirm_step.step_type.value
-                inputs["reviewer"] = config.get("reviewer", "human")
-                # Propagate llm_reviewer config when reviewer is 'llm'
-                if inputs["reviewer"] == "llm":
-                    llm_reviewer_config = config.get("llm_reviewer", {})
-                    inputs["llm_reviewer"] = {
-                        "model": llm_reviewer_config.get("model", None),
-                        "max_iterations": llm_reviewer_config.get("max_iterations", 3),
-                    }
+                inputs["step_to_review_type"] = reviewed_type
+
+                step_cfg = config.get("steps", {}).get(reviewed_type)
+                if step_cfg is None:
+                    # Defensive fallback — insert_confirmation_steps is the
+                    # only path that puts CONFIRM into the sequence, and it
+                    # gates on this same dict, so reaching here implies a
+                    # config drift between dict snapshots. Behave as 'human'
+                    # so the user can decide what to do.
+                    logger.warning(
+                        "CONFIRM step inserted for %s but no entry under "
+                        "confirmation.steps; defaulting to human reviewer",
+                        reviewed_type,
+                    )
+                    inputs["reviewer"] = "human"
+                else:
+                    reviewer = step_cfg.get("reviewer")
+                    max_iters = step_cfg.get("max_iterations") or 3
+                    if reviewer == "human":
+                        inputs["reviewer"] = "human"
+                    elif reviewer:
+                        # Agent name reference — resolve against registry.
+                        registry = load_agent_registry(self.project_root)
+                        agent = registry.get(reviewer)
+                        if agent is None:
+                            # load_confirmation_config already fail-fasts on
+                            # this; keep a defensive guard for completeness.
+                            raise StateMachineError(
+                                f"confirmation.steps.{reviewed_type}.reviewer "
+                                f"references unknown agent {reviewer!r}"
+                            )
+                        inputs["reviewer"] = reviewer
+                        inputs["agents"] = [agent.to_agent_dict()]
+                        inputs["max_iterations"] = max_iters
+                    else:
+                        # Reviewer omitted — fall back to llm_caller.defaults.
+                        inputs["reviewer"] = None
+                        inputs["agents"] = load_agents(self.project_root)
+                        inputs["max_iterations"] = max_iters
 
         # Special handling for TEST step when in fix iteration
         if step_type == StepType.TEST:

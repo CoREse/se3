@@ -448,13 +448,12 @@ class TestConfirmationStepInsertion:
         self.tmpdir = tempfile.mkdtemp()
         self.project_root = Path(self.tmpdir)
 
-        # Create se3.yaml with confirmation enabled
+        # Create se3.yaml using the per-step confirmation schema.
         se3_yaml = self.project_root / "se3.yaml"
         se3_yaml.write_text("""
 confirmation:
-  enabled: true
-  steps: ["plan"]
-  reviewer: "human"
+  steps:
+    plan: {reviewer: human}
 """)
 
         self.persistence = PersistenceManager(self.project_root)
@@ -489,14 +488,13 @@ confirmation:
         assert confirm_after_plan_idx is not None
         assert confirm_after_plan_idx == plan_idx + 1
 
-    def test_confirm_steps_not_inserted_when_disabled(self):
-        """Test that CONFIRM steps are not inserted when disabled in config."""
-        # Create config with disabled confirmation
+    def test_confirm_steps_not_inserted_when_steps_omitted(self):
+        """Test that CONFIRM steps are not inserted when no steps are listed."""
+        # Empty confirmation.steps means no step gets confirmed.
         se3_yaml = self.project_root / "se3.yaml"
         se3_yaml.write_text("""
 confirmation:
-  enabled: false
-  steps: ["plan"]
+  steps: {}
 """)
 
         flow = self.state_machine.create_flow(
@@ -521,13 +519,12 @@ class TestEndToEndConfirmationFlow:
         (self.project_root / "se3" / "calls").mkdir(parents=True, exist_ok=True)
         (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
 
-        # Create se3.yaml with confirmation enabled
+        # Create se3.yaml using the per-step confirmation schema.
         se3_yaml = self.project_root / "se3.yaml"
         se3_yaml.write_text("""
 confirmation:
-  enabled: true
-  steps: ["plan"]
-  reviewer: "human"
+  steps:
+    plan: {reviewer: human}
 """)
 
     def teardown_method(self):

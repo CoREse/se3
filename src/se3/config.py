@@ -181,33 +181,32 @@ class VersionConfig:
 
 @dataclass
 class Config:
-    """Main SE3 configuration."""
-    
+    """Main SE3 configuration.
+
+    ``confirmation_enabled`` is always ``True`` under the new per-step
+    schema (the legacy global enable/disable switch has been removed —
+    only steps that appear in ``confirmation.steps`` are confirmed).
+    ``confirmation_steps`` is derived from the keys of the new dict
+    schema for backward compatibility with code that still reads the
+    list form.
+    """
+
     project_root: Path
-    confirmation_enabled: bool = False
+    confirmation_enabled: bool = True
     confirmation_steps: list[str] = field(default_factory=list)
-    
+
     def __post_init__(self):
         if isinstance(self.project_root, str):
             self.project_root = Path(self.project_root)
-    
+
     @classmethod
     def load(cls, project_root: Path) -> "Config":
-        """Load configuration from se3.yaml."""
-        config_path = project_root / "se3.yaml"
-        
-        if not config_path.exists():
-            return cls(project_root=project_root)
-        
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        
-        confirmation = data.get("confirmation", {})
-        
+        """Load configuration from se3.yaml using the new per-step schema."""
+        confirm = load_confirmation_config(project_root)
         return cls(
             project_root=project_root,
-            confirmation_enabled=confirmation.get("enabled", False),
-            confirmation_steps=confirmation.get("steps", []),
+            confirmation_enabled=True,
+            confirmation_steps=list(confirm.get("steps", {}).keys()),
         )
 
 
@@ -241,88 +240,274 @@ def load_config(project_root: Optional[Path] = None) -> Config:
     return Config.load(project_root)
 
 
+_CONFIRM_DEFAULT_MAX_ITERATIONS = 3
+_CONFIRM_VALID_STEP_CFG_KEYS = frozenset({"reviewer", "max_iterations"})
+
+_warned_confirmation_enabled_for: set[str] = set()
+_warned_confirmation_top_reviewer_for: set[str] = set()
+_warned_confirmation_llm_reviewer_for: set[str] = set()
+_warned_confirmation_steps_list_for: set[str] = set()
+_warned_confirmation_unknown_fields_for: set[tuple[str, str, tuple[str, ...]]] = set()
+
+
+def _parse_confirmation_step_entry(
+    source_label: str, step_name: str, raw: Any,
+) -> Optional[dict]:
+    """Validate and normalize a single ``confirmation.steps.<step>`` entry.
+
+    Returns ``{"reviewer": str|None, "max_iterations": int|None}``, or
+    ``None`` if the entry is structurally invalid (non-dict, non-None).
+    Empty/missing ``reviewer`` or ``max_iterations`` map to ``None`` so
+    downstream consumers can apply their own fallback.
+    """
+    if raw is None:
+        return {"reviewer": None, "max_iterations": None}
+    if not isinstance(raw, dict):
+        logger.warning(
+            "%s: confirmation.steps.%s is not a mapping (got %s); "
+            "ignoring this step entry",
+            source_label, step_name, type(raw).__name__,
+        )
+        return None
+
+    extra = tuple(sorted(k for k in raw if k not in _CONFIRM_VALID_STEP_CFG_KEYS))
+    if extra:
+        dedup_key = (source_label, step_name, extra)
+        if dedup_key not in _warned_confirmation_unknown_fields_for:
+            _warned_confirmation_unknown_fields_for.add(dedup_key)
+            logger.warning(
+                "%s: confirmation.steps.%s has unknown field(s) %s; "
+                "only 'reviewer' and 'max_iterations' are supported "
+                "— ignoring those fields",
+                source_label, step_name, list(extra),
+            )
+
+    reviewer = raw.get("reviewer")
+    if reviewer is not None:
+        if not (isinstance(reviewer, str) and reviewer.strip()):
+            logger.warning(
+                "%s: confirmation.steps.%s.reviewer must be a non-empty "
+                "string (got %r); ignoring reviewer (will fall back to "
+                "llm_caller.defaults)",
+                source_label, step_name, reviewer,
+            )
+            reviewer = None
+
+    raw_iters = raw.get("max_iterations")
+    if raw_iters is None:
+        max_iterations: Optional[int] = None
+    else:
+        try:
+            iters = int(raw_iters)
+        except (TypeError, ValueError):
+            logger.warning(
+                "%s: confirmation.steps.%s.max_iterations must be a "
+                "positive integer (got %r); using default %d",
+                source_label, step_name, raw_iters,
+                _CONFIRM_DEFAULT_MAX_ITERATIONS,
+            )
+            max_iterations = None
+        else:
+            if iters <= 0:
+                logger.warning(
+                    "%s: confirmation.steps.%s.max_iterations=%d must be "
+                    "positive; using default %d",
+                    source_label, step_name, iters,
+                    _CONFIRM_DEFAULT_MAX_ITERATIONS,
+                )
+                max_iterations = None
+            else:
+                max_iterations = iters
+
+    return {"reviewer": reviewer, "max_iterations": max_iterations}
+
+
+def _warn_deprecated_confirmation_fields(source_label: str, section: dict) -> None:
+    """Emit one-shot warnings for deprecated keys under ``confirmation:``.
+
+    These keys are silently ignored by the new schema; they do not alter
+    behavior. Each (source, key) pair is warned about only once per
+    process lifetime to avoid log floods when ``load_confirmation_config``
+    is called per step.
+    """
+    if "enabled" in section and source_label not in _warned_confirmation_enabled_for:
+        _warned_confirmation_enabled_for.add(source_label)
+        logger.warning(
+            "%s: 'confirmation.enabled' is deprecated and ignored. Under "
+            "the new schema, only steps listed in 'confirmation.steps' "
+            "are confirmed — there is no global on/off switch. Remove "
+            "this field.",
+            source_label,
+        )
+    if "reviewer" in section and source_label not in _warned_confirmation_top_reviewer_for:
+        _warned_confirmation_top_reviewer_for.add(source_label)
+        logger.warning(
+            "%s: top-level 'confirmation.reviewer' is deprecated and "
+            "ignored. Set 'reviewer' per step under "
+            "'confirmation.steps.<step>.reviewer'.",
+            source_label,
+        )
+    if "llm_reviewer" in section and source_label not in _warned_confirmation_llm_reviewer_for:
+        _warned_confirmation_llm_reviewer_for.add(source_label)
+        logger.warning(
+            "%s: 'confirmation.llm_reviewer' is deprecated and ignored. "
+            "Define LLM agents under top-level 'agents:' and reference "
+            "them via 'confirmation.steps.<step>.reviewer: <agent_name>'; "
+            "use 'confirmation.steps.<step>.max_iterations' for the "
+            "review-modify cycle limit.",
+            source_label,
+        )
+
+
 def load_confirmation_config(project_root: Optional[Path] = None) -> dict:
-    """Load confirmation configuration from project.
-    
-    Args:
-        project_root: Project root directory. If None, uses current working directory.
-        
-    Returns:
-        Dictionary with confirmation configuration settings.
+    """Load per-step confirmation configuration from global + project YAML.
+
+    Returns a dict shaped as::
+
+        {"steps": {step_name: {"reviewer": Optional[str],
+                                "max_iterations": Optional[int]}}}
+
+    A step is confirmed iff it appears as a key in ``steps``. The
+    legacy global ``enabled`` switch has been removed — there is no
+    other on/off control.
+
+    ``reviewer`` semantics inside each step entry:
+    - ``'human'``   → MCP call file + interactive resume path
+    - agent name   → LLM review using that registered agent (fail-fast
+      at startup if the name is not in the top-level ``agents`` registry)
+    - ``None``     → LLM review using the default ``llm_caller.defaults``
+      chain (resolved by ``state_machine`` at step build time)
+
+    Deprecated fields (``confirmation.enabled``, top-level
+    ``confirmation.reviewer``, ``confirmation.llm_reviewer``, list-form
+    ``confirmation.steps``) are detected, warned about once per source,
+    and ignored.
+
+    Global + project ``confirmation.steps`` are merged at the entry
+    level: same step key in project overrides global; non-conflicting
+    entries from either side coexist.
     """
     if project_root is None:
         project_root = Path.cwd()
-    
-    config_path = project_root / "se3.yaml"
-    
-    if not config_path.exists():
-        return {"enabled": True, "steps": ["plan"]}
-    
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        
-        confirmation = data.get("confirmation", {})
-        return {
-            "enabled": confirmation.get("enabled", True),
-            "steps": confirmation.get("steps", ["plan"]),
-            "reviewer": confirmation.get("reviewer", "human"),
-            "llm_reviewer": confirmation.get("llm_reviewer", {}),
-        }
-    except Exception:
-        return {"enabled": True, "steps": ["plan"]}
+
+    global_data, project_data = _load_agent_configs(project_root)
+
+    sources = [
+        ("~/.se3/config.yaml", global_data),
+        ("se3.yaml", project_data),
+    ]
+
+    merged_steps: dict[str, dict] = {}
+
+    for source_label, data in sources:
+        section = data.get("confirmation")
+        if section is None:
+            continue
+        if not isinstance(section, dict):
+            logger.warning(
+                "%s: 'confirmation' is not a mapping (got %s); ignoring",
+                source_label, type(section).__name__,
+            )
+            continue
+
+        _warn_deprecated_confirmation_fields(source_label, section)
+
+        steps_raw = section.get("steps")
+        if steps_raw is None:
+            continue
+        if isinstance(steps_raw, list):
+            if source_label not in _warned_confirmation_steps_list_for:
+                _warned_confirmation_steps_list_for.add(source_label)
+                logger.warning(
+                    "%s: 'confirmation.steps' is a list (legacy form) and "
+                    "is no longer supported. Convert to a dict, e.g.\n"
+                    "  confirmation:\n"
+                    "    steps:\n"
+                    "      plan: {reviewer: human}\n"
+                    "Ignoring the entire confirmation.steps section for "
+                    "this source.",
+                    source_label,
+                )
+            continue
+        if not isinstance(steps_raw, dict):
+            logger.warning(
+                "%s: 'confirmation.steps' is not a mapping (got %s); "
+                "ignoring",
+                source_label, type(steps_raw).__name__,
+            )
+            continue
+
+        for step_name, step_cfg in steps_raw.items():
+            if not (isinstance(step_name, str) and step_name.strip()):
+                logger.warning(
+                    "%s: confirmation.steps key %r is not a non-empty "
+                    "string; skipping",
+                    source_label, step_name,
+                )
+                continue
+            normalized = _parse_confirmation_step_entry(
+                source_label, step_name, step_cfg,
+            )
+            if normalized is not None:
+                merged_steps[step_name] = normalized
+
+    # Fail-fast on unknown agent name references. Resolve the registry
+    # lazily so configs without any agent-name reviewers do not pay the
+    # cost of building it.
+    if merged_steps:
+        registry: Optional[dict[str, AgentDef]] = None
+        for step_name, cfg in merged_steps.items():
+            reviewer = cfg.get("reviewer")
+            if reviewer in (None, "human"):
+                continue
+            if registry is None:
+                registry, _ = _agent_registry_from_data(global_data, project_data)
+            if reviewer not in registry:
+                available = sorted(registry.keys())
+                raise ValueError(
+                    f"confirmation.steps.{step_name}.reviewer: unknown "
+                    f"agent name {reviewer!r}; registered agents: {available}"
+                )
+
+    return {"steps": merged_steps}
 
 
 def insert_confirmation_steps(
     steps: list,
     project_root: Optional[Path] = None,
 ) -> list:
-    """Insert CONFIRM steps after configured step types.
-    
-    This is a standalone function that can be used by both the state machine
-    and the analyze step handler to consistently insert confirmation steps.
-    
-    Args:
-        steps: Original step sequence (list of StepType or StepType-like objects)
-        project_root: Project root directory for loading config
-        
-    Returns:
-        Modified step sequence with CONFIRM steps inserted
+    """Insert CONFIRM steps after each step type that requires confirmation.
+
+    A step type triggers a CONFIRM insertion iff it is a key in
+    ``confirmation.steps`` (the new per-step dict) AND it actually
+    appears in the supplied step sequence. There is no global on/off
+    switch — opting a step out of confirmation simply means omitting it
+    from ``confirmation.steps``.
     """
     config = load_confirmation_config(project_root)
-    
-    if not config.get("enabled", True):
+    steps_dict = config.get("steps", {})
+    if not steps_dict:
         return steps
-    
-    steps_requiring_confirm = config.get("steps", ["plan"])
-    
-    # Handle both StepType enum and string step types
-    # Get step type values for comparison
+
     step_type_names = set()
     for s in steps:
-        if hasattr(s, 'value'):
+        if hasattr(s, "value"):
             step_type_names.add(s.value)
         else:
             step_type_names.add(str(s))
-    
-    # Only insert confirm for steps that are actually in the sequence
-    steps_to_confirm = [s for s in steps_requiring_confirm if s in step_type_names]
-    
+
+    steps_to_confirm = {s for s in steps_dict.keys() if s in step_type_names}
     if not steps_to_confirm:
         return steps
-    
-    # Import StepType here to avoid circular imports
+
     from .engine.models import StepType
-    
+
     result = []
     for step in steps:
         result.append(step)
-        # Get step value for comparison
-        step_value = step.value if hasattr(step, 'value') else str(step)
+        step_value = step.value if hasattr(step, "value") else str(step)
         if step_value in steps_to_confirm:
-            # Insert CONFIRM step after this step
             result.append(StepType.CONFIRM)
-    
     return result
 
 
