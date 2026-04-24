@@ -1,0 +1,29 @@
+id: 088
+title: Spec introduces a third Scenario '程序化确认门控 — 空输入 no-op' not declared in the
+  plan's spec_changes. The task description's literal rule is binary (=="1" → confirm;
+  otherwise → next turn), so empty input would strictly belong to the 'continue' branch.
+  The implementation's no-op choice is pragmatic (avoids feeding empty messages to
+  the LLM) and is explicitly documented, but formally it deviates from the declared
+  scope.
+description: 'Spec introduces a third Scenario ''程序化确认门控 — 空输入 no-op'' not declared
+  in the plan''s spec_changes. The task description''s literal rule is binary (=="1"
+  → confirm; otherwise → next turn), so empty input would strictly belong to the ''continue''
+  branch. The implementation''s no-op choice is pragmatic (avoids feeding empty messages
+  to the LLM) and is explicitly documented, but formally it deviates from the declared
+  scope.
+
+
+  Suggestion: Accept as an emergent edge-case decision. If future spec hygiene is
+  desired, record this case in the plan''s spec_changes list or collapse it back into
+  the ''continue'' branch (treating empty input as an empty user turn) to match the
+  task description literally.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-24T16:45:21.075809'
+updated_at: '2026-04-24T16:45:21.075809'

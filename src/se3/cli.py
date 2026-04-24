@@ -61,6 +61,8 @@ def _read_multiline_input(
     prompt_title: str = "Input",
     prompt_message: str = "Enter task description (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
     history: Optional[any] = None,
+    *,
+    strip: bool = True,
 ) -> Optional[str]:
     """Read multiline input from stdin with proper Unicode support.
 
@@ -70,6 +72,9 @@ def _read_multiline_input(
     Args:
         prompt_title: Title displayed above the input area.
         prompt_message: Instruction text shown to the user.
+        strip: Whether to strip leading/trailing whitespace from input.
+               Default True. Set False when strict character comparison is
+               needed (e.g., discovery confirmation gate's == "1" check).
     """
     # Check if stdin is a tty (interactive terminal)
     if not sys.stdin.isatty():
@@ -82,7 +87,8 @@ def _read_multiline_input(
             if lines:
                 render_full("\n".join(lines), title=prompt_title)
 
-            content = content.strip()
+            if strip:
+                content = content.strip()
             return content if content else None
         except (EOFError, KeyboardInterrupt):
             return None
@@ -117,7 +123,8 @@ def _read_multiline_input(
             content = session.prompt()
 
         # Show full content for review
-        content = content.strip()
+        if strip:
+            content = content.strip()
         if content:
             lines = content.split("\n")
             if len(lines) > 1:

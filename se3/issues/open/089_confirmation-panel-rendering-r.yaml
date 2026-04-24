@@ -1,0 +1,28 @@
+id: 089
+title: Confirmation Panel rendering rules now mandate a styled prompt hint (rendering
+  table row + 'Confirmation phase content display' paragraph + new AND-clause in the
+  'Confirmation phase shows full LLM analysis content' Scenario). This display-layer
+  addition was not declared in spec_changes, though it is necessary for users to discover
+  the `1` affordance once the 1/2 UI was removed. The author marked the exact wording
+  as Non-normative to avoid over-constraining implementations.
+description: 'Confirmation Panel rendering rules now mandate a styled prompt hint
+  (rendering table row + ''Confirmation phase content display'' paragraph + new AND-clause
+  in the ''Confirmation phase shows full LLM analysis content'' Scenario). This display-layer
+  addition was not declared in spec_changes, though it is necessary for users to discover
+  the `1` affordance once the 1/2 UI was removed. The author marked the exact wording
+  as Non-normative to avoid over-constraining implementations.
+
+
+  Suggestion: Accept as a usability-driven emergent addition. For future planning
+  hygiene, display-layer affordances related to input contract changes could be declared
+  in spec_changes upfront.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-24T16:45:21.077504'
+updated_at: '2026-04-24T16:45:21.077504'

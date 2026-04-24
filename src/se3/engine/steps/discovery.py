@@ -23,6 +23,10 @@ from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
 
+# Sentinel value used by the orchestrator to signal that the user confirmed
+# via the programmatic confirmation gate. This must NEVER reach the LLM.
+PROGRAMMATIC_CONFIRM_SENTINEL = "__PROGRAMMATIC_CONFIRM__"
+
 # Prompt for initial discovery analysis
 INITIAL_DISCOVERY_PROMPT = """You are an expert software engineering assistant in DISCOVERY mode.
 
@@ -251,7 +255,6 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """
     # Programmatic confirmation early return: user already confirmed via program gate
     if step.inputs.get("programmatic_confirmed"):
-        refined_description = step.outputs.get("refined_description", "")
         step.outputs["discovery_summary"] = _generate_summary(
             step.inputs.get("discovery_state", {}).get("history", [])
         )
@@ -284,6 +287,15 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
     specs_info, base_spec_content = _gather_specs_info(builder)
 
     try:
+        # Defensive guard: the sentinel must never reach the LLM as a user turn.
+        # The orchestrator stores this in user_response only after setting
+        # programmatic_confirmed=True, which is handled by the early-return guard above.
+        if user_response == PROGRAMMATIC_CONFIRM_SENTINEL:
+            raise RuntimeError(
+                f"Discovery handler received the programmatic confirmation sentinel "
+                f"'{PROGRAMMATIC_CONFIRM_SENTINEL}' without programmatic_confirmed=True. "
+                f"This indicates a contract violation — the sentinel leaked into the LLM path."
+            )
         if round_number == 0 and not resumed:
             # Initial discovery round
             result, raw_result_text = _run_discovery_round(
@@ -325,7 +337,6 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Parse result
         mode = result.get("mode", "question")
         content = result.get("content", "")
-        ready_to_proceed = result.get("ready_to_proceed", False)
         refined_description = result.get("refined_description", "")
 
         # Store the LLM's full raw result text as context for subsequent rounds,
@@ -348,24 +359,22 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Clear previous outputs to avoid confusion
         step.outputs.clear()
         step.outputs["message"] = content
+        step.outputs["raw_result_text"] = raw_result_text
 
         # Internal state should not be in user-facing outputs
         # (mode, round are tracked in discovery_state above)
 
         questions = result.get("questions", [])
 
-        # Check if there has been at least one user interaction in this discovery
-        has_user_interaction = any(
-            e.get("role") == "user" for e in conversation_history
-        )
-
-        if mode == "confirmation" and ready_to_proceed and refined_description and not questions and has_user_interaction:
-            # LLM confirmed — pause for programmatic user confirmation gate
+        if refined_description and not questions:
+            # All cases with a refined description and no pending questions
+            # route through the programmatic confirmation gate (user types "1" to confirm).
+            # This covers: LLM confirmation mode, synthesis mode without questions, and
+            # premature confirmation before any user interaction.
             step.outputs["refined_description"] = refined_description
             step.outputs["awaiting_programmatic_confirm"] = True
-            logger.info("Discovery LLM confirmed — awaiting programmatic user confirmation")
+            logger.info("Discovery has refined description — awaiting programmatic user confirmation")
 
-            # Show LLM analysis content and confirmed description
             _display_discovery_message(
                 content,
                 refined_description,
@@ -374,14 +383,6 @@ def discovery_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 raw_result_text=raw_result_text,
             )
 
-            return StepStatus.PAUSED
-
-        elif (mode == "synthesis" and refined_description and not questions) or \
-             (mode == "confirmation" and refined_description and not has_user_interaction):
-            # Have a refined description - ask for user confirmation before proceeding.
-            # Also catches LLM prematurely returning "confirmation" before any user interaction.
-            step.outputs["proposed_description"] = refined_description
-            _display_discovery_message(content, refined_description, questions=None, raw_result_text=raw_result_text)
             return StepStatus.PAUSED
 
         else:
@@ -647,6 +648,14 @@ def _display_discovery_message(
             renderables.append(Text(""))
         renderables.append(Markdown(refined_description))
         renderables.append(Text(""))
+        # Non-normative hint: advertise the '1' confirmation affordance
+        hint = Text()
+        hint.append("Type ", style="dim")
+        hint.append("1", style="bold green")
+        hint.append(" and press Enter to confirm and proceed,", style="dim")
+        hint.append("\nor type your questions/feedback to continue discovery.", style="dim")
+        renderables.append(hint)
+        renderables.append(Text(""))
     elif refined_description and questions:
         # Synthesis with pending questions - show content, proposed description, then questions
         if content:
@@ -659,24 +668,6 @@ def _display_discovery_message(
         for i, q in enumerate(questions, 1):
             renderables.append(Text(f"  {i}. {q}"))
         renderables.append(Text(""))
-    elif refined_description:
-        # Synthesis mode - show content explanation and proposed description
-        if content:
-            renderables.append(Markdown(content))
-            renderables.append(Text(""))
-        renderables.append(Text("Proposed Task Description:", style="bold cyan"))
-        renderables.append(Markdown(refined_description))
-        renderables.append(Text(""))
-        prompt = Text()
-        prompt.append("Does this accurately capture what you want to build?\n\n")
-        prompt.append("Reply with:\n")
-        prompt.append("  yes", style="bold")
-        prompt.append(" or ")
-        prompt.append("ok", style="bold")
-        prompt.append(" to proceed with this description\n")
-        prompt.append("  no", style="bold")
-        prompt.append(" or provide corrections/clarifications\n")
-        renderables.append(prompt)
     elif questions:
         # Question mode - show the message and questions
         if content:
@@ -701,44 +692,3 @@ def _display_discovery_message(
     console.print(panel)
 
 
-def parse_user_response(response: str) -> Dict[str, Any]:
-    """Parse user response to determine if they confirmed or want to continue.
-
-    Args:
-        response: User's input
-
-    Returns:
-        Dict with 'confirmed' (bool) and 'feedback' (str)
-    """
-    response_lower = response.lower().strip()
-
-    # Check for confirmation indicators
-    confirm_keywords = [
-        "yes", "ok", "sure", "proceed", "go ahead", "that's right",
-        "correct", "looks good", "good", "fine", "confirm", "confirmed",
-        "没问题", "好的", "可以", "行", "确认", "是的", "对的",
-    ]
-
-    # Check for rejection indicators
-    reject_keywords = [
-        "no", "not quite", "wrong", "incorrect", "needs change",
-        "modify", "update", "fix", "change", "不对", "不是", "需要修改",
-    ]
-
-    confirmed = any(kw in response_lower for kw in confirm_keywords)
-    rejected = any(kw in response_lower for kw in reject_keywords)
-
-    # If clearly confirmed and no rejection indicators
-    if confirmed and not rejected:
-        return {"confirmed": True, "feedback": response}
-
-    # If clearly rejected
-    if rejected:
-        return {"confirmed": False, "feedback": response}
-
-    # Ambiguous - treat as feedback/continuation
-    # Check for length - short responses are more likely confirmations
-    if len(response_lower) < 20 and not rejected:
-        return {"confirmed": True, "feedback": response}
-
-    return {"confirmed": False, "feedback": response}

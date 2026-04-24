@@ -91,9 +91,8 @@ se3 run --discover "我想做一个用户管理功能"
 1. **初始探索**: 根据用户的初步描述，AI 提出澄清问题
 2. **对话迭代**: 用户回答后，AI 继续追问或转向综合
 3. **综合确认**: AI 总结理解并生成精炼的任务描述
-4. **用户确认**: 用户确认或要求修改
-5. **程序化确认门控**: LLM 确认后，程序向用户展示编号选项，要求人工明确选择才能继续
-6. **进入分析**: 人工确认后使用精炼描述继续 `analyze` 步骤
+4. **程序化确认门控**: LLM 判定需求已明确并生成精炼描述后，直接 PAUSED 进入程序化确认门控，由用户最终裁决
+5. **进入分析**: 用户确认后使用精炼描述继续 `analyze` 步骤
 
 **状态管理：**
 - 对话历史保存在 `discovery_state` 中
@@ -103,16 +102,17 @@ se3 run --discover "我想做一个用户管理功能"
 **LLM 调用模式：**
 - `question` 模式: 向用户提出具体问题
 - `synthesis` 模式: 总结理解并生成精炼描述
-- `confirmation` 模式: 用户确认后暂停等待程序化确认门控
+- `confirmation` 模式: LLM 判定需求已明确，返回精炼描述后暂停，等待程序化门控
 
 **程序化确认门控：**
 
-当 LLM 的 `confirmation` 模式判定需求已明确并生成精炼描述后，discovery 步骤不直接完成，而是返回 `PAUSED` 状态并设置 `awaiting_programmatic_confirm=True`。程序运行循环检测到此标志后，向用户展示编号选项：
+当 LLM 的 `confirmation` 模式判定需求已明确并生成精炼描述后，discovery 步骤不直接完成，而是返回 `PAUSED` 状态并设置 `awaiting_programmatic_confirm=True`。程序运行循环检测到此标志后，在 discovery 的普通输入框读取用户输入：
 
-1. **确认并继续** — 进入实现规划阶段
-2. **还有问题** — 继续 discovery 对话
+- 若 `user_input == "1"`（严格相等，不做 strip/normalize，不允许 `1.`、`1 ok`、` 1 `、`yes` 等变体）—— 视为**确认并继续**，进入实现规划阶段
+- 若 `user_input` 为空（用户直接按回车）—— 视为 **no-op**：不清除 `awaiting_programmatic_confirm` 标志，不推进 discovery 对话，不触发任何 LLM 调用，仅重绘已缓存的确认 Panel
+- 其它非空输入 —— 视为**还有问题**：清除 `awaiting_programmatic_confirm` 标志，该输入直接作为下一轮 discovery 的用户输入，不再单独提示输入问题
 
-只有用户明确选择选项 1 时，流程才会继续。选择选项 2 将清除确认标志并重新进入 discovery 对话，用户可以提供额外的问题或反馈。
+选择 `1` 而非 `yes` 的理由：`1` 是语言无关的通用符号，为未来非英语界面预留空间。严格 `==` 判定避免 `1. 我还想补充…` 被误判为确认。
 
 这确保了 LLM 的确认判断不会单方面推进流程，人工始终拥有最终决定权。
 
@@ -143,12 +143,12 @@ se3 run --discover "我想做一个用户管理功能"
 - **THEN** `_restore_discovery_display()` 从 `step.outputs` 读取描述时优先取 `proposed_description`
 - **AND** 当 `proposed_description` 不存在时，回退到 `refined_description`
 - **AND** `refined_description` 作为 markdown 正确渲染
-- **AND** 向用户展示确认选项
+- **AND** 在 discovery 普通输入框提示用户输入 `1` 以确认并继续，其它输入作为下一轮 discovery 的用户输入
 
 #### Scenario: 程序化确认门控 — 用户确认继续
 - **GIVEN** LLM 在 confirmation 模式下判定需求已明确
 - **AND** discovery 步骤返回 PAUSED 且 `awaiting_programmatic_confirm=True`
-- **WHEN** 程序向用户展示编号选项且用户选择"确认并继续"
+- **WHEN** 程序在 discovery 普通输入框读取用户输入且 `user_input == "1"`（严格相等，不做 strip/normalize）
 - **THEN** 设置 `programmatic_confirmed=True` 到步骤输入
 - **AND** 重新执行 discovery handler，handler 检测到此标志后直接完成步骤
 - **AND** 生成 `discovery_summary` 并设置 `requirements_clarified=True`
@@ -156,10 +156,18 @@ se3 run --discover "我想做一个用户管理功能"
 #### Scenario: 程序化确认门控 — 用户继续探索
 - **GIVEN** LLM 在 confirmation 模式下判定需求已明确
 - **AND** discovery 步骤返回 PAUSED 且 `awaiting_programmatic_confirm=True`
-- **WHEN** 程序向用户展示编号选项且用户选择"还有问题"
+- **WHEN** 程序在 discovery 普通输入框读取的用户输入不严格等于 `"1"` 且非空（包括 `1.`、`1 ok`、` 1 `、`yes` 等变体）
 - **THEN** 清除 `awaiting_programmatic_confirm` 标志
-- **AND** 提示用户输入问题或反馈
-- **AND** 将用户输入作为新的 discovery 轮次继续对话
+- **AND** 该用户输入直接作为新一轮 discovery 的用户输入，不单独提示输入问题
+
+#### Scenario: 程序化确认门控 — 空输入 no-op
+- **GIVEN** LLM 在 confirmation 模式下判定需求已明确
+- **AND** discovery 步骤返回 PAUSED 且 `awaiting_programmatic_confirm=True`
+- **WHEN** 程序在 discovery 普通输入框读取的用户输入为空（用户直接按回车）
+- **THEN** `awaiting_programmatic_confirm` 标志保持不变
+- **AND** 不创建新的 discovery 对话轮次
+- **AND** 不触发任何 LLM 调用，仅使用已缓存的 `refined_description` 重绘确认 Panel
+- **AND** 用户可再次看到确认提示并输入 `1` 确认或输入其它内容继续探索
 
 #### Scenario: Discovery 输出传递
 - **GIVEN** discovery 步骤完成且用户已通过程序化确认门控确认
@@ -191,7 +199,7 @@ When `raw_result_text` is provided (the raw LLM output from which JSON was extra
 
 | Mode | `content` field | `refined_description` field | Structural elements |
 |------|----------------|---------------------------|---------------------|
-| Confirmation (`is_confirmation=True`) | Markdown | Markdown | — |
+| Confirmation (`is_confirmation=True`) | Markdown | Markdown | Confirmation prompt hint as styled `Text` (see Confirmation phase content display) |
 | Synthesis + questions | Markdown | Markdown (under "Proposed Task Description:" heading) | Heading as styled `Text`, numbered questions as `Text` |
 | Synthesis (no questions) | Markdown | Markdown (under "Proposed Task Description:" heading) | Heading as styled `Text`, confirmation prompt as styled `Text` |
 | Question | Markdown | — | Numbered questions as `Text` |
@@ -199,7 +207,7 @@ When `raw_result_text` is provided (the raw LLM output from which JSON was extra
 
 **Confirmation phase content display:**
 
-When the discovery step enters the confirmation phase (`is_confirmation=True`), `_display_discovery_message()` SHALL display the full LLM analysis content (`content` field) followed by the `refined_description`, both rendered as markdown. This ensures users see the complete LLM analysis (reasoning, summaries, context) alongside the final proposed description before making their confirmation decision.
+When the discovery step enters the confirmation phase (`is_confirmation=True`), `_display_discovery_message()` SHALL display the full LLM analysis content (`content` field) followed by the `refined_description`, both rendered as markdown. This ensures users see the complete LLM analysis (reasoning, summaries, context) alongside the final proposed description before making their confirmation decision. The confirmation Panel SHALL include a styled prompt hint at the bottom, outside the markdown content area, rendered as Rich `Text` (not markdown). This hint is the only mechanism by which the user learns the `1` affordance — without it, the rendering spec is silent on input expectations. **Non-normative:** The exact hint wording is non-normative; only the `1` affordance is normative. Implementations MAY localize or reword the hint freely (e.g., `输入 1 确认并继续，输入其它内容继续探索；直接回车重新显示本提示`), provided the `1` confirmation key is communicated to the user and the empty-input no-op behavior is preserved.
 
 ##### Scenario: Discovery message renders LLM content as markdown
 - **GIVEN** the discovery step receives LLM response with `content` and `refined_description` fields containing markdown syntax (headings, lists, bold, etc.)
@@ -213,6 +221,7 @@ When the discovery step enters the confirmation phase (`is_confirmation=True`), 
 - **WHEN** the confirmation display is rendered
 - **THEN** the full `content` from the LLM response is displayed as markdown
 - **AND** the `refined_description` is displayed as markdown below it
+- **AND** a styled prompt hint is rendered at the bottom of the Panel as Rich `Text` (not markdown), communicating the `1` confirmation affordance
 - **AND** the user can review the complete analysis before choosing to confirm or continue exploration
 
 ##### Scenario: Narrative text from raw LLM output prefixed to Panel

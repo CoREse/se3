@@ -33,6 +33,7 @@ try:
     from ..engine.state_machine import StateMachine
     from ..engine.context_builder import ContextBuilder
     from ..engine.steps import STEP_HANDLERS
+    from ..engine.steps.discovery import PROGRAMMATIC_CONFIRM_SENTINEL
     from ..engine.llm_caller import set_extra_prompt
     from ..engine.output import (
         display_error,
@@ -52,6 +53,7 @@ except ImportError:
     from engine.state_machine import StateMachine
     from engine.context_builder import ContextBuilder
     from engine.steps import STEP_HANDLERS
+    from engine.steps.discovery import PROGRAMMATIC_CONFIRM_SENTINEL
     from engine.llm_caller import set_extra_prompt
     from engine.output import (
         display_error,
@@ -462,19 +464,16 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
         get_console().print("[yellow]Please provide a response or press Ctrl+C to exit.[/yellow]")
         return _handle_discovery_pause(flow, current_step, persistence, prompt_history)
 
-    # Parse the response to check if user is confirming
-    from ..engine.steps.discovery import parse_user_response
-    parsed = parse_user_response(user_input)
-
-    # If user confirmed a synthesis, mark it
-    if parsed["confirmed"] and current_step.inputs.get("discovery_state", {}).get("mode") == "synthesis":
-        current_step.outputs["user_confirmed"] = True
-
     return user_input
 
 
-# Sentinel returned by programmatic confirm handler when user chooses to proceed
-_PROGRAMMATIC_CONFIRM = "__PROGRAMMATIC_CONFIRM__"
+# Sentinel returned by programmatic confirm handler when user chooses to proceed.
+# INVARIANT: This value is only returned AFTER setting inputs["programmatic_confirmed"]=True.
+# The discovery_handler's early-return guard (programmatic_confirmed check) MUST execute
+# before any code path that could feed this value to the LLM as a user message. The
+# persistence.save_flow() call in the orchestrator loop happens after the sentinel is
+# returned but before the next handler invocation, so the flag is always persisted.
+_PROGRAMMATIC_CONFIRM = PROGRAMMATIC_CONFIRM_SENTINEL
 
 
 def _handle_discovery_programmatic_confirm(
@@ -485,9 +484,10 @@ def _handle_discovery_programmatic_confirm(
 ) -> Optional[str]:
     """Handle programmatic confirmation gate after LLM confirms discovery.
 
-    Presents numbered choices to the user:
-    1. Confirm and proceed to the next step
-    2. Still have questions — continue discovery
+    Uses the regular discovery multiline input box. The user types exactly
+    "1" (strict equality, no whitespace stripping) to confirm and proceed.
+    Empty input is a no-op (re-displays the confirmation panel). Any other
+    non-empty input continues discovery as the next user turn.
 
     Args:
         flow: Current flow instance
@@ -497,68 +497,70 @@ def _handle_discovery_programmatic_confirm(
 
     Returns:
         _PROGRAMMATIC_CONFIRM sentinel if user confirms,
-        user's follow-up input string if they want to continue,
-        or None if cancelled (Ctrl+C).
+        user's input string if they want to continue discovery,
+        or None if cancelled (Ctrl+C/EOF).
     """
-    try:
-        choice = prompt_user_choice(
-            "The discovery analysis is ready. How would you like to proceed?",
-            [
-                "Confirm and proceed to implementation planning",
-                "I have more questions or changes — continue discovery",
-            ],
-        )
-    except KeyboardInterrupt:
-        persistence.save_flow(flow)
-        render_full(
-            "Discovery paused. Flow state saved.\n"
-            "Resume with: se3 run --resume",
-            title="Paused",
-        )
-        return None
-
-    if choice == 0:
-        # User confirmed — mark for programmatic confirmation
-        current_step.inputs["programmatic_confirmed"] = True
-        return _PROGRAMMATIC_CONFIRM
-
-    # User wants to continue — clear the programmatic confirm flag
-    current_step.outputs.pop("awaiting_programmatic_confirm", None)
-
-    render_full(
-        "Continuing discovery. Please provide your questions or feedback.",
-        title="Discovery Continue",
-    )
-
-    try:
+    # The confirmation panel was already displayed by the discovery handler
+    # or _restore_discovery_display.
+    while True:
         user_input = _read_multiline_input(
-            prompt_title="Discovery Response",
-            prompt_message="Enter your response (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+            prompt_title="Discovery Confirmation",
+            prompt_message="Type 1 to confirm and proceed, or type your questions/feedback to continue discovery (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
             history=prompt_history,
+            strip=False,
         )
-    except KeyboardInterrupt:
-        persistence.save_flow(flow)
-        render_full(
-            "Discovery paused. Flow state saved.\n"
-            "Resume with: se3 run --resume",
-            title="Paused",
+
+        if user_input is None:
+            # None = Ctrl+C (interactive) or EOF/empty pipe (non-interactive).
+            # NOTE: Intentional divergence — interactive empty input (Ctrl+D on
+            # empty buffer) returns "" and loops with re-display. Non-interactive
+            # empty input returns None because sys.stdin.read() consumes all data
+            # at once; there is nothing left to re-read, so pausing is the only
+            # safe behavior. Scripted drivers that pipe "\n" or empty input will
+            # see the flow pause rather than loop.
+            persistence.save_flow(flow)
+            render_full(
+                "Discovery paused. Flow state saved.\n"
+                "Resume with: se3 run --resume",
+                title="Paused",
+            )
+            return None
+
+        # Strip trailing newlines — these are artifacts of the multiline input
+        # UI (pressing Enter before Ctrl+D), not part of the user's intended
+        # input. The spec's strict == "1" rule still rejects " 1 ", "1.",
+        # "yes", " 1", etc.; only the exact single character "1" confirms.
+        if user_input.rstrip('\n\r') == "1":
+            current_step.inputs["programmatic_confirmed"] = True
+            return _PROGRAMMATIC_CONFIRM
+
+        if not user_input.strip():
+            # Empty or whitespace-only input — no-op: re-display the cached
+            # confirmation panel. This covers both interactive empty input
+            # and non-interactive piped whitespace (e.g., "   \n").
+            from ..engine.steps.discovery import _display_discovery_message
+
+            content = current_step.outputs.get("message", "")
+            refined = (
+                current_step.outputs.get("refined_description")
+                or current_step.outputs.get("proposed_description")
+                or ""
+            )
+            raw_result_text = current_step.outputs.get("raw_result_text", "")
+
+            _display_discovery_message(
+                content, refined, is_confirmation=True, raw_result_text=raw_result_text
+            )
+            continue
+
+        # Non-empty, non-"1" input — continue discovery:
+        # clear the programmatic confirm flag, use this input as the next
+        # discovery user input directly (no separate prompt for questions)
+        current_step.outputs.pop("awaiting_programmatic_confirm", None)
+        get_console().print(
+            "[dim]Captured input — continuing discovery with your feedback.[/dim]"
         )
-        return None
-
-    if user_input is None:
-        persistence.save_flow(flow)
-        render_full(
-            "Discovery paused. Flow state saved.\n"
-            "Resume with: se3 run --resume",
-            title="Paused",
-        )
-        return None
-
-    if not user_input:
-        get_console().print("[yellow]Please provide a response or press Ctrl+C to exit.[/yellow]")
-        return _handle_discovery_programmatic_confirm(flow, current_step, persistence, prompt_history)
-
-    return user_input
+        return user_input
 
 
 def _should_show_type(current_step_type: str, flow: FlowInstance) -> bool:

@@ -17,7 +17,7 @@ from se3.engine.models import (
 from se3.engine.state_machine import StateMachine
 from se3.engine.steps.discovery import (
     discovery_handler,
-    parse_user_response,
+    PROGRAMMATIC_CONFIRM_SENTINEL,
     _format_conversation_history,
     _generate_summary,
     _extract_narrative_from_raw,
@@ -124,10 +124,12 @@ class TestDiscoveryHandler:
         result = discovery_handler(step, flow)
 
         assert result == StepStatus.PAUSED
-        # User-facing outputs for synthesis mode
+        # Synthesis with refined description and no questions routes through
+        # the programmatic confirmation gate (same as confirmation mode).
         assert "message" in step.outputs
-        assert "proposed_description" in step.outputs
-        assert step.outputs["proposed_description"] == "Build a user authentication system with login/logout"
+        assert "refined_description" in step.outputs
+        assert step.outputs["refined_description"] == "Build a user authentication system with login/logout"
+        assert step.outputs.get("awaiting_programmatic_confirm") is True
         # Internal state stored in discovery_state
         assert step.inputs["discovery_state"]["mode"] == "synthesis"
 
@@ -267,31 +269,224 @@ class TestProgrammaticConfirmation:
         assert "awaiting_programmatic_confirm" not in step.outputs
 
 
-class TestUserResponseParsing:
-    """Test user response parsing."""
+class TestProgrammaticConfirmGate:
+    """Test _handle_discovery_programmatic_confirm in run.py.
 
-    def test_confirm_keywords(self):
-        """Should detect confirmation keywords."""
-        assert parse_user_response("yes")["confirmed"] is True
-        assert parse_user_response("ok")["confirmed"] is True
-        assert parse_user_response("proceed")["confirmed"] is True
-        assert parse_user_response("没问题")["confirmed"] is True
-        assert parse_user_response("好的")["confirmed"] is True
+    These tests drive every branch of the programmatic confirmation gate
+    by mocking _read_multiline_input.
+    """
 
-    def test_reject_keywords(self):
-        """Should detect rejection keywords."""
-        assert parse_user_response("no")["confirmed"] is False
-        assert parse_user_response("not quite")["confirmed"] is False
-        assert parse_user_response("需要修改")["confirmed"] is False
+    @patch("se3.commands.run._read_multiline_input")
+    def test_input_1_confirms(self, mock_read):
+        """Strict '1' confirms and returns sentinel."""
+        from se3.commands.run import _handle_discovery_programmatic_confirm
 
-    def test_ambiguous_short_response(self):
-        """Short ambiguous responses treated as confirm."""
-        assert parse_user_response("ok thanks")["confirmed"] is True
+        step = Step(step_type=StepType.DISCOVERY, inputs={})
+        step.outputs["message"] = "msg"
+        step.outputs["refined_description"] = "desc"
+        flow = FlowInstance(task_description="test")
+        persistence = Mock()
 
-    def test_ambiguous_long_response(self):
-        """Long ambiguous responses treated as feedback."""
-        result = parse_user_response("Actually I think we need to change this part because it doesn't match what I want")
-        assert result["confirmed"] is False
+        mock_read.return_value = "1"
+
+        result = _handle_discovery_programmatic_confirm(flow, step, persistence)
+
+        assert result == PROGRAMMATIC_CONFIRM_SENTINEL
+        assert step.inputs["programmatic_confirmed"] is True
+
+    @patch("se3.commands.run._read_multiline_input")
+    def test_input_1_with_newline_confirms(self, mock_read):
+        """'1\\n' confirms (trailing newline artifact from multiline UI)."""
+        from se3.commands.run import _handle_discovery_programmatic_confirm
+
+        step = Step(step_type=StepType.DISCOVERY, inputs={})
+        step.outputs["message"] = "msg"
+        step.outputs["refined_description"] = "desc"
+        flow = FlowInstance(task_description="test")
+        persistence = Mock()
+
+        mock_read.return_value = "1\n"
+
+        result = _handle_discovery_programmatic_confirm(flow, step, persistence)
+
+        assert result == PROGRAMMATIC_CONFIRM_SENTINEL
+        assert step.inputs["programmatic_confirmed"] is True
+
+    @patch("se3.commands.run._read_multiline_input")
+    def test_input_1_with_crlf_confirms(self, mock_read):
+        """'1\\r\\n' confirms (trailing CRLF artifact from multiline UI)."""
+        from se3.commands.run import _handle_discovery_programmatic_confirm
+
+        step = Step(step_type=StepType.DISCOVERY, inputs={})
+        step.outputs["message"] = "msg"
+        step.outputs["refined_description"] = "desc"
+        flow = FlowInstance(task_description="test")
+        persistence = Mock()
+
+        mock_read.return_value = "1\r\n"
+
+        result = _handle_discovery_programmatic_confirm(flow, step, persistence)
+
+        assert result == PROGRAMMATIC_CONFIRM_SENTINEL
+        assert step.inputs["programmatic_confirmed"] is True
+
+    @patch("se3.commands.run._read_multiline_input")
+    def test_input_1_dot_rejected(self, mock_read):
+        """'1.' is not strict '1' — clears flag and returns input for continued discovery."""
+        from se3.commands.run import _handle_discovery_programmatic_confirm
+
+        step = Step(step_type=StepType.DISCOVERY, inputs={})
+        step.outputs["message"] = "msg"
+        step.outputs["refined_description"] = "desc"
+        step.outputs["awaiting_programmatic_confirm"] = True
+        flow = FlowInstance(task_description="test")
+        persistence = Mock()
+
+        mock_read.return_value = "1."
+
+        result = _handle_discovery_programmatic_confirm(flow, step, persistence)
+
+        assert result == "1."
+        assert "awaiting_programmatic_confirm" not in step.outputs
+        assert "programmatic_confirmed" not in step.inputs
+
+    @patch("se3.commands.run._read_multiline_input")
+    def test_input_whitespace_1_rejected(self, mock_read):
+        """' 1 ' is not strict '1' — clears flag and returns input."""
+        from se3.commands.run import _handle_discovery_programmatic_confirm
+
+        step = Step(step_type=StepType.DISCOVERY, inputs={})
+        step.outputs["message"] = "msg"
+        step.outputs["refined_description"] = "desc"
+        step.outputs["awaiting_programmatic_confirm"] = True
+        flow = FlowInstance(task_description="test")
+        persistence = Mock()
+
+        mock_read.return_value = " 1 "
+
+        result = _handle_discovery_programmatic_confirm(flow, step, persistence)
+
+        assert result == " 1 "
+        assert "awaiting_programmatic_confirm" not in step.outputs
+
+    @patch("se3.commands.run._read_multiline_input")
+    def test_input_yes_rejected(self, mock_read):
+        """'yes' is not strict '1' — clears flag and returns input."""
+        from se3.commands.run import _handle_discovery_programmatic_confirm
+
+        step = Step(step_type=StepType.DISCOVERY, inputs={})
+        step.outputs["message"] = "msg"
+        step.outputs["refined_description"] = "desc"
+        step.outputs["awaiting_programmatic_confirm"] = True
+        flow = FlowInstance(task_description="test")
+        persistence = Mock()
+
+        mock_read.return_value = "yes"
+
+        result = _handle_discovery_programmatic_confirm(flow, step, persistence)
+
+        assert result == "yes"
+        assert "awaiting_programmatic_confirm" not in step.outputs
+
+    @patch("se3.commands.run._read_multiline_input")
+    def test_input_foo_rejected(self, mock_read):
+        """'foo' clears flag and returns input for continued discovery."""
+        from se3.commands.run import _handle_discovery_programmatic_confirm
+
+        step = Step(step_type=StepType.DISCOVERY, inputs={})
+        step.outputs["message"] = "msg"
+        step.outputs["refined_description"] = "desc"
+        step.outputs["awaiting_programmatic_confirm"] = True
+        flow = FlowInstance(task_description="test")
+        persistence = Mock()
+
+        mock_read.return_value = "foo"
+
+        result = _handle_discovery_programmatic_confirm(flow, step, persistence)
+
+        assert result == "foo"
+        assert "awaiting_programmatic_confirm" not in step.outputs
+
+    @patch("se3.engine.steps.discovery._display_discovery_message")
+    @patch("se3.commands.run._read_multiline_input")
+    def test_empty_input_redisplays(self, mock_read, mock_display):
+        """Empty input loops with re-display, then '1' breaks the loop."""
+        from se3.commands.run import _handle_discovery_programmatic_confirm
+
+        step = Step(step_type=StepType.DISCOVERY, inputs={})
+        step.outputs["message"] = "msg"
+        step.outputs["refined_description"] = "desc"
+        flow = FlowInstance(task_description="test")
+        persistence = Mock()
+
+        mock_read.side_effect = ["", "1"]
+
+        result = _handle_discovery_programmatic_confirm(flow, step, persistence)
+
+        assert result == PROGRAMMATIC_CONFIRM_SENTINEL
+        assert mock_display.call_count == 1  # re-displayed after empty input
+        assert mock_read.call_count == 2
+
+    @patch("se3.engine.steps.discovery._display_discovery_message")
+    @patch("se3.commands.run._read_multiline_input")
+    def test_whitespace_only_redisplays(self, mock_read, mock_display):
+        """Whitespace-only input loops with re-display, then '1' breaks."""
+        from se3.commands.run import _handle_discovery_programmatic_confirm
+
+        step = Step(step_type=StepType.DISCOVERY, inputs={})
+        step.outputs["message"] = "msg"
+        step.outputs["refined_description"] = "desc"
+        flow = FlowInstance(task_description="test")
+        persistence = Mock()
+
+        mock_read.side_effect = ["   ", "1"]
+
+        result = _handle_discovery_programmatic_confirm(flow, step, persistence)
+
+        assert result == PROGRAMMATIC_CONFIRM_SENTINEL
+        assert mock_display.call_count == 1
+        assert mock_read.call_count == 2
+
+    @patch("se3.commands.run._read_multiline_input")
+    def test_none_cancels_and_saves(self, mock_read):
+        """None (Ctrl+C / EOF) returns None after saving flow."""
+        from se3.commands.run import _handle_discovery_programmatic_confirm
+
+        step = Step(step_type=StepType.DISCOVERY, inputs={})
+        step.outputs["message"] = "msg"
+        step.outputs["refined_description"] = "desc"
+        flow = FlowInstance(task_description="test")
+        persistence = Mock()
+
+        mock_read.return_value = None
+
+        result = _handle_discovery_programmatic_confirm(flow, step, persistence)
+
+        assert result is None
+        persistence.save_flow.assert_called_once_with(flow)
+
+
+class TestSentinelAssertion:
+    """Test that the sentinel never leaks into the LLM path."""
+
+    def test_sentinel_without_programmatic_confirmed_fails(self):
+        """If user_response contains the sentinel without programmatic_confirmed,
+        the handler must fail rather than feed it to the LLM."""
+        step = Step(
+            step_type=StepType.DISCOVERY,
+            inputs={
+                "task_description": "Test task",
+                "user_response": PROGRAMMATIC_CONFIRM_SENTINEL,
+                "discovery_state": {"round": 1, "history": []},
+            },
+        )
+        flow = FlowInstance(task_description="Test task")
+
+        result = discovery_handler(step, flow)
+
+        assert result == StepStatus.FAILED
+        assert "sentinel" in step.error_message.lower()
+        assert PROGRAMMATIC_CONFIRM_SENTINEL in step.error_message
 
 
 class TestStateMachineIntegration:
