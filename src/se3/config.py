@@ -1,6 +1,7 @@
 """SE3 configuration management."""
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Optional
 from dataclasses import dataclass, field
@@ -1779,11 +1780,34 @@ class TestConfig:
         return [p for p in self.phases if p.get("in_fix_loop", True)]
 
 
+_USE_WORKTREE_ENV_VAR = "SE3_IMPLEMENT_USE_WORKTREE"
+
+
+def _coerce_bool(value: Any, default: bool) -> bool:
+    """Coerce a YAML/env scalar to bool, tolerating 'true'/'false'/'0'/'1'.
+
+    Unknown strings fall back to ``default`` so a typo cannot silently
+    flip behaviour. Real booleans pass through.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in ("true", "1", "yes", "on"):
+            return True
+        if lowered in ("false", "0", "no", "off"):
+            return False
+    return default
+
+
 @dataclass
 class ImplementConfig:
     """Implement step configuration loaded from se3.yaml implement: section."""
 
     group_loc_threshold: int = 300
+    use_worktree: bool = True
 
     @classmethod
     def from_dict(cls, data: dict) -> "ImplementConfig":
@@ -1792,18 +1816,23 @@ class ImplementConfig:
             return cls()
         return cls(
             group_loc_threshold=int(data.get("group_loc_threshold", 300)),
+            use_worktree=_coerce_bool(data.get("use_worktree", True), default=True),
         )
 
     @classmethod
     def load(cls, project_root: Path) -> "ImplementConfig":
         """Load implement configuration from the active project YAML."""
         data, _src = load_project_yaml(project_root)
-        if not data:
-            return cls()
-        impl_data = data.get("implement", {})
-        if not impl_data or not isinstance(impl_data, dict):
-            return cls()
-        return cls.from_dict(impl_data)
+        impl_data = data.get("implement", {}) if data else {}
+        if not isinstance(impl_data, dict):
+            impl_data = {}
+        config = cls.from_dict(impl_data)
+
+        env_raw = os.environ.get(_USE_WORKTREE_ENV_VAR)
+        if env_raw is not None:
+            config.use_worktree = _coerce_bool(env_raw, default=config.use_worktree)
+
+        return config
 
 
 @dataclass
