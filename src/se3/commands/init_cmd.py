@@ -1,5 +1,6 @@
 """SE3 Init command - Initialize a new SE3 project."""
 
+import fnmatch
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -11,6 +12,10 @@ import typer
 
 DEFAULT_SE3_YAML = """# SE3 Project Configuration
 # https://github.com/Fission-AI/SE3
+#
+# For local-only overrides, create se3.local.yaml in the project root.
+# When present, it fully replaces this file at load time and is
+# gitignored by default so personal tweaks never get committed.
 
 project_name: {project_name}
 
@@ -22,14 +27,20 @@ version:
   #   bugfix: patch
 
 # Confirmation steps (optional)
+# Per-step dict: list a step here to insert a CONFIRM after it.
+# Steps NOT listed are not confirmed (there is no global toggle).
 # confirmation:
-#   enabled: true
-#   steps: [plan]
+#   steps:
+#     plan: {{reviewer: human}}
+#     design: {{reviewer: reviewer_bot, max_iterations: 3}}
 
-# Claude CLI command resolution
-# claude_commands:
-#   - cmd: claude
-#     priority: 0
+# Agent registry (optional) — referenced by name from llm_caller / confirmation.
+# agents:
+#   primary: {{type: claude-code, cmd: claude, priority: 10}}
+
+# LLM caller chain (optional)
+# llm_caller:
+#   defaults: [primary]
 """
 
 # Default .gitignore template for SE3 projects
@@ -123,26 +134,194 @@ def init_repository(path: Path) -> tuple[bool, str]:
         return False, "Git is not installed or not in PATH"
 
 
-def create_gitignore(path: Path, force: bool = False) -> tuple[bool, str]:
-    """Create .gitignore file at the given path.
+LOCAL_CONFIG_PATTERN = "se3.local.yaml"
+# Sentinel used to distinguish narrow negation patterns (that specifically
+# un-ignore ``se3.local.yaml``) from broad ones (like ``!*.yaml``). A
+# negation is "narrow" only if it matches LOCAL_CONFIG_PATTERN while NOT
+# also matching the committed ``se3.yaml`` — i.e. the user was targeting
+# the ``.local.yaml`` name specifically, not ``.yaml`` in general.
+_PROJECT_CONFIG_PATTERN = "se3.yaml"
+# No leading newline here — callers add exactly one blank-line separator
+# before this block, independent of whether the existing file ends with
+# a newline. Keeping the separator logic out of the constant avoids the
+# asymmetric "zero vs one trailing newline → one vs two blank lines"
+# artefact the old layout produced.
+LOCAL_CONFIG_APPEND_BLOCK = (
+    "# SE3: local-only config overrides (never committed)\n"
+    f"{LOCAL_CONFIG_PATTERN}\n"
+)
+
+
+def _normalize_gitignore_pattern(pattern: str) -> str:
+    """Strip anchor / recursive-glob / directory markers for fnmatch.
+
+    - Leading ``/``: gitignore root anchor, not part of the filename.
+    - Leading ``**/``: git's recursive-glob semantics — matches the file
+      at any depth. ``fnmatchcase`` does not model ``**``, so without
+      stripping we would miss patterns like ``**/se3.local.yaml`` and
+      append a redundant rule.
+    - Trailing ``/``: directory-only marker. A directory-only pattern
+      does not strictly ignore a regular file, but the user has already
+      spelled the name out — treat it as intent to ignore and avoid
+      appending a duplicate line.
+    """
+    if pattern.startswith("/"):
+        pattern = pattern[1:]
+    if pattern.startswith("**/"):
+        pattern = pattern[3:]
+    if pattern.endswith("/"):
+        pattern = pattern[:-1]
+    return pattern
+
+
+def _gitignore_has_local_pattern(content: str) -> bool:
+    """Return True when .gitignore already ignores ``se3.local.yaml``.
+
+    Matches literal lines (``se3.local.yaml`` / ``/se3.local.yaml`` /
+    ``**/se3.local.yaml``) as well as glob patterns that already cover
+    the filename (e.g. ``*.local.yaml``, ``*.local.*``, ``se3.local.*``).
+    Without this the user would get a redundant append block on every
+    ``se3 init`` even though the file is already ignored by an existing
+    broader pattern. Negation patterns (``!...``) are skipped — they
+    weaken ignore rules rather than add them.
+    """
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or line.startswith("!"):
+            continue
+        pattern = _normalize_gitignore_pattern(line)
+        if not pattern:
+            continue
+        if fnmatch.fnmatchcase(LOCAL_CONFIG_PATTERN, pattern):
+            return True
+    return False
+
+
+def _gitignore_has_local_negation(content: str) -> bool:
+    """Return True when .gitignore *narrowly* un-ignores ``se3.local.yaml``.
+
+    Git's ``!pattern`` syntax re-includes a previously-ignored path. If
+    the user has explicitly written ``!se3.local.yaml`` (perhaps because
+    a broad pattern like ``*.yaml`` was ignoring it and they wanted the
+    file tracked), silently appending ``se3.local.yaml`` afterwards
+    creates two conflicting rules that fight by last-line-wins order —
+    the user could end up with the file tracked or ignored depending on
+    unrelated edits, without any warning.
+
+    "Narrow" here means the negation pattern matches ``se3.local.yaml``
+    but does NOT also match ``se3.yaml``. Broad patterns such as
+    ``!*.yaml``, ``!se3.*``, or ``!*`` happen to cover our file too, but
+    the user was not explicitly un-ignoring it — they just have a general
+    rule that tracks all YAML (or all) files. In that case appending our
+    ignore rule is the right thing to do, and the warning would mislead.
+    """
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("!"):
+            continue
+        body = line[1:].lstrip()
+        if not body or body.startswith("#"):
+            continue
+        pattern = _normalize_gitignore_pattern(body)
+        if not pattern:
+            continue
+        matches_local = fnmatch.fnmatchcase(LOCAL_CONFIG_PATTERN, pattern)
+        matches_project = fnmatch.fnmatchcase(_PROJECT_CONFIG_PATTERN, pattern)
+        if matches_local and not matches_project:
+            return True
+    return False
+
+
+def create_gitignore(path: Path, force: bool = False) -> tuple[str, str]:
+    """Ensure ``.gitignore`` ignores ``se3.local.yaml``.
+
+    Five outcomes are returned via ``status``:
+
+    - ``"created"`` — file did not exist (or ``force=True``); template was
+      written from scratch.
+    - ``"appended"`` — file existed without ``se3.local.yaml`` in it; we
+      appended the local-config-ignore block (idempotent: re-running is a
+      no-op). Even without ``--force`` this happens, because the task
+      explicitly requires the pattern to be present.
+    - ``"negated"`` — file existed and contained an explicit negation
+      (``!se3.local.yaml``) that would fight a plain ``se3.local.yaml``
+      append. We leave the file untouched and surface a warning rather
+      than create two conflicting rules that silently resolve by
+      last-line-wins.
+    - ``"unchanged"`` — file existed and already ignored
+      ``se3.local.yaml``.
+    - ``"error"`` — an I/O error prevented reading or writing the file.
+      Distinct from ``"unchanged"`` so callers can surface the real
+      failure instead of showing a misleading "already exists" message.
 
     Args:
-        path: Directory where .gitignore should be created
-        force: Whether to overwrite existing .gitignore
+        path: Directory where ``.gitignore`` lives.
+        force: When True, overwrite any existing file with the full template.
 
     Returns:
-        Tuple of (created: bool, message: str)
+        Tuple of ``(status, message)``.
     """
     gitignore_path = path / ".gitignore"
 
-    if gitignore_path.exists() and not force:
-        return False, f".gitignore already exists (use --force to overwrite)"
+    if not gitignore_path.exists() or force:
+        try:
+            gitignore_path.write_text(DEFAULT_GITIGNORE_TEMPLATE, encoding="utf-8")
+            return "created", ".gitignore created"
+        except Exception as e:
+            return "error", f"Failed to create .gitignore: {str(e)}"
 
     try:
-        gitignore_path.write_text(DEFAULT_GITIGNORE_TEMPLATE, encoding="utf-8")
-        return True, ".gitignore created"
+        existing = gitignore_path.read_text(encoding="utf-8")
     except Exception as e:
-        return False, f"Failed to create .gitignore: {str(e)}"
+        return "error", f"Failed to read existing .gitignore: {str(e)}"
+
+    # Negation check runs BEFORE the ignore-pattern check on purpose: a
+    # file can contain both a broad ignore (e.g. ``*.yaml``) AND an
+    # explicit ``!se3.local.yaml`` negation. Semantically the negation
+    # wins — git keeps the file tracked — so returning ``"unchanged"``
+    # because the broad pattern also matches would make us silently
+    # accept a state where se3.local.yaml is NOT ignored and the
+    # operator never gets warned. Surface the negation warning first.
+    if _gitignore_has_local_negation(existing):
+        # User explicitly un-ignored se3.local.yaml. Appending a plain
+        # ``se3.local.yaml`` line now would create two conflicting rules
+        # where later-line-wins determines the outcome — exactly the
+        # kind of silent foot-gun we want to avoid. Do not modify the
+        # file; the caller will surface the warning to the operator.
+        return (
+            "negated",
+            f".gitignore contains an explicit negation of {LOCAL_CONFIG_PATTERN} "
+            f"(``!{LOCAL_CONFIG_PATTERN}``); refusing to append a conflicting rule",
+        )
+
+    if _gitignore_has_local_pattern(existing):
+        return "unchanged", ".gitignore already exists (use --force to overwrite)"
+
+    # Append the local-config block with exactly one blank line of
+    # separation, regardless of whether the existing file ends with a
+    # trailing newline:
+    #   "xyz\n"  + separator + block → "xyz\n\n# SE3…"
+    #   "xyz"    + separator + block → "xyz\n\n# SE3…"
+    # Both end up with one blank line between the previous content and
+    # the comment header.
+    if not existing:
+        separator = ""
+    elif existing.endswith("\n"):
+        separator = "\n"
+    else:
+        separator = "\n\n"
+    # Single write_text call replaces the read+append pair, so the
+    # on-disk transition from "existing" to "existing + block" is one
+    # syscall rather than two. A concurrent writer slipping in between
+    # the earlier read and an append can no longer produce a duplicated
+    # pattern line — the worst case now is a last-writer-wins clobber,
+    # which is the normal semantics of any non-locking file writer.
+    new_content = existing + separator + LOCAL_CONFIG_APPEND_BLOCK
+    try:
+        gitignore_path.write_text(new_content, encoding="utf-8")
+    except Exception as e:
+        return "error", f"Failed to append to .gitignore: {str(e)}"
+    return "appended", f"appended {LOCAL_CONFIG_PATTERN} to existing .gitignore"
 
 
 def _get_base_spec_template(project_name: str) -> str:
@@ -240,7 +419,11 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
     # Detect (but do not modify) an existing se3.local.yaml so the operator
     # knows it will shadow the just-generated se3.yaml at load time.
     local_yaml = root / "se3.local.yaml"
-    local_overrides_yaml = local_yaml.exists()
+    # Use is_file() (not exists()) so the warning fires only for a real
+    # file that will actually shadow se3.yaml at load time — matches the
+    # check in get_project_config_path(). A directory or dangling symlink
+    # at this path would not shadow, so we shouldn't warn about it.
+    local_overrides_yaml = local_yaml.is_file()
 
     # Create base spec
     base_spec = base_dir / "spec.md"
@@ -263,16 +446,19 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
         if success:
             git_initialized = True
 
-    # Create .gitignore
-    gitignore_created = False
-    gitignore_already_existed = False
-    gitignore_message = ""
-
-    gitignore_created_result, gitignore_message = create_gitignore(root, force=force)
-    if gitignore_created_result:
-        gitignore_created = True
-    elif "already exists" in gitignore_message:
-        gitignore_already_existed = True
+    # Create or update .gitignore. Five outcomes are surfaced: created
+    # (brand-new file), appended (existing file gained the se3.local.yaml
+    # pattern), negated (file explicitly un-ignores se3.local.yaml so we
+    # refused to append a conflicting rule), unchanged (existing file
+    # already had the pattern), and error (an I/O error prevented the
+    # read or write). The error status is kept distinct from unchanged so
+    # the UI does not mislabel a real I/O failure as "already exists".
+    gitignore_status, gitignore_message = create_gitignore(root, force=force)
+    gitignore_created = gitignore_status == "created"
+    gitignore_appended = gitignore_status == "appended"
+    gitignore_negated = gitignore_status == "negated"
+    gitignore_already_existed = gitignore_status == "unchanged"
+    gitignore_error = gitignore_status == "error"
 
     return {
         "created": created,
@@ -281,7 +467,10 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
         "git_already_existed": git_already_existed,
         "git_message": git_message,
         "gitignore_created": gitignore_created,
+        "gitignore_appended": gitignore_appended,
+        "gitignore_negated": gitignore_negated,
         "gitignore_already_existed": gitignore_already_existed,
+        "gitignore_error": gitignore_error,
         "gitignore_message": gitignore_message,
         "local_overrides_yaml": local_overrides_yaml,
     }
@@ -321,6 +510,16 @@ def init_cmd(
     # Display .gitignore creation status
     if result.get("gitignore_created"):
         typer.echo(f"✓ Created .gitignore")
+    elif result.get("gitignore_appended"):
+        typer.echo(f"✓ Appended {LOCAL_CONFIG_PATTERN} to .gitignore")
+    elif result.get("gitignore_negated"):
+        typer.echo(
+            f"⚠ .gitignore contains an explicit negation of {LOCAL_CONFIG_PATTERN} "
+            f"(!{LOCAL_CONFIG_PATTERN}); leaving it untouched. "
+            f"Remove the negation or delete {LOCAL_CONFIG_PATTERN} from tracking."
+        )
+    elif result.get("gitignore_error"):
+        typer.echo(f"⚠ {result.get('gitignore_message')}")
     elif result.get("gitignore_already_existed"):
         typer.echo(f"⚠ .gitignore already exists (use --force to overwrite)")
 

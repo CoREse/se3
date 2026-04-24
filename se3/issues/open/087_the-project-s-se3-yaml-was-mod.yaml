@@ -1,0 +1,29 @@
+id: 087
+title: The project's se3.yaml was modified to uncomment the `agents:` and `llm_caller:`
+  sections, turning previously-commented example blocks into active configuration.
+  This change is unrelated to the se3.local.yaml task and was not declared in the
+  Planned Spec Changes. Ironically, personal/local activation of these agents is exactly
+  what the new se3.local.yaml mechanism is designed to hold — they would fit better
+  in se3.local.yaml.
+description: 'The project''s se3.yaml was modified to uncomment the `agents:` and
+  `llm_caller:` sections, turning previously-commented example blocks into active
+  configuration. This change is unrelated to the se3.local.yaml task and was not declared
+  in the Planned Spec Changes. Ironically, personal/local activation of these agents
+  is exactly what the new se3.local.yaml mechanism is designed to hold — they would
+  fit better in se3.local.yaml.
+
+
+  Suggestion: Revert the uncommenting in se3.yaml (restore the `#`-prefixed example
+  form), or if the user wants these agents active, move them into se3.local.yaml (which
+  is now gitignored). Not blocking — se3.yaml is the project''s own config, not task
+  output.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-24T11:09:47.317209'
+updated_at: '2026-04-24T11:09:47.317209'

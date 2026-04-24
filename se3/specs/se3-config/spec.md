@@ -87,6 +87,17 @@ root for developer-local overrides.
 - **AND** values from `se3.yaml` that are absent from `se3.local.yaml`
   do NOT leak through (no deep merge)
 
+#### Scenario: Only se3.local.yaml exists
+- **GIVEN** the project root contains `se3.local.yaml` but no `se3.yaml`
+- **WHEN** the framework loads project-level configuration
+- **THEN** `se3.local.yaml` is used as the project-level config source
+
+#### Scenario: Only se3.yaml exists (no local override)
+- **GIVEN** the project root contains `se3.yaml` but no `se3.local.yaml`
+- **WHEN** the framework loads project-level configuration
+- **THEN** `se3.yaml` is used as the project-level config source
+  (existing behavior, unchanged)
+
 #### Scenario: Project detected with only se3.local.yaml
 - **GIVEN** a directory contains `se3.local.yaml` but no `se3.yaml`
 - **WHEN** any SE3 CLI command (`se3 run`, `se3 issue`, `se3 history`,

@@ -103,21 +103,19 @@ def get_issue_discovery_injection(step_type: str, project_root: Path) -> str:
     if step_type in ISSUE_DISCOVERY_FORBIDDEN_STEPS:
         return ""
 
-    # Read whitelist from se3.yaml (or se3.local.yaml) config
+    # Read whitelist from the active project YAML (se3.local.yaml when
+    # present, otherwise se3.yaml). Routing through load_project_yaml
+    # keeps malformed-local-shadow warnings firing here too instead of
+    # relying on some other loader having run first.
     whitelist = ISSUE_DISCOVERY_DEFAULT_STEPS
-    try:
-        from ..config import get_project_config_path
+    from ..config import load_project_yaml
 
-        config_path = get_project_config_path(project_root)
-        if config_path.exists():
-            import yaml
-            with open(config_path) as f:
-                config = yaml.safe_load(f) or {}
-            configured_steps = config.get("issue_discovery", {}).get("steps")
-            if configured_steps is not None:
-                whitelist = configured_steps
-    except Exception:
-        pass  # Use defaults on any config error
+    config, _src = load_project_yaml(project_root)
+    issue_section = config.get("issue_discovery") if isinstance(config, dict) else None
+    if isinstance(issue_section, dict):
+        configured_steps = issue_section.get("steps")
+        if configured_steps is not None:
+            whitelist = configured_steps
 
     if step_type not in whitelist:
         return ""
@@ -159,31 +157,28 @@ def get_spec_names_injection(
     if step_type in SPEC_NAMES_INJECTION_FORBIDDEN_STEPS:
         return ""
 
-    # Read whitelist from se3.yaml (or se3.local.yaml) config
-    # (mirror of issue_discovery loader)
+    # Read whitelist from the active project YAML (se3.local.yaml when
+    # present, otherwise se3.yaml). Routing through load_project_yaml
+    # ensures malformed-local-shadow warnings surface here too rather
+    # than depending on some other loader having run first.
     whitelist = SPEC_NAMES_INJECTION_DEFAULT_STEPS
-    try:
-        from ..config import get_project_config_path
+    from ..config import load_project_yaml
 
-        config_path = get_project_config_path(project_root)
-        if config_path.exists():
-            import yaml
-            with open(config_path) as f:
-                config = yaml.safe_load(f) or {}
-            # Use `or {}` rather than the default arg so that an explicit
-            # `spec_names_injection: null` (common when users "disable" a key)
-            # falls through to defaults instead of raising AttributeError
-            # on the subsequent .get("steps") call.
-            section = config.get("spec_names_injection") or {}
-            configured_steps = section.get("steps")
-            # Only accept list overrides; silently ignore malformed values
-            # (e.g. a bare string / dict from a user typo) which would
-            # otherwise turn the `in` check into surprising substring or
-            # key-lookup semantics.
-            if isinstance(configured_steps, list):
-                whitelist = configured_steps
-    except Exception:
-        pass  # Use defaults on any config error (malformed YAML, I/O, etc.)
+    config, _src = load_project_yaml(project_root)
+    # Use `or {}` rather than the default arg so that an explicit
+    # `spec_names_injection: null` (common when users "disable" a key)
+    # falls through to defaults instead of raising AttributeError
+    # on the subsequent .get("steps") call.
+    section = config.get("spec_names_injection") if isinstance(config, dict) else None
+    section = section or {}
+    if isinstance(section, dict):
+        configured_steps = section.get("steps")
+        # Only accept list overrides; silently ignore malformed values
+        # (e.g. a bare string / dict from a user typo) which would
+        # otherwise turn the `in` check into surprising substring or
+        # key-lookup semantics.
+        if isinstance(configured_steps, list):
+            whitelist = configured_steps
 
     if step_type not in whitelist:
         return ""

@@ -34,7 +34,10 @@ def salvage(project_root: Optional[Path] = None) -> int:
     if project_root is None:
         project_root = _find_project_root()
         if project_root is None:
-            console.print("[red]Could not find project root (no .git or se3.yaml found)[/red]")
+            console.print(
+                "[red]Could not find project root "
+                "(no .git, se3.yaml, se3.local.yaml, or se3.config.yaml found)[/red]"
+            )
             return 1
 
     project_root = Path(project_root)

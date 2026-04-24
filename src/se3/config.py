@@ -17,13 +17,36 @@ PROJECT_LOCAL_CONFIG_FILENAME = "se3.local.yaml"
 def get_project_config_path(project_root: Path) -> Path:
     """Return the active project config path for ``project_root``.
 
-    If ``<project_root>/se3.local.yaml`` exists it takes precedence and is
-    returned (fully replacing ``se3.yaml``); otherwise the canonical
-    ``<project_root>/se3.yaml`` path is returned (whether or not it exists).
+    If ``<project_root>/se3.local.yaml`` exists **as a regular file** it
+    takes precedence and is returned (fully replacing ``se3.yaml``);
+    otherwise the canonical ``<project_root>/se3.yaml`` path is returned
+    (whether or not it exists).
+
+    Using ``is_file()`` rather than ``exists()`` means a stray directory
+    or dangling symlink at ``se3.local.yaml`` does not silently shadow
+    the committed ``se3.yaml`` and trigger a misleading "malformed local
+    file" warning downstream — only a real file participates in the
+    override.
+
+    Symlinks that resolve to a regular file are treated as real files
+    (``is_file()`` follows symlinks). A layout such as
+    ``se3.local.yaml -> ../shared-overrides.yaml`` is therefore picked
+    up as the active override, which is the intended behaviour for users
+    who share local overrides between clones via a symlink. If you want
+    the committed ``se3.yaml`` to win, remove or rename the symlink.
+
+    TOCTOU note: there is a theoretical window between this ``is_file()``
+    probe and the subsequent ``_read_yaml`` open inside the caller — if
+    ``se3.local.yaml`` is deleted in between, readers observe the file
+    as absent and fall back to built-in defaults rather than reading
+    ``se3.yaml``. The failure mode is safe (defaults) and vanishingly
+    rare in practice; eliminating the window would require passing an
+    already-opened file handle through the loader stack and is not
+    worth the churn unless the race is actually observed.
     """
     root = Path(project_root)
     local = root / PROJECT_LOCAL_CONFIG_FILENAME
-    if local.exists():
+    if local.is_file():
         return local
     return root / PROJECT_CONFIG_FILENAME
 
@@ -44,9 +67,119 @@ def is_se3_project_root(path: Path) -> bool:
     Recognised markers: ``se3.local.yaml``, ``se3.yaml``, or the legacy
     ``se3.config.yaml``. The check is non-recursive — only files directly
     under ``path`` are considered.
+
+    Uses ``is_file()`` (not ``exists()``) to stay symmetrical with
+    :func:`get_project_config_path`: a stray directory or dangling
+    symlink at one of those paths would NOT be loaded as config, so it
+    must not be treated as a project marker either. Otherwise the
+    parent-walk commands would resolve the folder as a project root but
+    every config loader would silently fall back to built-in defaults,
+    leaving the user to debug a phantom "empty config" state.
     """
     p = Path(path)
-    return any((p / marker).exists() for marker in _PROJECT_ROOT_MARKERS)
+    return any((p / marker).is_file() for marker in _PROJECT_ROOT_MARKERS)
+
+
+# Dedup set keyed by absolute path string. The dedup is one-shot per
+# (process, path): if a long-running process (daemon, test session, IDE
+# integration) sees the user fix se3.local.yaml and then later
+# reintroduce a typo at the same path, the second breakage will NOT
+# re-warn — the path is already in this set. Tests reset the set
+# explicitly between cases. Restart the process for a fresh warning.
+_warned_malformed_local_for: set[str] = set()
+
+
+def _maybe_warn_local_shadow(config_path: Path) -> None:
+    """Warn (one-shot per path) when ``se3.local.yaml`` is unreadable.
+
+    A malformed local override silently shadows the committed ``se3.yaml``,
+    so without this warning the loaders would just fall back to built-in
+    defaults and the user would never see why their project config stopped
+    taking effect. Only fires for ``se3.local.yaml``.
+
+    Dedup is per-process, per-path — see ``_warned_malformed_local_for``.
+    """
+    if config_path.name != PROJECT_LOCAL_CONFIG_FILENAME:
+        return
+    try:
+        key = str(config_path.resolve())
+    except OSError:
+        key = str(config_path)
+    if key in _warned_malformed_local_for:
+        return
+    _warned_malformed_local_for.add(key)
+    yaml_path = config_path.parent / PROJECT_CONFIG_FILENAME
+    logger.warning(
+        "%s is unreadable or malformed and is shadowing %s — project "
+        "configuration is falling back to built-in defaults until the "
+        "local file is fixed or removed.",
+        config_path, yaml_path,
+    )
+
+
+def load_project_yaml(project_root: Path) -> tuple[dict, str]:
+    """Read the active project YAML config tolerantly.
+
+    Thin wrapper over :func:`_read_yaml` that resolves the active project
+    config path (``se3.local.yaml`` when present, otherwise ``se3.yaml``)
+    and returns ``(data, source_label)`` where ``data`` is an empty dict
+    when the file is missing, empty, malformed, or non-mapping. Never
+    raises. Malformed/non-mapping/parse-error classification and the
+    local-shadow warning are handled inside ``_read_yaml``.
+
+    This is a public API: cross-module readers (engine/context_builder,
+    engine/steps/verify_spec, internal loaders) all route through this
+    single entry point to pick up ``se3.local.yaml`` precedence
+    uniformly. Keep the signature stable.
+
+    ``source_label`` semantics: always the filename that
+    :func:`get_project_config_path` *chose* (``se3.local.yaml`` when
+    present as a regular file, otherwise ``se3.yaml``) — **not**
+    necessarily the file that was successfully read. When
+    ``se3.local.yaml`` exists but is unparsable, ``data`` is ``{}`` and
+    ``source_label`` is still ``se3.local.yaml``. This is intentional:
+    error messages and deprecation warnings should point at the file
+    the user placed (and therefore needs to fix), not at the fallback
+    committed file which is innocent. Callers that log ``source_label``
+    in "Failed to load … from %s" messages get the correct target even
+    when the file could not be read.
+    """
+    config_path = get_project_config_path(project_root)
+    source_label = config_path.name
+    # None here means the file is absent or unusable (parse error,
+    # non-mapping top level, or I/O failure). Either way we fall back
+    # to built-in defaults; the malformed-local warning (if applicable)
+    # has already been emitted inside _read_yaml.
+    return _read_yaml(config_path) or {}, source_label
+
+
+# Back-compat alias: older code imported ``_load_project_yaml`` as a
+# module-private helper. Keep the alias so any external caller continues
+# to work, but prefer the public name in new code.
+_load_project_yaml = load_project_yaml
+
+
+# Canonical dedup token shared by ``se3.yaml`` and ``se3.local.yaml``.
+# Warning dedup sets are keyed on ``source_label``, which flips between
+# those two filenames depending on which file is active for the current
+# call. Without canonicalization, a long-running process that sees the
+# user toggle the local file on/off (delete/recreate) could emit the
+# same warning once per label. Collapse both project-level labels to a
+# single token so a given config mistake warns at most once regardless
+# of which file is currently shadowing the other.
+_PROJECT_DEDUP_TOKEN = "<project>"
+
+
+def _dedup_source_key(source_label: str) -> str:
+    """Return the dedup token for a config source label.
+
+    Project-level labels (``se3.yaml`` / ``se3.local.yaml``) collapse
+    to a single token; any other label (e.g. ``~/.se3/config.yaml``)
+    passes through unchanged.
+    """
+    if source_label in (PROJECT_CONFIG_FILENAME, PROJECT_LOCAL_CONFIG_FILENAME):
+        return _PROJECT_DEDUP_TOKEN
+    return source_label
 
 
 class BumpType(Enum):
@@ -171,17 +304,11 @@ class VersionConfig:
     
     @classmethod
     def load(cls, project_root: Path) -> "VersionConfig":
-        """Load version configuration from se3.yaml in project root."""
-        config_path = get_project_config_path(project_root)
-        if not config_path.exists():
+        """Load version configuration from the active project YAML."""
+        data, _src = load_project_yaml(project_root)
+        if not data:
             return cls()
-        
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            return cls.from_dict(data)
-        except Exception:
-            return cls()
+        return cls.from_dict(data)
     
     def get_bump_type(self, task_type: str) -> BumpType:
         """Get the bump type for a given task type.
@@ -311,7 +438,7 @@ def _parse_confirmation_step_entry(
 
     extra = tuple(sorted(k for k in raw if k not in _CONFIRM_VALID_STEP_CFG_KEYS))
     if extra:
-        dedup_key = (source_label, step_name, extra)
+        dedup_key = (_dedup_source_key(source_label), step_name, extra)
         if dedup_key not in _warned_confirmation_unknown_fields_for:
             _warned_confirmation_unknown_fields_for.add(dedup_key)
             logger.warning(
@@ -369,8 +496,9 @@ def _warn_deprecated_confirmation_fields(source_label: str, section: dict) -> No
     process lifetime to avoid log floods when ``load_confirmation_config``
     is called per step.
     """
-    if "enabled" in section and source_label not in _warned_confirmation_enabled_for:
-        _warned_confirmation_enabled_for.add(source_label)
+    dedup_key = _dedup_source_key(source_label)
+    if "enabled" in section and dedup_key not in _warned_confirmation_enabled_for:
+        _warned_confirmation_enabled_for.add(dedup_key)
         logger.warning(
             "%s: 'confirmation.enabled' is deprecated and ignored. Under "
             "the new schema, only steps listed in 'confirmation.steps' "
@@ -378,16 +506,16 @@ def _warn_deprecated_confirmation_fields(source_label: str, section: dict) -> No
             "this field.",
             source_label,
         )
-    if "reviewer" in section and source_label not in _warned_confirmation_top_reviewer_for:
-        _warned_confirmation_top_reviewer_for.add(source_label)
+    if "reviewer" in section and dedup_key not in _warned_confirmation_top_reviewer_for:
+        _warned_confirmation_top_reviewer_for.add(dedup_key)
         logger.warning(
             "%s: top-level 'confirmation.reviewer' is deprecated and "
             "ignored. Set 'reviewer' per step under "
             "'confirmation.steps.<step>.reviewer'.",
             source_label,
         )
-    if "llm_reviewer" in section and source_label not in _warned_confirmation_llm_reviewer_for:
-        _warned_confirmation_llm_reviewer_for.add(source_label)
+    if "llm_reviewer" in section and dedup_key not in _warned_confirmation_llm_reviewer_for:
+        _warned_confirmation_llm_reviewer_for.add(dedup_key)
         logger.warning(
             "%s: 'confirmation.llm_reviewer' is deprecated and ignored. "
             "Define LLM agents under top-level 'agents:' and reference "
@@ -441,8 +569,9 @@ def _merge_confirmation_steps(
         if steps_raw is None:
             continue
         if isinstance(steps_raw, list):
-            if source_label not in _warned_confirmation_steps_list_for:
-                _warned_confirmation_steps_list_for.add(source_label)
+            dedup_key = _dedup_source_key(source_label)
+            if dedup_key not in _warned_confirmation_steps_list_for:
+                _warned_confirmation_steps_list_for.add(dedup_key)
                 logger.warning(
                     "%s: 'confirmation.steps' is a list (legacy form) and "
                     "is no longer supported. Convert to a dict, e.g.\n"
@@ -624,23 +753,44 @@ def _read_yaml(path: Path) -> Optional[dict]:
     """Read and parse a YAML file; log on parse error and return None.
 
     Returns the parsed dict, an empty dict if the file is empty/yaml-null,
-    or None if the file does not exist or failed to parse.
+    or None if the file does not exist, is non-mapping, or failed to parse.
+    Non-mapping top levels (including falsy ones like ``[]``/``0``/``''``)
+    are treated as malformed and produce a warning.
+
+    This is the single source of truth for tolerant YAML reads. Whenever
+    the path actually exists but is unusable (parse error or non-mapping
+    top level), a one-shot local-shadow warning is emitted via
+    ``_maybe_warn_local_shadow`` — a no-op for any file other than
+    ``se3.local.yaml`` — so a broken local override cannot silently shadow
+    the committed ``se3.yaml`` regardless of which loader path reads it.
     """
     if not path.exists():
         return None
     try:
         with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-        if not isinstance(data, dict):
-            logger.warning(
-                "expected a YAML mapping at top of %s; got %s — ignoring",
-                path, type(data).__name__,
-            )
-            return None
-        return data
-    except Exception as exc:
-        logger.warning("failed to parse %s: %s", path, exc)
+            data = yaml.safe_load(f)
+    except OSError as exc:
+        logger.warning("failed to read %s: %s", path, exc)
+        _maybe_warn_local_shadow(path)
         return None
+    except yaml.YAMLError as exc:
+        logger.warning("failed to parse %s: %s", path, exc)
+        _maybe_warn_local_shadow(path)
+        return None
+    except Exception as exc:
+        logger.warning("failed to load %s: %s", path, exc)
+        _maybe_warn_local_shadow(path)
+        return None
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        logger.warning(
+            "expected a YAML mapping at top of %s; got %s — ignoring",
+            path, type(data).__name__,
+        )
+        _maybe_warn_local_shadow(path)
+        return None
+    return data
 
 
 def _load_agent_configs(
@@ -660,6 +810,8 @@ def _load_agent_configs(
     project_source_label = PROJECT_CONFIG_FILENAME
     if project_root is not None:
         project_config_path = get_project_config_path(project_root)
+        # _read_yaml emits the local-shadow warning internally on
+        # parse-error / non-mapping, so every caller gets the signal.
         project_data = _read_yaml(project_config_path) or {}
         project_source_label = project_config_path.name
     return global_data, project_data, project_source_label
@@ -725,8 +877,9 @@ def _migrate_claude_commands(
         )
         defaults.append(name)
 
-    if source_label not in _warned_claude_commands_deprecated_for:
-        _warned_claude_commands_deprecated_for.add(source_label)
+    dedup_key = _dedup_source_key(source_label)
+    if dedup_key not in _warned_claude_commands_deprecated_for:
+        _warned_claude_commands_deprecated_for.add(dedup_key)
         lines = ["agents:"]
         for name, agent in registry.items():
             parts = [f"type: {agent.type}", f"cmd: {agent.cmd}"]
@@ -759,8 +912,9 @@ def _agents_dict_from_source(
         return None
     if isinstance(raw, list):
         # Legacy list form is removed. Warn and ignore.
-        if source_label not in _warned_list_agents_for:
-            _warned_list_agents_for.add(source_label)
+        dedup_key = _dedup_source_key(source_label)
+        if dedup_key not in _warned_list_agents_for:
+            _warned_list_agents_for.add(dedup_key)
             logger.warning(
                 "%s: top-level 'agents' is a list — this legacy form is "
                 "no longer supported. Use a dict keyed by agent name "
@@ -848,8 +1002,9 @@ def _agent_registry_from_data(
         if claude_commands:
             if has_explicit_agents:
                 # Both set: ignore claude_commands with warning.
-                if source_label not in _warned_claude_commands_ignored_for:
-                    _warned_claude_commands_ignored_for.add(source_label)
+                dedup_key = _dedup_source_key(source_label)
+                if dedup_key not in _warned_claude_commands_ignored_for:
+                    _warned_claude_commands_ignored_for.add(dedup_key)
                     logger.warning(
                         "%s: both 'agents' and 'claude_commands' are "
                         "set; ignoring legacy 'claude_commands'",
@@ -928,8 +1083,9 @@ def _read_llm_caller_section(
     if llm_caller is None:
         return None
     if not isinstance(llm_caller, dict):
-        if source_label not in _warned_non_dict_llm_caller_for:
-            _warned_non_dict_llm_caller_for.add(source_label)
+        dedup_key = _dedup_source_key(source_label)
+        if dedup_key not in _warned_non_dict_llm_caller_for:
+            _warned_non_dict_llm_caller_for.add(dedup_key)
             logger.warning(
                 "%s: top-level 'llm_caller' is not a mapping (got %s); "
                 "ignoring",
@@ -1044,7 +1200,7 @@ def _warn_on_unknown_step_keys(
     unknown = sorted(k for k in steps_dict.keys() if k not in valid)
     if not unknown:
         return
-    dedup_key = (source_label, *unknown)
+    dedup_key = (_dedup_source_key(source_label), *unknown)
     if dedup_key in _warned_unknown_step_keys_for:
         return
     _warned_unknown_step_keys_for.add(dedup_key)
@@ -1410,22 +1566,17 @@ class LanguageConfig:
 
     @classmethod
     def load(cls, project_root: Path) -> "LanguageConfig":
-        """Load language configuration from se3.yaml."""
-        config_path = get_project_config_path(project_root)
-        if not config_path.exists():
+        """Load language configuration from the active project YAML."""
+        data, _src = load_project_yaml(project_root)
+        if not data:
             return cls()
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            lang_section = data.get("language", {})
-            if not lang_section or not isinstance(lang_section, dict):
-                return cls()
-            return cls(
-                language=lang_section.get("language"),
-                spec_language=lang_section.get("spec_language"),
-            )
-        except Exception:
+        lang_section = data.get("language", {})
+        if not lang_section or not isinstance(lang_section, dict):
             return cls()
+        return cls(
+            language=lang_section.get("language"),
+            spec_language=lang_section.get("spec_language"),
+        )
 
 
 def load_language_config(project_root: Optional[Path] = None) -> "LanguageConfig":
@@ -1493,19 +1644,14 @@ class ConflictResolverConfig:
 
     @classmethod
     def load(cls, project_root: Path) -> "ConflictResolverConfig":
-        """Load conflict resolver configuration from se3.yaml."""
-        config_path = get_project_config_path(project_root)
-        if not config_path.exists():
+        """Load conflict resolver configuration from the active project YAML."""
+        data, _src = load_project_yaml(project_root)
+        if not data:
             return cls()
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            cr_data = data.get("conflict_resolver", {})
-            if not cr_data or not isinstance(cr_data, dict):
-                return cls()
-            return cls.from_dict(cr_data)
-        except Exception:
+        cr_data = data.get("conflict_resolver", {})
+        if not cr_data or not isinstance(cr_data, dict):
             return cls()
+        return cls.from_dict(cr_data)
 
 
 def load_conflict_resolver_config(project_root: Optional[Path] = None) -> ConflictResolverConfig:
@@ -1539,14 +1685,11 @@ class TestConfig:
 
     @classmethod
     def load(cls, project_root: Path) -> "TestConfig":
-        """Load test configuration from se3.yaml."""
-        config_path = get_project_config_path(project_root)
-        if not config_path.exists():
+        """Load test configuration from the active project YAML."""
+        data, source_label = load_project_yaml(project_root)
+        if not data:
             return cls()
-        source_label = config_path.name
         try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
             test_data = data.get("test", {})
             if not test_data:
                 return cls()
@@ -1653,19 +1796,14 @@ class ImplementConfig:
 
     @classmethod
     def load(cls, project_root: Path) -> "ImplementConfig":
-        """Load implement configuration from se3.yaml."""
-        config_path = get_project_config_path(project_root)
-        if not config_path.exists():
+        """Load implement configuration from the active project YAML."""
+        data, _src = load_project_yaml(project_root)
+        if not data:
             return cls()
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            impl_data = data.get("implement", {})
-            if not impl_data or not isinstance(impl_data, dict):
-                return cls()
-            return cls.from_dict(impl_data)
-        except Exception:
+        impl_data = data.get("implement", {})
+        if not impl_data or not isinstance(impl_data, dict):
             return cls()
+        return cls.from_dict(impl_data)
 
 
 @dataclass
@@ -1685,22 +1823,17 @@ class StepConfig:
 
     @classmethod
     def load(cls, project_root: Path) -> "StepConfig":
-        """Load step configuration from se3.yaml."""
-        config_path = get_project_config_path(project_root)
-        if not config_path.exists():
+        """Load step configuration from the active project YAML."""
+        data, _src = load_project_yaml(project_root)
+        if not data:
             return cls()
-        try:
-            with open(config_path, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-            steps_data = data.get("steps", {})
-            if not steps_data or not isinstance(steps_data, dict):
-                return cls()
-            append_raw = steps_data.get("append", [])
-            if not isinstance(append_raw, list):
-                return cls()
-            return cls(append_steps=[str(s) for s in append_raw])
-        except Exception:
+        steps_data = data.get("steps", {})
+        if not steps_data or not isinstance(steps_data, dict):
             return cls()
+        append_raw = steps_data.get("append", [])
+        if not isinstance(append_raw, list):
+            return cls()
+        return cls(append_steps=[str(s) for s in append_raw])
 
 
 def load_step_config(project_root: Optional[Path] = None) -> StepConfig:
@@ -1770,16 +1903,10 @@ def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
     else:
         project_root = Path(project_root)
 
-    config_path = get_project_config_path(project_root)
-
-    if not config_path.exists():
+    data, _src = load_project_yaml(project_root)
+    if not data:
         return DEFAULT_MAX_FIX_ITERATIONS
-
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-
-        workflow = data.get("workflow", {})
-        return workflow.get("max_fix_iterations", DEFAULT_MAX_FIX_ITERATIONS)
-    except Exception:
+    workflow = data.get("workflow", {})
+    if not isinstance(workflow, dict):
         return DEFAULT_MAX_FIX_ITERATIONS
+    return workflow.get("max_fix_iterations", DEFAULT_MAX_FIX_ITERATIONS)

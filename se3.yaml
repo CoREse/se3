@@ -15,10 +15,10 @@ session:
 # resolved by name against this dict. Unknown names fail fast at startup.
 # Global + project merge is entry-level: project entries override global
 # entries with the same name; non-conflicting entries coexist.
-# agents:
-#   primary: { type: claude-code, cmd: claude, priority: 10 }
-#   backup: { type: claude-code, cmd: kclaude, priority: 5 }
-#   low:    { type: claude-code, cmd: hclaude, priority: 1 }
+agents:
+  primary: { type: claude-code, cmd: claude, priority: 10 }
+  backup: { type: claude-code, cmd: kclaude, priority: 5 }
+  low:    { type: claude-code, cmd: hclaude, priority: 1 }
 
 # LLM Caller Configuration
 # `defaults` is the default caller chain by agent name (referencing
@@ -26,11 +26,11 @@ session:
 # override — there is no silent fallback to `defaults`, so if you want a
 # default tail you must list it explicitly. Rotation on infrastructure
 # errors happens strictly within the step's list.
-# llm_caller:
-#   defaults: [primary]
-  # steps:
-  #   implement: [opus, primary]
-  #   summarize: [primary]
+llm_caller:
+  defaults: [primary]
+  steps:
+    implement: [primary]
+    summarize: [primary]
 
 # Confirmation (Review) Configuration
 # Per-step dict: a step is confirmed iff it appears as a key here.
