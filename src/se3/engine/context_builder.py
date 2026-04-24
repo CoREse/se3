@@ -103,10 +103,12 @@ def get_issue_discovery_injection(step_type: str, project_root: Path) -> str:
     if step_type in ISSUE_DISCOVERY_FORBIDDEN_STEPS:
         return ""
 
-    # Read whitelist from se3.yaml config
+    # Read whitelist from se3.yaml (or se3.local.yaml) config
     whitelist = ISSUE_DISCOVERY_DEFAULT_STEPS
     try:
-        config_path = project_root / "se3.yaml"
+        from ..config import get_project_config_path
+
+        config_path = get_project_config_path(project_root)
         if config_path.exists():
             import yaml
             with open(config_path) as f:
@@ -157,10 +159,13 @@ def get_spec_names_injection(
     if step_type in SPEC_NAMES_INJECTION_FORBIDDEN_STEPS:
         return ""
 
-    # Read whitelist from se3.yaml config (mirror of issue_discovery loader)
+    # Read whitelist from se3.yaml (or se3.local.yaml) config
+    # (mirror of issue_discovery loader)
     whitelist = SPEC_NAMES_INJECTION_DEFAULT_STEPS
     try:
-        config_path = project_root / "se3.yaml"
+        from ..config import get_project_config_path
+
+        config_path = get_project_config_path(project_root)
         if config_path.exists():
             import yaml
             with open(config_path) as f:

@@ -85,14 +85,16 @@ def _sigint_handler(signum: int, frame: Any) -> None:
 
 
 def get_project_root() -> Path:
-    """Find project root by looking for .git directory or se3.yaml."""
+    """Find project root by looking for .git directory or an SE3 config file."""
+    from ..config import is_se3_project_root
+
     cwd = Path.cwd()
     for parent in [cwd] + list(cwd.parents):
         # Check for .git directory
         if (parent / ".git").exists():
             return parent
-        # Check for se3.yaml (project config file)
-        if (parent / "se3.yaml").exists() or (parent / "se3.config.yaml").exists():
+        # Check for any SE3 project marker (se3.yaml, se3.local.yaml, se3.config.yaml)
+        if is_se3_project_root(parent):
             return parent
     return cwd
 

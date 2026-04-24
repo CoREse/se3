@@ -374,7 +374,9 @@ def _get_max_fix_iterations(flow: FlowInstance) -> int:
         else:
             project_root = Path.cwd()
 
-        config_path = project_root / "se3.yaml"
+        from ...config import get_project_config_path
+
+        config_path = get_project_config_path(project_root)
         if config_path.exists():
             with open(config_path) as f:
                 config = yaml.safe_load(f) or {}

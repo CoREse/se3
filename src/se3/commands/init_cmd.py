@@ -75,6 +75,9 @@ env/
 !/se3/specs/
 !/se3/issues/
 !/se3/scripts/
+
+# SE3: local-only config overrides (never committed)
+se3.local.yaml
 """
 
 
@@ -223,7 +226,8 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
     specs_dir.mkdir(exist_ok=True)
     base_dir.mkdir(exist_ok=True)
 
-    # Create se3.yaml
+    # Create se3.yaml (never touch se3.local.yaml — it is user-owned and
+    # takes precedence at load time).
     se3_yaml = root / "se3.yaml"
     if not se3_yaml.exists() or force:
         se3_yaml.write_text(
@@ -232,6 +236,11 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
         created.append(str(se3_yaml.relative_to(root)))
     else:
         skipped.append(f"{se3_yaml.relative_to(root)} already exists (use --force to overwrite)")
+
+    # Detect (but do not modify) an existing se3.local.yaml so the operator
+    # knows it will shadow the just-generated se3.yaml at load time.
+    local_yaml = root / "se3.local.yaml"
+    local_overrides_yaml = local_yaml.exists()
 
     # Create base spec
     base_spec = base_dir / "spec.md"
@@ -274,6 +283,7 @@ def run_init(project_root: Path, project_name: str, force: bool = False) -> dict
         "gitignore_created": gitignore_created,
         "gitignore_already_existed": gitignore_already_existed,
         "gitignore_message": gitignore_message,
+        "local_overrides_yaml": local_overrides_yaml,
     }
 
 
@@ -313,6 +323,12 @@ def init_cmd(
         typer.echo(f"✓ Created .gitignore")
     elif result.get("gitignore_already_existed"):
         typer.echo(f"⚠ .gitignore already exists (use --force to overwrite)")
+
+    # Warn when an existing se3.local.yaml will shadow the generated se3.yaml
+    if result.get("local_overrides_yaml"):
+        typer.echo(
+            "⚠ se3.local.yaml exists — it will override se3.yaml at load time"
+        )
 
     typer.echo(f"\n🎉 SE3 project initialized: {name}")
     typer.echo(f"\nNext steps:")

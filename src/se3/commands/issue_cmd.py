@@ -28,12 +28,14 @@ console = Console()
 
 
 def get_project_root() -> Path:
-    """Find project root by looking for .git directory or se3.yaml."""
+    """Find project root by looking for .git directory or an SE3 config file."""
+    from ..config import is_se3_project_root
+
     cwd = Path.cwd()
     for parent in [cwd] + list(cwd.parents):
         if (parent / ".git").exists():
             return parent
-        if (parent / "se3.yaml").exists() or (parent / "se3.config.yaml").exists():
+        if is_se3_project_root(parent):
             return parent
     return cwd
 

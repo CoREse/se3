@@ -113,10 +113,12 @@ def salvage(project_root: Optional[Path] = None) -> int:
 
 
 def _find_project_root() -> Optional[Path]:
-    """Find project root by looking for .git or se3.yaml."""
+    """Find project root by looking for .git or an SE3 config file."""
+    from ..config import is_se3_project_root
+
     cwd = Path.cwd()
     for p in [cwd] + list(cwd.parents):
-        if (p / ".git").exists() or (p / "se3.yaml").exists():
+        if (p / ".git").exists() or is_se3_project_root(p):
             return p
     return None
 

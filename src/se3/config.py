@@ -28,6 +28,27 @@ def get_project_config_path(project_root: Path) -> Path:
     return root / PROJECT_CONFIG_FILENAME
 
 
+# Filenames that mark a directory as an SE3 project root. Used by
+# parent-walk detection in the CLI commands so that `se3.local.yaml`,
+# `se3.yaml`, or the legacy `se3.config.yaml` all count as markers.
+_PROJECT_ROOT_MARKERS = (
+    PROJECT_LOCAL_CONFIG_FILENAME,
+    PROJECT_CONFIG_FILENAME,
+    "se3.config.yaml",
+)
+
+
+def is_se3_project_root(path: Path) -> bool:
+    """Return True when ``path`` contains any recognised SE3 project marker.
+
+    Recognised markers: ``se3.local.yaml``, ``se3.yaml``, or the legacy
+    ``se3.config.yaml``. The check is non-recursive — only files directly
+    under ``path`` are considered.
+    """
+    p = Path(path)
+    return any((p / marker).exists() for marker in _PROJECT_ROOT_MARKERS)
+
+
 class BumpType(Enum):
     """Version bump types following Semantic Versioning."""
     MAJOR = "major"
