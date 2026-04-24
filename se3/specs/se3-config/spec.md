@@ -14,6 +14,32 @@ The configuration file is located at the project root using YAML format. All con
 
 The system SHALL also support a global config at `~/.se3/config.yaml`. Project-level config overrides global config at the top-level key level (no deep merge).
 
+**Local override file (`se3.local.yaml`):**
+
+The system SHALL support an optional `se3.local.yaml` in the project
+root for developer-local overrides.
+
+- When `<project_root>/se3.local.yaml` exists, the framework reads **it
+  instead of** `se3.yaml` as the project-level config source. The two
+  files are NOT deep-merged — `se3.local.yaml` entirely replaces
+  `se3.yaml` for the duration of the load. Developers who want to
+  retain values from `se3.yaml` must copy them explicitly into
+  `se3.local.yaml`.
+- The global + project merge rules (entry-level for `agents` and
+  `confirmation.steps`, whole-replace for `llm_caller.defaults` and
+  `llm_caller.steps.<step>`) still apply, using `se3.local.yaml` as
+  the project source.
+- `se3.local.yaml` SHALL be gitignored by default (added by `se3 init`
+  to the generated `.gitignore`) so that machine-specific overrides do
+  not leak into commits.
+- Project-root parent-walk detection (used by `se3 run`, `se3 issue`,
+  `se3 history`, `se3 salvage`) SHALL recognise a directory containing
+  only `se3.local.yaml` as a valid SE3 project root, for parity with
+  `se3.yaml`.
+- Warning / deprecation log messages emitted while loading the project
+  config SHALL reference the actual filename that was read
+  (`se3.local.yaml` when it is present, otherwise `se3.yaml`).
+
 **Configurable options:**
 - `version.enabled`: Enable automatic version bumping (default: true)
 - `version.file_path`: Path to version file (auto-detect if null)
@@ -53,6 +79,24 @@ The system SHALL also support a global config at `~/.se3/config.yaml`. Project-l
 - **WHEN** both global and project configs define the same top-level key
 - **THEN** the project-level config takes precedence
 - **AND** `agents` dict and `confirmation.steps` dict merge entry-level (by name / step_name), while `llm_caller.defaults` and `llm_caller.steps.<step>` are whole-replaced
+
+#### Scenario: se3.local.yaml replaces se3.yaml when present
+- **GIVEN** the project root contains both `se3.yaml` and `se3.local.yaml`
+- **WHEN** the framework loads project-level configuration
+- **THEN** only `se3.local.yaml` is consulted as the project source
+- **AND** values from `se3.yaml` that are absent from `se3.local.yaml`
+  do NOT leak through (no deep merge)
+
+#### Scenario: Project detected with only se3.local.yaml
+- **GIVEN** a directory contains `se3.local.yaml` but no `se3.yaml`
+- **WHEN** any SE3 CLI command (`se3 run`, `se3 issue`, `se3 history`,
+  `se3 salvage`) performs parent-walk project-root detection
+- **THEN** the directory is recognised as the SE3 project root
+
+#### Scenario: se3.local.yaml is gitignored by se3 init
+- **WHEN** `se3 init` generates the project `.gitignore`
+- **THEN** the generated `.gitignore` contains an entry that ignores
+  `se3.local.yaml` so the local override file is not committed
 
 ### Requirement: Version Configuration
 

@@ -14,6 +14,7 @@ The system SHALL define the standard SE3 project file structure.
 ```
 project/
 ├── se3.yaml               # Framework configuration (optional)
+├── se3.local.yaml         # Optional developer-local override (gitignored)
 ├── README.md              # Project documentation
 ├── se3/                   # SE3 runtime directory
 │   ├── specs/             # Source of truth for requirements
@@ -72,6 +73,13 @@ The system SHALL require a base specification at `se3/specs/base/spec.md` in eve
 The system SHALL support configuring framework behavior via `se3.yaml`.
 
 **Configuration file location:** Project root (`se3.yaml`)
+
+**Optional local override:** Developers MAY place a `se3.local.yaml`
+at the project root. When present, it fully replaces `se3.yaml` as
+the project-level config source (no deep merge). `se3.local.yaml` is
+gitignored by default so machine-specific overrides stay local. See
+the `se3-config` *Configuration File Format* requirement for the
+authoritative semantics.
 
 **Configuration options:**
 - `version.enabled`: Enable automatic version bumping (default: true)
