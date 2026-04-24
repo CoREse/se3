@@ -867,9 +867,17 @@ def _run_flow_impl(
                 # User chose to exit
                 return 130
 
-            # Store user response and re-run discovery step
+            # Store user response and re-run discovery step.
+            # Advancing to the next discovery round is a NEW LLM call with a
+            # new CONTINUE_DISCOVERY_PROMPT (containing the fresh
+            # user_response and updated conversation history) — not a retry
+            # of the previous round. Clear any stale retry counter left
+            # behind by a prior FAILED-Retry or interrupted-resume so the
+            # next round's prompt isn't discarded by LLMCaller's
+            # retry-context wrapping.
             current_step.inputs["user_response"] = user_response
             current_step.inputs["resumed"] = True
+            current_step.inputs.pop("retry_count", None)
             current_step.status = StepStatus.PENDING
             persistence.save_flow(flow)
             continue

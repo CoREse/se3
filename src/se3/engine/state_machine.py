@@ -56,6 +56,33 @@ class TransitionError(StateMachineError):
     pass
 
 
+def _reset_retry_counter_for_new_call(step: "Step") -> None:
+    """Clear ``step.inputs['retry_count']`` at a transition point where the
+    next LLM call is a fresh one (new discovery round, new fix iteration,
+    new revision) rather than a retry of a previous attempt with the same
+    intended prompt.
+
+    Why this exists:
+        ``inputs['retry_count']`` drives ``LLMCaller.external_attempt``,
+        which flips ``is_retry=True`` and causes the caller to *replace*
+        the step's carefully-built prompt with a retry-context wrapper
+        ("previous attempt history + 'continue from where you left off'").
+        That semantic is correct for same-call retries (e.g. user clicks
+        Retry after FAILED, or the process was interrupted mid-call) but
+        wrong for multi-round / iteration-based steps, whose next prompt
+        is a new prompt with new inputs (``user_response``,
+        ``fix_instructions``, ``revision_feedback``, ...). Without this
+        reset, once any prior step-level retry bumps the counter, every
+        subsequent round or iteration silently discards its own prompt and
+        the LLM sees a stale snapshot of the previous call.
+
+    Callers: ``_transition_to_fix``, ``_transition_to_revision``, and the
+    discovery user-response branch in ``run.py``. See spec / tests for the
+    exhaustive list.
+    """
+    step.inputs.pop("retry_count", None)
+
+
 def _infer_fix_reason(trigger_step_type: str) -> str:
     reason_map = {
         "self_check": "self_check",
@@ -521,6 +548,11 @@ class StateMachine:
         step_to_review.inputs["previous_output"] = previous_output
         step_to_review.error_message = None
         step_to_review.error_details = None
+        # A revision is a NEW LLM call with a revision prompt (containing
+        # revision_feedback + previous_output), not a retry of the prior
+        # call. Clear any stale retry counter so the revision prompt isn't
+        # discarded by the LLMCaller retry-context path.
+        _reset_retry_counter_for_new_call(step_to_review)
         # Keep the outputs for reference, but mark that they may be outdated
         step_to_review.outputs["_is_outdated"] = True
 
@@ -616,6 +648,10 @@ class StateMachine:
         implement_step.inputs["fix_context"] = fix_context
         implement_step.inputs["is_fix_iteration"] = True
         implement_step.inputs["fix_iteration"] = iteration
+        # A fix iteration is a NEW LLM call with its own FIX_PROMPT, not a
+        # retry of the prior implement call. Clear any stale retry counter
+        # so LLMCaller doesn't discard the fix prompt via retry-context.
+        _reset_retry_counter_for_new_call(implement_step)
 
         # Serialize previous outputs for reference. Exclude internal keys and
         # any nested previous_output to prevent quadratic growth across iterations.
