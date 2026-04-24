@@ -1262,7 +1262,9 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - If there is exactly one task group, it is executed as a single LLM call directly (no threshold comparison needed).
 - If there are multiple groups, the implement step computes total `estimated_loc` across all tasks in all groups (tasks missing the field default to 50 LOC each).
   - If total LOC ≤ `implement.group_loc_threshold` (default: 300, configurable in `se3.yaml`), all groups are merged into a single LLM call regardless of grouping.
-  - If total LOC > threshold, groups are executed according to the DAG parallel strategy.
+  - If total LOC > threshold, the step would normally execute groups according to the DAG parallel strategy, subject to the two short-circuit rules below.
+- **Short-circuit 1 — explicit disable:** If `implement.use_worktree` is `false`, the DAG parallel path is never entered. All groups execute sequentially in `group_order` order on the original branch, with no per-group worktree or `impl/*` branch. This holds regardless of DAG topology, including forked DAGs with real parallelism potential.
+- **Short-circuit 2 — linear chain fallback:** If the DAG's `RelayPlan` is a linear chain (no forks and exactly one root — i.e. every topological layer has at most one node), the implement step falls back to sequential execution even when `use_worktree=true`. Linear chains yield no parallelism benefit, so the worktree/branch overhead is skipped.
 - The `plan` step grouping principles (high cohesion, low coupling) are preserved — the implement step only decides whether to collapse groups at execution time.
 
 #### Scenario: Single group uses single LLM call directly
@@ -1278,8 +1280,36 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 
 #### Scenario: Large implementation uses DAG parallel
 - **GIVEN** `plan` produced 4 groups with total estimated_loc = 500
+- **AND** the groups' dependency graph has at least one fork (some node has more than one direct dependent)
+- **AND** `implement.use_worktree` is `true` (default)
 - **WHEN** the implement step executes
 - **THEN** groups are executed via DAG parallel strategy with relay branching
+
+#### Scenario: use_worktree=false forces sequential execution
+- **GIVEN** `plan` produced groups with total estimated_loc > `implement.group_loc_threshold`
+- **AND** the groups' dependency graph contains forks (would normally trigger DAG parallel)
+- **AND** `implement.use_worktree: false` in `se3.yaml`
+- **WHEN** the implement step executes
+- **THEN** no `impl/*` branch or worktree is created for any group
+- **AND** groups are executed sequentially in `group_order` order on the original branch
+- **AND** the execution-strategy panel shows the sequential strategy, not `dag_parallel`
+- **AND** the panel strategy line includes the short-circuit reason `use_worktree=False`
+
+#### Scenario: Linear chain falls back to sequential
+- **GIVEN** `plan` produced groups forming a linear chain G1 → G2 → G3
+- **AND** total estimated_loc > `implement.group_loc_threshold`
+- **AND** `implement.use_worktree` is `true` (default)
+- **WHEN** the implement step executes
+- **THEN** `_relay_plan_is_linear()` returns `true` for the computed `RelayPlan`
+- **AND** the implement step falls back to sequential execution on the original branch
+- **AND** no `impl/*` branch or worktree is created
+- **AND** a log entry explains that the DAG was linear so worktree creation was skipped
+- **AND** the panel strategy line includes the short-circuit reason `linear chain`
+
+#### Scenario: Natural small-LOC sequential has no reason label
+- **GIVEN** `plan` produced a single group or a multi-group plan whose routing naturally selects the sequential path without any short-circuit
+- **WHEN** the implement step renders the task plan panel
+- **THEN** the sequential strategy line omits the `reason:` suffix, preserving the original display
 
 **Transitive Reduction:**
 - Before DAG parallel execution, the implement step performs transitive reduction on group `depends_on` edges.
@@ -1302,18 +1332,10 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 
 **Branch Relay Strategy:**
 - The implement step uses a branch relay strategy instead of per-group branch creation with pre-merge and merge-back.
-- For linear chains (G1 → G2 → G3): G1 creates a worktree; G2 reuses G1's worktree/branch; G3 reuses G2's. Only the chain endpoint merges back.
+- Branch Relay applies only when the DAG parallel strategy is actually selected (see short-circuit rules above). For linear chains and `use_worktree=false`, the implement step executes sequentially on the original branch and the relay strategy is not used.
 - For forks (G1 → G2, G1 → G3): G1 executes; G2 (primary heir, lowest group_order) reuses G1's worktree; G3 forks G1's branch into a new worktree. G2 and G3 execute in parallel.
 - For convergence points (G2, G3 → G4): G4 inherits the primary predecessor's worktree and merges secondary predecessor branches before executing.
-- The relay plan is produced by `classify_chains()` which computes `RelayPlan` containing: relay_map, fork_from, leaf_nodes, convergence_points, and root_nodes.
-
-#### Scenario: Linear chain relay
-- **GIVEN** groups form a linear chain G1 → G2 → G3
-- **WHEN** DAG parallel executes
-- **THEN** G1 creates a new worktree
-- **AND** G2 reuses G1's worktree and branch
-- **AND** G3 reuses G2's worktree and branch
-- **AND** only G3 (leaf) merges back to the original branch
+- The relay plan is produced by `classify_chains()` which computes `RelayPlan` containing: relay_map, fork_from, leaf_nodes, convergence_points, and root_nodes. Helper `_relay_plan_is_linear(plan)` is used by `implement_handler` to detect the linear-chain short-circuit — it returns `true` iff `plan.fork_from` is empty and `plan.root_nodes` has exactly one element.
 
 #### Scenario: Fork relay
 - **GIVEN** G1 has two dependents G2 and G3 (G2 has lower group_order)

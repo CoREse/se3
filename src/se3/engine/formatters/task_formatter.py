@@ -537,6 +537,7 @@ class TaskFormatter:
         total_loc: int,
         loc_threshold: int,
         relay_plan: Optional[RelayPlan] = None,
+        sequential_reason: Optional[str] = None,
     ) -> Panel:
         """Format implement step task plan with execution strategy summary.
 
@@ -546,6 +547,10 @@ class TaskFormatter:
             total_loc: Total estimated lines of code across all tasks
             loc_threshold: LOC threshold for group merging
             relay_plan: Relay execution plan (only for dag_parallel strategy)
+            sequential_reason: Optional human-readable reason for choosing
+                the sequential strategy. Only surfaced when
+                ``execution_strategy == "sequential"``. Typical values are
+                ``"use_worktree=False"`` or ``"linear chain"``.
 
         Returns:
             Rich Panel containing task tree with strategy summary
@@ -558,6 +563,7 @@ class TaskFormatter:
         # Strategy summary line
         strategy_line = self._format_strategy_line(
             execution_strategy, total_loc, loc_threshold, len(task_groups),
+            sequential_reason=sequential_reason,
         )
         renderables.append(strategy_line)
         renderables.append(Text(""))  # blank separator
@@ -600,9 +606,23 @@ class TaskFormatter:
         total_loc: int,
         loc_threshold: int,
         num_groups: int,
+        sequential_reason: Optional[str] = None,
     ) -> Text:
-        """Build the execution strategy summary line."""
+        """Build the execution strategy summary line.
+
+        When ``strategy == "sequential"`` and ``sequential_reason`` is
+        provided, the reason is appended to the description so users can
+        see *why* DAG parallel was not selected (e.g. short-circuited
+        because ``implement.use_worktree=False`` or the RelayPlan was a
+        linear chain).
+        """
         from rich.text import Text
+
+        sequential_desc = f"Sequential ({num_groups} groups)"
+        if strategy == "sequential" and sequential_reason:
+            sequential_desc = (
+                f"Sequential ({num_groups} groups, reason: {sequential_reason})"
+            )
 
         strategy_map = {
             "single": (
@@ -617,7 +637,7 @@ class TaskFormatter:
             ),
             "sequential": (
                 "\U0001f4cb",  # 📋
-                f"Sequential ({num_groups} groups)",
+                sequential_desc,
             ),
         }
 

@@ -126,9 +126,12 @@ class TestLocThresholdRouting:
 
         mock_dag.return_value = StepStatus.COMPLETED
 
+        # Fork DAG (G1 → G2, G1 → G3) so the linear-chain short-circuit
+        # does not apply; linear chains fall through to sequential.
         groups = _make_groups([
             ("G1", 1, [], 200),
             ("G2", 2, ["G1"], 200),
+            ("G3", 3, ["G1"], 200),
         ])
         step = _make_step(inputs={
             "task_description": "Test",

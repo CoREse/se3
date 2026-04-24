@@ -327,6 +327,120 @@ class TestTaskFormatter:
         assert "300 threshold" in output
         assert "3 groups" in output
 
+    def test_format_strategy_line_sequential_default(self, formatter, console):
+        """Sequential without a reason shows only the group count."""
+        text = formatter._format_strategy_line("sequential", 500, 300, 3)
+        with console.capture() as capture:
+            console.print(text)
+        output = capture.get()
+        assert "Sequential" in output
+        assert "3 groups" in output
+        assert "reason" not in output
+
+    def test_format_strategy_line_sequential_reason_use_worktree_false(
+        self, formatter, console,
+    ):
+        """Sequential-with-reason surfaces the short-circuit explanation."""
+        text = formatter._format_strategy_line(
+            "sequential", 600, 300, 3,
+            sequential_reason="use_worktree=False",
+        )
+        with console.capture() as capture:
+            console.print(text)
+        output = capture.get()
+        assert "Sequential" in output
+        assert "3 groups" in output
+        assert "reason: use_worktree=False" in output
+
+    def test_format_strategy_line_sequential_reason_linear_chain(
+        self, formatter, console,
+    ):
+        """Linear-chain short-circuit is surfaced as the sequential reason."""
+        text = formatter._format_strategy_line(
+            "sequential", 900, 300, 3,
+            sequential_reason="linear chain",
+        )
+        with console.capture() as capture:
+            console.print(text)
+        output = capture.get()
+        assert "Sequential" in output
+        assert "reason: linear chain" in output
+
+    def test_format_strategy_line_reason_ignored_for_non_sequential(
+        self, formatter, console,
+    ):
+        """``sequential_reason`` is not rendered for non-sequential strategies."""
+        text = formatter._format_strategy_line(
+            "dag_parallel", 500, 300, 3,
+            sequential_reason="use_worktree=False",
+        )
+        with console.capture() as capture:
+            console.print(text)
+        output = capture.get()
+        assert "DAG parallel" in output
+        assert "reason" not in output
+
+    def test_format_implement_plan_threads_reason(
+        self, formatter, console,
+    ):
+        """``format_implement_plan`` forwards ``sequential_reason`` to the line."""
+        task_groups = [
+            {
+                "group_id": "G1",
+                "name": "One",
+                "description": "first",
+                "group_order": 1,
+                "depends_on": [],
+                "tasks": [],
+            },
+            {
+                "group_id": "G2",
+                "name": "Two",
+                "description": "second",
+                "group_order": 2,
+                "depends_on": ["G1"],
+                "tasks": [],
+            },
+        ]
+        panel = formatter.format_implement_plan(
+            task_groups=task_groups,
+            execution_strategy="sequential",
+            total_loc=400,
+            loc_threshold=300,
+            sequential_reason="linear chain",
+        )
+        with console.capture() as capture:
+            console.print(panel)
+        output = capture.get()
+        assert "Sequential" in output
+        assert "reason: linear chain" in output
+
+    def test_format_implement_plan_no_reason_default(
+        self, formatter, console,
+    ):
+        """Omitting ``sequential_reason`` keeps the panel backward compatible."""
+        task_groups = [
+            {
+                "group_id": "G1",
+                "name": "One",
+                "description": "first",
+                "group_order": 1,
+                "depends_on": [],
+                "tasks": [],
+            },
+        ]
+        panel = formatter.format_implement_plan(
+            task_groups=task_groups,
+            execution_strategy="sequential",
+            total_loc=50,
+            loc_threshold=300,
+        )
+        with console.capture() as capture:
+            console.print(panel)
+        output = capture.get()
+        assert "Sequential" in output
+        assert "reason" not in output
+
 
 class TestFormatTaskGroupsConvenience:
     """Tests for the format_task_groups convenience function."""

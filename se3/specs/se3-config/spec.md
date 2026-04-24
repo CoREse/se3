@@ -55,6 +55,7 @@ root for developer-local overrides.
 - `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: ["summarize"])
 - `conflict_resolver.strategy`: Merge conflict resolution strategy — `"human"` or `"llm"` (default: `"human"`)
 - `implement.group_loc_threshold`: LOC threshold for collapsing task groups into a single LLM call (default: 300)
+- `implement.use_worktree`: Whether the implement step may use per-group worktrees and `impl/*` branches on the DAG parallel path (default: true). Set to `false` to force fully sequential execution on the original branch regardless of DAG topology.
 - `workflow.max_fix_iterations`: Max fix loop iterations before FAILED (default: 20)
 - `test.command`: Primary test command override (default: null = auto-detect)
 - `test.timeout`: Fallback timeout (seconds) when dynamic timeout is unavailable (default: 1800)
@@ -340,21 +341,46 @@ The system SHALL support configuration for the implement step's execution strate
 
 **Implement section options:**
 - `implement.group_loc_threshold`: Total estimated LOC threshold below which all task groups are collapsed into a single LLM call (default: 300). When the sum of `estimated_loc` across all tasks in all groups is at or below this threshold, the implement step merges all groups into one call instead of executing them as separate DAG-parallel groups.
+- `implement.use_worktree`: Boolean gate for the DAG parallel path's per-group worktree creation (default: `true`). When `false`, the implement step never creates `impl/*` branches or per-group worktrees and executes all groups sequentially on the original branch, regardless of DAG topology. This is the `implement`-step-scoped setting and is orthogonal to the loop mode `--no-worktree` CLI flag, which controls a different layer (whether the whole loop iteration runs in an isolated worktree). Accepts boolean values and common string forms (`"true"`, `"false"`, `"1"`, `"0"`, `"yes"`, `"no"`); unrecognized strings fall back to the default `true`.
+- Environment variable `SE3_IMPLEMENT_USE_WORKTREE`: Overrides `implement.use_worktree` from the environment (useful for CI or one-off runs). Accepts the same string forms as the config value. Takes precedence over `se3.yaml`.
 
 **Example configuration:**
 ```yaml
 implement:
   group_loc_threshold: 300  # Collapse groups when total LOC ≤ 300
+  use_worktree: true        # Allow DAG parallel path to create per-group worktrees
 ```
 
 #### Scenario: Default implement configuration
 - **WHEN** no `implement` section exists in se3.yaml
 - **THEN** the framework uses a default `group_loc_threshold` of 300
+- **AND** `use_worktree` defaults to `true`
 
 #### Scenario: Custom LOC threshold
 - **GIVEN** `implement.group_loc_threshold: 500` in se3.yaml
 - **WHEN** `plan` produces groups with total estimated_loc = 400
 - **THEN** the implement step collapses all groups into a single LLM call
+
+#### Scenario: Disable worktree via se3.yaml
+- **GIVEN** `implement.use_worktree: false` in se3.yaml
+- **WHEN** the implement step would otherwise enter the DAG parallel path (large multi-group implementation with forks)
+- **THEN** `ImplementConfig.load()` yields `use_worktree=False`
+- **AND** the implement step executes all groups sequentially on the original branch
+- **AND** no `impl/*` branch or worktree is created
+
+#### Scenario: Environment variable overrides config file
+- **GIVEN** `implement.use_worktree: true` in se3.yaml
+- **AND** environment variable `SE3_IMPLEMENT_USE_WORKTREE=0`
+- **WHEN** `ImplementConfig.load()` runs
+- **THEN** the effective `use_worktree` is `False`
+- **AND** the environment variable takes precedence over the file value
+
+#### Scenario: Orthogonality with loop --no-worktree
+- **GIVEN** the user runs `se3 run ... --loop --no-worktree`
+- **AND** `implement.use_worktree: true` in se3.yaml
+- **THEN** the loop iteration runs without its own isolated loop-level worktree
+- **AND** the implement step inside each iteration may still use DAG parallel worktrees when the topology justifies it
+- **AND** the two settings do not conflict because they govern different layers of the execution pipeline
 
 ### Requirement: Workflow Configuration
 

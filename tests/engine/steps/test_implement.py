@@ -439,9 +439,12 @@ class TestDagEmptyRepoFallback:
             task_type="feature",
         )
 
+        # Fork DAG (G1 → G2, G1 → G3) so the linear-chain short-circuit
+        # does not apply; linear chains now fall through to sequential.
         self.task_groups = [
             {"group_id": "G1", "group_order": 1, "depends_on": [], "tasks": [{"id": 1, "estimated_loc": 200}]},
             {"group_id": "G2", "group_order": 2, "depends_on": ["G1"], "tasks": [{"id": 2, "estimated_loc": 200}]},
+            {"group_id": "G3", "group_order": 3, "depends_on": ["G1"], "tasks": [{"id": 3, "estimated_loc": 200}]},
         ]
 
     def teardown_method(self):
@@ -489,7 +492,7 @@ class TestDagEmptyRepoFallback:
         # Should NOT have called _run_dag_parallel (we'd see an error if it did)
         assert result == StepStatus.COMPLETED
         # LLMCaller should have been called once per group (sequential)
-        assert mock_caller.call_count == 2
+        assert mock_caller.call_count == len(self.task_groups)
 
     @patch("se3.engine.steps.implement.has_commits", return_value=True)
     @patch("se3.engine.steps.implement._run_dag_parallel")

@@ -15,7 +15,14 @@ import threading
 from pathlib import Path
 from typing import Any, Callable
 
-from ..dag_scheduler import DAGScheduler, GroupResult, RelayContext, RelayPlan, classify_chains
+from ..dag_scheduler import (
+    DAGScheduler,
+    GroupResult,
+    RelayContext,
+    RelayPlan,
+    _relay_plan_is_linear,
+    classify_chains,
+)
 from ..transitive_reduction import transitive_reduce
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
@@ -321,8 +328,40 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
         _resolve_files_changed(step, project_root, baseline_hash)
         return result
 
-    # --- DAG parallel path (when dependency info is present) ---
-    if _should_use_dag(groups, total_loc, impl_config.group_loc_threshold):
+    # --- Decide DAG parallel vs sequential execution ---
+    want_dag = _should_use_dag(groups, total_loc, impl_config.group_loc_threshold)
+    # Short-circuit reason surfaced to the task plan panel when sequential
+    # is chosen instead of DAG parallel. Remains None if sequential was
+    # simply the natural outcome (e.g. low LOC, no dependencies).
+    sequential_reason: str | None = None
+
+    # Short-circuit 1: explicit use_worktree=False disables DAG parallel
+    if want_dag and not impl_config.use_worktree:
+        logger.info(
+            "implement.use_worktree=False; skipping DAG parallel, using sequential path",
+        )
+        want_dag = False
+        sequential_reason = "use_worktree=False"
+
+    # Short-circuit 2: linear RelayPlan yields no parallel wave, skip DAG
+    if want_dag:
+        try:
+            _reduced_preview = transitive_reduce(groups)
+            _relay_preview = classify_chains(_reduced_preview)
+            if _relay_plan_is_linear(_relay_preview):
+                logger.info(
+                    "RelayPlan is a linear chain (no fork, single root); "
+                    "using sequential path instead of DAG parallel",
+                )
+                want_dag = False
+                sequential_reason = "linear chain"
+        except Exception:
+            logger.debug(
+                "Linear chain detection failed; proceeding with DAG parallel",
+                exc_info=True,
+            )
+
+    if want_dag:
         _display_task_plan(groups, "dag_parallel", total_loc, impl_config.group_loc_threshold)
         if not has_commits(project_root):
             logger.warning(
@@ -446,7 +485,13 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             return result
 
     # --- Group-by-group execution ---
-    _display_task_plan(groups, "sequential", total_loc, impl_config.group_loc_threshold)
+    _display_task_plan(
+        groups,
+        "sequential",
+        total_loc,
+        impl_config.group_loc_threshold,
+        sequential_reason=sequential_reason,
+    )
     logger.info("Executing %d task groups sequentially", len(groups))
 
     all_files_changed = []
@@ -643,11 +688,15 @@ def _display_task_plan(
     strategy: str,
     total_loc: int,
     threshold: int,
+    sequential_reason: str | None = None,
 ) -> None:
     """Display implementation task plan with execution strategy.
 
     Wraps the call in try/except so display failures never block execution.
     For dag_parallel strategy, computes RelayPlan to show execution topology.
+    ``sequential_reason`` is surfaced in the strategy line when the
+    sequential path was chosen by a short-circuit rule rather than by
+    the natural small-LOC fallback.
     """
     try:
         from ..formatters import TaskFormatter
@@ -671,6 +720,7 @@ def _display_task_plan(
             total_loc=total_loc,
             loc_threshold=threshold,
             relay_plan=relay_plan,
+            sequential_reason=sequential_reason,
         ))
     except Exception:
         logger.debug("Could not render implementation plan", exc_info=True)

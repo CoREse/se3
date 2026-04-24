@@ -47,6 +47,31 @@ TWO_GROUPS = [
 ]
 
 
+# Forking DAG: G1 → G2 and G1 → G3. Used where the test must route to
+# DAG parallel; a linear chain (TWO_GROUPS) now short-circuits to the
+# sequential path per the implement.use_worktree / linear-chain rules.
+FORK_GROUPS = [
+    {
+        "group_id": "G1",
+        "group_order": 1,
+        "depends_on": [],
+        "tasks": [{"id": 1, "description": "Task 1", "estimated_loc": 200}],
+    },
+    {
+        "group_id": "G2",
+        "group_order": 2,
+        "depends_on": ["G1"],
+        "tasks": [{"id": 2, "description": "Task 2", "estimated_loc": 200}],
+    },
+    {
+        "group_id": "G3",
+        "group_order": 3,
+        "depends_on": ["G1"],
+        "tasks": [{"id": 3, "description": "Task 3", "estimated_loc": 200}],
+    },
+]
+
+
 class TestFormatSpecBrief:
     """Tests for _format_spec_brief trailing newline behavior."""
 
@@ -120,7 +145,7 @@ class TestImplementHandlerEmptyRepoFallback:
         """DAG parallel should be used when has_commits() returns True."""
         from se3.engine.steps.implement import implement_handler
 
-        step, flow = _make_step_and_flow(tmp_path, TWO_GROUPS)
+        step, flow = _make_step_and_flow(tmp_path, FORK_GROUPS)
         result = implement_handler(step, flow)
 
         # DAG parallel SHOULD have been called
