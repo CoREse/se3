@@ -225,6 +225,50 @@ class TestSequentialReasonPropagation:
         assert reason == "linear chain"
 
     @patch(f"{_IMP}._display_task_plan")
+    @patch(f"{_IMP}._resolve_files_changed")
+    @patch(f"{_IMP}.parse_json_response", return_value=_PARSED)
+    @patch(f"{_IMP}.LLMCaller")
+    @patch(f"{_IMP}._run_dag_parallel")
+    @patch(f"{_IMP}.has_commits", return_value=False)
+    @patch(
+        "se3.engine.context_builder.get_issue_discovery_injection",
+        return_value=None,
+    )
+    @patch.object(
+        ImplementConfig,
+        "load",
+        return_value=ImplementConfig(
+            group_loc_threshold=300, use_worktree=True,
+        ),
+    )
+    def test_has_commits_false_reports_reason(
+        self,
+        mock_cfg,
+        mock_inj,
+        mock_commits,
+        mock_dag,
+        mock_caller_cls,
+        mock_parse,
+        mock_resolve,
+        mock_display,
+        tmp_path,
+    ):
+        """has_commits=False fallback sets reason ``no commits``."""
+        from se3.engine.steps.implement import implement_handler
+
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = json.dumps(_PARSED)
+        mock_caller_cls.return_value = mock_caller
+
+        step, flow = _make_step_flow(tmp_path, FORK_GROUPS)
+        result = implement_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        mock_dag.assert_not_called()
+        reason = _extract_sequential_reason(mock_display)
+        assert reason == "no commits"
+
+    @patch(f"{_IMP}._display_task_plan")
     @patch(f"{_IMP}._run_single_llm_call", return_value=StepStatus.COMPLETED)
     @patch(f"{_IMP}._resolve_files_changed")
     @patch(f"{_IMP}.parse_json_response", return_value=_PARSED)

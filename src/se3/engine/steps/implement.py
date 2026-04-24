@@ -362,127 +362,130 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             )
 
     if want_dag:
-        _display_task_plan(groups, "dag_parallel", total_loc, impl_config.group_loc_threshold)
         if not has_commits(project_root):
             logger.warning(
                 "Repository has no commits — falling back to sequential "
                 "group-by-group execution instead of DAG parallel"
             )
-        else:
-            # Resume filtering for DAG parallel path
-            prior_outputs: dict[str, Any] | None = None
-            dag_groups = groups
+            want_dag = False
+            sequential_reason = "no commits"
 
-            if step.inputs.get("resumed"):
-                # Try step.outputs first (normal resume where state was saved)
-                completed_groups_dag = set(
-                    g if isinstance(g, str) else g.get("group_id", "")
-                    for g in step.outputs.get("implemented_groups", [])
+    if want_dag:
+        _display_task_plan(groups, "dag_parallel", total_loc, impl_config.group_loc_threshold)
+        # Resume filtering for DAG parallel path
+        prior_outputs: dict[str, Any] | None = None
+        dag_groups = groups
+
+        if step.inputs.get("resumed"):
+            # Try step.outputs first (normal resume where state was saved)
+            completed_groups_dag = set(
+                g if isinstance(g, str) else g.get("group_id", "")
+                for g in step.outputs.get("implemented_groups", [])
+            )
+
+            # Disaster recovery: check for surviving impl branches
+            # that completed after the last state save.
+            # Skip this scan if step.outputs already accounts for all groups.
+            all_group_ids = {g.get("group_id", g.get("name", "unknown")) for g in groups}
+            unaccounted = all_group_ids - completed_groups_dag
+
+            if unaccounted:
+                original_branch = get_current_branch(project_root)
+
+                # If we're on an impl branch from a crashed run, restore
+                impl_prefix = f"impl/{flow.flow_id}/"
+                if original_branch.startswith(impl_prefix):
+                    logger.warning(
+                        "DAG disaster recovery: repo left on impl branch %s",
+                        original_branch,
+                    )
+                    # Try common base branches directly (checkout - is unreliable
+                    # after multi-thread checkout sequences)
+                    restored = False
+                    for candidate in ("master", "main", "develop"):
+                        result = _run_git(project_root, "rev-parse", "--verify", candidate, check=False)
+                        if result.returncode == 0:
+                            _run_git(project_root, "checkout", candidate, check=False)
+                            original_branch = candidate
+                            restored = True
+                            logger.info("DAG disaster recovery: restored to %s", candidate)
+                            break
+                    if not restored:
+                        logger.error("DAG disaster recovery: cannot determine base branch, aborting")
+                        step.error_message = (
+                            f"Repo is on impl branch {original_branch} from a crashed run "
+                            f"and no base branch (master/main) found. "
+                            f"Please checkout the correct branch manually and retry."
+                        )
+                        return StepStatus.FAILED
+
+
+                for gid in unaccounted:
+                    branch = f"impl/{flow.flow_id}/{gid}"
+                    try:
+                        if has_new_commits(project_root, branch, original_branch):
+                            completed_groups_dag.add(gid)
+                            logger.info(
+                                "DAG disaster recovery: found surviving branch %s",
+                                branch,
+                            )
+                    except Exception:
+                        pass
+
+            if completed_groups_dag:
+                dag_groups = [
+                    g for g in groups
+                    if g.get("group_id", g.get("name", "unknown")) not in completed_groups_dag
+                ]
+                if not dag_groups:
+                    logger.info("DAG parallel: all groups already completed on resume")
+                    # Merge surviving branches before returning
+                    result = _run_dag_parallel(
+                        groups=[],
+                        step=step,
+                        flow=flow,
+                        project_root=project_root,
+                        task_description=task_description,
+                        task_type=task_type,
+                        design_section=design_section,
+                        spec_summary=spec_summary,
+                        injection=injection,
+                        retry_count=retry_count,
+                        prior_outputs={
+                            "files_changed": list(step.outputs.get("files_changed", [])),
+                            "tests_added": list(step.outputs.get("tests_added", [])),
+                            "test_mapping": dict(step.outputs.get("test_mapping", {})),
+                            "implemented_groups": list(completed_groups_dag),
+                        },
+                    )
+                    _resolve_files_changed(step, project_root, baseline_hash)
+                    return result
+                prior_outputs = {
+                    "files_changed": list(step.outputs.get("files_changed", [])),
+                    "tests_added": list(step.outputs.get("tests_added", [])),
+                    "test_mapping": dict(step.outputs.get("test_mapping", {})),
+                    "implemented_groups": list(completed_groups_dag),
+                }
+                logger.info(
+                    "DAG parallel resume: skipping %d completed groups, running %d remaining",
+                    len(completed_groups_dag), len(dag_groups),
                 )
 
-                # Disaster recovery: check for surviving impl branches
-                # that completed after the last state save.
-                # Skip this scan if step.outputs already accounts for all groups.
-                all_group_ids = {g.get("group_id", g.get("name", "unknown")) for g in groups}
-                unaccounted = all_group_ids - completed_groups_dag
-
-                if unaccounted:
-                    original_branch = get_current_branch(project_root)
-
-                    # If we're on an impl branch from a crashed run, restore
-                    impl_prefix = f"impl/{flow.flow_id}/"
-                    if original_branch.startswith(impl_prefix):
-                        logger.warning(
-                            "DAG disaster recovery: repo left on impl branch %s",
-                            original_branch,
-                        )
-                        # Try common base branches directly (checkout - is unreliable
-                        # after multi-thread checkout sequences)
-                        restored = False
-                        for candidate in ("master", "main", "develop"):
-                            result = _run_git(project_root, "rev-parse", "--verify", candidate, check=False)
-                            if result.returncode == 0:
-                                _run_git(project_root, "checkout", candidate, check=False)
-                                original_branch = candidate
-                                restored = True
-                                logger.info("DAG disaster recovery: restored to %s", candidate)
-                                break
-                        if not restored:
-                            logger.error("DAG disaster recovery: cannot determine base branch, aborting")
-                            step.error_message = (
-                                f"Repo is on impl branch {original_branch} from a crashed run "
-                                f"and no base branch (master/main) found. "
-                                f"Please checkout the correct branch manually and retry."
-                            )
-                            return StepStatus.FAILED
-
-
-                    for gid in unaccounted:
-                        branch = f"impl/{flow.flow_id}/{gid}"
-                        try:
-                            if has_new_commits(project_root, branch, original_branch):
-                                completed_groups_dag.add(gid)
-                                logger.info(
-                                    "DAG disaster recovery: found surviving branch %s",
-                                    branch,
-                                )
-                        except Exception:
-                            pass
-
-                if completed_groups_dag:
-                    dag_groups = [
-                        g for g in groups
-                        if g.get("group_id", g.get("name", "unknown")) not in completed_groups_dag
-                    ]
-                    if not dag_groups:
-                        logger.info("DAG parallel: all groups already completed on resume")
-                        # Merge surviving branches before returning
-                        result = _run_dag_parallel(
-                            groups=[],
-                            step=step,
-                            flow=flow,
-                            project_root=project_root,
-                            task_description=task_description,
-                            task_type=task_type,
-                            design_section=design_section,
-                            spec_summary=spec_summary,
-                            injection=injection,
-                            retry_count=retry_count,
-                            prior_outputs={
-                                "files_changed": list(step.outputs.get("files_changed", [])),
-                                "tests_added": list(step.outputs.get("tests_added", [])),
-                                "test_mapping": dict(step.outputs.get("test_mapping", {})),
-                                "implemented_groups": list(completed_groups_dag),
-                            },
-                        )
-                        _resolve_files_changed(step, project_root, baseline_hash)
-                        return result
-                    prior_outputs = {
-                        "files_changed": list(step.outputs.get("files_changed", [])),
-                        "tests_added": list(step.outputs.get("tests_added", [])),
-                        "test_mapping": dict(step.outputs.get("test_mapping", {})),
-                        "implemented_groups": list(completed_groups_dag),
-                    }
-                    logger.info(
-                        "DAG parallel resume: skipping %d completed groups, running %d remaining",
-                        len(completed_groups_dag), len(dag_groups),
-                    )
-
-            result = _run_dag_parallel(
-                groups=dag_groups,
-                step=step,
-                flow=flow,
-                project_root=project_root,
-                task_description=task_description,
-                task_type=task_type,
-                design_section=design_section,
-                spec_summary=spec_summary,
-                injection=injection,
-                retry_count=retry_count,
-                prior_outputs=prior_outputs,
-            )
-            _resolve_files_changed(step, project_root, baseline_hash)
-            return result
+        result = _run_dag_parallel(
+            groups=dag_groups,
+            step=step,
+            flow=flow,
+            project_root=project_root,
+            task_description=task_description,
+            task_type=task_type,
+            design_section=design_section,
+            spec_summary=spec_summary,
+            injection=injection,
+            retry_count=retry_count,
+            prior_outputs=prior_outputs,
+        )
+        _resolve_files_changed(step, project_root, baseline_hash)
+        return result
 
     # --- Group-by-group execution ---
     _display_task_plan(

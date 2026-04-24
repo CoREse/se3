@@ -123,13 +123,17 @@ class TestImplementHandlerEmptyRepoFallback:
         mock_caller.call.return_value = "{}"
         mock_llm_cls.return_value = mock_caller
 
-        step, flow = _make_step_and_flow(tmp_path, TWO_GROUPS)
+        # Use FORK_GROUPS (not TWO_GROUPS) because a linear chain now
+        # short-circuits to sequential via _relay_plan_is_linear *before*
+        # the has_commits=False guard is reached. FORK_GROUPS preserves
+        # the test's original intent: verifying DAG fallback on empty repo.
+        step, flow = _make_step_and_flow(tmp_path, FORK_GROUPS)
         result = implement_handler(step, flow)
 
         # DAG parallel must NOT have been called
         mock_dag_parallel.assert_not_called()
         # Sequential path calls LLMCaller once per group
-        assert mock_llm_cls.call_count == 2
+        assert mock_llm_cls.call_count == 3
         assert result == StepStatus.COMPLETED
 
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value=None)

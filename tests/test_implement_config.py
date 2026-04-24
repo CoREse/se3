@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from se3.config import ImplementConfig
+from se3.config import ImplementConfig, _coerce_bool
 
 
 class TestImplementConfigDefaults:
@@ -170,3 +170,21 @@ class TestImplementConfigUseWorktree:
         config = ImplementConfig.load(tmp_path)
         # Invalid env value falls back to whatever the YAML produced.
         assert config.use_worktree is False
+
+
+class TestCoerceBool:
+    """Tests for the _coerce_bool helper."""
+
+    def test_float_zero(self):
+        # 0.0 coerces to False via standard Python bool() semantics.
+        assert _coerce_bool(0.0, default=True) is False
+
+    def test_float_non_zero(self):
+        # Non-zero floats coerce to True.
+        assert _coerce_bool(1.5, default=False) is True
+        assert _coerce_bool(-0.1, default=False) is True
+
+    def test_none_falls_back_to_default(self):
+        # None falls through every branch and returns default.
+        assert _coerce_bool(None, default=True) is True
+        assert _coerce_bool(None, default=False) is False
