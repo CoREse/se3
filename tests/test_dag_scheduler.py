@@ -15,6 +15,7 @@ from se3.engine.dag_scheduler import (
     GroupResult,
     RelayContext,
     RelayPlan,
+    _relay_plan_is_linear,
     classify_chains,
 )
 
@@ -883,6 +884,60 @@ class TestClassifyChains:
         assert plan.relay_map == {"G1": None, "G2": "G1", "G3": None, "G4": "G3"}
         assert plan.fork_from == {}
         assert plan.convergence_points == {}
+
+
+# ---------------------------------------------------------------------------
+# _relay_plan_is_linear tests
+# ---------------------------------------------------------------------------
+
+
+class TestRelayPlanIsLinear:
+    """Tests for _relay_plan_is_linear() linear-chain detector."""
+
+    def test_linear_chain_returns_true(self):
+        """A → B → C: single root, no forks → linear."""
+        groups = [
+            {"group_id": "A", "group_order": 1, "depends_on": []},
+            {"group_id": "B", "group_order": 2, "depends_on": ["A"]},
+            {"group_id": "C", "group_order": 3, "depends_on": ["B"]},
+        ]
+        assert _relay_plan_is_linear(classify_chains(groups)) is True
+
+    def test_single_node_returns_true(self):
+        """A single-node DAG is trivially linear."""
+        groups = [{"group_id": "A", "group_order": 1, "depends_on": []}]
+        assert _relay_plan_is_linear(classify_chains(groups)) is True
+
+    def test_fork_returns_false(self):
+        """A → B, A → C: fork present → not linear."""
+        groups = [
+            {"group_id": "A", "group_order": 1, "depends_on": []},
+            {"group_id": "B", "group_order": 2, "depends_on": ["A"]},
+            {"group_id": "C", "group_order": 3, "depends_on": ["A"]},
+        ]
+        assert _relay_plan_is_linear(classify_chains(groups)) is False
+
+    def test_multiple_roots_returns_false(self):
+        """Two independent roots → not linear even without forks."""
+        groups = [
+            {"group_id": "A", "group_order": 1, "depends_on": []},
+            {"group_id": "B", "group_order": 2, "depends_on": []},
+        ]
+        assert _relay_plan_is_linear(classify_chains(groups)) is False
+
+    def test_diamond_returns_false(self):
+        """Diamond (convergence point) contains a fork → not linear."""
+        groups = [
+            {"group_id": "A", "group_order": 1, "depends_on": []},
+            {"group_id": "B", "group_order": 2, "depends_on": ["A"]},
+            {"group_id": "C", "group_order": 3, "depends_on": ["A"]},
+            {"group_id": "D", "group_order": 4, "depends_on": ["B", "C"]},
+        ]
+        assert _relay_plan_is_linear(classify_chains(groups)) is False
+
+    def test_empty_plan_returns_false(self):
+        """Empty plan has zero roots → not linear."""
+        assert _relay_plan_is_linear(classify_chains([])) is False
 
 
 # ---------------------------------------------------------------------------
