@@ -184,6 +184,21 @@ def classify_chains(groups: list[dict]) -> RelayPlan:
     )
 
 
+def _relay_plan_is_linear(plan: RelayPlan) -> bool:
+    """Return True iff the DAG described by ``plan`` is a linear chain.
+
+    A linear chain has no forks (``fork_from`` empty) and exactly one root,
+    which means every topological layer contains at most one node — i.e.
+    the DAG has no actual parallel wave. Callers can use this to short-circuit
+    DAG-parallel execution and fall back to the sequential path, since
+    spinning up per-group worktrees yields no parallelism benefit.
+
+    Note: does not require ``plan`` to be non-empty; an empty plan has zero
+    roots and therefore returns False.
+    """
+    return not plan.fork_from and len(plan.root_nodes) == 1
+
+
 @dataclass
 class GroupResult:
     """Result of executing a single task group."""
