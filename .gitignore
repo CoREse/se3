@@ -23,5 +23,8 @@ tmp*.prompt
 
 # SE3 session file
 .claude/.session.json
+
+# SE3 local project config override (not checked in)
+se3.local.yaml
 src/se3/__pycache__/
 *.egg-info/

@@ -10,6 +10,24 @@ import yaml
 logger = logging.getLogger(__name__)
 
 
+PROJECT_CONFIG_FILENAME = "se3.yaml"
+PROJECT_LOCAL_CONFIG_FILENAME = "se3.local.yaml"
+
+
+def get_project_config_path(project_root: Path) -> Path:
+    """Return the active project config path for ``project_root``.
+
+    If ``<project_root>/se3.local.yaml`` exists it takes precedence and is
+    returned (fully replacing ``se3.yaml``); otherwise the canonical
+    ``<project_root>/se3.yaml`` path is returned (whether or not it exists).
+    """
+    root = Path(project_root)
+    local = root / PROJECT_LOCAL_CONFIG_FILENAME
+    if local.exists():
+        return local
+    return root / PROJECT_CONFIG_FILENAME
+
+
 class BumpType(Enum):
     """Version bump types following Semantic Versioning."""
     MAJOR = "major"
@@ -133,7 +151,7 @@ class VersionConfig:
     @classmethod
     def load(cls, project_root: Path) -> "VersionConfig":
         """Load version configuration from se3.yaml in project root."""
-        config_path = project_root / "se3.yaml"
+        config_path = get_project_config_path(project_root)
         if not config_path.exists():
             return cls()
         
@@ -361,6 +379,7 @@ def _warn_deprecated_confirmation_fields(source_label: str, section: dict) -> No
 
 def _merge_confirmation_steps(
     global_data: dict, project_data: dict,
+    project_source_label: str = PROJECT_CONFIG_FILENAME,
 ) -> dict[str, dict]:
     """Merge ``confirmation.steps`` from global + project YAML.
 
@@ -379,7 +398,7 @@ def _merge_confirmation_steps(
     """
     sources = [
         ("~/.se3/config.yaml", global_data),
-        ("se3.yaml", project_data),
+        (project_source_label, project_data),
     ]
 
     merged_steps: dict[str, dict] = {}
@@ -443,6 +462,7 @@ def _validate_confirmation_reviewer_names(
     merged_steps: dict[str, dict],
     global_data: dict,
     project_data: dict,
+    project_source_label: str = PROJECT_CONFIG_FILENAME,
 ) -> None:
     """Fail-fast if any ``confirmation.steps.<step>.reviewer`` is an
     unknown agent name.
@@ -460,7 +480,9 @@ def _validate_confirmation_reviewer_names(
         if reviewer in (None, "human"):
             continue
         if registry is None:
-            registry, _ = _agent_registry_from_data(global_data, project_data)
+            registry, _ = _agent_registry_from_data(
+                global_data, project_data, project_source_label,
+            )
         if reviewer not in registry:
             available = sorted(registry.keys())
             raise ValueError(
@@ -500,10 +522,12 @@ def load_confirmation_config(project_root: Optional[Path] = None) -> dict:
     if project_root is None:
         project_root = Path.cwd()
 
-    global_data, project_data = _load_agent_configs(project_root)
-    merged_steps = _merge_confirmation_steps(global_data, project_data)
+    global_data, project_data, project_source_label = _load_agent_configs(project_root)
+    merged_steps = _merge_confirmation_steps(
+        global_data, project_data, project_source_label,
+    )
     _validate_confirmation_reviewer_names(
-        merged_steps, global_data, project_data,
+        merged_steps, global_data, project_data, project_source_label,
     )
     return {"steps": merged_steps}
 
@@ -600,17 +624,24 @@ def _read_yaml(path: Path) -> Optional[dict]:
 
 def _load_agent_configs(
     project_root: Optional[Path],
-) -> tuple[dict, dict]:
+) -> tuple[dict, dict, str]:
     """Read global and project YAML configs in one pass.
 
-    Returns ``(global_data, project_data)``; missing/invalid files are
-    returned as empty dicts so callers can uniformly use ``.get(...)``.
+    Returns ``(global_data, project_data, project_source_label)``;
+    missing/invalid files are returned as empty dicts so callers can
+    uniformly use ``.get(...)``. ``project_source_label`` is the
+    filename of the project config actually consulted
+    (``se3.local.yaml`` when it exists, otherwise ``se3.yaml``) — used
+    to produce accurate warning/error messages.
     """
     global_data = _read_yaml(Path.home() / _GLOBAL_CONFIG_PATH_SUFFIX[0] / _GLOBAL_CONFIG_PATH_SUFFIX[1]) or {}
     project_data: dict = {}
+    project_source_label = PROJECT_CONFIG_FILENAME
     if project_root is not None:
-        project_data = _read_yaml(Path(project_root) / "se3.yaml") or {}
-    return global_data, project_data
+        project_config_path = get_project_config_path(project_root)
+        project_data = _read_yaml(project_config_path) or {}
+        project_source_label = project_config_path.name
+    return global_data, project_data, project_source_label
 
 
 _warned_list_agents_for: set[str] = set()
@@ -762,6 +793,7 @@ def _agents_dict_from_source(
 
 def _agent_registry_from_data(
     global_data: dict, project_data: dict,
+    project_source_label: str = PROJECT_CONFIG_FILENAME,
 ) -> tuple[dict[str, AgentDef], list[str]]:
     """Build the agent registry from global + project YAML data.
 
@@ -773,7 +805,7 @@ def _agent_registry_from_data(
     """
     sources = [
         ("~/.se3/config.yaml", global_data),
-        ("se3.yaml", project_data),
+        (project_source_label, project_data),
     ]
 
     merged: dict[str, AgentDef] = {}
@@ -840,8 +872,10 @@ def load_agent_registry(
     source omits ``agents``. Invalid top-level forms (list, scalar)
     produce a warning and are ignored.
     """
-    global_data, project_data = _load_agent_configs(project_root)
-    registry, _ = _agent_registry_from_data(global_data, project_data)
+    global_data, project_data, project_source_label = _load_agent_configs(project_root)
+    registry, _ = _agent_registry_from_data(
+        global_data, project_data, project_source_label,
+    )
     return registry
 
 
@@ -917,7 +951,10 @@ def _explicit_defaults(
     return names if names else None
 
 
-def _default_chain_from_data(global_data: dict, project_data: dict) -> list[dict]:
+def _default_chain_from_data(
+    global_data: dict, project_data: dict,
+    project_source_label: str = PROJECT_CONFIG_FILENAME,
+) -> list[dict]:
     """Build the default agent chain from already-parsed YAML data.
 
     Priority (first non-empty wins):
@@ -929,14 +966,14 @@ def _default_chain_from_data(global_data: dict, project_data: dict) -> list[dict
     Unknown names at the selected level raise ``ValueError``.
     """
     registry, legacy_defaults = _agent_registry_from_data(
-        global_data, project_data,
+        global_data, project_data, project_source_label,
     )
 
     # 1 & 2: explicit defaults.
-    project_names = _explicit_defaults(project_data, "se3.yaml")
+    project_names = _explicit_defaults(project_data, project_source_label)
     if project_names is not None:
         return _resolve_name_list(
-            "se3.yaml: llm_caller.defaults", project_names, registry,
+            f"{project_source_label}: llm_caller.defaults", project_names, registry,
         )
     global_names = _explicit_defaults(global_data, "~/.se3/config.yaml")
     if global_names is not None:
@@ -999,6 +1036,7 @@ def _warn_on_unknown_step_keys(
 
 def _step_override_from_data(
     global_data: dict, project_data: dict, step_type: str,
+    project_source_label: str = PROJECT_CONFIG_FILENAME,
 ) -> Optional[list[dict]]:
     """Extract and validate a per-step override from already-parsed YAML.
 
@@ -1019,16 +1057,16 @@ def _step_override_from_data(
         return section if isinstance(section, dict) else {}
 
     global_steps = _section(global_data, "~/.se3/config.yaml")
-    project_steps = _section(project_data, "se3.yaml")
+    project_steps = _section(project_data, project_source_label)
 
     _warn_on_unknown_step_keys("~/.se3/config.yaml", global_steps)
-    _warn_on_unknown_step_keys("se3.yaml", project_steps)
+    _warn_on_unknown_step_keys(project_source_label, project_steps)
 
     # Source label is tracked so ValueError messages point the user to
     # the exact YAML file where the typo lives.
     if step_type in project_steps:
         raw = project_steps[step_type]
-        source_label = "se3.yaml"
+        source_label = project_source_label
     elif step_type in global_steps:
         raw = global_steps[step_type]
         source_label = "~/.se3/config.yaml"
@@ -1084,7 +1122,9 @@ def _step_override_from_data(
             )
         return None
 
-    registry, _ = _agent_registry_from_data(global_data, project_data)
+    registry, _ = _agent_registry_from_data(
+        global_data, project_data, project_source_label,
+    )
     return _resolve_name_list(
         f"{source_label}: llm_caller.steps.{step_type}",
         names,
@@ -1108,8 +1148,8 @@ def load_agents(project_root: Optional[Path] = None) -> list[dict]:
         List of agent config dicts ``{name, type, cmd, priority}`` sorted by
         priority descending.
     """
-    global_data, project_data = _load_agent_configs(project_root)
-    return _default_chain_from_data(global_data, project_data)
+    global_data, project_data, project_source_label = _load_agent_configs(project_root)
+    return _default_chain_from_data(global_data, project_data, project_source_label)
 
 
 def load_step_agents(
@@ -1142,8 +1182,10 @@ def load_step_agents(
     """
     if not step_type:
         return None
-    global_data, project_data = _load_agent_configs(project_root)
-    return _step_override_from_data(global_data, project_data, step_type)
+    global_data, project_data, project_source_label = _load_agent_configs(project_root)
+    return _step_override_from_data(
+        global_data, project_data, step_type, project_source_label,
+    )
 
 
 def resolve_confirm_inputs(
@@ -1178,10 +1220,12 @@ def resolve_confirm_inputs(
     any unknown agent-name reference under a different step key would
     otherwise slip past unnoticed.
     """
-    global_data, project_data = _load_agent_configs(project_root)
-    merged_steps = _merge_confirmation_steps(global_data, project_data)
+    global_data, project_data, project_source_label = _load_agent_configs(project_root)
+    merged_steps = _merge_confirmation_steps(
+        global_data, project_data, project_source_label,
+    )
     _validate_confirmation_reviewer_names(
-        merged_steps, global_data, project_data,
+        merged_steps, global_data, project_data, project_source_label,
     )
 
     step_cfg = merged_steps.get(reviewed_step_type)
@@ -1199,7 +1243,9 @@ def resolve_confirm_inputs(
         }
 
     if reviewer is None:
-        agents = _default_chain_from_data(global_data, project_data)
+        agents = _default_chain_from_data(
+            global_data, project_data, project_source_label,
+        )
         return {
             "reviewer": None,
             "max_iterations": max_iterations,
@@ -1207,7 +1253,9 @@ def resolve_confirm_inputs(
         }
 
     # Name already validated above; resolve against registry.
-    registry, _ = _agent_registry_from_data(global_data, project_data)
+    registry, _ = _agent_registry_from_data(
+        global_data, project_data, project_source_label,
+    )
     return {
         "reviewer": reviewer,
         "max_iterations": max_iterations,
@@ -1231,12 +1279,16 @@ def resolve_agents(
     Used by :class:`LLMCaller` to avoid the cost of reading the same YAML
     files twice (once via ``load_step_agents``, once via ``load_agents``).
     """
-    global_data, project_data = _load_agent_configs(project_root)
+    global_data, project_data, project_source_label = _load_agent_configs(project_root)
     if step_type:
-        override = _step_override_from_data(global_data, project_data, step_type)
+        override = _step_override_from_data(
+            global_data, project_data, step_type, project_source_label,
+        )
         if override:
             return override, True
-    return _default_chain_from_data(global_data, project_data), False
+    return _default_chain_from_data(
+        global_data, project_data, project_source_label,
+    ), False
 
 
 def load_claude_commands(project_root: Optional[Path] = None) -> list[dict]:
@@ -1338,7 +1390,7 @@ class LanguageConfig:
     @classmethod
     def load(cls, project_root: Path) -> "LanguageConfig":
         """Load language configuration from se3.yaml."""
-        config_path = Path(project_root) / "se3.yaml"
+        config_path = get_project_config_path(project_root)
         if not config_path.exists():
             return cls()
         try:
@@ -1421,7 +1473,7 @@ class ConflictResolverConfig:
     @classmethod
     def load(cls, project_root: Path) -> "ConflictResolverConfig":
         """Load conflict resolver configuration from se3.yaml."""
-        config_path = Path(project_root) / "se3.yaml"
+        config_path = get_project_config_path(project_root)
         if not config_path.exists():
             return cls()
         try:
@@ -1467,9 +1519,10 @@ class TestConfig:
     @classmethod
     def load(cls, project_root: Path) -> "TestConfig":
         """Load test configuration from se3.yaml."""
-        config_path = Path(project_root) / "se3.yaml"
+        config_path = get_project_config_path(project_root)
         if not config_path.exists():
             return cls()
+        source_label = config_path.name
         try:
             with open(config_path, "r", encoding="utf-8") as f:
                 data = yaml.safe_load(f) or {}
@@ -1485,8 +1538,8 @@ class TestConfig:
                 multiplier = float(raw_multiplier)
             except (TypeError, ValueError):
                 logger.warning(
-                    "Invalid timeout_multiplier %r in se3.yaml; using default 2.0",
-                    raw_multiplier,
+                    "Invalid timeout_multiplier %r in %s; using default 2.0",
+                    raw_multiplier, source_label,
                 )
                 multiplier = 2.0
             if multiplier < 1.0:
@@ -1504,8 +1557,8 @@ class TestConfig:
                 min_dyn = int(raw_min)
             except (TypeError, ValueError):
                 logger.warning(
-                    "Invalid min_dynamic_timeout %r in se3.yaml; using default 30",
-                    raw_min,
+                    "Invalid min_dynamic_timeout %r in %s; using default 30",
+                    raw_min, source_label,
                 )
                 min_dyn = 30
             if min_dyn < 1:
@@ -1525,8 +1578,8 @@ class TestConfig:
                 max_dyn = int(raw_max)
             except (TypeError, ValueError):
                 logger.warning(
-                    "Invalid max_dynamic_timeout %r in se3.yaml; using default %d",
-                    raw_max, default_max,
+                    "Invalid max_dynamic_timeout %r in %s; using default %d",
+                    raw_max, source_label, default_max,
                 )
                 max_dyn = default_max
             if max_dyn < min_dyn:
@@ -1547,7 +1600,10 @@ class TestConfig:
                 max_dynamic_timeout=max_dyn,
             )
         except Exception as e:
-            logger.warning("Failed to load TestConfig from se3.yaml, using defaults: %s", e)
+            logger.warning(
+                "Failed to load TestConfig from %s, using defaults: %s",
+                source_label, e,
+            )
             return cls()
 
     def get_phases_for_run(self, is_fix_iteration: bool = False) -> list[dict]:
@@ -1577,7 +1633,7 @@ class ImplementConfig:
     @classmethod
     def load(cls, project_root: Path) -> "ImplementConfig":
         """Load implement configuration from se3.yaml."""
-        config_path = Path(project_root) / "se3.yaml"
+        config_path = get_project_config_path(project_root)
         if not config_path.exists():
             return cls()
         try:
@@ -1609,7 +1665,7 @@ class StepConfig:
     @classmethod
     def load(cls, project_root: Path) -> "StepConfig":
         """Load step configuration from se3.yaml."""
-        config_path = Path(project_root) / "se3.yaml"
+        config_path = get_project_config_path(project_root)
         if not config_path.exists():
             return cls()
         try:
@@ -1693,7 +1749,7 @@ def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
     else:
         project_root = Path(project_root)
 
-    config_path = project_root / "se3.yaml"
+    config_path = get_project_config_path(project_root)
 
     if not config_path.exists():
         return DEFAULT_MAX_FIX_ITERATIONS
