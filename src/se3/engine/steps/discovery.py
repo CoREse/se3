@@ -68,6 +68,37 @@ Respond in JSON format:
     "thinking": "Brief explanation of your approach and what you've learned so far"
 }}
 
+Handling Evaluative/Inquisitive Initial Descriptions:
+
+If the user's initial description is phrased as an evaluation, judgment, review, or inquiry — for example patterns like:
+- "Is this correct/reasonable?" / "Does X make sense?"
+- "Evaluate/judge/assess whether X is reasonable"
+- "Does approach Y have problems?" / "What's wrong with Z?"
+- "Please review this change/modification carefully"
+- "What do you think about X?" / "Give me your opinion on X"
+- References to specific code, files, commits, or change names embedded in the description
+- Chinese equivalents: "这样做对吗", "评判X是否合理", "Y方案有问题吗", "仔细全面地评估/审查这个改动"
+
+Then DO NOT ask clarifying questions about "what is the task" or "what is the scope" or "what do you want to accomplish". Instead:
+
+1. READ the relevant code/context first using Read, Grep, Glob, Bash as needed
+2. FORM a concrete substantive assessment/opinion based on what you read
+3. ENGAGE the user with content-focused questions or counter-arguments about your assessment (e.g., "I see X does Y, but Z might be a concern because...")
+4. CONTINUE this substantive discussion across multiple rounds
+5. CONVERGE on a "correct approach" through discussion — the refined_description should describe that consensus correct approach (which may be: keep as-is, make a local fix, redo entirely, adopt a different approach, etc.)
+6. The refined_description is NOT the user's original evaluation request — it is the agreed-upon correct course of action discovered through discussion
+
+You MAY still ask about:
+- Output format, deliverable boundaries, or how the result should be presented
+- Priority, urgency, or sequencing of work
+- Specific constraints the user cares about
+
+You MUST NOT ask:
+- "What do you want to do?" / "What is the task scope?" / "What is your goal?" when the user has already presented a concrete evaluation target
+- Questions that re-ask for the task definition itself rather than probing the substance of the evaluation
+
+If you are uncertain whether the input is evaluative/inquisitive, fall back to the normal clarification behavior below.
+
 Guidelines:
 - Start by understanding the current project context (see Project Context above)
 - Ask questions that help narrow down what fits within the existing architecture
@@ -118,6 +149,19 @@ Respond in JSON format:
     "ready_to_proceed": false,  // Set to true when you have enough information to proceed
     "thinking": "Brief explanation of your current understanding"
 }}
+
+Handling Evaluative/Inquisitive Initial Descriptions (continuation):
+
+If the initial description was evaluative or inquisitive (recognition patterns: "Is this correct?", "Evaluate X", "Does Y have problems?", "Review this change", "What do you think about X?", Chinese equivalents like "这样做对吗" / "评判X是否合理" / "Y方案有问题吗" / "仔细评估这个改动", or references to specific code/files/commits), MAINTAIN the substantive discussion posture throughout all subsequent rounds. Do NOT revert to "let me re-confirm the task scope" or "what do you want to accomplish" midway through the conversation.
+
+- Continue reading code and context as needed
+- Continue offering substantive assessments and content-focused counter-arguments
+- Let the discussion converge on a consensus "correct approach"
+- The refined_description must describe that agreed-upon correct approach (keep as-is, local fix, redo, different approach, etc.), NOT restate the user's original evaluation question
+
+You MAY still ask about output format, priority, or constraints.
+You MUST NOT ask "What do you want to do?" / "What is the task scope?" when a concrete evaluation target was already given.
+If uncertain, fall back to normal clarification behavior.
 
 Guidelines:
 - Consider the existing project architecture when asking questions

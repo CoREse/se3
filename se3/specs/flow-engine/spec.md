@@ -104,6 +104,18 @@ se3 run --discover "我想做一个用户管理功能"
 - `synthesis` 模式: 总结理解并生成精炼描述
 - `confirmation` 模式: LLM 判定需求已明确，返回精炼描述后暂停，等待程序化门控
 
+**评估/询问类初始描述的处理：**
+
+当用户的 initial description 表现为对已有代码/方案/改动的评估、判断、审查或询问（例如 "这样做对吗"、"评判 X 是否合理"、"Y 方案有问题吗"、"仔细评估这个改动"、"Is this correct?"、"Evaluate X"、"Review this change"，或内嵌具体代码/文件/commit 引用的提问）时，`INITIAL_DISCOVERY_PROMPT` 与 `CONTINUE_DISCOVERY_PROMPT` SHALL 指示 LLM 避免反问「任务是什么 / 任务范围 / 你想做什么」这类对任务定义本身的澄清问题，而应：
+
+1. 先读取相关代码/上下文（Read、Grep、Glob、Bash 等工具）
+2. 形成具体、实质性的评估/意见
+3. 就评估内容本身与用户交换观点、提出针对内容的追问或反论
+4. 通过多轮对话收敛到一个「正确做法」共识（可以是保持原状、局部修复、全盘重做、换方案等任一结论）
+5. 将**共识得出的正确做法**作为 `refined_description` 提交给确认门控 / `analyze` 步骤，而非原样透传用户的评估请求
+
+对「产出形式 / 交付边界 / 优先级 / 约束」等非任务定义层面的合理追问仍被允许。识别依赖 LLM 依 prompt 指令自行判断，接受边界模糊情况的不确定性，不追求 100% 规避；不在代码层引入关键词匹配或分类启发式。`CONTINUE_DISCOVERY_PROMPT` SHALL 在后续轮次同样维持实质讨论姿态，禁止中途漂回「让我重新确认任务范围」。
+
 **程序化确认门控：**
 
 当 LLM 的 `confirmation` 模式判定需求已明确并生成精炼描述后，discovery 步骤不直接完成，而是返回 `PAUSED` 状态并设置 `awaiting_programmatic_confirm=True`。程序运行循环检测到此标志后，在 discovery 的普通输入框读取用户输入：
@@ -127,6 +139,14 @@ se3 run --discover "我想做一个用户管理功能"
 - **WHEN** AI 进入 synthesis 模式
 - **THEN** 生成结构化的任务描述
 - **AND** 暂停等待用户确认
+
+#### Scenario: 评估/询问类初始描述 — 不反问任务范围
+- **GIVEN** 用户执行 `se3 run --discover "你仔细、全面、客观地评判一下这个改动是否合理"`（或同类评估/询问式输入，英文 "Is this change reasonable?"、"Review this modification carefully" 等）
+- **WHEN** discovery 步骤初始轮执行
+- **THEN** LLM 按 prompt 指示先读取相关代码/上下文，形成对该改动的实质性评估
+- **AND** 不输出「你想做什么 / 任务范围是什么 / 你的目标是什么」这类对任务定义本身的澄清问题
+- **AND** 可以针对评估内容本身与用户交换观点或提出针对内容的追问
+- **AND** 经多轮讨论收敛后，`refined_description` 描述的是讨论得出的正确做法（保持原状 / 局部修复 / 重做 / 换方案等），而非用户原始的评估请求
 
 #### Scenario: Discovery 中断恢复
 - **GIVEN** 用户在第 3 轮对话时中断（Ctrl+C）
