@@ -35,6 +35,7 @@ try:
     from ..engine.steps import STEP_HANDLERS
     from ..engine.steps.discovery import PROGRAMMATIC_CONFIRM_SENTINEL
     from ..engine.llm_caller import set_extra_prompt
+    from ..config import clear_main_repo_root_cache
     from ..engine.output import (
         display_error,
         display_success,
@@ -55,6 +56,7 @@ except ImportError:
     from engine.steps import STEP_HANDLERS
     from engine.steps.discovery import PROGRAMMATIC_CONFIRM_SENTINEL
     from engine.llm_caller import set_extra_prompt
+    from config import clear_main_repo_root_cache
     from engine.output import (
         display_error,
         display_success,
@@ -87,7 +89,15 @@ def _sigint_handler(signum: int, frame: Any) -> None:
 
 
 def get_project_root() -> Path:
-    """Find project root by looking for .git directory or an SE3 config file."""
+    """Find project root by looking for .git directory or an SE3 config file.
+
+    When the current directory is inside a git worktree, this returns the
+    worktree root (so SE3 state files remain isolated per-worktree).
+    Config lookup via :func:`config.get_project_config_path` automatically
+    ascends to the main repository when appropriate, so worktree-local
+    ``se3.local.yaml`` still takes precedence and the main repo's
+    ``se3.local.yaml`` can override the worktree's tracked ``se3.yaml``.
+    """
     from ..config import is_se3_project_root
 
     cwd = Path.cwd()
@@ -1080,6 +1090,19 @@ def run_loop_mode(
 
     try:
         for iteration in range(1, iter_limit + 1):
+            # Invalidate cached worktree topology before each iteration so
+            # that config lookups reflect the current state (worktrees may
+            # have been created or removed between iterations).
+            #
+            # Defensive assumption: config is loaded only at iteration
+            # boundaries (here, before the implement step runs), NOT inside
+            # per-group worktrees created by the DAG-parallel implement path.
+            # If a future change adds config reads inside transient worktrees,
+            # this single cache clear at the top of the loop would be
+            # insufficient — an additional clear would be needed after each
+            # per-group worktree is torn down.
+            clear_main_repo_root_cache()
+
             get_console().print(Rule(f"[bold]Loop #{iteration}[/bold]", style="cyan"))
 
             result = controller.run_iteration(

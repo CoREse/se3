@@ -11,6 +11,8 @@ Covers:
   when local is present (observable via deprecation warning text).
 - Command-layer project-root detection (``is_se3_project_root``) accepts a
   directory that only contains ``se3.local.yaml``.
+- Worktree-aware four-tier config lookup: worktree-local > main-repo-local >
+  worktree-yaml > main-repo-yaml.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from __future__ import annotations
 import logging
 import os
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -40,6 +43,8 @@ from se3.config import (  # noqa: E402
     get_project_config_path,
     is_se3_project_root,
     load_confirmation_config,
+    load_project_yaml,
+    _resolve_main_repo_root,
 )
 
 # Deliberately fetched via attribute access (not a direct `import TestConfig`)
@@ -58,6 +63,70 @@ def isolated_global_home(monkeypatch, tmp_path):
     fake_home.mkdir()
     monkeypatch.setattr(Path, "home", lambda: fake_home)
     return fake_home
+
+
+# ---------------------------------------------------------------------------
+# Worktree fixture
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def make_worktree(tmp_path):
+    """Create a real git repo + worktree and return (main_root, worktree_root).
+
+    Skips the test if ``git`` is not available.
+    """
+    main_root = tmp_path / "main_repo"
+    main_root.mkdir()
+    worktree_root = tmp_path / "worktree"
+
+    def _git(*args, cwd=None):
+        result = subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            cwd=cwd or str(main_root),
+            check=False,
+        )
+        return result
+
+    # Verify git is available
+    if _git("--version").returncode != 0:
+        pytest.skip("git not available")
+
+    _git("init", cwd=str(main_root))
+    _git("config", "user.email", "test@example.com", cwd=str(main_root))
+    _git("config", "user.name", "Test User", cwd=str(main_root))
+    _git("config", "commit.gpgsign", "false", cwd=str(main_root))
+    _git("config", "init.defaultBranch", "master", cwd=str(main_root))
+    # Create an initial commit so we can create a branch + worktree
+    (main_root / "initial.txt").write_text("initial")
+    _git("add", "initial.txt", cwd=str(main_root))
+    commit_result = _git("commit", "-m", "initial", cwd=str(main_root))
+    if commit_result.returncode != 0:
+        pytest.skip(
+            f"git initial commit failed (rc={commit_result.returncode}): "
+            f"{commit_result.stderr}"
+        )
+
+    # Create a branch for the worktree
+    _git("branch", "wt-branch", cwd=str(main_root))
+    _git("worktree", "add", str(worktree_root), "wt-branch", cwd=str(main_root))
+
+    yield main_root, worktree_root
+
+    # Cleanup: remove worktree so tmp_path can be deleted cleanly
+    remove_result = _git(
+        "worktree", "remove", "--force", str(worktree_root), cwd=str(main_root),
+    )
+    if remove_result.returncode != 0:
+        # Log the failure to help diagnose CI flakes (e.g. open file
+        # handles on Windows / NFS preventing removal).
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "git worktree remove --force %s failed (rc=%d): %s",
+            worktree_root, remove_result.returncode, remove_result.stderr,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -859,3 +928,646 @@ class TestGlobalPlusLocalAgentMerge:
         agents = load_agents(tmp_path)
         names = [a["name"] for a in agents]
         assert names == ["opus"]
+
+
+# ---------------------------------------------------------------------------
+# Worktree-aware four-tier config lookup
+# ---------------------------------------------------------------------------
+
+
+class TestWorktreeFourTierPriority:
+    """When project_root is inside a git worktree, get_project_config_path
+    uses a four-tier lookup so the main repo's se3.local.yaml can override
+    the worktree's tracked se3.yaml (since se3.local.yaml is gitignored and
+    does not travel into worktrees).
+    """
+
+    def test_resolve_main_repo_root_returns_none_for_non_git(self, tmp_path):
+        """_resolve_main_repo_root returns None for a plain directory."""
+        assert _resolve_main_repo_root(tmp_path) is None
+
+    def test_resolve_main_repo_root_returns_none_for_regular_git_repo(
+        self, tmp_path,
+    ):
+        """A normal (non-worktree) git repo returns None."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        result = subprocess.run(
+            ["git", "init"], cwd=str(repo), capture_output=True, check=False,
+        )
+        if result.returncode != 0:
+            pytest.skip("git not available")
+        assert _resolve_main_repo_root(repo) is None
+
+    def test_malformed_git_output_returns_none(self, tmp_path, monkeypatch):
+        """When git rev-parse emits an unexpected number of lines (e.g. a
+        warning leaked into stdout), the function must return None rather
+        than misparsing the output.
+        """
+        from se3.config import clear_main_repo_root_cache
+
+        clear_main_repo_root_cache()
+
+        def _fake_run(*_args, **_kwargs):
+            return subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="only-one-line\n",
+                stderr="",
+            )
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        assert _resolve_main_repo_root(tmp_path) is None
+
+    def test_resolve_main_repo_root_finds_main_repo(self, make_worktree):
+        """_resolve_main_repo_root correctly identifies worktree and returns
+        the main repo root."""
+        main_root, worktree_root = make_worktree
+        resolved = _resolve_main_repo_root(worktree_root)
+        assert resolved is not None
+        assert resolved.resolve() == main_root.resolve()
+
+    def test_main_local_overrides_worktree_yaml(
+        self, make_worktree, isolated_global_home,
+    ):
+        """Tier 2: main repo se3.local.yaml overrides worktree se3.yaml."""
+        main_root, worktree_root = make_worktree
+        # Worktree has only se3.yaml
+        (worktree_root / "se3.yaml").write_text("version:\n  enabled: false\n")
+        # Main repo has se3.local.yaml
+        (main_root / "se3.local.yaml").write_text("version:\n  enabled: true\n")
+
+        path = get_project_config_path(worktree_root)
+        assert path == main_root / PROJECT_LOCAL_CONFIG_FILENAME
+
+        data, label = load_project_yaml(worktree_root)
+        assert data.get("version", {}).get("enabled") is True
+        assert label.endswith(PROJECT_LOCAL_CONFIG_FILENAME)
+        assert "main_repo" in label or "main" in label
+
+    def test_worktree_local_beats_main_local(
+        self, make_worktree, isolated_global_home,
+    ):
+        """Tier 1: worktree se3.local.yaml wins over main repo se3.local.yaml."""
+        main_root, worktree_root = make_worktree
+        (main_root / "se3.local.yaml").write_text("version:\n  enabled: false\n")
+        (worktree_root / "se3.local.yaml").write_text("version:\n  enabled: true\n")
+
+        path = get_project_config_path(worktree_root)
+        assert path == worktree_root / PROJECT_LOCAL_CONFIG_FILENAME
+
+        data, _ = load_project_yaml(worktree_root)
+        assert data.get("version", {}).get("enabled") is True
+
+    def test_worktree_yaml_beats_main_yaml_when_no_local(
+        self, make_worktree, isolated_global_home,
+    ):
+        """Tier 3: worktree se3.yaml wins over main repo se3.yaml."""
+        main_root, worktree_root = make_worktree
+        (main_root / "se3.yaml").write_text("version:\n  enabled: false\n")
+        (worktree_root / "se3.yaml").write_text("version:\n  enabled: true\n")
+
+        path = get_project_config_path(worktree_root)
+        assert path == worktree_root / PROJECT_CONFIG_FILENAME
+
+        data, _ = load_project_yaml(worktree_root)
+        assert data.get("version", {}).get("enabled") is True
+
+    def test_main_yaml_fallback_when_only_main_has_yaml(
+        self, make_worktree, isolated_global_home,
+    ):
+        """Tier 4: main repo se3.yaml is used when nothing else exists."""
+        main_root, worktree_root = make_worktree
+        (main_root / "se3.yaml").write_text("version:\n  enabled: true\n")
+        # Nothing in worktree
+
+        path = get_project_config_path(worktree_root)
+        assert path == main_root / PROJECT_CONFIG_FILENAME
+
+        data, _ = load_project_yaml(worktree_root)
+        assert data.get("version", {}).get("enabled") is True
+
+    def test_all_four_tiers_with_unique_markers(
+        self, make_worktree, isolated_global_home,
+    ):
+        """Verify each tier is correctly distinguished using unique marker keys."""
+        main_root, worktree_root = make_worktree
+
+        # Create all four files with unique marker values
+        (worktree_root / "se3.local.yaml").write_text("marker: wt_local\n")
+        (main_root / "se3.local.yaml").write_text("marker: main_local\n")
+        (worktree_root / "se3.yaml").write_text("marker: wt_yaml\n")
+        (main_root / "se3.yaml").write_text("marker: main_yaml\n")
+
+        path = get_project_config_path(worktree_root)
+        data, _ = load_project_yaml(worktree_root)
+        assert path == worktree_root / PROJECT_LOCAL_CONFIG_FILENAME
+        assert data.get("marker") == "wt_local"
+
+    def test_tier2_vs_tier3_vs_tier4(self, make_worktree, isolated_global_home):
+        """With no worktree local, check main-local > worktree-yaml > main-yaml."""
+        main_root, worktree_root = make_worktree
+
+        # No worktree local
+        (main_root / "se3.local.yaml").write_text("marker: main_local\n")
+        (worktree_root / "se3.yaml").write_text("marker: wt_yaml\n")
+        (main_root / "se3.yaml").write_text("marker: main_yaml\n")
+
+        path = get_project_config_path(worktree_root)
+        data, _ = load_project_yaml(worktree_root)
+        assert path == main_root / PROJECT_LOCAL_CONFIG_FILENAME
+        assert data.get("marker") == "main_local"
+
+    def test_tier3_vs_tier4(self, make_worktree, isolated_global_home):
+        """With no locals at all, worktree-yaml > main-yaml."""
+        main_root, worktree_root = make_worktree
+
+        (worktree_root / "se3.yaml").write_text("marker: wt_yaml\n")
+        (main_root / "se3.yaml").write_text("marker: main_yaml\n")
+
+        path = get_project_config_path(worktree_root)
+        data, _ = load_project_yaml(worktree_root)
+        assert path == worktree_root / PROJECT_CONFIG_FILENAME
+        assert data.get("marker") == "wt_yaml"
+
+
+    def test_directory_at_worktree_local_falls_back_to_main_local(
+        self, make_worktree, isolated_global_home,
+    ):
+        """When worktree/se3.local.yaml is a directory (not a file), the
+        is_file() filter skips it and the main repo's se3.local.yaml is
+        picked up instead (tier 2).
+        """
+        main_root, worktree_root = make_worktree
+        # Worktree has se3.local.yaml as a directory (user mistake)
+        (worktree_root / PROJECT_LOCAL_CONFIG_FILENAME).mkdir()
+        # Main repo has a real se3.local.yaml file
+        (main_root / "se3.local.yaml").write_text("version:\n  enabled: true\n")
+
+        path = get_project_config_path(worktree_root)
+        assert path == main_root / PROJECT_LOCAL_CONFIG_FILENAME
+
+        data, _ = load_project_yaml(worktree_root)
+        assert data.get("version", {}).get("enabled") is True
+
+    def test_git_binary_missing_returns_none(self, tmp_path, monkeypatch):
+        """When ``git`` is not installed, _resolve_main_repo_root must catch
+        FileNotFoundError and return None (documented contract).
+        """
+        def _raise(*_args, **_kwargs):
+            raise FileNotFoundError("git not found")
+
+        monkeypatch.setattr(subprocess, "run", _raise)
+        assert _resolve_main_repo_root(tmp_path) is None
+
+    def test_toplevel_failure_returns_none(self, tmp_path, monkeypatch):
+        """Safety net: when --git-common-dir/--git-dir indicates a worktree
+        but the candidate's --show-toplevel returns non-zero, the function
+        returns None instead of misidentifying the parent directory.
+
+        Locks in the documented contract for bare-repo-backed worktrees /
+        corrupt git layouts where the common-dir parent is not a real
+        working tree (e.g. a bare repo that lives inside ``foo.git/``).
+        """
+        from se3.config import clear_main_repo_root_cache
+
+        # Construct two distinct fake paths so common_dir != git_dir →
+        # function thinks it's looking at a worktree and tries to verify
+        # the candidate via --show-toplevel.
+        fake_common = tmp_path / "main_repo" / ".git"
+        fake_git = tmp_path / "worktree" / ".git" / "worktrees" / "wt"
+        fake_common.mkdir(parents=True)
+        fake_git.mkdir(parents=True)
+
+        call_count = [0]
+
+        def _fake_run(args, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # First call: rev-parse --git-common-dir --git-dir succeeds.
+                return subprocess.CompletedProcess(
+                    args, returncode=0,
+                    stdout=f"{fake_common}\n{fake_git}\n",
+                    stderr="",
+                )
+            # Second call: rev-parse --show-toplevel fails (e.g. the
+            # candidate is not a real working tree).
+            return subprocess.CompletedProcess(
+                args, returncode=128,
+                stdout="",
+                stderr="not a working tree",
+            )
+
+        clear_main_repo_root_cache()
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        assert _resolve_main_repo_root(tmp_path) is None
+        # Confirm the safety net actually ran the second probe.
+        assert call_count[0] == 2
+
+    def test_toplevel_empty_stdout_returns_none(self, tmp_path, monkeypatch):
+        """Safety net (empty-stdout branch): when --show-toplevel returns
+        success with empty stdout, the function still returns None rather
+        than treating an empty path as the main repo.
+        """
+        from se3.config import clear_main_repo_root_cache
+
+        fake_common = tmp_path / "main_repo" / ".git"
+        fake_git = tmp_path / "worktree" / ".git" / "worktrees" / "wt"
+        fake_common.mkdir(parents=True)
+        fake_git.mkdir(parents=True)
+
+        call_count = [0]
+
+        def _fake_run(args, **_kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return subprocess.CompletedProcess(
+                    args, returncode=0,
+                    stdout=f"{fake_common}\n{fake_git}\n",
+                    stderr="",
+                )
+            # --show-toplevel returns success but empty stdout.
+            return subprocess.CompletedProcess(
+                args, returncode=0, stdout="\n", stderr="",
+            )
+
+        clear_main_repo_root_cache()
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        assert _resolve_main_repo_root(tmp_path) is None
+        assert call_count[0] == 2
+
+    def test_timeout_expired_returns_none(self, tmp_path, monkeypatch):
+        """When the git subprocess hangs (e.g. credential prompt), the
+        timeout fires and the function returns None rather than blocking.
+        """
+        from se3.config import clear_main_repo_root_cache
+
+        clear_main_repo_root_cache()
+
+        def _raise_timeout(*_args, **_kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd=["git", "rev-parse", "--git-common-dir", "--git-dir"],
+                timeout=5,
+            )
+
+        monkeypatch.setattr(subprocess, "run", _raise_timeout)
+        assert _resolve_main_repo_root(tmp_path) is None
+
+    def test_file_existence_not_cached_mid_process(
+        self, make_worktree, isolated_global_home,
+    ):
+        """Creating main_repo/se3.local.yaml after an initial lookup is
+        observed by subsequent calls even though _resolve_main_repo_root
+        remains cached. The file-existence is_file() probes are NOT cached.
+        """
+        from se3.config import clear_main_repo_root_cache
+
+        clear_main_repo_root_cache()
+        main_root, worktree_root = make_worktree
+
+        # Tier 3/4: only worktree se3.yaml exists initially.
+        (worktree_root / "se3.yaml").write_text("marker: first\n")
+
+        # First lookup: worktree se3.yaml is selected.
+        first_path = get_project_config_path(worktree_root)
+        assert first_path == worktree_root / PROJECT_CONFIG_FILENAME
+
+        # Mid-process: user creates main_repo/se3.local.yaml.
+        (main_root / "se3.local.yaml").write_text("marker: second\n")
+
+        # Second lookup WITHOUT clearing any cache: main_repo local wins.
+        second_path = get_project_config_path(worktree_root)
+        assert second_path == main_root / PROJECT_LOCAL_CONFIG_FILENAME
+
+        data, _ = load_project_yaml(worktree_root)
+        assert data.get("marker") == "second"
+
+    def test_clear_main_repo_root_cache_invalidates_stale_results(
+        self, tmp_path, monkeypatch,
+    ):
+        """``clear_main_repo_root_cache`` invalidates stale lru_cache entries.
+
+        Documents the contract that long-lived processes (loop mode,
+        daemons) can rely on: after the cache is cleared, the next
+        lookup re-runs the git probes rather than returning a stale
+        answer.
+        """
+        from se3.config import clear_main_repo_root_cache
+
+        call_count = [0]
+
+        def _fake_run(*_args, **_kwargs):
+            call_count[0] += 1
+            raise FileNotFoundError("git not found")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        clear_main_repo_root_cache()
+
+        # First call hits the (mocked) git probe.
+        assert _resolve_main_repo_root(tmp_path) is None
+        first_count = call_count[0]
+        assert first_count >= 1
+
+        # Cached: subsequent call must NOT re-invoke subprocess.run.
+        assert _resolve_main_repo_root(tmp_path) is None
+        assert call_count[0] == first_count
+
+        # After cache_clear, the next call re-invokes subprocess.run.
+        clear_main_repo_root_cache()
+        assert _resolve_main_repo_root(tmp_path) is None
+        assert call_count[0] > first_count
+
+    def test_env_sanitization_ignores_inherited_git_vars(
+        self, make_worktree, monkeypatch, tmp_path,
+    ):
+        """Inherited GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR must not
+        misdirect the probe to a different repository.
+
+        Without env sanitization, ``git -C <worktree> rev-parse`` would
+        honour GIT_DIR and report the foreign repo's paths instead of the
+        on-disk worktree's main repo.
+        """
+        from se3.config import clear_main_repo_root_cache
+
+        clear_main_repo_root_cache()
+        main_root, worktree_root = make_worktree
+
+        # Create a foreign git repo to act as a decoy.
+        foreign = tmp_path / "foreign_repo"
+        foreign.mkdir()
+        subprocess.run(
+            ["git", "init"], cwd=str(foreign),
+            capture_output=True, check=False,
+        )
+
+        # Poison the environment: point GIT_DIR at the foreign repo.
+        monkeypatch.setenv("GIT_DIR", str(foreign / ".git"))
+        monkeypatch.setenv("GIT_WORK_TREE", str(foreign))
+        monkeypatch.setenv("GIT_COMMON_DIR", str(foreign / ".git"))
+
+        # Despite the env vars, the probe must still return the real main repo.
+        resolved = _resolve_main_repo_root(worktree_root)
+        assert resolved is not None
+        assert resolved.resolve() == main_root.resolve()
+
+
+class TestWorktreeFallbackPaths:
+    """Ensure non-worktree and error paths fall back correctly."""
+
+    def test_non_worktree_git_repo_only_looks_at_own_files(self, tmp_path):
+        """A regular git repo (not a worktree) must not ascend to parent dirs."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        parent = tmp_path / "parent"
+        parent.mkdir()
+
+        result = subprocess.run(
+            ["git", "init"], cwd=str(repo), capture_output=True, check=False,
+        )
+        if result.returncode != 0:
+            pytest.skip("git not available")
+
+        # Parent has se3.yaml and se3.local.yaml — repo must NOT see them.
+        (parent / "se3.yaml").write_text("version:\n  enabled: false\n")
+        (parent / "se3.local.yaml").write_text("version:\n  enabled: false\n")
+
+        # Repo has its own se3.yaml
+        (repo / "se3.yaml").write_text("version:\n  enabled: true\n")
+
+        path = get_project_config_path(repo)
+        assert path == repo / PROJECT_CONFIG_FILENAME
+
+        data, _ = load_project_yaml(repo)
+        assert data.get("version", {}).get("enabled") is True
+
+    def test_non_git_directory_behavior_unchanged(self, tmp_path):
+        """A plain directory without git uses the existing two-tier logic."""
+        (tmp_path / "se3.yaml").write_text("version:\n  enabled: false\n")
+
+        path = get_project_config_path(tmp_path)
+        assert path == tmp_path / PROJECT_CONFIG_FILENAME
+
+        data, _ = load_project_yaml(tmp_path)
+        assert data.get("version", {}).get("enabled") is False
+
+    def test_resolve_main_repo_root_returns_none_falls_back(
+        self, tmp_path, monkeypatch,
+    ):
+        """When _resolve_main_repo_root returns None, get_project_config_path
+        falls back to the original two-tier logic.
+        """
+        # Patch _resolve_main_repo_root to always return None
+        monkeypatch.setattr(
+            _cfg, "_resolve_main_repo_root", lambda _root: None,
+        )
+        (tmp_path / "se3.yaml").write_text("version:\n  enabled: true\n")
+
+        path = get_project_config_path(tmp_path)
+        assert path == tmp_path / PROJECT_CONFIG_FILENAME
+
+        data, _ = load_project_yaml(tmp_path)
+        assert data.get("version", {}).get("enabled") is True
+
+    def test_worktree_none_found_returns_canonical_yaml(
+        self, make_worktree, isolated_global_home,
+    ):
+        """When no config file exists anywhere, the canonical worktree/se3.yaml
+        is returned (not-found semantics preserved)."""
+        main_root, worktree_root = make_worktree
+        # Delete any files that might exist in the worktree from the fixture
+
+        path = get_project_config_path(worktree_root)
+        assert path == worktree_root / PROJECT_CONFIG_FILENAME
+
+    def test_per_section_loaders_use_worktree_lookup(self, make_worktree, isolated_global_home):
+        """VersionConfig.load and other per-section loaders correctly read
+        from the main repo's se3.local.yaml when in a worktree."""
+        main_root, worktree_root = make_worktree
+        (worktree_root / "se3.yaml").write_text("version:\n  enabled: false\n")
+        (main_root / "se3.local.yaml").write_text(
+            "version:\n  enabled: true\n  bump_rules:\n    feature: patch\n"
+        )
+
+        cfg = VersionConfig.load(worktree_root)
+        assert cfg.enabled is True
+        assert cfg.bump_rules["feature"] == "patch"
+
+    def test_agent_registry_loader_uses_worktree_lookup(
+        self, make_worktree, isolated_global_home,
+    ):
+        """load_agent_registry (via _load_agent_configs → load_project_yaml)
+        inherits the four-tier lookup when project_root is a worktree.
+
+        This locks in the contract for agent / confirmation paths that
+        previously had their own sensitivity to local-vs-yaml shadowing.
+        """
+        from se3.config import load_agent_registry
+
+        main_root, worktree_root = make_worktree
+        # Worktree has only se3.yaml with one agent
+        (worktree_root / "se3.yaml").write_text(
+            "agents:\n  wt_agent: {type: claude-code, cmd: claude-wt}\n"
+        )
+        # Main repo has se3.local.yaml with a different agent
+        (main_root / "se3.local.yaml").write_text(
+            "agents:\n  main_agent: {type: claude-code, cmd: claude-main}\n"
+        )
+
+        registry = load_agent_registry(worktree_root)
+        # main_repo/se3.local.yaml wins (tier 2) over worktree/se3.yaml (tier 3)
+        assert "main_agent" in registry
+        assert "wt_agent" not in registry
+        assert registry["main_agent"].cmd == "claude-main"
+
+
+class TestImplementNoConfigReadRegression:
+    """Regression guard: the implement step must NOT read project config
+    inside transient per-group worktrees.
+
+    Loop mode clears ``_resolve_main_repo_root`` cache once per iteration
+    (at src/se3/commands/run.py:1093-1102). The design assumption is that
+    config is loaded only at iteration boundaries, NOT inside per-group
+    worktrees created by the DAG-parallel implement path. If implement.py
+    ever gains a ``load_project_yaml`` or ``get_project_config_path`` call
+    site, that invariant is violated and stale/incorrect config could be
+    read inside a worktree. This test fails to alert the author.
+    """
+
+    def test_implement_step_does_not_call_load_project_yaml(self):
+        import inspect
+        from se3.engine.steps import implement as impl_mod
+
+        source = inspect.getsource(impl_mod)
+        assert "load_project_yaml" not in source, (
+            "implement.py must not call load_project_yaml — "
+            "per-group worktree config reads would observe stale cache"
+        )
+
+    def test_implement_step_does_not_call_get_project_config_path(self):
+        import inspect
+        from se3.engine.steps import implement as impl_mod
+
+        source = inspect.getsource(impl_mod)
+        assert "get_project_config_path" not in source, (
+            "implement.py must not call get_project_config_path — "
+            "per-group worktree config reads would observe stale cache"
+        )
+
+
+class TestWorktreeNestedParentWalkIntegration:
+    """End-to-end: get_project_root() parent-walk + get_project_config_path()
+    worktree lookup when starting from a nested subdirectory.
+    """
+
+    def test_nested_subdir_walks_up_to_worktree_then_finds_main_local(
+        self, make_worktree, monkeypatch, isolated_global_home,
+    ):
+        """When cwd is <worktree>/src/deep, get_project_root() walks up to
+        the worktree root, and get_project_config_path() then ascends to
+        the main repo's se3.local.yaml (tier 2 lookup).
+        """
+        from se3.commands.run import get_project_root
+
+        main_root, worktree_root = make_worktree
+        # Worktree has se3.yaml; main repo has se3.local.yaml
+        (worktree_root / "se3.yaml").write_text("version:\n  enabled: false\n")
+        (main_root / "se3.local.yaml").write_text("version:\n  enabled: true\n")
+
+        # Create nested subdir inside worktree and chdir there.
+        nested = worktree_root / "src" / "deep"
+        nested.mkdir(parents=True)
+        monkeypatch.chdir(nested)
+
+        # get_project_root walks up from nested to worktree root.
+        project_root = get_project_root()
+        assert project_root == worktree_root
+
+        # get_project_config_path ascends from worktree to main repo.
+        cfg_path = get_project_config_path(project_root)
+        assert cfg_path == main_root / PROJECT_LOCAL_CONFIG_FILENAME
+
+        data, label = load_project_yaml(worktree_root)
+        assert data.get("version", {}).get("enabled") is True
+        assert "local" in label
+
+
+class TestWorktreeWarningDedup:
+    """Verify that warning dedup keys collapse worktree-mode prefixed
+    labels (e.g. ``main_repo/se3.local.yaml``) to the same project
+    token as their bare counterparts. Otherwise the same deprecated
+    key surfaced under different labels in successive loads would
+    warn twice.
+    """
+
+    def _reset_confirmation_warned_sets(self):
+        """Reset all confirmation-related one-shot warning sets."""
+        _cfg._warned_confirmation_enabled_for.clear()
+        _cfg._warned_confirmation_top_reviewer_for.clear()
+        _cfg._warned_confirmation_llm_reviewer_for.clear()
+        _cfg._warned_confirmation_steps_list_for.clear()
+        _cfg._warned_confirmation_unknown_fields_for.clear()
+
+    def test_dedup_collapses_prefixed_labels_to_project_token(self):
+        """Bare and directory-prefixed project labels share one dedup key."""
+        from se3.config import _dedup_source_key, _PROJECT_DEDUP_TOKEN
+
+        # All four project-label spellings collapse to the project token.
+        assert _dedup_source_key("se3.yaml") == _PROJECT_DEDUP_TOKEN
+        assert _dedup_source_key("se3.local.yaml") == _PROJECT_DEDUP_TOKEN
+        assert _dedup_source_key("main_repo/se3.yaml") == _PROJECT_DEDUP_TOKEN
+        assert _dedup_source_key("main_repo/se3.local.yaml") == _PROJECT_DEDUP_TOKEN
+        # Anything else passes through unchanged.
+        assert _dedup_source_key("~/.se3/config.yaml") == "~/.se3/config.yaml"
+
+    def test_deprecated_warning_dedups_across_worktree_label_transition(
+        self, make_worktree, isolated_global_home, caplog,
+    ):
+        """A deprecated ``confirmation.enabled`` key warns at most once
+        even when the active project label flips between
+        ``se3.yaml`` (worktree) and ``main_repo/se3.local.yaml``
+        across successive loads in the same process.
+        """
+        self._reset_confirmation_warned_sets()
+        main_root, worktree_root = make_worktree
+
+        # Initially only the worktree's se3.yaml exists, with the
+        # deprecated key. First load: warning fires under label "se3.yaml".
+        (worktree_root / "se3.yaml").write_text(
+            "confirmation:\n"
+            "  enabled: false\n"
+            "  steps:\n"
+            "    plan: {reviewer: human}\n"
+        )
+
+        with caplog.at_level(logging.WARNING, logger="se3.config"):
+            load_confirmation_config(worktree_root)
+        first_warnings = [
+            r.getMessage() for r in caplog.records
+            if "confirmation.enabled" in r.getMessage()
+        ]
+        assert len(first_warnings) == 1, (
+            f"expected one deprecation warning on first load; got: {first_warnings}"
+        )
+
+        # Now the user adds a main-repo se3.local.yaml that ALSO carries
+        # the deprecated key. The active label transitions from
+        # "se3.yaml" to "main_repo/se3.local.yaml" — without basename-
+        # aware dedup, the warning fires AGAIN.
+        (main_root / "se3.local.yaml").write_text(
+            "confirmation:\n"
+            "  enabled: false\n"
+            "  steps:\n"
+            "    design: {reviewer: human}\n"
+        )
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="se3.config"):
+            load_confirmation_config(worktree_root)
+        second_warnings = [
+            r.getMessage() for r in caplog.records
+            if "confirmation.enabled" in r.getMessage()
+        ]
+        assert len(second_warnings) == 0, (
+            f"deprecation warning must dedup across worktree label "
+            f"transition; got: {second_warnings}"
+        )

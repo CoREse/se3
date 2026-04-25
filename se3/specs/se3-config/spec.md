@@ -40,6 +40,58 @@ root for developer-local overrides.
   config SHALL reference the actual filename that was read
   (`se3.local.yaml` when it is present, otherwise `se3.yaml`).
 
+**Worktree-aware four-tier lookup:**
+
+When the resolved project root is the working tree of a git **worktree**
+(i.e. an additional working tree linked to a main repository via
+`git worktree add`), the project-config file lookup SHALL extend across
+both the worktree and its main repository so that an `se3.local.yaml`
+placed in the main repo can drive runs that execute inside any
+worktree. Because `se3.local.yaml` is gitignored, it does NOT travel
+with `git checkout` into a worktree; without this rule, a worktree
+would silently ignore the developer's main-repo override.
+
+- Worktree identity SHALL be detected via git itself, e.g. by comparing
+  `git rev-parse --git-common-dir` with `git rev-parse --git-dir` (a
+  worktree has the two diverge; a normal clone has them coincide). The
+  main repository's working-tree root is derived from the common git
+  directory and verified with `git rev-parse --show-toplevel` against
+  that directory.
+- When a worktree is detected, the framework probes the following
+  paths in order and uses the **first existing** file as the project
+  config source (pick-first, no merging):
+  1. `<worktree>/se3.local.yaml`
+  2. `<main_repo>/se3.local.yaml`
+  3. `<worktree>/se3.yaml`
+  4. `<main_repo>/se3.yaml`
+- When no candidate exists, the framework returns the canonical
+  worktree path (`<worktree>/se3.yaml`) as the not-found location, so
+  downstream "no project config" handling is unchanged.
+- When the project root is NOT a worktree (plain clone or non-git
+  directory) the lookup is unchanged: `se3.local.yaml` first, then
+  `se3.yaml`, both inside the project root only. No upward search
+  toward parent directories or unrelated git roots is performed.
+- Failures of the git probes (timeout, non-zero exit, malformed output,
+  `git` not on PATH) SHALL be caught and SHALL silently fall back to
+  the legacy two-tier lookup inside the project root. Worktree
+  detection MUST NOT raise from the config loader.
+- Git probe invocations SHALL sanitize the inherited environment
+  (clearing `GIT_DIR`, `GIT_WORK_TREE`, `GIT_COMMON_DIR`) so an
+  unrelated outer git context cannot misclassify the project root as a
+  worktree of some other repository.
+- The framework MAY memoize the resolved main-repo root keyed by the
+  absolute project-root path for the duration of a single run, and
+  SHALL invalidate that memoization at the start of each loop iteration
+  so subsequent iterations re-probe a possibly relocated worktree.
+- The above lookup applies uniformly to every loader that reads the
+  project YAML (`load_project_yaml` and its callers), so version,
+  agents, confirmation, implement, test, language, and any other
+  top-level section all observe the same resolved file.
+- The SE3 runtime directory (`se3/state`, `se3/calls`, `se3/logs`,
+  …) continues to live under the **worktree** root, not the main
+  repo. Only the project-config file lookup crosses the worktree
+  boundary.
+
 **Configurable options:**
 - `version.enabled`: Enable automatic version bumping (default: true)
 - `version.file_path`: Path to version file (auto-detect if null)
@@ -109,6 +161,68 @@ root for developer-local overrides.
 - **WHEN** `se3 init` generates the project `.gitignore`
 - **THEN** the generated `.gitignore` contains an entry that ignores
   `se3.local.yaml` so the local override file is not committed
+
+#### Scenario: Worktree falls back to main repo se3.local.yaml
+- **GIVEN** a main repository at `<main>` with `<main>/se3.local.yaml`
+  present and `<main>/se3.yaml` tracked in git
+- **AND** a linked worktree at `<wt>` created via `git worktree add`
+  whose checkout contains the tracked `<wt>/se3.yaml` but no
+  `<wt>/se3.local.yaml`
+- **WHEN** any SE3 command runs inside `<wt>` and loads the project
+  config
+- **THEN** the framework reads `<main>/se3.local.yaml` (tier 2),
+  bypassing the worktree's tracked `<wt>/se3.yaml`
+
+#### Scenario: Worktree-local override wins over main repo
+- **GIVEN** both `<wt>/se3.local.yaml` and `<main>/se3.local.yaml`
+  exist
+- **WHEN** SE3 loads the project config from inside `<wt>`
+- **THEN** `<wt>/se3.local.yaml` (tier 1) is used and the main-repo
+  copy is ignored
+
+#### Scenario: Worktree falls through to main se3.yaml when nothing else exists
+- **GIVEN** neither `<wt>/se3.local.yaml`, `<main>/se3.local.yaml`,
+  nor `<wt>/se3.yaml` exist, and only `<main>/se3.yaml` exists
+- **WHEN** SE3 loads the project config from inside `<wt>`
+- **THEN** `<main>/se3.yaml` (tier 4) is used
+
+#### Scenario: Plain clone is unaffected
+- **GIVEN** the project root is a normal git clone (not a worktree),
+  with both `se3.yaml` and `se3.local.yaml` at the project root
+- **WHEN** SE3 loads the project config
+- **THEN** `se3.local.yaml` is used (legacy two-tier behavior),
+  unchanged by the worktree lookup rule
+
+#### Scenario: Non-git project is unaffected
+- **GIVEN** the project root is not a git repository at all
+- **WHEN** SE3 loads the project config
+- **THEN** the framework uses the existing `se3.local.yaml` →
+  `se3.yaml` order inside the project root, with no parent walk and
+  no git probes propagated to the user
+
+#### Scenario: Git probe failure falls back silently
+- **GIVEN** `git` is unavailable, times out, or returns a non-zero or
+  malformed result while resolving the main-repo root
+- **WHEN** SE3 loads the project config
+- **THEN** the framework treats the project root as a non-worktree
+  location and uses only the in-root two-tier lookup
+- **AND** no exception is raised from the config loader
+
+#### Scenario: Inherited git environment does not misclassify worktree
+- **GIVEN** the SE3 process is launched with `GIT_DIR`, `GIT_WORK_TREE`,
+  or `GIT_COMMON_DIR` set to point at an unrelated repository
+- **WHEN** worktree detection runs
+- **THEN** the git probes execute with those variables stripped from
+  the child environment so they reflect the project root, not the
+  outer git context
+
+#### Scenario: Loop iterations re-probe worktree identity
+- **GIVEN** SE3 is running in `--loop` mode and each iteration may
+  create or remove a worktree
+- **WHEN** a new iteration starts
+- **THEN** any cached main-repo-root resolution is invalidated so the
+  next config load re-runs the git probes against the current project
+  root
 
 ### Requirement: Version Configuration
 

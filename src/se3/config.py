@@ -1,7 +1,9 @@
 """SE3 configuration management."""
 
+import functools
 import logging
 import os
+import subprocess
 from pathlib import Path
 from typing import Any, Optional
 from dataclasses import dataclass, field
@@ -15,13 +17,141 @@ PROJECT_CONFIG_FILENAME = "se3.yaml"
 PROJECT_LOCAL_CONFIG_FILENAME = "se3.local.yaml"
 
 
+def _resolve_main_repo_root(project_root: Path) -> Optional[Path]:
+    """Detect whether ``project_root`` is inside a git worktree and, if so,
+    return the main repository's working-tree root.
+
+    Uses the git-recommended heuristic: compare ``--git-common-dir``
+    against ``--git-dir``.  When they differ the repo is a worktree and
+    ``--git-common-dir`` points inside the main repo's ``.git``
+    directory.  We derive the main working tree root from the common
+    dir's parent, and then ask git for ``--show-toplevel`` to be safe.
+
+    Returns ``None`` when:
+    - ``project_root`` is not inside a git repository,
+    - the repository is not a worktree (common-dir == git-dir),
+    - git is not installed / not available, or
+    - any subprocess or parsing error occurs.
+
+    Caching: results are memoized per *resolved* ``project_root`` via
+    :func:`functools.lru_cache` on the inner
+    ``_resolve_main_repo_root_cached`` (size 64). The outer wrapper
+    resolves the argument to an absolute path *before* the cache lookup,
+    so the cache key is stable across cwd changes and relative-path
+    invocations from different directories.
+
+    Long-lived processes that mutate worktree topology (loop mode
+    adding/removing per-iteration worktrees, daemons, IDE integrations,
+    test sessions) MUST call :func:`clear_main_repo_root_cache` (or
+    ``_resolve_main_repo_root.cache_clear()``) after such changes;
+    otherwise a path that has switched between "plain repo" and
+    "worktree" states would observe a stale answer.
+    """
+    # Resolve to absolute path so the cache key is stable across cwd
+    # changes and relative-path invocations from different directories.
+    resolved = Path(project_root).resolve()
+    return _resolve_main_repo_root_cached(resolved)
+
+
+@functools.lru_cache(maxsize=64)
+def _resolve_main_repo_root_cached(project_root: Path) -> Optional[Path]:
+    """Actual git-probe implementation — cached on the resolved absolute path."""
+    # Enforce the documented contract: the public wrapper always passes a
+    # resolved absolute path, but this module-level symbol is importable by
+    # third-party callers who may bypass the wrapper.  An assertion here
+    # documents and defends the contract rather than silently misbehaving.
+    assert project_root.is_absolute(), (
+        f"_resolve_main_repo_root_cached expects an absolute path, got {project_root!r}"
+    )
+    # Sanitize the environment so that inherited GIT_DIR / GIT_WORK_TREE /
+    # GIT_COMMON_DIR do not override the -C flag and cause the probe to
+    # report the env-var-pinned repo instead of the on-disk one.
+    _clean_env = {**os.environ}
+    for _env_key in ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"):
+        _clean_env.pop(_env_key, None)
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "rev-parse", "--git-common-dir", "--git-dir"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            env=_clean_env,
+        )
+        if result.returncode != 0:
+            return None
+        lines = [line.strip() for line in result.stdout.strip().splitlines() if line.strip()]
+        # Safety: a worktree path with an embedded newline would produce more
+        # than two lines here; we conservatively return None rather than risk
+        # misparsing. This is a safe fallback (treats as non-worktree).
+        if len(lines) != 2:
+            return None
+        common_dir, git_dir = lines
+        # Normalize relative paths (git may emit relative to project_root)
+        common_dir = str(Path(project_root) / common_dir) if not Path(common_dir).is_absolute() else common_dir
+        git_dir = str(Path(project_root) / git_dir) if not Path(git_dir).is_absolute() else git_dir
+        if Path(common_dir).resolve() == Path(git_dir).resolve():
+            return None
+        # Derive main repo working tree root from common-dir parent
+        candidate = Path(common_dir).parent
+        # Safety: confirm with git --show-toplevel from the candidate.
+        # If this fails the candidate is not a valid working tree (e.g.
+        # bare-repo-backed worktree or corrupt layout), so return None
+        # rather than probing the wrong directory.
+        toplevel_result = subprocess.run(
+            ["git", "-C", str(candidate), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+            env=_clean_env,
+        )
+        if toplevel_result.returncode == 0:
+            toplevel = toplevel_result.stdout.strip()
+            if toplevel:
+                return Path(toplevel).resolve()
+        return None
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
+# Expose cache_clear on the public wrapper name so tests and callers
+# that invoke ``_resolve_main_repo_root.cache_clear()`` continue to work.
+_resolve_main_repo_root.cache_clear = _resolve_main_repo_root_cached.cache_clear  # type: ignore[attr-defined]
+
+
+def clear_main_repo_root_cache() -> None:
+    """Invalidate the cached results of :func:`_resolve_main_repo_root`.
+
+    Call this after any operation that may flip a path between "plain
+    git repo" and "worktree-of-some-other-repo" states (loop mode
+    adding/removing per-iteration worktrees, IDE integrations, test
+    fixtures), so the next ``get_project_config_path`` lookup resolves
+    the current topology rather than a stale snapshot.
+    """
+    _resolve_main_repo_root_cached.cache_clear()
+
+
 def get_project_config_path(project_root: Path) -> Path:
     """Return the active project config path for ``project_root``.
 
-    If ``<project_root>/se3.local.yaml`` exists **as a regular file** it
-    takes precedence and is returned (fully replacing ``se3.yaml``);
-    otherwise the canonical ``<project_root>/se3.yaml`` path is returned
-    (whether or not it exists).
+    When ``project_root`` is inside a git worktree, a four-tier lookup is
+    used so that the main repository's ``se3.local.yaml`` can override
+    the worktree's tracked ``se3.yaml`` (since ``se3.local.yaml`` is
+    gitignored and does not travel into worktrees):
+
+    1. ``<worktree>/se3.local.yaml``  (highest)
+    2. ``<main_repo>/se3.local.yaml``
+    3. ``<worktree>/se3.yaml``
+    4. ``<main_repo>/se3.yaml``       (lowest)
+
+    The first existing regular file wins (``is_file()`` follows symlinks).
+    If none of the four exist, the canonical ``<worktree>/se3.yaml`` is
+    returned so callers know which file would be read.
+
+    For non-worktree projects (regular git repo or not under version
+    control) the old two-tier logic is preserved:
+    ``<project_root>/se3.local.yaml`` wins over ``se3.yaml``.
 
     Using ``is_file()`` rather than ``exists()`` means a stray directory
     or dangling symlink at ``se3.local.yaml`` does not silently shadow
@@ -44,11 +174,31 @@ def get_project_config_path(project_root: Path) -> Path:
     rare in practice; eliminating the window would require passing an
     already-opened file handle through the loader stack and is not
     worth the churn unless the race is actually observed.
+
+    Relative-path fields inside the selected config (e.g.
+    ``version.file_path`` or ``test.command``) are resolved by
+    downstream callers against ``project_root`` (the worktree root when
+    running inside a worktree), NOT against the directory that contains
+    the config file. Keep this in mind when editing a main-repo
+    ``se3.local.yaml`` that is read from inside a worktree: a relative
+    path written there is interpreted relative to the running worktree.
     """
     root = Path(project_root)
     local = root / PROJECT_LOCAL_CONFIG_FILENAME
     if local.is_file():
         return local
+
+    main_repo = _resolve_main_repo_root(root)
+    if main_repo is not None:
+        candidates = [
+            main_repo / PROJECT_LOCAL_CONFIG_FILENAME,
+            root / PROJECT_CONFIG_FILENAME,
+            main_repo / PROJECT_CONFIG_FILENAME,
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+
     return root / PROJECT_CONFIG_FILENAME
 
 
@@ -118,6 +268,25 @@ def _maybe_warn_local_shadow(config_path: Path) -> None:
     )
 
 
+def _config_source_label(config_path: Path, project_root: Path) -> str:
+    """Return a source label for ``config_path``.
+
+    When the config comes from a different directory than ``project_root``
+    (e.g., main repo in worktree mode), include the directory name so
+    warning messages point to the right file.
+
+    The returned label is for human display only (appears in log/warning
+    messages).  It is NOT a stable machine-parseable identifier — callers
+    that need deduplication should use ``_dedup_source_key`` instead.
+    """
+    try:
+        if config_path.parent.resolve() != Path(project_root).resolve():
+            return f"{config_path.parent.name}/{config_path.name}"
+    except OSError:
+        pass
+    return config_path.name
+
+
 def load_project_yaml(project_root: Path) -> tuple[dict, str]:
     """Read the active project YAML config tolerantly.
 
@@ -133,12 +302,13 @@ def load_project_yaml(project_root: Path) -> tuple[dict, str]:
     single entry point to pick up ``se3.local.yaml`` precedence
     uniformly. Keep the signature stable.
 
-    ``source_label`` semantics: always the filename that
+    ``source_label`` semantics: always the filename (or directory-prefixed
+    filename when from a different directory) that
     :func:`get_project_config_path` *chose* (``se3.local.yaml`` when
     present as a regular file, otherwise ``se3.yaml``) — **not**
     necessarily the file that was successfully read. When
     ``se3.local.yaml`` exists but is unparsable, ``data`` is ``{}`` and
-    ``source_label`` is still ``se3.local.yaml``. This is intentional:
+    ``source_label`` still names ``se3.local.yaml``. This is intentional:
     error messages and deprecation warnings should point at the file
     the user placed (and therefore needs to fix), not at the fallback
     committed file which is innocent. Callers that log ``source_label``
@@ -146,7 +316,7 @@ def load_project_yaml(project_root: Path) -> tuple[dict, str]:
     when the file could not be read.
     """
     config_path = get_project_config_path(project_root)
-    source_label = config_path.name
+    source_label = _config_source_label(config_path, project_root)
     # None here means the file is absent or unusable (parse error,
     # non-mapping top level, or I/O failure). Either way we fall back
     # to built-in defaults; the malformed-local warning (if applicable)
@@ -177,8 +347,17 @@ def _dedup_source_key(source_label: str) -> str:
     Project-level labels (``se3.yaml`` / ``se3.local.yaml``) collapse
     to a single token; any other label (e.g. ``~/.se3/config.yaml``)
     passes through unchanged.
+
+    In worktree mode ``_config_source_label`` may emit a directory-
+    prefixed label such as ``main_repo/se3.local.yaml`` when the
+    selected config lives outside the worktree. Match by basename so
+    those prefixed forms collapse to the same project token —
+    otherwise a deprecated key surfaced under one label and then again
+    under the prefixed form (e.g. after the user adds a main-repo
+    local override) would warn twice in the same process.
     """
-    if source_label in (PROJECT_CONFIG_FILENAME, PROJECT_LOCAL_CONFIG_FILENAME):
+    basename = source_label.rsplit("/", 1)[-1]
+    if basename in (PROJECT_CONFIG_FILENAME, PROJECT_LOCAL_CONFIG_FILENAME):
         return _PROJECT_DEDUP_TOKEN
     return source_label
 
@@ -814,7 +993,9 @@ def _load_agent_configs(
         # _read_yaml emits the local-shadow warning internally on
         # parse-error / non-mapping, so every caller gets the signal.
         project_data = _read_yaml(project_config_path) or {}
-        project_source_label = project_config_path.name
+        project_source_label = _config_source_label(
+            project_config_path, Path(project_root),
+        )
     return global_data, project_data, project_source_label
 
 
