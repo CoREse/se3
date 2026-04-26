@@ -32,6 +32,7 @@ from .persistence import PersistenceManager
 from ..config import (
     insert_confirmation_steps,
     resolve_confirm_inputs,
+    SpecLoadingConfig,
 )
 from .. import __version__ as se3_version
 
@@ -755,6 +756,7 @@ class StateMachine:
                     inputs["project_summary"] = step.outputs.get("project_summary")
                     inputs["relevant_specs"] = step.outputs.get("relevant_specs")
                     inputs["spec_content"] = step.outputs.get("spec_content")
+                    inputs["selected_items"] = step.outputs.get("selected_items", [])
                 # Deprecated: PROJECT_SUMMARY and READ_SPEC merged into ANALYZE (backward compat for persisted flows)
                 elif step.step_type == StepType.PROJECT_SUMMARY:
                     inputs["project_summary"] = step.outputs.get("project_summary")
@@ -813,6 +815,61 @@ class StateMachine:
                 elif step.step_type == StepType.CONFIRM:
                     # Pass through review result for tracking
                     inputs["last_review_result"] = step.outputs.get("review_result")
+
+        # Resolve spec loading mode for downstream steps.
+        # If the current step is configured for full_spec mode, re-render
+        # spec_content from the full spec files rather than using the
+        # analyze-step item-filtered version.
+        #
+        # Sentinel check: distinguish "ANALYZE never ran" (key absent) from
+        # "ANALYZE ran and returned an empty list" (key present, value []).  The
+        # old truthy check `if not selected_items` would fall back to stale
+        # context for an explicit empty list, pulling in specs from a previous
+        # ANALYZE run that the user did not intend.
+        if "selected_items" not in inputs:
+            # ANALYZE step hasn't populated it — fall back to flow context
+            # (e.g. flow resumed mid-way, CONFIRM steps obscure the walk).
+            fallback = flow.state.context.get("selected_items")
+            if fallback is not None:
+                selected_items = fallback
+            else:
+                selected_items = []
+            inputs["selected_items"] = selected_items
+        else:
+            selected_items = inputs["selected_items"] or []
+
+        try:
+            from ..config import load_spec_loading_config
+            spec_loading = load_spec_loading_config(self.project_root)
+            load_mode = spec_loading.mode_for(step_type.value)
+        except Exception:
+            # Fall back to per-step built-in defaults so update_spec still
+            # gets full_spec even when config loading fails.
+            load_mode = SpecLoadingConfig().mode_for(step_type.value)
+
+        if load_mode == "full_spec":
+            try:
+                from .spec_loader import load_for_step
+                full_result = load_for_step(
+                    step_type=step_type.value,
+                    selected_items=selected_items,
+                    project_root=self.project_root,
+                    mode="full_spec",
+                )
+                inputs["spec_content"] = full_result.text
+                # Update relevant_specs to reflect full-spec load
+                inputs["relevant_specs"] = full_result.relevant_specs
+            except Exception:
+                logger.warning(
+                    "full_spec load failed for step %s; "
+                    "downstream step receiving items-mode spec_content",
+                    step_type.value,
+                    exc_info=True,
+                )
+                # Leave the existing items-mode spec_content in place
+
+        # Ensure selected_items is always present in inputs (may be empty)
+        inputs["selected_items"] = selected_items
 
         # When discovery produced a refined_description, use it as the task_description
         # for all downstream steps (preserving original for traceability)

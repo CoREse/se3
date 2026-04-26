@@ -1,3 +1,5 @@
+<!-- spec-format: v1 -->
+
 # flow-engine Specification
 
 ## Purpose
@@ -302,14 +304,14 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 | 步骤 | 职责 | LLM 参与 | JSON 模式 | Read-Only | 输入 | 输出 |
 |------|------|---------|-----------|-----------|------|------|
 | `discovery` | 需求探索（多轮对话） | 是 | STRICT | **是** | initial_description | refined_description, discovery_summary |
-| `analyze` | 分析任务类型和范围；收集项目上下文；选择并加载 spec | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content, selected_specs |
+| `analyze` | 分析任务类型和范围；收集项目上下文；选择并加载相关 spec items | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content, selected_specs, selected_items |
 | ~~`read_spec`~~ | ~~读取相关 spec 文件~~ (deprecated — merged into analyze) | 否（程序自动） | - | **是** | scope | relevant_specs, spec_content |
 | `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type, project_summary | plan{proposal,design}, task_groups, spec_changes |
 | `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed, estimated_test_duration |
 | `test` | 运行测试验证 | 否（程序执行） | - | 否 | - | test_results, tests_passed |
 | `self_check` | LLM 代码审查：逻辑完整性、代码健壮性、功能遗漏、测试未覆盖区域（不检查 spec 合规性） | 是 | TWO_PHASE | **是** | test_results, changes_made, spec_content, task_groups, fix_iteration | issues (structured list with description, severity, location), status |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, fix_needed, fix_instructions, fix_context |
-| `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | 否 | changes_made, verification_result, spec_changes, design_doc | updated_specs |
+| `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | 否 | changes_made, verification_result, spec_changes, design_doc, selected_items | updated_specs, new_capabilities, spec_decisions, notes |
 | `version_analyze` | 分析变更确定版本类型 + 生成 commit message | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning, commit_message |
 | `commit` | 提交变更 | 否（程序执行） | - | 否 | changes_made, bump_type | commit_hash |
 | `summarize` | 生成总结和 handoff | 是 | 文本 | **是** | all_previous_outputs | summary (Markdown 文本) |
@@ -926,12 +928,12 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 
 **输入构建规则：**
 - 所有步骤接收 `task_description` 和 `flow_id`
-- `analyze` 输出 `task_type`、`scope`、`complexity`、`reasoning`、`project_summary`、`relevant_specs`、`spec_content`、`selected_specs`；其中 `project_summary` 由 `ProjectContextCollector.collect()` 程序化生成（非 LLM），`spec_content` 由后处理程序化加载（base spec 自动附加 + LLM 选择的 spec）
+- `analyze` 输出 `task_type`、`scope`、`complexity`、`reasoning`、`project_summary`、`relevant_specs`、`spec_content`、`selected_specs`、`selected_items`；其中 `project_summary` 由 `ProjectContextCollector.collect()` 程序化生成（非 LLM），`spec_content` 由后处理程序化加载（base spec 自动附加 + LLM 选择的 spec items），`selected_items` 为 LLM 选中的 `[{spec, requirement_name, tags}]` 列表
 - `plan` 接收 `spec_content`（从 analyze）、`task_type`、`scope`、`project_summary`（从 analyze），输出 `plan`（含 proposal + design）、`task_groups` 和 `spec_changes`（仅 full depth）
 - `implement` 接收 `design_doc`（从 plan.design 映射）、`task_groups`、`spec_content`（从 analyze）、`project_summary`（从 analyze）
 - `self_check` 接收 `test_results`（从 test）、`changes_made`（从 implement）、`spec_content`（从 analyze）、`task_groups`（从 plan，用作「功能遗漏」维度的 scope 参考）、`fix_iteration`（当前 fix loop 迭代次数）
 - `verify_spec` 接收 `changes_made`、`spec_content`（从 analyze）、`test_results`、`fix_iteration`、`spec_changes`（从 plan 步骤传递，用于区分有意变更与回归）和 `relevant_specs`（从 analyze）
-- `update_spec` 接收 `changes_made`、`verification_result`、`spec_changes`（从 plan 步骤传递，作为变更指引清单）和 `design_doc`（从 plan.design 映射，提供架构上下文）
+- `update_spec` 接收 `changes_made`、`verification_result`、`spec_changes`（从 plan 步骤传递，作为变更指引清单）、`design_doc`（从 plan.design 映射，提供架构上下文）、`selected_items`（从 analyze，用于定位相关 spec）；默认以 `full_spec` 模式加载所有 spec 全文，支持命名查重和跨 spec 一致性检查
 - `commit` 接收 `changes_made`、`commit_message`（from version_analyze）、`bump_type`（from version_analyze）
 - `summarize` 接收所有前序输出（when included in step sequence）
 
@@ -939,6 +941,24 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - **WHEN** 流程转换到新步骤
 - **THEN** 根据规则自动构建步骤输入
 - **AND** 包含所有相关的前序输出
+
+#### Scenario: selected_items 透传到下游步骤
+- **WHEN** analyze 步骤输出包含 `selected_items: [{"spec": "flow-engine", "requirement_name": "统一入口"}]`
+- **THEN** state_machine 在构建所有下游步骤输入时透传 `selected_items`
+- **AND** `verify_spec`、`update_spec` 等步骤均可通过 `selected_items` 获知原始选中项
+
+#### Scenario: update_spec 默认以 full_spec 模式加载
+- **WHEN** state_machine 为 update_spec 构建输入
+- **AND** `se3.yaml` 未显式配置 `spec_loading.steps.update_spec`
+- **THEN** `update_spec` 的 `spec_content` 包含所有相关 spec 的完整文本（非 item 节选）
+- **AND** LLM 可基于完整内容判断命名冲突和跨 spec 一致性
+
+#### Scenario: update_spec 走新建 spec 判据后创建新 spec
+- **GIVEN** update_spec 步骤以 full_spec 模式加载，看到所有现有 spec
+- **WHEN** 实现引入了一个新子系统（如 Issue Discovery）
+- **THEN** update_spec 的 LLM 在追加新 Requirement 前显式回答 4 项判据
+- **AND** 判据输出 `spec_decisions` 包含 `decision: new_spec` 及 reasoning
+- **AND** 新 spec 文件被创建在 `se3/specs/issue-discovery/spec.md`
 
 ### Requirement: Version Analyze 步骤
 
@@ -1240,6 +1260,8 @@ The `update_spec` step SHALL receive `spec_changes` and `design_doc` from the pl
 **Prompt composition:**
 - The "Spec Change Guidance" section is formatted using `_format_spec_changes()` which renders each entry with spec_name, change_type, target, description, and rationale.
 - The "Design Context" section is formatted using `_format_design_doc()` which renders the design overview, components, and architecture decisions.
+- The "New Spec Decision" section requires the LLM to evaluate four criteria (conceptual independence, dependency direction, naming test, cross-scenario reusability) before appending any new Requirement. See the `spec-guardrails` spec for the full criteria definition.
+- `update_spec` defaults to `full_spec` loading mode so the LLM sees all spec files and can perform naming collision checks.
 
 #### Scenario: Guided spec update with spec_changes
 - **GIVEN** the plan step produced non-empty `spec_changes` and a `design_doc`
@@ -1253,6 +1275,13 @@ The `update_spec` step SHALL receive `spec_changes` and `design_doc` from the pl
 - **WHEN** update_spec executes
 - **THEN** the LLM infers which specs need updating from changes_made and verification_result
 - **AND** update_spec behavior is identical to pre-refactoring
+
+#### Scenario: update_spec enforces new spec decision criteria
+- **GIVEN** the implementation introduces a new Requirement that does not fit any existing spec
+- **WHEN** update_spec executes
+- **THEN** the LLM evaluates the four criteria before deciding to append or create a new spec
+- **AND** the JSON output includes `spec_decisions` with `decision: new_spec` and `reasoning`
+- **AND** a new spec file is created following the standard structure
 
 ### Requirement: Implement Step DAG Execution Strategy
 
@@ -1992,11 +2021,20 @@ implement 步骤的 FIX_PROMPT SHALL 识别 `fix_context` 中的超时元数据�
 
 `update_spec` 步骤 SHALL 在实现引入新的子系统或机制时，创建对应的新 spec 文件，而不仅仅是更新已有 spec。
 
+**New Spec vs Append 判据（由 spec-guardrails 定义，update_spec 强制执行）：**
+1. **概念独立性** — 新内容是否与现有 spec 属于同一概念域。
+2. **依赖方向** — 添加新 Requirement 是否会导致现有 Requirement 反向依赖它。
+3. **命名测试** — 新 Requirement 是否能在现有 spec 标题下自然命名。
+4. **跨场景共享** — 新内容是否会被多个 capability 复用（跨切面关注点应独立成 spec）。
+
 #### Scenario: 新子系统触发新 spec 创建
 - **WHEN** 实现引入了一个新的子系统（如 Issue Discovery）
 - **AND** 该子系统没有对应的 spec 文件
-- **THEN** update_spec 步骤在 `se3/specs/` 下创建新的 spec 目录和 `spec.md`
+- **THEN** update_spec 步骤在追加前走 4 项判据
+- **AND** 判据结果指向 new_spec 时，在 `se3/specs/` 下创建新的 spec 目录和 `spec.md`
 - **AND** 新 spec 包含 Purpose、Requirements、Scenarios 等标准结构
+- **AND** 新 spec 首行包含 `<!-- spec-format: v1 -->`
+- **AND** `spec_decisions` 输出记录该决策及 reasoning
 
 ## Architecture
 

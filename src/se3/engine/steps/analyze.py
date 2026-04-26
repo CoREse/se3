@@ -17,12 +17,14 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, List
 
 from ..context_builder import ContextBuilder
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, StepType, get_default_step_sequence
 from ..project_context import ProjectContextCollector, list_spec_names
+from ..spec_index import load_or_build
+from ..spec_loader import load_for_step
 from ..utils.json_parser import parse_json_response
 from ...config import insert_confirmation_steps
 
@@ -46,10 +48,10 @@ ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze th
 
 4. **reasoning**: Brief explanation of your classification
 
-5. **selected_specs**: Based on the task scope and the available specs listed below, select which specifications are relevant to this task. Choose specs whose content would help understand the requirements, architecture, or conventions relevant to the task. Be selective — only include specs that are genuinely relevant. If no specs are relevant, return an empty list. Do NOT include "base" — it is always loaded automatically.
+5. **selected_items**: Based on the task scope and the available spec items listed below, select which individual Requirements are relevant to this task. Be selective — only include items that are genuinely relevant. The base spec is always loaded automatically, so you do NOT need to select items from it.
 
-## Available Specs
-{available_specs}
+## Available Items
+{available_items}
 
 Respond in JSON format:
 {{
@@ -57,8 +59,13 @@ Respond in JSON format:
     "scope": "description of affected areas",
     "complexity": "simple|medium|complex",
     "reasoning": "explanation",
+    "selected_items": [
+        {{"spec": "spec-name", "requirement_name": "Requirement Name"}}
+    ],
     "selected_specs": ["spec-name-1", "spec-name-2"]
 }}
+
+The `selected_items` field is the primary selection mechanism. The `selected_specs` field is deprecated but retained for backward compatibility — derive it from the distinct spec names in `selected_items`.
 
 Task description:
 ---
@@ -99,16 +106,20 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # (1) Collect structured project context
     project_summary = _collect_project_summary(project_root)
 
-    # (2) List available spec names
+    # (2) Build item-level index and list available items for selector
     builder = ContextBuilder(project_root)
-    spec_names = list_spec_names(builder.specs_dir)
-    available_specs = ", ".join(spec_names) if spec_names else "(none)"
+    index = load_or_build(project_root)
+    selector_items = index.list_for_selector()
+    available_items = _format_selector_items(selector_items)
 
-    # Build prompt with project context and spec names
+    # (3) List spec names for validating LLM-returned selected_items
+    spec_names = list_spec_names(builder.specs_dir)
+
+    # Build prompt with project context and available items
     prompt = ANALYZE_PROMPT.format(
         task_description=task_description,
         project_context=project_summary,
-        available_specs=available_specs,
+        available_items=available_items,
     )
 
     # Append issue discovery injection if applicable
@@ -150,19 +161,100 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         flow.task_type = resolved_task_type
 
         # --- Post-processing: load spec content programmatically ---
-        selected_specs = result.get("selected_specs", [])
-        spec_content, relevant_specs = _load_specs(
-            builder, selected_specs, spec_names,
+        # Parse selected_items (new primary format) with fallback to selected_specs
+        selected_items = result.get("selected_items", [])
+
+        # Fallback: if LLM returned old-format selected_specs but no selected_items,
+        # map spec names to all their requirements
+        if not selected_items and result.get("selected_specs"):
+            logger.warning(
+                "LLM returned legacy selected_specs instead of selected_items; "
+                "falling back to full-spec loading for each selected spec. "
+                "This defeats item-level loading — consider re-prompting for selected_items."
+            )
+            raw_specs = result.get("selected_specs", [])
+            # Validate spec names before fallback so unknown specs are logged
+            # rather than silently producing an empty item list.
+            if spec_names:
+                unknown = [s for s in raw_specs if s not in spec_names]
+                if unknown:
+                    logger.warning(
+                        "Filtering out unknown specs from selected_specs: %r",
+                        unknown,
+                    )
+                raw_specs = [s for s in raw_specs if s in spec_names]
+            selected_items = _fallback_items_from_specs(index, raw_specs)
+
+        # Validate selected_items
+        if not isinstance(selected_items, list):
+            logger.warning(
+                "selected_items is not a list (%s), using empty list",
+                type(selected_items).__name__,
+            )
+            selected_items = []
+
+        # Filter out items with hallucinated spec names (spec doesn't exist)
+        if spec_names:
+            valid_items = []
+            for item in selected_items:
+                if isinstance(item, dict) and item.get("spec") in spec_names:
+                    valid_items.append(item)
+                elif isinstance(item, dict):
+                    logger.warning(
+                        "Filtering out selected_items entry with unknown spec: %r",
+                        item.get("spec"),
+                    )
+            selected_items = valid_items
+
+        # Use spec_loader to assemble spec content
+        load_result = load_for_step(
+            step_type="analyze",
+            selected_items=selected_items,
+            project_root=project_root,
+            mode="items",
         )
 
-        # Store outputs (original + new)
+        # Defensive: detect hallucinated requirement names that passed spec-name
+        # validation but don't exist in the actual spec files.
+        selected_ids = {
+            f"{item.get('spec')}::{item.get('requirement_name')}"
+            for item in selected_items
+            if isinstance(item, dict) and item.get("spec") and item.get("requirement_name")
+        }
+        # Exclude base-spec selections (base is always loaded as full text)
+        non_base_selected_ids = {sid for sid in selected_ids if not sid.startswith("base::")}
+        loaded_ids = set(load_result.loaded_items)
+        if non_base_selected_ids and loaded_ids < non_base_selected_ids:
+            missing = sorted(non_base_selected_ids - loaded_ids)
+            logger.warning(
+                "LLM selected %d non-base item(s) but only %d loaded — "
+                "hallucinated requirement names: %r",
+                len(non_base_selected_ids), len(loaded_ids), missing,
+            )
+
+        # Derive selected_specs from selected_items for backward compatibility
+        selected_specs = list({
+            item["spec"]
+            for item in selected_items
+            if isinstance(item, dict) and item.get("spec")
+        })
+
+        # Store outputs
         step.outputs["task_type"] = task_type
         step.outputs["scope"] = result.get("scope", "")
         step.outputs["complexity"] = result.get("complexity", "medium")
         step.outputs["reasoning"] = result.get("reasoning", "")
         step.outputs["project_summary"] = project_summary
-        step.outputs["relevant_specs"] = relevant_specs
-        step.outputs["spec_content"] = spec_content
+        step.outputs["relevant_specs"] = load_result.relevant_specs
+        step.outputs["spec_content"] = load_result.text
+        step.outputs["selected_items"] = selected_items
+        step.outputs["selected_specs"] = selected_specs  # deprecated, kept for compat
+
+        # Persist selected_items in flow context for cross-session /
+        # cross-CONFIRM resilience — downstream steps that scan history
+        # for selected_items will find it even if the ANALYZE step object
+        # is not directly reachable.
+        flow.state.context["selected_items"] = selected_items
 
         # Update flow's selected steps based on task_type (fixed sequences)
         # Note: discover mode is handled separately via --discover flag, not by analyze
@@ -171,7 +263,8 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.info(
             f"Analysis complete: type={resolved_task_type}, "
             f"complexity={result.get('complexity')}, "
-            f"specs={relevant_specs}"
+            f"specs={load_result.relevant_specs}, "
+            f"items={len(selected_items)}"
         )
 
         return StepStatus.COMPLETED
@@ -298,61 +391,73 @@ def _collect_project_summary(project_root: Path) -> str:
     return "\n".join(parts) if parts else "No additional context available"
 
 
-def _load_specs(
-    builder: ContextBuilder,
-    selected_specs: Any,
-    known_spec_names: List[str],
-) -> tuple[Dict[str, str], List[str]]:
-    """Load spec content programmatically after LLM selection.
+def _format_selector_items(items: list[dict[str, Any]]) -> str:
+    """Format the item list for injection into the analyze prompt.
 
-    Auto-loads base spec (if exists) regardless of LLM selection.
-    Validates selected spec names against known specs and loads their content.
+    Each line shows: ``- spec::Requirement Name [tags: foo, bar] — summary``
 
     Args:
-        builder: ContextBuilder instance for spec loading
-        selected_specs: List of spec names selected by LLM (may be invalid)
-        known_spec_names: Valid spec names from the specs directory
+        items: Output of ``SpecIndex.list_for_selector()``.
 
     Returns:
-        Tuple of (spec_content dict, relevant_specs list)
+        Formatted multi-line string.
     """
-    spec_content: Dict[str, str] = {}
-    relevant_specs: List[str] = []
+    if not items:
+        return "(no items available)"
 
-    # Auto-load base spec (always, regardless of LLM selection)
-    base_content = builder._load_spec_content("base")
-    if base_content:
-        spec_content["base"] = base_content
-        relevant_specs.append("base")
-        logger.info(f"Auto-loaded base spec ({len(base_content)} chars)")
+    lines: list[str] = []
+    current_spec: str = ""
+    for item in items:
+        spec = item.get("spec", "")
+        if not spec:
+            continue  # Defensive: skip items with missing spec name
+        if spec != current_spec:
+            heading = f"### {spec}"
+            if lines:
+                heading = f"\n{heading}"
+            lines.append(heading)
+            current_spec = spec
+        name = item.get("requirement_name", "")
+        tags = item.get("tags", [])
+        summary = item.get("summary", "")
+        tag_str = f" [tags: {', '.join(tags)}]" if tags else ""
+        summary_str = f" — {summary}" if summary else ""
+        lines.append(f"- {spec}::{name}{tag_str}{summary_str}")
 
-    # Validate and sanitize selected_specs from LLM
-    if not isinstance(selected_specs, list):
-        logger.warning(f"selected_specs is not a list ({type(selected_specs)}), using empty list")
-        selected_specs = []
+    return "\n".join(lines)
 
+
+def _fallback_items_from_specs(
+    index: Any,
+    selected_specs: list[str],
+) -> list[dict[str, str]]:
+    """Map old-format ``selected_specs`` to ``selected_items``.
+
+    For each selected spec name, include ALL Requirements from that spec.
+    This is a best-effort fallback when an older LLM returns the legacy
+    ``selected_specs`` array.
+
+    Args:
+        index: A ``SpecIndex`` (or anything with ``.items`` dict).
+        selected_specs: List of spec names from legacy output.
+
+    Returns:
+        List of ``{"spec": str, "requirement_name": str}`` dicts.
+    """
+    items: list[dict[str, str]] = []
+    seen: set[str] = set()
     for spec_name in selected_specs:
         if not isinstance(spec_name, str):
             continue
-        # Skip base (already loaded) and unknown names
-        if spec_name == "base":
-            continue
-        if spec_name not in known_spec_names:
-            logger.warning(f"LLM selected unknown spec '{spec_name}', skipping")
-            continue
-        if spec_name in spec_content:
-            continue
-
-        content = builder._load_spec_content(spec_name)
-        if content:
-            spec_content[spec_name] = content
-            relevant_specs.append(spec_name)
-            logger.debug(f"Loaded spec: {spec_name} ({len(content)} chars)")
-        else:
-            logger.warning(f"Could not load spec content: {spec_name}")
-
-    logger.info(f"Loaded {len(spec_content)} specs: {relevant_specs}")
-    return spec_content, relevant_specs
+        for item_id, meta in getattr(index, "items", {}).items():
+            if item_id.startswith(f"{spec_name}::"):
+                req_name = getattr(meta, "requirement_name", "")
+                if req_name and req_name != "__no_requirements__":
+                    key = f"{spec_name}::{req_name}"
+                    if key not in seen:
+                        seen.add(key)
+                        items.append({"spec": spec_name, "requirement_name": req_name})
+    return items
 
 
 def _update_flow_steps(

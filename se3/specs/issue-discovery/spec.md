@@ -1,3 +1,4 @@
+<!-- spec-format: v1 -->
 # issue-discovery Specification
 
 ## Purpose

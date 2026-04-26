@@ -46,6 +46,27 @@ UPDATE_SPEC_PROMPT = """You are an expert technical writer. Update the project s
 6. Follow spec guardrails: do NOT delete existing requirements, only add or modify.
 7. If Design Context is provided, use it to understand the architectural rationale behind changes — this helps produce more accurate and well-motivated spec updates.
 
+## New Spec Decision (Mandatory)
+
+Before appending ANY new Requirement to an existing spec, you MUST evaluate the following four criteria. ALL four must pass to append; if ANY fails, create a new spec.
+
+1. **Conceptual Independence** — The new content shares the same conceptual domain as the existing spec. It is about the same subsystem, mechanism, or abstraction level. If the content introduces a fundamentally different concept (e.g., "how to format JSON" into a spec about "error handling patterns"), it fails this test.
+
+2. **Dependency Direction** — The new content does NOT cause existing Requirements in the spec to depend on it. If adding the Requirement would force older Requirements to reference or assume the new behavior (e.g., an existing "Retry Logic" Requirement now needs to know about a new "Circuit Breaker" Requirement), the dependency direction is wrong and a new spec is needed.
+
+3. **Naming Test** — The new Requirement can be naturally named under the existing spec's title. A reader encountering the Requirement name should not be surprised to find it in this spec. If the name feels like it belongs in a different category, it fails this test.
+
+4. **Cross-Scenario Reusability** — The new content is NOT expected to be referenced by multiple unrelated capabilities. If the content is a cross-cutting concern (e.g., "Authentication", "Configuration Format", "Versioning Rules") that multiple specs will need to cite, it should be its own spec to avoid circular references and provide a single source of truth.
+
+**Decision rule:**
+- If ALL four criteria pass → **append** the new Requirement to the existing spec.
+- If ANY criterion fails → **create a new spec** at `se3/specs/<new_name>/spec.md` with standard structure (Purpose, Requirements, Scenarios).
+
+When creating a new spec:
+- Choose a concise, kebab-case directory name (e.g., `issue-discovery`, `test-runner`).
+- Include `## Purpose`, `## Requirements` with at least one `### Requirement: <name>`, and `#### Scenario:` blocks.
+- Add `<!-- spec-format: v1 -->` as the first line.
+
 When you are done, output a JSON summary:
 ```json
 {{
@@ -56,11 +77,20 @@ When you are done, output a JSON summary:
         }}
     ],
     "new_capabilities": ["capability1", "capability2"],
+    "spec_decisions": [
+        {{
+            "requirement_name": "Name of the new requirement",
+            "decision": "append|new_spec",
+            "target_spec": "spec-name where requirement was placed",
+            "reasoning": "Brief justification referencing which criteria passed/failed"
+        }}
+    ],
     "notes": "Any additional notes"
 }}
 ```
 
-If no spec updates are needed, return an empty `specs_updated` array.
+- `spec_decisions` is REQUIRED whenever you add a new Requirement. If you only modified existing Requirements, return an empty array.
+- If no spec updates are needed at all, return empty arrays for both `specs_updated` and `spec_decisions`.
 """
 
 
@@ -136,7 +166,7 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         response = caller.call(
             prompt=prompt,
             json_mode="two_phase",
-            json_schema_hint='{"specs_updated": [{"spec_name": "...", "change_description": "..."}], "new_capabilities": [], "notes": "..."}',
+            json_schema_hint='{"specs_updated": [{"spec_name": "...", "change_description": "..."}], "new_capabilities": [], "spec_decisions": [{"requirement_name": "...", "decision": "append|new_spec", "target_spec": "...", "reasoning": "..."}], "notes": "..."}',
         )
 
         # Parse JSON response
@@ -150,6 +180,7 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         specs_updated = update_result.get("specs_updated", [])
         step.outputs["updated_specs"] = specs_updated
         step.outputs["new_capabilities"] = update_result.get("new_capabilities", [])
+        step.outputs["spec_decisions"] = update_result.get("spec_decisions", [])
 
         if specs_updated:
             logger.info(f"Specs updated: {len(specs_updated)}")
@@ -157,6 +188,157 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 logger.info(f"  - {spec.get('spec_name', '?')}: {spec.get('change_description', '')}")
         else:
             logger.info("No spec updates needed")
+
+        # Log spec decisions if present
+        spec_decisions = step.outputs["spec_decisions"]
+        if spec_decisions:
+            logger.info(f"Spec decisions recorded: {len(spec_decisions)}")
+            for dec in spec_decisions:
+                logger.info(
+                    f"  - {dec.get('requirement_name', '?')}: {dec.get('decision', '?')} → {dec.get('target_spec', '?')}"
+                )
+
+        # Rebuild spec index for touched specs so the next load picks up changes.
+        # rebuild_for() re-parses the on-disk file and updates the in-memory
+        # index, so save() persists the fresh data (not a stale snapshot).
+        try:
+            from ...engine.spec_index import SpecIndex
+            from ...engine.spec_format import parse_spec
+
+            try:
+                import fcntl as _fcntl
+            except ImportError:
+                _fcntl = None
+
+            # Acquire advisory lock BEFORE loading the index so the entire
+            # load → rebuild → verify → save sequence is atomic. This prevents
+            # a race where two processes load stale data, then the second
+            # writer overwrites the first writer's fresher index.
+            lock_file = (project_root / "se3" / "cache" / "spec-index.json.lock")
+            lock_acquired = False
+            # Pre-derive touched_specs from prior outputs so the OSError fallback
+            # below has a defined value even if open(lock_file) or flock() fails
+            # before line where it would otherwise be assigned inside the with block.
+            touched_specs = {s.get("spec_name", "") for s in specs_updated}
+            touched_specs.update(d.get("target_spec", "") for d in spec_decisions)
+            try:
+                with open(lock_file, "w") as lock_fd:
+                    if _fcntl is not None:
+                        _fcntl.flock(lock_fd, _fcntl.LOCK_EX)
+                        lock_acquired = True
+
+                    # Direct instantiation to avoid reentrant flock deadlock:
+                    # load_or_build() would try to acquire the same lock again.
+                    index = SpecIndex(project_root)
+                    if not index.load():
+                        index.build()
+                    for spec_name in touched_specs:
+                        if spec_name:
+                            index.rebuild_for(spec_name)
+
+                    # Verify new-spec creations actually materialised on disk.
+                    # LLMs can hallucinate target_spec names; catch drift early.
+                    builder = ContextBuilder(project_root)
+                    for dec in spec_decisions:
+                        if dec.get("decision") == "new_spec":
+                            target = dec.get("target_spec", "")
+                            if target:
+                                spec_file = builder.specs_dir / target / "spec.md"
+                                if not spec_file.exists():
+                                    logger.error(
+                                        "New spec '%s' was declared but file does not exist: %s",
+                                        target, spec_file,
+                                    )
+                                    step.error_message = (
+                                        f"Spec update failed: declared new spec '{target}' "
+                                        f"but {spec_file} does not exist."
+                                    )
+                                    if lock_acquired and _fcntl is not None:
+                                        try:
+                                            _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
+                                        except OSError:
+                                            pass
+                                    return StepStatus.FAILED
+
+                                # Strengthened check: require at least one
+                                # Requirement and a non-empty header.
+                                try:
+                                    parsed = parse_spec(spec_file.read_text(encoding="utf-8"))
+                                except Exception as exc:
+                                    logger.error(
+                                        "New spec '%s' exists but cannot be parsed: %s",
+                                        target, exc,
+                                    )
+                                    step.error_message = (
+                                        f"Spec update failed: declared new spec '{target}' "
+                                        f"exists but is unparsable."
+                                    )
+                                    if lock_acquired and _fcntl is not None:
+                                        try:
+                                            _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
+                                        except OSError:
+                                            pass
+                                    return StepStatus.FAILED
+
+                                if not parsed.requirements:
+                                    logger.error(
+                                        "New spec '%s' has no Requirements — "
+                                        "it may be empty or structurally invalid.",
+                                        target,
+                                    )
+                                    step.error_message = (
+                                        f"Spec update failed: declared new spec '{target}' "
+                                        f"has no Requirements."
+                                    )
+                                    if lock_acquired and _fcntl is not None:
+                                        try:
+                                            _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
+                                        except OSError:
+                                            pass
+                                    return StepStatus.FAILED
+
+                                if not parsed.header_text or len(parsed.header_text.strip()) < 10:
+                                    logger.error(
+                                        "New spec '%s' has an empty or very short header.",
+                                        target,
+                                    )
+                                    step.error_message = (
+                                        f"Spec update failed: declared new spec '{target}' "
+                                        f"has an empty or very short header."
+                                    )
+                                    if lock_acquired and _fcntl is not None:
+                                        try:
+                                            _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
+                                        except OSError:
+                                            pass
+                                    return StepStatus.FAILED
+
+                    index.save()
+                    if lock_acquired and _fcntl is not None:
+                        try:
+                            _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
+                        except OSError:
+                            pass
+            except OSError:
+                # Fallback: load/rebuild/save without lock
+                logger.warning(
+                    "File lock not available; rebuilding spec index without coordination."
+                )
+                # Direct instantiation — no lock is held here, but stay consistent.
+                index = SpecIndex(project_root)
+                if not index.load():
+                    index.build()
+                for spec_name in touched_specs:
+                    if spec_name:
+                        index.rebuild_for(spec_name)
+                index.save()
+                if lock_acquired and _fcntl is not None:
+                    try:
+                        _fcntl.flock(lock_fd, _fcntl.LOCK_UN)
+                    except OSError:
+                        pass
+        except Exception:
+            logger.warning("Failed to rebuild spec index after update_spec", exc_info=True)
 
         return StepStatus.COMPLETED
 

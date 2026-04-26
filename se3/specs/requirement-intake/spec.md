@@ -1,3 +1,4 @@
+<!-- spec-format: v1 -->
 # requirement-intake Specification
 
 ## Purpose

@@ -1,3 +1,4 @@
+<!-- spec-format: v1 -->
 # se3-scaffold Specification
 
 ## Purpose

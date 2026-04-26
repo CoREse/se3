@@ -1,3 +1,4 @@
+<!-- spec-format: v1 -->
 # se3-workflows Specification
 
 ## Purpose

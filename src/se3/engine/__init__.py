@@ -13,10 +13,14 @@ from .schema import FlowInstanceSchema, ContextSchema, build_context_from_flow
 from .logging_config import StructuredLogger, LogEventType, LogLevel, get_logger
 from .spec_index import (
     SpecIndex,
-    SpecInfo,
+    ItemMeta,
+    load_or_build,
     get_or_build_index,
-    match_specs_for_task,
-    assess_change_size,
+)
+from .spec_loader import (
+    LoadResult,
+    load_for_step,
+    load_full,
 )
 
 __all__ = [
@@ -39,8 +43,10 @@ __all__ = [
     "LogLevel",
     "get_logger",
     "SpecIndex",
-    "SpecInfo",
+    "ItemMeta",
+    "load_or_build",
     "get_or_build_index",
-    "match_specs_for_task",
-    "assess_change_size",
+    "LoadResult",
+    "load_for_step",
+    "load_full",
 ]

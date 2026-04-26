@@ -474,7 +474,7 @@ class SyncEngine:
         """
         from .spec_index import SpecIndex
 
-        index = SpecIndex(self.project_root).build_index()
+        index = SpecIndex(self.project_root).build()
         specs: Dict[str, Any] = {}
 
         if "base" in index.specs:

@@ -1,3 +1,4 @@
+<!-- spec-format: v1 -->
 # SE3 Framework — Base Specification
 
 ## Purpose

@@ -5,7 +5,7 @@ import logging
 import os
 import subprocess
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import yaml
@@ -2095,6 +2095,92 @@ def apply_step_config(steps: list, project_root: Optional[Path] = None) -> list:
             pass  # Ignore invalid step names
 
     return result
+
+
+@dataclass
+class SpecLoadingConfig:
+    """Spec loading mode configuration per step.
+
+    Controls whether downstream steps receive ``items`` (header + selected
+    requirements only) or ``full_spec`` (entire spec file) content.
+    """
+
+    steps: dict[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "SpecLoadingConfig":
+        """Create from the ``spec_loading`` YAML section."""
+        if not data:
+            return cls()
+        steps_raw = data.get("steps", {})
+        if not isinstance(steps_raw, dict):
+            logger.warning(
+                "spec_loading.steps has invalid type %s (expected dict); "
+                "using default empty config.",
+                type(steps_raw).__name__,
+            )
+            return cls()
+        steps: dict[str, str] = {}
+        for step_name, mode in steps_raw.items():
+            if isinstance(mode, str) and mode.strip().lower() in ("items", "full_spec"):
+                steps[str(step_name)] = mode.strip().lower()
+            else:
+                logger.warning(
+                    "spec_loading.steps.%s has invalid value %r; "
+                    "expected 'items' or 'full_spec'. Skipping — "
+                    "built-in default will apply.",
+                    step_name, mode,
+                )
+                # Skip invalid entries so mode_for() falls through to the
+                # per-step built-in default instead of shadowing it.
+        return cls(steps=steps)
+
+    # Steps that default to full_spec loading (can be overridden in se3.yaml)
+    _DEFAULT_FULL_SPEC_STEPS = {"update_spec"}
+
+    def mode_for(self, step_type: str) -> Literal["items", "full_spec"]:
+        """Return the loading mode for *step_type*.
+
+        Defaults to ``"items"`` for most steps. ``update_spec`` defaults to
+        ``"full_spec"`` so the LLM can see all existing spec names for naming
+        collision avoidance and cross-spec consistency checks. Both defaults
+        can be overridden via ``spec_loading.steps.<step>`` in ``se3.yaml``.
+        """
+        # Explicit config always wins
+        if step_type in self.steps:
+            mode = self.steps[step_type]
+            if mode in ("items", "full_spec"):
+                return mode  # type: ignore[return-value]
+            return "items"
+        # Default: full_spec for update_spec, items for everything else
+        if step_type in self._DEFAULT_FULL_SPEC_STEPS:
+            return "full_spec"  # type: ignore[return-value]
+        return "items"
+
+    @classmethod
+    def load(cls, project_root: Path) -> "SpecLoadingConfig":
+        """Load spec loading configuration from the active project YAML."""
+        data, _src = load_project_yaml(project_root)
+        if not data:
+            return cls()
+        sl_data = data.get("spec_loading", {})
+        if not sl_data or not isinstance(sl_data, dict):
+            return cls()
+        return cls.from_dict(sl_data)
+
+
+def load_spec_loading_config(project_root: Optional[Path] = None) -> SpecLoadingConfig:
+    """Load spec loading configuration from project.
+
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+
+    Returns:
+        SpecLoadingConfig instance with loaded or default settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    return SpecLoadingConfig.load(project_root)
 
 
 def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:

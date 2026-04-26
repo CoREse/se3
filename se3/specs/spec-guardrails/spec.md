@@ -1,3 +1,5 @@
+<!-- spec-format: v1 -->
+
 # spec-guardrails Specification
 
 ## Purpose
@@ -90,3 +92,52 @@ When a guardrail violation is detected, the system SHALL provide clear reporting
 #### Scenario: Report weakening violation
 - **WHEN** SHALL is changed to SHOULD
 - **THEN** the report shows: "[must_not_weaken] Requirement weakened: SHALL → SHOULD"
+
+### Requirement: New Spec vs Append Criteria
+
+Before adding a new Requirement to an existing spec, the agent SHALL explicitly evaluate whether the content should instead become a new spec. This decision is made during the `update_spec` step and SHALL be recorded in a structured `spec_decisions` output.
+
+**Four evaluation criteria (ALL must be met to append; if ANY fails, create a new spec):**
+
+1. **Conceptual Independence** — The new content shares the same conceptual domain as the existing spec. It is about the same subsystem, mechanism, or abstraction level. If the content introduces a fundamentally different concept (e.g., "how to format JSON" into a spec about "error handling patterns"), it fails this test.
+
+2. **Dependency Direction** — The new content does NOT cause existing Requirements in the spec to depend on it. If adding the Requirement would force older Requirements to reference or assume the new behavior (e.g., an existing "Retry Logic" Requirement now needs to know about a new "Circuit Breaker" Requirement), the dependency direction is wrong and a new spec is needed.
+
+3. **Naming Test** — The new Requirement can be naturally named under the existing spec's title. A reader encountering the Requirement name should not be surprised to find it in this spec. If the name feels like it belongs in a different category, it fails this test.
+
+4. **Cross-Scenario Reusability** — The new content is NOT expected to be referenced by multiple unrelated capabilities. If the content is a cross-cutting concern (e.g., "Authentication", "Configuration Format", "Versioning Rules") that multiple specs will need to cite, it should be its own spec to avoid circular references and provide a single source of truth.
+
+**Decision rule:**
+- If ALL four criteria pass → **append** the new Requirement to the existing spec.
+- If ANY criterion fails → **create a new spec** at `se3/specs/<new_name>/spec.md` with standard structure (Purpose, Requirements, Scenarios).
+
+**Enforcement:**
+- The `update_spec` step prompt SHALL include these four criteria explicitly.
+- The LLM SHALL output a `spec_decisions` array where each entry documents the decision for every new Requirement.
+- The default spec loading mode for `update_spec` is `full_spec` so that the LLM can see all existing spec names and avoid naming collisions.
+
+#### Scenario: Typical append — related requirement in same domain
+- **GIVEN** the `flow-engine` spec already contains Requirements about step execution and state transitions
+- **WHEN** a new Requirement about "step retry backoff strategy" is proposed
+- **THEN** all four criteria pass:
+  - Conceptual Independence: same domain (flow engine mechanics)
+  - Dependency Direction: existing steps do not need to reference backoff
+  - Naming Test: "Step Retry Backoff Strategy" fits naturally in flow-engine
+  - Cross-Scenario Reusability: only flow-engine references it
+- **AND** the decision is **append** to flow-engine
+
+#### Scenario: Typical new spec — conceptually independent subsystem
+- **GIVEN** the project has specs for `flow-engine`, `se3-config`, and `spec-guardrails`
+- **WHEN** implementing a new "Issue Discovery" subsystem with its own data model, lifecycle, and UI
+- **THEN** Criteria 1 fails (different concept from all existing specs)
+- **AND** Criteria 4 fails (multiple other specs will reference issue-discovery rules)
+- **AND** the decision is **new spec** — create `se3/specs/issue-discovery/spec.md`
+
+#### Scenario: Boundary case — naming test fails but others pass
+- **GIVEN** the `se3-config` spec governs YAML configuration file semantics
+- **WHEN** a new Requirement about "CLI color theme configuration" is proposed
+- **THEN** Criteria 1 passes (both are about configuration)
+- **AND** Criteria 2 passes (existing config Requirements do not depend on color themes)
+- **AND** Criteria 4 passes (only se3-config consumers care)
+- **BUT** Criteria 3 fails — "CLI Color Theme Configuration" is surprising under a spec titled "se3-config" which is about framework configuration, not UI appearance
+- **AND** the decision is **new spec** — create `se3/specs/ui-customization/spec.md` (or equivalent)

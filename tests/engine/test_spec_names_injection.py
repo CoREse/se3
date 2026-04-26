@@ -654,8 +654,8 @@ class TestHandlerIntegrationNegative:
         assert INJECTION_MARKER not in prompt
         assert INJECTION_HEADING not in prompt
         # analyze's own template heading is a distinct string ("Available
-        # Specs", no "ifications") — ensure it survived.
-        assert "## Available Specs" in prompt
+        # Items", no "ifications") — ensure it survived.
+        assert "## Available Items" in prompt
 
     def test_discovery_handler_prompt_lacks_injection(self, tmp_path):
         """discovery is NOT in the injection whitelist. Invoke the real

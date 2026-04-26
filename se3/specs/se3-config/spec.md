@@ -1,3 +1,5 @@
+<!-- spec-format: v1 -->
+
 # se3-config Specification
 
 ## Purpose
@@ -109,6 +111,7 @@ would silently ignore the developer's main-repo override.
 - `implement.group_loc_threshold`: LOC threshold for collapsing task groups into a single LLM call (default: 300)
 - `implement.use_worktree`: Whether the implement step may use per-group worktrees and `impl/*` branches on the DAG parallel path (default: true). Set to `false` to force fully sequential execution on the original branch regardless of DAG topology.
 - `workflow.max_fix_iterations`: Max fix loop iterations before FAILED (default: 20)
+- `spec_loading.steps.<step_name>`: Per-step spec loading mode — `"items"` (default, header + selected requirements only) or `"full_spec"` (entire spec file). `update_spec` defaults to `full_spec`; all other steps default to `items`.
 - `test.command`: Primary test command override (default: null = auto-detect)
 - `test.timeout`: Fallback timeout (seconds) when dynamic timeout is unavailable (default: 1800)
 - `test.timeout_multiplier`: Multiplier applied to implement's `estimated_test_duration` to compute the dynamic timeout for the primary test command (default: 2.0, clamped to >= 1.0)
@@ -853,3 +856,48 @@ llm_caller:
 - **AND** project config declares `llm_caller.steps.implement: [c]`
 - **WHEN** the implement step runs in the project
 - **THEN** the chain is exactly `[c]` — the global list is not merged
+
+### Requirement: Spec Loading Configuration
+
+The system SHALL support per-step spec loading mode configuration via the `spec_loading` section in `se3.yaml`.
+
+**Purpose:** Control whether a downstream step receives only the selected spec items (saving context window) or the full spec text (needed for cross-item consistency checks and naming collision detection).
+
+**Schema:**
+```yaml
+spec_loading:
+  steps:
+    update_spec: full_spec    # see all specs for naming checks
+    verify_spec: items        # default, only selected items
+```
+
+**Mode semantics:**
+- `"items"`: Each involved spec contributes its header (Purpose, Definitions, Constraints) plus only the Requirements that were selected by the analyze step. Base spec is always included in full. This is the default for all steps except `update_spec`.
+- `"full_spec"`: Each involved spec contributes its complete text. Used when the step needs to see all Requirements in a spec (e.g., `update_spec` naming a new spec must check for collisions across all existing spec names).
+
+**Default behavior:**
+- Steps NOT listed in `spec_loading.steps` use the built-in default: `"items"` for most steps, `"full_spec"` for `update_spec`.
+- The default cannot be changed globally — each step must be explicitly configured if the built-in default is unsuitable.
+
+#### Scenario: Default items mode for plan step
+- **GIVEN** `se3.yaml` has no `spec_loading` section
+- **WHEN** the `plan` step builds its inputs
+- **THEN** `spec_content` contains only the base spec full text + selected spec headers + selected items
+- **AND** unselected Requirements are omitted from context
+
+#### Scenario: YAML override switches verify_spec to full_spec
+- **GIVEN** `se3.yaml` contains:
+  ```yaml
+  spec_loading:
+    steps:
+      verify_spec: full_spec
+  ```
+- **WHEN** the `verify_spec` step builds its inputs
+- **THEN** `spec_content` contains the full text of all involved specs
+- **AND** the LLM can perform cross-Requirement consistency checks
+
+#### Scenario: update_spec defaults to full_spec without explicit config
+- **GIVEN** `se3.yaml` has no `spec_loading` section
+- **WHEN** the `update_spec` step builds its inputs
+- **THEN** `spec_content` contains the full text of all involved specs
+- **AND** the LLM can see all existing spec names to avoid naming collisions when creating a new spec
