@@ -285,6 +285,16 @@ version:
 - **THEN** no version bumping occurs
 - **AND** existing version is preserved
 
+#### Scenario: Aggregated SemVer bump after `se3 merge`
+- **GIVEN** the current branch is at version `4.4.0`
+- **AND** the user runs `se3 merge feat/a feat/b feat/c`
+- **AND** `feat/a` represents a `patch` bump relative to its merge base, `feat/b` a `patch`, and `feat/c` a `minor`
+- **WHEN** all three branches have been sequentially merged
+- **THEN** the per-branch bump types are reduced via SemVer's max rule (`max(patch, patch, minor) = minor`)
+- **AND** a single `pyproject.toml` update writes the new version `4.5.0`
+- **AND** that update is amended onto the last merge commit (not added as a separate commit)
+- **AND** historical commits on `feat/a`, `feat/b`, `feat/c` are NOT rewritten — SemVer uniqueness is enforced by tags, not by retroactive bumps on the merged branches
+
 ### Requirement: Documentation Updates
 
 SE3 SHALL automatically update README.md and VERSIONS.md when version changes.

@@ -74,6 +74,13 @@ The system SHALL enforce guardrails through automated checks.
 - **THEN** the system checks for spec drift in `openspec/specs/`
 - **AND** blocks archiving if violations are found
 
+#### Scenario: Mandatory guardrails after every `se3 merge` commit
+- **GIVEN** a `se3 merge <branch>` invocation produces a merge commit that touches one or more `se3/specs/**/spec.md` files (whether or not those files had textual conflicts)
+- **WHEN** the merge product is evaluated
+- **THEN** `se3 guardrails` is run against each touched spec file before the merge is considered complete
+- **AND** the check is enforced in all three strategy tiers — `default`, `strict`, AND `fast` — so that the `fast` tier's relaxation for ordinary text conflicts does NOT extend to spec files
+- **AND** any violation (deleted requirement, weakened language SHALL→SHOULD, weakened quantifier all→some, deleted scenarios) causes the merge commit to be rolled back and escalated to a human MCP call file under `se3/calls/`
+
 ### Requirement: Guardrail Violation Reporting
 
 When a guardrail violation is detected, the system SHALL provide clear reporting.

@@ -2206,3 +2206,54 @@ def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
     if not isinstance(workflow, dict):
         return DEFAULT_MAX_FIX_ITERATIONS
     return workflow.get("max_fix_iterations", DEFAULT_MAX_FIX_ITERATIONS)
+
+
+@dataclass
+class MergeConfig:
+    """Merge command configuration loaded from se3.yaml merge: section."""
+
+    strategy: str = "default"
+    delete_merged_default: bool = False
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "MergeConfig":
+        """Create MergeConfig from dictionary."""
+        if not data:
+            return cls()
+        strategy = data.get("strategy", "default")
+        if strategy not in ("default", "strict", "fast"):
+            logger.warning(
+                "Invalid merge.strategy %r; using default 'default'", strategy,
+            )
+            strategy = "default"
+        return cls(
+            strategy=strategy,
+            delete_merged_default=_coerce_bool(
+                data.get("delete_merged_default", False), default=False,
+            ),
+        )
+
+    @classmethod
+    def load(cls, project_root: Path) -> "MergeConfig":
+        """Load merge configuration from the active project YAML."""
+        data, _src = load_project_yaml(project_root)
+        if not data:
+            return cls()
+        merge_data = data.get("merge", {})
+        if not isinstance(merge_data, dict):
+            return cls()
+        return cls.from_dict(merge_data)
+
+
+def load_merge_config(project_root: Optional[Path] = None) -> MergeConfig:
+    """Load merge configuration from project.
+
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+
+    Returns:
+        MergeConfig instance with loaded or default settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    return MergeConfig.load(project_root)

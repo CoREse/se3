@@ -452,6 +452,46 @@ The system SHALL support configuring merge conflict resolution strategy for loop
 - **AND** if all files are resolved, the merge completes automatically
 - **AND** if any file fails, falls back to human mode
 
+### Requirement: Merge Configuration
+
+The system SHALL support configuration of the `se3 merge` command via a top-level `merge` section in `se3.yaml`.
+
+**Merge section options:**
+- `merge.strategy`: Default conflict-resolution tier for `se3 merge` (default: `"default"`). Allowed values: `"default"`, `"strict"`, `"fast"`. The CLI flag `--strategy` overrides this value for a single invocation.
+- `merge.delete_merged_default`: Whether `se3 merge` defaults to deleting merged branches and their bound worktrees (default: `false`). The CLI flags `--delete-merged` / `--no-delete-merged` override this value for a single invocation.
+
+**Orthogonality with `conflict_resolver.strategy`:**
+
+`merge.strategy` is independent of and orthogonal to `conflict_resolver.strategy`. The latter governs only the in-loop branch merge performed by `se3 run --loop --merge`; the former governs the standalone `se3 merge <branch> ...` command. Setting one has no effect on the other.
+
+**Example configuration:**
+```yaml
+merge:
+  strategy: default            # default | strict | fast
+  delete_merged_default: false # require --delete-merged on the command line
+```
+
+#### Scenario: Default merge configuration
+- **WHEN** no `merge` section exists in se3.yaml
+- **THEN** `se3 merge` uses `strategy: default` and `delete_merged_default: false`
+
+#### Scenario: Strategy override via CLI flag
+- **GIVEN** `merge.strategy: default` in se3.yaml
+- **WHEN** the user runs `se3 merge feat/x --strategy strict`
+- **THEN** the invocation uses the `strict` tier
+- **AND** the configured default is unchanged for future invocations
+
+#### Scenario: delete_merged_default honored when no CLI flag is given
+- **GIVEN** `merge.delete_merged_default: true` in se3.yaml
+- **WHEN** the user runs `se3 merge feat/x` without `--no-delete-merged`
+- **THEN** merged branches (and their clean bound worktrees) are deleted
+
+#### Scenario: Independence from conflict_resolver.strategy
+- **GIVEN** `conflict_resolver.strategy: "llm"` and no `merge` section
+- **WHEN** the user runs `se3 merge feat/x`
+- **THEN** the standalone merge command uses `merge.strategy = default`, NOT the `conflict_resolver` value
+- **AND** `se3 run --loop --merge` continues to honor `conflict_resolver.strategy: "llm"`
+
 ### Requirement: Implement Configuration
 
 The system SHALL support configuration for the implement step's execution strategy.

@@ -310,6 +310,110 @@ se3 sync-respond <call-file-path>
 
 `se3 sync` SHALL only directly modify spec files (`se3/specs/`) and issue files (`se3/issues/`). All situations requiring code changes SHALL be recorded as issues, never applied directly to project source code.
 
+### Requirement: `se3 merge` Command
+
+The `se3 merge` command SHALL sequentially merge one or more named branches into the current branch, targeting same-repo multi-task parallel aggregation. Branches are merged pairwise in the order given (no octopus merge); the command is unaware of the source workflow that produced each branch and coexists with `se3 run --loop --merge` (which remains the in-loop single-branch path).
+
+**Interface:**
+```bash
+se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-merged | --no-delete-merged]
+```
+
+**Behavior contract:**
+
+1. **Sequential pairwise merge.** Git owns the merge topology. For each branch in argument order, the command runs `git merge <branch>` against the current HEAD. The minimum unit of conflict resolution is a single `git merge` invocation: all conflicting files of that one merge are handed to the LLM in a single call, written back, committed, and only then does the next branch start.
+
+2. **Conflict-resolution context contract.** When a `git merge` reports conflicts, the LLM call SHALL receive at minimum:
+   - Merge metadata: ours/theirs branch names, merge-base commit, both HEAD commit hashes and messages.
+   - For every conflicting file: the full base/ours/theirs three-way contents (`git show :1:`/`:2:`/`:3:`) plus the working-tree file with `<<<<<<<` / `=======` / `>>>>>>>` markers.
+   - The path and hunk line ranges of each conflict.
+   - The selected strategy tier (default/strict/fast).
+
+   The call SHOULD additionally receive `git log <merge-base>..<theirs>` and `git log <merge-base>..<ours>` (oneline), a flag identifying spec files (subject to spec-guardrails), and a project-conventions summary.
+
+3. **Structured LLM output.** The LLM SHALL return structured JSON. For each file: `resolved_content` (full file text), per-hunk `confidence` and `reasoning`, and an `overall_confidence`. Top-level `flags` MAY include `requires_human_review` and `spec_guardrail_concern`. The strategy tier consumes this structured output to decide accept / human / reject.
+
+4. **Three strategy tiers (aligned with `se3 sync`):**
+   | Tier | Behavior |
+   |------|----------|
+   | `default` | LLM auto-resolves high-confidence conflicts. Low-confidence conflicts or any `spec_guardrail_concern` raise an MCP human call. |
+   | `strict` | Accept only when every hunk is high-confidence AND guardrails pass; otherwise raise a human call. |
+   | `fast` | Accept aggressively for ordinary text conflicts. Spec files (`se3/specs/**/spec.md`) are NOT exempted from guardrails or `spec_guardrail_concern`. |
+
+5. **Spec-guardrail enforcement.** Whenever a merge touches a `se3/specs/**/spec.md` file (whether or not it had a textual conflict), the merge product SHALL be re-checked by `se3 guardrails`. The check is mandatory in all three tiers. Violations (deleted requirements, weakened language SHALL→SHOULD, weakened quantifiers all→some, deleted scenarios) cause the merge to be rolled back and escalated to a human call.
+
+6. **Failure handling.** A merge that cannot be accepted (rejected by strategy, guardrails violation, LLM failure) defaults to `git merge --abort`, restoring the working tree. Branches successfully merged earlier in the sequence are preserved.
+
+7. **SemVer aggregation after merge.** After all branches are processed, the per-branch SemVer bump types (patch/minor/major), each computed against the merge base of that branch, are reduced via SemVer's max rule and a single `pyproject.toml` update is amended onto the last merge commit. Example: base `4.4.0` + patch + patch + minor → `4.5.0`. Per-branch historical commits are NOT rewritten — SemVer uniqueness is guaranteed by tags.
+
+8. **Branch and worktree cleanup.** Default behavior is to keep merged branches. With `--delete-merged`:
+   - Each merged branch is removed via `git branch -d` (lowercase) so that branches not reachable from HEAD are not silently destroyed.
+   - If a branch has a bound git worktree, `git worktree remove` is called when the worktree is clean (`git status --porcelain` empty); when dirty the cleanup is refused with an error and `--force` is NEVER used.
+   - The current branch and `main`/`master` are NEVER deleted.
+
+9. **Infrastructure reuse.** Execution logs go to `se3/logs/`. Human-decision artifacts go to `se3/calls/` as MCP call files (e.g., `se3/calls/merge_<timestamp>_<branch>.json`), consistent with `se3 sync` and the existing `merge_loop_branch` flow.
+
+**Out of scope (first version):** octopus merge (git's strategy supports only conflict-free combinations); single LLM call resolving multiple branches simultaneously (no ground truth); cross-branch hunk-level batching (git does not support partial layered merges); rewriting per-branch historical commits' versions; auto-deciding which branches to merge (the list MUST be explicit); injecting unrelated full-file context or historical-merge few-shot examples into the LLM prompt (possible later enhancement).
+
+#### Scenario: Successful sequential merge with no conflicts
+- **GIVEN** branches `feat/a`, `feat/b`, `feat/c` all merge cleanly into the current branch
+- **WHEN** user runs `se3 merge feat/a feat/b feat/c`
+- **THEN** each branch is merged in order, producing one merge commit per branch
+- **AND** the aggregated SemVer bump (max of each branch's bump type) is applied as a single `pyproject.toml` update amended onto the last merge commit
+
+#### Scenario: Conflict resolved automatically in default strategy
+- **GIVEN** merging `feat/x` produces text conflicts in non-spec files
+- **AND** the LLM returns high `overall_confidence` with no `spec_guardrail_concern`
+- **WHEN** strategy is `default`
+- **THEN** the resolved contents are written back, staged, and committed
+- **AND** the merge proceeds to the next branch
+
+#### Scenario: Low-confidence conflict escalates to human call
+- **GIVEN** the LLM resolution for a merge has low `overall_confidence` or sets `requires_human_review`
+- **WHEN** strategy is `default`
+- **THEN** `git merge --abort` restores the working tree
+- **AND** an MCP call file is created at `se3/calls/merge_<timestamp>_<branch>.json` containing the conflict context, LLM proposal, and confidence data
+- **AND** subsequent branches in the argument list are NOT attempted
+
+#### Scenario: Strict strategy rejects mixed-confidence resolution
+- **GIVEN** the LLM resolution contains at least one hunk below the high-confidence bar
+- **WHEN** strategy is `strict`
+- **THEN** the merge is aborted and a human call is created
+- **AND** previously successfully merged branches in the same invocation are preserved
+
+#### Scenario: Fast strategy still enforces guardrails on spec files
+- **GIVEN** a merge produces a change to `se3/specs/foo/spec.md` that weakens a SHALL to SHOULD
+- **WHEN** strategy is `fast`
+- **THEN** the guardrails check fails after the merge commit
+- **AND** the merge commit is rolled back
+- **AND** the issue is escalated to a human call (fast does NOT bypass spec guardrails or `spec_guardrail_concern`)
+
+#### Scenario: Branch cleanup with --delete-merged
+- **GIVEN** `feat/x` was merged successfully and has no bound worktree
+- **WHEN** the user passes `--delete-merged`
+- **THEN** `git branch -d feat/x` removes the branch
+- **AND** `main`/`master` and the current branch are never touched
+
+#### Scenario: Cleanup refuses to delete a dirty worktree
+- **GIVEN** `feat/y` was merged and has a bound worktree containing uncommitted changes
+- **WHEN** `--delete-merged` is in effect
+- **THEN** the cleanup reports an error for `feat/y`, leaves both worktree and branch intact, and does NOT use `git worktree remove --force`
+
+### Requirement: `se3 merge-respond` Command
+
+The `se3 merge-respond` command SHALL process an MCP call response file produced by `se3 merge` when conflicts were escalated for human decision.
+
+**Interface:**
+```bash
+se3 merge-respond <call-file-path>
+```
+
+#### Scenario: Process merge call response
+- **GIVEN** an MCP call file has been created by `se3 merge`
+- **AND** the user has filled in the `.response` file with resolutions or directives
+- **WHEN** user runs `se3 merge-respond <call-file-path>`
+- **THEN** the engine consumes the response and resumes the merge sequence (re-applying the resolved contents or skipping the merge per the user's decision)
+
 ## Command Summary
 
 | Command | Purpose | Status |
@@ -320,6 +424,8 @@ se3 sync-respond <call-file-path>
 | `se3 history` | View and manage flow history | **Required** |
 | `se3 sync` | Check and synchronize specs with project code | **Required** |
 | `se3 sync-respond` | Process MCP call response for sync conflicts | **Required** |
+| `se3 merge` | Sequentially merge one or more branches into current with LLM-assisted conflict resolution | **Required** |
+| `se3 merge-respond` | Process MCP call response for merge conflicts | **Required** |
 
 ### Requirement: Loop Mode CLI Options
 

@@ -242,3 +242,11 @@ Loop mode SHALL use git worktree-based branch isolation by default.
 - **WHEN** `se3 run --loop --merge se3-loop/20260324-120000` is executed
 - **THEN** the specified branch is merged into current branch
 - **AND** success or conflict is reported
+
+#### Scenario: Coexistence with standalone `se3 merge`
+- **GIVEN** the project supports both the in-loop `se3 run --loop --merge <branch>` path and the standalone `se3 merge <branch> [<branch> ...]` command
+- **WHEN** a user wants to fold one loop branch back into the original branch at the end of an iteration
+- **THEN** they use `se3 run --loop --merge`, which retains the existing in-loop semantics (single branch, governed by `conflict_resolver.strategy`)
+- **WHEN** a user wants to aggregate multiple parallel-task branches into the current branch in one shot, with strategy tiers, mandatory spec guardrails, and aggregated SemVer bumping
+- **THEN** they use `se3 merge <branch> [<branch> ...]`, which is governed by the `merge.*` config section and is independent of `conflict_resolver.strategy`
+- **AND** the two commands intentionally coexist — neither replaces the other

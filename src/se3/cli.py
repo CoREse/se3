@@ -387,24 +387,17 @@ def guardrails_cmd(
             typer.echo(f"Warning: Could not find original version in git history")
             original_content = new_content  # Compare with itself (no violations)
 
-    # Simple guardrails check
+    from .engine.merge.guardrails import check_spec_diff, GuardrailViolation
+
+    # Run the shared guardrails check
+    raw_violations = check_spec_diff(original_content, new_content, file_path=str(spec_file))
     violations = []
-
-    # Check for weakened language patterns
-    weaken_patterns = [
-        (r'\bMUST\b', r'\b(SHOULD|MAY)\b', "MUST weakened to SHOULD/MAY"),
-        (r'\bSHALL\b', r'\b(SHOULD|MAY)\b', "SHALL weakened to SHOULD/MAY"),
-        (r'\bREQUIRED\b', r'\b(RECOMMENDED|OPTIONAL)\b', "REQUIRED weakened to RECOMMENDED/OPTIONAL"),
-    ]
-
-    for strong, weak, message in weaken_patterns:
-        if re.search(strong, original_content) and re.search(weak, new_content):
-            if not re.search(strong, new_content):
-                violations.append({
-                    "type": "WEAKENING",
-                    "guardrail": "must_not_weaken",
-                    "message": message
-                })
+    for v in raw_violations:
+        violations.append({
+            "type": v.violation_type,
+            "guardrail": "must_not_weaken" if v.violation_type == "WEAKENING" else "must_not_delete",
+            "message": v.message,
+        })
 
     # Use full-content display for guardrails output
     lines = [
@@ -483,6 +476,65 @@ def sync_respond_cmd(
     from .commands.sync import process_call_response
 
     process_call_response(call_file)
+
+
+@app.command(name="merge")
+def merge_cmd(
+    branches: list[str] = typer.Argument(None, help="Branches to merge into current branch (in order)"),
+    strategy: str = typer.Option(None, "--strategy", "-s", help="Conflict resolution strategy: default, strict, or fast"),
+    delete_merged: bool = typer.Option(None, "--delete-merged", "-d", help="Delete merged branches and their worktrees after successful merge"),
+    no_delete_merged: bool = typer.Option(False, "--no-delete-merged", help="Do not delete merged branches (overrides config)"),
+):
+    """Merge one or more branches sequentially into the current branch.
+
+    Each branch is merged in order using git merge. Conflicts are handled
+    per the chosen strategy. After all merges complete, SemVer bumps are
+    aggregated and applied to pyproject.toml.
+
+    Default strategy and delete-merged behaviour can be configured in
+    se3.yaml under the ``merge:`` section.
+
+    Examples:
+        se3 merge feature-x
+        se3 merge feature-x feature-y --strategy=strict
+        se3 merge feature-x --delete-merged
+    """
+    from .commands.merge_cmd import run_merge
+    from .commands.run import get_project_root
+    from .config import load_merge_config
+
+    # Resolve project root first so config is loaded from the correct location
+    # (not cwd, which may be a subdirectory of the project).
+    project_root = get_project_root()
+    merge_cfg = load_merge_config(project_root)
+    effective_strategy = strategy if strategy is not None else merge_cfg.strategy
+    if no_delete_merged:
+        effective_delete = False
+    else:
+        effective_delete = delete_merged if delete_merged is not None else merge_cfg.delete_merged_default
+
+    if not branches:
+        render_full(
+            "Error: At least one branch name is required.\n\n"
+            "Usage: se3 merge <branch> [<branch> ...]\n"
+            "       se3 merge --help",
+            title="Error",
+        )
+        raise typer.Exit(1)
+
+    if effective_strategy not in ("default", "strict", "fast"):
+        render_text(
+            f"Invalid strategy '{effective_strategy}'. Must be one of: default, strict, fast",
+            title="Error",
+        )
+        raise typer.Exit(1)
+
+    exit_code = run_merge(
+        branches=branches,
+        strategy=effective_strategy,
+        delete_merged=effective_delete,
+    )
+    raise typer.Exit(exit_code)
 
 
 @app.command(name="salvage")
