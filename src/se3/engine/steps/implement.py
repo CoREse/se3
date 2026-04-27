@@ -1936,13 +1936,20 @@ def _format_fix_context_structured(fix_context: dict | str | None) -> str:
     return "\n".join(lines) if lines else "No additional context."
 
 
-def _format_spec_brief(spec_content: dict[str, str] | None) -> str:
-    """Format spec content for the implement prompt."""
+def _format_spec_brief(spec_content) -> str:
+    """Format spec content for the implement prompt.
+
+    Accepts either a pre-rendered string (current spec_loader output) or a
+    legacy ``{spec_name: text}`` dict from older persisted flows.
+    """
     if not spec_content:
         return "No project conventions specified."
 
+    if isinstance(spec_content, str):
+        return spec_content
+
     parts = []
-    for name, content in (spec_content or {}).items():
+    for name, content in spec_content.items():
         if content is None:
             content = ""
         parts.append(f"### {name}")
