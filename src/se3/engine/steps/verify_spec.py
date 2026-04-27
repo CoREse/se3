@@ -390,10 +390,13 @@ def _get_max_fix_iterations(flow: FlowInstance) -> int:
     return DEFAULT_MAX_FIX_ITERATIONS
 
 
-def _format_spec_content(spec_content: dict[str, str]) -> str:
+def _format_spec_content(spec_content) -> str:
     """Format spec content for inclusion in prompt."""
     if not spec_content:
         return "No specifications provided."
+
+    if isinstance(spec_content, str):
+        return spec_content
 
     parts = []
     for name, content in spec_content.items():

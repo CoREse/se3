@@ -175,10 +175,13 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # since spec info wasn't digested through propose → design pipeline
     spec_section = ""
     if not had_design and spec_content:
-        spec_parts = []
-        for name, content in spec_content.items():
-            spec_parts.append(f"### {name}\n{content}")
-        spec_section = "## Relevant Specifications\n\n" + "\n\n".join(spec_parts)
+        if isinstance(spec_content, str):
+            spec_section = "## Relevant Specifications\n\n" + spec_content
+        else:
+            spec_parts = []
+            for name, content in spec_content.items():
+                spec_parts.append(f"### {name}\n{content}")
+            spec_section = "## Relevant Specifications\n\n" + "\n\n".join(spec_parts)
 
     # Build revision section if this is a revision
     if is_revision and revision_feedback:

@@ -494,10 +494,17 @@ def _display_plan(plan: dict, task_groups: list, depth: str) -> None:
         console.print(summary_panel)
 
 
-def _format_spec_content(spec_content: dict[str, str]) -> str:
-    """Format spec content for inclusion in prompt."""
+def _format_spec_content(spec_content) -> str:
+    """Format spec content for inclusion in prompt.
+
+    Accepts either a pre-rendered string (current spec_loader output) or a
+    legacy ``{spec_name: text}`` dict from older persisted flows.
+    """
     if not spec_content:
         return "No relevant specifications found."
+
+    if isinstance(spec_content, str):
+        return spec_content
 
     parts = []
     for name, content in spec_content.items():

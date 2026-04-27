@@ -450,9 +450,12 @@ def _format_test_results(test_results: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _format_spec_content(spec_content: dict[str, str]) -> str:
+def _format_spec_content(spec_content) -> str:
     if not spec_content:
         return "No specifications provided."
+
+    if isinstance(spec_content, str):
+        return spec_content
 
     parts = []
     for name, content in spec_content.items():
