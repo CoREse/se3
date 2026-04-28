@@ -204,6 +204,77 @@ class TestDetailFromHistory:
         assert detail["steps"] == []
         assert detail["chat_sessions"] == 0
 
+    def test_self_check_pass_index_reconstructed(self, project):
+        """History-only flows reconstruct self_check pass indices from session order."""
+        flow_id = "flow-sc-passes"
+        history_dir = project / "se3" / "history" / flow_id
+        history_dir.mkdir(parents=True)
+
+        _write_jsonl(
+            history_dir / "01_analyze_a.jsonl",
+            [_mk_msg("user", "analyze", "2026-04-17T09:00:00")],
+        )
+        _write_jsonl(
+            history_dir / "05_self_check_b.jsonl",
+            [_mk_msg("user", "self_check", "2026-04-17T10:00:00")],
+        )
+        _write_jsonl(
+            history_dir / "06_self_check_c.jsonl",
+            [_mk_msg("user", "self_check", "2026-04-17T10:05:00")],
+        )
+        _write_jsonl(
+            history_dir / "07_verify_spec_d.jsonl",
+            [_mk_msg("user", "verify_spec", "2026-04-17T10:10:00")],
+        )
+
+        detail = _detail_from_history(project, flow_id)
+        assert detail is not None
+        steps = detail["steps"]
+        assert len(steps) == 4
+
+        # analyze has no pass metadata
+        assert steps[0]["outputs"] == {}
+
+        # First self_check gets pass_index=1
+        assert steps[1]["outputs"]["self_check_pass_index"] == 1
+        assert steps[1]["outputs"]["self_check_passes_required"] is not None
+
+        # Second self_check gets pass_index=2
+        assert steps[2]["outputs"]["self_check_pass_index"] == 2
+        assert steps[2]["outputs"]["self_check_passes_required"] is not None
+
+        # verify_spec resets the counter
+        assert steps[3]["outputs"] == {}
+
+    def test_self_check_pass_index_resets_after_non_self_check(self, project):
+        """Consecutive self_check counter resets at non-self_check steps."""
+        flow_id = "flow-sc-reset"
+        history_dir = project / "se3" / "history" / flow_id
+        history_dir.mkdir(parents=True)
+
+        _write_jsonl(
+            history_dir / "05_self_check_a.jsonl",
+            [_mk_msg("user", "self_check", "2026-04-17T10:00:00")],
+        )
+        _write_jsonl(
+            history_dir / "06_test_b.jsonl",
+            [_mk_msg("user", "test", "2026-04-17T10:05:00")],
+        )
+        _write_jsonl(
+            history_dir / "07_self_check_c.jsonl",
+            [_mk_msg("user", "self_check", "2026-04-17T10:10:00")],
+        )
+
+        detail = _detail_from_history(project, flow_id)
+        steps = detail["steps"]
+
+        # First self_check pass_index=1
+        assert steps[0]["outputs"]["self_check_pass_index"] == 1
+        # test resets counter
+        assert steps[1]["outputs"] == {}
+        # Second self_check (after test) pass_index=1 again
+        assert steps[2]["outputs"]["self_check_pass_index"] == 1
+
 
 def _write_jsonl(path: Path, messages: list[dict]) -> None:
     lines = [json.dumps(m, ensure_ascii=False) for m in messages]

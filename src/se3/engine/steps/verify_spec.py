@@ -353,19 +353,15 @@ def _get_max_fix_iterations(flow: FlowInstance) -> int:
         flow: Current flow instance
 
     Returns:
-        Maximum number of fix iterations (default: 3)
+        Maximum number of fix iterations (default: 20)
     """
     # Try to get from flow context first
     max_iter = flow.state.context.get("max_fix_iterations")
     if max_iter is not None:
         return int(max_iter)
 
-    # Try to load from the active project config (se3.local.yaml if
-    # present, otherwise se3.yaml). Route through load_project_yaml for
-    # consistency with the rest of the loaders — this gives us the
-    # malformed-local-shadow warning uniformly when verify_spec is
-    # invoked in isolation (e.g. from a unit test) without any other
-    # per-section loader having run in the same process.
+    # Try to load from the active project config via WorkflowConfig for
+    # consistency with the rest of the loaders.
     try:
         project_root_str = flow.state.context.get("project_root")
         if project_root_str:
@@ -378,13 +374,10 @@ def _get_max_fix_iterations(flow: FlowInstance) -> int:
         else:
             project_root = Path.cwd()
 
-        from ...config import load_project_yaml
+        from ...config import WorkflowConfig
 
-        config, _source = load_project_yaml(project_root)
-        workflow_config = config.get("workflow", {}) if isinstance(config, dict) else {}
-        max_iter = workflow_config.get("max_fix_iterations", DEFAULT_MAX_FIX_ITERATIONS)
-        return int(max_iter)
-    except Exception as e:
+        return WorkflowConfig.load(project_root).max_fix_iterations
+    except (IOError, OSError) as e:
         logger.debug(f"Could not load max_fix_iterations from config: {e}")
 
     return DEFAULT_MAX_FIX_ITERATIONS

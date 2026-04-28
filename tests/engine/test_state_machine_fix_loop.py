@@ -531,8 +531,20 @@ class TestBuildStepInputsSelfCheck:
         inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.SELF_CHECK)
         assert "max_fix_iterations" in inputs
 
-    def test_propagates_prev_self_check_issues(self, state_machine, flow_in_fix_loop):
+    def test_no_prev_self_check_issues_when_convergence_disabled(self, state_machine, flow_in_fix_loop):
+        """With convergence disabled (default), prev_self_check_issues is NOT injected."""
         inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.SELF_CHECK)
+        assert "prev_self_check_issues" not in inputs
+
+    def test_propagates_prev_self_check_issues_when_convergence_enabled(self, state_machine, flow_in_fix_loop):
+        """When convergence is enabled, prev_self_check_issues is injected on pass_index==1."""
+        # Temporarily enable convergence for this flow by injecting the flag
+        # into the state machine's workflow config path
+        from se3.config import WorkflowConfig
+        with patch.object(WorkflowConfig, 'load', return_value=WorkflowConfig(
+            self_check_convergence_enabled=True,
+        )):
+            inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.SELF_CHECK)
         assert len(inputs["prev_self_check_issues"]) == 1
         assert inputs["prev_self_check_issues"][0]["description"] == "Missing null check"
 
@@ -590,6 +602,7 @@ class TestPrevInputsDeepCopy:
         assert prev_verify.outputs["verification_result"]["issues"][0]["message"] == "A"
 
     def test_self_check_prev_issues_is_deep_copied(self, state_machine):
+        from se3.config import WorkflowConfig
         flow = FlowInstance(
             flow_id="test-deepcopy-sc",
             task_description="Test task",
@@ -604,7 +617,10 @@ class TestPrevInputsDeepCopy:
         )
         flow.state.add_step(prev_sc)
 
-        inputs = state_machine._build_step_inputs(flow, StepType.SELF_CHECK)
+        with patch.object(WorkflowConfig, 'load', return_value=WorkflowConfig(
+            self_check_convergence_enabled=True,
+        )):
+            inputs = state_machine._build_step_inputs(flow, StepType.SELF_CHECK)
         inputs["prev_self_check_issues"][0]["description"] = "MUTATED"
         assert prev_sc.outputs["issues"][0]["description"] == "D"
 

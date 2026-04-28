@@ -480,6 +480,7 @@ class TestSelfCheckConvergence:
                 "fix_iteration": 2,
                 "max_fix_iterations": 10,
                 "prev_self_check_issues": prev_issues,
+                "self_check_convergence_enabled": True,
             },
         )
         response = json.dumps({"issues": prev_issues, "summary": "same"})

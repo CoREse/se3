@@ -186,6 +186,13 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     max_iterations = step.inputs.get("max_fix_iterations") or _get_max_fix_iterations(flow)
     prev_issues = step.inputs.get("prev_self_check_issues", [])
     fix_history = step.inputs.get("fix_history", [])
+    convergence_enabled = step.inputs.get("self_check_convergence_enabled", False)
+    pass_index = step.inputs.get("self_check_pass_index", 1)
+    passes_required = step.inputs.get("self_check_passes_required", 1)
+
+    # Write back so history renderers can read the pass position
+    step.outputs["self_check_pass_index"] = pass_index
+    step.outputs["self_check_passes_required"] = passes_required
 
     changes_text = _format_changes(changes_made)
     test_text = _format_test_results(test_results)
@@ -216,7 +223,10 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     if spec_names:
         prompt += spec_names
 
-    logger.info(f"Running self-check code review (fix iteration: {fix_iteration})...")
+    logger.info(
+        f"Running self-check code review "
+        f"#{pass_index}/{passes_required} (fix iteration: {fix_iteration})..."
+    )
 
     try:
         retry_count = step.inputs.get("retry_count", 0)
@@ -247,14 +257,21 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["actionable_count"] = len(issues)
 
         if not issues:
-            logger.info("Self-check passed (no issues found)")
+            logger.info(f"Self-check #{pass_index}/{passes_required} passed (no issues found)")
             return StepStatus.COMPLETED
 
-        if _issues_converged(issues, prev_issues):
+        # NOTE: When convergence_enabled=True and N>1, pass #1 may return
+        # COMPLETED via the convergence shortcut. Pass #2+ deliberately strips
+        # prev_self_check_issues (no intra-round comparison), so if pass #2
+        # finds the same issues it returns REVISION_NEEDED, triggering another
+        # fix loop. This is intentional: convergence breaks stalled fix loops
+        # across rounds, not within a single N-pass round.
+        if convergence_enabled and _issues_converged(issues, prev_issues):
             logger.warning(
-                f"Self-check converged: {len(issues)} issue(s) match previous "
-                f"iteration's signatures — stopping fix loop to avoid re-flagging "
-                f"already-fixed or not-real issues"
+                f"Self-check #{pass_index}/{passes_required} converged: "
+                f"{len(issues)} issue(s) match previous iteration's signatures "
+                f"— stopping fix loop to avoid re-flagging already-fixed or "
+                f"not-real issues"
             )
             step.outputs["converged"] = True
             step.outputs["convergence_reason"] = (
@@ -264,8 +281,8 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             return StepStatus.COMPLETED
 
         logger.warning(
-            f"Self-check found {len(issues)} issue(s) "
-            f"(fix iteration {fix_iteration}/{max_iterations})"
+            f"Self-check #{pass_index}/{passes_required} found {len(issues)} "
+            f"issue(s) (fix iteration {fix_iteration}/{max_iterations})"
         )
 
         issue_details = "\n".join(

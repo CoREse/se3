@@ -111,6 +111,8 @@ would silently ignore the developer's main-repo override.
 - `implement.group_loc_threshold`: LOC threshold for collapsing task groups into a single LLM call (default: 300)
 - `implement.use_worktree`: Whether the implement step may use per-group worktrees and `impl/*` branches on the DAG parallel path (default: true). Set to `false` to force fully sequential execution on the original branch regardless of DAG topology.
 - `workflow.max_fix_iterations`: Max fix loop iterations before FAILED (default: 20)
+- `workflow.self_check_passes_required`: Number of consecutive clean self_check passes required within a fix-loop round before advancing to the next step (default: 1, must be >= 1 — startup fail-fast otherwise)
+- `workflow.self_check_convergence_enabled`: Enable cross-fix-loop convergence detection in self_check (default: false). When true, the first self_check instance of each fix-loop round (pass_index=1) compares its issues against the last self_check instance of the previous fix-loop round; identical issues short-circuit to COMPLETED. Same-round self_check instances never compare against each other.
 - `spec_loading.steps.<step_name>`: Per-step spec loading mode — `"items"` (default, header + selected requirements only) or `"full_spec"` (entire spec file). `update_spec` defaults to `full_spec`; all other steps default to `items`.
 - `test.command`: Primary test command override (default: null = auto-detect)
 - `test.timeout`: Fallback timeout (seconds) when dynamic timeout is unavailable (default: 1800)
@@ -541,26 +543,53 @@ implement:
 
 ### Requirement: Workflow Configuration
 
-The system SHALL support workflow-level configuration for the fix loop mechanism.
+The system SHALL support workflow-level configuration for the fix loop mechanism and the self_check N-pass / convergence behavior.
 
 **Workflow section options:**
 - `workflow.max_fix_iterations`: Maximum number of fix loop iterations before the flow is marked FAILED (default: 20). The fix loop counter is shared across TEST, SELF_CHECK, and VERIFY_SPEC steps. When exhausted, the state machine sets the flow to FAILED status, generates an A-class issue, and stops execution.
+- `workflow.self_check_passes_required`: Number of consecutive clean self_check passes required within a single fix-loop round before advancing to the next step (default: 1). MUST be an integer `>= 1`. When set to N>1, each fix-loop round repeats the self_check step up to N times: any single instance reporting issues short-circuits to fix-loop immediately (remaining instances are not created). Only after N consecutive clean instances does the flow advance. Values `< 1` (including 0 and negatives) trigger startup fail-fast in `WorkflowConfig` loading.
+- `workflow.self_check_convergence_enabled`: Toggle for the cross-fix-loop self_check convergence shortcut (default: `false`). When `false`, the state machine never compares the current round's issues against the previous round's issues, and `_issues_converged` is not invoked. When `true`, only the first self_check instance of a new fix-loop round (pass_index=1) receives `prev_self_check_issues` and participates in the comparison; instances #2..#N within the same round never participate. **NOTE:** the default flipped from on to off in this revision; this flip is intentionally not announced via changelog or startup log because the project requires every issue to be resolved, making convergence-based early exit a no-op on the happy path.
 
 **Example configuration:**
 ```yaml
 workflow:
-  max_fix_iterations: 20  # Allow up to 20 fix loop iterations
+  max_fix_iterations: 20                # Allow up to 20 fix loop iterations
+  self_check_passes_required: 3         # Require 3 consecutive clean self_check passes per round
+  self_check_convergence_enabled: false # Disable cross-round convergence shortcut (default)
 ```
 
 #### Scenario: Default workflow configuration
 - **WHEN** no `workflow` section exists in se3.yaml
-- **THEN** the framework uses a default `max_fix_iterations` of 20
+- **THEN** the framework uses `max_fix_iterations=20`, `self_check_passes_required=1`, and `self_check_convergence_enabled=false`
+- **AND** self_check executes once per fix-loop round (legacy behavior, single pass)
+- **AND** convergence detection is OFF — even when current and previous round issues are identical, the flow still enters fix-loop
 
 #### Scenario: Custom max fix iterations
 - **GIVEN** `workflow.max_fix_iterations: 10` in se3.yaml
 - **WHEN** the fix loop reaches 10 iterations without resolving all issues
 - **THEN** the state machine sets the flow to FAILED status
 - **AND** an A-class issue is generated describing the unresolved problems
+
+#### Scenario: Custom N-pass self_check
+- **GIVEN** `workflow.self_check_passes_required: 3` in se3.yaml
+- **WHEN** a fix-loop round enters the self_check step
+- **THEN** the state machine creates self_check Step instances #1, #2, #3 sequentially as each prior instance returns COMPLETED with no issues
+- **AND** only after #3 returns clean does the flow advance to verify_spec
+- **AND** if any instance reports issues, the flow enters fix-loop immediately and remaining instances are skipped
+
+#### Scenario: self_check_passes_required=0 fail-fast
+- **GIVEN** `workflow.self_check_passes_required: 0` in se3.yaml (or any value `< 1`)
+- **WHEN** the framework loads `WorkflowConfig` at startup
+- **THEN** a `ConfigError` is raised before any flow runs
+- **AND** the error message identifies the offending key and value (e.g., "self_check_passes_required must be >= 1, got 0")
+- **AND** the flow is not allowed to start with an invalid value (no silent clamping to 1)
+
+#### Scenario: Explicit convergence enabled
+- **GIVEN** `workflow.self_check_convergence_enabled: true` in se3.yaml
+- **WHEN** a fix-loop round's first self_check instance (pass_index=1) reports issues that match the previous round's last self_check issues
+- **THEN** `_issues_converged` is invoked and returns True
+- **AND** the self_check instance returns COMPLETED with `outputs["converged"]=true`, short-circuiting the fix-loop
+- **AND** subsequent instances #2..#N within the same round do not participate in convergence comparison even if `prev_self_check_issues` data exists, because the input is only injected at pass_index=1
 
 ### Requirement: Test Configuration
 
