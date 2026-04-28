@@ -19,7 +19,12 @@ from ..worktree import _run_git, get_conflicting_files, get_current_branch
 from .cleanup import CleanupManager, CleanupReport
 from .conflict_context import build as build_conflict_context
 from .conflict_resolver import ConflictResolver, LLMResolution, MergeStrategy
-from .guardrails import MergeGuardrailsCheck
+from .guardrail_repair import GuardrailRepairer
+from .guardrails import (
+    MergeGuardrailsCheck,
+    _get_changed_spec_files,
+    _read_file_from_ref,
+)
 from .human_call import HumanCallWriter
 from .strategy import DecisionAction, StrategyDecider, StrategyDecision
 from .version_aggregator import (
@@ -56,6 +61,20 @@ class GuardrailCallFileError(RuntimeError):
     def __init__(self, message: str, call_file: Optional[Path] = None) -> None:
         super().__init__(message)
         self.call_file = call_file
+
+
+class GuardrailRepairFailed(RuntimeError):
+    """Raised when fast-mode guardrail repair fails.
+
+    In ``fast`` strategy, post-merge guardrail violations are sent to the LLM
+    for repair. If the LLM cannot fix them, or if the repair process itself
+    fails, this exception is raised so the orchestrator can abort cleanly
+    without writing a human call file.
+    """
+
+    def __init__(self, message: str, failure_reason: str = "guardrail_repair_failed") -> None:
+        super().__init__(message)
+        self.failure_reason = failure_reason
 
 
 @dataclass
@@ -112,6 +131,7 @@ class MergeOrchestrator:
         self._decider = StrategyDecider()
         self._human_writer = HumanCallWriter(project_root)
         self._guardrails = MergeGuardrailsCheck(project_root)
+        self._repairer = GuardrailRepairer(project_root)
 
     def _log(self, message: str) -> None:
         """Append a line to the internal log buffer and the logger."""
@@ -343,6 +363,25 @@ class MergeOrchestrator:
                 self._write_log()
                 report.log_file = self.log_file
                 return report
+            elif result == "fast_abort":
+                self._log(
+                    f"Branch '{branch}' aborted in fast mode — no human call created"
+                )
+                if report.merged_branches:
+                    self._log(
+                        f"Version not bumped despite {len(report.merged_branches)} "
+                        f"successful merge(s) — re-run after resolving"
+                    )
+                report.success = False
+                report.failed_branch = branch
+                # Use the failure_reason already set by the lower layer if present
+                if not report.failure_reason:
+                    report.failure_reason = "fast_abort"
+                report.pending_human = False
+                report.version_aggregation_skipped = True
+                self._write_log()
+                report.log_file = self.log_file
+                return report
             else:
                 self._log(f"Branch '{branch}' merge returned unexpected result: {result}")
                 if report.merged_branches:
@@ -484,7 +523,16 @@ class MergeOrchestrator:
                 return "already_merged"
 
             try:
-                guardrails_result = self._run_guardrails(pre_merge_sha, post_merge_sha, branch)
+                guardrails_result = self._run_guardrails(
+                    pre_merge_sha, post_merge_sha, branch, strategy=self.strategy,
+                )
+            except GuardrailRepairFailed as exc:
+                self._log(
+                    f"Guardrail repair failed for '{branch}' in fast mode: {exc}"
+                )
+                report.rollback_failed = False
+                report.failure_reason = exc.failure_reason
+                return "fast_abort"
             except GuardrailCallFileError as exc:
                 self._log(
                     f"Guardrail violation detected, rollback succeeded, but "
@@ -535,10 +583,8 @@ class MergeOrchestrator:
 
         Returns:
             "merged" (if resolved and committed), "pending_human",
-            "guardrail_violation", or "conflict" (if rejected/aborted).
+            "guardrail_violation", "fast_abort", or "conflict" (if rejected/aborted).
         """
-        self._log(f"Conflict detected with branch '{branch}', invoking LLM resolution")
-
         # Build conflict context (must be called while mid-merge)
         try:
             ours_branch = getattr(self, "_current_branch", "HEAD")
@@ -548,7 +594,67 @@ class MergeOrchestrator:
             self._abort_merge()
             return "conflict"
 
-        # Call LLM resolver
+        # --- STRICT: short-circuit to human call, skip LLM ---
+        if self.strategy == MergeStrategy.STRICT:
+            self._log(
+                f"Strict strategy: skipping LLM resolution for '{branch}', "
+                f"routing directly to human call"
+            )
+            # Build a placeholder resolution from working tree content
+            from .conflict_resolver import Confidence, FileResolution, HunkResolution, LLMResolution
+            placeholder_files: list[FileResolution] = []
+            for cf in context.files:
+                placeholder_files.append(
+                    FileResolution(
+                        path=cf.path,
+                        resolved_content=cf.working_content if not cf.is_binary else "[binary]",
+                        hunks=[
+                            HunkResolution(
+                                start_line=h.start_line,
+                                end_line=h.end_line,
+                                confidence=Confidence.LOW,
+                                reasoning="Strict strategy: LLM resolution skipped",
+                            )
+                            for h in cf.hunks
+                        ],
+                        overall_confidence=Confidence.LOW,
+                        flags={},
+                        is_spec=cf.is_spec,
+                    )
+                )
+            placeholder_resolution = LLMResolution(
+                files=placeholder_files,
+                overall_confidence=Confidence.LOW,
+                flags={},
+            )
+            strict_decision = StrategyDecision(
+                action=DecisionAction.HUMAN_CALL,
+                reason="Strict strategy: conflict detected, LLM resolution skipped — human review required",
+            )
+            try:
+                call_file = self._human_writer.write_call(
+                    context, placeholder_resolution, strict_decision,
+                )
+            except Exception as exc:
+                self._log(
+                    f"CRITICAL: Failed to write human call file for strict mode: {exc}. "
+                    f"The merge is being aborted because the user has no call file to respond to."
+                )
+                self._abort_merge()
+                return "human_call_write_failed"
+            report.human_call_file = call_file
+            try:
+                self._human_writer.print_instructions(call_file)
+            except Exception as exc:
+                self._log(
+                    f"WARNING: Failed to print instructions (call file was written "
+                    f"successfully): {exc}"
+                )
+            return "pending_human"
+
+        # --- DEFAULT / FAST: call LLM resolver ---
+        self._log(f"Conflict detected with branch '{branch}', invoking LLM resolution")
+
         try:
             resolution = self._resolver.resolve(context, strategy=self.strategy)
         except Exception as exc:
@@ -564,6 +670,15 @@ class MergeOrchestrator:
         )
 
         self._log(f"Strategy decision: {decision.action.value} — {decision.reason}")
+
+        # --- FAST: HUMAN_CALL → abort (no human call file) ---
+        if decision.action == DecisionAction.HUMAN_CALL and self.strategy == MergeStrategy.FAST:
+            self._log(
+                f"Fast strategy: decision is HUMAN_CALL — aborting merge "
+                f"without human call file"
+            )
+            self._abort_merge()
+            return "fast_abort"
 
         if decision.action == DecisionAction.ACCEPT:
             # Pre-check: ensure resolution covers exactly the conflict files
@@ -588,6 +703,13 @@ class MergeOrchestrator:
                 self._log(
                     f"LLM resolution incomplete: {reason_detail}"
                 )
+                # --- FAST: incomplete resolution → abort ---
+                if self.strategy == MergeStrategy.FAST:
+                    self._log(
+                        f"Fast strategy: incomplete resolution — aborting merge"
+                    )
+                    self._abort_merge()
+                    return "fast_abort"
                 incomplete_decision = StrategyDecision(
                     action=DecisionAction.HUMAN_CALL,
                     reason=f"LLM resolution incomplete — {reason_detail}",
@@ -659,6 +781,8 @@ class MergeOrchestrator:
 
         # REJECT
         self._abort_merge()
+        if self.strategy == MergeStrategy.FAST:
+            return "fast_abort"
         return "conflict"
 
     def _apply_resolution(
@@ -792,6 +916,8 @@ class MergeOrchestrator:
         if add_failures:
             self._log("Aborting merge due to validation failures")
             self._abort_merge()
+            if self.strategy == MergeStrategy.FAST:
+                return "fast_abort"
             return "conflict"
 
         # --- Second pass: write and stage (all paths pre-validated) ---
@@ -842,11 +968,15 @@ class MergeOrchestrator:
             if add_failures:
                 self._log("Aborting merge due to write/stage failures")
                 self._abort_merge()
+                if self.strategy == MergeStrategy.FAST:
+                    return "fast_abort"
                 return "conflict"
 
         except Exception as exc:
             self._log(f"Exception during resolution application: {exc}")
             self._abort_merge()
+            if self.strategy == MergeStrategy.FAST:
+                return "fast_abort"
             return "conflict"
 
         # Commit the merge
@@ -859,10 +989,14 @@ class MergeOrchestrator:
         except subprocess.TimeoutExpired:
             self._log(f"git commit timed out for branch '{branch}'")
             self._abort_merge()
+            if self.strategy == MergeStrategy.FAST:
+                return "fast_abort"
             return "resolution_commit_timeout"
         if commit_result.returncode != 0:
             self._log(f"Merge commit failed: {commit_result.stderr.strip()}")
             self._abort_merge()
+            if self.strategy == MergeStrategy.FAST:
+                return "fast_abort"
             return "conflict"
 
         # Run guardrails
@@ -871,7 +1005,16 @@ class MergeOrchestrator:
             check=False, timeout=15,
         ).stdout.strip()
         try:
-            guardrails_result = self._run_guardrails(pre_merge_sha, post_merge_sha, branch)
+            guardrails_result = self._run_guardrails(
+                pre_merge_sha, post_merge_sha, branch, strategy=self.strategy,
+            )
+        except GuardrailRepairFailed as exc:
+            self._log(
+                f"Guardrail repair failed for '{branch}' in fast mode: {exc}"
+            )
+            report.rollback_failed = False
+            report.failure_reason = exc.failure_reason
+            return "fast_abort"
         except GuardrailCallFileError as exc:
             self._log(
                 f"Guardrail violation detected, rollback succeeded, but "
@@ -895,19 +1038,39 @@ class MergeOrchestrator:
         self._log(f"LLM-resolved merge of '{branch}' committed successfully")
         return "merged"
 
-    def _run_guardrails(self, pre_sha: str, post_sha: str, branch: str) -> Optional[Path]:
+    def _run_guardrails(
+        self,
+        pre_sha: str,
+        post_sha: str,
+        branch: str,
+        strategy: MergeStrategy = MergeStrategy.DEFAULT,
+    ) -> Optional[Path]:
         """Run guardrails check on spec files changed in the merge.
 
         If violations are found or the check itself fails, rolls back to
         ``pre_sha`` BEFORE writing the human call file so the call file's
         message is always truthful.
 
+        In ``fast`` strategy, violations are fed to the LLM for repair instead
+        of escalating to a human call. If repair succeeds, the merge commit is
+        amended and ``None`` is returned. If repair fails,
+        ``GuardrailRepairFailed`` is raised (after rollback).
+
+        Args:
+            pre_sha: SHA of HEAD before the merge.
+            post_sha: SHA of the merge commit.
+            branch: The branch being merged.
+            strategy: The merge strategy tier.
+
         Returns:
-            ``None`` if guardrails passed.
+            ``None`` if guardrails passed (or were repaired in fast mode).
             ``Path`` to the human call file if violations were found or the
             check itself failed (rollback performed, human call written).
+            Only returned for ``default`` and ``strict`` strategies.
 
         Raises:
+            GuardrailRepairFailed: In ``fast`` strategy, when LLM repair of
+            guardrail violations fails after rollback.
             RuntimeError: If the rollback (git reset --hard) fails. The
             caller must escalate because the tree is in an inconsistent state.
         """
@@ -917,9 +1080,15 @@ class MergeOrchestrator:
                 "(pre_sha=%r, post_sha=%r). Treating as failure.",
                 branch, pre_sha, post_sha,
             )
-            # Roll back to pre_sha if we have it, even if post_sha is missing
             if pre_sha:
                 self._rollback_to(pre_sha)
+            if strategy == MergeStrategy.FAST:
+                raise GuardrailRepairFailed(
+                    f"Guardrails check skipped for '{branch}': missing SHA "
+                    f"(pre_sha={pre_sha!r}, post_sha={post_sha!r}). "
+                    f"Fast mode aborts without human call.",
+                    failure_reason="guardrail_repair_failed",
+                )
             call_message = (
                 f"Guardrails check skipped: missing SHA "
                 f"(pre_sha={pre_sha!r}, post_sha={post_sha!r})."
@@ -956,8 +1125,6 @@ class MergeOrchestrator:
                     f"WARNING: Failed to print instructions (call file was written "
                     f"successfully): {exc}"
                 )
-            # If pre_sha is empty we could not roll back; escalate so the caller
-            # reports rollback_failed rather than guardrail_violation.
             if not pre_sha:
                 raise GuardrailRollbackError(
                     f"Guardrails check for '{branch}' could not roll back because "
@@ -971,14 +1138,63 @@ class MergeOrchestrator:
                 self._log(f"Guardrails passed for merge of '{branch}'")
                 return None
 
-            self._log(f"Guardrails detected {len(gr_report.violations)} violation(s) for '{branch}'")
+            self._log(
+                f"Guardrails detected {len(gr_report.violations)} violation(s) "
+                f"for '{branch}' (reason: post-merge guardrails violation)"
+            )
             for v in gr_report.violations:
                 self._log(f"  [{v.violation_type}] {v.file_path}: {v.message}")
 
-            # Rollback FIRST, then write human call so the message is truthful.
+            # --- fast strategy: attempt LLM repair ---
+            if strategy == MergeStrategy.FAST:
+                self._log(
+                    f"Fast strategy: attempting LLM repair of "
+                    f"{len(gr_report.violations)} guardrail violation(s)"
+                )
+
+                # Gather original and merged spec contents for the repair prompt
+                spec_files = _get_changed_spec_files(
+                    self.project_root, pre_sha, post_sha,
+                )
+                original_specs: dict[str, str] = {}
+                merged_specs: dict[str, str] = {}
+                for sp in spec_files:
+                    orig = _read_file_from_ref(self.project_root, sp, pre_sha)
+                    if orig is not None:
+                        original_specs[sp] = orig
+                    merged = _read_file_from_ref(self.project_root, sp, post_sha)
+                    if merged is not None:
+                        merged_specs[sp] = merged
+
+                repair_result = self._repairer.repair_violations(
+                    branch=branch,
+                    pre_sha=pre_sha,
+                    post_sha=post_sha,
+                    violations=gr_report.violations,
+                    original_spec_contents=original_specs,
+                    merged_spec_contents=merged_specs,
+                )
+
+                if repair_result.success:
+                    self._log(
+                        f"Guardrail repair succeeded for '{branch}': "
+                        f"{len(repair_result.repaired_files)} file(s) corrected"
+                    )
+                    return None
+
+                # Repair failed — rollback and abort (no human call in fast)
+                self._log(
+                    f"Guardrail repair failed for '{branch}': {repair_result.error}"
+                )
+                self._rollback_to(pre_sha)
+                raise GuardrailRepairFailed(
+                    f"Guardrail repair failed for '{branch}': {repair_result.error}",
+                    failure_reason="guardrail_repair_failed",
+                )
+
+            # --- default / strict strategy: rollback + human call ---
             self._rollback_to(pre_sha)
 
-            # Write human call for guardrail violation
             call_file: Optional[Path] = None
             try:
                 violation_dicts = [
@@ -1010,10 +1226,17 @@ class MergeOrchestrator:
                     f"successfully): {exc}"
                 )
             return call_file
+        except GuardrailRepairFailed:
+            raise  # re-raise fast-mode repair failures without wrapping
         except Exception as exc:
             self._log(f"Guardrails check failed for '{branch}': {exc}")
-            # Fail closed: treat check failure as a guardrail violation.
             self._rollback_to(pre_sha)
+            if strategy == MergeStrategy.FAST:
+                raise GuardrailRepairFailed(
+                    f"Guardrails check failed for '{branch}': {exc}. "
+                    f"Fast mode aborts without human call.",
+                    failure_reason="guardrail_repair_failed",
+                ) from exc
             try:
                 call_file = self._human_writer.write_guardrail_call(
                     branch=branch,

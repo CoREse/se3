@@ -451,8 +451,13 @@ class TestOrchestratorGuardrailsIntegration:
         call_files = list(calls_dir.glob("merge_*_guardrail.json"))
         assert len(call_files) == 1
 
-    def test_fast_strategy_spec_weakening_still_rollback(self, tmp_path: Path) -> None:
-        """fast strategy + spec weakening → rollback (key anti-regression test)."""
+    def test_fast_strategy_spec_weakening_llm_repair_success(self, tmp_path: Path) -> None:
+        """fast strategy + spec weakening → LLM repair → merge succeeds.
+
+        In fast mode, guardrail violations are sent to the LLM for repair
+        instead of rolling back and creating a human call. If the LLM
+        successfully restores the weakened requirement, the merge proceeds.
+        """
         default_branch = self._setup_repo_with_spec(tmp_path)
 
         _git(tmp_path, "checkout", "-b", "feature-fast")
@@ -472,10 +477,59 @@ class TestOrchestratorGuardrailsIntegration:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute(["feature-fast"])
 
-        # Even in fast mode, spec weakening must be rejected
+        # Fast mode: LLM repairs the violation, merge succeeds
+        assert report.success is True, (
+            f"Expected success after LLM repair, got failure_reason={report.failure_reason}"
+        )
+        assert "feature-fast" in report.merged_branches
+        assert report.pending_human is False
+        assert report.human_call_file is None
+
+        # HEAD should have changed (merge commit created and amended)
+        post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        assert post_head != pre_head
+
+        # Spec should have been repaired (SHALL restored)
+        spec_content = spec_path.read_text()
+        assert "SHALL" in spec_content
+        assert "SHOULD" not in spec_content
+
+    def test_fast_strategy_spec_weakening_llm_repair_failure_aborts(self, tmp_path: Path, monkeypatch) -> None:
+        """fast strategy + spec weakening + LLM repair fails → abort, no human call."""
+        default_branch = self._setup_repo_with_spec(tmp_path)
+
+        _git(tmp_path, "checkout", "-b", "feature-fast")
+        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path.write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n\n"
+            "#### Scenario: Valid input\n"
+            "- WHEN user provides valid data\n"
+            "- THEN authentication succeeds\n"
+        )
+        _commit(tmp_path, "weaken spec")
+
+        _git(tmp_path, "checkout", default_branch)
+        pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        # Mock repairer to always fail
+        def mock_repair(self, branch, pre_sha, post_sha, violations, original_spec_contents, merged_spec_contents):
+            from se3.engine.merge.guardrail_repair import RepairResult
+            return RepairResult(success=False, error="LLM could not fix")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            mock_repair,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature-fast"])
+
+        # Fast mode: repair failed, merge aborts, no human call
         assert report.success is False
-        assert report.failure_reason == "guardrail_violation"
-        assert report.pending_human is True
+        assert report.failure_reason == "guardrail_repair_failed"
+        assert report.pending_human is False
+        assert report.human_call_file is None
 
         # HEAD restored
         post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()

@@ -30,7 +30,7 @@ class HumanCallWriter:
     def write_call(
         self,
         context: ConflictContext,
-        resolution: LLMResolution,
+        resolution: Optional[LLMResolution],
         decision: StrategyDecision,
         *,
         options: Optional[dict[str, str]] = None,
@@ -41,7 +41,8 @@ class HumanCallWriter:
 
         Args:
             context: The three-way merge context.
-            resolution: The LLM's proposed resolution.
+            resolution: The LLM's proposed resolution. May be ``None`` when
+                the strict strategy short-circuits LLM resolution.
             decision: The strategy decision that led to human escalation.
             options: Optional custom options dict to override the default
                 ``accept / abort / manual`` choices.
@@ -68,10 +69,11 @@ class HumanCallWriter:
 
         # Build file entries with both context and resolution
         file_entries = []
+        resolution_files = resolution.files if resolution is not None else []
         for cf in context.files:
             # Find matching resolution file
             res_file = None
-            for rf in resolution.files:
+            for rf in resolution_files:
                 if rf.path == cf.path:
                     res_file = rf
                     break
@@ -110,6 +112,13 @@ class HumanCallWriter:
 
             file_entries.append(entry)
 
+        if resolution is not None:
+            llm_overall_confidence = resolution.overall_confidence.value
+            llm_flags = resolution.flags
+        else:
+            llm_overall_confidence = "low"
+            llm_flags = {}
+
         call_data = {
             "type": "merge_conflict",
             "created_at": datetime.now().isoformat(),
@@ -120,8 +129,8 @@ class HumanCallWriter:
             "theirs_head_sha": context.theirs_head_sha,
             "decision_reason": decision.reason,
             "files": file_entries,
-            "llm_overall_confidence": resolution.overall_confidence.value,
-            "llm_flags": resolution.flags,
+            "llm_overall_confidence": llm_overall_confidence,
+            "llm_flags": llm_flags,
             "options": options or {
                 "accept": "Accept LLM resolution — write resolved content and complete merge",
                 "abort": "Abort merge — run `git merge --abort` and stop",
