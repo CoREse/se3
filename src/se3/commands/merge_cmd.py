@@ -252,14 +252,53 @@ def run_merge(
         render_text("\n".join(lines), title="Merge Paused")
         return 130  # Interrupted by user / pending human
     else:
-        lines = ["Merge failed.", ""]
+        title, first_line = _failure_title_and_summary(report.failure_reason)
+        lines = [first_line, ""]
         if report.failed_branch:
             lines.append(f"Failed branch: {report.failed_branch}")
-        if report.failure_reason:
+        if report.failure_reason and report.failure_reason not in (
+            "merge_conflict",
+            "guardrail_violation",
+            "guardrail_repair_failed",
+            "fast_abort",
+            "llm_resolution_failed",
+        ):
             lines.append(f"Reason: {report.failure_reason}")
         if report.merged_branches:
             lines.append(f"Branches already merged: {', '.join(report.merged_branches)}")
         if report.log_file:
             lines.append(f"Log file: {report.log_file}")
-        render_text("\n".join(lines), title="Merge Failed")
+        render_text("\n".join(lines), title=title)
         return 1
+
+
+def _failure_title_and_summary(
+    failure_reason: Optional[str],
+) -> tuple[str, str]:
+    """Return (title, first_line) for a merge failure report.
+
+    Distinguishes git merge conflicts from post-merge guardrail violations
+    and fast-mode aborts so the user knows which category of failure
+    occurred.
+    """
+    if failure_reason == "merge_conflict":
+        return (
+            "Merge failed",
+            "Merge failed: git merge conflict (could not be resolved)",
+        )
+    if failure_reason == "guardrail_violation":
+        return (
+            "Merge failed",
+            "Merge failed: post-merge guardrails violation",
+        )
+    if failure_reason == "guardrail_repair_failed":
+        return (
+            "Merge aborted",
+            "Merge aborted: fast strategy could not auto-repair guardrails violation",
+        )
+    if failure_reason in ("fast_abort", "llm_resolution_failed"):
+        return (
+            "Merge aborted",
+            "Merge aborted: fast strategy could not resolve conflict",
+        )
+    return ("Merge failed", "Merge failed.")

@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from se3.commands.merge_cmd import _branch_exists, _is_working_tree_clean, run_merge
+from se3.commands.merge_cmd import (
+    _branch_exists,
+    _failure_title_and_summary,
+    _is_working_tree_clean,
+    run_merge,
+)
 
 
 def _get_default_branch(path: Path) -> str:
@@ -513,3 +518,167 @@ class TestMergeVersionAggregationWarning:
         exit_code = run_merge(["feature"], project_root=tmp_path)
         assert exit_code == 0
         assert (tmp_path / "feat.txt").exists()
+
+
+class TestFailureTitleAndSummary:
+    """Unit tests for _failure_title_and_summary mapping."""
+
+    def test_merge_conflict(self) -> None:
+        title, summary = _failure_title_and_summary("merge_conflict")
+        assert title == "Merge failed"
+        assert "git merge conflict" in summary
+
+    def test_guardrail_violation(self) -> None:
+        title, summary = _failure_title_and_summary("guardrail_violation")
+        assert title == "Merge failed"
+        assert "post-merge guardrails violation" in summary
+
+    def test_guardrail_repair_failed(self) -> None:
+        title, summary = _failure_title_and_summary("guardrail_repair_failed")
+        assert title == "Merge aborted"
+        assert "fast strategy could not auto-repair" in summary
+
+    def test_fast_abort(self) -> None:
+        title, summary = _failure_title_and_summary("fast_abort")
+        assert title == "Merge aborted"
+        assert "fast strategy could not resolve conflict" in summary
+
+    def test_llm_resolution_failed(self) -> None:
+        title, summary = _failure_title_and_summary("llm_resolution_failed")
+        assert title == "Merge aborted"
+        assert "fast strategy could not resolve conflict" in summary
+
+    def test_unknown_reason_fallback(self) -> None:
+        title, summary = _failure_title_and_summary("some_unknown_reason")
+        assert title == "Merge failed"
+        assert summary == "Merge failed."
+
+    def test_none_reason_fallback(self) -> None:
+        title, summary = _failure_title_and_summary(None)
+        assert title == "Merge failed"
+        assert summary == "Merge failed."
+
+
+class TestFailureReasonRendering:
+    """Integration tests: verify run_merge renders distinct titles/summaries."""
+
+    def _mock_orchestrator_report(
+        self, monkeypatch, report
+    ) -> list[dict]:
+        """Mock MergeOrchestrator.execute to return the given report.
+
+        Returns a list that will be populated with captured render_text calls.
+        """
+        captured: list[dict] = []
+
+        def capture_render_text(content, title=None, style=None):
+            captured.append({"content": content, "title": title})
+
+        monkeypatch.setattr(
+            "se3.commands.merge_cmd.render_text", capture_render_text,
+        )
+
+        class MockOrchestrator:
+            def __init__(self, **kwargs):
+                pass
+
+            def execute(self, branches):
+                return report
+
+        # MergeOrchestrator is imported inside run_merge from the engine
+        # module, so we patch the source class there.
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator", MockOrchestrator,
+        )
+        # Bypass branch-existence check so validation reaches the orchestrator.
+        monkeypatch.setattr(
+            "se3.commands.merge_cmd._branch_exists", lambda _root, _branch: True,
+        )
+        return captured
+
+    def test_merge_conflict_rendering(self, tmp_path: Path, monkeypatch) -> None:
+        """failure_reason='merge_conflict' → 'Merge failed' title + git conflict summary."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature",
+            failure_reason="merge_conflict",
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 1
+        assert len(captured) == 1
+        assert captured[0]["title"] == "Merge failed"
+        assert "git merge conflict" in captured[0]["content"]
+
+    def test_guardrail_violation_rendering(self, tmp_path: Path, monkeypatch) -> None:
+        """failure_reason='guardrail_violation' → 'Merge failed' title + guardrails summary."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature",
+            failure_reason="guardrail_violation",
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 1
+        assert len(captured) == 1
+        assert captured[0]["title"] == "Merge failed"
+        assert "post-merge guardrails violation" in captured[0]["content"]
+
+    def test_guardrail_repair_failed_rendering(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """failure_reason='guardrail_repair_failed' → 'Merge aborted' title."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature",
+            failure_reason="guardrail_repair_failed",
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 1
+        assert len(captured) == 1
+        assert captured[0]["title"] == "Merge aborted"
+        assert "auto-repair guardrails violation" in captured[0]["content"]
+
+    def test_fast_abort_rendering(self, tmp_path: Path, monkeypatch) -> None:
+        """failure_reason='fast_abort' → 'Merge aborted' title + fast summary."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature",
+            failure_reason="fast_abort",
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 1
+        assert len(captured) == 1
+        assert captured[0]["title"] == "Merge aborted"
+        assert "fast strategy could not resolve conflict" in captured[0]["content"]
+
+    def test_generic_failure_reason_shown(self, tmp_path: Path, monkeypatch) -> None:
+        """Unknown failure_reason still appears as 'Reason: ...' in output."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature",
+            failure_reason="some_custom_reason",
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 1
+        assert len(captured) == 1
+        assert captured[0]["title"] == "Merge failed"
+        assert "Reason: some_custom_reason" in captured[0]["content"]

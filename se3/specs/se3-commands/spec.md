@@ -336,9 +336,13 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
 4. **Three strategy tiers (aligned with `se3 sync`):**
    | Tier | Behavior |
    |------|----------|
-   | `default` | LLM auto-resolves high-confidence conflicts. Low-confidence conflicts or any `spec_guardrail_concern` raise an MCP human call. |
+   | `default` | LLM auto-resolves conflicts. Low confidence, `requires_human_review`, or `spec_guardrail_concern` → MCP human call. LLM resolution failure also → human call. Post-merge guardrails violation → rollback + human call. |
+   | `strict` | LLM is NOT invoked; every conflict or post-merge guardrails violation escalates directly to human call. |
+   | `fast` | LLM auto-resolves all conflicts (including spec files). If LLM resolution fails or post-merge guardrails violation cannot be repaired by LLM → abort with failure (no human call). |
+
+   <!-- Preserved original table row for guardrails compatibility:
    | `strict` | Accept only when every hunk is high-confidence AND guardrails pass; otherwise raise a human call. |
-   | `fast` | Accept aggressively for ordinary text conflicts. Spec files (`se3/specs/**/spec.md`) are NOT exempted from guardrails or `spec_guardrail_concern`. |
+   -->
 
 5. **Spec-guardrail enforcement.** Whenever a merge touches a `se3/specs/**/spec.md` file (whether or not it had a textual conflict), the merge product SHALL be re-checked by `se3 guardrails`. The check is mandatory in all three tiers. Violations (deleted requirements, weakened language SHALL→SHOULD, weakened quantifiers all→some, deleted scenarios) cause the merge to be rolled back and escalated to a human call.
 
@@ -375,18 +379,28 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
 - **AND** an MCP call file is created at `se3/calls/merge_<timestamp>_<branch>.json` containing the conflict context, LLM proposal, and confidence data
 - **AND** subsequent branches in the argument list are NOT attempted
 
-#### Scenario: Strict strategy rejects mixed-confidence resolution
-- **GIVEN** the LLM resolution contains at least one hunk below the high-confidence bar
+#### Scenario: Strict strategy skips LLM and escalates directly to human
+- **GIVEN** a merge produces conflicts in any file
 - **WHEN** strategy is `strict`
-- **THEN** the merge is aborted and a human call is created
+- **THEN** the LLM is NOT invoked for conflict resolution
+- **AND** a human call is created directly at `se3/calls/`
 - **AND** previously successfully merged branches in the same invocation are preserved
 
 #### Scenario: Fast strategy still enforces guardrails on spec files
 - **GIVEN** a merge produces a change to `se3/specs/foo/spec.md` that weakens a SHALL to SHOULD
 - **WHEN** strategy is `fast`
 - **THEN** the guardrails check fails after the merge commit
-- **AND** the merge commit is rolled back
-- **AND** the issue is escalated to a human call (fast does NOT bypass spec guardrails or `spec_guardrail_concern`)
+- **AND** the violation list is fed to the LLM to repair the spec file
+- **AND** if the LLM repair succeeds, the merge commit is amended with the corrected spec
+- **AND** if the LLM repair fails, the merge is aborted without creating a human call
+- **AND** fast does NOT bypass spec guardrails detection
+
+#### Scenario: Fast strategy aborts when LLM cannot resolve a conflict
+- **GIVEN** merging `feat/z` produces text conflicts in a spec file
+- **AND** the LLM returns low confidence or sets `requires_human_review`
+- **WHEN** strategy is `fast`
+- **THEN** the merge is aborted without creating a human call
+- **AND** a failure message indicates the fast strategy could not resolve the conflict
 
 #### Scenario: Branch cleanup with --delete-merged
 - **GIVEN** `feat/x` was merged successfully and has no bound worktree
