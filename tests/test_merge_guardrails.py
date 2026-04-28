@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from se3.engine.merge.conflict_resolver import MergeStrategy
 from se3.engine.merge.guardrails import (
     GuardrailViolation,
     MergeGuardrailsCheck,
@@ -826,3 +827,180 @@ class TestOrchestratorGuardrailsIntegration:
         # NOT be confused by the working tree MUST
         assert report.passed is False
         assert any("SHALL" in v.message for v in report.violations)
+
+
+class TestRunGuardrailsFastBranch:
+    """Tests for _run_guardrails fast strategy branch.
+
+    Uses real git repos + mock GuardrailRepairer to verify:
+    - branch name passed correctly to repairer
+    - amend is performed by the repairer
+    - final guardrails re-check is executed after amend
+    """
+
+    def _setup_spec_repo(self, tmp_path: Path) -> str:
+        """Init repo with a spec file. Returns default branch name."""
+        _init_repo(tmp_path)
+        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "spec.md").write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHALL validate all user inputs.\n"
+        )
+        (tmp_path / "code.py").write_text("def auth(): pass\n")
+        _commit(tmp_path, "initial")
+        return _current_branch(tmp_path)
+
+    def test_fast_run_guardrails_calls_repairer_with_correct_branch(self, tmp_path: Path, monkeypatch) -> None:
+        """_run_guardrails(strategy=fast) calls repairer with correct branch name."""
+        default_branch = self._setup_spec_repo(tmp_path)
+
+        # Create feature branch that weakens spec
+        _git(tmp_path, "checkout", "-b", "feature-fast")
+        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path.write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        _commit(tmp_path, "weaken spec")
+
+        _git(tmp_path, "checkout", default_branch)
+
+        # Merge feature-fast (creates merge commit with violation)
+        pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        _git(tmp_path, "merge", "feature-fast", "--no-edit", "-m", "Merge feature-fast")
+        post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        # Track repairer calls
+        repairer_calls = []
+
+        def mock_repair(self, branch, pre_sha, post_sha, violations,
+                        original_spec_contents, merged_spec_contents):
+            repairer_calls.append({
+                "branch": branch,
+                "pre_sha": pre_sha,
+                "post_sha": post_sha,
+                "violation_count": len(violations),
+            })
+            from se3.engine.merge.guardrail_repair import RepairResult
+            return RepairResult(success=True, repaired_files=["se3/specs/base/spec.md"])
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            mock_repair,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        result = orch._run_guardrails(
+            pre_head, post_head, "feature-fast", strategy=MergeStrategy.FAST,
+        )
+
+        # Should return None (no violation after repair)
+        assert result is None
+
+        # Repairer should have been called once with correct branch
+        assert len(repairer_calls) == 1
+        assert repairer_calls[0]["branch"] == "feature-fast"
+        assert repairer_calls[0]["pre_sha"] == pre_head
+        assert repairer_calls[0]["post_sha"] == post_head
+        assert repairer_calls[0]["violation_count"] >= 1
+
+    def test_fast_run_guardrails_repairer_amends_and_rechecks(self, tmp_path: Path, monkeypatch) -> None:
+        """_run_guardrails(strategy=fast): repairer amends commit and guardrails re-check."""
+        default_branch = self._setup_spec_repo(tmp_path)
+
+        _git(tmp_path, "checkout", "-b", "feature-amend")
+        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path.write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        (tmp_path / "code.py").write_text("def auth(): return True\n")
+        _commit(tmp_path, "weaken spec and update code")
+
+        _git(tmp_path, "checkout", default_branch)
+
+        pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        _git(tmp_path, "merge", "feature-amend", "--no-edit", "-m", "Merge feature-amend")
+        post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        # Mock repairer to actually fix the file and amend
+        def mock_repair(self, branch, pre_sha, post_sha, violations,
+                        original_spec_contents, merged_spec_contents):
+            # Fix the spec file
+            content = spec_path.read_text()
+            content = content.replace("SHOULD", "SHALL")
+            spec_path.write_text(content)
+            # Stage and amend
+            _git(self.project_root, "add", "se3/specs/base/spec.md")
+            amend_result = _git(
+                self.project_root, "commit", "--amend", "--no-edit", check=False,
+            )
+            if amend_result.returncode != 0:
+                raise RuntimeError(f"git amend failed: {amend_result.stderr}")
+            from se3.engine.merge.guardrail_repair import RepairResult
+            return RepairResult(success=True, repaired_files=["se3/specs/base/spec.md"])
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            mock_repair,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        result = orch._run_guardrails(
+            pre_head, post_head, "feature-amend", strategy=MergeStrategy.FAST,
+        )
+
+        # Should return None (repair succeeded)
+        assert result is None
+
+        # HEAD should have changed due to amend
+        amended_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        assert amended_head != post_head
+
+        # Spec should be fixed
+        assert "SHALL" in spec_path.read_text()
+        assert "SHOULD" not in spec_path.read_text()
+
+    def test_fast_run_guardrails_repair_failure_raises(self, tmp_path: Path, monkeypatch) -> None:
+        """_run_guardrails(strategy=fast): repairer failure raises GuardrailRepairFailed."""
+        default_branch = self._setup_spec_repo(tmp_path)
+
+        _git(tmp_path, "checkout", "-b", "feature-fail")
+        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path.write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        _commit(tmp_path, "weaken spec")
+
+        _git(tmp_path, "checkout", default_branch)
+
+        pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        _git(tmp_path, "merge", "feature-fail", "--no-edit", "-m", "Merge feature-fail")
+        post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        # Mock repairer to fail
+        def mock_repair(self, branch, pre_sha, post_sha, violations,
+                        original_spec_contents, merged_spec_contents):
+            from se3.engine.merge.guardrail_repair import RepairResult
+            return RepairResult(
+                success=False,
+                error="LLM could not fix the weakening",
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            mock_repair,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        from se3.engine.merge.orchestrator import GuardrailRepairFailed
+        with pytest.raises(GuardrailRepairFailed):
+            orch._run_guardrails(
+                pre_head, post_head, "feature-fail", strategy=MergeStrategy.FAST,
+            )
+
+        # HEAD should be rolled back to pre-merge state
+        current_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        assert current_head == pre_head
