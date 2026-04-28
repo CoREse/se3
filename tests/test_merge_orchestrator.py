@@ -857,8 +857,13 @@ class TestMergeOrchestratorConflictResolution:
         ).stdout.strip()
         assert post_head == pre_head
 
-    def test_fast_spec_guardrail_human_call(self, tmp_path: Path, monkeypatch) -> None:
-        """fast strategy + spec_guardrail_concern → HUMAN_CALL regardless of confidence."""
+    def test_fast_spec_guardrail_concern_accepted(self, tmp_path: Path, monkeypatch) -> None:
+        """fast strategy + spec_guardrail_concern → ACCEPT (deferred to post-merge guardrails).
+
+        The LLM's spec_guardrail_concern flag is ignored in _decide_fast;
+        post-merge guardrails handle real violations. Since shared.txt is not
+        a real spec file, guardrails pass and the merge succeeds.
+        """
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
@@ -887,9 +892,10 @@ class TestMergeOrchestratorConflictResolution:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute([feature_branch])
 
-        assert report.success is False
-        assert report.pending_human is True
-        assert report.failed_branch == feature_branch
+        # spec_guardrail_concern is deferred; merge succeeds
+        assert report.success is True
+        assert feature_branch in report.merged_branches
+        assert (tmp_path / "shared.txt").read_text() == "line1\nRESOLVED\nline3\n"
 
     def test_fast_strategy_conflict_markers_in_non_spec_file_abort(self, tmp_path: Path, monkeypatch) -> None:
         """fast strategy + non-spec file with conflict markers in resolved_content → abort.

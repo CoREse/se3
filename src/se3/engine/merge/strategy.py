@@ -37,10 +37,12 @@ class StrategyDecider:
     Three strategies:
     - default: high confidence + no spec_guardrail_concern → ACCEPT,
                otherwise HUMAN_CALL
-    - strict:  all hunks high confidence + guardrails pass → ACCEPT,
-               otherwise HUMAN_CALL
-    - fast:    regular files → aggressive accept (low confidence ok),
-               spec files → same as default (spec_guardrail_concern → HUMAN_CALL)
+    - strict:  short-circuited by orchestrator (_handle_conflict skips LLM
+               and goes directly to human call). Retained as fallback.
+    - fast:    ACCEPT or REJECT only — never HUMAN_CALL.
+               Regular files → aggressive accept (low confidence ok).
+               Spec files → REJECT on requires_human_review or low confidence.
+               spec_guardrail_concern is deferred to post-merge guardrails.
     """
 
     def decide(
@@ -131,7 +133,13 @@ class StrategyDecider:
         resolution: LLMResolution,
         has_spec_files: bool,
     ) -> StrategyDecision:
-        """Strict strategy: ALL hunks high confidence + no spec concerns → ACCEPT."""
+        """Strict strategy: placeholder — orchestrator short-circuits this path.
+
+        In practice, the orchestrator handles strict strategy in
+        ``_handle_conflict`` by skipping LLM resolution and writing a human
+        call directly. This method is retained as a fallback for unexpected
+        code paths (e.g., if the orchestrator's short-circuit is bypassed).
+        """
         # Check global flags
         if resolution.flags.get("spec_guardrail_concern", False):
             return StrategyDecision(
@@ -186,53 +194,40 @@ class StrategyDecider:
         resolution: LLMResolution,
         has_spec_files: bool,
     ) -> StrategyDecision:
-        """Fast strategy: aggressive for regular files, spec files = default.
+        """Fast strategy: aggressive accept for regular files; spec quality gates → REJECT.
 
-        For spec files, spec_guardrail_concern still forces HUMAN_CALL.
-        For regular files, accept even low confidence unless explicitly flagged.
+        Fast mode NEVER returns HUMAN_CALL — only ACCEPT or REJECT.
+        - Regular (non-spec) files: always accepted regardless of confidence.
+        - Spec files: REJECTed if the LLM explicitly asks for human review or
+          reports low confidence.  ``spec_guardrail_concern`` is ignored here
+          because fast mode delegates spec violations to post-merge guardrails
+          (and, if needed, ``GuardrailRepairer``).
+        - Any REJECT is translated by the orchestrator into a clean abort with
+          no human call file written.
         """
-        # spec_guardrail_concern is NEVER ignored, even in fast mode
-        if resolution.flags.get("spec_guardrail_concern", False):
+        # requires_human_review at global level → REJECT (fast never calls human)
+        if resolution.flags.get("requires_human_review", False):
             return StrategyDecision(
-                action=DecisionAction.HUMAN_CALL,
-                reason="spec_guardrail_concern flag set (fast strategy — spec files never exempt)",
+                action=DecisionAction.REJECT,
+                reason="requires_human_review flag set (fast strategy aborts, no human call)",
             )
 
-        # Check per-file spec guardrail concerns
-        spec_file_concerns = []
-        for f in resolution.files:
-            if f.is_spec and f.flags.get("spec_guardrail_concern", False):
-                spec_file_concerns.append(f.path)
-
-        if spec_file_concerns:
-            return StrategyDecision(
-                action=DecisionAction.HUMAN_CALL,
-                reason=f"spec_guardrail_concern on spec file(s): {', '.join(spec_file_concerns)} (fast strategy)",
-            )
-
-        # For spec files: same as default (requires high confidence, no guardrail concerns).
-        # For regular (non-spec) files: fast mode aggressively accepts even low confidence
-        # (per-file requires_human_review on regular files is intentionally ignored).
-        has_spec_with_low_confidence = False
         for f in resolution.files:
             if f.is_spec:
-                # Spec files in fast mode still need careful handling
                 if f.flags.get("requires_human_review", False):
                     return StrategyDecision(
-                        action=DecisionAction.HUMAN_CALL,
-                        reason=f"requires_human_review on spec file {f.path} (fast strategy)",
+                        action=DecisionAction.REJECT,
+                        reason=f"requires_human_review on spec file {f.path} (fast strategy aborts, no human call)",
                     )
+                # Spec files still need high confidence even in fast mode
                 if f.overall_confidence != Confidence.HIGH:
-                    has_spec_with_low_confidence = True
+                    return StrategyDecision(
+                        action=DecisionAction.REJECT,
+                        reason=f"overall confidence on spec file {f.path} is {f.overall_confidence.value}, not high (fast strategy aborts, no human call)",
+                    )
 
-        if has_spec_with_low_confidence:
-            return StrategyDecision(
-                action=DecisionAction.HUMAN_CALL,
-                reason="Low confidence on spec file(s) (fast strategy)",
-            )
-
-        # All checks passed — accept (even low confidence on regular files)
+        # All checks passed — accept aggressively (spec_guardrail_concern deferred)
         return StrategyDecision(
             action=DecisionAction.ACCEPT,
-            reason="Fast strategy: regular files accepted, spec files pass guardrails",
+            reason="Fast strategy: accepted (spec_guardrail_concern deferred to post-merge guardrails)",
         )

@@ -454,7 +454,8 @@ class TestStrategyDeciderFast:
         decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.FAST)
         assert decision.action == DecisionAction.ACCEPT
 
-    def test_fast_spec_guardrail_concern_human_call(self) -> None:
+    def test_fast_spec_guardrail_concern_accept(self) -> None:
+        """spec_guardrail_concern is deferred to post-merge guardrails in fast mode."""
         decider = StrategyDecider()
         resolution = _make_resolution(
             overall_confidence=Confidence.HIGH,
@@ -462,10 +463,11 @@ class TestStrategyDeciderFast:
             is_spec=True,
         )
         decision = decider.decide(resolution, has_spec_files=True, strategy=MergeStrategy.FAST)
-        assert decision.action == DecisionAction.HUMAN_CALL
-        assert "spec_guardrail_concern" in decision.reason
+        assert decision.action == DecisionAction.ACCEPT
+        assert "deferred" in decision.reason.lower()
 
-    def test_fast_spec_low_confidence_human_call(self) -> None:
+    def test_fast_spec_low_confidence_reject(self) -> None:
+        """Low confidence on spec file in fast mode → REJECT (abort, no human call)."""
         decider = StrategyDecider()
         resolution = _make_resolution(
             overall_confidence=Confidence.HIGH,
@@ -474,10 +476,11 @@ class TestStrategyDeciderFast:
         )
         resolution.files[0].overall_confidence = Confidence.LOW
         decision = decider.decide(resolution, has_spec_files=True, strategy=MergeStrategy.FAST)
-        assert decision.action == DecisionAction.HUMAN_CALL
-        assert "spec" in decision.reason.lower()
+        assert decision.action == DecisionAction.REJECT
+        assert "fast strategy aborts" in decision.reason.lower()
 
-    def test_fast_spec_requires_human_review_human_call(self) -> None:
+    def test_fast_spec_requires_human_review_reject(self) -> None:
+        """requires_human_review on spec file in fast mode -> REJECT (abort, no human call)."""
         decider = StrategyDecider()
         resolution = _make_resolution(
             overall_confidence=Confidence.HIGH,
@@ -486,7 +489,8 @@ class TestStrategyDeciderFast:
             requires_human_review=True,
         )
         decision = decider.decide(resolution, has_spec_files=True, strategy=MergeStrategy.FAST)
-        assert decision.action == DecisionAction.HUMAN_CALL
+        assert decision.action == DecisionAction.REJECT
+        assert "fast strategy aborts" in decision.reason.lower()
 
     def test_fast_mixed_regular_and_spec_accept(self) -> None:
         decider = StrategyDecider()
