@@ -36,6 +36,7 @@ class HumanCallWriter:
         options: Optional[dict[str, str]] = None,
         instructions_override: Optional[str] = None,
         call_file_name: Optional[str] = None,
+        strategy: Optional[str] = None,
     ) -> Path:
         """Write a human call file for the current merge conflict.
 
@@ -53,6 +54,9 @@ class HumanCallWriter:
                 predict the on-disk name (e.g. for embedding in
                 ``instructions_override``). When omitted, a name is generated
                 from the current timestamp.
+            strategy: Optional strategy tier (e.g. ``"strict"``) that produced
+                this call file. Consumers can use this to skip the
+                ``llm_resolution`` section when it is a placeholder.
 
         Returns:
             Path to the written call file.
@@ -119,7 +123,7 @@ class HumanCallWriter:
             llm_overall_confidence = "low"
             llm_flags = {}
 
-        call_data = {
+        call_data: dict = {
             "type": "merge_conflict",
             "created_at": datetime.now().isoformat(),
             "ours_branch": context.ours_branch,
@@ -148,6 +152,8 @@ class HumanCallWriter:
                 f"For 'manual': edit files to resolve, then run `git add . && git commit`."
             ),
         }
+        if strategy is not None:
+            call_data["strategy"] = strategy
 
         call_file.write_text(
             json.dumps(call_data, indent=2, ensure_ascii=False),

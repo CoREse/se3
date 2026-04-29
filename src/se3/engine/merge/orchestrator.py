@@ -73,9 +73,8 @@ class GuardrailCallFileError(RuntimeError):
     rollback failed.
     """
 
-    def __init__(self, message: str, call_file: Optional[Path] = None) -> None:
+    def __init__(self, message: str) -> None:
         super().__init__(message)
-        self.call_file = call_file
 
 
 class GuardrailRepairFailed(RuntimeError):
@@ -265,7 +264,8 @@ class MergeOrchestrator:
                 report.success = False
                 report.pending_human = True
                 report.failed_branch = branch
-                report.failure_reason = "pending_human"
+                if not report.failure_reason:
+                    report.failure_reason = "pending_human"
                 report.version_aggregation_skipped = True
                 self._write_log()
                 report.log_file = self.log_file
@@ -297,7 +297,6 @@ class MergeOrchestrator:
                         f"successful merge(s) — re-run after resolving"
                     )
                 report.success = False
-                report.pending_human = True
                 report.failed_branch = branch
                 report.failure_reason = "guardrail_violation_call_failed"
                 report.version_aggregation_skipped = True
@@ -356,6 +355,11 @@ class MergeOrchestrator:
                 report.failed_branch = branch
                 if not report.failure_reason:
                     report.failure_reason = "merge_abort_failed"
+                # If a human call file was written before the abort failed,
+                # surface it to the user so they know there is a call file
+                # to respond to (even though the working tree may be inconsistent).
+                if report.human_call_file:
+                    report.pending_human = True
                 report.version_aggregation_skipped = True
                 self._write_log()
                 report.log_file = self.log_file
@@ -731,8 +735,6 @@ class MergeOrchestrator:
                 )
                 report.rollback_failed = False
                 report.failure_reason = "guardrail_violation_call_failed"
-                if exc.call_file is not None:
-                    report.human_call_file = exc.call_file
                 return "guardrail_violation_call_failed"
             except GuardrailNoRollbackError as exc:
                 self._log(
@@ -835,8 +837,47 @@ class MergeOrchestrator:
                 else:
                     report.failure_reason = "conflict_context_failed"
                 return "fast_abort"
+            if self.strategy == MergeStrategy.STRICT and abort_ok:
+                # Strict contract: any conflict escalates to human call.
+                # Write a degraded call file since we cannot build full context.
+                try:
+                    call_file = self._human_writer.write_guardrail_call(
+                        branch=branch,
+                        violations=[
+                            {
+                                "file_path": "N/A",
+                                "violation_type": "CONFLICT_CONTEXT_BUILD_FAILURE",
+                                "message": (
+                                    f"Conflict context could not be built: {exc}. "
+                                    f"The merge has been aborted. "
+                                    f"Please inspect the branch and resolve manually."
+                                ),
+                            }
+                        ],
+                        pre_merge_sha=pre_merge_sha,
+                    )
+                    report.human_call_file = call_file
+                    report.failure_reason = "conflict_context_failed"
+                    try:
+                        self._human_writer.print_instructions(call_file)
+                    except Exception as print_exc:
+                        self._log(
+                            f"WARNING: Failed to print instructions "
+                            f"(call file was written): {print_exc}"
+                        )
+                    return "pending_human"
+                except Exception as write_exc:
+                    self._log(
+                        f"CRITICAL: Failed to write degraded human call file for "
+                        f"strict mode: {write_exc}. The merge is being aborted."
+                    )
+                    report.failure_reason = (
+                        "conflict_context_failed_call_file_write_failed"
+                    )
             if not abort_ok:
                 report.failure_reason = "merge_abort_failed"
+            elif not report.failure_reason:
+                report.failure_reason = "conflict_context_failed"
             return "conflict"
 
         # --- STRICT: short-circuit to human call, skip LLM ---
@@ -883,7 +924,7 @@ class MergeOrchestrator:
             placeholder_resolution = LLMResolution(
                 files=placeholder_files,
                 overall_confidence=Confidence.LOW,
-                flags={},
+                flags={"llm_invoked": False},
             )
             strict_decision = StrategyDecision(
                 action=DecisionAction.HUMAN_CALL,
@@ -892,6 +933,7 @@ class MergeOrchestrator:
             try:
                 call_file = self._human_writer.write_call(
                     context, placeholder_resolution, strict_decision,
+                    strategy="strict",
                 )
             except Exception as exc:
                 self._log(
@@ -952,6 +994,7 @@ class MergeOrchestrator:
                     self._log(
                         "WARNING: git merge --abort failed — working tree may still be mid-merge"
                     )
+                    report.failure_reason = "merge_abort_failed"
                 return "human_call_write_failed"
             report.human_call_file = call_file
             try:
@@ -1252,6 +1295,12 @@ class MergeOrchestrator:
                     )
             self._log("Aborting merge due to validation failures")
             abort_ok = self._abort_merge()
+            # Capture and clean up the binary-file flag before any early
+            # returns so a future retry on the same instance does not see
+            # a stale value.
+            was_binary = getattr(self, "_binary_file_rejected", False)
+            if hasattr(self, "_binary_file_rejected"):
+                delattr(self, "_binary_file_rejected")
             if not abort_ok:
                 report.failure_reason = "merge_abort_failed"
                 if self.strategy == MergeStrategy.FAST:
@@ -1259,9 +1308,11 @@ class MergeOrchestrator:
                 return "merge_abort_failed"
             # Use a dedicated reason when a binary file was in the conflict set
             # so the CLI can surface a targeted message.
-            if getattr(self, "_binary_file_rejected", False):
-                report.failure_reason = "binary_file_conflict"
-                delattr(self, "_binary_file_rejected")
+            if was_binary:
+                if self.strategy == MergeStrategy.FAST:
+                    report.failure_reason = "binary_file_conflict_fast_abort"
+                else:
+                    report.failure_reason = "binary_file_conflict"
             else:
                 report.failure_reason = "resolution_validation_failed"
             if self.strategy == MergeStrategy.FAST:
@@ -1408,8 +1459,6 @@ class MergeOrchestrator:
             )
             report.rollback_failed = False
             report.failure_reason = "guardrail_violation_call_failed"
-            if exc.call_file is not None:
-                report.human_call_file = exc.call_file
             return "guardrail_violation_call_failed"
         except GuardrailNoRollbackError as exc:
             self._log(
@@ -1495,6 +1544,28 @@ class MergeOrchestrator:
                 "(pre_sha=%r, post_sha=%r). Treating as failure.",
                 branch, pre_sha, post_sha,
             )
+
+            # Fast mode: abort immediately without human call (no rollback needed
+            # when SHA is missing — there is no known good state to roll back to)
+            if strategy == MergeStrategy.FAST:
+                if not pre_sha and not post_sha:
+                    missing_reason = "pre and post SHA"
+                    failure_reason = "guardrail_missing_pre_and_post_sha"
+                elif not pre_sha:
+                    missing_reason = "pre_sha"
+                    failure_reason = "guardrail_missing_pre_sha"
+                else:
+                    missing_reason = "post_sha"
+                    failure_reason = "guardrail_missing_post_sha"
+                raise GuardrailRepairFailed(
+                    f"Guardrails check skipped for '{branch}': missing {missing_reason} "
+                    f"(pre_sha={pre_sha!r}, post_sha={post_sha!r}). "
+                    f"Fast mode aborts without human call.",
+                    failure_reason=failure_reason,
+                    rollback_failed=False,
+                )
+
+            # Non-fast: attempt rollback if pre_sha exists
             if pre_sha:
                 try:
                     self._rollback_to(pre_sha)
@@ -1506,13 +1577,7 @@ class MergeOrchestrator:
                     )
                     self._log(call_message)
                     raise RuntimeError(call_message) from rbe
-            if strategy == MergeStrategy.FAST:
-                raise GuardrailRepairFailed(
-                    f"Guardrails check skipped for '{branch}': missing post_sha "
-                    f"(pre_sha={pre_sha!r}, post_sha={post_sha!r}). "
-                    f"Fast mode aborts without human call.",
-                    failure_reason="guardrail_missing_post_sha",
-                )
+
             call_message = (
                 f"Guardrails check skipped: missing SHA "
                 f"(pre_sha={pre_sha!r}, post_sha={post_sha!r})."
@@ -1536,12 +1601,20 @@ class MergeOrchestrator:
                 )
             except Exception as exc:
                 self._log(f"Failed to write guardrail human call file: {exc}")
-                raise GuardrailCallFileError(
-                    f"Guardrails failed for '{branch}' (missing SHA) and the "
-                    f"human call file could not be written: {exc}. "
-                    f"The merge has been rolled back; manual intervention required.",
-                    call_file=None,
-                ) from exc
+                if pre_sha:
+                    call_err_msg = (
+                        f"Guardrails failed for '{branch}' (missing SHA) and the "
+                        f"human call file could not be written: {exc}. "
+                        f"The merge has been rolled back; manual intervention required."
+                    )
+                else:
+                    call_err_msg = (
+                        f"Guardrails failed for '{branch}' (missing SHA) and the "
+                        f"human call file could not be written: {exc}. "
+                        f"Rollback was NOT attempted because pre_merge_sha was missing. "
+                        f"The merge commit may still be in HEAD."
+                    )
+                raise GuardrailCallFileError(call_err_msg) from exc
             try:
                 self._human_writer.print_instructions(call_file)
             except Exception as exc:
@@ -1686,8 +1759,7 @@ class MergeOrchestrator:
                 raise GuardrailCallFileError(
                     f"Guardrails detected violations for '{branch}' and the "
                     f"human call file could not be written: {exc}. "
-                    f"The merge has been rolled back; manual intervention required.",
-                    call_file=None,
+                    f"The merge has been rolled back; manual intervention required."
                 ) from exc
             try:
                 self._human_writer.print_instructions(call_file)
@@ -1753,8 +1825,7 @@ class MergeOrchestrator:
                 raise GuardrailCallFileError(
                     f"Guardrails check failed for '{branch}' and the "
                     f"human call file could not be written: {write_exc}. "
-                    f"The merge has been rolled back; manual intervention required.",
-                    call_file=None,
+                    f"The merge has been rolled back; manual intervention required."
                 ) from write_exc
             try:
                 self._human_writer.print_instructions(call_file)

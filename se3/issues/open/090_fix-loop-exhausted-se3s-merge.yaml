@@ -3,7 +3,28 @@ title: 'Fix loop exhausted: se3s merge scn discoverbug -s fast，还是给我卡
 description: 'The fix loop reached maximum iterations while working on: se3s merge
   scn discoverbug -s fast，还是给我卡在human call了，没有自动解决冲突，你看看怎么回事（se3s就是se3的一个别名）
 
-  refined prompt: "重新对齐 `se3 merge` 的三档策略语义并修复实现，使三档语义清晰且互不重叠：\\n\\n**目标语义**\\n- `default`：自动 merge；遇到冲突 → 调 LLM 解决；LLM 解决不了（confidence 不达标 / 修不动 guardrails 违规 / 其他系统级失败）→ human call。\\n- `strict`：自动 merge；任何冲突或 guardrails 违规 → 不调 LLM，直接 human call。\\n- `fast`：自动 merge；任何冲突 + guardrails 违规一律由 LLM 解决；LLM 也搞不定 → abort 报失败，**绝不**触发 human call。\\n\\n**当前实现与目标的差距（需修复）**\\n1. `strict` 当前仍调用 LLM、用『所有 hunk HIGH』门槛过滤；需改为遇到冲突/违规直接走 human call 路径，跳过 LLM 调用。\\n2. `fast` 当前在 `strategy._decide_fast` 中对 spec 文件 + `spec_guardrail_concern` 强制 human call；需改为 fast 模式下任何 spec 相关问题都送 LLM。\\n3. `orchestrator._run_guardrails` 的 post-merge guardrails 检测目前是策略外的独立环节，无视策略一律 rollback + human call；需改为感知策略：\\n   - default → 维持当前行为（违规 → rollback + human call）；\\n   - strict → 同 default（违规 → rollback + human call）；\\n   - fast → 把违规列表喂给 LLM，要求其改写涉及的 spec 文件以消除违规（如恢复被弱化的 SHALL），改完后重跑 guardrails 验证。\\n4. fast 路径上现存的其他 human-escalation 出口（incomplete resolution、commit/write/stage 失败、binary file、commit timeout 等）需统一改为 abort + 失败返回，不 call human。\\n\\n**LLM 任务形态（fast 下处理 guardrails 违规）**\\n- 输入：违规清单（文件、违规类型如 WEAKENING、原文/合并后的 diff、被弱化的具体 SHALL 句子）、相关 spec 文件全文。\\n- 输出：修正后的 spec 文件内容，使违规消除。\\n- 验证：写回工作区后重跑 guardrails，若仍违规或 LLM 无法修复 → abort（不 call human，符合 fast 的『绝不 call human』承诺）。\\n\\n**本次触发场景的预期行为**\\n- 用户 case：`se3 merge scn discoverbug -s fast`，scn 合并后 guardrails 检出 `se3-config/spec.md` 的 SHALL→SHOULD 弱化。\\n- 修复后预期：fast 模式下 guardrails 违规列表交 LLM，让 LLM 改写 spec 把 SHALL 恢复，然后重跑 guardrails 通过 → 提交合并；若 LLM 修不好 → abort 整个 merge（不 call human），并在 log 中清晰说明失败原因。\\n\\n**非目标（不在本次范围）**\\n- 不引入第四档策略（如 manual / human-only）。\\n- 不改变 default 现有的『冲突 → LLM → 人类兜底』链路。\\n- 不改变 guardrails 检测器本身的判定逻辑（如 WEAKENING 的识别规则）。\\n\\n**输出错误信息改进（捎带）**\\n- merge 失败 / 触发 human call 时，log 与 CLI 输出需明确区分『git merge conflict』与『post-merge guardrails violation』两类原因，避免再次出现『以为是冲突没解决，其实是 guardrails 拦下』的混淆。"
+  refined prompt: "重新对齐 `se3 merge` 的三档策略语义并修复实现，使三档语义清晰且互不重叠：\\n\\n**目标语义**\\n- `default`：自动
+  merge；遇到冲突 → 调 LLM 解决；LLM 解决不了（confidence 不达标 / 修不动 guardrails 违规 / 其他系统级失败）→ human
+  call。\\n- `strict`：自动 merge；任何冲突或 guardrails 违规 → 不调 LLM，直接 human call。\\n- `fast`：自动
+  merge；任何冲突 + guardrails 违规一律由 LLM 解决；LLM 也搞不定 → abort 报失败，**绝不**触发 human call。\\n\\n**当前实现与目标的差距（需修复）**\\n1.
+  `strict` 当前仍调用 LLM、用『所有 hunk HIGH』门槛过滤；需改为遇到冲突/违规直接走 human call 路径，跳过 LLM 调用。\\n2.
+  `fast` 当前在 `strategy._decide_fast` 中对 spec 文件 + `spec_guardrail_concern` 强制 human
+  call；需改为 fast 模式下任何 spec 相关问题都送 LLM。\\n3. `orchestrator._run_guardrails` 的 post-merge
+  guardrails 检测目前是策略外的独立环节，无视策略一律 rollback + human call；需改为感知策略：\\n   - default →
+  维持当前行为（违规 → rollback + human call）；\\n   - strict → 同 default（违规 → rollback + human
+  call）；\\n   - fast → 把违规列表喂给 LLM，要求其改写涉及的 spec 文件以消除违规（如恢复被弱化的 SHALL），改完后重跑 guardrails
+  验证。\\n4. fast 路径上现存的其他 human-escalation 出口（incomplete resolution、commit/write/stage
+  失败、binary file、commit timeout 等）需统一改为 abort + 失败返回，不 call human。\\n\\n**LLM 任务形态（fast
+  下处理 guardrails 违规）**\\n- 输入：违规清单（文件、违规类型如 WEAKENING、原文/合并后的 diff、被弱化的具体 SHALL 句子）、相关
+  spec 文件全文。\\n- 输出：修正后的 spec 文件内容，使违规消除。\\n- 验证：写回工作区后重跑 guardrails，若仍违规或 LLM 无法修复
+  → abort（不 call human，符合 fast 的『绝不 call human』承诺）。\\n\\n**本次触发场景的预期行为**\\n- 用户 case：`se3
+  merge scn discoverbug -s fast`，scn 合并后 guardrails 检出 `se3-config/spec.md` 的 SHALL→SHOULD
+  弱化。\\n- 修复后预期：fast 模式下 guardrails 违规列表交 LLM，让 LLM 改写 spec 把 SHALL 恢复，然后重跑 guardrails
+  通过 → 提交合并；若 LLM 修不好 → abort 整个 merge（不 call human），并在 log 中清晰说明失败原因。\\n\\n**非目标（不在本次范围）**\\n-
+  不引入第四档策略（如 manual / human-only）。\\n- 不改变 default 现有的『冲突 → LLM → 人类兜底』链路。\\n- 不改变
+  guardrails 检测器本身的判定逻辑（如 WEAKENING 的识别规则）。\\n\\n**输出错误信息改进（捎带）**\\n- merge 失败 / 触发
+  human call 时，log 与 CLI 输出需明确区分『git merge conflict』与『post-merge guardrails violation』两类原因，避免再次出现『以为是冲突没解决，其实是
+  guardrails 拦下』的混淆。"
 
   **Trigger step:** self_check
 
@@ -46,10 +67,9 @@ description: 'The fix loop reached maximum iterations while working on: se3s mer
   review'' framing, but there is no call file to respond to — it''s an unrecoverable
   failure, not a pending state. The error message text is accurate (''call file could
   not be written''), but pending_human=T
-  
-  flow id: 20260428-124606_3e921464, history path: se3/history/20260428-124606_3e921464
-  '
-status: open
+
+  flow id: 20260428-124606_3e921464, history path: se3/history/20260428-124606_3e921464 '
+status: in-progress
 priority: high
 scope: in_scope
 type: bug
@@ -57,4 +77,4 @@ tags:
 - auto-discovered
 - source:fix-loop
 created_at: '2026-04-28T23:43:39.055080'
-updated_at: '2026-04-28T23:43:39.055080'
+updated_at: '2026-04-29T09:23:39.172610'

@@ -469,6 +469,47 @@ class TestMergeOrchestrator:
             for v in call_data["violations"]
         )
 
+    def test_strict_rev_parse_head_failure_guardrails_fail_closed(self, tmp_path: Path, monkeypatch) -> None:
+        """If pre_sha is missing in strict mode, guardrails fail-closed with no rollback."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        call_count = 0
+
+        def patch_run_git(project_root, *args, check=True, timeout=30):
+            nonlocal call_count
+            if len(args) >= 2 and args[0] == "rev-parse" and args[1] == "HEAD":
+                call_count += 1
+                if call_count == 2:
+                    class FakeResult:
+                        returncode = 1
+                        stdout = ""
+                        stderr = "mock rev-parse failure"
+                    return FakeResult()
+            import se3.engine.worktree as _wt
+            return _wt._run_git(project_root, *args, check=check, timeout=timeout)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", patch_run_git
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="strict")
+        report = orch.execute(["feature"])
+
+        # Same as default: missing pre_sha -> GuardrailNoRollbackError
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "guardrail_violation_no_rollback"
+        assert report.rollback_failed is False
+        assert report.pending_human is True
+        assert report.human_call_file is not None
+
     def test_rev_parse_head_timeout_guardrails_fail_closed(self, tmp_path: Path, monkeypatch) -> None:
         """If rev-parse HEAD after a clean merge times out, guardrails fail-closed."""
         import subprocess as _sp
@@ -2790,6 +2831,9 @@ class TestStrictShortCircuit:
         # Decision reason should mention strict
         assert "strict" in call_data["decision_reason"].lower()
 
+        # Strategy marker so consumers know the proposal is a placeholder
+        assert call_data.get("strategy") == "strict"
+
     def test_strict_write_call_failure_aborts(self, tmp_path: Path, monkeypatch) -> None:
         """If write_call raises in strict mode, the merge must abort."""
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
@@ -2828,10 +2872,11 @@ class TestStrictShortCircuit:
         assert post_head == pre_head
 
     def test_strict_build_context_raises_routes_to_conflict(self, tmp_path: Path, monkeypatch) -> None:
-        """strict + build_conflict_context raises -> abort, reported as merge_conflict.
+        """strict + build_conflict_context raises -> write degraded call, pending_human.
 
-        The strict short-circuit runs AFTER context building; if that fails,
-        the merge aborts and is reported as a conflict (not pending_human).
+        Strict's contract is 'any conflict escalates directly to human call'.
+        When context building fails, a degraded guardrail-style call is written
+        so the user still has a call file to respond to.
         """
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
@@ -2852,12 +2897,12 @@ class TestStrictShortCircuit:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="strict")
         report = orch.execute([feature_branch])
 
-        # Should be reported as merge_conflict, NOT pending_human
+        # Strict contract: must escalate to human call even when context build fails
         assert report.success is False
         assert report.failed_branch == feature_branch
-        assert report.failure_reason == "merge_conflict"
-        assert report.pending_human is False
-        assert report.human_call_file is None
+        assert report.pending_human is True
+        assert report.human_call_file is not None
+        assert report.human_call_file.exists()
 
         # Working tree should be clean after abort
         assert _is_working_tree_clean(tmp_path) is True
@@ -2869,10 +2914,44 @@ class TestStrictShortCircuit:
         ).stdout.strip()
         assert post_head == pre_head
 
+    def test_default_build_context_raises_routes_to_conflict(self, tmp_path: Path, monkeypatch) -> None:
+        """default + build_conflict_context raises -> abort, reported as conflict_context_failed."""
+        default_branch, feature_branch = self._create_conflict_repo(tmp_path)
+
+        def mock_build_context(project_root, ours, theirs):
+            raise RuntimeError("mock context failure")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.build_conflict_context",
+            mock_build_context,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        report = orch.execute([feature_branch])
+
+        assert report.success is False
+        assert report.failed_branch == feature_branch
+        assert report.failure_reason == "conflict_context_failed"
+        assert report.pending_human is False
+        assert report.human_call_file is None
+
+        assert _is_working_tree_clean(tmp_path) is True
+
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
     def test_fast_build_context_raises_routes_to_fast_abort(self, tmp_path: Path, monkeypatch) -> None:
         """fast + build_conflict_context raises -> abort, reported as conflict_context_failed.
 
-        Mirrors the strict test but verifies fast mode returns fast_abort
+        Mirrors the strict/default tests and verifies fast mode returns fast_abort
         (not merge_conflict) and creates no human call file.
         """
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
@@ -3288,13 +3367,13 @@ class TestFastAbortBehavior:
         assert post_head == pre_head
 
     def test_fast_binary_file_conflict_aborts_with_specific_reason(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + binary file conflict -> abort with binary_file_conflict reason.
+        """fast + binary file conflict -> abort with binary_file_conflict_fast_abort reason.
 
         The first-pass validation in ``_apply_resolution`` detects that the
         conflict file is binary and aborts before writing anything back.
-        Unlike the generic ``resolution_validation_failed`` path, binary
-        files receive the dedicated ``binary_file_conflict`` failure reason
-        so the CLI can surface a targeted message.
+        In fast mode the dedicated ``binary_file_conflict_fast_abort`` failure
+        reason is used so the CLI can surface a strategy-appropriate message
+        that does not promise human review (fast mode never calls human).
         """
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
@@ -3372,10 +3451,10 @@ class TestFastAbortBehavior:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute(["feature"])
 
-        # Must fail with the specific binary_file_conflict reason
+        # Must fail with the fast-specific binary_file_conflict_fast_abort reason
         assert report.success is False
         assert report.failed_branch == "feature"
-        assert report.failure_reason == "binary_file_conflict"
+        assert report.failure_reason == "binary_file_conflict_fast_abort"
         assert report.pending_human is False
 
         # The binary file should still have the main content (not overwritten by LLM)
@@ -3980,7 +4059,51 @@ class TestGuardrailsStrategyAware:
         assert report.success is True
         assert "feature" in report.merged_branches
 
-    def test_fast_guardrail_missing_sha_aborts(self, tmp_path: Path, monkeypatch) -> None:
+    def test_fast_guardrail_missing_pre_sha_aborts(self, tmp_path: Path, monkeypatch) -> None:
+        """fast + missing pre_sha in guardrails -> guardrail_missing_pre_sha (no rollback attempted)."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Patch the SECOND "rev-parse HEAD" call (pre_merge_sha inside
+        # _merge_single_branch, line 639) to fail.
+        call_count = 0
+
+        def patch_rev_parse(project_root, *args, check=True, timeout=30):
+            nonlocal call_count
+            if len(args) >= 2 and args[0] == "rev-parse" and args[1] == "HEAD":
+                call_count += 1
+                if call_count == 2:
+                    class FakeResult:
+                        returncode = 1
+                        stdout = ""
+                        stderr = "mock failure"
+                    return FakeResult()
+            import se3.engine.worktree as _wt
+            return _wt._run_git(project_root, *args, check=check, timeout=timeout)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", patch_rev_parse
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature"])
+
+        # Missing pre_sha in fast mode -> GuardrailRepairFailed with guardrail_missing_pre_sha
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "guardrail_missing_pre_sha"
+        # rollback_failed=False because no rollback was attempted (pre_sha missing)
+        assert report.rollback_failed is False
+        assert report.pending_human is False
+        assert report.human_call_file is None
+
+    def test_fast_guardrail_missing_post_sha_aborts(self, tmp_path: Path, monkeypatch) -> None:
         """fast + missing post_sha in guardrails -> guardrail_missing_post_sha."""
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
@@ -3991,18 +4114,20 @@ class TestGuardrailsStrategyAware:
             check=True, capture_output=True,
         )
 
-        # Patch rev-parse HEAD to return empty on the second call (inside _merge_single_branch)
+        # Patch the THIRD "rev-parse HEAD" call (post_merge_sha inside
+        # _merge_single_branch after clean merge, line 680) to fail.
         call_count = 0
 
         def patch_rev_parse(project_root, *args, check=True, timeout=30):
             nonlocal call_count
-            call_count += 1
-            if call_count == 2 and len(args) >= 2 and args[0] == "rev-parse" and args[1] == "HEAD":
-                class FakeResult:
-                    returncode = 1
-                    stdout = ""
-                    stderr = "mock failure"
-                return FakeResult()
+            if len(args) >= 2 and args[0] == "rev-parse" and args[1] == "HEAD":
+                call_count += 1
+                if call_count == 3:
+                    class FakeResult:
+                        returncode = 1
+                        stdout = ""
+                        stderr = "mock failure"
+                    return FakeResult()
             import se3.engine.worktree as _wt
             return _wt._run_git(project_root, *args, check=check, timeout=timeout)
 
@@ -4017,6 +4142,7 @@ class TestGuardrailsStrategyAware:
         assert report.success is False
         assert report.failed_branch == "feature"
         assert report.failure_reason == "guardrail_missing_post_sha"
+        assert report.rollback_failed is False  # rollback was not needed (no commit to roll back)
         assert report.pending_human is False
         assert report.human_call_file is None
 
@@ -4330,11 +4456,12 @@ class TestGuardrailsStrategyAware:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
         report = orch.execute(["feature"])
 
-        # Should surface the call-file failure, not rollback failure
+        # Should surface the call-file failure, not rollback failure.
+        # No call file was written, so pending_human is False (not a pending state).
         assert report.success is False
         assert report.failed_branch == "feature"
         assert report.failure_reason == "guardrail_violation_call_failed"
-        assert report.pending_human is True
+        assert report.pending_human is False
         # Rollback succeeded, so HEAD should be restored
         post_head = subprocess.run(
             ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
@@ -4494,3 +4621,480 @@ class TestGuardrailsStrategyAware:
         assert report.pending_human is False
         # Verify the conflict was actually resolved
         assert (tmp_path / "shared.txt").read_text() == "line1\nRESOLVED\nline3\n"
+
+    def test_strict_context_build_failure_writes_degraded_call(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """strict + build_conflict_context fails -
+        write degraded human call and return pending_human.
+
+        Strict's contract is 'any conflict escalates directly to human call'.
+        When context build fails, a degraded guardrail-style call is written
+        so the user still has a call file to respond to.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _add_commit(tmp_path, "shared.txt", "base content\n", "Add shared")
+        _create_branch(tmp_path, "feature")
+        (tmp_path / "shared.txt").write_text("feature version\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on feature"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "shared.txt").write_text("main version\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on main"],
+            check=True, capture_output=True,
+        )
+
+        # Mock build_conflict_context to raise
+        def mock_build_context(*args, **kwargs):
+            raise RuntimeError("mock context build failure")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.build_conflict_context",
+            mock_build_context,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="strict")
+        report = orch.execute(["feature"])
+
+        # Strict contract: must escalate to human call even when context build fails
+        assert report.success is False
+        assert report.pending_human is True
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "conflict_context_failed"
+        assert report.human_call_file is not None
+        assert report.human_call_file.exists()
+        # Call file is guardrail-style with CONFLICT_CONTEXT_BUILD_FAILURE
+        call_data = json.loads(report.human_call_file.read_text())
+        assert call_data["type"] == "guardrail_violation"
+        assert any(
+            v["violation_type"] == "CONFLICT_CONTEXT_BUILD_FAILURE"
+            for v in call_data["violations"]
+        )
+
+        # Working tree should be clean after abort
+        assert _is_working_tree_clean(tmp_path) is True
+        # HEAD should be unchanged
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
+    def test_llm_failure_then_human_call_write_failure(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """LLM resolve raises + write_call also raises -
+        abort_merge fallback runs, failure_reason='human_call_write_failed',
+        pending_human stays False.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _add_commit(tmp_path, "shared.txt", "base content\n", "Add shared")
+        _create_branch(tmp_path, "feature")
+        (tmp_path / "shared.txt").write_text("feature version\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on feature"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "shared.txt").write_text("main version\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on main"],
+            check=True, capture_output=True,
+        )
+
+        # Mock LLM resolver to raise
+        def mock_resolve(self, context, strategy):
+            raise RuntimeError("mock LLM failure")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        # Mock HumanCallWriter.write_call to raise
+        def mock_write_call(*args, **kwargs):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.HumanCallWriter.write_call",
+            mock_write_call,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        report = orch.execute(["feature"])
+
+        # Must abort, not return pending_human without a call file
+        assert report.success is False
+        assert report.pending_human is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "human_call_write_failed"
+        assert report.human_call_file is None
+
+        # Working tree should be clean after abort
+        assert _is_working_tree_clean(tmp_path) is True
+        # HEAD should be unchanged
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
+    def test_human_call_decision_then_write_failure(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Decider returns HUMAN_CALL + write_call raises -
+        abort_merge fallback runs, failure_reason='human_call_write_failed',
+        pending_human stays False.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _add_commit(tmp_path, "shared.txt", "base content\n", "Add shared")
+        _create_branch(tmp_path, "feature")
+        (tmp_path / "shared.txt").write_text("feature version\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on feature"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "shared.txt").write_text("main version\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on main"],
+            check=True, capture_output=True,
+        )
+
+        # Mock LLM resolver: low confidence -
+        # strategy decider will return HUMAN_CALL
+        def mock_resolve(self, context, strategy):
+            from se3.engine.merge.conflict_resolver import (
+                Confidence, FileResolution, HunkResolution, LLMResolution,
+            )
+            return LLMResolution(
+                files=[
+                    FileResolution(
+                        path="shared.txt",
+                        resolved_content="",
+                        hunks=[HunkResolution(1, 3, Confidence.LOW, "uncertain")],
+                        overall_confidence=Confidence.LOW,
+                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        is_spec=False,
+                    ),
+                ],
+                overall_confidence=Confidence.LOW,
+                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        # Mock HumanCallWriter.write_call to raise
+        def mock_write_call(*args, **kwargs):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.HumanCallWriter.write_call",
+            mock_write_call,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        report = orch.execute(["feature"])
+
+        # Must abort, not return pending_human without a call file
+        assert report.success is False
+        assert report.pending_human is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "human_call_write_failed"
+        assert report.human_call_file is None
+
+        # Working tree should be clean after abort
+        assert _is_working_tree_clean(tmp_path) is True
+        # HEAD should be unchanged
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
+    def test_human_call_decision_then_write_failure_and_abort_fails(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Decider returns HUMAN_CALL + write_call raises + abort_merge also fails -
+        failure_reason cascades to 'merge_abort_failed' overriding
+        'human_call_write_failed'.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _add_commit(tmp_path, "shared.txt", "base content\n", "Add shared")
+        _create_branch(tmp_path, "feature")
+        (tmp_path / "shared.txt").write_text("feature version\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on feature"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "shared.txt").write_text("main version\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on main"],
+            check=True, capture_output=True,
+        )
+
+        # Mock LLM resolver: low confidence -
+        # strategy decider will return HUMAN_CALL
+        def mock_resolve(self, context, strategy):
+            from se3.engine.merge.conflict_resolver import (
+                Confidence, FileResolution, HunkResolution, LLMResolution,
+            )
+            return LLMResolution(
+                files=[
+                    FileResolution(
+                        path="shared.txt",
+                        resolved_content="",
+                        hunks=[HunkResolution(1, 3, Confidence.LOW, "uncertain")],
+                        overall_confidence=Confidence.LOW,
+                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        is_spec=False,
+                    ),
+                ],
+                overall_confidence=Confidence.LOW,
+                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        # Mock HumanCallWriter.write_call to raise
+        def mock_write_call(*args, **kwargs):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.HumanCallWriter.write_call",
+            mock_write_call,
+        )
+
+        # Mock _abort_merge to always return False
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            lambda self: False,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        report = orch.execute(["feature"])
+
+        # abort_merge failed overrides human_call_write_failed
+        assert report.success is False
+        assert report.pending_human is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "merge_abort_failed"
+        assert report.human_call_file is None
+
+    def test_llm_failure_then_write_failure_and_abort_fails(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """LLM resolve raises + write_call also raises + abort_merge also fails -
+        failure_reason cascades to 'merge_abort_failed' overriding
+        'human_call_write_failed'.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _add_commit(tmp_path, "shared.txt", "base content\n", "Add shared")
+        _create_branch(tmp_path, "feature")
+        (tmp_path / "shared.txt").write_text("feature version\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on feature"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "shared.txt").write_text("main version\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on main"],
+            check=True, capture_output=True,
+        )
+
+        # Mock LLM resolver to raise
+        def mock_resolve(self, context, strategy):
+            raise RuntimeError("mock LLM failure")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        # Mock HumanCallWriter.write_call to raise
+        def mock_write_call(*args, **kwargs):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.HumanCallWriter.write_call",
+            mock_write_call,
+        )
+
+        # Mock _abort_merge to always return False
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            lambda self: False,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        report = orch.execute(["feature"])
+
+        # abort_merge failed overrides human_call_write_failed
+        assert report.success is False
+        assert report.pending_human is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "merge_abort_failed"
+        assert report.human_call_file is None
+
+    def test_strict_build_context_failure_write_guardrail_call_fails(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """strict + build_conflict_context fails + write_guardrail_call also fails -
+        failure_reason is 'conflict_context_failed_call_file_write_failed'.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _add_commit(tmp_path, "shared.txt", "base content\n", "Add shared")
+        _create_branch(tmp_path, "feature")
+        (tmp_path / "shared.txt").write_text("feature version\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on feature"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "shared.txt").write_text("main version\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on main"],
+            check=True, capture_output=True,
+        )
+
+        # Mock build_conflict_context to raise
+        def mock_build_context(*args, **kwargs):
+            raise RuntimeError("mock context build failure")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.build_conflict_context",
+            mock_build_context,
+        )
+
+        # Mock HumanCallWriter.write_guardrail_call to raise
+        def mock_write_guardrail_call(*args, **kwargs):
+            raise RuntimeError("disk full")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.HumanCallWriter.write_guardrail_call",
+            mock_write_guardrail_call,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="strict")
+        report = orch.execute(["feature"])
+
+        # Strict mode: context build fails, degraded write also fails
+        assert report.success is False
+        assert report.pending_human is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "conflict_context_failed_call_file_write_failed"
+        assert report.human_call_file is None
+
+        # Working tree should be clean after abort
+        assert _is_working_tree_clean(tmp_path) is True
+        # HEAD should be unchanged
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head

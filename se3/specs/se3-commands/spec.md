@@ -413,6 +413,24 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
 - **WHEN** `--delete-merged` is in effect
 - **THEN** the cleanup reports an error for `feat/y`, leaves both worktree and branch intact, and does NOT use `git worktree remove --force`
 
+#### Scenario: Failure messages distinguish conflict vs guardrails categories
+- **GIVEN** a merge fails for any reason
+- **WHEN** the CLI renders the failure summary and the log file is written
+- **THEN** the message clearly identifies the failure category, distinguishing at minimum:
+  - `git merge conflict (could not be resolved)` — text conflicts the resolver could not handle
+  - `post-merge guardrails violation` — spec guardrails rejected the merge result
+  - `failed to build conflict context` — the resolver could not even prepare conflict input (strategy-neutral phrasing applies to default, strict, and fast)
+  - fast-mode aborts (`fast strategy could not resolve conflict`, `fast strategy could not auto-repair guardrails violation`, `fast strategy LLM resolution failed`)
+- **AND** the same category labels are used in the CLI summary and the corresponding log entry, so that users do not confuse a guardrails-driven failure with an unresolved git conflict
+
+#### Scenario: Human call required but call file cannot be written
+- **GIVEN** the merge needs to escalate to a human call (low-confidence LLM resolution, post-merge guardrails violation in default/strict, etc.)
+- **AND** writing the MCP call file fails (filesystem error, permission issue, etc.)
+- **WHEN** the merge command finalizes the report
+- **THEN** the report is treated as an outright failure rather than a pending-human state
+- **AND** the CLI exits with the general-failure code rather than the interrupted/paused code, because there is no call file for the user to respond to with `se3 merge-respond`
+- **AND** the summary explicitly states that the human call file could not be written
+
 ### Requirement: `se3 merge-respond` Command
 
 The `se3 merge-respond` command SHALL process an MCP call response file produced by `se3 merge` when conflicts were escalated for human decision.

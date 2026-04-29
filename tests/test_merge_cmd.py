@@ -599,6 +599,18 @@ class TestFailureTitleAndSummary:
         assert title == "Merge aborted"
         assert "post-merge commit SHA was unavailable" in summary
 
+    def test_guardrail_missing_pre_sha(self) -> None:
+        title, summary = _failure_title_and_summary("guardrail_missing_pre_sha")
+        assert title == "Merge aborted"
+        assert "pre-merge commit SHA was unavailable" in summary
+        assert "merge commit may still be in HEAD" in summary
+
+    def test_guardrail_missing_pre_and_post_sha(self) -> None:
+        title, summary = _failure_title_and_summary("guardrail_missing_pre_and_post_sha")
+        assert title == "Merge aborted"
+        assert "both pre-merge and post-merge commit SHAs were unavailable" in summary
+        assert "merge commit may still be in HEAD" in summary
+
     def test_resolution_commit_timeout(self) -> None:
         title, summary = _failure_title_and_summary("resolution_commit_timeout")
         assert title == "Merge aborted"
@@ -615,6 +627,20 @@ class TestFailureTitleAndSummary:
         assert "post-merge guardrails violation" in summary
         assert "could not roll back" in summary
 
+    def test_conflict_context_failed(self) -> None:
+        title, summary = _failure_title_and_summary("conflict_context_failed")
+        assert title == "Merge aborted"
+        assert "failed to build conflict context" in summary
+        assert "fast strategy" not in summary.lower()
+
+    def test_conflict_context_failed_pending_human(self) -> None:
+        title, summary = _failure_title_and_summary(
+            "conflict_context_failed", pending_human=True
+        )
+        assert title == "Merge failed"
+        assert "failed to build conflict context" in summary
+        assert "paused for human review" in summary
+
     def test_guardrail_violation_call_failed(self) -> None:
         title, summary = _failure_title_and_summary("guardrail_violation_call_failed")
         assert title == "Merge failed"
@@ -625,6 +651,14 @@ class TestFailureTitleAndSummary:
         title, summary = _failure_title_and_summary("rollback_failed")
         assert title == "Merge failed"
         assert "git rollback failed after guardrail violation" in summary
+
+    def test_conflict_context_failed_call_file_write_failed(self) -> None:
+        title, summary = _failure_title_and_summary(
+            "conflict_context_failed_call_file_write_failed"
+        )
+        assert title == "Merge failed"
+        assert "failed to build conflict context" in summary
+        assert "could not write human call file" in summary
 
     def test_unknown_reason_fallback(self) -> None:
         title, summary = _failure_title_and_summary("some_unknown_reason")
@@ -765,7 +799,10 @@ class TestFailureReasonRendering:
     def test_guardrail_violation_call_failed_rendering(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        """failure_reason='guardrail_violation_call_failed' → correct title in pending_human branch."""
+        """failure_reason='guardrail_violation_call_failed' → correct title in failure branch.
+
+        No call file was written, so pending_human must be False and exit code is 1 (not 130).
+        """
         _init_repo(tmp_path)
         from se3.engine.merge.orchestrator import MergeReport
 
@@ -773,11 +810,11 @@ class TestFailureReasonRendering:
             success=False,
             failed_branch="feature",
             failure_reason="guardrail_violation_call_failed",
-            pending_human=True,
+            pending_human=False,
         )
         captured = self._mock_orchestrator_report(monkeypatch, report)
         exit_code = run_merge(["feature"], project_root=tmp_path)
-        assert exit_code == 130
+        assert exit_code == 1
         assert len(captured) == 1
         assert captured[0]["title"] == "Merge failed"
         assert "guardrails violation" in captured[0]["content"]
@@ -821,6 +858,26 @@ class TestFailureReasonRendering:
         assert len(captured) == 1
         assert captured[0]["title"] == "Merge aborted"
         assert "post-merge commit SHA was unavailable" in captured[0]["content"]
+
+    def test_guardrail_missing_pre_sha_rendering(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """failure_reason='guardrail_missing_pre_sha' -> 'Merge aborted' title with HEAD warning."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature",
+            failure_reason="guardrail_missing_pre_sha",
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 1
+        assert len(captured) == 1
+        assert captured[0]["title"] == "Merge aborted"
+        assert "pre-merge commit SHA was unavailable" in captured[0]["content"]
+        assert "merge commit may still be in HEAD" in captured[0]["content"]
 
     def test_binary_file_conflict_rendering(
         self, tmp_path: Path, monkeypatch
@@ -878,3 +935,46 @@ class TestFailureReasonRendering:
         assert len(captured) == 1
         assert "CRITICAL" in captured[0]["content"] or "corrupted" in captured[0]["content"].lower()
         assert "INCONSISTENT" in captured[0]["content"]
+
+    def test_fast_binary_file_conflict_rendering(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """failure_reason='binary_file_conflict_fast_abort' -> strategy-appropriate message without human review promise."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature",
+            failure_reason="binary_file_conflict_fast_abort",
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 1
+        assert len(captured) == 1
+        assert captured[0]["title"] == "Merge aborted"
+        assert "fast strategy" in captured[0]["content"]
+        assert "binary file conflict" in captured[0]["content"]
+        assert "cannot be auto-resolved" in captured[0]["content"]
+        assert "human review" not in captured[0]["content"].lower()
+        assert "requires" not in captured[0]["content"].lower()
+
+    def test_conflict_context_failed_call_file_write_failed_rendering(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """failure_reason='conflict_context_failed_call_file_write_failed' → correct title/summary."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature",
+            failure_reason="conflict_context_failed_call_file_write_failed",
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 1
+        assert len(captured) == 1
+        assert captured[0]["title"] == "Merge failed"
+        assert "failed to build conflict context" in captured[0]["content"]
+        assert "could not write human call file" in captured[0]["content"]

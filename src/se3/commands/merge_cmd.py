@@ -218,8 +218,9 @@ def run_merge(
         render_text("\n".join(lines), title="Merge Complete")
         return 0
     elif report.rollback_failed:
+        reason_text = report.failure_reason or "unknown"
         lines = [
-            "CRITICAL: Git rollback failed after guardrail violation.",
+            f"CRITICAL: Git rollback failed (reason: {reason_text}).",
             "",
             "The working tree is in an INCONSISTENT state. Manual intervention is required.",
             "",
@@ -237,7 +238,9 @@ def run_merge(
         render_text("\n".join(lines), title="Merge Rollback Failed -- Repository May Be Corrupted")
         return 1
     elif report.pending_human:
-        title, first_line = _failure_title_and_summary(report.failure_reason)
+        title, first_line = _failure_title_and_summary(
+            report.failure_reason, report.pending_human
+        )
         lines = [first_line, ""]
         if report.merged_branches:
             lines.append(
@@ -253,7 +256,9 @@ def run_merge(
         render_text("\n".join(lines), title=title)
         return 130  # Interrupted by user / pending human
     else:
-        title, first_line = _failure_title_and_summary(report.failure_reason)
+        title, first_line = _failure_title_and_summary(
+            report.failure_reason, report.pending_human
+        )
         lines = [first_line, ""]
         if report.failed_branch:
             lines.append(f"Failed branch: {report.failed_branch}")
@@ -275,6 +280,7 @@ def run_merge(
 
 def _failure_title_and_summary(
     failure_reason: Optional[str],
+    pending_human: bool = False,
 ) -> tuple[str, str]:
     """Return (title, first_line) for a merge failure report.
 
@@ -358,9 +364,19 @@ def _failure_title_and_summary(
             "Merge aborted: fast strategy could not auto-repair guardrails violation",
         )
     if failure_reason == "conflict_context_failed":
+        if pending_human:
+            return (
+                "Merge failed",
+                "Merge failed: failed to build conflict context — paused for human review",
+            )
         return (
             "Merge aborted",
-            "Merge aborted: fast strategy failed to build conflict context",
+            "Merge aborted: failed to build conflict context for conflict resolution",
+        )
+    if failure_reason == "conflict_context_failed_call_file_write_failed":
+        return (
+            "Merge failed",
+            "Merge failed: failed to build conflict context and could not write human call file",
         )
     if failure_reason == "llm_resolution_failed":
         return (
@@ -376,6 +392,11 @@ def _failure_title_and_summary(
         return (
             "Merge aborted",
             "Merge aborted: fast strategy rejected the LLM resolution",
+        )
+    if failure_reason == "binary_file_conflict_fast_abort":
+        return (
+            "Merge aborted",
+            "Merge aborted: fast strategy — binary file conflict cannot be auto-resolved",
         )
     if failure_reason == "binary_file_conflict":
         return (
@@ -416,6 +437,16 @@ def _failure_title_and_summary(
         return (
             "Merge aborted",
             "Merge aborted: guardrails check could not verify merge — post-merge commit SHA was unavailable",
+        )
+    if failure_reason == "guardrail_missing_pre_sha":
+        return (
+            "Merge aborted",
+            "Merge aborted: guardrails check could not verify merge — pre-merge commit SHA was unavailable (merge commit may still be in HEAD)",
+        )
+    if failure_reason == "guardrail_missing_pre_and_post_sha":
+        return (
+            "Merge aborted",
+            "Merge aborted: guardrails check could not verify merge — both pre-merge and post-merge commit SHAs were unavailable (merge commit may still be in HEAD)",
         )
     if failure_reason == "pending_human":
         return (
