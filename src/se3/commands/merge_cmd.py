@@ -233,6 +233,8 @@ def run_merge(
         ]
         if report.merged_branches:
             lines.append(f"Branches already merged: {', '.join(report.merged_branches)}")
+        if report.human_call_file:
+            lines.append(f"Call file: {report.human_call_file}")
         if report.log_file:
             lines.append(f"Log file: {report.log_file}")
         render_text("\n".join(lines), title="Merge Rollback Failed -- Repository May Be Corrupted")
@@ -337,6 +339,26 @@ def _failure_title_and_summary(
         return (
             "Merge failed",
             "Merge failed: post-merge guardrails violation (call file could not be written)",
+        )
+    if failure_reason == "guardrail_repair_stalled_call_failed":
+        return (
+            "Merge failed",
+            "Merge failed: post-merge guardrails violation — repair stalled and call file could not be written",
+        )
+    if failure_reason == "guardrail_repair_exhausted_call_failed":
+        return (
+            "Merge failed",
+            "Merge failed: post-merge guardrails violation — repair exhausted and call file could not be written",
+        )
+    if failure_reason == "guardrail_repair_stalled":
+        return (
+            "Merge paused for human review",
+            "Merge paused: fast strategy could not auto-repair guardrails violation (repair stalled)",
+        )
+    if failure_reason == "guardrail_repair_exhausted":
+        return (
+            "Merge paused for human review",
+            "Merge paused: fast strategy could not auto-repair guardrails violation (repair exhausted)",
         )
     if failure_reason == "human_call_write_failed":
         return (

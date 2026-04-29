@@ -1,0 +1,25 @@
+id: 092
+title: Task (B) scope mentioned `strategy.py` would change for fast-mode robustness,
+  but the change actually lives in `orchestrator.py` (seen_hashes / GuardrailRepairStalled
+  path). This is a divergence from the stated file scope, not a behavioral defect
+  — the orchestrator is the correct layer because it owns the post-merge guardrails
+  loop. No fix needed.
+description: 'Task (B) scope mentioned `strategy.py` would change for fast-mode robustness,
+  but the change actually lives in `orchestrator.py` (seen_hashes / GuardrailRepairStalled
+  path). This is a divergence from the stated file scope, not a behavioral defect
+  — the orchestrator is the correct layer because it owns the post-merge guardrails
+  loop. No fix needed.
+
+
+  Suggestion: Note for future scope drafting: stall detection naturally lives in the
+  orchestrator''s repair loop, not in the strategy decision module.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-04-29T21:23:15.540489'
+updated_at: '2026-04-29T21:23:15.540489'

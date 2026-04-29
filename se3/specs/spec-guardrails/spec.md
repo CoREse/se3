@@ -63,6 +63,7 @@ The system SHALL enforce guardrails through automated checks.
 2. Check for deleted scenarios (missing WHEN clauses)
 3. Check for weakened language (SHALL → SHOULD, MUST → SHOULD)
 4. Check for weakened quantifiers (all → some, every → some)
+5. For corner-case branches that infer weakening from the combination of "a strong line is missing" AND "a weak-only line exists in the new file", the detector SHALL prove the two lines are a replacement pair before reporting a violation (see "Pairing-Based Corner-Case Detection")
 
 #### Scenario: Automated guardrail check
 - **WHEN** `se3 guardrails <spec-file>` is run
@@ -92,6 +93,13 @@ When a guardrail violation is detected, the system SHALL provide clear reporting
 - Modified text (if applicable)
 - Rule that was violated
 
+**Structured evidence:** Each violation SHALL additionally carry a structured `evidence` payload that callers (fast-mode abort reports, human MCP call files, log entries) can render directly. Evidence MAY include any of the following fields when relevant to the violation type:
+- `strong_line` / `weak_line` — original strong-language text and the candidate weak replacement text
+- `strong_line_no` / `weak_line_no` — line numbers within the modified spec file
+- `pairing_score` — the similarity score (e.g., token-set Jaccard) that justified treating the two lines as a replacement pair
+- `deleted_line` / `when_clause` — for deletion violations, the removed text or WHEN-clause name
+- `branch_name` / `trigger_branch` / `branch_kind` — the merge branch and detector code-path that produced the report (e.g., "primary" vs "corner-case")
+
 #### Scenario: Report deletion violation
 - **WHEN** a scenario is deleted from a spec
 - **THEN** the report shows: "[must_not_delete] Deleted scenarios detected: {scenario_names}"
@@ -99,6 +107,46 @@ When a guardrail violation is detected, the system SHALL provide clear reporting
 #### Scenario: Report weakening violation
 - **WHEN** SHALL is changed to SHOULD
 - **THEN** the report shows: "[must_not_weaken] Requirement weakened: SHALL → SHOULD"
+
+#### Scenario: Violation evidence is structured and self-contained
+- **GIVEN** a guardrail violation has been detected by any branch (primary or corner-case)
+- **WHEN** the violation is serialized for downstream consumers (fast-mode abort summary, human MCP call file, log entry)
+- **THEN** the violation carries an `evidence` object containing the strong/weak line text, line numbers, and the detector branch that fired
+- **AND** consumers SHALL render the evidence verbatim without having to re-read the spec file or re-run the detector
+
+### Requirement: Pairing-Based Corner-Case Detection
+
+To avoid false positives when a spec is legitimately extended (e.g., a SHALL sentence is rephrased or expanded, while an unrelated SHOULD/MAY line was already present), the corner-case weakening branch of the detector SHALL prove that the missing strong line and a candidate weak line in the modified file are a replacement pair before reporting a violation.
+
+**Pairing rule (applies to both SHALL/MUST weakening and quantifier weakening corner-case branches):**
+
+1. For every "missing strong line" the primary diff identified, the detector SHALL attempt to pair it with a "weak-only line" from the modified file.
+2. Pairing is decided by a deterministic content-similarity score (e.g., token-set Jaccard after stripping role words such as SHALL/SHOULD/MAY/MUST and stopwords). The score MUST meet a documented threshold (≥ 0.5 for SHALL/MUST; ≥ 0.65 for in-place mixed-line weakening) for the pair to be accepted.
+3. If no candidate weak-only line clears the threshold, the corner-case branch SHALL NOT report a violation — even if both "a strong line went missing somewhere" and "a weak-only line exists somewhere" are independently true.
+4. When pairing succeeds, the violation's structured evidence SHALL include the paired strong and weak line texts, both line numbers, and the pairing score.
+5. The same pairing rule applies to the quantifier (e.g., `all`/`every` → `some`) corner-case branch.
+
+The similarity computation MUST stay at the pure string/regex layer (no semantic models) so that detection is deterministic, dependency-free, and unit-testable.
+
+#### Scenario: Legitimate SHALL extension does not trigger corner-case false positive
+- **GIVEN** the modified spec extends an existing SHALL sentence and adds a new MUST line, with no SHALL→SHOULD/MAY weakening
+- **AND** an unrelated SHOULD or MAY line already existed in the file before the change
+- **WHEN** the corner-case weakening branch evaluates the diff
+- **THEN** the detector tries to pair the missing strong line with each weak-only line by token-set similarity
+- **AND** because no weak-only line clears the similarity threshold, no WEAKENING violation is reported
+- **AND** the merge proceeds without escalation
+
+#### Scenario: Genuine SHALL → MAY weakening is still caught
+- **GIVEN** a SHALL sentence in the original spec is rewritten to a MAY sentence covering the same subject in the modified spec
+- **WHEN** the corner-case branch evaluates the diff
+- **THEN** the missing strong line and the new MAY line have token-set similarity above the threshold and form a replacement pair
+- **AND** the detector reports a WEAKENING violation with structured evidence containing both lines, both line numbers, and the pairing score
+
+#### Scenario: Mixed corner case — one weakening offset by an added SHALL is still flagged
+- **GIVEN** the diff both weakens one SHALL into a SHOULD AND adds an unrelated new SHALL elsewhere
+- **WHEN** the corner-case branch evaluates the diff
+- **THEN** the pairing logic still finds a replacement pair for the weakened line and reports a WEAKENING violation
+- **AND** the unrelated added SHALL does not mask the weakening
 
 ### Requirement: New Spec vs Append Criteria
 

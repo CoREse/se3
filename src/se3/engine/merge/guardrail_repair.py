@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,11 +19,9 @@ from typing import Any, Optional
 
 from ..json_extractor import extract_json_two_phase
 from ..worktree import _run_git
-from .guardrails import GuardrailViolation, MergeGuardrailsCheck
+from .guardrails import GuardrailViolation, MergeGuardrailsCheck, _is_spec_path
 
 logger = logging.getLogger(__name__)
-
-_SPEC_PATH_RE = re.compile(r"^se3/specs/.+/spec\.md$")
 
 _REPAIR_SCHEMA = """{
   "files": [
@@ -138,10 +135,15 @@ class GuardrailRepairer:
                 error=f"LLM call failed: {exc}",
             )
 
-        if not raw_response:
+        if raw_response == "" or raw_response is None:
             return RepairResult(
                 success=False,
                 error="LLM returned empty response for guardrail repair",
+            )
+        if raw_response == {} or raw_response == {"files": []}:
+            return RepairResult(
+                success=False,
+                error="LLM returned empty response (no files to repair)",
             )
 
         # Parse LLM response
@@ -190,17 +192,19 @@ class GuardrailRepairer:
                     "Guardrail repair attempted to write outside spec dir: %s — rejected",
                     path,
                 )
+                self._restore_merged_content(repaired_files, merged_spec_contents)
                 return RepairResult(
                     success=False,
                     error=f"Guardrail repair attempted to write outside spec dir: {path}",
                 )
 
             # Must also match the spec file naming pattern
-            if not self._is_spec_path(path):
+            if not _is_spec_path(path):
                 logger.warning(
                     "Guardrail repair attempted to write non-spec path: %s — rejected",
                     path,
                 )
+                self._restore_merged_content(repaired_files, merged_spec_contents)
                 return RepairResult(
                     success=False,
                     error=f"Guardrail repair attempted to write non-spec path: {path}",
@@ -216,6 +220,7 @@ class GuardrailRepairer:
                     path,
                     ", ".join(sorted(allowed_paths)),
                 )
+                self._restore_merged_content(repaired_files, merged_spec_contents)
                 return RepairResult(
                     success=False,
                     error=(
@@ -231,6 +236,7 @@ class GuardrailRepairer:
                     "contains unresolved git conflict markers",
                     path,
                 )
+                self._restore_merged_content(repaired_files, merged_spec_contents)
                 return RepairResult(
                     success=False,
                     error=(
@@ -340,6 +346,12 @@ class GuardrailRepairer:
                     check=False, timeout=15,
                 )
                 if reset_result.returncode != 0:
+                    # TODO: A failed un-amend leaves HEAD on an unverified amended
+                    # commit. The orchestrator's subsequent _rollback_to(pre_sha)
+                    # will move HEAD regardless, masking this failure. If the
+                    # orchestrator were to return success unexpectedly, the repo
+                    # would be left in an inconsistent state. Consider raising
+                    # here instead of only logging.
                     logger.warning(
                         "Un-amend (reset --soft HEAD~1) failed after timeout: %s",
                         reset_result.stderr.strip() or "unknown error",
@@ -363,6 +375,7 @@ class GuardrailRepairer:
                     check=False, timeout=15,
                 )
                 if reset_result.returncode != 0:
+                    # TODO: See matching TODO above in the TimeoutExpired path.
                     logger.warning(
                         "Un-amend (reset --soft HEAD~1) failed after exception: %s",
                         reset_result.stderr.strip() or "unknown error",
@@ -375,18 +388,21 @@ class GuardrailRepairer:
 
         if not gr_report.passed:
             # Still has violations after repair — restore and report failure.
-            # Unstage repaired files and un-amend before restoring working tree
-            # so the repairer is self-contained.
+            # Reorder: (a) soft-reset to undo the amend, (b) unstage repaired
+            # files from the new HEAD so index and working tree stay in sync,
+            # (c) restore the original merged content.  This makes the repairer
+            # self-contained regardless of whether the caller performs a
+            # downstream hard reset.
             if amend_succeeded:
+                _run_git(
+                    self.project_root, "reset", "--soft", "HEAD~1",
+                    check=False, timeout=15,
+                )
                 for path in repaired_files:
                     _run_git(
                         self.project_root, "reset", "HEAD", path,
                         check=False, timeout=15,
                     )
-                _run_git(
-                    self.project_root, "reset", "--soft", "HEAD~1",
-                    check=False, timeout=15,
-                )
             self._restore_merged_content(repaired_files, merged_spec_contents)
             remaining = [
                 f"[{v.violation_type}] {v.file_path}: {v.message}"
@@ -417,6 +433,58 @@ class GuardrailRepairer:
         for i, v in enumerate(violations, 1):
             lines.append(f"{i}. [{v.violation_type}] {v.file_path}")
             lines.append(f"   {v.message}")
+            evidence = v.evidence
+            if evidence:
+                if "strong_line" in evidence and "weak_line" in evidence:
+                    lines.append(
+                        f"   Original:  '{evidence['strong_line']}' "
+                        f"(line {evidence.get('strong_line_no', '?')})"
+                    )
+                    lines.append(
+                        f"   Modified:  '{evidence['weak_line']}' "
+                        f"(line {evidence.get('weak_line_no', '?')})"
+                    )
+                    if "pairing_score" in evidence:
+                        lines.append(
+                            f"   Pairing score: {evidence['pairing_score']}"
+                        )
+                    if "all_pairings" in evidence:
+                        ap = evidence["all_pairings"]
+                        if len(ap) > 1:
+                            lines.append(
+                                f"   Additional pairings ({len(ap) - 1}):"
+                            )
+                            for p in ap[1:]:
+                                lines.append(
+                                    f"     - '{p['strong_line']}' -> "
+                                    f"'{p['weak_line']}' "
+                                    f"(line {p.get('strong_line_no', '?')} -> "
+                                    f"{p.get('weak_line_no', '?')})"
+                                )
+                if "deleted_line" in evidence:
+                    lines.append(
+                        f"   Deleted:   '{evidence['deleted_line']}' "
+                        f"(line {evidence.get('deleted_line_no', '?')})"
+                    )
+                if "when_clauses" in evidence:
+                    for wc in evidence["when_clauses"]:
+                        lines.append(f"   Deleted WHEN: '{wc}'")
+                # Defensive fallback: dump any unrecognized evidence keys so
+                # the LLM repair prompt still gets context when evidence shape
+                # evolves (e.g. new detector adds a novel key).
+                # Use str() for scalars and json.dumps() for collections so
+                # the prompt format stays consistent with the recognized branches.
+                recognized = {
+                    "strong_line", "weak_line", "strong_line_no",
+                    "weak_line_no", "pairing_score", "deleted_line",
+                    "deleted_line_no", "when_clauses", "all_pairings",
+                }
+                for key, value in evidence.items():
+                    if key not in recognized:
+                        if isinstance(value, (list, dict, tuple, set)):
+                            lines.append(f"   {key}: {json.dumps(value, ensure_ascii=False)}")
+                        else:
+                            lines.append(f"   {key}: {str(value)}")
         return "\n".join(lines) if lines else "(none)"
 
     def _format_spec_contents(self, contents: dict[str, str]) -> str:
@@ -427,11 +495,6 @@ class GuardrailRepairer:
             lines.append(content)
             lines.append("")
         return "\n".join(lines) if lines else "(none)"
-
-    def _is_spec_path(self, path: str) -> bool:
-        """Return True when path matches se3/specs/**/spec.md."""
-        normalized = path.replace("\\", "/")
-        return bool(_SPEC_PATH_RE.match(normalized))
 
     def _restore_merged_content(
         self,

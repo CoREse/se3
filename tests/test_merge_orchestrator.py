@@ -3842,8 +3842,8 @@ class TestGuardrailsStrategyAware:
         ).stdout.strip()
         assert post_head != pre_head
 
-    def test_fast_guardrail_violation_llm_repair_failure_aborts(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + guardrail violation + LLM repair fails -> rollback + fast_abort."""
+    def test_fast_guardrail_violation_llm_repair_stalled_escalates(self, tmp_path: Path, monkeypatch) -> None:
+        """fast + guardrail violation + LLM repair stalled -> pending_human with call file."""
         default_branch = self._setup_spec_repo(tmp_path)
 
         subprocess.run(
@@ -3868,7 +3868,7 @@ class TestGuardrailsStrategyAware:
             check=True, capture_output=True,
         )
 
-        # Mock GuardrailRepairer to fail
+        # Mock GuardrailRepairer to always fail (no progress)
         def mock_repair(self, branch, pre_sha, post_sha, violations, original_spec_contents, merged_spec_contents):
             from se3.engine.merge.guardrail_repair import RepairResult
             return RepairResult(
@@ -3889,12 +3889,13 @@ class TestGuardrailsStrategyAware:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute(["feature"])
 
-        # Must fail
+        # Stalled repair escalates to human call
         assert report.success is False
         assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_repair_failed"
-        assert report.pending_human is False
-        assert report.human_call_file is None
+        assert report.failure_reason == "guardrail_repair_stalled"
+        assert report.pending_human is True
+        assert report.human_call_file is not None
+        assert report.human_call_file.exists()
 
         # HEAD should be restored to pre-merge state
         post_head = subprocess.run(
@@ -3902,12 +3903,6 @@ class TestGuardrailsStrategyAware:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
         assert post_head == pre_head
-
-        # No call files should exist
-        calls_dir = tmp_path / "se3" / "calls"
-        if calls_dir.exists():
-            call_files = list(calls_dir.glob("merge_*.json"))
-            assert len(call_files) == 0
 
     def test_default_guardrail_violation_unchanged(self, tmp_path: Path) -> None:
         """default + guardrail violation -> still rollback + human call (unchanged)."""
@@ -4334,8 +4329,8 @@ class TestGuardrailsStrategyAware:
         assert "SHALL" in spec_content
         assert "SHOULD" not in spec_content
 
-    def test_fast_repair_failure_aborts_no_call(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + guardrail violation + repair fails -> abort, no human call file."""
+    def test_fast_repair_stalled_creates_call_file(self, tmp_path: Path, monkeypatch) -> None:
+        """fast + guardrail violation + repair stalled -> pending_human with call file."""
         default_branch = self._setup_spec_repo(tmp_path)
 
         subprocess.run(
@@ -4365,11 +4360,7 @@ class TestGuardrailsStrategyAware:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        # Count call files before
-        calls_dir = tmp_path / "se3" / "calls"
-        calls_before = list(calls_dir.glob("merge_*.json")) if calls_dir.exists() else []
-
-        # Mock repairer to fail
+        # Mock repairer to always fail (no progress)
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
             from se3.engine.merge.guardrail_repair import RepairResult
@@ -4383,12 +4374,13 @@ class TestGuardrailsStrategyAware:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute(["feature"])
 
-        # Must fail with guardrail_repair_failed
+        # Stalled repair escalates to human call
         assert report.success is False
         assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_repair_failed"
-        assert report.pending_human is False
-        assert report.human_call_file is None
+        assert report.failure_reason == "guardrail_repair_stalled"
+        assert report.pending_human is True
+        assert report.human_call_file is not None
+        assert report.human_call_file.exists()
 
         # HEAD restored
         post_head = subprocess.run(
@@ -4397,9 +4389,125 @@ class TestGuardrailsStrategyAware:
         ).stdout.strip()
         assert post_head == pre_head
 
-        # No new call files
-        calls_after = list(calls_dir.glob("merge_*.json")) if calls_dir.exists() else []
-        assert len(calls_after) == len(calls_before)
+        # Call file should be the stalled type (detected at iteration 2 because
+        # the same hash repeats across two consecutive iterations).
+        import json
+        data = json.loads(report.human_call_file.read_text())
+        assert data["type"] == "guardrail_repair_stalled"
+        assert data["iteration_count"] == 2
+        assert len(data["violations"]) >= 1
+
+    def test_fast_repair_hash_changes_aborts_after_max(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """fast + repair changes hash each round -> exhausted after max iterations.
+
+        The mock alternates between two violation hashes.  With last_hash
+        tracking only the immediately previous iteration, the oscillation
+        back to the initial hash is not detected as a stall within 2 iterations.
+        Instead, max iterations are exhausted and the report is escalated to a
+        human call via GuardrailRepairExhausted (subclass of GuardrailRepairStalled).
+        """
+        default_branch = self._setup_spec_repo(tmp_path)
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
+            check=True, capture_output=True,
+        )
+        spec_dir = tmp_path / "se3" / "specs" / "base"
+        (spec_dir / "spec.md").write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        check_call_count = [0]
+
+        # Mock repairer to always fail
+        def mock_repair(self, branch, pre_sha, post_sha, violations,
+                        original_spec_contents, merged_spec_contents):
+            from se3.engine.merge.guardrail_repair import RepairResult
+            return RepairResult(success=False, error="LLM could not fix")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            mock_repair,
+        )
+
+        # Mock guardrails re-check to return violations with different
+        # strong_line evidence each time so the stable key (and thus hash)
+        # changes, but violations are never empty.  Because the mock is also
+        # used for the initial check, the first result (odd) sets the initial
+        # hash; iteration 1 (even) produces a different hash; iteration 2
+        # (odd) returns the SAME hash as the initial check.  Because last_hash
+        # only compares the immediately previous iteration, this oscillation
+        # is NOT detected as a stall (iter2 hash A != iter1 hash B).
+        def mock_check(self, pre_sha: str, post_sha: str):
+            check_call_count[0] += 1
+            from se3.engine.merge.guardrails import GuardrailReport, GuardrailViolation
+            if check_call_count[0] % 2 == 1:
+                evidence = {
+                    "strong_line": "The system SHALL validate inputs.",
+                    "weak_line": "The system SHOULD validate inputs.",
+                    "pairing_score": 0.9,
+                }
+            else:
+                evidence = {
+                    "strong_line": "The system SHALL check permissions.",
+                    "weak_line": "The system SHOULD check permissions.",
+                    "pairing_score": 0.9,
+                }
+            return GuardrailReport(
+                passed=False,
+                violations=[
+                    GuardrailViolation(
+                        file_path="se3/specs/base/spec.md",
+                        violation_type="WEAKENING",
+                        message="SHALL weakened to SHOULD",
+                        evidence=evidence,
+                    ),
+                ],
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            mock_check,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature"])
+
+        # Oscillating hash not detected as stall within max iterations ->
+        # exhausted -> human call (via GuardrailRepairExhausted subclass)
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "guardrail_repair_exhausted"
+        assert report.pending_human is True
+        assert report.human_call_file is not None
+        assert report.human_call_file.exists()
+
+        # HEAD restored
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
 
     def test_default_guardrail_checker_crash_call_file_fails(
         self, tmp_path: Path, monkeypatch

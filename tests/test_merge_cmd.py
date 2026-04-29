@@ -542,6 +542,18 @@ class TestFailureTitleAndSummary:
         assert title == "Merge aborted"
         assert "fast strategy could not auto-repair" in summary
 
+    def test_guardrail_repair_stalled(self) -> None:
+        title, summary = _failure_title_and_summary("guardrail_repair_stalled")
+        assert title == "Merge paused for human review"
+        assert "fast strategy could not auto-repair" in summary
+        assert "repair stalled" in summary
+
+    def test_guardrail_repair_exhausted(self) -> None:
+        title, summary = _failure_title_and_summary("guardrail_repair_exhausted")
+        assert title == "Merge paused for human review"
+        assert "fast strategy could not auto-repair" in summary
+        assert "repair exhausted" in summary
+
     def test_merge_timed_out(self) -> None:
         title, summary = _failure_title_and_summary("merge_timed_out")
         assert title == "Merge aborted"
@@ -935,6 +947,27 @@ class TestFailureReasonRendering:
         assert len(captured) == 1
         assert "CRITICAL" in captured[0]["content"] or "corrupted" in captured[0]["content"].lower()
         assert "INCONSISTENT" in captured[0]["content"]
+
+    def test_rollback_failed_with_call_file_rendering(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """rollback_failed=True with human_call_file set → CRITICAL message includes call file path."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature",
+            failure_reason="guardrail_repair_stalled",
+            rollback_failed=True,
+            human_call_file="se3/calls/merge_20260101_000000_feature.json",
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 1
+        assert len(captured) == 1
+        assert "CRITICAL" in captured[0]["content"]
+        assert "Call file: se3/calls/merge_20260101_000000_feature.json" in captured[0]["content"]
 
     def test_fast_binary_file_conflict_rendering(
         self, tmp_path: Path, monkeypatch

@@ -24,6 +24,7 @@ from .guardrails import (
     MergeGuardrailsCheck,
     _get_changed_spec_files,
     _read_file_from_ref,
+    violation_set_hash,
 )
 from .human_call import HumanCallWriter
 from .strategy import DecisionAction, StrategyDecider, StrategyDecision
@@ -34,6 +35,21 @@ from .version_aggregator import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Maximum LLM repair iterations in fast mode before giving up.
+# Stall is detected when two *consecutive repair-iteration* hashes match.
+# The initial gr_report hash is intentionally NOT compared against
+# last_hash (initialised to ""), so a true stall requires
+# iter1_hash == iter2_hash, which is detected on iteration 2.  The value 2
+# provides exactly one repair attempt plus one verification round; the
+# max-iterations abort path is only reachable when hashes keep changing
+# but violations never clear.
+_MAX_REPAIR_ITERATIONS = 2
+
+assert _MAX_REPAIR_ITERATIONS >= 1, (
+    "_MAX_REPAIR_ITERATIONS must be >= 1 so the repair loop executes at least "
+    "once and the exhausted-path fallback is well-defined."
+)
 
 
 class GuardrailRollbackError(RuntimeError):
@@ -97,6 +113,54 @@ class GuardrailRepairFailed(RuntimeError):
         self.rollback_failed = rollback_failed
 
 
+class GuardrailRepairStalled(RuntimeError):
+    """Raised when fast-mode guardrail repair makes no progress.
+
+    After LLM repair, if the violation set hash is unchanged for
+    consecutive iterations, we stop retrying and escalate to a human
+    call instead of aborting.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        call_file: Optional[Path] = None,
+        iteration_count: int = 0,
+        last_violation_hash: str = "",
+        failure_reason: str = "guardrail_repair_stalled",
+    ) -> None:
+        super().__init__(message)
+        self.call_file = call_file
+        self.iteration_count = iteration_count
+        self.last_violation_hash = last_violation_hash
+        self.failure_reason = failure_reason
+
+
+class GuardrailRepairExhausted(GuardrailRepairStalled):
+    """Raised when fast-mode guardrail repair reaches max iterations.
+
+    Subclass of GuardrailRepairStalled so callers can distinguish the
+    exhausted path (max iterations reached without resolution, hash
+    kept changing) from the stalled path (consecutive identical hashes)
+    while still catching both with a single ``except GuardrailRepairStalled``.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        call_file: Optional[Path] = None,
+        iteration_count: int = 0,
+        last_violation_hash: str = "",
+    ) -> None:
+        super().__init__(
+            message,
+            call_file=call_file,
+            iteration_count=iteration_count,
+            last_violation_hash=last_violation_hash,
+            failure_reason="guardrail_repair_exhausted",
+        )
+
+
 @dataclass
 class MergeReport:
     """Result of a merge orchestration run."""
@@ -152,6 +216,7 @@ class MergeOrchestrator:
         self._human_writer = HumanCallWriter(project_root)
         self._guardrails = MergeGuardrailsCheck(project_root)
         self._repairer = GuardrailRepairer(project_root)
+        self._last_stall_iteration_count: Optional[int] = None
 
     def _log(self, message: str) -> None:
         """Append a line to the internal log buffer and the logger."""
@@ -180,6 +245,11 @@ class MergeOrchestrator:
         report = MergeReport()
         current_branch = get_current_branch(self.project_root)
         self._current_branch = current_branch
+
+        # Defensive: clear stale instance state from any prior execution so
+        # that a later merge that stalls without setting this attribute does
+        # not pick up the value from a previous stall.
+        self._last_stall_iteration_count = None
 
         self._log("Merge orchestrator starting")
         self._log(f"Current branch: {current_branch}")
@@ -214,6 +284,9 @@ class MergeOrchestrator:
         branch_bumps: list[BumpType] = []
 
         for branch in branches:
+            # Reset per-branch mutable state so a stall on an earlier branch
+            # does not leak into a later branch's result formatting.
+            self._last_stall_iteration_count = None
             self._log(f"--- Merging branch: {branch} ---")
 
             result = self._merge_single_branch(branch, report)
@@ -319,6 +392,28 @@ class MergeOrchestrator:
                 report.failed_branch = branch
                 report.failure_reason = "guardrail_violation_no_rollback"
                 report.rollback_failed = False
+                report.version_aggregation_skipped = True
+                self._write_log()
+                report.log_file = self.log_file
+                return report
+            elif result in ("guardrail_repair_stalled", "guardrail_repair_exhausted"):
+                iter_info = getattr(self, "_last_stall_iteration_count", None)
+                iter_str = f" after {iter_info} iteration(s)" if iter_info else ""
+                reason_word = "exhausted" if result == "guardrail_repair_exhausted" else "stalled"
+                self._log(
+                    f"Branch '{branch}' guardrail repair {reason_word}{iter_str} — "
+                    f"escalated to human review"
+                )
+                if report.merged_branches:
+                    self._log(
+                        f"Version not bumped despite {len(report.merged_branches)} "
+                        f"successful merge(s) — re-run after resolving"
+                    )
+                report.success = False
+                report.pending_human = True
+                report.failed_branch = branch
+                if not report.failure_reason:
+                    report.failure_reason = "guardrail_repair_stalled"
                 report.version_aggregation_skipped = True
                 self._write_log()
                 report.log_file = self.log_file
@@ -716,10 +811,29 @@ class MergeOrchestrator:
                 guardrails_result = self._run_guardrails(
                     pre_merge_sha, post_merge_sha, branch, strategy=self.strategy,
                 )
+            except GuardrailRepairStalled as exc:
+                self._log(
+                    f"Guardrail repair stalled for '{branch}' after "
+                    f"{exc.iteration_count} iteration(s) — escalated to human review"
+                )
+                report.human_call_file = exc.call_file
+                report.failure_reason = exc.failure_reason
+                self._last_stall_iteration_count = exc.iteration_count
+                return exc.failure_reason
             except GuardrailRepairFailed as exc:
                 if exc.failure_reason == "guardrail_check_failed":
                     self._log(
                         f"Guardrails check itself crashed for '{branch}' in fast mode: {exc}"
+                    )
+                elif exc.failure_reason == "guardrail_repair_stalled_call_failed":
+                    self._log(
+                        f"Guardrail repair stalled for '{branch}' in fast mode: "
+                        f"rollback succeeded but the stalled human call file could not be written. {exc}"
+                    )
+                elif exc.failure_reason == "guardrail_repair_exhausted_call_failed":
+                    self._log(
+                        f"Guardrail repair exhausted for '{branch}' in fast mode: "
+                        f"rollback succeeded but the exhausted human call file could not be written. {exc}"
                     )
                 else:
                     self._log(
@@ -1440,10 +1554,29 @@ class MergeOrchestrator:
             guardrails_result = self._run_guardrails(
                 pre_merge_sha, post_merge_sha, branch, strategy=self.strategy,
             )
+        except GuardrailRepairStalled as exc:
+            self._log(
+                f"Guardrail repair stalled for '{branch}' after "
+                f"{exc.iteration_count} iteration(s) — escalated to human review"
+            )
+            report.human_call_file = exc.call_file
+            report.failure_reason = exc.failure_reason
+            self._last_stall_iteration_count = exc.iteration_count
+            return exc.failure_reason
         except GuardrailRepairFailed as exc:
             if exc.failure_reason == "guardrail_check_failed":
                 self._log(
                     f"Guardrails check itself crashed for '{branch}' in fast mode: {exc}"
+                )
+            elif exc.failure_reason == "guardrail_repair_stalled_call_failed":
+                self._log(
+                    f"Guardrail repair stalled for '{branch}' in fast mode: "
+                    f"rollback succeeded but the stalled human call file could not be written. {exc}"
+                )
+            elif exc.failure_reason == "guardrail_repair_exhausted_call_failed":
+                self._log(
+                    f"Guardrail repair exhausted for '{branch}' in fast mode: "
+                    f"rollback succeeded but the exhausted human call file could not be written. {exc}"
                 )
             else:
                 self._log(
@@ -1560,7 +1693,8 @@ class MergeOrchestrator:
                 raise GuardrailRepairFailed(
                     f"Guardrails check skipped for '{branch}': missing {missing_reason} "
                     f"(pre_sha={pre_sha!r}, post_sha={post_sha!r}). "
-                    f"Fast mode aborts without human call.",
+                    f"Fast mode aborts without rollback or human call when SHAs "
+                    f"are missing — the merge commit may still be in HEAD.",
                     failure_reason=failure_reason,
                     rollback_failed=False,
                 )
@@ -1642,70 +1776,333 @@ class MergeOrchestrator:
             for v in gr_report.violations:
                 self._log(f"  [{v.violation_type}] {v.file_path}: {v.message}")
 
-            # --- fast strategy: attempt LLM repair ---
+            # --- fast strategy: attempt LLM repair with iteration limit ---
             if strategy == MergeStrategy.FAST:
+                # Use a local variable for the working violation set so we
+                # never mutate the original gr_report object.
+                current_violations = gr_report.violations
+
                 self._log(
                     f"Fast strategy: attempting LLM repair of "
-                    f"{len(gr_report.violations)} guardrail violation(s)"
+                    f"{len(current_violations)} guardrail violation(s) "
+                    f"(max {_MAX_REPAIR_ITERATIONS} iterations)"
                 )
 
-                # Gather original and merged spec contents for the repair prompt
+                # Track the previous violation-set hash to detect stalls.
+                # A stall requires the same hash in *two consecutive repair
+                # iterations*, matching the spec's "连续 2 轮 hash 相同".
+                # Only the immediately previous hash is compared (not a set of
+                # all prior hashes) so that oscillating patterns which happen
+                # to revisit an earlier state after making progress are not
+                # falsely classified as stalled.
+                last_hash: str = ""
+
+                # Gather original and merged spec contents.
+                # original_specs is read once (pre_sha never changes).
+                # merged_specs is refreshed each iteration from the current HEAD
+                # so that the LLM sees the latest state after any amendments by
+                # previous repair rounds.
                 spec_files = _get_changed_spec_files(
                     self.project_root, pre_sha, post_sha,
                 )
                 original_specs: dict[str, str] = {}
-                merged_specs: dict[str, str] = {}
                 for sp in spec_files:
                     orig = _read_file_from_ref(self.project_root, sp, pre_sha)
-                    merged = _read_file_from_ref(self.project_root, sp, post_sha)
                     if orig is None:
                         self._log(
                             f"WARNING: Could not read original content of {sp} "
-                            f"from ref {pre_sha} — including placeholder in repair prompt"
+                            f"from ref {pre_sha} — including placeholder "
+                            f"in repair prompt"
                         )
                         orig = f"[Content unavailable at ref {pre_sha}]"
-                    if merged is None:
-                        self._log(
-                            f"WARNING: Could not read merged content of {sp} "
-                            f"from ref {post_sha} — including placeholder in repair prompt"
-                        )
-                        merged = f"[Content unavailable at ref {post_sha}]"
                     original_specs[sp] = orig
-                    merged_specs[sp] = merged
 
-                repair_result = self._repairer.repair_violations(
-                    branch=branch,
-                    pre_sha=pre_sha,
-                    post_sha=post_sha,
-                    violations=gr_report.violations,
-                    original_spec_contents=original_specs,
-                    merged_spec_contents=merged_specs,
-                )
+                for iteration in range(1, _MAX_REPAIR_ITERATIONS + 1):
+                    # Refresh merged specs from current HEAD so the LLM sees
+                    # the latest state after any amendments from previous repair
+                    # rounds. Falls back to post_sha if HEAD cannot be read.
+                    try:
+                        head_result = _run_git(
+                            self.project_root, "rev-parse", "HEAD",
+                            check=False, timeout=15,
+                        )
+                        current_head = (
+                            head_result.stdout.strip()
+                            if head_result.returncode == 0 else ""
+                        )
+                    except subprocess.TimeoutExpired:
+                        current_head = ""
+                    read_ref = current_head if current_head else post_sha
 
-                if repair_result.success:
+                    merged_specs: dict[str, str] = {}
+                    for sp in spec_files:
+                        merged = _read_file_from_ref(
+                            self.project_root, sp, read_ref,
+                        )
+                        if merged is None:
+                            # Fallback to original post_sha if HEAD ref read fails
+                            merged = _read_file_from_ref(
+                                self.project_root, sp, post_sha,
+                            )
+                            if merged is None:
+                                self._log(
+                                    f"WARNING: Could not read merged content of "
+                                    f"{sp} from ref {post_sha} — including "
+                                    f"placeholder in repair prompt"
+                                )
+                                merged = f"[Content unavailable at ref {post_sha}]"
+                        merged_specs[sp] = merged
+
                     self._log(
-                        f"Guardrail repair succeeded for '{branch}': "
-                        f"{len(repair_result.repaired_files)} file(s) corrected"
+                        f"Fast strategy: repair iteration {iteration}/"
+                        f"{_MAX_REPAIR_ITERATIONS}"
                     )
-                    return None
 
-                # Repair failed — rollback and abort (no human call in fast)
-                self._log(
-                    f"Guardrail repair failed for '{branch}': {repair_result.error}"
-                )
-                try:
-                    self._rollback_to(pre_sha)
-                except (RuntimeError, subprocess.TimeoutExpired) as rbe:
-                    raise GuardrailRepairFailed(
-                        f"Guardrail repair failed for '{branch}': {repair_result.error}. "
-                        f"Rollback also failed: {rbe}",
-                        failure_reason="guardrail_repair_failed",
-                        rollback_failed=True,
-                    ) from rbe
-                raise GuardrailRepairFailed(
-                    f"Guardrail repair failed for '{branch}': {repair_result.error}",
-                    failure_reason="guardrail_repair_failed",
-                )
+                    repair_result = self._repairer.repair_violations(
+                        branch=branch,
+                        pre_sha=pre_sha,
+                        post_sha=post_sha,
+                        violations=current_violations,
+                        original_spec_contents=original_specs,
+                        merged_spec_contents=merged_specs,
+                    )
+
+                    if repair_result.success:
+                        self._log(
+                            f"Guardrail repair succeeded for '{branch}' at "
+                            f"iteration {iteration}: "
+                            f"{len(repair_result.repaired_files)} file(s) corrected"
+                        )
+                        return None
+
+                    # Repair failed — re-run guardrails to get fresh violations
+                    self._log(
+                        f"Guardrail repair iteration {iteration} failed: "
+                        f"{repair_result.error}"
+                    )
+
+                    try:
+                        fresh_report = self._guardrails.check_merge_result(
+                            pre_sha, post_sha,
+                        )
+                    except Exception as exc:
+                        self._log(
+                            f"Guardrails re-check failed after repair: {exc}"
+                        )
+                        try:
+                            self._rollback_to(pre_sha)
+                        except (RuntimeError, subprocess.TimeoutExpired) as rbe:
+                            raise GuardrailRepairFailed(
+                                f"Guardrail repair failed at iteration {iteration} "
+                                f"and re-check crashed. Rollback also failed: {rbe}",
+                                failure_reason="guardrail_check_failed",
+                                rollback_failed=True,
+                            ) from rbe
+                        raise GuardrailRepairFailed(
+                            f"Guardrail repair failed at iteration {iteration} "
+                            f"and re-check crashed: {exc}",
+                            failure_reason="guardrail_check_failed",
+                        ) from exc
+
+                    if fresh_report.passed:
+                        # Verify HEAD has not drifted from post_sha before
+                        # accepting the side-effect clearance. If the repairer
+                        # left an amended commit, post_sha is stale and we
+                        # must refresh it for downstream callers.
+                        try:
+                            head_sha = _run_git(
+                                self.project_root, "rev-parse", "HEAD",
+                                check=False, timeout=15,
+                            ).stdout.strip()
+                        except subprocess.TimeoutExpired:
+                            self._log(
+                                "WARNING: git rev-parse HEAD timed out during "
+                                f"side-effect clearance check at iteration {iteration}. "
+                                "HEAD drift verification was skipped; downstream "
+                                "SHA may be stale."
+                            )
+                            head_sha = ""
+                        if head_sha and head_sha != post_sha:
+                            self._log(
+                                f"Guardrails passed on re-check after iteration "
+                                f"{iteration} — repair reported failure but "
+                                f"violations were cleared by side-effect; "
+                                f"HEAD moved from {post_sha[:8]} to "
+                                f"{head_sha[:8]}"
+                            )
+                            # Caller will refresh post_merge_sha when it sees
+                            # the merged return path.
+                        else:
+                            self._log(
+                                f"Guardrails passed on re-check after iteration "
+                                f"{iteration} — repair reported failure but "
+                                f"violations were cleared by side-effect; "
+                                f"accepting result"
+                            )
+                        return None
+
+                    current_hash = violation_set_hash(fresh_report.violations)
+                    self._log(
+                        f"Repair iteration {iteration}: violation hash "
+                        f"{current_hash[:8]}... "
+                        f"({len(fresh_report.violations)} violation(s))"
+                    )
+
+                    if current_hash == last_hash:
+                        # Stalled — violation set unchanged from previous
+                        # repair iteration (consecutive identical hash).
+                        self._log(
+                            f"Guardrail repair stalled at iteration {iteration}: "
+                            f"violation set hash {current_hash[:8]}... unchanged from previous iteration"
+                        )
+                        rollback_exc = None
+                        try:
+                            self._rollback_to(pre_sha)
+                        except (RuntimeError, subprocess.TimeoutExpired) as rbe:
+                            self._log(
+                                f"Rollback failed after stalled guardrail repair at "
+                                f"iteration {iteration}: {rbe}"
+                            )
+                            rollback_exc = rbe
+
+                        violation_dicts = self._violations_to_dicts(
+                            fresh_report.violations,
+                            branch=branch,
+                        )
+                        call_file: Optional[Path] = None
+                        try:
+                            call_file = self._human_writer.write_guardrail_call(
+                                branch=branch,
+                                violations=violation_dicts,
+                                pre_merge_sha=pre_sha,
+                                call_type="guardrail_repair_stalled",
+                                iteration_count=iteration,
+                            )
+                        except Exception as exc:
+                            self._log(
+                                f"Failed to write stalled guardrail call file: {exc}"
+                            )
+                            if rollback_exc is None:
+                                raise GuardrailRepairFailed(
+                                    f"Guardrail repair stalled at iteration {iteration} "
+                                    f"and call file could not be written: {exc}",
+                                    failure_reason="guardrail_repair_stalled_call_failed",
+                                ) from exc
+                            raise GuardrailRollbackError(
+                                f"Guardrail repair stalled at iteration {iteration}. "
+                                f"Rollback failed: {rollback_exc}. "
+                                f"Additionally, the human call file could not be written: {exc}. "
+                                f"Working tree may be in an inconsistent state. "
+                                f"Manual intervention required.",
+                                call_file=None,
+                            ) from exc
+
+                        try:
+                            self._human_writer.print_instructions(call_file)
+                        except Exception as exc:
+                            self._log(
+                                f"WARNING: Failed to print instructions (call file was written "
+                                f"successfully): {exc}"
+                            )
+
+                        if rollback_exc is not None:
+                            raise GuardrailRollbackError(
+                                f"Guardrail repair stalled at iteration {iteration} "
+                                f"but rollback failed. The human call file was written at "
+                                f"{call_file} for diagnostic evidence.",
+                                call_file=call_file,
+                            ) from rollback_exc
+
+                        raise GuardrailRepairStalled(
+                            f"Guardrail repair stalled after {iteration} "
+                            f"iteration(s): LLM could not reduce violations",
+                            call_file=call_file,
+                            iteration_count=iteration,
+                            last_violation_hash=current_hash,
+                            failure_reason="guardrail_repair_stalled",
+                        )
+
+                    last_hash = current_hash
+                    # Update working violation list for next iteration's repair
+                    # prompt. Use a local variable rather than mutating the
+                    # original gr_report object so any retained references
+                    # elsewhere do not observe stale data.
+                    current_violations = fresh_report.violations
+                else:
+                    # The else clause runs only when the loop completes all
+                    # iterations without an early return (repair success,
+                    # side-effect clearance, or stall exception).
+                    # Max iterations reached — violations persist but hash keeps
+                    # changing. Escalate to human call consistently with the stall
+                    # path instead of aborting outright.
+                    self._log(
+                        f"Guardrail repair exhausted after {_MAX_REPAIR_ITERATIONS} "
+                        f"iterations — escalating to human review"
+                    )
+                    rollback_exc = None
+                    try:
+                        self._rollback_to(pre_sha)
+                    except (RuntimeError, subprocess.TimeoutExpired) as rbe:
+                        self._log(
+                            f"Rollback failed after exhausted guardrail repair: {rbe}"
+                        )
+                        rollback_exc = rbe
+
+                    violation_dicts = self._violations_to_dicts(
+                        current_violations,
+                        branch=branch,
+                    )
+                    call_file: Optional[Path] = None
+                    try:
+                        call_file = self._human_writer.write_guardrail_call(
+                            branch=branch,
+                            violations=violation_dicts,
+                            pre_merge_sha=pre_sha,
+                            call_type="guardrail_repair_exhausted",
+                            iteration_count=iteration,
+                        )
+                    except Exception as exc:
+                        self._log(
+                            f"Failed to write exhausted guardrail call file: {exc}"
+                        )
+                        if rollback_exc is None:
+                            raise GuardrailRepairFailed(
+                                f"Guardrail repair exhausted after {_MAX_REPAIR_ITERATIONS} "
+                                f"iterations and call file could not be written: {exc}",
+                                failure_reason="guardrail_repair_exhausted_call_failed",
+                            ) from exc
+                        raise GuardrailRollbackError(
+                            f"Guardrail repair exhausted after {_MAX_REPAIR_ITERATIONS} "
+                            f"iterations. Rollback failed: {rollback_exc}. "
+                            f"Additionally, the human call file could not be written: {exc}. "
+                            f"Working tree may be in an inconsistent state. "
+                            f"Manual intervention required.",
+                            call_file=None,
+                        ) from exc
+
+                    try:
+                        self._human_writer.print_instructions(call_file)
+                    except Exception as exc:
+                        self._log(
+                            f"WARNING: Failed to print instructions (call file was written "
+                            f"successfully): {exc}"
+                        )
+
+                    if rollback_exc is not None:
+                        raise GuardrailRollbackError(
+                            f"Guardrail repair exhausted after {_MAX_REPAIR_ITERATIONS} "
+                            f"iterations but rollback failed. The human call file "
+                            f"was written at {call_file} for diagnostic evidence.",
+                            call_file=call_file,
+                        ) from rollback_exc
+
+                    raise GuardrailRepairExhausted(
+                        f"Guardrail repair exhausted after {_MAX_REPAIR_ITERATIONS} "
+                        f"iteration(s): LLM could not reduce violations",
+                        call_file=call_file,
+                        iteration_count=iteration,
+                        last_violation_hash=current_hash,
+                    )
 
             # --- default / strict strategy: rollback + human call ---
             try:
@@ -1718,7 +2115,10 @@ class MergeOrchestrator:
                 # Preserve actual violation details in the human call file
                 # even when rollback fails, so the operator knows what was
                 # weakened before the tree got into an inconsistent state.
-                violation_dicts = self._violations_to_dicts(gr_report.violations)
+                violation_dicts = self._violations_to_dicts(
+                    gr_report.violations,
+                    branch=branch,
+                )
                 call_file: Optional[Path] = None
                 try:
                     call_file = self._human_writer.write_guardrail_call(
@@ -1748,7 +2148,10 @@ class MergeOrchestrator:
 
             call_file = None
             try:
-                violation_dicts = self._violations_to_dicts(gr_report.violations)
+                violation_dicts = self._violations_to_dicts(
+                    gr_report.violations,
+                    branch=branch,
+                )
                 call_file = self._human_writer.write_guardrail_call(
                     branch=branch,
                     violations=violation_dicts,
@@ -1769,8 +2172,12 @@ class MergeOrchestrator:
                     f"successfully): {exc}"
                 )
             return call_file
+        except GuardrailRepairStalled:
+            raise  # re-raise stalled escalations without wrapping
         except GuardrailRepairFailed:
             raise  # re-raise fast-mode repair failures without wrapping
+        except GuardrailRollbackError:
+            raise  # re-raise so caller surfaces call_file in rollback_failed path
         except Exception as exc:
             self._log(f"Guardrails check failed for '{branch}': {exc}")
             if strategy == MergeStrategy.FAST:
@@ -1861,20 +2268,43 @@ class MergeOrchestrator:
             return False
 
     @staticmethod
-    def _violations_to_dicts(violations: list) -> list[dict]:
+    def _violations_to_dicts(violations: list, branch: str = "") -> list[dict]:
         """Convert a list of GuardrailViolation objects to plain dicts.
 
         Centralised so that rollback-failure and rollback-success paths in
         ``_run_guardrails`` stay consistent when the data model changes.
+
+        Args:
+            violations: List of GuardrailViolation objects.
+            branch: Optional branch name. When provided, ``branch_name`` and
+                ``trigger_branch`` are injected into each violation's evidence
+                dict so the human call file shows which branch produced the
+                violation.
         """
-        return [
-            {
+        result = []
+        for v in violations:
+            d = {
                 "file_path": v.file_path,
                 "violation_type": v.violation_type,
                 "message": v.message,
             }
-            for v in violations
-        ]
+            if getattr(v, "evidence", None) is not None:
+                # Shallow copy: evidence dicts are consumed once (written to
+                # JSON) and then discarded. Explicitly copy known mutable
+                # fields so downstream mutation cannot affect the original.
+                ev = dict(v.evidence)
+                if "when_clauses" in ev and isinstance(ev["when_clauses"], list):
+                    ev["when_clauses"] = list(ev["when_clauses"])
+            else:
+                ev = {}
+            if branch:
+                ev["branch_name"] = branch
+                ev["trigger_branch"] = branch
+                ev["branch_kind"] = "merge"
+            if ev:
+                d["evidence"] = ev
+            result.append(d)
+        return result
 
     def _rollback_to(self, sha: str) -> None:
         """Hard reset to a previous SHA to undo a merge commit.

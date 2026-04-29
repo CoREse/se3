@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import tempfile
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +21,29 @@ from .conflict_resolver import LLMResolution
 from .strategy import StrategyDecision
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_write_json(call_file: Path, call_data: dict) -> None:
+    """Atomically write JSON call data to ``call_file``.
+
+    Uses a temporary file in the same directory + ``os.replace`` so that
+    readers never observe a partially-written file.
+    """
+    call_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=call_file.parent,
+        prefix=f".tmp_{call_file.name}_",
+    )
+    try:
+        with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+            json.dump(call_data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, call_file)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 class HumanCallWriter:
@@ -155,10 +180,7 @@ class HumanCallWriter:
         if strategy is not None:
             call_data["strategy"] = strategy
 
-        call_file.write_text(
-            json.dumps(call_data, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        _atomic_write_json(call_file, call_data)
         logger.info("Created merge human call file: %s", call_file)
 
         return call_file
@@ -168,6 +190,8 @@ class HumanCallWriter:
         branch: str,
         violations: list[dict],
         pre_merge_sha: str,
+        call_type: str = "guardrail_violation",
+        iteration_count: Optional[int] = None,
     ) -> Path:
         """Write a human call file for a guardrail violation after merge.
 
@@ -175,6 +199,11 @@ class HumanCallWriter:
             branch: The branch that was being merged when the violation was detected.
             violations: List of violation dicts with file_path, violation_type, message.
             pre_merge_sha: The SHA of HEAD before the merge (for rollback).
+            call_type: Type label for the call file. Defaults to
+                ``"guardrail_violation"``; use ``"guardrail_repair_stalled"``
+                when the fast-mode repair loop made no progress.
+            iteration_count: Number of repair iterations attempted before
+                escalation. Only included when non-None.
 
         Returns:
             Path to the written call file.
@@ -186,18 +215,34 @@ class HumanCallWriter:
         safe_branch = branch.replace("/", "-")
         call_file = calls_dir / f"merge_{ts}_{safe_branch}_guardrail.json"
 
-        call_data = {
-            "type": "guardrail_violation",
-            "created_at": datetime.now().isoformat(),
-            "branch": branch,
-            "pre_merge_sha": pre_merge_sha,
-            "violations": violations,
-            "options": {
-                "accept": "Accept the merge despite guardrail violations — run `git reset --hard` rollback has already been done; manually fix spec and re-merge",
-                "abort": "Keep the rollback — the merge has been aborted and working tree restored to pre-merge state",
-                "manual": "Resolve manually — inspect the violations, fix the spec files, then re-run the merge",
-            },
-            "instructions": (
+        # Build type-specific instructions so the human knows whether the
+        # LLM already attempted repairs.
+        if call_type in ("guardrail_repair_stalled", "guardrail_repair_exhausted"):
+            if call_type == "guardrail_repair_stalled":
+                repair_note = (
+                    f"LLM repair was attempted {iteration_count} time(s) but could not "
+                    f"reduce the violations — the repair loop stalled. "
+                )
+            else:
+                repair_note = (
+                    f"LLM repair was attempted {iteration_count} time(s) but "
+                    f"exhausted the maximum allowed iterations without resolving "
+                    f"all violations. "
+                )
+            instructions = (
+                f"Guardrail violations detected after merging '{branch}'. "
+                f"{repair_note}"
+                f"The merge has been rolled back via `git reset --hard {pre_merge_sha}`. "
+                f"Review the violations below and choose how to proceed. "
+                f"To respond, create a file named '{call_file.name}.response' "
+                f"in the same directory with JSON: {{\"choice\": \"accept|abort|manual\", "
+                f"\"feedback\": \"optional notes\"}}. "
+                f"For 'accept': fix the spec files manually, then re-run `se3 merge`. "
+                f"For 'abort': no further action needed, the rollback is complete. "
+                f"For 'manual': inspect and fix the spec files, then re-run `se3 merge`."
+            )
+        else:
+            instructions = (
                 f"Guardrail violations detected after merging '{branch}'. "
                 f"The merge has been rolled back via `git reset --hard {pre_merge_sha}`. "
                 f"Review the violations below and choose how to proceed. "
@@ -207,28 +252,108 @@ class HumanCallWriter:
                 f"For 'accept': fix the spec files manually, then re-run `se3 merge`. "
                 f"For 'abort': no further action needed, the rollback is complete. "
                 f"For 'manual': inspect and fix the spec files, then re-run `se3 merge`."
-            ),
-        }
+            )
 
-        call_file.write_text(
-            json.dumps(call_data, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        # Defensive: validate required keys in violation dicts so the call
+        # file JSON does not silently carry None/missing values.
+        validated_violations: list[dict] = []
+        for v in violations:
+            if not isinstance(v, dict):
+                logger.warning(
+                    "write_guardrail_call received non-dict violation: %r — skipped",
+                    v,
+                )
+                continue
+            missing_keys = [k for k in ("file_path", "violation_type", "message") if k not in v]
+            if missing_keys:
+                logger.warning(
+                    "write_guardrail_call: violation dict missing required keys %s — "
+                    "substituting '<unknown>'",
+                    missing_keys,
+                )
+            validated_violations.append({
+                "file_path": v.get("file_path", "<unknown>"),
+                "violation_type": v.get("violation_type", "<unknown>"),
+                "message": v.get("message", "<unknown>"),
+                **{k: v[k] for k in v if k not in ("file_path", "violation_type", "message")},
+            })
+
+        call_data: dict = {
+            "type": call_type,
+            "created_at": datetime.now().isoformat(),
+            "branch": branch,
+            "pre_merge_sha": pre_merge_sha,
+            "violations": validated_violations,
+            "options": {
+                "accept": "Accept the merge despite guardrail violations — run `git reset --hard` rollback has already been done; manually fix spec and re-merge",
+                "abort": "Keep the rollback — the merge has been aborted and working tree restored to pre-merge state",
+                "manual": "Resolve manually — inspect the violations, fix the spec files, then re-run the merge",
+            },
+            "instructions": instructions,
+        }
+        if iteration_count is not None:
+            call_data["iteration_count"] = iteration_count
+
+        _atomic_write_json(call_file, call_data)
         logger.info("Created guardrail human call file: %s", call_file)
 
         return call_file
 
     def print_instructions(self, call_file: Path) -> None:
         """Print user-facing instructions for responding to the call."""
+        try:
+            call_data = json.loads(call_file.read_text(encoding="utf-8"))
+        except Exception:
+            call_data = {}
+        call_type = call_data.get("type", "merge_conflict")
+
         print(f"\n{'=' * 60}")
-        print("  Human review required for merge conflict")
+        if call_type in ("guardrail_violation", "guardrail_repair_stalled", "guardrail_repair_exhausted"):
+            print("  Human review required for guardrail violation")
+        else:
+            print("  Human review required for merge conflict")
         print(f"{'=' * 60}")
         print(f"\nCall file: {call_file}")
         print(f"\nTo respond, create: {call_file}.response")
         print("\nWith JSON content:")
         print('  {"choice": "accept|abort|manual", "feedback": "notes"}')
-        print("\nThen resolve manually:")
-        print("  - Edit files to resolve conflicts")
-        print("  - Run: git add . && git commit  (to complete)")
-        print("  - Or run: git merge --abort      (to abort)")
+        if call_type in ("guardrail_violation", "guardrail_repair_stalled", "guardrail_repair_exhausted"):
+            print("\nNext steps:")
+            print("  - Review the guardrail violations below")
+            print("  - Fix the spec files manually")
+            print("  - Re-run: se3 merge <branch>")
+            violations = call_data.get("violations", [])
+            for v in violations[:2]:
+                print(f"\n  [{v.get('violation_type', 'UNKNOWN')}] {v.get('file_path', '')}")
+                msg = v.get("message", "")
+                if msg:
+                    print(f"    Message: {msg}")
+                evidence = v.get("evidence")
+                if evidence:
+                    if "strong_line" in evidence and "weak_line" in evidence:
+                        print(f"    Strong:  {evidence['strong_line']}")
+                        print(f"    Weak:    {evidence['weak_line']}")
+                        print(f"    Score:   {evidence.get('pairing_score', 'N/A')}")
+                        if "all_pairings" in evidence:
+                            ap = evidence["all_pairings"]
+                            if len(ap) > 1:
+                                print(f"    Additional pairings ({len(ap) - 1}):")
+                                for p in ap[1:]:
+                                    print(f"      - '{p['strong_line']}' -> '{p['weak_line']}'")
+                    elif "deleted_line" in evidence:
+                        print(f"    Deleted: {evidence['deleted_line']}")
+                    if "when_clauses" in evidence:
+                        clauses = evidence["when_clauses"]
+                        print(f"    Deleted scenarios ({len(clauses)}):")
+                        for wc in clauses[:2]:
+                            print(f"      - {wc}")
+                        if len(clauses) > 2:
+                            print(f"      ... and {len(clauses) - 2} more")
+            if len(violations) > 2:
+                print(f"\n  ... and {len(violations) - 2} more violation(s)")
+        else:
+            print("\nThen resolve manually:")
+            print("  - Edit files to resolve conflicts")
+            print("  - Run: git add . && git commit  (to complete)")
+            print("  - Or run: git merge --abort      (to abort)")
         print(f"{'=' * 60}\n")

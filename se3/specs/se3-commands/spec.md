@@ -338,7 +338,7 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
    |------|----------|
    | `default` | LLM auto-resolves conflicts. Low confidence, `requires_human_review`, or `spec_guardrail_concern` → MCP human call. LLM resolution failure also → human call. Post-merge guardrails violation → rollback + human call. |
    | `strict` | LLM is NOT invoked; every conflict or post-merge guardrails violation escalates directly to human call. |
-   | `fast` | LLM auto-resolves all conflicts (including spec files). If LLM resolution fails or post-merge guardrails violation cannot be repaired by LLM → abort with failure (no human call). |
+   | `fast` | LLM auto-resolves all conflicts (including spec files). If LLM resolution fails or post-merge guardrails violation cannot be repaired by LLM → abort with failure (no human call). Exception: when the LLM repair loop *stalls* (consecutive repair iterations produce the same violation set, indicating no progress) the merge is escalated to a human call instead of aborting (see "Fast-Mode Guardrail Repair Stall Escalation"). |
 
    <!-- Preserved original table row for guardrails compatibility:
    | `strict` | Accept only when every hunk is high-confidence AND guardrails pass; otherwise raise a human call. |
@@ -390,9 +390,10 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
 - **GIVEN** a merge produces a change to `se3/specs/foo/spec.md` that weakens a SHALL to SHOULD
 - **WHEN** strategy is `fast`
 - **THEN** the guardrails check fails after the merge commit
-- **AND** the violation list is fed to the LLM to repair the spec file
+- **AND** the violation list is fed to the LLM to repair the spec file (in a bounded repair loop, see "Fast-Mode Guardrail Repair Stall Escalation")
 - **AND** if the LLM repair succeeds, the merge commit is amended with the corrected spec
-- **AND** if the LLM repair fails, the merge is aborted without creating a human call
+- **AND** if the LLM repair fails *and* repair iterations are still making progress, the merge is aborted without creating a human call
+- **AND** if the LLM repair *stalls* (no-progress detection fires), the merge is escalated to a human call instead of aborting
 - **AND** fast does NOT bypass spec guardrails detection
 
 #### Scenario: Fast strategy aborts when LLM cannot resolve a conflict
@@ -430,6 +431,36 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
 - **THEN** the report is treated as an outright failure rather than a pending-human state
 - **AND** the CLI exits with the general-failure code rather than the interrupted/paused code, because there is no call file for the user to respond to with `se3 merge-respond`
 - **AND** the summary explicitly states that the human call file could not be written
+
+### Requirement: Fast-Mode Guardrail Repair Stall Escalation
+
+The fast-strategy post-merge guardrail repair loop SHALL detect when the LLM is no longer making progress and escalate to a human MCP call instead of aborting.
+
+**Stall detection contract:**
+
+1. After each guardrail repair iteration, the orchestrator SHALL compute a deterministic hash of the current violation set, derived from `(file, violation_type, normalized_message)` triples sorted to be order-insensitive.
+2. When two consecutive repair iterations produce the *same* violation-set hash (the LLM's repair did not change the violation set), the orchestrator SHALL stop further repair attempts and treat the situation as a *stall*.
+3. On stall, the merge SHALL NOT be aborted. Instead, the orchestrator SHALL write a human MCP call file under `se3/calls/` with a distinct call type (e.g., `guardrail_repair_stalled`) and route the merge to a `pending_human` state, consistent with how default/strict tiers escalate guardrail violations.
+4. The stalled-repair call file SHALL embed the structured detector evidence from each violation (paired strong/weak lines, line numbers, branch identification) so the human reviewer can act without re-running the detector.
+5. If repair iterations are still changing the violation set but the maximum iteration cap is exhausted, fast mode SHALL fall back to the original abort-without-human-call behavior — only the *stall* condition triggers escalation.
+6. The repair loop's per-iteration semantics (one LLM call per iteration) live in the orchestrator/strategy layer, not inside the single-call repair primitive.
+
+**Rationale:** A persistently false-positive detector or a degenerate repair prompt can otherwise burn many minutes of LLM time looping without convergence; the stall exit lets a human resolve the disagreement quickly while preserving fast mode's "no human in the loop unless absolutely necessary" guarantee for the common case.
+
+#### Scenario: Repair loop stalls on repeated identical violation set
+- **GIVEN** a fast-mode merge whose post-merge guardrails check reports a violation
+- **AND** the LLM repair iteration produces a fix that the detector still rejects with the *same* violation set on the next iteration
+- **WHEN** the orchestrator hashes the new violation set and finds it equal to the previous iteration's hash
+- **THEN** further repair attempts are stopped at the second consecutive identical hash
+- **AND** a `guardrail_repair_stalled` MCP call file is written under `se3/calls/` with the detector evidence
+- **AND** the merge enters `pending_human` rather than aborting
+
+#### Scenario: Repair loop makes progress but never converges
+- **GIVEN** a fast-mode merge whose post-merge guardrails check reports a violation
+- **AND** each LLM repair iteration produces a *different* violation set (hash keeps changing)
+- **WHEN** the iteration cap is reached without the violation set becoming empty
+- **THEN** the merge is aborted with the standard fast-mode "could not auto-repair guardrails violation" failure
+- **AND** no human call file is created (stall escalation does not apply)
 
 ### Requirement: `se3 merge-respond` Command
 

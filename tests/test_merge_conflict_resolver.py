@@ -588,6 +588,107 @@ class TestHumanCallWriter:
         assert call_file.name.startswith("merge_")
         assert not call_file.name.startswith("merge_conflict_")
 
+    def test_guardrail_call_instructions_differ_for_stalled_type(self, tmp_path: Path) -> None:
+        """guardrail_repair_stalled call files mention LLM attempts in instructions."""
+        writer = HumanCallWriter(tmp_path)
+
+        violations = [
+            {
+                "file_path": "se3/specs/base/spec.md",
+                "violation_type": "WEAKENING",
+                "message": "SHALL weakened to SHOULD",
+            }
+        ]
+
+        # Standard violation call
+        call_violation = writer.write_guardrail_call(
+            branch="feature",
+            violations=violations,
+            pre_merge_sha="abc123",
+            call_type="guardrail_violation",
+        )
+        data_v = json.loads(call_violation.read_text(encoding="utf-8"))
+
+        # Stalled repair call
+        call_stalled = writer.write_guardrail_call(
+            branch="feature",
+            violations=violations,
+            pre_merge_sha="abc123",
+            call_type="guardrail_repair_stalled",
+            iteration_count=2,
+        )
+        data_s = json.loads(call_stalled.read_text(encoding="utf-8"))
+
+        # Both should have instructions
+        assert "instructions" in data_v
+        assert "instructions" in data_s
+
+        # Stalled instructions should mention LLM repair attempts
+        assert "LLM repair was attempted" in data_s["instructions"]
+        assert "2 time(s)" in data_s["instructions"]
+        assert "stalled" in data_s["instructions"]
+
+        # Regular violation instructions should NOT mention LLM repair attempts
+        assert "LLM repair was attempted" not in data_v["instructions"]
+
+        # Both should still mention rollback
+        assert "rolled back" in data_v["instructions"]
+        assert "rolled back" in data_s["instructions"]
+
+    def test_print_instructions_no_evidence_shows_header(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """Violations without evidence must still show type, file, and message."""
+        writer = HumanCallWriter(tmp_path)
+        violations = [
+            {
+                "file_path": "se3/specs/base/spec.md",
+                "violation_type": "WEAKENING",
+                "message": "SHALL weakened to SHOULD",
+            }
+        ]
+        call_file = writer.write_guardrail_call(
+            branch="feature",
+            violations=violations,
+            pre_merge_sha="abc123",
+            call_type="guardrail_violation",
+        )
+        writer.print_instructions(call_file)
+        captured = capsys.readouterr()
+        assert "[WEAKENING] se3/specs/base/spec.md" in captured.out
+        assert "Message: SHALL weakened to SHOULD" in captured.out
+
+    def test_print_instructions_many_violations_trailing_once(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        """With 3+ violations the trailing '... and N more' must print exactly once."""
+        writer = HumanCallWriter(tmp_path)
+        violations = [
+            {
+                "file_path": f"se3/specs/base/spec{i}.md",
+                "violation_type": "WEAKENING",
+                "message": f"msg {i}",
+                "evidence": {
+                    "strong_line": f"SHALL {i}",
+                    "weak_line": f"SHOULD {i}",
+                    "pairing_score": 0.8,
+                },
+            }
+            for i in range(3)
+        ]
+        call_file = writer.write_guardrail_call(
+            branch="feature",
+            violations=violations,
+            pre_merge_sha="abc123",
+            call_type="guardrail_violation",
+        )
+        writer.print_instructions(call_file)
+        captured = capsys.readouterr()
+        # Both first two violation headers should appear
+        assert captured.out.count("[WEAKENING]") == 2
+        # The trailing message must appear exactly once
+        assert captured.out.count("... and 1 more violation(s)") == 1
+
 
 # --------- Integration: resolver + strategy ---------
 
