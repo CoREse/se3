@@ -66,7 +66,7 @@ class StrategyDecider:
         elif strategy == MergeStrategy.STRICT:
             return self._decide_strict(resolution, has_spec_files)
         elif strategy == MergeStrategy.FAST:
-            return self._decide_fast(resolution, has_spec_files)
+            return self._decide_fast(resolution)
         else:
             logger.warning("Unknown strategy %s, falling back to default", strategy)
             return self._decide_default(resolution, has_spec_files)
@@ -80,6 +80,12 @@ class StrategyDecider:
 
         Unlike strict, default does NOT require every individual hunk to be
         HIGH — only file-level and global overall confidence.
+
+        Note:
+            ``has_spec_files`` is kept in the signature for API consistency
+            with ``decide()`` but is intentionally unused; default strategy
+            relies on per-file ``is_spec`` and confidence flags rather than
+            a global file-type predicate.
         """
         # Check global flags first
         if resolution.flags.get("spec_guardrail_concern", False):
@@ -139,6 +145,12 @@ class StrategyDecider:
         ``_handle_conflict`` by skipping LLM resolution and writing a human
         call directly. This method is retained as a fallback for unexpected
         code paths (e.g., if the orchestrator's short-circuit is bypassed).
+
+        Note:
+            ``has_spec_files`` is kept in the signature for API consistency
+            with ``decide()`` but is intentionally unused; strict strategy
+            gates on per-hunk confidence, not on whether spec files are
+            present in the merge.
         """
         # Check global flags
         if resolution.flags.get("spec_guardrail_concern", False):
@@ -192,7 +204,6 @@ class StrategyDecider:
     def _decide_fast(
         self,
         resolution: LLMResolution,
-        has_spec_files: bool,
     ) -> StrategyDecision:
         """Fast strategy: aggressive accept for regular files; spec quality gates → REJECT.
 
@@ -212,8 +223,21 @@ class StrategyDecider:
                 reason="requires_human_review flag set (fast strategy aborts, no human call)",
             )
 
+        # Global spec_guardrail_concern → log and defer (post-merge guardrails handle it)
+        if resolution.flags.get("spec_guardrail_concern", False):
+            logger.info(
+                "Fast strategy: deferring global spec_guardrail_concern "
+                "to post-merge guardrails"
+            )
+
         for f in resolution.files:
             if f.is_spec:
+                if f.flags.get("spec_guardrail_concern", False):
+                    logger.info(
+                        "Fast strategy: deferring spec_guardrail_concern on "
+                        "spec file %s to post-merge guardrails",
+                        f.path,
+                    )
                 if f.flags.get("requires_human_review", False):
                     return StrategyDecision(
                         action=DecisionAction.REJECT,
@@ -225,9 +249,25 @@ class StrategyDecider:
                         action=DecisionAction.REJECT,
                         reason=f"overall confidence on spec file {f.path} is {f.overall_confidence.value}, not high (fast strategy aborts, no human call)",
                     )
+        # Collect any pathological flags on non-spec files for visibility
+        dropped_flags: list[str] = []
+        for f in resolution.files:
+            if not f.is_spec:
+                if f.flags.get("spec_guardrail_concern", False):
+                    dropped_flags.append(f"spec_guardrail_concern on {f.path}")
+                if f.flags.get("requires_human_review", False):
+                    dropped_flags.append(f"requires_human_review on {f.path}")
+                    logger.warning(
+                        "Fast strategy accepted non-spec file %s despite per-file "
+                        "requires_human_review flag from LLM",
+                        f.path,
+                    )
 
-        # All checks passed — accept aggressively (spec_guardrail_concern deferred)
+        reason = "Fast strategy: accepted (spec_guardrail_concern deferred to post-merge guardrails)"
+        if dropped_flags:
+            reason += "; WARNING: " + ", ".join(dropped_flags)
+
         return StrategyDecision(
             action=DecisionAction.ACCEPT,
-            reason="Fast strategy: accepted (spec_guardrail_concern deferred to post-merge guardrails)",
+            reason=reason,
         )

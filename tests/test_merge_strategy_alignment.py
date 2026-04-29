@@ -212,6 +212,30 @@ class TestFastStrategyAcceptOrRejectOnly:
         assert decision.action == DecisionAction.REJECT
         assert "fast strategy aborts" in decision.reason.lower()
 
+    def test_fast_spec_per_file_requires_human_review_reject(self) -> None:
+        """Per-file requires_human_review on spec file (global False) → REJECT.
+
+        This is the safety-critical path at strategy.py:241-244: when the
+        global requires_human_review flag is False but a spec file sets it
+        per-file, fast mode must still REJECT. The global path (line 220-224)
+        is NOT reached here, so the per-file check is what actually fires.
+        """
+        decider = StrategyDecider()
+        resolution = _make_resolution(
+            overall_confidence=Confidence.HIGH,
+            hunk_confidence=Confidence.HIGH,
+            is_spec=True,
+            requires_human_review=False,  # global is False
+        )
+        # Set per-file flag only — this must trigger the spec-file REJECT path
+        resolution.files[0].flags["requires_human_review"] = True
+        decision = decider.decide(
+            resolution, has_spec_files=True, strategy=MergeStrategy.FAST,
+        )
+        assert decision.action == DecisionAction.REJECT
+        assert "requires_human_review on spec file" in decision.reason
+        assert "fast strategy aborts" in decision.reason.lower()
+
     def test_fast_mixed_regular_and_spec_accept(self) -> None:
         """Mixed regular + spec files, spec has high confidence → ACCEPT."""
         decider = StrategyDecider()

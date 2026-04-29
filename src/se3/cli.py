@@ -537,6 +537,24 @@ def merge_cmd(
     raise typer.Exit(exit_code)
 
 
+@app.command(name="merge-respond")
+def merge_respond_cmd(
+    call_file: Path = typer.Argument(..., help="Path to the merge call file"),
+):
+    """Process an MCP call response file for merge conflicts.
+
+    After editing the .response file for a merge call, run this command
+    to execute the conflict decisions (accept LLM resolution, abort, or manual).
+
+    Example:
+        se3 merge-respond se3/calls/merge_20240101_120000_feat-x.json
+    """
+    from .commands.merge_respond import process_merge_response
+
+    exit_code = process_merge_response(call_file)
+    raise typer.Exit(exit_code)
+
+
 @app.command(name="salvage")
 def salvage_cmd(
     project_root: Optional[str] = typer.Option(None, "--project-root", "-p", help="Project root directory"),

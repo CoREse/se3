@@ -660,7 +660,8 @@ class TestOrchestratorVersionAggregation:
         assert _read_pyproject_version(tmp_path) == "4.4.0"
 
     def test_conflict_reject_skips_aggregation(self, tmp_path: Path, monkeypatch):
-        """If a branch is REJECTed (merge --abort), aggregation skipped and version unchanged."""
+        """If a branch has a conflict and LLM resolution fails, default strategy
+        escalates to human call. Aggregation is skipped and version unchanged."""
         _init_repo(tmp_path)
         _write_pyproject(tmp_path, "4.4.0")
         _commit(tmp_path, "Add pyproject")
@@ -676,7 +677,7 @@ class TestOrchestratorVersionAggregation:
         (tmp_path / "shared.txt").write_text("base new content\n")
         _commit(tmp_path, "Change shared on base")
 
-        # Mock the resolver to raise — orchestrator should abort
+        # Mock the resolver to raise — default strategy escalates to human call
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve",
             lambda self, ctx, strategy: (_ for _ in ()).throw(RuntimeError("mock")),
@@ -686,10 +687,11 @@ class TestOrchestratorVersionAggregation:
         report = orch.execute(["feature"])
 
         assert report.success is False
-        assert report.failure_reason == "merge_conflict"
+        assert report.pending_human is True
+        assert report.failure_reason == "pending_human"
         assert report.version_aggregation_skipped is True
         assert report.final_version is None
-        # Version unchanged
+        # Version unchanged (merge not committed)
         assert _read_pyproject_version(tmp_path) == "4.4.0"
 
     def test_no_pyproject_skips_aggregation(self, tmp_path: Path):

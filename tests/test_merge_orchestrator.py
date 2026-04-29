@@ -149,7 +149,8 @@ class TestMergeOrchestrator:
         assert (tmp_path / "a.txt").exists()
         assert (tmp_path / "b.txt").exists()
 
-    def test_conflict_aborts_and_restores(self, tmp_path: Path, monkeypatch) -> None:
+    def test_conflict_llm_failure_escalates_to_human_call(self, tmp_path: Path, monkeypatch) -> None:
+        """default strategy + LLM resolver raises → human call file created, conflict markers preserved."""
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
         _add_commit(tmp_path, "shared.txt", "base content\n", "Add shared")
@@ -182,7 +183,7 @@ class TestMergeOrchestrator:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        # Mock LLM resolver to fail, triggering abort path
+        # Mock LLM resolver to fail — default strategy should escalate to human call
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve",
             lambda self, ctx, strategy: (_ for _ in ()).throw(RuntimeError("mock llm fail")),
@@ -192,8 +193,73 @@ class TestMergeOrchestrator:
         report = orch.execute(["feature"])
 
         assert report.success is False
+        assert report.pending_human is True
         assert report.failed_branch == "feature"
-        assert report.failure_reason == "merge_conflict"
+        assert report.failure_reason == "pending_human"
+        assert report.human_call_file is not None
+        assert report.human_call_file.exists()
+
+        # Working tree should still have conflict markers (merge not aborted)
+        content = (tmp_path / "shared.txt").read_text()
+        assert "<<<<<<<" in content
+        assert "=======" in content
+        assert ">>>>>>>" in content
+
+        # HEAD should be unchanged (no merge commit)
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_merge_head
+
+    def test_fast_conflict_llm_failure_aborts(self, tmp_path: Path, monkeypatch) -> None:
+        """fast strategy + LLM resolver raises → abort, no human call."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _add_commit(tmp_path, "shared.txt", "base content\n", "Add shared")
+        _create_branch(tmp_path, "feature")
+        (tmp_path / "shared.txt").write_text("feature content\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on feature"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "shared.txt").write_text("base new content\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on base"],
+            check=True, capture_output=True,
+        )
+
+        pre_merge_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        # Mock LLM resolver to fail — fast strategy should abort without human call
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve",
+            lambda self, ctx, strategy: (_ for _ in ()).throw(RuntimeError("mock llm fail")),
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature"])
+
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "llm_resolution_failed"
+        assert report.pending_human is False
+        assert report.human_call_file is None
 
         # Working tree should be clean after abort
         assert _is_working_tree_clean(tmp_path) is True
@@ -254,12 +320,18 @@ class TestMergeOrchestrator:
         assert report.success is False
         assert "feature-a" in report.merged_branches
         assert report.failed_branch == "feature-b"
+        assert report.pending_human is True
+        assert report.failure_reason == "pending_human"
+        assert report.human_call_file is not None
 
         # Verify feature-a is merged (a.txt should exist)
         assert (tmp_path / "a.txt").exists()
 
-        # Working tree should be clean
-        assert _is_working_tree_clean(tmp_path) is True
+        # Working tree should have conflict markers (default strategy leaves them for human)
+        content = (tmp_path / "shared.txt").read_text()
+        assert "<<<<<<<" in content
+        assert "=======" in content
+        assert ">>>>>>>" in content
 
     def test_log_file_created(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
@@ -379,14 +451,14 @@ class TestMergeOrchestrator:
 
         # The merge itself succeeds (git merge feature works), but because
         # pre_merge_sha in _merge_single_branch was empty, guardrails
-        # fail-closed with CHECK_FAILURE. Rollback is attempted using
-        # the captured pre_sha from _merge_single_branch (which is empty),
-        # so it becomes a no-op. The orchestrator now reports
-        # rollback_failed so the user sees an honest diagnosis.
+        # fail-closed with CHECK_FAILURE. Rollback was never attempted
+        # because there was no SHA to roll back to. The orchestrator reports
+        # guardrail_violation_no_rollback so the user sees an honest diagnosis.
         assert report.success is False
         assert report.failed_branch == "feature"
-        assert report.failure_reason == "rollback_failed"
-        assert report.rollback_failed is True
+        assert report.failure_reason == "guardrail_violation_no_rollback"
+        assert report.rollback_failed is False
+        assert report.pending_human is True
         assert report.human_call_file is not None
 
         # The merge commit IS still on HEAD because rollback couldn't be
@@ -394,6 +466,58 @@ class TestMergeOrchestrator:
         call_data = json.loads(report.human_call_file.read_text())
         assert any(
             "could not roll back" in v["message"].lower()
+            for v in call_data["violations"]
+        )
+
+    def test_rev_parse_head_timeout_guardrails_fail_closed(self, tmp_path: Path, monkeypatch) -> None:
+        """If rev-parse HEAD after a clean merge times out, guardrails fail-closed."""
+        import subprocess as _sp
+
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        call_count = 0
+
+        def patch_run_git(project_root, *args, check=True, timeout=30):
+            nonlocal call_count
+            # Make the THIRD "rev-parse HEAD" call time out (the post-merge
+            # one inside _merge_single_branch).  The first two are:
+            #   1. execute() pre-merge SHA capture
+            #   2. _merge_single_branch() pre_merge_sha capture
+            if len(args) >= 2 and args[0] == "rev-parse" and args[1] == "HEAD":
+                call_count += 1
+                if call_count == 3:
+                    raise _sp.TimeoutExpired(cmd=["git", "rev-parse", "HEAD"], timeout=15)
+            import se3.engine.worktree as _wt
+            return _wt._run_git(project_root, *args, check=check, timeout=timeout)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", patch_run_git,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        # The merge succeeds but post-merge rev-parse times out, so
+        # guardrails fail-closed.  pre_sha is available, so rollback is
+        # attempted and should succeed.  Result: guardrail_violation.
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "guardrail_violation"
+        assert report.rollback_failed is False
+        assert report.pending_human is True
+        assert report.human_call_file is not None
+
+        # Verify the call file mentions the missing SHA
+        call_data = json.loads(report.human_call_file.read_text())
+        assert any(
+            "missing SHA" in v["message"]
             for v in call_data["violations"]
         )
 
@@ -645,6 +769,201 @@ class TestMergeOrchestrator:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
         assert post_head == pre_head
+
+    def test_merge_timeout_default_strategy(self, tmp_path: Path, monkeypatch) -> None:
+        """git merge raises TimeoutExpired -> abort, failure_reason=merge_timed_out."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        import subprocess as _sp
+
+        def patch_run_git(project_root, *args, check=True, timeout=30):
+            # Only match the initial merge (not merge --abort)
+            if len(args) >= 1 and args[0] == "merge" and "--abort" not in args:
+                raise _sp.TimeoutExpired(cmd=["git", "merge"], timeout=30)
+            import se3.engine.worktree as _wt
+            return _wt._run_git(project_root, *args, check=check, timeout=timeout)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", patch_run_git
+        )
+        # Mock _abort_merge to succeed — real git has no merge in progress
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            lambda self: True,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        report = orch.execute(["feature"])
+
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "merge_timed_out"
+        assert report.pending_human is False
+
+        # HEAD should be unchanged
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
+    def test_merge_timeout_fast_strategy(self, tmp_path: Path, monkeypatch) -> None:
+        """fast strategy + git merge timeout -> fast_abort with merge_timed_out."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        import subprocess as _sp
+
+        def patch_run_git(project_root, *args, check=True, timeout=30):
+            # Only match the initial merge (not merge --abort)
+            if len(args) >= 1 and args[0] == "merge" and "--abort" not in args:
+                raise _sp.TimeoutExpired(cmd=["git", "merge"], timeout=30)
+            import se3.engine.worktree as _wt
+            return _wt._run_git(project_root, *args, check=check, timeout=timeout)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", patch_run_git
+        )
+        # Mock _abort_merge to succeed — real git has no merge in progress
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            lambda self: True,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature"])
+
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "merge_timed_out"
+        assert report.pending_human is False
+
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
+    def test_non_conflict_merge_failure_surfaces_stderr(self, tmp_path: Path, monkeypatch) -> None:
+        """git merge returns non-zero without conflicts -> stderr logged, failure_reason set."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        def patch_run_git(project_root, *args, check=True, timeout=30):
+            # Only match the initial merge (not merge --abort)
+            if len(args) >= 1 and args[0] == "merge" and "--abort" not in args:
+                class FakeResult:
+                    returncode = 1
+                    stdout = ""
+                    stderr = "fatal: refusing to merge unrelated histories"
+                return FakeResult()
+            import se3.engine.worktree as _wt
+            return _wt._run_git(project_root, *args, check=check, timeout=timeout)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", patch_run_git
+        )
+        # Mock _abort_merge to succeed — real git has no merge in progress
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            lambda self: True,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        report = orch.execute(["feature"])
+
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        # failure_reason should include the stderr message
+        assert "refusing to merge unrelated histories" in report.failure_reason
+        assert report.pending_human is False
+
+        # HEAD should be unchanged
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
+        # Log file should contain the stderr
+        assert report.log_file is not None
+        log_text = report.log_file.read_text()
+        assert "refusing to merge unrelated histories" in log_text
+
+    def test_fast_non_conflict_merge_failure_surfaces_stderr(self, tmp_path: Path, monkeypatch) -> None:
+        """fast strategy: git merge returns non-zero without conflicts -> stderr
+        is preserved in failure_reason with 'fast_failure:' prefix (distinct from
+        conflict-resolution 'fast_abort')."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        def patch_run_git(project_root, *args, check=True, timeout=30):
+            if len(args) >= 1 and args[0] == "merge" and "--abort" not in args:
+                class FakeResult:
+                    returncode = 1
+                    stdout = ""
+                    stderr = "fatal: refusing to merge unrelated histories"
+                return FakeResult()
+            import se3.engine.worktree as _wt
+            return _wt._run_git(project_root, *args, check=check, timeout=timeout)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", patch_run_git,
+        )
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            lambda self: True,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature"])
+
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        # failure_reason must use 'fast_failure:' prefix, not 'fast_abort:'
+        assert report.failure_reason.startswith("fast_failure")
+        assert "refusing to merge unrelated histories" in report.failure_reason
+        assert report.pending_human is False
 
 
 class TestMergeOrchestratorConflictResolution:
@@ -941,7 +1260,7 @@ class TestMergeOrchestratorConflictResolution:
         # Merge must fail — markers were detected and aborted
         assert report.success is False
         assert report.failed_branch == feature_branch
-        assert report.failure_reason == "fast_abort"
+        assert report.failure_reason == "resolution_validation_failed"
 
         # Working tree should be clean after abort
         assert _is_working_tree_clean(tmp_path) is True
@@ -960,35 +1279,9 @@ class TestMergeOrchestratorConflictResolution:
         # LLM resolution with markers was NOT written
         assert "RESOLVED" not in content
 
-    def test_strict_low_hunk_human_call(self, tmp_path: Path, monkeypatch) -> None:
-        """strict strategy + one low-confidence hunk → HUMAN_CALL."""
+    def test_strict_conflict_routes_to_human_call(self, tmp_path: Path) -> None:
+        """strict strategy + any conflict → HUMAN_CALL (LLM is never invoked)."""
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
-
-        def mock_resolve(self, context, strategy):
-            from se3.engine.merge.conflict_resolver import (
-                Confidence, FileResolution, HunkResolution, LLMResolution,
-            )
-            return LLMResolution(
-                files=[
-                    FileResolution(
-                        path="shared.txt",
-                        resolved_content="line1\nRESOLVED\nline3\n",
-                        hunks=[
-                            HunkResolution(1, 3, Confidence.HIGH, "clear"),
-                            HunkResolution(4, 8, Confidence.LOW, "unclear"),
-                        ],
-                        overall_confidence=Confidence.HIGH,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
-                        is_spec=False,
-                    ),
-                ],
-                overall_confidence=Confidence.HIGH,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
-            )
-
-        monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
-        )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="strict")
         report = orch.execute([feature_branch])
@@ -1402,6 +1695,134 @@ class TestMergeOrchestratorConflictResolution:
         assert post_head == pre_head
 
 
+class TestAbortMergeFailureHandling:
+    """Tests that when git merge --abort fails, the failure is surfaced."""
+
+    def _create_conflict_repo(self, tmp_path: Path) -> tuple[str, str]:
+        """Create repo with conflicting branches. Returns (default_branch, feature_branch)."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _add_commit(tmp_path, "shared.txt", "line1\nline2\nline3\n", "Add shared")
+        _create_branch(tmp_path, "feature")
+        (tmp_path / "shared.txt").write_text("line1\nFEATURE\nline3\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on feature"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "shared.txt").write_text("line1\nBASE\nline3\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on base"],
+            check=True, capture_output=True,
+        )
+        return default_branch, "feature"
+
+    def test_default_human_call_write_fails_and_abort_fails(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """default + write_call fails + abort fails -> failure_reason=merge_abort_failed."""
+        default_branch, feature_branch = self._create_conflict_repo(tmp_path)
+
+        def mock_resolve(self, context, strategy):
+            from se3.engine.merge.conflict_resolver import (
+                Confidence, FileResolution, HunkResolution, LLMResolution,
+            )
+            return LLMResolution(
+                files=[
+                    FileResolution(
+                        path="shared.txt",
+                        resolved_content="resolved",
+                        hunks=[HunkResolution(1, 5, Confidence.LOW, "uncertain")],
+                        overall_confidence=Confidence.LOW,
+                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        is_spec=False,
+                    ),
+                ],
+                overall_confidence=Confidence.LOW,
+                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        # Mock write_call to fail, and _abort_merge to also fail
+        monkeypatch.setattr(
+            "se3.engine.merge.human_call.HumanCallWriter.write_call",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("disk full")),
+        )
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            lambda self: False,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        report = orch.execute([feature_branch])
+
+        assert report.success is False
+        assert report.failed_branch == feature_branch
+        # KEY: abort failure must be surfaced, not masked by write failure
+        assert report.failure_reason == "merge_abort_failed"
+
+        # Clean up the mid-merge state for the test runner
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "merge", "--abort"],
+            capture_output=True,
+        )
+
+    def test_default_incomplete_resolution_write_fails_and_abort_fails(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """default + incomplete resolution + write_call fails + abort fails -> merge_abort_failed."""
+        default_branch, feature_branch = self._create_conflict_repo(tmp_path)
+
+        def mock_resolve(self, context, strategy):
+            from se3.engine.merge.conflict_resolver import (
+                Confidence, FileResolution, HunkResolution, LLMResolution,
+            )
+            return LLMResolution(
+                files=[],  # incomplete — missing shared.txt
+                overall_confidence=Confidence.HIGH,
+                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        # Mock write_call to fail, and _abort_merge to also fail
+        monkeypatch.setattr(
+            "se3.engine.merge.human_call.HumanCallWriter.write_call",
+            lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("disk full")),
+        )
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._abort_merge",
+            lambda self: False,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        report = orch.execute([feature_branch])
+
+        assert report.success is False
+        assert report.failed_branch == feature_branch
+        assert report.failure_reason == "merge_abort_failed"
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "merge", "--abort"],
+            capture_output=True,
+        )
+
 class TestMergeOrchestratorCleanupInteraction:
     """Tests for --delete-merged interaction with aggregation failures."""
 
@@ -1648,7 +2069,11 @@ class TestMergeOrchestratorCleanupInteraction:
         # Should fail — binary files cannot be auto-resolved
         assert report.success is False
         assert report.failed_branch == "feature"
-        assert report.failure_reason == "merge_conflict"
+        assert report.failure_reason == "binary_file_conflict"
+
+        # A human call must have been created for non-fast strategies
+        assert report.pending_human is True
+        assert report.human_call_file is not None
 
         # The binary file should still have the main content (not overwritten by LLM)
         assert (tmp_path / "data.bin").read_bytes() == main_content
@@ -1668,7 +2093,7 @@ class TestMergeOrchestratorCleanupInteraction:
 
         When LLM returns empty resolved_content for a text file (deletion),
         the second pass calls ``git rm -f``. If that fails, the merge must be
-        aborted and "conflict" returned.
+        aborted and ``resolution_write_failed`` returned.
         """
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
@@ -1775,7 +2200,7 @@ class TestMergeOrchestratorCleanupInteraction:
         # Should fail — git rm -f failed
         assert report.success is False
         assert report.failed_branch == "feature"
-        assert report.failure_reason == "merge_conflict"
+        assert report.failure_reason == "resolution_write_failed"
 
         # Abort must have been called
         assert len(abort_calls) >= 1
@@ -2065,7 +2490,7 @@ class TestMergeOrchestratorCleanupInteraction:
         # Should fail — low-confidence deletion of a file with content rejected
         assert report.success is False
         assert report.failed_branch == "feature"
-        assert report.failure_reason == "merge_conflict"
+        assert report.failure_reason == "resolution_validation_failed"
 
         # Working tree should be clean after abort
         assert _is_working_tree_clean(tmp_path) is True
@@ -2222,10 +2647,10 @@ class TestMergeOrchestratorCleanupInteraction:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute(["feature"])
 
-        # Should fail — empty hunks + LOW overall → rejected (fast_abort in fast mode)
+        # Should fail — empty hunks + LOW overall → validation rejects deletion
         assert report.success is False
         assert report.failed_branch == "feature"
-        assert report.failure_reason == "fast_abort"
+        assert report.failure_reason == "resolution_validation_failed"
 
         # Working tree should be clean after abort
         assert _is_working_tree_clean(tmp_path) is True
@@ -2402,6 +2827,86 @@ class TestStrictShortCircuit:
         ).stdout.strip()
         assert post_head == pre_head
 
+    def test_strict_build_context_raises_routes_to_conflict(self, tmp_path: Path, monkeypatch) -> None:
+        """strict + build_conflict_context raises -> abort, reported as merge_conflict.
+
+        The strict short-circuit runs AFTER context building; if that fails,
+        the merge aborts and is reported as a conflict (not pending_human).
+        """
+        default_branch, feature_branch = self._create_conflict_repo(tmp_path)
+
+        # Mock build_conflict_context to raise
+        def mock_build_context(project_root, ours, theirs):
+            raise RuntimeError("mock context failure")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.build_conflict_context",
+            mock_build_context,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="strict")
+        report = orch.execute([feature_branch])
+
+        # Should be reported as merge_conflict, NOT pending_human
+        assert report.success is False
+        assert report.failed_branch == feature_branch
+        assert report.failure_reason == "merge_conflict"
+        assert report.pending_human is False
+        assert report.human_call_file is None
+
+        # Working tree should be clean after abort
+        assert _is_working_tree_clean(tmp_path) is True
+
+        # HEAD unchanged
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
+    def test_fast_build_context_raises_routes_to_fast_abort(self, tmp_path: Path, monkeypatch) -> None:
+        """fast + build_conflict_context raises -> abort, reported as conflict_context_failed.
+
+        Mirrors the strict test but verifies fast mode returns fast_abort
+        (not merge_conflict) and creates no human call file.
+        """
+        default_branch, feature_branch = self._create_conflict_repo(tmp_path)
+
+        def mock_build_context(project_root, ours, theirs):
+            raise RuntimeError("mock context failure")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.build_conflict_context",
+            mock_build_context,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute([feature_branch])
+
+        assert report.success is False
+        assert report.failed_branch == feature_branch
+        assert report.failure_reason == "conflict_context_failed"
+        assert report.pending_human is False
+        assert report.human_call_file is None
+
+        assert _is_working_tree_clean(tmp_path) is True
+
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
     def test_strict_skips_llm_and_writes_call(self, tmp_path: Path, monkeypatch) -> None:
         """strict mode: LLMCaller.call never invoked; human call file created."""
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
@@ -2517,11 +3022,11 @@ class TestFastAbortBehavior:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute([feature_branch])
 
-        # Must fail with fast_abort, NOT pending_human
+        # Must fail with resolution_rejected, NOT pending_human
         assert report.success is False
         assert report.pending_human is False
         assert report.failed_branch == feature_branch
-        assert report.failure_reason == "fast_abort"
+        assert report.failure_reason == "resolution_rejected"
         assert report.human_call_file is None
 
         # Working tree should be clean after abort
@@ -2533,6 +3038,51 @@ class TestFastAbortBehavior:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
         assert post_head == pre_head
+
+        # No new call files should have been created
+        calls_after = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
+        assert len(calls_after) == len(calls_before)
+
+    def test_fast_per_file_requires_human_review_on_non_spec_accept(self, tmp_path: Path, monkeypatch) -> None:
+        """fast + per-file requires_human_review on non-spec file → ACCEPT (merge succeeds)."""
+        default_branch, feature_branch = self._create_conflict_repo(tmp_path)
+
+        def mock_resolve(self, context, strategy):
+            from se3.engine.merge.conflict_resolver import (
+                Confidence, FileResolution, HunkResolution, LLMResolution,
+            )
+            return LLMResolution(
+                files=[
+                    FileResolution(
+                        path="shared.txt",
+                        resolved_content="line1\nRESOLVED\nline3\n",
+                        hunks=[HunkResolution(1, 5, Confidence.HIGH, "ok")],
+                        overall_confidence=Confidence.HIGH,
+                        flags={"requires_human_review": True, "spec_guardrail_concern": False},
+                        is_spec=False,
+                    ),
+                ],
+                overall_confidence=Confidence.HIGH,
+                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        calls_before = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute([feature_branch])
+
+        # Must succeed — per-file requires_human_review on non-spec is dropped in fast mode
+        assert report.success is True
+        assert report.pending_human is False
+        assert feature_branch in report.merged_branches
+        assert report.human_call_file is None
+
+        # File should be resolved
+        assert (tmp_path / "shared.txt").read_text() == "line1\nRESOLVED\nline3\n"
 
         # No new call files should have been created
         calls_after = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
@@ -2603,11 +3153,11 @@ class TestFastAbortBehavior:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute(["feature"])
 
-        # Must fail with fast_abort
+        # Must fail with incomplete_resolution
         assert report.success is False
         assert report.pending_human is False
         assert report.failed_branch == "feature"
-        assert report.failure_reason == "fast_abort"
+        assert report.failure_reason == "incomplete_resolution"
         assert report.human_call_file is None
 
         # Working tree clean
@@ -2668,11 +3218,12 @@ class TestFastAbortBehavior:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute([feature_branch])
 
-        # Must fail with fast_abort
+        # Must fail with fast_abort result code, but failure_reason is resolution_commit_timeout
+        # the actual cause (commit timeout) so the CLI message is accurate.
         assert report.success is False
         assert report.pending_human is False
         assert report.failed_branch == feature_branch
-        assert report.failure_reason == "fast_abort"
+        assert report.failure_reason == "resolution_commit_timeout"
 
         # Working tree clean after abort
         assert _is_working_tree_clean(tmp_path) is True
@@ -2685,7 +3236,7 @@ class TestFastAbortBehavior:
         assert post_head == pre_head
 
     def test_fast_apply_resolution_validation_failure_aborts(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + validation failure in _apply_resolution -> fast_abort."""
+        """fast + validation failure in _apply_resolution -> resolution_validation_failed."""
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
@@ -2720,16 +3271,120 @@ class TestFastAbortBehavior:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute([feature_branch])
 
-        # Must fail with fast_abort
+        # Must fail with resolution_validation_failed
         assert report.success is False
         assert report.pending_human is False
         assert report.failed_branch == feature_branch
-        assert report.failure_reason == "fast_abort"
+        assert report.failure_reason == "resolution_validation_failed"
 
         # Working tree clean
         assert _is_working_tree_clean(tmp_path) is True
 
         # HEAD unchanged
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
+    def test_fast_binary_file_conflict_aborts_with_specific_reason(self, tmp_path: Path, monkeypatch) -> None:
+        """fast + binary file conflict -> abort with binary_file_conflict reason.
+
+        The first-pass validation in ``_apply_resolution`` detects that the
+        conflict file is binary and aborts before writing anything back.
+        Unlike the generic ``resolution_validation_failed`` path, binary
+        files receive the dedicated ``binary_file_conflict`` failure reason
+        so the CLI can surface a targeted message.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # Create a file with null bytes so our heuristic treats it as binary
+        binary_content = b"line1\n\x00\x01\x02\nline3\n"
+        (tmp_path / "data.bin").write_bytes(binary_content)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "data.bin"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Add binary file"],
+            check=True, capture_output=True,
+        )
+
+        # Create feature branch with different binary content
+        _create_branch(tmp_path, "feature")
+        feature_content = b"line1\n\x00\xfe\xff\nfeature_line\n"
+        (tmp_path / "data.bin").write_bytes(feature_content)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "data.bin"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change binary on feature"],
+            check=True, capture_output=True,
+        )
+
+        # Switch back to main, change binary differently
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        main_content = b"line1\n\x00\xaa\xbb\nmain_line\n"
+        (tmp_path / "data.bin").write_bytes(main_content)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "data.bin"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change binary on main"],
+            check=True, capture_output=True,
+        )
+
+        # Mock LLM resolver: returns non-empty resolved_content for binary file
+        def mock_resolve(self, context, strategy):
+            from se3.engine.merge.conflict_resolver import (
+                Confidence, FileResolution, HunkResolution, LLMResolution,
+            )
+            return LLMResolution(
+                files=[
+                    FileResolution(
+                        path="data.bin",
+                        resolved_content="some text that claims to resolve binary",
+                        hunks=[HunkResolution(1, 3, Confidence.HIGH, "binary")],
+                        overall_confidence=Confidence.HIGH,
+                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        is_spec=False,
+                    ),
+                ],
+                overall_confidence=Confidence.HIGH,
+                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature"])
+
+        # Must fail with the specific binary_file_conflict reason
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "binary_file_conflict"
+        assert report.pending_human is False
+
+        # The binary file should still have the main content (not overwritten by LLM)
+        assert (tmp_path / "data.bin").read_bytes() == main_content
+
+        # Working tree should be clean after abort
+        assert _is_working_tree_clean(tmp_path) is True
+
+        # HEAD should be unchanged (pre-merge state preserved)
         post_head = subprocess.run(
             ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
             capture_output=True, text=True, check=True,
@@ -2869,11 +3524,11 @@ class TestFastAbortBehavior:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute(["feature"])
 
-        # Must fail with fast_abort
+        # Must fail with incomplete_resolution
         assert report.success is False
         assert report.pending_human is False
         assert report.failed_branch == "feature"
-        assert report.failure_reason == "fast_abort"
+        assert report.failure_reason == "incomplete_resolution"
         assert report.human_call_file is None
 
         # Working tree clean
@@ -2887,6 +3542,110 @@ class TestFastAbortBehavior:
         assert post_head == pre_head
 
         # No new call files
+        calls_after = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
+        assert len(calls_after) == len(calls_before)
+
+    def test_fast_spec_file_low_confidence_aborts_no_call_file(self, tmp_path: Path, monkeypatch) -> None:
+        """fast + per-file LOW confidence on spec file -> REJECT, abort, no call file.
+
+        This is the safety-critical path at strategy.py:247-251: spec files
+        with non-HIGH overall_confidence must cause REJECT in fast mode.
+        The orchestrator must translate that REJECT into a clean abort with
+        no human call file.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # Set up a spec file and create conflicting branches
+        spec_dir = tmp_path / "se3" / "specs" / "test"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "spec.md").write_text("## Requirement: Auth\n\nThe system SHALL validate.\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Add spec"],
+            check=True, capture_output=True,
+        )
+
+        _create_branch(tmp_path, "feature")
+        (spec_dir / "spec.md").write_text("## Requirement: Auth\n\nThe system SHALL validate inputs.\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Update spec on feature"],
+            check=True, capture_output=True,
+        )
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        (spec_dir / "spec.md").write_text("## Requirement: Auth\n\nThe system SHALL validate all.\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Update spec on main"],
+            check=True, capture_output=True,
+        )
+
+        # Mock LLM: returns LOW overall_confidence for the spec file
+        def mock_resolve(self, context, strategy):
+            from se3.engine.merge.conflict_resolver import (
+                Confidence, FileResolution, HunkResolution, LLMResolution,
+            )
+            return LLMResolution(
+                files=[
+                    FileResolution(
+                        path="se3/specs/test/spec.md",
+                        resolved_content="## Requirement: Auth\n\nThe system SHALL validate all inputs.\n",
+                        hunks=[HunkResolution(1, 5, Confidence.HIGH, "merged")],
+                        overall_confidence=Confidence.LOW,
+                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        is_spec=True,
+                    ),
+                ],
+                overall_confidence=Confidence.HIGH,
+                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        calls_before = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature"])
+
+        # Must fail with resolution_rejected (not pending_human)
+        assert report.success is False
+        assert report.pending_human is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "resolution_rejected"
+        assert report.human_call_file is None
+
+        # Working tree should be clean after abort
+        assert _is_working_tree_clean(tmp_path) is True
+
+        # HEAD unchanged
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
+        # No new call files should have been created
         calls_after = list((tmp_path / "se3" / "calls").glob("merge_*.json")) if (tmp_path / "se3" / "calls").exists() else []
         assert len(calls_after) == len(calls_before)
 
@@ -2907,6 +3666,36 @@ class TestGuardrailsStrategyAware:
         (tmp_path / "code.py").write_text("def auth(): pass\n")
         _commit(tmp_path, "initial")
         return default_branch
+
+    def _create_conflict_repo(self, tmp_path: Path) -> tuple[str, str]:
+        """Create repo with conflicting branches. Returns (default_branch, feature_branch)."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _add_commit(tmp_path, "shared.txt", "line1\nline2\nline3\n", "Add shared")
+        _create_branch(tmp_path, "feature")
+        (tmp_path / "shared.txt").write_text("line1\nFEATURE\nline3\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on feature"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "shared.txt").write_text("line1\nBASE\nline3\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "Change shared on base"],
+            check=True, capture_output=True,
+        )
+        return default_branch, "feature"
 
     def test_fast_guardrail_violation_llm_repair_success(self, tmp_path: Path, monkeypatch) -> None:
         """fast + SHALL->SHOULD guardrail violation -> LLM repair -> merge succeeds."""
@@ -3090,6 +3879,55 @@ class TestGuardrailsStrategyAware:
         ).stdout.strip()
         assert post_head == pre_head
 
+    def test_strict_guardrail_violation_unchanged(self, tmp_path: Path) -> None:
+        """strict + guardrail violation -> rollback + human call (no LLM repair)."""
+        default_branch = self._setup_spec_repo(tmp_path)
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
+            check=True, capture_output=True,
+        )
+        spec_dir = tmp_path / "se3" / "specs" / "base"
+        (spec_dir / "spec.md").write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="strict")
+        report = orch.execute(["feature"])
+
+        # strict should behave like default for guardrails: rollback + human call
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "guardrail_violation"
+        assert report.pending_human is True
+        assert report.human_call_file is not None
+        assert report.human_call_file.exists()
+
+        # HEAD should be restored
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
     def test_fast_clean_merge_guardrail_violation_repair(self, tmp_path: Path, monkeypatch) -> None:
         """fast + clean merge that touches spec + guardrail violation -> LLM repair."""
         default_branch = self._setup_spec_repo(tmp_path)
@@ -3142,8 +3980,8 @@ class TestGuardrailsStrategyAware:
         assert report.success is True
         assert "feature" in report.merged_branches
 
-    def test_fast_guardrail_repair_missing_sha_aborts(self, tmp_path: Path, monkeypatch) -> None:
-        """fast + missing pre_sha/post_sha in guardrails -> GuardrailRepairFailed."""
+    def test_fast_guardrail_missing_sha_aborts(self, tmp_path: Path, monkeypatch) -> None:
+        """fast + missing post_sha in guardrails -> guardrail_missing_post_sha."""
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
         _create_branch(tmp_path, "feature")
@@ -3175,12 +4013,127 @@ class TestGuardrailsStrategyAware:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute(["feature"])
 
-        # Missing SHA in fast mode -> GuardrailRepairFailed -> fast_abort
+        # Missing post_sha in fast mode -> GuardrailRepairFailed with guardrail_missing_post_sha
         assert report.success is False
         assert report.failed_branch == "feature"
-        assert report.failure_reason == "guardrail_repair_failed"
+        assert report.failure_reason == "guardrail_missing_post_sha"
         assert report.pending_human is False
         assert report.human_call_file is None
+
+    def test_fast_guardrail_crash_and_rollback_fails(self, tmp_path: Path, monkeypatch) -> None:
+        """fast + check_merge_result crashes + rollback fails -> rollback_failed=True."""
+        default_branch = self._setup_spec_repo(tmp_path)
+
+        # Create feature branch that weakens spec
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
+            check=True, capture_output=True,
+        )
+        spec_dir = tmp_path / "se3" / "specs" / "base"
+        (spec_dir / "spec.md").write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Mock check_merge_result to raise (simulating crash)
+        def mock_check_crash(self, pre_sha: str, post_sha: str):
+            raise RuntimeError("Simulated guardrails check crash")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            mock_check_crash,
+        )
+
+        # Mock _rollback_to to fail
+        def mock_rollback_fails(self, sha: str) -> None:
+            raise RuntimeError("Simulated rollback failure")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._rollback_to",
+            mock_rollback_fails,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature"])
+
+        # Both check crash and rollback failure should be reported
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "guardrail_check_failed_and_rollback_failed"
+        assert report.rollback_failed is True  # KEY: rollback failure must be surfaced
+        assert report.pending_human is False
+        assert report.human_call_file is None
+
+    def test_fast_guardrail_crash_rollback_succeeds(self, tmp_path: Path, monkeypatch) -> None:
+        """fast + check_merge_result crashes + rollback succeeds -> fast_abort."""
+        default_branch = self._setup_spec_repo(tmp_path)
+
+        # Create feature branch that weakens spec
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
+            check=True, capture_output=True,
+        )
+        spec_dir = tmp_path / "se3" / "specs" / "base"
+        (spec_dir / "spec.md").write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        # Mock check_merge_result to raise (simulating crash)
+        def mock_check_crash(self, pre_sha: str, post_sha: str):
+            raise RuntimeError("Simulated guardrails check crash")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            mock_check_crash,
+        )
+
+        # Rollback succeeds (real _rollback_to), so only check crash is reported
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature"])
+
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "guardrail_check_failed"
+        assert report.rollback_failed is False
+        assert report.pending_human is False
+        assert report.human_call_file is None
+
+        # HEAD should be restored to pre-merge state
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
 
     def test_fast_repairs_guardrail_violation(self, tmp_path: Path, monkeypatch) -> None:
         """fast + SHALL->SHOULD: mock repairer's LLM to return fix; merge succeeds with amend."""
@@ -3321,3 +4274,223 @@ class TestGuardrailsStrategyAware:
         # No new call files
         calls_after = list(calls_dir.glob("merge_*.json")) if calls_dir.exists() else []
         assert len(calls_after) == len(calls_before)
+
+    def test_default_guardrail_checker_crash_call_file_fails(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """default + guardrails checker crashes + rollback ok + call file fails
+        -> GuardrailCallFileError propagated, failure_reason set correctly."""
+        default_branch = self._setup_spec_repo(tmp_path)
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
+            check=True, capture_output=True,
+        )
+        spec_dir = tmp_path / "se3" / "specs" / "base"
+        (spec_dir / "spec.md").write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        pre_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        # Mock check_merge_result to crash (not report violations)
+        def mock_check_crash(self, pre_sha: str, post_sha: str):
+            raise RuntimeError("mock guardrails checker crash")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            mock_check_crash,
+        )
+
+        # Mock write_guardrail_call to fail after rollback succeeds
+        def mock_write_guardrail_call(self, branch, violations, pre_merge_sha):
+            raise RuntimeError("mock call file write failure")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.human_call.HumanCallWriter.write_guardrail_call",
+            mock_write_guardrail_call,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        report = orch.execute(["feature"])
+
+        # Should surface the call-file failure, not rollback failure
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "guardrail_violation_call_failed"
+        assert report.pending_human is True
+        # Rollback succeeded, so HEAD should be restored
+        post_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert post_head == pre_head
+
+    def test_fast_clean_merge_guardrail_repair_sha_refresh_timeout(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """fast + clean merge + guardrail repair succeeds + SHA refresh times out
+        -> merge still succeeds (SHA refresh is best-effort)."""
+        default_branch = self._setup_spec_repo(tmp_path)
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
+            check=True, capture_output=True,
+        )
+        spec_dir = tmp_path / "se3" / "specs" / "base"
+        (spec_dir / "spec.md").write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Mock repairer's LLM call to return corrected content
+        def mock_call_llm(self, prompt):
+            import json
+            return json.dumps({
+                "files": [{
+                    "path": "se3/specs/base/spec.md",
+                    "corrected_content": (
+                        "## Requirement: Auth\n\n"
+                        "The system SHALL validate all user inputs.\n"
+                    ),
+                }]
+            }, ensure_ascii=False, indent=2)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair.GuardrailRepairer._call_llm",
+            mock_call_llm,
+        )
+
+        # Patch _run_git to timeout on the SHA refresh after guardrails check.
+        # In the clean-merge path the refresh is at orchestrator.py:737-748.
+        import se3.engine.worktree as _wt
+        rev_parse_count = 0
+        original_run_git = _wt._run_git
+
+        def patched_run_git(project_root, *args, check=True, timeout=30):
+            nonlocal rev_parse_count
+            if len(args) >= 2 and args[0] == "rev-parse" and args[1] == "HEAD":
+                rev_parse_count += 1
+                # Count: 1=execute pre-merge, 2=_merge_single_branch pre,
+                # 3=post-clean-merge, 4=repairer post-amend,
+                # 5=orchestrator SHA refresh after guardrails
+                if rev_parse_count == 5:
+                    raise subprocess.TimeoutExpired(
+                        cmd=["git", "rev-parse", "HEAD"], timeout=15,
+                    )
+            return original_run_git(project_root, *args, check=check, timeout=timeout)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", patched_run_git,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature"])
+
+        # Merge should still succeed despite SHA refresh timeout
+        assert report.success is True, (
+            f"Expected success, got failure_reason={report.failure_reason}"
+        )
+        assert "feature" in report.merged_branches
+        assert report.pending_human is False
+
+    def test_fast_apply_resolution_guardrail_sha_refresh_timeout(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """fast + conflict resolved + guardrails pass + SHA refresh times out
+        -> merge still succeeds (SHA refresh is best-effort)."""
+        default_branch, feature_branch = self._create_conflict_repo(tmp_path)
+
+        def mock_resolve(self, context, strategy):
+            from se3.engine.merge.conflict_resolver import (
+                Confidence, FileResolution, HunkResolution, LLMResolution,
+            )
+            return LLMResolution(
+                files=[
+                    FileResolution(
+                        path="shared.txt",
+                        resolved_content="line1\nRESOLVED\nline3\n",
+                        hunks=[HunkResolution(1, 3, Confidence.HIGH, "merged both")],
+                        overall_confidence=Confidence.HIGH,
+                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        is_spec=False,
+                    ),
+                ],
+                overall_confidence=Confidence.HIGH,
+                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        # Mock _run_guardrails to return None (simulate pass / repair success)
+        def mock_run_guardrails(self, pre_sha, post_sha, branch, strategy=None):
+            return None
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._run_guardrails",
+            mock_run_guardrails,
+        )
+
+        # Patch _run_git to timeout on the SHA refresh in _apply_resolution.
+        # In _apply_resolution the refresh is at orchestrator.py:1388-1408.
+        import se3.engine.worktree as _wt
+        rev_parse_count = 0
+        original_run_git = _wt._run_git
+
+        def patched_run_git(project_root, *args, check=True, timeout=30):
+            nonlocal rev_parse_count
+            if len(args) >= 2 and args[0] == "rev-parse" and args[1] == "HEAD":
+                rev_parse_count += 1
+                # Count: 1=execute pre-merge, 2=_merge_single_branch pre,
+                # 3=_apply_resolution post-commit, 4=_apply_resolution SHA refresh
+                if rev_parse_count == 4:
+                    raise subprocess.TimeoutExpired(
+                        cmd=["git", "rev-parse", "HEAD"], timeout=15,
+                    )
+            return original_run_git(project_root, *args, check=check, timeout=timeout)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._run_git", patched_run_git,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute([feature_branch])
+
+        # Merge should still succeed despite SHA refresh timeout
+        assert report.success is True, (
+            f"Expected success, got failure_reason={report.failure_reason}"
+        )
+        assert feature_branch in report.merged_branches
+        assert report.pending_human is False
+        # Verify the conflict was actually resolved
+        assert (tmp_path / "shared.txt").read_text() == "line1\nRESOLVED\nline3\n"

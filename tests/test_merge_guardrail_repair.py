@@ -542,7 +542,8 @@ class TestGuardrailRepairerFailures:
         )
 
         assert result.success is False
-        assert "no valid spec files" in result.error.lower()
+        assert "without corrected_content" in result.error.lower()
+        assert "se3/specs/base/spec.md" in result.error
 
     def test_repair_result_defaults(self) -> None:
         """RepairResult dataclass has correct defaults."""
@@ -550,6 +551,327 @@ class TestGuardrailRepairerFailures:
         assert r.success is False
         assert r.repaired_files == []
         assert r.error is None
+
+    def test_path_traversal_via_dotdot_to_spec_dir(self, tmp_path: Path, monkeypatch) -> None:
+        """Path that passes regex but resolves outside specs/ is rejected."""
+        _init_repo(tmp_path)
+        _setup_spec_files(tmp_path)
+
+        repairer = GuardrailRepairer(tmp_path)
+
+        # This path passes the regex (^se3/specs/.+/spec\.md$) but resolves
+        # to se3/tools/spec.md — outside the se3/specs/ directory.
+        def mock_call_llm(self, prompt: str) -> str:
+            return json.dumps({
+                "files": [
+                    {
+                        "path": "se3/specs/base/../../tools/spec.md",
+                        "corrected_content": "evil",
+                    },
+                ],
+            })
+
+        monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
+
+        violations = _make_violations()
+        original_specs = _make_original_specs()
+        merged_specs = _make_merged_specs()
+
+        result = repairer.repair_violations(
+            branch="feature",
+            pre_sha="abc",
+            post_sha="def",
+            violations=violations,
+            original_spec_contents=original_specs,
+            merged_spec_contents=merged_specs,
+        )
+
+        assert result.success is False
+        assert "outside spec dir" in result.error.lower()
+
+        # se3/tools/spec.md must NOT have been created
+        assert not (tmp_path / "se3" / "tools" / "spec.md").exists()
+
+    def test_repair_recheck_crash_restores_content(self, tmp_path: Path, monkeypatch) -> None:
+        """Guardrails re-check crashes after files written — merged content restored."""
+        _init_repo(tmp_path)
+        _setup_spec_files(tmp_path)
+
+        repairer = GuardrailRepairer(tmp_path)
+
+        # Mock LLM to return corrected content
+        def mock_call_llm(self, prompt: str) -> str:
+            return json.dumps({
+                "files": [
+                    {
+                        "path": "se3/specs/base/spec.md",
+                        "corrected_content": (
+                            "## Requirement: Auth\n\n"
+                            "The system SHALL validate all user inputs.\n"
+                        ),
+                    },
+                ],
+            })
+
+        monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
+
+        # Mock guardrails re-check to crash (raise exception)
+        def mock_check_crash(self, pre_sha: str, post_sha: str):
+            raise RuntimeError("Simulated guardrails re-check crash")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            mock_check_crash,
+        )
+
+        violations = _make_violations()
+        original_specs = _make_original_specs()
+        merged_specs = _make_merged_specs()
+
+        # Add the merged spec to the repo so amend works
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "merged"],
+            check=True, capture_output=True,
+        )
+
+        result = repairer.repair_violations(
+            branch="feature",
+            pre_sha="abc",
+            post_sha="def",
+            violations=violations,
+            original_spec_contents=original_specs,
+            merged_spec_contents=merged_specs,
+        )
+
+        # Repair should report failure
+        assert result.success is False
+        assert "guardrails" in result.error.lower() or "re-check" in result.error.lower()
+
+        # Merged content should be restored (SHOULD, not SHALL)
+        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        restored_content = spec_path.read_text()
+        assert "SHOULD" in restored_content
+        assert "SHALL" not in restored_content
+
+    def test_repair_amend_timeout_restores_content(self, tmp_path: Path, monkeypatch) -> None:
+        """git commit --amend times out — merged content restored, HEAD un-amended."""
+        _init_repo(tmp_path)
+        _setup_spec_files(tmp_path)
+
+        # Add merged spec and create a merge commit
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "merged"],
+            check=True, capture_output=True,
+        )
+
+        repairer = GuardrailRepairer(tmp_path)
+
+        def mock_call_llm(self, prompt: str) -> str:
+            return json.dumps({
+                "files": [
+                    {
+                        "path": "se3/specs/base/spec.md",
+                        "corrected_content": (
+                            "## Requirement: Auth\n\n"
+                            "The system SHALL validate all user inputs.\n"
+                        ),
+                    },
+                ],
+            })
+
+        monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
+
+        # Mock _run_git to raise TimeoutExpired on amend
+        original_run_git = None
+
+        def mock_run_git(project_root, *args, check=True, timeout=30):
+            if len(args) >= 2 and args[0] == "commit" and args[1] == "--amend":
+                raise subprocess.TimeoutExpired(
+                    cmd=["git", "commit", "--amend"], timeout=30,
+                )
+            # Fall through to real _run_git
+            import se3.engine.worktree as _wt
+            return _wt._run_git(project_root, *args, check=check, timeout=timeout)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair._run_git", mock_run_git,
+        )
+
+        violations = _make_violations()
+        original_specs = _make_original_specs()
+        merged_specs = _make_merged_specs()
+
+        result = repairer.repair_violations(
+            branch="feature",
+            pre_sha="abc",
+            post_sha="def",
+            violations=violations,
+            original_spec_contents=original_specs,
+            merged_spec_contents=merged_specs,
+        )
+
+        assert result.success is False
+        assert "timeout" in result.error.lower()
+
+        # Merged content should be restored (SHOULD, not SHALL)
+        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        restored_content = spec_path.read_text()
+        assert "SHOULD" in restored_content
+        assert "SHALL" not in restored_content
+
+    def test_partial_repair_one_fixed_one_still_violates(self, tmp_path: Path, monkeypatch) -> None:
+        """LLM fixes file A but file B still violates — report remaining violations."""
+        _init_repo(tmp_path)
+
+        # Set up two spec files
+        spec_dir1 = tmp_path / "se3" / "specs" / "base"
+        spec_dir1.mkdir(parents=True)
+        (spec_dir1 / "spec.md").write_text("SHOULD do X\n")
+
+        spec_dir2 = tmp_path / "se3" / "specs" / "config"
+        spec_dir2.mkdir(parents=True)
+        (spec_dir2 / "spec.md").write_text("MAY do Y\n")
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "add specs"],
+            check=True, capture_output=True,
+        )
+
+        repairer = GuardrailRepairer(tmp_path)
+
+        # Mock LLM to fix only file A (base/spec.md)
+        def mock_call_llm(self, prompt: str) -> str:
+            return json.dumps({
+                "files": [
+                    {
+                        "path": "se3/specs/base/spec.md",
+                        "corrected_content": "SHALL do X\n",
+                    },
+                ],
+            })
+
+        monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
+
+        # Mock guardrails: file A passes, file B still violates
+        def mock_check_merge_result(self, pre_sha: str, post_sha: str) -> GuardrailReport:
+            return GuardrailReport(
+                passed=False,
+                violations=[
+                    GuardrailViolation(
+                        file_path="se3/specs/config/spec.md",
+                        violation_type="WEAKENING",
+                        message="MUST weakened to MAY",
+                    ),
+                ],
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            mock_check_merge_result,
+        )
+
+        violations = [
+            GuardrailViolation(
+                file_path="se3/specs/base/spec.md",
+                violation_type="WEAKENING",
+                message="SHALL weakened to SHOULD",
+            ),
+            GuardrailViolation(
+                file_path="se3/specs/config/spec.md",
+                violation_type="WEAKENING",
+                message="MUST weakened to MAY",
+            ),
+        ]
+        original_specs = {
+            "se3/specs/base/spec.md": "SHALL do X\n",
+            "se3/specs/config/spec.md": "MUST do Y\n",
+        }
+        merged_specs = {
+            "se3/specs/base/spec.md": "SHOULD do X\n",
+            "se3/specs/config/spec.md": "MAY do Y\n",
+        }
+
+        result = repairer.repair_violations(
+            branch="feature",
+            pre_sha="abc",
+            post_sha="def",
+            violations=violations,
+            original_spec_contents=original_specs,
+            merged_spec_contents=merged_specs,
+        )
+
+        assert result.success is False
+        # Should report that file A was repaired
+        assert "se3/specs/base/spec.md" in result.repaired_files
+        # Should report remaining violations from file B
+        assert "se3/specs/config/spec.md" in result.error
+        assert "MUST weakened to MAY" in result.error
+        assert "Remaining violations" in result.error
+
+        # File A should be restored to merged content (not the repaired content)
+        # because the repair failed overall
+        base_content = (tmp_path / "se3" / "specs" / "base" / "spec.md").read_text()
+        assert "SHOULD" in base_content
+
+    def test_conflict_markers_in_repaired_content_rejected(self, tmp_path: Path, monkeypatch) -> None:
+        """LLM returns corrected content containing conflict markers — rejected."""
+        _init_repo(tmp_path)
+        _setup_spec_files(tmp_path)
+
+        repairer = GuardrailRepairer(tmp_path)
+
+        def mock_call_llm(self, prompt: str) -> str:
+            return json.dumps({
+                "files": [
+                    {
+                        "path": "se3/specs/base/spec.md",
+                        "corrected_content": (
+                            "## Requirement: Auth\n\n"
+                            "The system SHALL validate all user inputs.\n"
+                            "<<<<<<< HEAD\n"
+                            "old line\n"
+                            "=======\n"
+                            "new line\n"
+                            ">>>>>>> branch\n"
+                        ),
+                    },
+                ],
+            })
+
+        monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
+
+        violations = _make_violations()
+        original_specs = _make_original_specs()
+        merged_specs = _make_merged_specs()
+
+        result = repairer.repair_violations(
+            branch="feature",
+            pre_sha="abc",
+            post_sha="def",
+            violations=violations,
+            original_spec_contents=original_specs,
+            merged_spec_contents=merged_specs,
+        )
+
+        assert result.success is False
+        assert "conflict markers" in result.error.lower()
+
+        # Original file should be unchanged (no write occurred)
+        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        assert "SHOULD" in spec_path.read_text()
+        assert "<<<<<<<" not in spec_path.read_text()
 
     def test_is_spec_path_method(self, tmp_path: Path) -> None:
         """GuardrailRepairer._is_spec_path accepts only se3/specs/**/spec.md."""
@@ -560,3 +882,89 @@ class TestGuardrailRepairerFailures:
         assert repairer._is_spec_path("se3/specs/base/other.txt") is False
         assert repairer._is_spec_path("src/main.py") is False
         assert repairer._is_spec_path("se3\\specs\\base\\spec.md") is True
+
+    def test_empty_allowed_paths_rejects_repair(self, tmp_path: Path, monkeypatch) -> None:
+        """Empty allowed_paths (no spec contents provided) rejects repair."""
+        _init_repo(tmp_path)
+        _setup_spec_files(tmp_path)
+
+        repairer = GuardrailRepairer(tmp_path)
+
+        def mock_call_llm(self, prompt: str) -> str:
+            return json.dumps({
+                "files": [
+                    {
+                        "path": "se3/specs/base/spec.md",
+                        "corrected_content": "SHALL do X\n",
+                    },
+                ],
+            })
+
+        monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
+
+        violations = _make_violations()
+
+        # Pass empty dicts for both spec contents — this simulates a race
+        # condition where _get_changed_spec_files returned nothing.
+        result = repairer.repair_violations(
+            branch="feature",
+            pre_sha="abc",
+            post_sha="def",
+            violations=violations,
+            original_spec_contents={},
+            merged_spec_contents={},
+        )
+
+        assert result.success is False
+        assert "not in the changed spec set" in result.error.lower() or "unexpected" in result.error.lower()
+
+    def test_extract_json_two_phase_exception(self, tmp_path: Path, monkeypatch) -> None:
+        """extract_json_two_phase raises → caught, returns specific parse error."""
+        _init_repo(tmp_path)
+        _setup_spec_files(tmp_path)
+
+        repairer = GuardrailRepairer(tmp_path)
+
+        def mock_extract_json(raw, project_root=None, schema_hint=None, required_keys=None):
+            raise ValueError("simulated two-phase extraction crash")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair.extract_json_two_phase",
+            mock_extract_json,
+        )
+
+        violations = _make_violations()
+        original_specs = _make_original_specs()
+        merged_specs = _make_merged_specs()
+
+        result = repairer.repair_violations(
+            branch="feature",
+            pre_sha="abc",
+            post_sha="def",
+            violations=violations,
+            original_spec_contents=original_specs,
+            merged_spec_contents=merged_specs,
+        )
+
+        assert result.success is False
+        assert "parsing failed" in result.error.lower() or "LLM call failed" in result.error
+        assert "simulated two-phase extraction crash" in result.error
+
+
+class TestParseResponseDictPath:
+    """_parse_response handles dict input from _call_llm (two-phase extractor)."""
+
+    def test_dict_with_files_key(self, tmp_path: Path) -> None:
+        """Dict with 'files' key is returned as-is."""
+        repairer = GuardrailRepairer(tmp_path)
+        payload = {"files": [{"path": "se3/specs/base/spec.md", "corrected_content": "x"}]}
+        result = repairer._parse_response(payload)
+        assert result is not None
+        assert "files" in result
+        assert result["files"][0]["path"] == "se3/specs/base/spec.md"
+
+    def test_dict_without_files_key(self, tmp_path: Path) -> None:
+        """Dict missing 'files' key returns None."""
+        repairer = GuardrailRepairer(tmp_path)
+        result = repairer._parse_response({"other": "value"})
+        assert result is None

@@ -237,7 +237,8 @@ def run_merge(
         render_text("\n".join(lines), title="Merge Rollback Failed -- Repository May Be Corrupted")
         return 1
     elif report.pending_human:
-        lines = ["Merge paused for human review.", ""]
+        title, first_line = _failure_title_and_summary(report.failure_reason)
+        lines = [first_line, ""]
         if report.merged_branches:
             lines.append(
                 f"Branches already merged ({len(report.merged_branches)}):"
@@ -249,19 +250,19 @@ def run_merge(
             lines.append(f"Call file: {report.human_call_file}")
         if report.log_file:
             lines.append(f"Log file: {report.log_file}")
-        render_text("\n".join(lines), title="Merge Paused")
+        render_text("\n".join(lines), title=title)
         return 130  # Interrupted by user / pending human
     else:
         title, first_line = _failure_title_and_summary(report.failure_reason)
         lines = [first_line, ""]
         if report.failed_branch:
             lines.append(f"Failed branch: {report.failed_branch}")
-        if report.failure_reason and report.failure_reason not in (
-            "merge_conflict",
-            "guardrail_violation",
-            "guardrail_repair_failed",
-            "fast_abort",
-            "llm_resolution_failed",
+        # Only show the raw failure_reason when _failure_title_and_summary
+        # fell back to the generic message (i.e. the reason has no dedicated
+        # entry).  This removes the need to maintain a manual exclusion list.
+        if (
+            report.failure_reason
+            and first_line == f"Merge failed: {report.failure_reason}."
         ):
             lines.append(f"Reason: {report.failure_reason}")
         if report.merged_branches:
@@ -280,7 +281,32 @@ def _failure_title_and_summary(
     Distinguishes git merge conflicts from post-merge guardrail violations
     and fast-mode aborts so the user knows which category of failure
     occurred.
+
+    Compound reasons such as ``"fast_abort: <stderr>"`` are matched by
+    prefix so that diagnostic detail is not lost.
     """
+    # Prefix matches first — compound reasons carry diagnostic detail
+    if failure_reason and failure_reason.startswith("fast_failure"):
+        detail = failure_reason[len("fast_failure"):].strip(": ")
+        msg = "Merge aborted: fast strategy merge failed"
+        if detail:
+            msg += f" — {detail}"
+        return ("Merge aborted", msg)
+
+    if failure_reason and failure_reason.startswith("fast_abort"):
+        detail = failure_reason[len("fast_abort"):].strip(": ")
+        msg = "Merge aborted: fast strategy could not resolve conflict"
+        if detail:
+            msg += f" — {detail}"
+        return ("Merge aborted", msg)
+
+    if failure_reason and failure_reason.startswith("merge_failed"):
+        detail = failure_reason[len("merge_failed"):].strip(": ")
+        msg = "Merge failed: git merge operation failed"
+        if detail:
+            msg += f" — {detail}"
+        return ("Merge failed", msg)
+
     if failure_reason == "merge_conflict":
         return (
             "Merge failed",
@@ -291,14 +317,111 @@ def _failure_title_and_summary(
             "Merge failed",
             "Merge failed: post-merge guardrails violation",
         )
+    if failure_reason == "guardrail_violation_no_rollback":
+        return (
+            "Merge failed",
+            "Merge failed: post-merge guardrails violation (could not roll back — merge commit may still be in HEAD)",
+        )
+    if failure_reason == "merge_abort_failed":
+        return (
+            "Merge aborted",
+            "Merge aborted: git merge --abort failed — working tree may still be mid-merge",
+        )
+    if failure_reason == "guardrail_violation_call_failed":
+        return (
+            "Merge failed",
+            "Merge failed: post-merge guardrails violation (call file could not be written)",
+        )
+    if failure_reason == "human_call_write_failed":
+        return (
+            "Merge failed",
+            "Merge failed: conflict resolution required human review, but the call file could not be written",
+        )
+    if failure_reason == "incomplete_resolution_call_failed":
+        return (
+            "Merge failed",
+            "Merge failed: LLM resolution was incomplete and the call file could not be written",
+        )
+    if failure_reason == "guardrail_check_failed":
+        return (
+            "Merge aborted",
+            "Merge aborted: guardrails check failed",
+        )
+    if failure_reason == "guardrail_check_failed_and_rollback_failed":
+        return (
+            "Merge aborted",
+            "Merge aborted: guardrails check crashed and rollback also failed — working tree may be in an inconsistent state",
+        )
     if failure_reason == "guardrail_repair_failed":
         return (
             "Merge aborted",
             "Merge aborted: fast strategy could not auto-repair guardrails violation",
         )
-    if failure_reason in ("fast_abort", "llm_resolution_failed"):
+    if failure_reason == "conflict_context_failed":
         return (
             "Merge aborted",
-            "Merge aborted: fast strategy could not resolve conflict",
+            "Merge aborted: fast strategy failed to build conflict context",
         )
+    if failure_reason == "llm_resolution_failed":
+        return (
+            "Merge aborted",
+            "Merge aborted: fast strategy LLM resolution failed",
+        )
+    if failure_reason == "incomplete_resolution":
+        return (
+            "Merge aborted",
+            "Merge aborted: fast strategy — LLM resolution was incomplete",
+        )
+    if failure_reason == "resolution_rejected":
+        return (
+            "Merge aborted",
+            "Merge aborted: fast strategy rejected the LLM resolution",
+        )
+    if failure_reason == "binary_file_conflict":
+        return (
+            "Merge aborted",
+            "Merge aborted: binary file conflict requires human review",
+        )
+    if failure_reason == "resolution_validation_failed":
+        return (
+            "Merge aborted",
+            "Merge aborted: resolved content failed validation",
+        )
+    if failure_reason == "resolution_write_failed":
+        return (
+            "Merge aborted",
+            "Merge aborted: failed to write or stage resolved files",
+        )
+    if failure_reason == "resolution_commit_failed":
+        return (
+            "Merge aborted",
+            "Merge aborted: merge commit failed after resolution",
+        )
+    if failure_reason == "resolution_commit_timeout":
+        return (
+            "Merge aborted",
+            "Merge aborted: conflict resolution succeeded but git commit timed out",
+        )
+    if failure_reason == "merge_timed_out":
+        return (
+            "Merge aborted",
+            "Merge aborted: git merge timed out",
+        )
+    if failure_reason == "rollback_failed":
+        return (
+            "Merge failed",
+            "Merge failed: git rollback failed after guardrail violation",
+        )
+    if failure_reason == "guardrail_missing_post_sha":
+        return (
+            "Merge aborted",
+            "Merge aborted: guardrails check could not verify merge — post-merge commit SHA was unavailable",
+        )
+    if failure_reason == "pending_human":
+        return (
+            "Merge paused for human review",
+            "Merge paused: conflict resolution requires your decision",
+        )
+    if failure_reason:
+        return ("Merge failed", f"Merge failed: {failure_reason}.")
     return ("Merge failed", "Merge failed.")

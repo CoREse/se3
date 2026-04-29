@@ -48,6 +48,21 @@ class GuardrailRollbackError(RuntimeError):
         self.call_file = call_file
 
 
+class GuardrailNoRollbackError(RuntimeError):
+    """Raised when guardrails detected violations but rollback was never attempted.
+
+    This happens when the pre-merge SHA is unavailable, so there is no
+    known state to roll back to.  The merge commit may still be on HEAD.
+    Distinct from ``GuardrailRollbackError``: here no rollback command was
+    issued at all, whereas ``GuardrailRollbackError`` means a rollback
+    command was issued and failed.
+    """
+
+    def __init__(self, message: str, call_file: Optional[Path] = None) -> None:
+        super().__init__(message)
+        self.call_file = call_file
+
+
 class GuardrailCallFileError(RuntimeError):
     """Raised when guardrails detected violations, rollback succeeded, but the
     human call file could not be written or printed.
@@ -72,9 +87,15 @@ class GuardrailRepairFailed(RuntimeError):
     without writing a human call file.
     """
 
-    def __init__(self, message: str, failure_reason: str = "guardrail_repair_failed") -> None:
+    def __init__(
+        self,
+        message: str,
+        failure_reason: str = "guardrail_repair_failed",
+        rollback_failed: bool = False,
+    ) -> None:
         super().__init__(message)
         self.failure_reason = failure_reason
+        self.rollback_failed = rollback_failed
 
 
 @dataclass
@@ -167,15 +188,19 @@ class MergeOrchestrator:
         self._log(f"Strategy: {self.strategy.value}")
 
         # Capture pre-merge state for SemVer aggregation
-        pre_merge_sha_result = _run_git(
-            self.project_root, "rev-parse", "HEAD",
-            check=False, timeout=15,
-        )
-        pre_merge_sha = (
-            pre_merge_sha_result.stdout.strip()
-            if pre_merge_sha_result.returncode == 0
-            else ""
-        )
+        try:
+            pre_merge_sha_result = _run_git(
+                self.project_root, "rev-parse", "HEAD",
+                check=False, timeout=15,
+            )
+            pre_merge_sha = (
+                pre_merge_sha_result.stdout.strip()
+                if pre_merge_sha_result.returncode == 0
+                else ""
+            )
+        except subprocess.TimeoutExpired:
+            self._log("git rev-parse HEAD timed out — cannot capture pre-merge SHA")
+            pre_merge_sha = ""
         pre_merge_version = (
             read_version_at_ref(self.project_root, pre_merge_sha)
             if pre_merge_sha
@@ -224,7 +249,8 @@ class MergeOrchestrator:
                     )
                 report.success = False
                 report.failed_branch = branch
-                report.failure_reason = "merge_conflict"
+                if not report.failure_reason:
+                    report.failure_reason = "merge_conflict"
                 report.version_aggregation_skipped = True
                 self._write_log()
                 report.log_file = self.log_file
@@ -278,6 +304,26 @@ class MergeOrchestrator:
                 self._write_log()
                 report.log_file = self.log_file
                 return report
+            elif result == "guardrail_violation_no_rollback":
+                self._log(
+                    f"Branch '{branch}' guardrail violation detected. "
+                    f"Rollback was not attempted because pre_merge_sha was missing. "
+                    f"The merge commit may still be in HEAD. See the human call file."
+                )
+                if report.merged_branches:
+                    self._log(
+                        f"Version not bumped despite {len(report.merged_branches)} "
+                        f"successful merge(s) — re-run after resolving"
+                    )
+                report.success = False
+                report.pending_human = True
+                report.failed_branch = branch
+                report.failure_reason = "guardrail_violation_no_rollback"
+                report.rollback_failed = False
+                report.version_aggregation_skipped = True
+                self._write_log()
+                report.log_file = self.log_file
+                return report
             elif result == "rollback_failed":
                 self._log(
                     f"Branch '{branch}' guardrail violation detected but ROLLBACK FAILED. "
@@ -296,6 +342,24 @@ class MergeOrchestrator:
                 self._write_log()
                 report.log_file = self.log_file
                 return report
+            elif result == "merge_abort_failed":
+                self._log(
+                    f"Branch '{branch}' aborted but git merge --abort FAILED. "
+                    f"Working tree may still be mid-merge. Manual intervention required."
+                )
+                if report.merged_branches:
+                    self._log(
+                        f"Version not bumped despite {len(report.merged_branches)} "
+                        f"successful merge(s) — re-run after resolving"
+                    )
+                report.success = False
+                report.failed_branch = branch
+                if not report.failure_reason:
+                    report.failure_reason = "merge_abort_failed"
+                report.version_aggregation_skipped = True
+                self._write_log()
+                report.log_file = self.log_file
+                return report
             elif result == "non_conflict_failure":
                 self._log(f"Branch '{branch}' merge failed (non-conflict) — aborting")
                 if report.merged_branches:
@@ -305,7 +369,8 @@ class MergeOrchestrator:
                     )
                 report.success = False
                 report.failed_branch = branch
-                report.failure_reason = "merge_failed"
+                if not report.failure_reason:
+                    report.failure_reason = "merge_failed"
                 report.version_aggregation_skipped = True
                 self._write_log()
                 report.log_file = self.log_file
@@ -322,7 +387,8 @@ class MergeOrchestrator:
                     )
                 report.success = False
                 report.failed_branch = branch
-                report.failure_reason = "resolution_commit_timeout"
+                if not report.failure_reason:
+                    report.failure_reason = "resolution_commit_timeout"
                 report.version_aggregation_skipped = True
                 self._write_log()
                 report.log_file = self.log_file
@@ -340,7 +406,8 @@ class MergeOrchestrator:
                     )
                 report.success = False
                 report.failed_branch = branch
-                report.failure_reason = "incomplete_resolution_call_failed"
+                if not report.failure_reason:
+                    report.failure_reason = "incomplete_resolution_call_failed"
                 report.version_aggregation_skipped = True
                 self._write_log()
                 report.log_file = self.log_file
@@ -358,7 +425,8 @@ class MergeOrchestrator:
                     )
                 report.success = False
                 report.failed_branch = branch
-                report.failure_reason = "human_call_write_failed"
+                if not report.failure_reason:
+                    report.failure_reason = "human_call_write_failed"
                 report.version_aggregation_skipped = True
                 self._write_log()
                 report.log_file = self.log_file
@@ -378,6 +446,90 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "fast_abort"
                 report.pending_human = False
+                report.version_aggregation_skipped = True
+                # If rollback_failed was set (e.g. by GuardrailRepairFailed),
+                # log a CRITICAL warning so the log file captures the severity
+                # even though merge_cmd.py will surface it in the CLI via
+                # its report.rollback_failed branch.
+                if report.rollback_failed:
+                    self._log(
+                        f"CRITICAL: Branch '{branch}' guardrail violation detected "
+                        f"but ROLLBACK FAILED. Working tree is in an inconsistent state. "
+                        f"Manual intervention required."
+                    )
+                self._write_log()
+                report.log_file = self.log_file
+                return report
+            elif result == "binary_file_conflict":
+                self._log(
+                    f"Branch '{branch}' aborted — binary file conflict requires human review"
+                )
+                if report.merged_branches:
+                    self._log(
+                        f"Version not bumped despite {len(report.merged_branches)} "
+                        f"successful merge(s) — re-run after resolving"
+                    )
+                report.success = False
+                report.failed_branch = branch
+                if not report.failure_reason:
+                    report.failure_reason = "binary_file_conflict"
+                # If a human call was written, treat as pending human review
+                if report.human_call_file:
+                    report.pending_human = True
+                report.version_aggregation_skipped = True
+                self._write_log()
+                report.log_file = self.log_file
+                return report
+            elif result == "resolution_validation_failed":
+                self._log(
+                    f"Branch '{branch}' aborted — resolved content failed validation"
+                )
+                if report.merged_branches:
+                    self._log(
+                        f"Version not bumped despite {len(report.merged_branches)} "
+                        f"successful merge(s) — re-run after resolving"
+                    )
+                report.success = False
+                report.failed_branch = branch
+                if not report.failure_reason:
+                    report.failure_reason = "resolution_validation_failed"
+                # If a human call was written, treat as pending human review
+                if report.human_call_file:
+                    report.pending_human = True
+                report.version_aggregation_skipped = True
+                self._write_log()
+                report.log_file = self.log_file
+                return report
+            elif result == "resolution_write_failed":
+                self._log(
+                    f"Branch '{branch}' aborted — failed to write or stage resolved files"
+                )
+                if report.merged_branches:
+                    self._log(
+                        f"Version not bumped despite {len(report.merged_branches)} "
+                        f"successful merge(s) — re-run after resolving"
+                    )
+                report.success = False
+                report.failed_branch = branch
+                if not report.failure_reason:
+                    report.failure_reason = "resolution_write_failed"
+                report.version_aggregation_skipped = True
+                self._write_log()
+                report.log_file = self.log_file
+                return report
+            elif result == "resolution_commit_failed":
+                self._log(
+                    f"Branch '{branch}' aborted — merge commit failed after resolution"
+                )
+                if report.merged_branches:
+                    self._log(
+                        f"Version not bumped despite {len(report.merged_branches)} "
+                        f"successful merge(s) — re-run after resolving"
+                    )
+                report.success = False
+                report.failed_branch = branch
+                if not report.failure_reason:
+                    report.failure_reason = "resolution_commit_failed"
                 report.version_aggregation_skipped = True
                 self._write_log()
                 report.log_file = self.log_file
@@ -484,11 +636,15 @@ class MergeOrchestrator:
             "guardrail_violation", "non_conflict_failure".
         """
         # Remember pre-merge HEAD for guardrails check and rollback
-        pre_merge_head = _run_git(
-            self.project_root, "rev-parse", "HEAD",
-            check=False, timeout=15,
-        )
-        pre_merge_sha = pre_merge_head.stdout.strip() if pre_merge_head.returncode == 0 else ""
+        try:
+            pre_merge_head = _run_git(
+                self.project_root, "rev-parse", "HEAD",
+                check=False, timeout=15,
+            )
+            pre_merge_sha = pre_merge_head.stdout.strip() if pre_merge_head.returncode == 0 else ""
+        except subprocess.TimeoutExpired:
+            self._log("git rev-parse HEAD timed out — cannot capture pre-merge SHA for rollback")
+            pre_merge_sha = ""
 
         # Run git merge
         try:
@@ -504,15 +660,45 @@ class MergeOrchestrator:
             )
         except subprocess.TimeoutExpired:
             self._log(f"git merge timed out for branch '{branch}'")
-            self._abort_merge()
+            abort_ok = self._abort_merge()
+            if self.strategy == MergeStrategy.FAST:
+                if not abort_ok:
+                    report.failure_reason = "merge_abort_failed"
+                else:
+                    report.failure_reason = "merge_timed_out"
+                return "fast_abort"
+            if not abort_ok:
+                report.failure_reason = "merge_abort_failed"
+            else:
+                report.failure_reason = "merge_timed_out"
             return "non_conflict_failure"
 
         if result.returncode == 0:
             # Clean merge — run guardrails on spec files
-            post_merge_sha = _run_git(
-                self.project_root, "rev-parse", "HEAD",
-                check=False, timeout=15,
-            ).stdout.strip()
+            rev_parse_result = None
+            try:
+                rev_parse_result = _run_git(
+                    self.project_root, "rev-parse", "HEAD",
+                    check=False, timeout=15,
+                )
+                post_merge_sha = rev_parse_result.stdout.strip()
+            except subprocess.TimeoutExpired:
+                self._log(
+                    f"git rev-parse HEAD timed out after clean merge of '{branch}'. "
+                    "Cannot verify merge commit SHA; treating as failure."
+                )
+                post_merge_sha = ""
+            if not post_merge_sha:
+                rc_str = (
+                    f"rc={rev_parse_result.returncode}"
+                    if rev_parse_result is not None
+                    else "timeout"
+                )
+                self._log(
+                    f"WARNING: git rev-parse HEAD failed ({rc_str}) "
+                    f"after clean merge of '{branch}'. This indicates possible git state "
+                    f"corruption; guardrails will fail closed."
+                )
 
             # Detect no-op (already-up-to-date) merge: HEAD did not change
             if post_merge_sha and post_merge_sha == pre_merge_sha:
@@ -527,10 +713,15 @@ class MergeOrchestrator:
                     pre_merge_sha, post_merge_sha, branch, strategy=self.strategy,
                 )
             except GuardrailRepairFailed as exc:
-                self._log(
-                    f"Guardrail repair failed for '{branch}' in fast mode: {exc}"
-                )
-                report.rollback_failed = False
+                if exc.failure_reason == "guardrail_check_failed":
+                    self._log(
+                        f"Guardrails check itself crashed for '{branch}' in fast mode: {exc}"
+                    )
+                else:
+                    self._log(
+                        f"Guardrail repair failed for '{branch}' in fast mode: {exc}"
+                    )
+                report.rollback_failed = getattr(exc, "rollback_failed", False)
                 report.failure_reason = exc.failure_reason
                 return "fast_abort"
             except GuardrailCallFileError as exc:
@@ -543,6 +734,16 @@ class MergeOrchestrator:
                 if exc.call_file is not None:
                     report.human_call_file = exc.call_file
                 return "guardrail_violation_call_failed"
+            except GuardrailNoRollbackError as exc:
+                self._log(
+                    f"Guardrails check for '{branch}' failed: {exc}. "
+                    f"Rollback was not attempted because pre_merge_sha was missing. "
+                    f"The merge commit may still be in HEAD."
+                )
+                report.rollback_failed = False
+                if exc.call_file is not None:
+                    report.human_call_file = exc.call_file
+                return "guardrail_violation_no_rollback"
             except (RuntimeError, subprocess.TimeoutExpired) as exc:
                 self._log(f"Rollback failed after guardrail violation: {exc}")
                 report.rollback_failed = True
@@ -552,6 +753,19 @@ class MergeOrchestrator:
             if guardrails_result is not None:
                 report.human_call_file = guardrails_result
                 return "guardrail_violation"
+            # If fast-mode guardrail repair amended the commit, HEAD changed.
+            # Refresh post_merge_sha so any downstream logging stays accurate.
+            try:
+                post_merge_sha = _run_git(
+                    self.project_root, "rev-parse", "HEAD",
+                    check=False, timeout=15,
+                ).stdout.strip()
+            except subprocess.TimeoutExpired:
+                self._log(
+                    f"git rev-parse HEAD timed out after guardrails check for '{branch}'. "
+                    "Downstream SHA may be stale."
+                )
+                # Keep the old post_merge_sha (or empty if already unset)
             return "merged"
 
         # Merge failed — determine if it's a conflict or something else
@@ -569,8 +783,31 @@ class MergeOrchestrator:
         if is_conflict:
             return self._handle_conflict(branch, pre_merge_sha, report)
 
-        # Non-conflict failure — abort and report
-        self._abort_merge()
+        # Non-conflict failure — log stderr, abort and report
+        stderr_msg = result.stderr.strip()
+        if stderr_msg:
+            self._log(f"git merge stderr: {stderr_msg}")
+        if self.strategy == MergeStrategy.FAST:
+            if not self._abort_merge():
+                self._log(
+                    "WARNING: git merge --abort failed — working tree may still be mid-merge"
+                )
+                report.failure_reason = "merge_abort_failed"
+            else:
+                # Use 'fast_failure:' (not 'fast_abort:') for non-conflict
+                # git failures so the CLI can distinguish them from conflict-
+                # resolution aborts and produce an accurate message.
+                report.failure_reason = (
+                    f"fast_failure: {stderr_msg}" if stderr_msg else "fast_failure"
+                )
+            return "fast_abort"
+        if not self._abort_merge():
+            self._log(
+                "WARNING: git merge --abort failed — working tree may still be mid-merge"
+            )
+            report.failure_reason = "merge_abort_failed"
+        else:
+            report.failure_reason = f"merge_failed: {stderr_msg}" if stderr_msg else "merge_failed"
         return "non_conflict_failure"
 
     def _handle_conflict(
@@ -591,7 +828,15 @@ class MergeOrchestrator:
             context = build_conflict_context(self.project_root, ours_branch, branch)
         except Exception as exc:
             self._log(f"Failed to build conflict context: {exc}")
-            self._abort_merge()
+            abort_ok = self._abort_merge()
+            if self.strategy == MergeStrategy.FAST:
+                if not abort_ok:
+                    report.failure_reason = "merge_abort_failed"
+                else:
+                    report.failure_reason = "conflict_context_failed"
+                return "fast_abort"
+            if not abort_ok:
+                report.failure_reason = "merge_abort_failed"
             return "conflict"
 
         # --- STRICT: short-circuit to human call, skip LLM ---
@@ -604,10 +849,23 @@ class MergeOrchestrator:
             from .conflict_resolver import Confidence, FileResolution, HunkResolution, LLMResolution
             placeholder_files: list[FileResolution] = []
             for cf in context.files:
+                # In strict mode the LLM is skipped, so the "resolved_content"
+                # is a placeholder that prevents a downstream merge-respond
+                # consumer from accidentally writing conflict markers back.
+                if cf.is_binary:
+                    strict_resolved = (
+                        "[__SE3_STRICT_PLACEHOLDER__: binary file — LLM resolution was skipped. "
+                        "Please resolve conflicts manually. DO NOT accept this as final content.]"
+                    )
+                else:
+                    strict_resolved = (
+                        "[__SE3_STRICT_PLACEHOLDER__: LLM resolution was skipped. "
+                        "Please resolve conflicts manually. DO NOT accept this as final content.]"
+                    )
                 placeholder_files.append(
                     FileResolution(
                         path=cf.path,
-                        resolved_content=cf.working_content if not cf.is_binary else "[binary]",
+                        resolved_content=strict_resolved,
                         hunks=[
                             HunkResolution(
                                 start_line=h.start_line,
@@ -640,7 +898,11 @@ class MergeOrchestrator:
                     f"CRITICAL: Failed to write human call file for strict mode: {exc}. "
                     f"The merge is being aborted because the user has no call file to respond to."
                 )
-                self._abort_merge()
+                if not self._abort_merge():
+                    self._log(
+                        "WARNING: git merge --abort failed — working tree may still be mid-merge"
+                    )
+                    report.failure_reason = "merge_abort_failed"
                 return "human_call_write_failed"
             report.human_call_file = call_file
             try:
@@ -659,8 +921,48 @@ class MergeOrchestrator:
             resolution = self._resolver.resolve(context, strategy=self.strategy)
         except Exception as exc:
             self._log(f"LLM resolution failed: {exc}")
-            self._abort_merge()
-            return "conflict"
+            if self.strategy == MergeStrategy.FAST:
+                if not self._abort_merge():
+                    report.failure_reason = "merge_abort_failed"
+                else:
+                    report.failure_reason = "llm_resolution_failed"
+                return "fast_abort"
+            # DEFAULT strategy: escalate to human call (do NOT abort yet)
+            llm_fail_decision = StrategyDecision(
+                action=DecisionAction.HUMAN_CALL,
+                reason=f"LLM resolution system failure: {exc}",
+            )
+            from .conflict_resolver import Confidence, LLMResolution
+            placeholder_resolution = LLMResolution(
+                files=[],
+                overall_confidence=Confidence.LOW,
+                flags={},
+            )
+            try:
+                call_file = self._human_writer.write_call(
+                    context, placeholder_resolution, llm_fail_decision,
+                )
+            except Exception as write_exc:
+                self._log(
+                    f"CRITICAL: Failed to write human call file for LLM failure: "
+                    f"{write_exc}. The merge is being aborted because the user has "
+                    f"no call file to respond to."
+                )
+                if not self._abort_merge():
+                    self._log(
+                        "WARNING: git merge --abort failed — working tree may still be mid-merge"
+                    )
+                return "human_call_write_failed"
+            report.human_call_file = call_file
+            try:
+                self._human_writer.print_instructions(call_file)
+            except Exception as print_exc:
+                self._log(
+                    f"WARNING: Failed to print instructions (call file was written "
+                    f"successfully): {print_exc}"
+                )
+            # Leave working tree with conflict markers for human — do NOT abort
+            return "pending_human"
 
         # Strategy decision
         decision = self._decider.decide(
@@ -670,15 +972,6 @@ class MergeOrchestrator:
         )
 
         self._log(f"Strategy decision: {decision.action.value} — {decision.reason}")
-
-        # --- FAST: HUMAN_CALL → abort (no human call file) ---
-        if decision.action == DecisionAction.HUMAN_CALL and self.strategy == MergeStrategy.FAST:
-            self._log(
-                f"Fast strategy: decision is HUMAN_CALL — aborting merge "
-                f"without human call file"
-            )
-            self._abort_merge()
-            return "fast_abort"
 
         if decision.action == DecisionAction.ACCEPT:
             # Pre-check: ensure resolution covers exactly the conflict files
@@ -708,7 +1001,10 @@ class MergeOrchestrator:
                     self._log(
                         f"Fast strategy: incomplete resolution — aborting merge"
                     )
-                    self._abort_merge()
+                    if not self._abort_merge():
+                        report.failure_reason = "merge_abort_failed"
+                    else:
+                        report.failure_reason = "incomplete_resolution"
                     return "fast_abort"
                 incomplete_decision = StrategyDecision(
                     action=DecisionAction.HUMAN_CALL,
@@ -745,7 +1041,11 @@ class MergeOrchestrator:
                         f"resolution: {exc}. The merge is being aborted because the user "
                         f"has no call file to respond to."
                     )
-                    self._abort_merge()
+                    if not self._abort_merge():
+                        self._log(
+                            "WARNING: git merge --abort failed — working tree may still be mid-merge"
+                        )
+                        report.failure_reason = "merge_abort_failed"
                     return "incomplete_resolution_call_failed"
                 report.human_call_file = call_file
                 try:
@@ -766,7 +1066,11 @@ class MergeOrchestrator:
                     f"CRITICAL: Failed to write human call file: {exc}. The merge is "
                     f"being aborted because the user has no call file to respond to."
                 )
-                self._abort_merge()
+                if not self._abort_merge():
+                    self._log(
+                        "WARNING: git merge --abort failed — working tree may still be mid-merge"
+                    )
+                    report.failure_reason = "merge_abort_failed"
                 return "human_call_write_failed"
             report.human_call_file = call_file
             try:
@@ -780,8 +1084,12 @@ class MergeOrchestrator:
             return "pending_human"
 
         # REJECT
-        self._abort_merge()
+        abort_ok = self._abort_merge()
         if self.strategy == MergeStrategy.FAST:
+            if not abort_ok:
+                report.failure_reason = "merge_abort_failed"
+            else:
+                report.failure_reason = "resolution_rejected"
             return "fast_abort"
         return "conflict"
 
@@ -797,10 +1105,14 @@ class MergeOrchestrator:
 
         Returns:
             "merged" on success, "guardrail_violation" if guardrails fail
-            (after rollback), "conflict" on validation or write/stage failure
-            (after abort), "rollback_failed" if guardrails detected violations
-            but rollback could not be completed, "resolution_commit_timeout"
-            if the post-resolution ``git commit`` timed out (after abort).
+            (after rollback), "resolution_validation_failed" if resolved
+            content fails validation (after abort), "resolution_write_failed"
+            if writing or staging resolved files fails (after abort),
+            "resolution_commit_failed" if the merge commit fails after
+            resolution (after abort), "rollback_failed" if guardrails detected
+            violations but rollback could not be completed,
+            "resolution_commit_timeout" if the post-resolution ``git commit``
+            timed out (after abort).
         """
         # Build the set of valid paths and path→ConflictFile mapping
         valid_paths = {cf.path for cf in context.files}
@@ -846,6 +1158,9 @@ class MergeOrchestrator:
                     f"Binary file conflict requires human review: {file_res.path}"
                 )
                 add_failures = True
+                # Distinguish binary rejection from generic validation failure
+                # so the CLI can surface a targeted message.
+                self._binary_file_rejected = True  # type: ignore[attr-defined]
                 continue
 
             # (e) Empty resolved content: verify working-tree file is safe to delete
@@ -914,11 +1229,45 @@ class MergeOrchestrator:
                 continue
 
         if add_failures:
+            # For non-fast strategies, write human call before aborting
+            if self.strategy != MergeStrategy.FAST:
+                from .strategy import DecisionAction, StrategyDecision
+                if getattr(self, "_binary_file_rejected", False):
+                    validation_reason = "Binary file conflict requires human review"
+                else:
+                    validation_reason = "Resolved content failed validation"
+                validation_decision = StrategyDecision(
+                    action=DecisionAction.HUMAN_CALL,
+                    reason=validation_reason,
+                )
+                try:
+                    call_file = self._human_writer.write_call(
+                        context, resolution, validation_decision,
+                    )
+                    report.human_call_file = call_file
+                except Exception as exc:
+                    self._log(
+                        f"CRITICAL: Failed to write human call file for validation "
+                        f"failure: {exc}. The merge is being aborted without a call file."
+                    )
             self._log("Aborting merge due to validation failures")
-            self._abort_merge()
+            abort_ok = self._abort_merge()
+            if not abort_ok:
+                report.failure_reason = "merge_abort_failed"
+                if self.strategy == MergeStrategy.FAST:
+                    return "fast_abort"
+                return "merge_abort_failed"
+            # Use a dedicated reason when a binary file was in the conflict set
+            # so the CLI can surface a targeted message.
+            if getattr(self, "_binary_file_rejected", False):
+                report.failure_reason = "binary_file_conflict"
+                delattr(self, "_binary_file_rejected")
+            else:
+                report.failure_reason = "resolution_validation_failed"
             if self.strategy == MergeStrategy.FAST:
                 return "fast_abort"
-            return "conflict"
+            # For non-fast, use the same reason we stored in report
+            return report.failure_reason or "resolution_validation_failed"
 
         # --- Second pass: write and stage (all paths pre-validated) ---
         try:
@@ -967,17 +1316,29 @@ class MergeOrchestrator:
             # Abort if any file failed during second pass
             if add_failures:
                 self._log("Aborting merge due to write/stage failures")
-                self._abort_merge()
+                abort_ok = self._abort_merge()
+                if not abort_ok:
+                    report.failure_reason = "merge_abort_failed"
+                    if self.strategy == MergeStrategy.FAST:
+                        return "fast_abort"
+                    return "merge_abort_failed"
+                report.failure_reason = "resolution_write_failed"
                 if self.strategy == MergeStrategy.FAST:
                     return "fast_abort"
-                return "conflict"
+                return "resolution_write_failed"
 
         except Exception as exc:
             self._log(f"Exception during resolution application: {exc}")
-            self._abort_merge()
+            abort_ok = self._abort_merge()
+            if not abort_ok:
+                report.failure_reason = "merge_abort_failed"
+                if self.strategy == MergeStrategy.FAST:
+                    return "fast_abort"
+                return "merge_abort_failed"
+            report.failure_reason = "resolution_write_failed"
             if self.strategy == MergeStrategy.FAST:
                 return "fast_abort"
-            return "conflict"
+            return "resolution_write_failed"
 
         # Commit the merge
         try:
@@ -988,31 +1349,56 @@ class MergeOrchestrator:
             )
         except subprocess.TimeoutExpired:
             self._log(f"git commit timed out for branch '{branch}'")
-            self._abort_merge()
+            abort_ok = self._abort_merge()
+            if not abort_ok:
+                report.failure_reason = "merge_abort_failed"
+                if self.strategy == MergeStrategy.FAST:
+                    return "fast_abort"
+                return "merge_abort_failed"
+            report.failure_reason = "resolution_commit_timeout"
             if self.strategy == MergeStrategy.FAST:
                 return "fast_abort"
             return "resolution_commit_timeout"
         if commit_result.returncode != 0:
             self._log(f"Merge commit failed: {commit_result.stderr.strip()}")
-            self._abort_merge()
+            abort_ok = self._abort_merge()
+            if not abort_ok:
+                report.failure_reason = "merge_abort_failed"
+                if self.strategy == MergeStrategy.FAST:
+                    return "fast_abort"
+                return "merge_abort_failed"
+            report.failure_reason = "resolution_commit_failed"
             if self.strategy == MergeStrategy.FAST:
                 return "fast_abort"
-            return "conflict"
+            return "resolution_commit_failed"
 
         # Run guardrails
-        post_merge_sha = _run_git(
-            self.project_root, "rev-parse", "HEAD",
-            check=False, timeout=15,
-        ).stdout.strip()
+        try:
+            post_merge_sha = _run_git(
+                self.project_root, "rev-parse", "HEAD",
+                check=False, timeout=15,
+            ).stdout.strip()
+        except subprocess.TimeoutExpired:
+            self._log(
+                "git rev-parse HEAD timed out after merge commit for '%s'. "
+                "Cannot verify post-merge SHA; guardrails will fail closed.",
+                branch,
+            )
+            post_merge_sha = ""
         try:
             guardrails_result = self._run_guardrails(
                 pre_merge_sha, post_merge_sha, branch, strategy=self.strategy,
             )
         except GuardrailRepairFailed as exc:
-            self._log(
-                f"Guardrail repair failed for '{branch}' in fast mode: {exc}"
-            )
-            report.rollback_failed = False
+            if exc.failure_reason == "guardrail_check_failed":
+                self._log(
+                    f"Guardrails check itself crashed for '{branch}' in fast mode: {exc}"
+                )
+            else:
+                self._log(
+                    f"Guardrail repair failed for '{branch}' in fast mode: {exc}"
+                )
+            report.rollback_failed = getattr(exc, "rollback_failed", False)
             report.failure_reason = exc.failure_reason
             return "fast_abort"
         except GuardrailCallFileError as exc:
@@ -1025,6 +1411,16 @@ class MergeOrchestrator:
             if exc.call_file is not None:
                 report.human_call_file = exc.call_file
             return "guardrail_violation_call_failed"
+        except GuardrailNoRollbackError as exc:
+            self._log(
+                f"Guardrails check for '{branch}' failed: {exc}. "
+                f"Rollback was not attempted because pre_merge_sha was missing. "
+                f"The merge commit may still be in HEAD."
+            )
+            report.rollback_failed = False
+            if exc.call_file is not None:
+                report.human_call_file = exc.call_file
+            return "guardrail_violation_no_rollback"
         except (RuntimeError, subprocess.TimeoutExpired) as exc:
             self._log(f"Rollback failed after guardrail violation: {exc}")
             report.rollback_failed = True
@@ -1035,7 +1431,26 @@ class MergeOrchestrator:
             report.human_call_file = guardrails_result
             return "guardrail_violation"
 
-        self._log(f"LLM-resolved merge of '{branch}' committed successfully")
+        # Refresh SHA in case guardrail repair amended the commit
+        sha_fresh = True
+        try:
+            post_merge_sha = _run_git(
+                self.project_root, "rev-parse", "HEAD",
+                check=False, timeout=15,
+            ).stdout.strip()
+        except subprocess.TimeoutExpired:
+            self._log(
+                f"git rev-parse HEAD timed out after guardrails for '{branch}'. "
+                "SHA may be stale."
+            )
+            sha_fresh = False
+            # Clear the stale value so the log does not show a misleading SHA
+            post_merge_sha = "<unavailable — refresh timed out>"
+        sha_note = "" if sha_fresh else " (SHA may be stale)"
+        self._log(
+            f"LLM-resolved merge of '{branch}' committed successfully "
+            f"(SHA: {post_merge_sha}){sha_note}"
+        )
         return "merged"
 
     def _run_guardrails(
@@ -1081,13 +1496,22 @@ class MergeOrchestrator:
                 branch, pre_sha, post_sha,
             )
             if pre_sha:
-                self._rollback_to(pre_sha)
+                try:
+                    self._rollback_to(pre_sha)
+                except (RuntimeError, subprocess.TimeoutExpired) as rbe:
+                    call_message = (
+                        f"Guardrails check skipped: missing SHA "
+                        f"(pre_sha={pre_sha!r}, post_sha={post_sha!r}). "
+                        f"Rollback also failed: {rbe}."
+                    )
+                    self._log(call_message)
+                    raise RuntimeError(call_message) from rbe
             if strategy == MergeStrategy.FAST:
                 raise GuardrailRepairFailed(
-                    f"Guardrails check skipped for '{branch}': missing SHA "
+                    f"Guardrails check skipped for '{branch}': missing post_sha "
                     f"(pre_sha={pre_sha!r}, post_sha={post_sha!r}). "
                     f"Fast mode aborts without human call.",
-                    failure_reason="guardrail_repair_failed",
+                    failure_reason="guardrail_missing_post_sha",
                 )
             call_message = (
                 f"Guardrails check skipped: missing SHA "
@@ -1104,7 +1528,7 @@ class MergeOrchestrator:
                     violations=[
                         {
                             "file_path": "N/A",
-                            "violation_type": "CHECK_FAILURE",
+                            "violation_type": "MISSING_SHA",
                             "message": call_message,
                         }
                     ],
@@ -1126,7 +1550,7 @@ class MergeOrchestrator:
                     f"successfully): {exc}"
                 )
             if not pre_sha:
-                raise GuardrailRollbackError(
+                raise GuardrailNoRollbackError(
                     f"Guardrails check for '{branch}' could not roll back because "
                     f"pre_merge_sha was missing. The merge commit may still be in HEAD.",
                     call_file=call_file,
@@ -1160,11 +1584,21 @@ class MergeOrchestrator:
                 merged_specs: dict[str, str] = {}
                 for sp in spec_files:
                     orig = _read_file_from_ref(self.project_root, sp, pre_sha)
-                    if orig is not None:
-                        original_specs[sp] = orig
                     merged = _read_file_from_ref(self.project_root, sp, post_sha)
-                    if merged is not None:
-                        merged_specs[sp] = merged
+                    if orig is None:
+                        self._log(
+                            f"WARNING: Could not read original content of {sp} "
+                            f"from ref {pre_sha} — including placeholder in repair prompt"
+                        )
+                        orig = f"[Content unavailable at ref {pre_sha}]"
+                    if merged is None:
+                        self._log(
+                            f"WARNING: Could not read merged content of {sp} "
+                            f"from ref {post_sha} — including placeholder in repair prompt"
+                        )
+                        merged = f"[Content unavailable at ref {post_sha}]"
+                    original_specs[sp] = orig
+                    merged_specs[sp] = merged
 
                 repair_result = self._repairer.repair_violations(
                     branch=branch,
@@ -1186,25 +1620,62 @@ class MergeOrchestrator:
                 self._log(
                     f"Guardrail repair failed for '{branch}': {repair_result.error}"
                 )
-                self._rollback_to(pre_sha)
+                try:
+                    self._rollback_to(pre_sha)
+                except (RuntimeError, subprocess.TimeoutExpired) as rbe:
+                    raise GuardrailRepairFailed(
+                        f"Guardrail repair failed for '{branch}': {repair_result.error}. "
+                        f"Rollback also failed: {rbe}",
+                        failure_reason="guardrail_repair_failed",
+                        rollback_failed=True,
+                    ) from rbe
                 raise GuardrailRepairFailed(
                     f"Guardrail repair failed for '{branch}': {repair_result.error}",
                     failure_reason="guardrail_repair_failed",
                 )
 
             # --- default / strict strategy: rollback + human call ---
-            self._rollback_to(pre_sha)
-
-            call_file: Optional[Path] = None
             try:
-                violation_dicts = [
-                    {
-                        "file_path": v.file_path,
-                        "violation_type": v.violation_type,
-                        "message": v.message,
-                    }
-                    for v in gr_report.violations
-                ]
+                self._rollback_to(pre_sha)
+            except (RuntimeError, subprocess.TimeoutExpired) as rbe:
+                self._log(
+                    f"Rollback failed after guardrail violation for "
+                    f"'{branch}': {rbe}"
+                )
+                # Preserve actual violation details in the human call file
+                # even when rollback fails, so the operator knows what was
+                # weakened before the tree got into an inconsistent state.
+                violation_dicts = self._violations_to_dicts(gr_report.violations)
+                call_file: Optional[Path] = None
+                try:
+                    call_file = self._human_writer.write_guardrail_call(
+                        branch=branch,
+                        violations=violation_dicts,
+                        pre_merge_sha=pre_sha,
+                    )
+                except Exception as write_exc:
+                    self._log(
+                        f"Failed to write guardrail human call file: {write_exc}"
+                    )
+                    raise GuardrailRollbackError(
+                        f"Guardrails detected {len(gr_report.violations)} "
+                        f"violation(s) for '{branch}' but rollback failed: {rbe}. "
+                        f"Additionally, the human call file could not be written. "
+                        f"Working tree may be in an inconsistent state. "
+                        f"Manual intervention required.",
+                        call_file=None,
+                    ) from write_exc
+                raise GuardrailRollbackError(
+                    f"Guardrails detected {len(gr_report.violations)} "
+                    f"violation(s) for '{branch}' but rollback failed: {rbe}. "
+                    f"Working tree may be in an inconsistent state. "
+                    f"Manual intervention required.",
+                    call_file=call_file,
+                ) from rbe
+
+            call_file = None
+            try:
+                violation_dicts = self._violations_to_dicts(gr_report.violations)
                 call_file = self._human_writer.write_guardrail_call(
                     branch=branch,
                     violations=violation_dicts,
@@ -1230,12 +1701,40 @@ class MergeOrchestrator:
             raise  # re-raise fast-mode repair failures without wrapping
         except Exception as exc:
             self._log(f"Guardrails check failed for '{branch}': {exc}")
-            self._rollback_to(pre_sha)
             if strategy == MergeStrategy.FAST:
+                # In fast mode the guardrail check crash is the primary failure;
+                # attempt rollback and surface rollback failure in the reason so
+                # the CLI can distinguish a simple check crash from a corrupted
+                # working tree.
+                rollback_ok = True
+                try:
+                    self._rollback_to(pre_sha)
+                except (RuntimeError, subprocess.TimeoutExpired) as rbe:
+                    self._log(
+                        f"Rollback also failed after guardrails check crash: {rbe}"
+                    )
+                    rollback_ok = False
+                failure_reason = (
+                    "guardrail_check_failed_and_rollback_failed"
+                    if not rollback_ok else "guardrail_check_failed"
+                )
                 raise GuardrailRepairFailed(
-                    f"Guardrails check failed for '{branch}': {exc}. "
-                    f"Fast mode aborts without human call.",
-                    failure_reason="guardrail_repair_failed",
+                    f"Guardrails check itself crashed for '{branch}': {exc}. "
+                    f"No repair was attempted. Fast mode aborts without human call.",
+                    failure_reason=failure_reason,
+                    rollback_failed=not rollback_ok,
+                ) from exc
+            try:
+                self._rollback_to(pre_sha)
+            except (RuntimeError, subprocess.TimeoutExpired) as rbe:
+                self._log(
+                    f"Rollback also failed after guardrails check crash: {rbe}"
+                )
+                raise GuardrailRollbackError(
+                    f"Guardrails check itself crashed for '{branch}': {exc}. "
+                    f"Rollback also failed: {rbe}. "
+                    f"Working tree may be in an inconsistent state. "
+                    f"Manual intervention required.",
                 ) from exc
             try:
                 call_file = self._human_writer.write_guardrail_call(
@@ -1266,37 +1765,71 @@ class MergeOrchestrator:
                 )
             return call_file
 
-    def _abort_merge(self) -> None:
-        """Abort the current merge to restore working tree."""
-        abort_result = _run_git(
-            self.project_root,
-            "merge",
-            "--abort",
-            check=False,
-            timeout=30,
-        )
+    def _abort_merge(self) -> bool:
+        """Abort the current merge to restore working tree.
+
+        Returns:
+            True if abort succeeded, False if it failed.
+        """
+        try:
+            abort_result = _run_git(
+                self.project_root,
+                "merge",
+                "--abort",
+                check=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self._log(f"git merge --abort timed out: {exc}")
+            return False
         if abort_result.returncode == 0:
             self._log("git merge --abort succeeded")
+            return True
         else:
             self._log(f"git merge --abort failed: {abort_result.stderr.strip()}")
+            return False
+
+    @staticmethod
+    def _violations_to_dicts(violations: list) -> list[dict]:
+        """Convert a list of GuardrailViolation objects to plain dicts.
+
+        Centralised so that rollback-failure and rollback-success paths in
+        ``_run_guardrails`` stay consistent when the data model changes.
+        """
+        return [
+            {
+                "file_path": v.file_path,
+                "violation_type": v.violation_type,
+                "message": v.message,
+            }
+            for v in violations
+        ]
 
     def _rollback_to(self, sha: str) -> None:
         """Hard reset to a previous SHA to undo a merge commit.
 
         Raises:
-            RuntimeError: If git reset --hard fails. Callers must escalate
-            because the working tree is in an inconsistent state.
+            RuntimeError: If git reset --hard fails or times out. Callers
+            must escalate because the working tree is in an inconsistent state.
         """
         if not sha:
             return
-        reset_result = _run_git(
-            self.project_root,
-            "reset",
-            "--hard",
-            sha,
-            check=False,
-            timeout=30,
-        )
+        try:
+            reset_result = _run_git(
+                self.project_root,
+                "reset",
+                "--hard",
+                sha,
+                check=False,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired as exc:
+            self._log(f"git reset --hard {sha} timed out: {exc}")
+            raise RuntimeError(
+                f"git reset --hard {sha} timed out: {exc}. "
+                f"Working tree may be in an inconsistent state. "
+                f"Manual intervention required."
+            ) from exc
         if reset_result.returncode == 0:
             self._log(f"git reset --hard {sha} succeeded — merge rolled back")
         else:

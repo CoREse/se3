@@ -13,12 +13,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
+from ..json_extractor import extract_json_two_phase
 from ..worktree import _run_git
-from .guardrails import GuardrailViolation, MergeGuardrailsCheck, check_spec_diff
+from .guardrails import GuardrailViolation, MergeGuardrailsCheck
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +160,11 @@ class GuardrailRepairer:
                 error=f"LLM repair response 'files' is not a list: {type(files_data).__name__}",
             )
 
+        # Build the set of spec files that were actually changed in the merge
+        allowed_paths = set(original_spec_contents.keys()) | set(merged_spec_contents.keys())
+
         repaired_files: list[str] = []
+        skipped_missing_content: list[str] = []
         for file_data in files_data:
             if not isinstance(file_data, dict):
                 continue
@@ -171,9 +177,25 @@ class GuardrailRepairer:
 
             # Skip entries without corrected content (missing or empty)
             if not corrected_content:
+                skipped_missing_content.append(path)
                 continue
 
-            # Validate path is a spec path
+            # Resolve full path and validate it lies inside se3/specs/
+            full_path = (self.project_root / path).resolve()
+            specs_dir = (self.project_root / "se3" / "specs").resolve()
+            try:
+                full_path.relative_to(specs_dir)
+            except ValueError:
+                logger.warning(
+                    "Guardrail repair attempted to write outside spec dir: %s — rejected",
+                    path,
+                )
+                return RepairResult(
+                    success=False,
+                    error=f"Guardrail repair attempted to write outside spec dir: {path}",
+                )
+
+            # Must also match the spec file naming pattern
             if not self._is_spec_path(path):
                 logger.warning(
                     "Guardrail repair attempted to write non-spec path: %s — rejected",
@@ -184,14 +206,37 @@ class GuardrailRepairer:
                     error=f"Guardrail repair attempted to write non-spec path: {path}",
                 )
 
-            # Resolve full path inside project root
-            full_path = (self.project_root / path).resolve()
-            try:
-                full_path.relative_to(self.project_root.resolve())
-            except ValueError:
+            # Defense-in-depth: reject files not among the changed spec set.
+            # An empty allowed_paths set means the caller passed no spec contents,
+            # which is a bug or race condition — reject to prevent hallucinated paths.
+            if not allowed_paths or path not in allowed_paths:
+                logger.warning(
+                    "Guardrail repair attempted to write unexpected spec file: %s — "
+                    "not in the changed spec set (%s) — rejected",
+                    path,
+                    ", ".join(sorted(allowed_paths)),
+                )
                 return RepairResult(
                     success=False,
-                    error=f"Guardrail repair path outside project root: {path}",
+                    error=(
+                        f"Guardrail repair attempted to write unexpected spec file: "
+                        f"{path}. Only changed spec files may be repaired."
+                    ),
+                )
+
+            # Defense-in-depth: reject content that still contains conflict markers
+            if "<<<<<<<" in corrected_content or ">>>>>>>" in corrected_content:
+                logger.warning(
+                    "Guardrail repair rejected corrected content for %s: "
+                    "contains unresolved git conflict markers",
+                    path,
+                )
+                return RepairResult(
+                    success=False,
+                    error=(
+                        f"Guardrail repair rejected corrected content for {path}: "
+                        f"contains unresolved git conflict markers"
+                    ),
                 )
 
             # Write corrected content
@@ -201,61 +246,148 @@ class GuardrailRepairer:
                 repaired_files.append(path)
                 logger.info("Guardrail repair wrote corrected spec: %s", path)
             except Exception as exc:
+                self._restore_merged_content(repaired_files, merged_spec_contents)
                 return RepairResult(
                     success=False,
                     error=f"Failed to write repaired spec {path}: {exc}",
                 )
 
         if not repaired_files:
+            if skipped_missing_content:
+                return RepairResult(
+                    success=False,
+                    error=(
+                        f"LLM repair returned {len(skipped_missing_content)} file entry(s) "
+                        f"without corrected_content: {', '.join(skipped_missing_content)}"
+                    ),
+                )
             return RepairResult(
                 success=False,
                 error="LLM repair returned no valid spec files to write",
             )
 
-        # Stage repaired files
-        for path in repaired_files:
-            add_result = _run_git(
-                self.project_root, "add", path,
-                check=False, timeout=15,
+        # Stage, amend, and re-check — catch timeouts so the orchestrator
+        # knows the failure mode precisely instead of misattributing it as a
+        # guardrails-check crash.
+        amend_succeeded = False
+        try:
+            # Stage repaired files
+            for path in repaired_files:
+                add_result = _run_git(
+                    self.project_root, "add", path,
+                    check=False, timeout=15,
+                )
+                if add_result.returncode != 0:
+                    # Unstage any previously staged files before restoring
+                    for staged_path in repaired_files:
+                        _run_git(
+                            self.project_root, "reset", "HEAD", staged_path,
+                            check=False, timeout=15,
+                        )
+                    self._restore_merged_content(repaired_files, merged_spec_contents)
+                    return RepairResult(
+                        success=False,
+                        error=f"Failed to stage repaired spec {path}: {add_result.stderr.strip()}",
+                    )
+
+            # Amend the merge commit with repaired specs
+            amend_result = _run_git(
+                self.project_root,
+                "commit",
+                "--amend",
+                "--no-edit",
+                check=False, timeout=30,
             )
-            if add_result.returncode != 0:
+            if amend_result.returncode != 0:
+                # Unstage repaired files so the repairer is self-contained
+                for path in repaired_files:
+                    _run_git(
+                        self.project_root, "reset", "HEAD", path,
+                        check=False, timeout=15,
+                    )
+                self._restore_merged_content(repaired_files, merged_spec_contents)
                 return RepairResult(
                     success=False,
-                    error=f"Failed to stage repaired spec {path}: {add_result.stderr.strip()}",
+                    error=f"Failed to amend merge commit with repaired specs: {amend_result.stderr.strip()}",
                 )
 
-        # Amend the merge commit with repaired specs
-        amend_result = _run_git(
-            self.project_root,
-            "commit",
-            "--amend",
-            "--no-edit",
-            check=False, timeout=30,
-        )
-        if amend_result.returncode != 0:
-            return RepairResult(
-                success=False,
-                error=f"Failed to amend merge commit with repaired specs: {amend_result.stderr.strip()}",
-            )
+            amend_succeeded = True
+            logger.info("Amended merge commit with repaired spec files for '%s'", branch)
 
-        logger.info("Amended merge commit with repaired spec files for '%s'", branch)
-
-        # Re-run guardrails on the amended commit
-        try:
+            # Re-run guardrails on the amended commit
             guardrails = MergeGuardrailsCheck(self.project_root)
-            amended_sha = _run_git(
+            rev_parse_result = _run_git(
                 self.project_root, "rev-parse", "HEAD",
                 check=False, timeout=15,
-            ).stdout.strip()
+            )
+            if rev_parse_result.returncode != 0:
+                self._restore_merged_content(repaired_files, merged_spec_contents)
+                return RepairResult(
+                    success=False,
+                    error=f"Failed to get amended commit SHA: {rev_parse_result.stderr.strip() or 'git rev-parse HEAD failed'}",
+                )
+            amended_sha = rev_parse_result.stdout.strip()
             gr_report = guardrails.check_merge_result(pre_sha, amended_sha)
+        except subprocess.TimeoutExpired as exc:
+            # Defensive: un-amend the commit before restoring working-tree
+            # files so that if the process crashes before the caller's
+            # rollback, HEAD won't be left on an unverified amended commit.
+            # Only un-amend if the amend actually succeeded; otherwise we
+            # would accidentally undo the original merge commit.
+            if amend_succeeded:
+                reset_result = _run_git(
+                    self.project_root, "reset", "--soft", "HEAD~1",
+                    check=False, timeout=15,
+                )
+                if reset_result.returncode != 0:
+                    logger.warning(
+                        "Un-amend (reset --soft HEAD~1) failed after timeout: %s",
+                        reset_result.stderr.strip() or "unknown error",
+                    )
+                # Unstage repaired files so index and working tree stay in sync
+                for path in repaired_files:
+                    _run_git(
+                        self.project_root, "reset", "HEAD", path,
+                        check=False, timeout=15,
+                    )
+            self._restore_merged_content(repaired_files, merged_spec_contents)
+            return RepairResult(
+                success=False,
+                error=f"Timeout during guardrail repair git operation: {exc}",
+            )
         except Exception as exc:
+            # Defensive: un-amend the commit (same reasoning as above).
+            if amend_succeeded:
+                reset_result = _run_git(
+                    self.project_root, "reset", "--soft", "HEAD~1",
+                    check=False, timeout=15,
+                )
+                if reset_result.returncode != 0:
+                    logger.warning(
+                        "Un-amend (reset --soft HEAD~1) failed after exception: %s",
+                        reset_result.stderr.strip() or "unknown error",
+                    )
+            self._restore_merged_content(repaired_files, merged_spec_contents)
             return RepairResult(
                 success=False,
                 error=f"Guardrails re-check failed after repair: {exc}",
             )
 
         if not gr_report.passed:
-            # Still has violations after repair — report failure
+            # Still has violations after repair — restore and report failure.
+            # Unstage repaired files and un-amend before restoring working tree
+            # so the repairer is self-contained.
+            if amend_succeeded:
+                for path in repaired_files:
+                    _run_git(
+                        self.project_root, "reset", "HEAD", path,
+                        check=False, timeout=15,
+                    )
+                _run_git(
+                    self.project_root, "reset", "--soft", "HEAD~1",
+                    check=False, timeout=15,
+                )
+            self._restore_merged_content(repaired_files, merged_spec_contents)
             remaining = [
                 f"[{v.violation_type}] {v.file_path}: {v.message}"
                 for v in gr_report.violations
@@ -301,9 +433,37 @@ class GuardrailRepairer:
         normalized = path.replace("\\", "/")
         return bool(_SPEC_PATH_RE.match(normalized))
 
-    def _call_llm(self, prompt: str) -> str:
+    def _restore_merged_content(
+        self,
+        repaired_files: list[str],
+        merged_spec_contents: dict[str, str],
+    ) -> None:
+        """Restore the merged spec content for files that were modified.
+
+        Called when repair fails after files have been written, to leave the
+        working tree in the same state it was before ``repair_violations`` was
+        called.  This makes the repairer self-contained: callers do not have
+        to perform their own cleanup.
+        """
+        for path in repaired_files:
+            merged_content = merged_spec_contents.get(path)
+            if merged_content is not None:
+                full_path = (self.project_root / path).resolve()
+                try:
+                    full_path.write_text(merged_content, encoding="utf-8")
+                    logger.info("Restored merged content for %s", path)
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to restore merged content for %s: %s",
+                        path, exc,
+                    )
+            else:
+                logger.warning(
+                    "No merged content available to restore for %s", path,
+                )
+
+    def _call_llm(self, prompt: str) -> str | dict[str, Any]:
         """Call LLM with the repair prompt."""
-        from ..json_extractor import extract_json_two_phase
         from ..llm_caller import LLMCaller
 
         caller = LLMCaller(
@@ -323,21 +483,36 @@ class GuardrailRepairer:
             "A JSON object with a 'files' array. Each file has 'path' and "
             "'corrected_content' fields."
         )
-        parsed = extract_json_two_phase(
-            raw,
-            project_root=self.project_root,
-            schema_hint=schema_hint,
-            required_keys=["files"],
-        )
+        try:
+            parsed = extract_json_two_phase(
+                raw,
+                project_root=self.project_root,
+                schema_hint=schema_hint,
+                required_keys=["files"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "Guardrail repair LLM response parsing failed: %s", exc
+            )
+            raise ValueError(
+                f"guardrail repair LLM response parsing failed: {exc}"
+            ) from exc
 
         if parsed is not None:
-            return json.dumps(parsed, ensure_ascii=False, indent=2)
+            # Return the dict directly to avoid a wasteful
+            # serialize→deserialize round-trip.
+            return parsed
 
         # Return raw for fallback parsing
         return raw
 
-    def _parse_response(self, raw_response: str) -> Optional[dict[str, Any]]:
+    def _parse_response(self, raw_response: str | dict[str, Any]) -> Optional[dict[str, Any]]:
         """Parse LLM repair response as JSON dict."""
+        if isinstance(raw_response, dict):
+            if "files" in raw_response:
+                return raw_response
+            return None
+
         from ..utils.json_parser import parse_json_response
 
         return parse_json_response(raw_response, required_keys=["files"])
