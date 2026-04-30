@@ -23,6 +23,7 @@ from .guardrails import (
 )
 from .human_call import HumanCallWriter
 from .orchestrator import MergeOrchestrator, MergeReport
+from .runtime_sync import RuntimeSyncCollision, SyncReport, sync_branch_runtime
 from .strategy import DecisionAction, StrategyDecider, StrategyDecision
 from .version_aggregator import (
     AggregateResult,

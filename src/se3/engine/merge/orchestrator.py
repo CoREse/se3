@@ -27,6 +27,7 @@ from .guardrails import (
     violation_set_hash,
 )
 from .human_call import HumanCallWriter
+from .runtime_sync import RuntimeSyncCollision, sync_branch_runtime
 from .strategy import DecisionAction, StrategyDecider, StrategyDecision
 from .version_aggregator import (
     aggregate_and_apply,
@@ -633,6 +634,23 @@ class MergeOrchestrator:
                 self._write_log()
                 report.log_file = self.log_file
                 return report
+            elif result == "runtime_sync_collision":
+                self._log(
+                    f"Branch '{branch}' runtime sync collision — stopping merge sequence"
+                )
+                if report.merged_branches:
+                    self._log(
+                        f"Version not bumped despite {len(report.merged_branches)} "
+                        f"successful merge(s) — re-run after resolving"
+                    )
+                report.success = False
+                report.failed_branch = branch
+                if not report.failure_reason:
+                    report.failure_reason = "runtime_sync_collision"
+                report.version_aggregation_skipped = True
+                self._write_log()
+                report.log_file = self.log_file
+                return report
             else:
                 self._log(f"Branch '{branch}' merge returned unexpected result: {result}")
                 if report.merged_branches:
@@ -726,6 +744,33 @@ class MergeOrchestrator:
         self._write_log()
         report.log_file = self.log_file
         return report
+
+    def _sync_runtime(self, branch: str, report: MergeReport) -> Optional[str]:
+        """Sync runtime data from *branch*'s bound worktree into current se3/.
+
+        Returns ``None`` on success or when the source worktree is missing.
+        Returns ``"runtime_sync_collision"`` when a tier A file collides,
+        setting ``report.failure_reason``.
+        """
+        try:
+            sync_report = sync_branch_runtime(self.project_root, branch)
+            if sync_report.skipped:
+                self._log(f"Runtime sync skipped for '{branch}': no bound worktree")
+            else:
+                if sync_report.copied:
+                    self._log(
+                        f"Runtime sync copied for '{branch}': {sync_report.copied}"
+                    )
+                if sync_report.discarded:
+                    self._log(
+                        f"Runtime sync discarded for '{branch}': "
+                        f"{len(sync_report.discarded)} file(s)"
+                    )
+        except RuntimeSyncCollision as exc:
+            self._log(f"Runtime sync collision for '{branch}': {exc}")
+            report.failure_reason = "runtime_sync_collision"
+            return "runtime_sync_collision"
+        return None
 
     def _merge_single_branch(self, branch: str, report: MergeReport) -> str:
         """Merge a single branch and classify the outcome.
@@ -882,6 +927,9 @@ class MergeOrchestrator:
                     "Downstream SHA may be stale."
                 )
                 # Keep the old post_merge_sha (or empty if already unset)
+            sync_result = self._sync_runtime(branch, report)
+            if sync_result:
+                return sync_result
             return "merged"
 
         # Merge failed — determine if it's a conflict or something else
@@ -1633,6 +1681,9 @@ class MergeOrchestrator:
             f"LLM-resolved merge of '{branch}' committed successfully "
             f"(SHA: {post_merge_sha}){sha_note}"
         )
+        sync_result = self._sync_runtime(branch, report)
+        if sync_result:
+            return sync_result
         return "merged"
 
     def _run_guardrails(

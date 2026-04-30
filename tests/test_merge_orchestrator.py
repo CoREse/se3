@@ -5206,3 +5206,142 @@ class TestGuardrailsStrategyAware:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
         assert post_head == pre_head
+
+
+class TestRuntimeSyncIntegration:
+    """Integration tests for runtime sync in merge orchestrator."""
+
+    def test_runtime_sync_copies_tier_a_after_merge(self, tmp_path: Path) -> None:
+        """Clean merge with bound worktree copies tier A runtime files."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # Create feature branch, commit a non-se3 file
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+
+        # Checkout back to default so feature branch is free for worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Create a bound worktree for the feature branch
+        wt_dir = tmp_path / ".." / "feature-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature"],
+            check=True, capture_output=True,
+        )
+
+        # Add UNCOMMITTED tier A runtime files to the worktree's se3/
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (wt_se3 / "history" / "flow1.log").write_text("wt log")
+        (wt_se3 / "logs").mkdir(parents=True, exist_ok=True)
+        (wt_se3 / "logs" / "app.log").write_text("wt app log")
+        (wt_se3 / "state").mkdir(parents=True, exist_ok=True)
+        (wt_se3 / "state" / "summary-abc.md").write_text("wt summary")
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        assert report.success is True
+        assert report.merged_branches == ["feature"]
+
+        # Tier A files from the worktree should be copied into target se3/
+        target_se3 = tmp_path / "se3"
+        assert (target_se3 / "history" / "flow1.log").exists()
+        assert (target_se3 / "history" / "flow1.log").read_text() == "wt log"
+        assert (target_se3 / "logs" / "app.log").exists()
+        assert (target_se3 / "logs" / "app.log").read_text() == "wt app log"
+        assert (target_se3 / "state" / "summary-abc.md").exists()
+        assert (target_se3 / "state" / "summary-abc.md").read_text() == "wt summary"
+
+        # Cleanup worktree (force because se3/ files are gitignored but present)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_collision_stops_merge(self, tmp_path: Path) -> None:
+        """Tier A collision stops the merge sequence, preserving earlier merges."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature-a: clean merge, no worktree
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-b: will have a collision
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Set up target se3/ with an UNCOMMITTED file that will collide
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        # Create bound worktree for feature-b with a colliding file
+        wt_dir = tmp_path / ".." / "feature-b-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
+            check=True, capture_output=True,
+        )
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature-a", "feature-b"])
+
+        # feature-a merged successfully, feature-b collided
+        assert report.success is False
+        assert "feature-a" in report.merged_branches
+        assert report.failed_branch == "feature-b"
+        assert report.failure_reason == "runtime_sync_collision"
+
+        # feature-a's file should exist
+        assert (tmp_path / "a.txt").exists()
+
+        # feature-b's merge commit should still be on HEAD (not rolled back)
+        assert (tmp_path / "b.txt").exists()
+
+        # The colliding file in target should remain unchanged
+        assert (target_se3 / "history" / "flow1.log").read_text() == "target log"
+
+        # Cleanup worktree (force because se3/ files are gitignored but present)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_skips_when_no_worktree(self, tmp_path: Path) -> None:
+        """Merge succeeds without worktree — runtime sync is skipped."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        assert report.success is True
+        assert report.merged_branches == ["feature"]
+        assert report.log_file is not None
+        log_content = report.log_file.read_text()
+        assert "Runtime sync skipped" in log_content
