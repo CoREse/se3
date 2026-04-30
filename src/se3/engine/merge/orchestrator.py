@@ -299,19 +299,41 @@ class MergeOrchestrator:
                     and pre_merge_sha
                     and pre_merge_version
                 ):
+                    # Compute merge-base for end-to-end diff semantics
                     try:
-                        bump = infer_branch_bump(
-                            self.project_root, branch, pre_merge_sha,
+                        merge_base_result = _run_git(
+                            self.project_root,
+                            "merge-base",
+                            pre_merge_sha,
+                            branch,
+                            check=False,
+                            timeout=15,
                         )
-                        if bump is not None:
-                            branch_bumps.append(bump)
-                            self._log(f"Inferred bump for '{branch}': {bump.value}")
-                        else:
+                    except subprocess.TimeoutExpired:
+                        self._log(
+                            f"merge-base timed out for '{branch}' — skipping bump inference"
+                        )
+                    else:
+                        if merge_base_result.returncode != 0:
                             self._log(
-                                f"No version metadata for '{branch}' — skip bump"
+                                f"merge-base failed for '{branch}': "
+                                f"{merge_base_result.stderr.strip()} — skipping bump inference"
                             )
-                    except Exception as exc:
-                        self._log(f"Failed to infer bump for '{branch}': {exc}")
+                        else:
+                            merge_base_sha = merge_base_result.stdout.strip()
+                            try:
+                                bump = infer_branch_bump(
+                                    self.project_root, branch, merge_base_sha,
+                                )
+                                if bump is not None:
+                                    branch_bumps.append(bump)
+                                    self._log(f"Inferred bump for '{branch}': {bump.value}")
+                                else:
+                                    self._log(
+                                        f"No version metadata for '{branch}' — skip bump"
+                                    )
+                            except Exception as exc:
+                                self._log(f"Failed to infer bump for '{branch}': {exc}")
             elif result == "conflict":
                 self._log(f"Branch '{branch}' has conflicts — aborting")
                 if report.merged_branches:

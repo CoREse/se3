@@ -228,6 +228,77 @@ class TestInferBranchBump:
         bump = infer_branch_bump(tmp_path, "feature", base_sha)
         assert bump is None
 
+    def test_end_to_end_diff_ignores_intermediate_bumps(self, tmp_path: Path):
+        """Intermediate bumps inside a branch are ignored; only end-to-end diff counts."""
+        _init_repo(tmp_path)
+        _write_pyproject(tmp_path, "1.0.0")
+        _commit(tmp_path, "Add pyproject")
+        default_branch = _get_default_branch(tmp_path)
+
+        _checkout(tmp_path, "feature", create=True)
+        # Multiple internal bumps: minor, patch, minor
+        _write_pyproject(tmp_path, "1.1.0")
+        _commit(tmp_path, "Bump minor")
+        _write_pyproject(tmp_path, "1.1.1")
+        _commit(tmp_path, "Bump patch")
+        _write_pyproject(tmp_path, "1.2.0")
+        _commit(tmp_path, "Bump minor again")
+
+        merge_base = subprocess.run(
+            ["git", "-C", str(tmp_path), "merge-base", default_branch, "feature"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        bump = infer_branch_bump(tmp_path, "feature", merge_base)
+        # End-to-end: 1.0.0 -> 1.2.0 = MINOR (not cumulative major)
+        assert bump == BumpType.MINOR
+
+    def test_spec_example_branch_bumps(self, tmp_path: Path):
+        """Spec example: A branch-point 4.4.0, B tip 4.4.1 (PATCH), C tip 4.6.0 (MINOR).
+
+        Even though C traversed 4.5.0 -> 4.5.1 internally, the end-to-end
+        diff from merge-base (4.4.0) to tip (4.6.0) is MINOR.
+        """
+        _init_repo(tmp_path)
+        _write_pyproject(tmp_path, "4.4.0")
+        _commit(tmp_path, "M0")
+        default_branch = _get_default_branch(tmp_path)
+
+        # Branch B: patch bump
+        _checkout(tmp_path, "B", create=True)
+        _write_pyproject(tmp_path, "4.4.1")
+        _commit(tmp_path, "Bump patch on B")
+        _checkout(tmp_path, default_branch)
+
+        # Branch C: minor bump with intermediate noise
+        _checkout(tmp_path, "C", create=True)
+        _write_pyproject(tmp_path, "4.5.0")
+        _commit(tmp_path, "C1: 4.5.0")
+        _write_pyproject(tmp_path, "4.5.1")
+        _commit(tmp_path, "C2: 4.5.1")
+        _write_pyproject(tmp_path, "4.6.0")
+        _commit(tmp_path, "C3: 4.6.0")
+        _checkout(tmp_path, default_branch)
+
+        # A advances past branch-point
+        _write_pyproject(tmp_path, "4.6.0")
+        _commit(tmp_path, "M1: advance A to 4.6.0")
+
+        merge_base_b = subprocess.run(
+            ["git", "-C", str(tmp_path), "merge-base", "HEAD", "B"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        merge_base_c = subprocess.run(
+            ["git", "-C", str(tmp_path), "merge-base", "HEAD", "C"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        bump_b = infer_branch_bump(tmp_path, "B", merge_base_b)
+        bump_c = infer_branch_bump(tmp_path, "C", merge_base_c)
+
+        assert bump_b == BumpType.PATCH
+        assert bump_c == BumpType.MINOR
+
 
 # ---------- Unit tests: aggregate_and_apply ---------- #
 
@@ -442,6 +513,22 @@ class TestAggregateAndApply:
         assert result.success is False
         assert "timed out" in (result.error or "")
         assert _read_pyproject_version(tmp_path) == original_version
+
+    def test_spec_example_aggregate_to_4_7_0(self, tmp_path: Path):
+        """Spec example: max(PATCH, MINOR) applied to pre-merge 4.6.0 -> 4.7.0."""
+        _init_repo(tmp_path)
+        _write_pyproject(tmp_path, "4.6.0")
+        _commit(tmp_path, "Add pyproject")
+        # Stand-in for a merge commit
+        (tmp_path / "merge_marker.txt").write_text("merged\n")
+        _commit(tmp_path, "Merge branch 'C'")
+
+        result = aggregate_and_apply(tmp_path, [BumpType.PATCH, BumpType.MINOR], "4.6.0")
+
+        assert result.success is True
+        assert result.bump_type == BumpType.MINOR
+        assert result.new_version == "4.7.0"
+        assert _read_pyproject_version(tmp_path) == "4.7.0"
 
 
 # ---------- Unit tests: read_version_at_ref ---------- #
@@ -765,3 +852,95 @@ class TestOrchestratorVersionAggregation:
         assert r.new_version is None
         assert r.bump_type is None
         assert r.error is None
+
+    def test_orchestrator_passes_merge_base_to_infer_branch_bump(self, tmp_path: Path, monkeypatch):
+        """Orchestrator computes merge-base and passes it to infer_branch_bump.
+
+        When A advanced past the branch-point, the merge-base is different
+        from pre-merge HEAD. We verify the orchestrator passes the correct
+        merge-base SHA by capturing the arguments passed to infer_branch_bump.
+        """
+        _init_repo(tmp_path)
+        _write_pyproject(tmp_path, "4.4.0")
+        _commit(tmp_path, "M0")
+        default_branch = _get_default_branch(tmp_path)
+
+        # Feature branch (no pyproject change = clean merge)
+        _checkout(tmp_path, "feature", create=True)
+        (tmp_path / "f.txt").write_text("f")
+        _commit(tmp_path, "Add f")
+        _checkout(tmp_path, default_branch)
+
+        # A advances past branch-point (no pyproject change = clean merge)
+        (tmp_path / "a.txt").write_text("a")
+        _commit(tmp_path, "Advance A")
+
+        expected_merge_base = subprocess.run(
+            ["git", "-C", str(tmp_path), "merge-base", "HEAD", "feature"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        pre_merge_sha = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        # merge-base should differ from pre-merge HEAD because A advanced
+        assert expected_merge_base != pre_merge_sha
+
+        captured = []
+        def mock_infer(project_root, branch, base_ref):
+            captured.append((branch, base_ref))
+            return None
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.infer_branch_bump",
+            mock_infer,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        assert report.success is True
+        assert len(captured) == 1
+        assert captured[0][0] == "feature"
+        assert captured[0][1] == expected_merge_base
+
+    def test_merge_base_failure_skips_bump_inference(self, tmp_path: Path, monkeypatch):
+        """When merge-base computation fails, the branch's bump is skipped."""
+        _init_repo(tmp_path)
+        _write_pyproject(tmp_path, "4.4.0")
+        _commit(tmp_path, "Add pyproject")
+        default_branch = _get_default_branch(tmp_path)
+
+        _checkout(tmp_path, "feature", create=True)
+        _write_pyproject(tmp_path, "4.5.0")
+        (tmp_path / "f.txt").write_text("f")
+        _commit(tmp_path, "Bump minor on feature")
+        _checkout(tmp_path, default_branch)
+
+        # Mock _run_git so merge-base returns non-zero
+        import se3.engine.merge.orchestrator as orch_mod
+        orig_run_git = orch_mod._run_git
+
+        def fake_run_git(project_root, *args, **kwargs):
+            if len(args) >= 1 and args[0] == "merge-base":
+                import subprocess as sp
+                return sp.CompletedProcess(
+                    args=args, returncode=1, stdout="", stderr="no merge base"
+                )
+            return orig_run_git(project_root, *args, **kwargs)
+
+        monkeypatch.setattr(orch_mod, "_run_git", fake_run_git)
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        assert report.success is True
+        assert report.merged_branches == ["feature"]
+        assert report.pre_merge_version == "4.4.0"
+        # Bump inference skipped because merge-base failed;
+        # no aggregation applied, but the merge itself succeeded
+        assert report.final_version is None
+        assert report.version_aggregation_skipped is True
+        # Version from working tree reflects the merged branch
+        assert _read_pyproject_version(tmp_path) == "4.5.0"

@@ -1,10 +1,11 @@
 """SemVer aggregation for merge orchestrator.
 
 After all branches are sequentially merged into the current branch,
-infer each branch's SemVer bump type relative to a base SHA (the
-pre-merge HEAD), take the max bump, apply it to ``pyproject.toml``,
-and amend the last merge commit so the version change ships with the
-merge rather than producing a stand-alone commit.
+infer each branch's SemVer bump type relative to a base ref (the
+merge-base between the pre-merge HEAD and the branch), take the max
+bump, apply it to ``pyproject.toml``, and amend the last merge commit
+so the version change ships with the merge rather than producing a
+stand-alone commit.
 """
 
 from __future__ import annotations
@@ -101,12 +102,15 @@ def _diff_bump(base: Version, branch: Version) -> Optional[BumpType]:
 def infer_branch_bump(
     project_root: Path,
     branch: str,
-    base_sha: str,
+    base_ref: str,
 ) -> BumpType | None:
-    """Infer the SemVer bump type for ``branch`` relative to ``base_sha``.
+    """Infer the SemVer bump type for ``branch`` relative to ``base_ref``.
 
-    Compares pyproject.toml's version at ``base_sha`` against the
-    branch tip.
+    ``base_ref`` should be the merge-base between the pre-merge HEAD
+    and ``branch`` (i.e. the commit where the branch diverged). The
+    function performs an end-to-end diff: it compares pyproject.toml's
+    version at ``base_ref`` against the branch tip, ignoring any
+    intermediate bumps inside the branch.
 
     - When both sides have readable versions and the branch advanced
       the version, returns the detected bump type.
@@ -118,7 +122,7 @@ def infer_branch_bump(
       or unparseable on both sides), returns ``None``. The orchestrator
       skips aggregation if *all* branches return ``None``.
     """
-    base_version_str = read_version_at_ref(project_root, base_sha)
+    base_version_str = read_version_at_ref(project_root, base_ref)
     branch_version_str = read_version_at_ref(project_root, branch)
 
     # Neither side has readable version → no version metadata at all
