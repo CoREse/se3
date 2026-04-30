@@ -483,7 +483,7 @@ class TestRealSpecFiles:
     def test_spec_guardrails_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "spec-guardrails" / "spec.md").read_text()
         parsed = parse_spec(text)
-        assert len(parsed.requirements) == 5
+        assert len(parsed.requirements) == 6
 
     def test_all_specs_parse_without_exception(self, specs_dir: Path):
         """Every spec file must be parseable without raising."""
