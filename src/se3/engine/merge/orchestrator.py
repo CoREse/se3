@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from ..version_bumper import BumpType
+from ..version_bumper import BumpType, Version
 from ..worktree import _run_git, get_conflicting_files, get_current_branch
 from .cleanup import CleanupManager, CleanupReport
 from .conflict_context import build as build_conflict_context
@@ -30,6 +30,7 @@ from .human_call import HumanCallWriter
 from .runtime_sync import RuntimeSyncCollision, sync_branch_runtime
 from .strategy import DecisionAction, StrategyDecider, StrategyDecision
 from .version_aggregator import (
+    InferResult,
     aggregate_and_apply,
     infer_branch_bump,
     read_version_at_ref,
@@ -174,13 +175,17 @@ class MergeReport:
     human_call_file: Optional[Path] = None
     log_file: Optional[Path] = None
     pre_merge_version: Optional[str] = None
+    effective_pre_merge_version: Optional[str] = None
     final_version: Optional[str] = None
     bump_type: Optional[str] = None
     version_aggregation_skipped: bool = False
     version_aggregation_error: Optional[str] = None
     cleanup_report: Optional[CleanupReport] = None
     cleanup_skipped: bool = True
+    runtime_sync_skipped_branches: list[str] = field(default_factory=list)
+    runtime_sync_skipped_files: list[tuple[str, list[str]]] = field(default_factory=list)
     rollback_failed: bool = False
+    unattempted_branches: list[str] = field(default_factory=list)
 
 
 class MergeOrchestrator:
@@ -283,8 +288,13 @@ class MergeOrchestrator:
             self._log("Pre-merge version: <unavailable>")
 
         branch_bumps: list[BumpType] = []
+        # Track the effective pre-merge version for aggregation. When
+        # already-merged branches have their version changes already in HEAD,
+        # this is updated to the version before those branches (so retries
+        # after partial failures do not over-bump).
+        effective_pre_merge_version = pre_merge_version
 
-        for branch in branches:
+        for idx, branch in enumerate(branches):
             # Reset per-branch mutable state so a stall on an earlier branch
             # does not leak into a later branch's result formatting.
             self._last_stall_iteration_count = None
@@ -295,17 +305,74 @@ class MergeOrchestrator:
             if result == "merged" or result == "already_merged":
                 self._log(f"Branch '{branch}' merged successfully")
                 report.merged_branches.append(branch)
-                if (
-                    result == "merged"
-                    and pre_merge_sha
-                    and pre_merge_version
-                ):
+                if pre_merge_sha and pre_merge_version:
                     # Compute merge-base for end-to-end diff semantics
+                    if result == "already_merged":
+                        # For already-merged branches, pre_merge_sha includes
+                        # the merge. Walk up the first-parent chain to find
+                        # the state before this branch was merged, and also
+                        # the exact commit that was merged (so we don't use
+                        # the live branch tip which may have moved forward).
+                        base_ref, merged_commit = self._find_base_ref_for_already_merged(
+                            branch, pre_merge_sha,
+                        )
+                        if base_ref is None:
+                            self._log(
+                                f"Could not find base ref for already-merged "
+                                f"'{branch}' — skipping bump inference"
+                            )
+                            continue
+                        # Defensive: if the version at HEAD already differs
+                        # from the version before this branch was merged, the
+                        # branch's version change is already in the tree and
+                        # we must not double-bump.
+                        head_version = read_version_at_ref(
+                            self.project_root, pre_merge_sha,
+                        )
+                        base_version = read_version_at_ref(
+                            self.project_root, base_ref,
+                        )
+                        if (
+                            head_version is not None
+                            and base_version is not None
+                            and head_version != base_version
+                        ):
+                            # The branch's version change is already in HEAD.
+                            # Use the version before this branch as the
+                            # effective pre-merge version (lowest wins when
+                            # multiple already-merged branches exist).
+                            try:
+                                base_v = Version.parse(base_version)
+                                eff_v = (
+                                    Version.parse(effective_pre_merge_version)
+                                    if effective_pre_merge_version
+                                    else None
+                                )
+                                if eff_v is None or base_v < eff_v:
+                                    effective_pre_merge_version = base_version
+                            except ValueError:
+                                # One or both versions are not parseable as SemVer.
+                                # Do NOT fall back to lexicographic string comparison
+                                # (e.g. '1.10.0' < '1.2.0' would be wrong).
+                                if effective_pre_merge_version is None:
+                                    effective_pre_merge_version = base_version
+                            self._log(
+                                f"Version change for already-merged '{branch}' "
+                                f"already in HEAD ({base_version} -> {head_version}) "
+                                f"— using {base_version} as effective pre-merge version"
+                            )
+                        # Always fall through to merge-base + bump inference below
+                        # so the branch contributes its bump based on end-to-end
+                        # diff (branch tip vs merge-base), regardless of what
+                        # HEAD's pyproject ended up showing after conflict resolution.
+                    else:
+                        base_ref = pre_merge_sha
+
                     try:
                         merge_base_result = _run_git(
                             self.project_root,
                             "merge-base",
-                            pre_merge_sha,
+                            base_ref,
                             branch,
                             check=False,
                             timeout=15,
@@ -322,16 +389,25 @@ class MergeOrchestrator:
                             )
                         else:
                             merge_base_sha = merge_base_result.stdout.strip()
+                            # For already-merged branches, use the actual merged
+                            # commit instead of the live branch tip (which may
+                            # have advanced past the merge).
+                            branch_ref_for_bump = merged_commit if result == "already_merged" else branch
                             try:
-                                bump = infer_branch_bump(
-                                    self.project_root, branch, merge_base_sha,
+                                infer_result = infer_branch_bump(
+                                    self.project_root,
+                                    branch_ref_for_bump or branch,
+                                    merge_base_sha,
                                 )
-                                if bump is not None:
-                                    branch_bumps.append(bump)
-                                    self._log(f"Inferred bump for '{branch}': {bump.value}")
+                                if infer_result.bump is not None:
+                                    branch_bumps.append(infer_result.bump)
+                                    self._log(
+                                        f"Inferred bump for '{branch}': {infer_result.bump.value}"
+                                    )
                                 else:
                                     self._log(
-                                        f"No version metadata for '{branch}' — skip bump"
+                                        f"Bump inference skipped for '{branch}': "
+                                        f"{infer_result.reason}"
                                     )
                             except Exception as exc:
                                 self._log(f"Failed to infer bump for '{branch}': {exc}")
@@ -660,6 +736,15 @@ class MergeOrchestrator:
                 self._log(
                     f"Branch '{branch}' runtime sync collision — stopping merge sequence"
                 )
+                # The git merge succeeded; the merge commit is on HEAD.
+                # Record the branch as merged so the report matches git state.
+                if branch not in report.merged_branches:
+                    report.merged_branches.append(branch)
+                self._log(
+                    f"WARNING: Branch '{branch}' merge commit is on HEAD but "
+                    f"runtime sync failed. On retry, include '{branch}' again "
+                    f"so the already-merged path can complete runtime sync."
+                )
                 if report.merged_branches:
                     self._log(
                         f"Version not bumped despite {len(report.merged_branches)} "
@@ -673,6 +758,54 @@ class MergeOrchestrator:
                 self._write_log()
                 report.log_file = self.log_file
                 return report
+            elif result == "runtime_sync_os_error":
+                self._log(
+                    f"Branch '{branch}' runtime sync OS error — stopping merge sequence"
+                )
+                if branch not in report.merged_branches:
+                    report.merged_branches.append(branch)
+                self._log(
+                    f"WARNING: Branch '{branch}' merge commit is on HEAD but "
+                    f"runtime sync failed. On retry, include '{branch}' again "
+                    f"so the already-merged path can complete runtime sync."
+                )
+                if report.merged_branches:
+                    self._log(
+                        f"Version not bumped despite {len(report.merged_branches)} "
+                        f"successful merge(s) — re-run after resolving"
+                    )
+                report.success = False
+                report.failed_branch = branch
+                if not report.failure_reason:
+                    report.failure_reason = "runtime_sync_os_error"
+                report.version_aggregation_skipped = True
+                self._write_log()
+                report.log_file = self.log_file
+                return report
+            elif result == "runtime_sync_timeout":
+                self._log(
+                    f"Branch '{branch}' runtime sync timed out — stopping merge sequence"
+                )
+                if branch not in report.merged_branches:
+                    report.merged_branches.append(branch)
+                self._log(
+                    f"WARNING: Branch '{branch}' merge commit is on HEAD but "
+                    f"runtime sync failed. On retry, include '{branch}' again "
+                    f"so the already-merged path can complete runtime sync."
+                )
+                if report.merged_branches:
+                    self._log(
+                        f"Version not bumped despite {len(report.merged_branches)} "
+                        f"successful merge(s) — re-run after resolving"
+                    )
+                report.success = False
+                report.failed_branch = branch
+                if not report.failure_reason:
+                    report.failure_reason = "runtime_sync_timeout"
+                report.version_aggregation_skipped = True
+                self._write_log()
+                report.log_file = self.log_file
+                return report
             else:
                 self._log(f"Branch '{branch}' merge returned unexpected result: {result}")
                 if report.merged_branches:
@@ -682,7 +815,8 @@ class MergeOrchestrator:
                     )
                 report.success = False
                 report.failed_branch = branch
-                report.failure_reason = "unexpected"
+                if not report.failure_reason:
+                    report.failure_reason = "unexpected"
                 report.version_aggregation_skipped = True
                 self._write_log()
                 report.log_file = self.log_file
@@ -694,18 +828,28 @@ class MergeOrchestrator:
         self._log(f"Merged: {', '.join(report.merged_branches)}")
 
         # SemVer aggregation: apply max bump to pyproject.toml and amend
-        if pre_merge_version and branch_bumps:
+        if effective_pre_merge_version and branch_bumps:
+            report.effective_pre_merge_version = effective_pre_merge_version
             self._log("Aggregating SemVer bumps from merged branches")
             try:
+                is_published = self._is_head_published()
+                if is_published:
+                    self._log(
+                        "WARNING: HEAD has been published to a remote. "
+                        "Creating a new commit for version aggregation instead of amending."
+                    )
                 agg = aggregate_and_apply(
-                    self.project_root, branch_bumps, pre_merge_version,
+                    self.project_root,
+                    branch_bumps,
+                    effective_pre_merge_version,
+                    amend=not is_published,
                 )
                 if agg.success:
                     report.final_version = agg.new_version
                     if agg.bump_type is not None:
                         report.bump_type = agg.bump_type.value
                     self._log(
-                        f"Version aggregated: {pre_merge_version} → {agg.new_version} "
+                        f"Version aggregated: {effective_pre_merge_version} → {agg.new_version} "
                         f"({agg.bump_type.value if agg.bump_type else 'unknown'})"
                     )
                 else:
@@ -718,7 +862,7 @@ class MergeOrchestrator:
                 self._log(f"Version aggregation raised: {exc}")
         else:
             report.version_aggregation_skipped = True
-            if not pre_merge_version:
+            if not effective_pre_merge_version:
                 self._log("Skipping version aggregation: no pre-merge version available")
             elif not branch_bumps:
                 self._log("Skipping version aggregation: no branches contributed bumps")
@@ -763,9 +907,214 @@ class MergeOrchestrator:
             elif not report.success:
                 self._log("Cleanup skipped: merge did not fully succeed")
 
+        # Compute unattempted branches when the loop exited early.
+        if report.failed_branch and report.failed_branch in branches:
+            failed_idx = branches.index(report.failed_branch)
+            report.unattempted_branches = branches[failed_idx + 1:]
+            if report.unattempted_branches:
+                self._log(
+                    f"Unattempted branches: {', '.join(report.unattempted_branches)}"
+                )
+
         self._write_log()
         report.log_file = self.log_file
         return report
+
+    def _is_head_published(self) -> bool:
+        """Check whether the current HEAD has been pushed to any remote.
+
+        Uses ``git for-each-ref --contains HEAD refs/remotes`` to detect
+        remote-tracking branches that include the current commit. Returns
+        ``True`` when at least one remote branch contains HEAD.
+        """
+        result = _run_git(
+            self.project_root,
+            "for-each-ref",
+            "--format=%(refname)",
+            "--contains", "HEAD",
+            "refs/remotes",
+            check=False,
+            timeout=15,
+        )
+        if result.returncode != 0:
+            return False
+        return any(line.strip() for line in result.stdout.strip().split("\n") if line.strip())
+
+    def _find_base_ref_for_already_merged(
+        self, branch: str, head_sha: str
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Find the appropriate base ref and merged commit for an already-merged branch.
+
+        Uses ``git rev-list --merges --ancestry-path`` to locate the merge
+        commit(s) on the ancestry path from *branch* to *head_sha*, then
+        filters to merge commits whose second parent has *branch* as an
+        ancestor **and** whose first parent does **not** have *branch* as an
+        ancestor. This distinguishes a merge *of* ``branch`` from a merge of
+        some other branch that merely happens to lie on the ancestry path.
+
+        Returns a tuple of:
+        - ``base_ref``: the first parent of the newest matching merge commit,
+          representing the state of HEAD immediately before ``branch`` was
+          merged.
+        - ``merged_commit``: the second parent of the newest matching merge
+          commit, i.e. the actual commit from ``branch`` that was merged into
+          HEAD. This is used instead of the live branch ref for version
+          inference, because the branch tip may have advanced past the merge.
+
+        Returns ``(None, None)`` when no matching merge commit is found (e.g.
+        the branch was fast-forwarded, rebased, or squashed into HEAD) or when
+        the git command fails.
+        """
+        # Find merge commits on the ancestry path from branch to head.
+        # --ancestry-path selects commits that are on a path from branch to
+        # head (descendants of branch and ancestors of head).
+        result = _run_git(
+            self.project_root,
+            "rev-list",
+            "--merges",
+            "--ancestry-path",
+            f"{branch}..{head_sha}",
+            check=False,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            self._log(
+                f"_find_base_ref_for_already_merged: rev-list failed for "
+                f"branch '{branch}': {result.stderr.strip()}"
+            )
+            return None, None
+
+        merge_commits = [
+            line.strip() for line in result.stdout.strip().split("\n") if line.strip()
+        ]
+        if not merge_commits:
+            # No merge commit on the ancestry path — the branch may have been
+            # fast-forwarded, rebased, or squashed. Cannot determine pre-merge
+            # state reliably.
+            self._log(
+                f"_find_base_ref_for_already_merged: no merge commit found for "
+                f"'{branch}' on ancestry path from {head_sha[:8]} — "
+                f"branch may have been fast-forwarded or rebased; "
+                f"bump inference skipped"
+            )
+            return None, None
+
+        # Filter to merge commits that actually merged this branch:
+        #   - branch must be an ancestor of the second parent (theirs)
+        #   - branch must NOT be an ancestor of the first parent (ours)
+        # This prevents mis-identifying a later merge of another branch
+        # (whose first parent already contains this branch's changes) as
+        # the merge of this branch.
+        branch_merge_commits: list[str] = []
+        for merge_commit in merge_commits:
+            merge_theirs = f"{merge_commit}^2"
+            # Verify this merge commit actually merged THIS branch:
+            # merge_commit^2 (the exact commit merged) must be an ancestor of
+            # the named branch ref. This distinguishes a direct merge of
+            # ``branch`` from a later merge of an unrelated branch that merely
+            # happens to have ``branch`` in its ancestry.
+            is_ancestor_of_branch = _run_git(
+                self.project_root,
+                "merge-base",
+                "--is-ancestor",
+                merge_theirs,
+                branch,
+                check=False,
+                timeout=15,
+            )
+            if is_ancestor_of_branch.returncode != 0:
+                # merge_commit^2 is not reachable from branch — this merge
+                # is of some other branch, not this one.
+                continue
+            is_ancestor_of_first = _run_git(
+                self.project_root,
+                "merge-base",
+                "--is-ancestor",
+                merge_theirs,
+                f"{merge_commit}^1",
+                check=False,
+                timeout=15,
+            )
+            if is_ancestor_of_first.returncode == 0:
+                # merge_commit^2 is already reachable from merge_commit^1.
+                # This means the merge is a redundant / no-op --no-ff re-merge
+                # of an already-integrated branch, not the original merge of
+                # this branch. Skip it.
+                continue
+            branch_merge_commits.append(merge_commit)
+
+        if not branch_merge_commits:
+            self._log(
+                f"_find_base_ref_for_already_merged: no merge commit of "
+                f"'{branch}' found on ancestry path from {head_sha[:8]} — "
+                f"branch may have been fast-forwarded or rebased; "
+                f"bump inference skipped"
+            )
+            return None, None
+
+        # branch_merge_commits are returned newest-first; use the newest merge
+        # commit (most recent time the branch was merged). This handles the
+        # case where a branch was merged, reverted, and re-merged — the oldest
+        # merge's parent would represent the original integration's pre-state,
+        # which may not reflect the true state before the re-merge.
+        newest_merge = branch_merge_commits[0]
+
+        # Warn for octopus merges (more than 2 parents). The first parent is
+        # the pre-merge HEAD, which is the correct base for our purposes, but
+        # other merged branches' changes are also in the ancestry.
+        parents_result = _run_git(
+            self.project_root,
+            "rev-parse",
+            f"{newest_merge}^@",
+            check=False,
+            timeout=15,
+        )
+        if parents_result.returncode == 0:
+            parents = [
+                line.strip()
+                for line in parents_result.stdout.strip().split("\n")
+                if line.strip()
+            ]
+            if len(parents) > 2:
+                self._log(
+                    f"WARNING: _find_base_ref_for_already_merged: merge commit "
+                    f"{newest_merge[:8]} for '{branch}' is an octopus merge "
+                    f"({len(parents)} parents). Using first parent as base; "
+                    f"other branches merged in the same octopus commit may "
+                    f"affect version inference."
+                )
+
+        parent_result = _run_git(
+            self.project_root,
+            "rev-parse",
+            f"{newest_merge}^",
+            check=False,
+            timeout=15,
+        )
+        if parent_result.returncode != 0:
+            self._log(
+                f"_find_base_ref_for_already_merged: could not get first parent "
+                f"of merge commit {newest_merge[:8]} for '{branch}'"
+            )
+            return None, None
+
+        base_ref = parent_result.stdout.strip()
+
+        # Get the second parent (the actual commit from the branch that was merged)
+        theirs_result = _run_git(
+            self.project_root,
+            "rev-parse",
+            f"{newest_merge}^2",
+            check=False,
+            timeout=15,
+        )
+        merged_commit = (
+            theirs_result.stdout.strip()
+            if theirs_result.returncode == 0
+            else None
+        )
+
+        return base_ref, merged_commit
 
     def _sync_runtime(self, branch: str, report: MergeReport) -> Optional[str]:
         """Sync runtime data from *branch*'s bound worktree into current se3/.
@@ -778,6 +1127,7 @@ class MergeOrchestrator:
             sync_report = sync_branch_runtime(self.project_root, branch)
             if sync_report.skipped:
                 self._log(f"Runtime sync skipped for '{branch}': no bound worktree")
+                report.runtime_sync_skipped_branches.append(branch)
             else:
                 if sync_report.copied:
                     self._log(
@@ -788,10 +1138,30 @@ class MergeOrchestrator:
                         f"Runtime sync discarded for '{branch}': "
                         f"{len(sync_report.discarded)} file(s)"
                     )
+                if sync_report.skipped_files:
+                    self._log(
+                        f"Runtime sync skipped files for '{branch}': "
+                        f"{sync_report.skipped_files}"
+                    )
+                    report.runtime_sync_skipped_files.append(
+                        (branch, sync_report.skipped_files)
+                    )
         except RuntimeSyncCollision as exc:
             self._log(f"Runtime sync collision for '{branch}': {exc}")
             report.failure_reason = "runtime_sync_collision"
             return "runtime_sync_collision"
+        except OSError as exc:
+            self._log(
+                f"Runtime sync OS error for '{branch}': {exc}"
+            )
+            report.failure_reason = "runtime_sync_os_error"
+            return "runtime_sync_os_error"
+        except subprocess.TimeoutExpired as exc:
+            self._log(
+                f"Runtime sync timeout for '{branch}': {exc}"
+            )
+            report.failure_reason = "runtime_sync_timeout"
+            return "runtime_sync_timeout"
         return None
 
     def _merge_single_branch(self, branch: str, report: MergeReport) -> str:
@@ -872,6 +1242,9 @@ class MergeOrchestrator:
                     f"Branch '{branch}' is already an ancestor — "
                     f"no-op merge, skipping bump inference"
                 )
+                sync_result = self._sync_runtime(branch, report)
+                if sync_result:
+                    return sync_result
                 return "already_merged"
 
             try:

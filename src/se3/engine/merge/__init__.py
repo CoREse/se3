@@ -27,6 +27,7 @@ from .runtime_sync import RuntimeSyncCollision, SyncReport, sync_branch_runtime
 from .strategy import DecisionAction, StrategyDecider, StrategyDecision
 from .version_aggregator import (
     AggregateResult,
+    InferResult,
     aggregate_and_apply,
     infer_branch_bump,
     max_bump,
@@ -51,6 +52,7 @@ __all__ = [
     "GuardrailViolation",
     "HumanCallWriter",
     "HunkResolution",
+    "InferResult",
     "infer_branch_bump",
     "LLMResolution",
     "max_bump",
@@ -59,6 +61,9 @@ __all__ = [
     "MergeReport",
     "MergeStrategy",
     "read_version_at_ref",
+    "RuntimeSyncCollision",
     "StrategyDecider",
     "StrategyDecision",
+    "sync_branch_runtime",
+    "SyncReport",
 ]

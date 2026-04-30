@@ -295,6 +295,16 @@ version:
 - **AND** that update is amended onto the last merge commit (not added as a separate commit)
 - **AND** historical commits on `feat/a`, `feat/b`, `feat/c` are NOT rewritten — SemVer uniqueness is enforced by tags, not by retroactive bumps on the merged branches
 
+#### Scenario: Per-branch bump uses end-to-end merge-base diff, not pre-merge HEAD
+- **GIVEN** the current branch's pre-merge version is `4.6.0`
+- **AND** branch `B` diverged from the current branch at version `4.4.0` and its tip is `4.4.1`
+- **AND** branch `C` diverged at `4.4.0` and its tip is `4.6.0`, with intermediate commits walking through `4.5.0` → `4.5.1` → `4.6.0`
+- **WHEN** the user runs `se3 merge B C`
+- **THEN** branch `B`'s bump is computed as the end-to-end diff `4.4.0 → 4.4.1` = PATCH
+- **AND** branch `C`'s bump is computed as the end-to-end diff `4.4.0 → 4.6.0` = MINOR (intra-branch intermediate bumps are NOT accumulated)
+- **AND** the comparison base is each branch's git merge-base with the pre-merge HEAD, NOT the pre-merge HEAD itself — so a branch tip that is below the pre-merge version still produces a valid bump rather than being skipped
+- **AND** the aggregated `max(PATCH, MINOR) = MINOR` is applied to the pre-merge version `4.6.0`, producing `4.7.0`
+
 ### Requirement: Documentation Updates
 
 SE3 SHALL automatically update README.md and VERSIONS.md when version changes.

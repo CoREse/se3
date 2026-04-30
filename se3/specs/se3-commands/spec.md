@@ -348,7 +348,7 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
 
 6. **Failure handling.** A merge that cannot be accepted (rejected by strategy, guardrails violation, LLM failure) defaults to `git merge --abort`, restoring the working tree. Branches successfully merged earlier in the sequence are preserved.
 
-7. **SemVer aggregation after merge.** After all branches are processed, the per-branch SemVer bump types (patch/minor/major), each computed against the merge base of that branch, are reduced via SemVer's max rule and a single `pyproject.toml` update is amended onto the last merge commit. Example: base `4.4.0` + patch + patch + minor → `4.5.0`. Per-branch historical commits are NOT rewritten — SemVer uniqueness is guaranteed by tags.
+7. **SemVer aggregation after merge.** After all branches are processed, the per-branch SemVer bump types (patch/minor/major) are reduced via SemVer's max rule and a single `pyproject.toml` update is amended onto the last merge commit. Each per-branch bump type is computed as an **end-to-end diff** from the version at that branch's merge-base (the commit where the branch diverged from the current branch) to the version at the branch tip; intra-branch intermediate bumps are NOT accumulated (symmetric with the cross-branch max rule, and robust to noisy intermediate version commits). The **application base** for the chosen aggregated bump is the current branch's pre-merge version (which may be ahead of any branch's merge-base version). Example: pre-merge `4.6.0`, branch `B` whose merge-base version is `4.4.0` and tip `4.4.1` (PATCH end-to-end), branch `C` whose merge-base version is `4.4.0` and tip `4.6.0` (MINOR end-to-end, even if its history walked through `4.5.0` → `4.5.1` → `4.6.0`) → `max(PATCH, MINOR) = MINOR`, applied to `4.6.0` yields `4.7.0`. Per-branch historical commits are NOT rewritten — SemVer uniqueness is guaranteed by tags.
 
 8. **Branch and worktree cleanup.** Default behavior is to keep merged branches. With `--delete-merged`:
    - Each merged branch is removed via `git branch -d` (lowercase) so that branches not reachable from HEAD are not silently destroyed.
@@ -421,6 +421,7 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
   - `git merge conflict (could not be resolved)` — text conflicts the resolver could not handle
   - `post-merge guardrails violation` — spec guardrails rejected the merge result
   - `failed to build conflict context` — the resolver could not even prepare conflict input (strategy-neutral phrasing applies to default, strict, and fast)
+  - `runtime_sync_collision` — post-merge runtime data synchronization (see "`se3 merge` Runtime Data Synchronization") detected a tier A relative-path collision and halted the sequence
   - fast-mode aborts (`fast strategy could not resolve conflict`, `fast strategy could not auto-repair guardrails violation`, `fast strategy LLM resolution failed`)
 - **AND** the same category labels are used in the CLI summary and the corresponding log entry, so that users do not confuse a guardrails-driven failure with an unresolved git conflict
 
@@ -431,6 +432,62 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
 - **THEN** the report is treated as an outright failure rather than a pending-human state
 - **AND** the CLI exits with the general-failure code rather than the interrupted/paused code, because there is no call file for the user to respond to with `se3 merge-respond`
 - **AND** the summary explicitly states that the human call file could not be written
+
+### Requirement: `se3 merge` Runtime Data Synchronization
+
+After each successful `git merge` of a branch, `se3 merge` SHALL synchronize gitignored runtime content under `se3/` from the merged branch's bound worktree into the current branch's project root. Because `git merge` only handles tracked files, runtime data excluded by `.gitignore` (logs, history, archived state, etc.) would otherwise be silently dropped. The synchronization is partitioned into three tiers with distinct semantics.
+
+**Tier A — Append-with-collision (relative-path keyed, structure preserved):**
+- Paths: `se3/history/`, `se3/logs/`, `se3/state/archive/`, `se3/collab/tasks/`, plus the direct-children glob patterns `se3/state/summary-*` and `se3/calls/confirm_*`.
+- Semantics: For every file under these tier A paths in the source worktree, copy it into the same relative path under the current project root only if no file already exists at that target relative path. Collisions are tested at the **relative-path** level — files with the same base name in different subdirectories do NOT collide.
+- Collision policy: When a tier A relative path is already present in the current `se3/`, the entire `se3 merge` invocation SHALL halt with the `runtime_sync_collision` failure category. The just-completed git merge commit is NOT rolled back; subsequent branches in the argument list are NOT attempted.
+- Idempotency: When the source and destination files have identical content (byte-for-byte), the destination is treated as already-synced and the file is skipped silently rather than being reported as a collision. This allows safe re-runs of `se3 merge` against the same branch.
+
+**Tier B — Discard branch-side (preserve current state):**
+- Paths: `se3/state/engine.json`, `se3/state/known_test_failures.json`, `se3/calls/active/`.
+- Semantics: The current project's tier B content is preserved as-is; the merged branch's tier B content is recorded as discarded but NOT copied. Rationale: these files describe live flow-engine runtime state and overwriting them would corrupt the current run.
+
+**Tier C — Skip entirely (neither read nor written):**
+- Paths: `se3/cache/`, `se3/tmp/`, `se3/worktrees/`.
+- Semantics: Tier C content is ignored on both sides. These are derived caches or nested worktree pointers that have no meaningful merge.
+
+**Source-worktree absence:** When the merged branch has no bound worktree, or the worktree's filesystem path is missing (e.g. force-removed externally), runtime sync logs a warning and skips that branch's sync without treating it as a failure. The runtime data is simply unavailable; the merge sequence continues.
+
+#### Scenario: Tier A files synced from merged branch
+- **GIVEN** branch `feat/x` has files `se3/history/run-001.json` and `se3/logs/2026-04-30.log` in its bound worktree
+- **AND** the current project's `se3/` has no files at those relative paths
+- **WHEN** `se3 merge feat/x` completes the git merge
+- **THEN** both files are copied into the current project root at their original relative paths
+
+#### Scenario: Tier A relative-path collision halts the sequence
+- **GIVEN** branch `feat/y` has `se3/history/run-001.json` in its worktree with different content from the current project's `se3/history/run-001.json`
+- **WHEN** `se3 merge feat/y feat/z` runs and the git merge of `feat/y` succeeds
+- **THEN** the runtime sync detects the collision and the entire invocation halts with the `runtime_sync_collision` failure category
+- **AND** the just-completed merge commit for `feat/y` is preserved (not aborted)
+- **AND** `feat/z` is NOT attempted
+
+#### Scenario: Identical-content tier A file is treated as idempotent no-op
+- **GIVEN** branch `feat/q` has `se3/history/run-007.json` whose content is byte-for-byte identical to the current project's `se3/history/run-007.json`
+- **WHEN** `se3 merge feat/q` runs runtime sync
+- **THEN** the file is skipped without being reported as a collision
+- **AND** the merge sequence proceeds to the next branch
+
+#### Scenario: Tier B preserves current runtime state
+- **GIVEN** branch `feat/a` has its own `se3/state/engine.json` and entries under `se3/calls/active/`
+- **WHEN** `se3 merge feat/a` completes
+- **THEN** the current project's `se3/state/engine.json` and `se3/calls/active/` are unchanged
+- **AND** `feat/a`'s tier B content is recorded as discarded but not copied
+
+#### Scenario: Tier C is not touched
+- **GIVEN** branch `feat/b` has `se3/cache/index.db` and `se3/tmp/scratch.txt` in its worktree
+- **WHEN** `se3 merge feat/b` completes
+- **THEN** runtime sync neither reads nor writes any tier C path
+
+#### Scenario: Source worktree missing
+- **GIVEN** branch `feat/c` has no bound worktree (or its worktree directory has been removed externally)
+- **WHEN** `se3 merge feat/c` completes the git merge
+- **THEN** runtime sync logs a warning and skips that branch's sync
+- **AND** the merge sequence continues normally with subsequent branches
 
 ### Requirement: Fast-Mode Guardrail Repair Stall Escalation
 

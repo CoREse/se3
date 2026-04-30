@@ -8,6 +8,10 @@ from pathlib import Path
 from se3.engine.merge.orchestrator import MergeOrchestrator
 from se3.engine.merge.version_aggregator import (
     AggregateResult,
+    InferResult,
+    _diff_bump,
+    _parse_pyproject_version,
+    _slice_to_next_section,
     aggregate_and_apply,
     infer_branch_bump,
     max_bump,
@@ -125,6 +129,86 @@ class TestMaxBump:
         assert max_bump([BumpType.MINOR, BumpType.MINOR]) == BumpType.MINOR
 
 
+# ---------- Unit tests: _diff_bump ---------- #
+
+
+class TestDiffBump:
+    """Direct tests for _diff_bump including prerelease / build metadata."""
+
+    def test_major(self):
+        from se3.engine.version_bumper import Version
+        base = Version.parse("1.2.3")
+        branch = Version.parse("2.0.0")
+        assert _diff_bump(base, branch) == BumpType.MAJOR
+
+    def test_minor(self):
+        from se3.engine.version_bumper import Version
+        base = Version.parse("1.2.3")
+        branch = Version.parse("1.3.0")
+        assert _diff_bump(base, branch) == BumpType.MINOR
+
+    def test_patch(self):
+        from se3.engine.version_bumper import Version
+        base = Version.parse("1.2.3")
+        branch = Version.parse("1.2.4")
+        assert _diff_bump(base, branch) == BumpType.PATCH
+
+    def test_no_change_returns_none(self):
+        from se3.engine.version_bumper import Version
+        base = Version.parse("1.2.3")
+        branch = Version.parse("1.2.3")
+        assert _diff_bump(base, branch) is None
+
+    def test_backward_returns_none(self):
+        from se3.engine.version_bumper import Version
+        base = Version.parse("1.3.0")
+        branch = Version.parse("1.2.3")
+        assert _diff_bump(base, branch) is None
+
+    def test_prerelease_to_release_returns_patch(self):
+        """4.5.0-alpha -> 4.5.0 (release > prerelease per SemVer §11) = PATCH."""
+        from se3.engine.version_bumper import Version
+        base = Version.parse("4.5.0-alpha")
+        branch = Version.parse("4.5.0")
+        assert _diff_bump(base, branch) == BumpType.PATCH
+
+    def test_release_to_prerelease_returns_none(self):
+        """4.5.0 -> 4.5.0-alpha is a backward step in precedence."""
+        from se3.engine.version_bumper import Version
+        base = Version.parse("4.5.0")
+        branch = Version.parse("4.5.0-alpha")
+        assert _diff_bump(base, branch) is None
+
+    def test_build_metadata_only_returns_none(self):
+        """4.5.0 -> 4.5.0+build.42: build metadata ignored in precedence."""
+        from se3.engine.version_bumper import Version
+        base = Version.parse("4.5.0")
+        branch = Version.parse("4.5.0+build.42")
+        assert _diff_bump(base, branch) is None
+
+    def test_prerelease_bump_with_numeric_change(self):
+        """4.5.0-alpha -> 4.6.0: numeric minor change dominates."""
+        from se3.engine.version_bumper import Version
+        base = Version.parse("4.5.0-alpha")
+        branch = Version.parse("4.6.0")
+        assert _diff_bump(base, branch) == BumpType.MINOR
+
+
+# ---------- Unit tests: InferResult ---------- #
+
+
+class TestInferResult:
+    def test_dataclass_fields(self):
+        r = InferResult(bump=BumpType.PATCH, reason="test")
+        assert r.bump == BumpType.PATCH
+        assert r.reason == "test"
+
+    def test_none_bump_with_reason(self):
+        r = InferResult(bump=None, reason="no version metadata")
+        assert r.bump is None
+        assert r.reason == "no version metadata"
+
+
 # ---------- Unit tests: infer_branch_bump ---------- #
 
 
@@ -142,8 +226,9 @@ class TestInferBranchBump:
         _write_pyproject(tmp_path, "4.4.1")
         _commit(tmp_path, "Bump patch")
 
-        bump = infer_branch_bump(tmp_path, "feature", base_sha)
-        assert bump == BumpType.PATCH
+        result = infer_branch_bump(tmp_path, "feature", base_sha)
+        assert result.bump == BumpType.PATCH
+        assert "patch" in result.reason.lower()
 
     def test_minor_bump(self, tmp_path: Path):
         _init_repo(tmp_path)
@@ -158,8 +243,9 @@ class TestInferBranchBump:
         _write_pyproject(tmp_path, "4.5.0")
         _commit(tmp_path, "Bump minor")
 
-        bump = infer_branch_bump(tmp_path, "feature", base_sha)
-        assert bump == BumpType.MINOR
+        result = infer_branch_bump(tmp_path, "feature", base_sha)
+        assert result.bump == BumpType.MINOR
+        assert "minor" in result.reason.lower()
 
     def test_major_bump(self, tmp_path: Path):
         _init_repo(tmp_path)
@@ -174,8 +260,9 @@ class TestInferBranchBump:
         _write_pyproject(tmp_path, "5.0.0")
         _commit(tmp_path, "Bump major")
 
-        bump = infer_branch_bump(tmp_path, "feature", base_sha)
-        assert bump == BumpType.MAJOR
+        result = infer_branch_bump(tmp_path, "feature", base_sha)
+        assert result.bump == BumpType.MAJOR
+        assert "major" in result.reason.lower()
 
     def test_no_version_change_returns_none(self, tmp_path: Path):
         """When the branch did not advance the version, no bump is inferred."""
@@ -192,8 +279,9 @@ class TestInferBranchBump:
         (tmp_path / "feature.txt").write_text("data")
         _commit(tmp_path, "Add feature file")
 
-        bump = infer_branch_bump(tmp_path, "feature", base_sha)
-        assert bump is None
+        result = infer_branch_bump(tmp_path, "feature", base_sha)
+        assert result.bump is None
+        assert "did not advance" in result.reason.lower()
 
     def test_no_pyproject_returns_none(self, tmp_path: Path):
         """When neither base nor branch has a readable version, return None."""
@@ -208,8 +296,9 @@ class TestInferBranchBump:
         (tmp_path / "f.txt").write_text("x")
         _commit(tmp_path, "Add f")
 
-        bump = infer_branch_bump(tmp_path, "feature", base_sha)
-        assert bump is None
+        result = infer_branch_bump(tmp_path, "feature", base_sha)
+        assert result.bump is None
+        assert "no readable version" in result.reason.lower()
 
     def test_branch_lower_version_returns_none(self, tmp_path: Path):
         """A branch with a lower version does not contribute a bump."""
@@ -225,8 +314,9 @@ class TestInferBranchBump:
         _write_pyproject(tmp_path, "4.4.0")
         _commit(tmp_path, "Lower version")
 
-        bump = infer_branch_bump(tmp_path, "feature", base_sha)
-        assert bump is None
+        result = infer_branch_bump(tmp_path, "feature", base_sha)
+        assert result.bump is None
+        assert "did not advance" in result.reason.lower()
 
     def test_end_to_end_diff_ignores_intermediate_bumps(self, tmp_path: Path):
         """Intermediate bumps inside a branch are ignored; only end-to-end diff counts."""
@@ -249,9 +339,9 @@ class TestInferBranchBump:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        bump = infer_branch_bump(tmp_path, "feature", merge_base)
+        result = infer_branch_bump(tmp_path, "feature", merge_base)
         # End-to-end: 1.0.0 -> 1.2.0 = MINOR (not cumulative major)
-        assert bump == BumpType.MINOR
+        assert result.bump == BumpType.MINOR
 
     def test_spec_example_branch_bumps(self, tmp_path: Path):
         """Spec example: A branch-point 4.4.0, B tip 4.4.1 (PATCH), C tip 4.6.0 (MINOR).
@@ -293,11 +383,68 @@ class TestInferBranchBump:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        bump_b = infer_branch_bump(tmp_path, "B", merge_base_b)
-        bump_c = infer_branch_bump(tmp_path, "C", merge_base_c)
+        result_b = infer_branch_bump(tmp_path, "B", merge_base_b)
+        result_c = infer_branch_bump(tmp_path, "C", merge_base_c)
 
-        assert bump_b == BumpType.PATCH
-        assert bump_c == BumpType.MINOR
+        assert result_b.bump == BumpType.PATCH
+        assert result_c.bump == BumpType.MINOR
+
+    def test_prerelease_to_release_infers_patch(self, tmp_path: Path):
+        """A branch that finalizes a prerelease (e.g. 4.5.0-alpha → 4.5.0)
+        contributes a PATCH bump per SemVer 2.0.0 §11."""
+        _init_repo(tmp_path)
+        _write_pyproject(tmp_path, "4.5.0-alpha")
+        _commit(tmp_path, "Add pyproject")
+        base_sha = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        _checkout(tmp_path, "feature", create=True)
+        _write_pyproject(tmp_path, "4.5.0")
+        _commit(tmp_path, "Release finalize")
+
+        result = infer_branch_bump(tmp_path, "feature", base_sha)
+        assert result.bump == BumpType.PATCH
+        assert "patch" in result.reason.lower()
+
+    def test_release_to_prerelease_no_bump(self, tmp_path: Path):
+        """A branch that adds a prerelease suffix (4.5.0 → 4.5.0-alpha)
+        does NOT contribute a bump — it is a backward step in precedence."""
+        _init_repo(tmp_path)
+        _write_pyproject(tmp_path, "4.5.0")
+        _commit(tmp_path, "Add pyproject")
+        base_sha = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        _checkout(tmp_path, "feature", create=True)
+        _write_pyproject(tmp_path, "4.5.0-alpha")
+        _commit(tmp_path, "Add prerelease")
+
+        result = infer_branch_bump(tmp_path, "feature", base_sha)
+        assert result.bump is None
+        assert "did not advance" in result.reason.lower()
+
+    def test_build_metadata_only_no_bump(self, tmp_path: Path):
+        """Build metadata changes (4.5.0 → 4.5.0+build.42) do not affect
+        precedence and therefore do not contribute a bump."""
+        _init_repo(tmp_path)
+        _write_pyproject(tmp_path, "4.5.0")
+        _commit(tmp_path, "Add pyproject")
+        base_sha = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        _checkout(tmp_path, "feature", create=True)
+        _write_pyproject(tmp_path, "4.5.0+build.42")
+        _commit(tmp_path, "Add build metadata")
+
+        result = infer_branch_bump(tmp_path, "feature", base_sha)
+        assert result.bump is None
+        assert "did not advance" in result.reason.lower()
 
 
 # ---------- Unit tests: aggregate_and_apply ---------- #
@@ -529,6 +676,98 @@ class TestAggregateAndApply:
         assert result.bump_type == BumpType.MINOR
         assert result.new_version == "4.7.0"
         assert _read_pyproject_version(tmp_path) == "4.7.0"
+
+
+# ---------- Unit tests: _parse_pyproject_version ---------- #
+
+
+class TestParsePyprojectVersion:
+    def test_simple_project_version(self):
+        content = '[project]\nname = "test"\nversion = "1.2.3"\n'
+        assert _parse_pyproject_version(content) == "1.2.3"
+
+    def test_poetry_version(self):
+        content = '[tool.poetry]\nname = "test"\nversion = "2.0.0"\n'
+        assert _parse_pyproject_version(content) == "2.0.0"
+
+    def test_project_takes_precedence_over_poetry(self):
+        content = (
+            '[project]\nname = "test"\nversion = "1.0.0"\n'
+            '[tool.poetry]\nname = "test"\nversion = "2.0.0"\n'
+        )
+        assert _parse_pyproject_version(content) == "1.0.0"
+
+    def test_multiline_string_with_bracket_not_section_boundary(self):
+        """A \"\"\"...\"\"\" value containing `[` on its own line must not be
+        misinterpreted as a section boundary."""
+        content = (
+            '[project]\n'
+            'name = "test"\n'
+            'description = """\n'
+            'Some multi-line text\n'
+            '[example]\n'
+            'More text\n'
+            '"""\n'
+            'version = "1.2.3"\n'
+            '[tool.poetry]\n'
+            'version = "9.9.9"\n'
+        )
+        assert _parse_pyproject_version(content) == "1.2.3"
+
+    def test_single_quote_multiline_string_with_bracket(self):
+        """A \'\'\'...\'\'\' value containing `[` must also be respected."""
+        content = (
+            "[project]\n"
+            "name = 'test'\n"
+            "description = '''\n"
+            "Some multi-line text\n"
+            "[example]\n"
+            "More text\n"
+            "'''\n"
+            'version = "1.2.3"\n'
+        )
+        assert _parse_pyproject_version(content) == "1.2.3"
+
+    def test_no_version_returns_none(self):
+        content = '[project]\nname = "test"\n'
+        assert _parse_pyproject_version(content) is None
+
+    def test_inline_array_not_misread(self):
+        """keywords = [\"py\"] should not terminate the section."""
+        content = (
+            '[project]\n'
+            'name = "test"\n'
+            'keywords = ["py"]\n'
+            'version = "3.0.0"\n'
+            '[tool.poetry]\n'
+            'version = "9.9.9"\n'
+        )
+        assert _parse_pyproject_version(content) == "3.0.0"
+
+
+class TestSliceToNextSection:
+    def test_finds_next_section(self):
+        content = '[project]\na = 1\n[tool.poetry]\nb = 2\n'
+        result = _slice_to_next_section(content, len("[project]"))
+        assert result == '\na = 1\n'
+
+    def test_no_next_section_returns_rest(self):
+        content = '[project]\na = 1\nb = 2\n'
+        result = _slice_to_next_section(content, len("[project]"))
+        assert result == '\na = 1\nb = 2\n'
+
+    def test_skips_bracket_inside_triple_quoted_string(self):
+        content = (
+            '[project]\n'
+            'desc = """\n'
+            '[not-a-section]\n'
+            '"""\n'
+            'version = "1.0.0"\n'
+            '[next]\n'
+        )
+        result = _slice_to_next_section(content, len("[project]"))
+        assert '[not-a-section]' in result
+        assert '[next]' not in result
 
 
 # ---------- Unit tests: read_version_at_ref ---------- #
@@ -944,3 +1183,95 @@ class TestOrchestratorVersionAggregation:
         assert report.version_aggregation_skipped is True
         # Version from working tree reflects the merged branch
         assert _read_pyproject_version(tmp_path) == "4.5.0"
+
+    def test_end_to_end_spec_example_4_7_0(self, tmp_path: Path, monkeypatch):
+        """End-to-end: A advanced past branch-point, B PATCH, C MINOR → 4.7.0.
+
+        Repo state:
+        - Base (M0): pyproject 4.4.0
+        - Branch B: pyproject 4.4.1 (patch from base)
+        - Branch C: pyproject 4.5.0 → 4.5.1 → 4.6.0 (minor from base, with noise)
+        - A advances to 4.6.0 after branches were created
+
+        Merge order: C first (clean — pyproject identical to A at 4.6.0),
+        then B (conflict — B at 4.4.1 vs A at 4.6.0).
+        The conflict resolver is mocked to accept keeping A's version.
+        """
+        _init_repo(tmp_path)
+        _write_pyproject(tmp_path, "4.4.0")
+        _commit(tmp_path, "M0")
+        default_branch = _get_default_branch(tmp_path)
+
+        # Branch B: patch bump
+        _checkout(tmp_path, "B", create=True)
+        _write_pyproject(tmp_path, "4.4.1")
+        (tmp_path / "b.txt").write_text("b")
+        _commit(tmp_path, "Bump patch on B")
+        _checkout(tmp_path, default_branch)
+
+        # Branch C: minor bump with intermediate noise
+        _checkout(tmp_path, "C", create=True)
+        _write_pyproject(tmp_path, "4.5.0")
+        (tmp_path / "c.txt").write_text("c1")
+        _commit(tmp_path, "C1: 4.5.0")
+        _write_pyproject(tmp_path, "4.5.1")
+        _commit(tmp_path, "C2: 4.5.1")
+        _write_pyproject(tmp_path, "4.6.0")
+        (tmp_path / "c.txt").write_text("c3")
+        _commit(tmp_path, "C3: 4.6.0")
+        _checkout(tmp_path, default_branch)
+
+        # A advances past branch-point to 4.6.0
+        _write_pyproject(tmp_path, "4.6.0")
+        (tmp_path / "a.txt").write_text("a")
+        _commit(tmp_path, "M1: advance A to 4.6.0")
+
+        # Mock conflict resolver to accept the pyproject resolution (keep ours)
+        def mock_resolve(self, context, strategy):
+            from se3.engine.merge.conflict_resolver import (
+                Confidence, FileResolution, HunkResolution, LLMResolution,
+            )
+            files = []
+            for cf in context.files:
+                # Keep "ours" (A's) content for pyproject; pass through for others
+                if cf.path == "pyproject.toml":
+                    resolved = cf.ours_content
+                else:
+                    resolved = cf.ours_content
+                files.append(
+                    FileResolution(
+                        path=cf.path,
+                        resolved_content=resolved,
+                        hunks=[
+                            HunkResolution(
+                                h.start_line, h.end_line,
+                                Confidence.HIGH, "accept ours"
+                            )
+                            for h in cf.hunks
+                        ],
+                        overall_confidence=Confidence.HIGH,
+                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        is_spec=cf.is_spec,
+                    )
+                )
+            return LLMResolution(
+                files=files,
+                overall_confidence=Confidence.HIGH,
+                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["C", "B"])
+
+        assert report.success is True
+        assert "C" in report.merged_branches
+        assert "B" in report.merged_branches
+        assert report.pre_merge_version == "4.6.0"
+        # max(PATCH from B, MINOR from C) on 4.6.0 → 4.7.0
+        assert report.final_version == "4.7.0"
+        assert report.bump_type == "minor"
+        assert _read_pyproject_version(tmp_path) == "4.7.0"

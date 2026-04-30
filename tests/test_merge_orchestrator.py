@@ -85,6 +85,18 @@ def _write_pyproject(path: Path, version: str) -> None:
     (path / "pyproject.toml").write_text(content)
 
 
+def _read_pyproject_version(path: Path) -> str:
+    """Read pyproject.toml's version from working tree."""
+    content = (path / "pyproject.toml").read_text()
+    import re
+    match = re.search(
+        r'\[project\][^\[]*?version\s*=\s*["\']([^"\']+)["\']',
+        content, re.DOTALL,
+    )
+    assert match, "could not find version in pyproject.toml"
+    return match.group(1)
+
+
 def _commit(path: Path, message: str, *files: str) -> None:
     """Stage files and commit."""
     if files:
@@ -1886,7 +1898,7 @@ class TestMergeOrchestratorCleanupInteraction:
         )
 
         # Mock aggregate_and_apply to fail (simulate amend failure)
-        def mock_aggregate(project_root, bumps, pre_version):
+        def mock_aggregate(project_root, bumps, pre_version, amend=True):
             from se3.engine.merge.version_aggregator import AggregateResult
             return AggregateResult(
                 success=False,
@@ -5313,8 +5325,11 @@ class TestRuntimeSyncIntegration:
         # feature-a's file should exist
         assert (tmp_path / "a.txt").exists()
 
-        # feature-b's merge commit should still be on HEAD (not rolled back)
+        # Merge commit is on HEAD; branch IS recorded as merged so the
+        # report matches git state. On retry, the already-merged path will
+        # re-run runtime sync.
         assert (tmp_path / "b.txt").exists()
+        assert "feature-b" in report.merged_branches
 
         # The colliding file in target should remain unchanged
         assert (target_se3 / "history" / "flow1.log").read_text() == "target log"
@@ -5322,6 +5337,106 @@ class TestRuntimeSyncIntegration:
         # Cleanup worktree (force because se3/ files are gitignored but present)
         subprocess.run(
             ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_collision_report_shape_and_log(self, tmp_path: Path) -> None:
+        """Tier-A collision from inside the orchestrator: verify MergeReport shape.
+
+        Creates two branches with bound worktrees; the first merges cleanly and
+        copies its tier-A file into the target se3/. The second branch's merge
+        succeeds git-wise but runtime_sync collides because the target now has
+        the first branch's file. Verifies:
+        - failure_reason='runtime_sync_collision'
+        - branch recorded in merged_branches
+        - version_aggregation_skipped=True (no version bump applied)
+        - log contains retry warning
+        - merge commit is on HEAD
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # Set up pyproject.toml so version aggregation is attempted
+        _write_pyproject(tmp_path, "1.0.0")
+        _commit(tmp_path, "M0: v1.0.0")
+
+        # feature-a: clean merge with worktree containing tier-A file
+        _create_branch(tmp_path, "feature-a")
+        _write_pyproject(tmp_path, "1.0.1")
+        (tmp_path / "a.txt").write_text("a")
+        _commit(tmp_path, "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-b: will collide at runtime_sync (do NOT change pyproject.toml
+        # so the merge is clean and runtime_sync actually runs)
+        _create_branch(tmp_path, "feature-b")
+        (tmp_path / "b.txt").write_text("b")
+        _commit(tmp_path, "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Create bound worktree for feature-a with tier-A file
+        wt_a = (tmp_path / ".." / "feature-a-wt").resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_a), "feature-a"],
+            check=True, capture_output=True,
+        )
+        (wt_a / "se3" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_a / "se3" / "history" / "h1.md").write_text("feature-a history")
+
+        # Create bound worktree for feature-b with SAME tier-A file (collision)
+        wt_b = (tmp_path / ".." / "feature-b-wt").resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_b), "feature-b"],
+            check=True, capture_output=True,
+        )
+        (wt_b / "se3" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_b / "se3" / "history" / "h1.md").write_text("feature-b history")
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature-a", "feature-b"])
+
+        # feature-a merged, feature-b collided
+        assert report.success is False
+        assert "feature-a" in report.merged_branches
+        assert report.failed_branch == "feature-b"
+        assert report.failure_reason == "runtime_sync_collision"
+
+        # The collided branch IS recorded as merged (git merge succeeded)
+        assert "feature-b" in report.merged_branches
+
+        # Version aggregation was skipped because the sequence stopped early
+        assert report.version_aggregation_skipped is True
+        # No version bump was applied (aggregation skipped)
+        assert report.final_version is None
+
+        # Log should contain retry warning
+        assert report.log_file is not None
+        log_text = report.log_file.read_text()
+        assert "runtime sync collision" in log_text.lower()
+        assert "retry" in log_text.lower() or "again" in log_text.lower()
+
+        # Merge commit for feature-b IS on HEAD (git merge succeeded)
+        # Verify by checking the file exists and HEAD is a merge commit
+        assert (tmp_path / "b.txt").exists()
+        head_parents = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD^@"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip().splitlines()
+        assert len(head_parents) == 2, "HEAD should be a merge commit with 2 parents"
+
+        # Cleanup worktrees
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_a)],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_b)],
             check=True, capture_output=True,
         )
 
@@ -5345,3 +5460,745 @@ class TestRuntimeSyncIntegration:
         assert report.log_file is not None
         log_content = report.log_file.read_text()
         assert "Runtime sync skipped" in log_content
+
+    def test_already_merged_runs_runtime_sync(self, tmp_path: Path) -> None:
+        """When a branch is already merged (already_merged path), runtime sync still runs.
+
+        The branch tip's tracked content was already on HEAD, but its gitignored
+        runtime data (tier A) in the bound worktree still needs to be synced.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Merge feature first (normal path)
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report1 = orch.execute(["feature"])
+        assert report1.success is True
+        assert report1.merged_branches == ["feature"]
+
+        # Create bound worktree for feature with tier A runtime data
+        wt_dir = tmp_path / ".." / "feature-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature"],
+            check=True, capture_output=True,
+        )
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True)
+        (wt_se3 / "history" / "flow1.log").write_text("wt log")
+
+        # Try merging feature again — it's already an ancestor
+        # Reset the worktree so HEAD is back on main
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        orch2 = MergeOrchestrator(project_root=tmp_path)
+        report2 = orch2.execute(["feature"])
+
+        assert report2.success is True
+        assert report2.merged_branches == ["feature"]
+        # Tier A files from the worktree should be synced even though
+        # the branch was already merged
+        target_se3 = tmp_path / "se3"
+        assert (target_se3 / "history" / "flow1.log").exists()
+        assert (target_se3 / "history" / "flow1.log").read_text() == "wt log"
+
+        # Cleanup
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_os_error_stops_merge(self, tmp_path: Path) -> None:
+        """Tier A copy OSError stops the merge sequence with correct failure_reason."""
+        from pathlib import Path
+
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature-a: clean merge, no worktree
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-b: will have an OS error during copy
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Create bound worktree for feature-b with a tier A file
+        wt_dir = tmp_path / ".." / "feature-b-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
+            check=True, capture_output=True,
+        )
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
+
+        # Inject a PermissionError during os.open so the copy phase fails
+        import os
+        original_open = os.open
+        tier_a_file = str(wt_se3 / "history" / "flow1.log")
+        def _failing_open(path, flags, *args, **kwargs):
+            if str(path) == tier_a_file:
+                raise PermissionError(13, "Permission denied", str(path))
+            return original_open(path, flags, *args, **kwargs)
+
+        os.open = _failing_open
+        try:
+            orch = MergeOrchestrator(project_root=tmp_path)
+            report = orch.execute(["feature-a", "feature-b"])
+        finally:
+            os.open = original_open
+
+        # feature-a merged successfully, feature-b hit OS error
+        assert report.success is False
+        assert "feature-a" in report.merged_branches
+        assert report.failed_branch == "feature-b"
+        # Must NOT be reported as collision or unexpected
+        assert report.failure_reason == "runtime_sync_os_error"
+        # feature-b IS recorded as merged (merge commit is on HEAD)
+        assert "feature-b" in report.merged_branches
+
+        # feature-a's file should exist
+        assert (tmp_path / "a.txt").exists()
+        # feature-b's merge commit should still be on HEAD (not rolled back)
+        assert (tmp_path / "b.txt").exists()
+
+        # Cleanup worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_timeout_stops_merge(self, tmp_path: Path) -> None:
+        """TimeoutExpired from _get_worktree_path_for_branch stops merge gracefully."""
+        import se3.engine.merge.runtime_sync as _rs
+
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature-a: clean merge, no worktree
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-b: will timeout during worktree lookup
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Mock _get_worktree_path_for_branch to raise TimeoutExpired only for feature-b
+        original = _rs._get_worktree_path_for_branch
+        def _raise_timeout(project_root, branch):
+            if branch == "feature-b":
+                raise subprocess.TimeoutExpired(cmd=["git", "worktree", "list"], timeout=15)
+            return original(project_root, branch)
+
+        _rs._get_worktree_path_for_branch = _raise_timeout
+        try:
+            orch = MergeOrchestrator(project_root=tmp_path)
+            report = orch.execute(["feature-a", "feature-b"])
+        finally:
+            _rs._get_worktree_path_for_branch = original
+
+        assert report.success is False
+        assert "feature-a" in report.merged_branches
+        assert report.failed_branch == "feature-b"
+        assert report.failure_reason == "runtime_sync_timeout"
+        # feature-b IS recorded as merged (merge commit is on HEAD)
+        assert "feature-b" in report.merged_branches
+        assert (tmp_path / "a.txt").exists()
+
+    def test_runtime_sync_collision_recovery_path(self, tmp_path: Path) -> None:
+        """After a collision, re-running merge on the same branch succeeds
+        once the collision is cleared (already_merged path re-runs sync),
+        and the version from the merge commit is preserved."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # Set up version metadata before branching
+        _write_pyproject(tmp_path, "1.0.0")
+        _commit(tmp_path, "M0: v1.0.0")
+
+        _create_branch(tmp_path, "feature-b")
+        _write_pyproject(tmp_path, "1.0.1")
+        (tmp_path / "b.txt").write_text("b")
+        _commit(tmp_path, "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Set up target se3/ with a colliding file
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        # Create bound worktree for feature-b with a colliding file
+        wt_dir = tmp_path / ".." / "feature-b-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
+            check=True, capture_output=True,
+        )
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
+
+        # First merge attempt — should fail with collision
+        orch1 = MergeOrchestrator(project_root=tmp_path)
+        report1 = orch1.execute(["feature-b"])
+
+        assert report1.success is False
+        assert report1.failure_reason == "runtime_sync_collision"
+        # Merge commit IS on HEAD (git merge succeeded) — branch recorded as merged
+        assert "feature-b" in report1.merged_branches
+        assert (tmp_path / "b.txt").exists()
+        # Version from the merge commit is already present
+        assert _read_pyproject_version(tmp_path) == "1.0.1"
+
+        # User clears the collision by removing the target file
+        (target_se3 / "history" / "flow1.log").unlink()
+
+        # Second merge attempt — should succeed via already_merged path
+        orch2 = MergeOrchestrator(project_root=tmp_path)
+        report2 = orch2.execute(["feature-b"])
+
+        assert report2.success is True
+        assert "feature-b" in report2.merged_branches
+        # The tier A file should now be synced from the worktree
+        assert (target_se3 / "history" / "flow1.log").exists()
+        assert (target_se3 / "history" / "flow1.log").read_text() == "feature-b log"
+        # Version must remain correct (from the original merge, not double-bumped)
+        assert _read_pyproject_version(tmp_path) == "1.0.1"
+        # Aggregation runs (head != base path) but produces the same version
+        # because the branch's bump (patch on 1.0.0 = 1.0.1) matches what's
+        # already in HEAD.
+        assert report2.version_aggregation_skipped is False
+        assert report2.final_version == "1.0.1"
+        assert report2.bump_type == "patch"
+
+        # Cleanup worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_collision_multi_branch_retry_no_over_bump(
+        self, tmp_path: Path
+    ) -> None:
+        """Mixed-recovery: retry with one already-merged + one new branch.
+
+        First attempt: B merges (version 1.0.0 -> 1.0.1) but runtime_sync
+        collides, so C is never attempted. On retry `se3 merge B C`, B is
+        already_merged and C merges. The final version must be 1.0.1
+        (max(PATCH, PATCH) on original 1.0.0), NOT 1.0.2.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # M0: version 1.0.0
+        _write_pyproject(tmp_path, "1.0.0")
+        _commit(tmp_path, "M0: v1.0.0")
+
+        # Branch B: patch bump to 1.0.1
+        _create_branch(tmp_path, "feature-b")
+        _write_pyproject(tmp_path, "1.0.1")
+        (tmp_path / "b.txt").write_text("b")
+        _commit(tmp_path, "B: patch to 1.0.1")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Branch C: also patch bump to 1.0.1 (same target, different file)
+        _create_branch(tmp_path, "feature-c")
+        _write_pyproject(tmp_path, "1.0.1")
+        (tmp_path / "c.txt").write_text("c")
+        _commit(tmp_path, "C: patch to 1.0.1")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Set up target se3/ with a colliding file for B's worktree
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        # Create bound worktree for B with a colliding tier A file
+        wt_b_dir = tmp_path / ".." / "feature-b-wt"
+        wt_b_dir = wt_b_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_b_dir), "feature-b"],
+            check=True, capture_output=True,
+        )
+        wt_b_se3 = wt_b_dir / "se3"
+        (wt_b_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (wt_b_se3 / "history" / "flow1.log").write_text("feature-b log")
+
+        # First attempt: merge B then C — B succeeds, runtime_sync collides
+        orch1 = MergeOrchestrator(project_root=tmp_path)
+        report1 = orch1.execute(["feature-b", "feature-c"])
+
+        assert report1.success is False
+        assert report1.failure_reason == "runtime_sync_collision"
+        # B's merge commit IS on HEAD — branch recorded as merged
+        assert "feature-b" in report1.merged_branches
+        assert (tmp_path / "b.txt").exists()
+        assert _read_pyproject_version(tmp_path) == "1.0.1"
+
+        # Clear the collision so retry can proceed
+        (target_se3 / "history" / "flow1.log").unlink()
+
+        # Retry: B is already_merged, C merges cleanly
+        orch2 = MergeOrchestrator(project_root=tmp_path)
+        report2 = orch2.execute(["feature-b", "feature-c"])
+
+        assert report2.success is True
+        assert "feature-b" in report2.merged_branches
+        assert "feature-c" in report2.merged_branches
+        # Critical: must NOT over-bump. Both branches are PATCH on 1.0.0.
+        assert report2.final_version == "1.0.1"
+        assert _read_pyproject_version(tmp_path) == "1.0.1"
+
+        # Cleanup worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_b_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_conflict_resolved_then_runtime_sync(self, tmp_path: Path, monkeypatch) -> None:
+        """After LLM conflict resolution and commit, runtime sync runs
+        and copies tier A files from the branch's bound worktree."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _write_pyproject(tmp_path, "1.0.0")
+        _commit(tmp_path, "M0")
+
+        # Create a shared file that will conflict
+        (tmp_path / "shared.txt").write_text("base content")
+        _commit(tmp_path, "Add shared.txt")
+
+        # Branch modifies shared.txt
+        _create_branch(tmp_path, "conflict-branch")
+        (tmp_path / "shared.txt").write_text("theirs content")
+        _commit(tmp_path, "Branch change")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Default branch also modifies shared.txt (creates conflict)
+        (tmp_path / "shared.txt").write_text("ours content")
+        _commit(tmp_path, "Ours change")
+
+        # Set up bound worktree for the branch with tier A files
+        wt_dir = tmp_path / ".." / "conflict-branch-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "conflict-branch"],
+            check=True, capture_output=True,
+        )
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (wt_se3 / "history" / "flow.log").write_text("branch history")
+
+        # Mock conflict resolver to accept ours
+        def mock_resolve(self, context, strategy):
+            from se3.engine.merge.conflict_resolver import (
+                Confidence, FileResolution, HunkResolution, LLMResolution,
+            )
+            files = []
+            for cf in context.files:
+                resolved = cf.ours_content
+                files.append(
+                    FileResolution(
+                        path=cf.path,
+                        resolved_content=resolved,
+                        hunks=[
+                            HunkResolution(
+                                h.start_line, h.end_line,
+                                Confidence.HIGH, "accept ours",
+                            )
+                            for h in cf.hunks
+                        ],
+                        overall_confidence=Confidence.HIGH,
+                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        is_spec=cf.is_spec,
+                    )
+                )
+            return LLMResolution(
+                files=files,
+                overall_confidence=Confidence.HIGH,
+                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["conflict-branch"])
+
+        assert report.success is True
+        assert "conflict-branch" in report.merged_branches
+        # The conflict was resolved to ours
+        assert (tmp_path / "shared.txt").read_text() == "ours content"
+        # Runtime sync should have copied tier A files from the worktree
+        target_se3 = tmp_path / "se3"
+        assert (target_se3 / "history" / "flow.log").exists()
+        assert (target_se3 / "history" / "flow.log").read_text() == "branch history"
+
+        # Cleanup worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_end_to_end_spec_example_4_7_0(self, tmp_path: Path, monkeypatch) -> None:
+        """End-to-end: A advanced past branch-point, B PATCH, C MINOR -> 4.7.0.
+
+        Repo state:
+        - Base (M0): pyproject 4.4.0
+        - Branch B: pyproject 4.4.1 (patch from base)
+        - Branch C: pyproject 4.5.0 -> 4.5.1 -> 4.6.0 (minor from base, with noise)
+        - A advances to 4.6.0 after branches were created
+
+        Merge order: C first (clean -- pyproject identical to A at 4.6.0),
+        then B (conflict -- B at 4.4.1 vs A at 4.6.0).
+        The conflict resolver is mocked to accept keeping A's version.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _write_pyproject(tmp_path, "4.4.0")
+        _commit(tmp_path, "M0")
+
+        # Branch B: patch bump
+        _create_branch(tmp_path, "B")
+        _write_pyproject(tmp_path, "4.4.1")
+        (tmp_path / "b.txt").write_text("b")
+        _commit(tmp_path, "Bump patch on B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Branch C: minor bump with intermediate noise
+        _create_branch(tmp_path, "C")
+        _write_pyproject(tmp_path, "4.5.0")
+        (tmp_path / "c.txt").write_text("c1")
+        _commit(tmp_path, "C1: 4.5.0")
+        _write_pyproject(tmp_path, "4.5.1")
+        _commit(tmp_path, "C2: 4.5.1")
+        _write_pyproject(tmp_path, "4.6.0")
+        (tmp_path / "c.txt").write_text("c3")
+        _commit(tmp_path, "C3: 4.6.0")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # A advances past branch-point to 4.6.0
+        _write_pyproject(tmp_path, "4.6.0")
+        (tmp_path / "a.txt").write_text("a")
+        _commit(tmp_path, "M1: advance A to 4.6.0")
+
+        # Mock conflict resolver to accept the pyproject resolution (keep ours)
+        def mock_resolve(self, context, strategy):
+            from se3.engine.merge.conflict_resolver import (
+                Confidence, FileResolution, HunkResolution, LLMResolution,
+            )
+            files = []
+            for cf in context.files:
+                resolved = cf.ours_content
+                files.append(
+                    FileResolution(
+                        path=cf.path,
+                        resolved_content=resolved,
+                        hunks=[
+                            HunkResolution(
+                                h.start_line, h.end_line,
+                                Confidence.HIGH, "accept ours"
+                            )
+                            for h in cf.hunks
+                        ],
+                        overall_confidence=Confidence.HIGH,
+                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        is_spec=cf.is_spec,
+                    )
+                )
+            return LLMResolution(
+                files=files,
+                overall_confidence=Confidence.HIGH,
+                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["C", "B"])
+
+        assert report.success is True
+        assert "C" in report.merged_branches
+        assert "B" in report.merged_branches
+        assert report.pre_merge_version == "4.6.0"
+        # max(PATCH from B, MINOR from C) on 4.6.0 -> 4.7.0
+        assert report.final_version == "4.7.0"
+        assert report.bump_type == "minor"
+        assert _read_pyproject_version(tmp_path) == "4.7.0"
+
+    def test_runtime_sync_skipped_tracked_in_report(self, tmp_path: Path) -> None:
+        """When a branch has no bound worktree, it is recorded in the report."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _write_pyproject(tmp_path, "1.0.0")
+        _commit(tmp_path, "Add pyproject")
+
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        assert report.success is True
+        assert "feature" in report.merged_branches
+        assert "feature" in report.runtime_sync_skipped_branches
+
+    def test_clean_merge_merge_base_wiring(self, tmp_path: Path) -> None:
+        """Orchestrator passes merge-base (not pre_merge_sha) to infer_branch_bump.
+
+        When A advances past the branch-point and the branch merges cleanly,
+        the bump is computed relative to the merge-base, giving the correct
+        end-to-end diff.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _write_pyproject(tmp_path, "4.4.0")
+        _commit(tmp_path, "M0")
+
+        # Branch: minor bump (4.4.0 -> 4.6.0) with intermediate noise
+        _create_branch(tmp_path, "feature")
+        _write_pyproject(tmp_path, "4.5.0")
+        (tmp_path / "f.txt").write_text("f1")
+        _commit(tmp_path, "F1: 4.5.0")
+        _write_pyproject(tmp_path, "4.6.0")
+        (tmp_path / "f.txt").write_text("f2")
+        _commit(tmp_path, "F2: 4.6.0")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # A advances past branch-point to 4.6.0 (same as feature tip)
+        _write_pyproject(tmp_path, "4.6.0")
+        (tmp_path / "a.txt").write_text("a")
+        _commit(tmp_path, "M1: advance A to 4.6.0")
+
+        # Feature merges cleanly because both A and feature have pyproject=4.6.0
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        assert report.success is True
+        assert "feature" in report.merged_branches
+        assert report.pre_merge_version == "4.6.0"
+        # merge-base is M0 (4.4.0), feature tip is 4.6.0 -> MINOR bump
+        # 4.6.0 + MINOR = 4.7.0
+        assert report.final_version == "4.7.0"
+        assert report.bump_type == "minor"
+        assert _read_pyproject_version(tmp_path) == "4.7.0"
+
+    def test_merge_base_failure_skips_one_branch_aggregates_other(self, tmp_path: Path, monkeypatch) -> None:
+        """When merge-base fails for one branch, it is skipped; the other still contributes.
+
+        Creates two branches with related history. The first branch contributes a
+        MINOR bump; the second branch is simulated to have no merge-base (as if
+        from unrelated histories). The aggregation uses only the first branch.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _write_pyproject(tmp_path, "4.4.0")
+        _commit(tmp_path, "M0")
+
+        # Branch A: minor bump (4.4.0 -> 4.5.0)
+        _create_branch(tmp_path, "branch-a")
+        _write_pyproject(tmp_path, "4.5.0")
+        (tmp_path / "a.txt").write_text("a")
+        _commit(tmp_path, "Bump minor on A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Branch B: patch bump (4.4.0 -> 4.4.1)
+        _create_branch(tmp_path, "branch-b")
+        _write_pyproject(tmp_path, "4.4.1")
+        (tmp_path / "b.txt").write_text("b")
+        _commit(tmp_path, "Bump patch on B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Mock conflict resolver to avoid real LLM call for pyproject conflict
+        def mock_resolve(self, context, strategy):
+            from se3.engine.merge.conflict_resolver import (
+                Confidence, FileResolution, HunkResolution, LLMResolution,
+            )
+            files = []
+            for cf in context.files:
+                files.append(
+                    FileResolution(
+                        path=cf.path,
+                        resolved_content=cf.ours_content,
+                        hunks=[
+                            HunkResolution(
+                                h.start_line, h.end_line,
+                                Confidence.HIGH, "accept ours"
+                            )
+                            for h in cf.hunks
+                        ],
+                        overall_confidence=Confidence.HIGH,
+                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        is_spec=cf.is_spec,
+                    )
+                )
+            return LLMResolution(
+                files=files,
+                overall_confidence=Confidence.HIGH,
+                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
+        )
+
+        # Mock _run_git so merge-base fails for branch-b but succeeds for branch-a
+        import se3.engine.merge.orchestrator as orch_mod
+        orig_run_git = orch_mod._run_git
+
+        def fake_run_git(project_root, *args, **kwargs):
+            if len(args) >= 1 and args[0] == "merge-base":
+                # args = ("merge-base", base_ref, branch)
+                if len(args) >= 3 and args[2] == "branch-b":
+                    import subprocess as sp
+                    return sp.CompletedProcess(
+                        args=args, returncode=1, stdout="", stderr="no merge base"
+                    )
+            return orig_run_git(project_root, *args, **kwargs)
+
+        monkeypatch.setattr(orch_mod, "_run_git", fake_run_git)
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["branch-a", "branch-b"])
+
+        # Both branches merged successfully
+        assert report.success is True
+        assert "branch-a" in report.merged_branches
+        assert "branch-b" in report.merged_branches
+
+        # Only branch-a contributed to aggregation (branch-b skipped)
+        assert report.pre_merge_version == "4.4.0"
+        assert report.final_version == "4.5.0"
+        assert report.bump_type == "minor"
+        assert _read_pyproject_version(tmp_path) == "4.5.0"
+
+    def test_two_already_merged_branches_min_wins(self, tmp_path: Path) -> None:
+        """Two already-merged branches: min base_version wins for effective pre-merge.
+
+        Repo:
+        - M0: 1.0.0
+        - Branch A (from M0): 1.0.1 (patch) + a.txt
+        - Merge A → M1 (version 1.0.1)
+        - Branch B (from M1): 1.1.0 (minor) + b.txt
+        - Merge B → M2 (version 1.1.0)
+
+        Retry `se3 merge A B`:
+        - A's base ref = M0, base_version = 1.0.0
+        - B's base ref = M1, base_version = 1.0.1
+        - min-wins: effective_pre_merge_version = 1.0.0 (not 1.0.1)
+        - aggregate: max(patch, minor) on 1.0.0 = 1.1.0 (correct)
+
+        Without min-wins, effective_pre_merge_version would be 1.0.1
+        and aggregate would produce 1.2.0 (over-bump).
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # M0: version 1.0.0
+        _write_pyproject(tmp_path, "1.0.0")
+        _commit(tmp_path, "M0: v1.0.0")
+
+        # Branch A: patch bump to 1.0.1
+        _create_branch(tmp_path, "A")
+        _write_pyproject(tmp_path, "1.0.1")
+        (tmp_path / "a.txt").write_text("a")
+        _commit(tmp_path, "A: patch to 1.0.1")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Merge A → M1 (1.0.1)
+        orch1 = MergeOrchestrator(project_root=tmp_path)
+        report1 = orch1.execute(["A"])
+        assert report1.success is True
+        assert report1.final_version == "1.0.1"
+
+        # Branch B (from M1): minor bump to 1.1.0
+        _create_branch(tmp_path, "B")
+        _write_pyproject(tmp_path, "1.1.0")
+        (tmp_path / "b.txt").write_text("b")
+        _commit(tmp_path, "B: minor to 1.1.0")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Merge B → M2 (1.1.0)
+        orch2 = MergeOrchestrator(project_root=tmp_path)
+        report2 = orch2.execute(["B"])
+        assert report2.success is True
+        assert report2.final_version == "1.1.0"
+
+        # Now retry `se3 merge A B` — both are already merged
+        orch3 = MergeOrchestrator(project_root=tmp_path)
+        report3 = orch3.execute(["A", "B"])
+
+        assert report3.success is True
+        assert "A" in report3.merged_branches
+        assert "B" in report3.merged_branches
+        # Critical: must NOT over-bump. min-wins gives 1.0.0 as base.
+        # max(patch, minor) on 1.0.0 = 1.1.0 (not 1.2.0).
+        assert report3.final_version == "1.1.0"
+        assert _read_pyproject_version(tmp_path) == "1.1.0"

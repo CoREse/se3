@@ -188,10 +188,35 @@ def run_merge(
             lines.append(f"  - {b}")
         if report.final_version:
             lines.append("")
-            lines.append(f"Version: {report.pre_merge_version or '?'} -> {report.final_version}")
+            effective_base = report.effective_pre_merge_version or report.pre_merge_version or '?'
+            lines.append(f"Version: {effective_base} -> {report.final_version}")
+            if (
+                report.effective_pre_merge_version
+                and report.pre_merge_version
+                and report.effective_pre_merge_version != report.pre_merge_version
+            ):
+                lines.append(
+                    f"  (HEAD already at {report.pre_merge_version} from prior merges)"
+                )
         if report.version_aggregation_error:
             lines.append("")
             lines.append(f"WARNING: Version aggregation failed: {report.version_aggregation_error}")
+        if report.runtime_sync_skipped_branches:
+            lines.append("")
+            lines.append(
+                "WARNING: Runtime data was not synced for these branches "
+                "(no bound worktree found):"
+            )
+            for b in report.runtime_sync_skipped_branches:
+                lines.append(f"  - {b}")
+        if report.runtime_sync_skipped_files:
+            lines.append("")
+            lines.append(
+                "WARNING: Runtime sync skipped files (cross-tree symlinks or "
+                "unreadable entries):"
+            )
+            for branch, files in report.runtime_sync_skipped_files:
+                lines.append(f"  - {branch}: {', '.join(files)}")
         if report.cleanup_report:
             cr = report.cleanup_report
             lines.append("")
@@ -251,6 +276,13 @@ def run_merge(
             for b in report.merged_branches:
                 lines.append(f"  - {b}")
             lines.append("")
+        if report.unattempted_branches:
+            lines.append(
+                f"Unattempted branches ({len(report.unattempted_branches)}):"
+            )
+            for b in report.unattempted_branches:
+                lines.append(f"  - {b}")
+            lines.append("")
         if report.human_call_file:
             lines.append(f"Call file: {report.human_call_file}")
         if report.log_file:
@@ -274,6 +306,10 @@ def run_merge(
             lines.append(f"Reason: {report.failure_reason}")
         if report.merged_branches:
             lines.append(f"Branches already merged: {', '.join(report.merged_branches)}")
+        if report.unattempted_branches:
+            lines.append(
+                f"Unattempted branches: {', '.join(report.unattempted_branches)}"
+            )
         if report.log_file:
             lines.append(f"Log file: {report.log_file}")
         render_text("\n".join(lines), title=title)
@@ -474,6 +510,22 @@ def _failure_title_and_summary(
         return (
             "Merge paused for human review",
             "Merge paused: conflict resolution requires your decision",
+        )
+    if failure_reason == "runtime_sync_collision":
+        return (
+            "Merge failed",
+            "Merge failed: runtime sync collision — a tier A file already exists in se3/. "
+            "Check se3/ for the colliding file and resolve manually.",
+        )
+    if failure_reason == "runtime_sync_os_error":
+        return (
+            "Merge failed",
+            "Merge failed: runtime sync OS error — check file permissions and disk space.",
+        )
+    if failure_reason == "runtime_sync_timeout":
+        return (
+            "Merge failed",
+            "Merge failed: runtime sync timed out — the bound worktree may be unreachable.",
         )
     if failure_reason:
         return ("Merge failed", f"Merge failed: {failure_reason}.")
