@@ -134,6 +134,7 @@ def _detail_from_flow(project_root: Path, flow: Any) -> Dict[str, Any]:
             "completed_at": step.completed_at.isoformat() if step.completed_at else None,
             "retry_count": step.retry_count,
             "error_message": step.error_message,
+            "outputs": step.outputs,
         })
 
     completed, total = flow.get_progress()
@@ -208,9 +209,29 @@ def _detail_from_history(project_root: Path, flow_id: str) -> Optional[Dict[str,
     # Extract task description from chat history
     task_description = PersistenceManager.extract_history_summary(history_dir)
 
-    # Build step list from chat session step IDs
+    # Build step list from chat session step IDs.
+    # For history-only flows step.outputs are not preserved, but we can
+    # reconstruct self_check pass numbering by counting consecutive self_check
+    # sessions (resetting the counter at any non-self_check step).
+    from ..config import WorkflowConfig
+
+    try:
+        passes_required = WorkflowConfig.load(project_root).self_check_passes_required
+    except Exception:
+        passes_required = None
+
     step_details = []
+    sc_run_index = 0
     for session in chat_sessions:
+        outputs = {}
+        if session.step_type == "self_check":
+            sc_run_index += 1
+            outputs["self_check_pass_index"] = sc_run_index
+            outputs["self_check_passes_required"] = (
+                passes_required if passes_required is not None else sc_run_index
+            )
+        else:
+            sc_run_index = 0
         step_details.append({
             "step_id": session.step_id,
             "step_type": session.step_type,
@@ -219,6 +240,7 @@ def _detail_from_history(project_root: Path, flow_id: str) -> Optional[Dict[str,
             "completed_at": None,
             "retry_count": 0,
             "error_message": None,
+            "outputs": outputs,
         })
 
     return {
@@ -474,9 +496,18 @@ def show_cmd(
             if error_msg and len(error_msg) > 40:
                 error_msg = error_msg[:40] + "..."
 
+            # Surface self_check pass numbering (#i/N) when available
+            step_label = step['step_type']
+            outputs = step.get('outputs', {})
+            if step['step_type'] == 'self_check':
+                pass_index = outputs.get('self_check_pass_index')
+                passes_required = outputs.get('self_check_passes_required')
+                if pass_index is not None and passes_required is not None:
+                    step_label = f"self_check #{pass_index}/{passes_required}"
+
             steps_table.add_row(
                 str(i),
-                step['step_type'],
+                step_label,
                 f"[{status_color}]{step['status']}[/{status_color}]",
                 str(step.get('retry_count', 0)),
                 error_msg,

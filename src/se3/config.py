@@ -1850,6 +1850,128 @@ def load_conflict_resolver_config(project_root: Optional[Path] = None) -> Confli
     return ConflictResolverConfig.load(project_root)
 
 DEFAULT_MAX_FIX_ITERATIONS = 20
+DEFAULT_SELF_CHECK_PASSES_REQUIRED = 1
+DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED = False
+
+
+class ConfigError(ValueError):
+    """Raised when project configuration is invalid.
+
+    Inherits from ValueError so callers that catch ValueError also catch this.
+    """
+
+
+@dataclass
+class WorkflowConfig:
+    """Workflow-level configuration for the fix loop and self_check behavior.
+
+    Loaded from se3.yaml ``workflow:`` section with sensible defaults.
+    """
+
+    max_fix_iterations: int = DEFAULT_MAX_FIX_ITERATIONS
+    self_check_passes_required: int = DEFAULT_SELF_CHECK_PASSES_REQUIRED
+    self_check_convergence_enabled: bool = DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "WorkflowConfig":
+        """Create WorkflowConfig from dictionary with validation.
+
+        Args:
+            data: Raw dict from the ``workflow:`` YAML section (or the full
+                config dict, in which case the ``workflow`` key is extracted).
+
+        Raises:
+            ConfigError: If ``self_check_passes_required`` is < 1.
+        """
+        if not data:
+            return cls()
+
+        workflow_data = data.get("workflow", data)
+        if not isinstance(workflow_data, dict):
+            return cls()
+
+        max_fix = workflow_data.get("max_fix_iterations", DEFAULT_MAX_FIX_ITERATIONS)
+        try:
+            max_fix = int(max_fix)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"workflow.max_fix_iterations={max_fix!r} is not a valid integer; "
+                f"falling back to default {DEFAULT_MAX_FIX_ITERATIONS}"
+            )
+            max_fix = DEFAULT_MAX_FIX_ITERATIONS
+
+        raw_passes = workflow_data.get(
+            "self_check_passes_required", DEFAULT_SELF_CHECK_PASSES_REQUIRED
+        )
+        try:
+            passes = int(raw_passes)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"workflow.self_check_passes_required={raw_passes!r} is not a valid integer; "
+                f"falling back to default {DEFAULT_SELF_CHECK_PASSES_REQUIRED}"
+            )
+            passes = DEFAULT_SELF_CHECK_PASSES_REQUIRED
+        if passes < 1:
+            raise ConfigError(
+                f"workflow.self_check_passes_required={passes!r} must be >= 1"
+            )
+
+        raw_convergence = workflow_data.get("self_check_convergence_enabled")
+        convergence = _coerce_bool(
+            raw_convergence,
+            default=DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED,
+        )
+        if raw_convergence is not None and not isinstance(raw_convergence, (bool, int, float)):
+            if isinstance(raw_convergence, str):
+                if raw_convergence.strip().lower() not in (
+                    "true", "1", "yes", "on", "false", "0", "no", "off",
+                ):
+                    logger.warning(
+                        f"workflow.self_check_convergence_enabled={raw_convergence!r} is not a valid boolean; "
+                        f"falling back to default {DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED}"
+                    )
+            else:
+                logger.warning(
+                    f"workflow.self_check_convergence_enabled={raw_convergence!r} is not a valid boolean; "
+                    f"falling back to default {DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED}"
+                )
+
+        return cls(
+            max_fix_iterations=max_fix,
+            self_check_passes_required=passes,
+            self_check_convergence_enabled=convergence,
+        )
+
+    @classmethod
+    def load(cls, project_root: Path) -> "WorkflowConfig":
+        """Load workflow configuration from the active project YAML.
+
+        Args:
+            project_root: Project root directory.
+
+        Raises:
+            ConfigError: If ``self_check_passes_required`` is < 1.
+        """
+        data, _src = load_project_yaml(project_root)
+        if not data:
+            return cls()
+        return cls.from_dict(data)
+
+
+def load_workflow_config(project_root: Optional[Path] = None) -> WorkflowConfig:
+    """Load workflow configuration from project.
+
+    Args:
+        project_root: Project root directory. If None, uses current working directory.
+
+    Returns:
+        WorkflowConfig instance with loaded or default settings.
+    """
+    if project_root is None:
+        project_root = Path.cwd()
+    return WorkflowConfig.load(project_root)
+
+
 @dataclass
 class TestConfig:
     """Test step configuration loaded from se3.yaml test: section."""
@@ -2199,13 +2321,7 @@ def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
     else:
         project_root = Path(project_root)
 
-    data, _src = load_project_yaml(project_root)
-    if not data:
-        return DEFAULT_MAX_FIX_ITERATIONS
-    workflow = data.get("workflow", {})
-    if not isinstance(workflow, dict):
-        return DEFAULT_MAX_FIX_ITERATIONS
-    return workflow.get("max_fix_iterations", DEFAULT_MAX_FIX_ITERATIONS)
+    return WorkflowConfig.load(project_root).max_fix_iterations
 
 
 @dataclass

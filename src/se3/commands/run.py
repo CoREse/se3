@@ -35,7 +35,7 @@ try:
     from ..engine.steps import STEP_HANDLERS
     from ..engine.steps.discovery import PROGRAMMATIC_CONFIRM_SENTINEL
     from ..engine.llm_caller import set_extra_prompt
-    from ..config import clear_main_repo_root_cache
+    from ..config import ConfigError, clear_main_repo_root_cache
     from ..engine.output import (
         display_error,
         display_success,
@@ -56,7 +56,7 @@ except ImportError:
     from engine.steps import STEP_HANDLERS
     from engine.steps.discovery import PROGRAMMATIC_CONFIRM_SENTINEL
     from engine.llm_caller import set_extra_prompt
-    from config import clear_main_repo_root_cache
+    from config import ConfigError, clear_main_repo_root_cache
     from engine.output import (
         display_error,
         display_success,
@@ -685,83 +685,87 @@ def _run_flow_impl(
         state_machine.register_handler(step_type, handler)
 
     # Load or create flow
-    if flow_id:
-        flow = persistence.load_flow()
-        if not flow or flow.flow_id != flow_id:
-            display_error(f"Flow '{flow_id}' not found")
-            return 1
+    try:
+        if flow_id:
+            flow = persistence.load_flow()
+            if not flow or flow.flow_id != flow_id:
+                display_error(f"Flow '{flow_id}' not found")
+                return 1
 
-        # Detect and handle resume of a RUNNING or FAILED step
-        current_step = flow.state.get_current_step()
-        if current_step and current_step.status == StepStatus.RUNNING:
-            # Step was interrupted - prepare for resumption with context
-            current_step.status = StepStatus.PENDING
-            current_step.inputs["resumed"] = True
-            # Increment retry_count so LLMCaller picks up conversation history
-            # from the interrupted run via _get_retry_context()
-            current_step.inputs["retry_count"] = current_step.inputs.get("retry_count", 0) + 1
-            current_step.retry_count = 0
-            logger.info(f"Resuming interrupted step: {current_step.step_id} ({current_step.step_type.value})")
-            persistence.save_flow(flow)
-        elif current_step and current_step.status == StepStatus.FAILED:
-            # Step failed - prepare for retry from breakpoint
-            current_step.status = StepStatus.PENDING
-            current_step.inputs["resumed"] = True
-            # Increment retry_count so LLMCaller picks up conversation history (external_attempt)
-            current_step.inputs["retry_count"] = current_step.inputs.get("retry_count", 0) + 1
-            # Reset retry_count on the step model for fresh retry budget
-            current_step.retry_count = 0
-            flow.status = FlowStatus.RUNNING
-            logger.info(f"Retrying failed step from breakpoint: {current_step.step_id} ({current_step.step_type.value})")
-            persistence.save_flow(flow)
+            # Detect and handle resume of a RUNNING or FAILED step
+            current_step = flow.state.get_current_step()
+            if current_step and current_step.status == StepStatus.RUNNING:
+                # Step was interrupted - prepare for resumption with context
+                current_step.status = StepStatus.PENDING
+                current_step.inputs["resumed"] = True
+                # Increment retry_count so LLMCaller picks up conversation history
+                # from the interrupted run via _get_retry_context()
+                current_step.inputs["retry_count"] = current_step.inputs.get("retry_count", 0) + 1
+                current_step.retry_count = 0
+                logger.info(f"Resuming interrupted step: {current_step.step_id} ({current_step.step_type.value})")
+                persistence.save_flow(flow)
+            elif current_step and current_step.status == StepStatus.FAILED:
+                # Step failed - prepare for retry from breakpoint
+                current_step.status = StepStatus.PENDING
+                current_step.inputs["resumed"] = True
+                # Increment retry_count so LLMCaller picks up conversation history (external_attempt)
+                current_step.inputs["retry_count"] = current_step.inputs.get("retry_count", 0) + 1
+                # Reset retry_count on the step model for fresh retry budget
+                current_step.retry_count = 0
+                flow.status = FlowStatus.RUNNING
+                logger.info(f"Retrying failed step from breakpoint: {current_step.step_id} ({current_step.step_type.value})")
+                persistence.save_flow(flow)
 
-        # Display flow info with full content
-        content = [
-            f"Resuming flow: {flow.flow_id}",
-            f"Current step: {flow.state.current_step_id}",
-            f"Task: {flow.task_description}",
-        ]
-        render_full("\n".join(content), title="Flow Info")
-    else:
-        if not task_description:
-            display_error("Task description required for new flow")
-            return 1
-
-        flow = state_machine.create_flow(
-            task_description=task_description,
-            task_type=task_type,
-            change_name=change_name,
-            is_loop_mode=is_loop_mode,
-        )
-
-        # Set source issue ID if provided
-        if source_issue_id:
-            flow.source_issue_id = source_issue_id
-
-        # Store explicit_type if user provided --type flag
-        if task_type and task_type != "pending":
-            flow.state.context["explicit_type"] = task_type
-            persistence.save_flow(flow)
-
-        # Display new flow info with full content
-        content = [
-            f"Created new flow: {flow.flow_id}",
-            f"Task: {task_description}",
-        ]
-
-        # Only show type if explicitly provided (pending is auto-detect)
-        if task_type and task_type != "pending":
-            content.append(f"Type: {task_type} (user-specified)")
+            # Display flow info with full content
+            content = [
+                f"Resuming flow: {flow.flow_id}",
+                f"Current step: {flow.state.current_step_id}",
+                f"Task: {flow.task_description}",
+            ]
+            render_full("\n".join(content), title="Flow Info")
         else:
-            content.append("Type: pending (will be determined by analyze)")
+            if not task_description:
+                display_error("Task description required for new flow")
+                return 1
 
-        if change_name:
-            content.append(f"Change: {change_name}")
-        render_full("\n".join(content), title="New Flow")
+            flow = state_machine.create_flow(
+                task_description=task_description,
+                task_type=task_type,
+                change_name=change_name,
+                is_loop_mode=is_loop_mode,
+            )
 
-    # Initialize flow metadata and baseline commit (idempotent — safe for both
-    # new and resumed flows).
-    state_machine.init_flow(flow)
+            # Set source issue ID if provided
+            if source_issue_id:
+                flow.source_issue_id = source_issue_id
+
+            # Store explicit_type if user provided --type flag
+            if task_type and task_type != "pending":
+                flow.state.context["explicit_type"] = task_type
+                persistence.save_flow(flow)
+
+            # Display new flow info with full content
+            content = [
+                f"Created new flow: {flow.flow_id}",
+                f"Task: {task_description}",
+            ]
+
+            # Only show type if explicitly provided (pending is auto-detect)
+            if task_type and task_type != "pending":
+                content.append(f"Type: {task_type} (user-specified)")
+            else:
+                content.append("Type: pending (will be determined by analyze)")
+
+            if change_name:
+                content.append(f"Change: {change_name}")
+            render_full("\n".join(content), title="New Flow")
+
+        # Initialize flow metadata and baseline commit (idempotent — safe for both
+        # new and resumed flows).
+        state_machine.init_flow(flow)
+    except ConfigError as exc:
+        display_error(str(exc))
+        return 2
 
     # Execute flow
     while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED):

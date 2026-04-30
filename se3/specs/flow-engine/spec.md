@@ -309,7 +309,7 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 | `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type, project_summary | plan{proposal,design}, task_groups, spec_changes |
 | `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed, estimated_test_duration |
 | `test` | 运行测试验证 | 否（程序执行） | - | 否 | - | test_results, tests_passed |
-| `self_check` | LLM 代码审查：逻辑完整性、代码健壮性、功能遗漏、测试未覆盖区域（不检查 spec 合规性） | 是 | TWO_PHASE | **是** | test_results, changes_made, spec_content, task_groups, fix_iteration | issues (structured list with description, severity, location), status |
+| `self_check` | LLM 代码审查：逻辑完整性、代码健壮性、功能遗漏、测试未覆盖区域（不检查 spec 合规性） | 是 | TWO_PHASE | **是** | test_results, changes_made, spec_content, task_groups, fix_iteration, self_check_pass_index, self_check_passes_required, self_check_convergence_enabled, prev_self_check_issues (conditional) | issues (structured list with description, severity, location), status, self_check_pass_index, self_check_passes_required |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, fix_needed, fix_instructions, fix_context |
 | `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | 否 | changes_made, verification_result, spec_changes, design_doc, selected_items | updated_specs, new_capabilities, spec_decisions, notes |
 | `version_analyze` | 分析变更确定版本类型 + 生成 commit message | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning, commit_message |
@@ -338,8 +338,9 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 #### Scenario: SELF_CHECK 代码审查通过
 - **WHEN** self_check 步骤完成 LLM 代码审查
 - **AND** 未发现任何 severity 的遗漏（issues 列表为空）
-- **THEN** self_check 返回 COMPLETED
-- **AND** 流程继续到 verify_spec 步骤
+- **AND** 自本轮 fix-loop 进入 self_check 起，已累计连续 `workflow.self_check_passes_required`（默认 1）次全部 clean 的实例
+- **THEN** 流程推进到 verify_spec 步骤
+- **NOTE** 当 N>1 且累计 clean 次数尚未达到 N 时，状态机不前进 `current_step_index`，而是创建下一个 self_check Step 实例继续执行（参见「重复 N 次直至全部 clean」场景）
 
 #### Scenario: SELF_CHECK 发现遗漏触发 fix loop
 - **WHEN** self_check 步骤完成 LLM 代码审查
@@ -347,10 +348,38 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 - **THEN** self_check 返回 REVISION_NEEDED
 - **AND** 附带 fix_context（遗漏列表）和 fix_instructions
 - **AND** 触发现有 fix loop 机制回到 IMPLEMENT 步骤
+- **AND** 本轮剩余的 self_check 实例（若 pass_index < N）不会被创建，当前 fix-loop 立即转入修复
 - **AND** 修复后重跑 TEST → SELF_CHECK 直到遗漏列表为空或达到 max_fix_iterations 上限
 - **NOTE** fix_iterations 是全局计数器，TEST、SELF_CHECK、VERIFY_SPEC 三者共享，总循环次数不超过 max_fix_iterations（默认 20）
 - **NOTE** self_check handler 始终返回 REVISION_NEEDED（不在 handler 内判断耗尽），耗尽检测统一由 state_machine.transition_to_next() 处理
 - **NOTE** 当 fix loop 耗尽时，state_machine 将 flow 状态设为 FAILED 并停止执行，同时通过 A-class issue discovery 生成 issue
+
+#### Scenario: SELF_CHECK 重复 N 次直至全部 clean
+- **GIVEN** `workflow.self_check_passes_required` 配置为 N（N>=1，默认 1）
+- **WHEN** 一轮 fix-loop 进入 self_check 步骤
+- **THEN** state_machine 创建 self_check Step 实例 #1，inputs 注入 `self_check_pass_index=1`、`self_check_passes_required=N`
+- **AND** 实例 #1 完成且 issues 列表为空时，若 N>1 则 state_machine 在 transition_to_next 中检测到「连续 COMPLETED 的 self_check 实例数 < N」，新建 self_check Step 实例 #2（pass_index=2），`current_step_index` 不前进
+- **AND** 该过程重复直到累计连续 N 次全部 clean，才推进到 verify_spec
+- **AND** N 个 self_check 实例在 step 历史、`se3 history` 输出、日志中显示为 N 个独立 step 实例（日志前缀 `#1/N`、`#2/N`、…）
+- **AND** 同一轮内的 N 次 self_check 之间不做任何对比（同一轮只有「累计连续 clean 次数」一个状态量，不引入任何收敛或 issues 比较逻辑）
+
+#### Scenario: SELF_CHECK 任意一次报告 issues 即短路触发 fix-loop
+- **GIVEN** N>1，且 self_check 实例 #i（1 <= i <= N）执行中
+- **WHEN** 实例 #i 报告任意 severity 的 issues
+- **THEN** 实例 #i 立即返回 REVISION_NEEDED 并触发 fix-loop（流程跳回 IMPLEMENT）
+- **AND** 实例 #(i+1)..#N 不被创建，step 历史中只记录实际跑过的 i 个实例
+- **AND** 下一轮 fix-loop 重新进入 self_check 时，pass_index 计数从 1 重新开始（不继承上一轮的 pass_index）
+
+#### Scenario: SELF_CHECK 收敛检测（默认关闭、仅跨 fix-loop 轮）
+- **GIVEN** `workflow.self_check_convergence_enabled` 默认为 `false`
+- **WHEN** self_check 实例完成 LLM 代码审查并发现 issues
+- **THEN** 在默认配置下，state_machine 不调用 `_issues_converged`，handler 直接返回 REVISION_NEEDED 进入 fix-loop
+- **AND** 即使本轮 issues 与上一轮 fix-loop 末尾 self_check 的 issues 完全相同，也不会被短路为 COMPLETED
+- **WHEN** 用户在 `se3.yaml` 中显式设置 `workflow.self_check_convergence_enabled: true`
+- **THEN** 收敛检测仅作用于「本轮 fix-loop 的第一个 self_check 实例（pass_index=1）」与「上一轮 fix-loop 最后一个 self_check 实例的 issues」之间
+- **AND** 同一轮内的 #2..#N 不参与收敛比较（`prev_self_check_issues` 仅在 pass_index=1 注入，其余实例强制为空）
+- **AND** 收敛判定为 True 时，self_check 直接返回 COMPLETED，跳出 fix-loop（视为达到稳定点，相当于一次「人为 clean」）
+- **NOTE** 默认关闭的语义变更属于行为默认值变更，本次 spec 修订显式记录，不在 changelog 或启动日志中额外提示
 
 #### Scenario: SELF_CHECK prompt injects plan task_groups as scope reference
 - **WHEN** the `self_check` step builds its LLM prompt
@@ -931,7 +960,7 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - `analyze` 输出 `task_type`、`scope`、`complexity`、`reasoning`、`project_summary`、`relevant_specs`、`spec_content`、`selected_specs`、`selected_items`；其中 `project_summary` 由 `ProjectContextCollector.collect()` 程序化生成（非 LLM），`spec_content` 由后处理程序化加载（base spec 自动附加 + LLM 选择的 spec items），`selected_items` 为 LLM 选中的 `[{spec, requirement_name, tags}]` 列表
 - `plan` 接收 `spec_content`（从 analyze）、`task_type`、`scope`、`project_summary`（从 analyze），输出 `plan`（含 proposal + design）、`task_groups` 和 `spec_changes`（仅 full depth）
 - `implement` 接收 `design_doc`（从 plan.design 映射）、`task_groups`、`spec_content`（从 analyze）、`project_summary`（从 analyze）
-- `self_check` 接收 `test_results`（从 test）、`changes_made`（从 implement）、`spec_content`（从 analyze）、`task_groups`（从 plan，用作「功能遗漏」维度的 scope 参考）、`fix_iteration`（当前 fix loop 迭代次数）
+- `self_check` 接收 `test_results`（从 test）、`changes_made`（从 implement）、`spec_content`（从 analyze）、`task_groups`（从 plan，用作「功能遗漏」维度的 scope 参考）、`fix_iteration`（当前 fix loop 迭代次数）、`self_check_pass_index`（本轮 fix-loop 内的 1..N 序号）、`self_check_passes_required`（来自 `workflow.self_check_passes_required`）、`self_check_convergence_enabled`（来自 `workflow.self_check_convergence_enabled`，默认 false）、`prev_self_check_issues`（仅在 `convergence_enabled=true` 且 `pass_index=1` 时注入，承载上一轮 fix-loop 末尾 self_check 的 issues 作为收敛对比基线）
 - `verify_spec` 接收 `changes_made`、`spec_content`（从 analyze）、`test_results`、`fix_iteration`、`spec_changes`（从 plan 步骤传递，用于区分有意变更与回归）和 `relevant_specs`（从 analyze）
 - `update_spec` 接收 `changes_made`、`verification_result`、`spec_changes`（从 plan 步骤传递，作为变更指引清单）、`design_doc`（从 plan.design 映射，提供架构上下文）、`selected_items`（从 analyze，用于定位相关 spec）；默认以 `full_spec` 模式加载所有 spec 全文，支持命名查重和跨 spec 一致性检查
 - `commit` 接收 `changes_made`、`commit_message`（from version_analyze）、`bump_type`（from version_analyze）

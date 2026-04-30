@@ -30,9 +30,11 @@ from .issue_discovery import IssueDiscovery
 from .issue_manager import IssueManager
 from .persistence import PersistenceManager
 from ..config import (
+    ConfigError,
     insert_confirmation_steps,
     resolve_confirm_inputs,
     SpecLoadingConfig,
+    WorkflowConfig,
 )
 from .. import __version__ as se3_version
 
@@ -217,7 +219,14 @@ class StateMachine:
 
         Returns:
             New flow instance
+
+        Raises:
+            ConfigError: If workflow configuration is invalid (e.g.
+                self_check_passes_required < 1).
         """
+        # Fail-fast: validate workflow configuration before creating the flow
+        WorkflowConfig.load(self.project_root)
+
         # Determine initial step sequence
         selected_steps = get_default_step_sequence(task_type)
 
@@ -408,6 +417,10 @@ class StateMachine:
         Returns:
             Next step if transition successful, None if flow complete
         """
+        # Invalidate workflow config cache so each transition sees fresh config,
+        # but within a single transition _get_workflow_config is memoized.
+        self._workflow_config_cache = None
+
         current_step = flow.state.get_current_step()
 
         if not current_step:
@@ -466,6 +479,25 @@ class StateMachine:
                 if revision_step:
                     return revision_step
                 # If transition failed, continue to normal flow (will likely fail later)
+
+        # Handle N-pass self_check: if SELF_CHECK completed, check if we need more passes
+        if (
+            current_step.step_type == StepType.SELF_CHECK
+            and current_step.status == StepStatus.COMPLETED
+        ):
+            workflow_cfg = self._get_workflow_config()
+            passes_required = workflow_cfg.self_check_passes_required
+            consecutive_passes = self._count_consecutive_self_check_completed(flow)
+
+            if consecutive_passes < passes_required:
+                next_pass_index = consecutive_passes + 1
+                logger.info(
+                    f"Self-check pass {consecutive_passes}/{passes_required} completed; "
+                    f"creating repeat pass #{next_pass_index}/{passes_required}"
+                )
+                repeat_step = self._create_self_check_repeat_step(flow)
+                return repeat_step
+            # else: all N passes completed — fall through to normal progression
 
         # Find next step in selected sequence
         selected = flow.state.selected_steps
@@ -726,6 +758,86 @@ class StateMachine:
         except ImportError:
             return 20
 
+    def _get_workflow_config(self) -> "WorkflowConfig":
+        """Load and cache workflow configuration for the current flow.
+
+        The result is memoized on the instance to avoid re-reading se3.yaml
+        within a single transition cycle.
+
+        Returns:
+            WorkflowConfig instance with loaded or default settings.
+
+        Raises:
+            ConfigError: If the workflow configuration is invalid (e.g.
+                self_check_passes_required < 1).
+        """
+        cached = getattr(self, "_workflow_config_cache", None)
+        if cached is not None:
+            return cached
+        try:
+            cfg = WorkflowConfig.load(self.project_root)
+        except (IOError, OSError):
+            cfg = WorkflowConfig()
+        self._workflow_config_cache = cfg
+        return cfg
+
+    def _count_consecutive_self_check_completed(self, flow: FlowInstance) -> int:
+        """Count consecutive COMPLETED self_check steps from the end of step_history.
+
+        Stops at the first non-self_check step (other than CONFIRM) or any
+        self_check with a status other than COMPLETED. CONFIRM steps are skipped
+        because they can be inserted between self_check and the next step in the
+        sequence; their presence must not break the pass streak.
+
+        Args:
+            flow: Current flow instance.
+
+        Returns:
+            Number of consecutive COMPLETED self_check steps at the tail of
+            step_history (0 if none).
+        """
+        count = 0
+        for step_id in reversed(flow.state.step_history):
+            step = flow.state.steps.get(step_id)
+            if not step:
+                break
+            if step.step_type == StepType.CONFIRM:
+                if step.status == StepStatus.COMPLETED:
+                    continue
+                break
+            if step.step_type != StepType.SELF_CHECK:
+                break
+            if step.status != StepStatus.COMPLETED:
+                break
+            count += 1
+        return count
+
+    def _create_self_check_repeat_step(self, flow: FlowInstance) -> Step:
+        """Create a repeated self_check Step instance for the N-pass requirement.
+
+        Builds inputs via _build_step_inputs which computes the pass position so
+        the handler can log ``#i/N`` and the inputs carry the right metadata.
+
+        Args:
+            flow: Current flow instance.
+
+        Returns:
+            A new Step instance of type SELF_CHECK, already added to flow.state.
+        """
+        inputs = self._build_step_inputs(flow, StepType.SELF_CHECK)
+
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs=inputs,
+        )
+        flow.state.add_step(step)
+        flow.state.current_step_id = step.step_id
+        # current_step_index does NOT advance — we are still at the SELF_CHECK
+        # slot in the selected_steps sequence.
+        self.persistence.save_flow(flow)
+        return step
+
     def _build_step_inputs(self, flow: FlowInstance, step_type: StepType) -> Dict[str, Any]:
         """Build inputs for a step based on previous outputs.
 
@@ -979,12 +1091,28 @@ class StateMachine:
 
         # Special handling for SELF_CHECK step: ensure it receives test_results and changes_made
         if step_type == StepType.SELF_CHECK:
+            # Compute pass index: consecutive COMPLETED self_check at tail + 1
+            pass_index = self._count_consecutive_self_check_completed(flow) + 1
+            workflow_cfg = self._get_workflow_config()
+            inputs["self_check_pass_index"] = pass_index
+            inputs["self_check_passes_required"] = workflow_cfg.self_check_passes_required
+            inputs["self_check_convergence_enabled"] = workflow_cfg.self_check_convergence_enabled
+
             fix_iteration = flow.state.get_fix_iteration()
             if fix_iteration > 0:
                 inputs["fix_iteration"] = fix_iteration
                 inputs["fix_history"] = copy.deepcopy(flow.state.fix_history)
                 inputs["max_fix_iterations"] = self._get_max_fix_iterations()
-                # Find previous SELF_CHECK with REVISION_NEEDED (skipped by history loop)
+
+            # Inject prev_self_check_issues ONLY when convergence is enabled,
+            # this is the first pass of the current round (pass_index == 1),
+            # AND we are in a fix loop (fix_iteration > 0). Cross-round
+            # convergence by definition requires a prior round to compare against.
+            if (
+                workflow_cfg.self_check_convergence_enabled
+                and pass_index == 1
+                and fix_iteration > 0
+            ):
                 for step_id in reversed(flow.state.step_history):
                     step = flow.state.steps.get(step_id)
                     if not step or step.status == StepStatus.FAILED:
@@ -995,6 +1123,7 @@ class StateMachine:
                             step.outputs.get("issues", [])
                         )
                         break
+
             # Ensure test_results and changes_made are present (from history loop above)
             # If not already set, find them from step history
             for step_id in reversed(flow.state.step_history):
@@ -1145,6 +1274,9 @@ class StateMachine:
         Args:
             flow: Flow instance to initialize
         """
+        # Fail-fast: validate workflow configuration on every start/resume
+        WorkflowConfig.load(self.project_root)
+
         self._write_flow_meta(flow)
         self._record_baseline_commit(flow)
 
