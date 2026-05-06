@@ -533,6 +533,7 @@ def merge_cmd(
         branches=branches,
         strategy=effective_strategy,
         delete_merged=effective_delete,
+        strict_runtime_sync=merge_cfg.strict_runtime_sync,
     )
     raise typer.Exit(exit_code)
 

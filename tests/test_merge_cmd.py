@@ -220,6 +220,31 @@ class TestMergeConfig:
         config = MergeConfig.load(tmp_path)
         assert config.strategy == "default"
         assert config.delete_merged_default is False
+        assert config.strict_runtime_sync is False
+
+    def test_merge_config_strict_runtime_sync_true(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml.write_text(
+            "merge:\n"
+            "  strict_runtime_sync: true\n"
+        )
+        from se3.config import MergeConfig
+
+        config = MergeConfig.load(tmp_path)
+        assert config.strict_runtime_sync is True
+
+    def test_merge_config_strict_runtime_sync_string_true(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml.write_text(
+            "merge:\n"
+            "  strict_runtime_sync: 'true'\n"
+        )
+        from se3.config import MergeConfig
+
+        config = MergeConfig.load(tmp_path)
+        assert config.strict_runtime_sync is True
 
 
 class TestMergeConfigFromSubdirectory:
@@ -270,6 +295,7 @@ class TestMergeCliFromSubdirectory:
             "merge:\n"
             "  strategy: fast\n"
             "  delete_merged_default: true\n"
+            "  strict_runtime_sync: true\n"
         )
         default = _get_default_branch(tmp_path)
         _create_branch(tmp_path, "feature")
@@ -284,10 +310,12 @@ class TestMergeCliFromSubdirectory:
         captured: dict = {}
 
         def mock_run_merge(
-            branches, strategy="default", delete_merged=False, project_root=None
+            branches, strategy="default", delete_merged=False,
+            strict_runtime_sync=False, project_root=None,
         ):
             captured["strategy"] = strategy
             captured["delete_merged"] = delete_merged
+            captured["strict_runtime_sync"] = strict_runtime_sync
             captured["project_root"] = str(project_root) if project_root else None
             return 0
 
@@ -304,9 +332,11 @@ class TestMergeCliFromSubdirectory:
             assert result.exit_code == 0, result.output
             assert captured.get("strategy") == "fast"
             assert captured.get("delete_merged") is True
+            assert captured.get("strict_runtime_sync") is True
             # project_root is not passed explicitly — run_merge calls
             # get_project_root() internally when None. The key assertion
-            # is that strategy/delete_merged from se3.yaml were read.
+            # is that strategy/delete_merged/strict_runtime_sync from
+            # se3.yaml were read.
         finally:
             os.chdir(old_cwd)
 
@@ -447,7 +477,8 @@ class TestMergeDeleteMergedTristate:
         captured: dict = {}
 
         def mock_run_merge(
-            branches, strategy="default", delete_merged=False, project_root=None
+            branches, strategy="default", delete_merged=False,
+            strict_runtime_sync=False, project_root=None,
         ):
             captured["delete_merged"] = delete_merged
             return 0
@@ -1011,3 +1042,285 @@ class TestFailureReasonRendering:
         assert captured[0]["title"] == "Merge failed"
         assert "failed to build conflict context" in captured[0]["content"]
         assert "could not write human call file" in captured[0]["content"]
+
+    def test_success_with_runtime_sync_collisions_rendered(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Success path with runtime_sync_collisions renders collision summary."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+        from se3.engine.merge.runtime_sync import BypassedCollision
+
+        report = MergeReport(
+            success=True,
+            merged_branches=["feature"],
+            runtime_sync_collisions=[
+                BypassedCollision(
+                    branch="feature",
+                    original_rel_path="history/flow1.log",
+                    sidecar_rel_path="history/flow1.log.from-feature",
+                    src_hash="abcd1234" * 8,
+                    dest_hash="efgh5678" * 8,
+                ),
+            ],
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 0
+        assert len(captured) == 1
+        assert "Runtime sync collisions (sidecar bypass):" in captured[0]["content"]
+        assert "history/flow1.log" in captured[0]["content"]
+        assert "history/flow1.log.from-feature" in captured[0]["content"]
+        assert "src_hash=abcd1234" in captured[0]["content"]
+        assert "dest_hash=efgh5678" in captured[0]["content"]
+
+    def test_pending_human_with_runtime_sync_collisions_rendered(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Pending-human path with runtime_sync_collisions renders collision summary."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+        from se3.engine.merge.runtime_sync import BypassedCollision
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature",
+            failure_reason="pending_human",
+            pending_human=True,
+            runtime_sync_collisions=[
+                BypassedCollision(
+                    branch="feature",
+                    original_rel_path="history/flow1.log",
+                    sidecar_rel_path="history/flow1.log.from-feature",
+                    src_hash="abcd1234" * 8,
+                    dest_hash="efgh5678" * 8,
+                ),
+            ],
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 130
+        assert len(captured) == 1
+        assert "Runtime sync collisions (sidecar bypass):" in captured[0]["content"]
+        assert "history/flow1.log" in captured[0]["content"]
+
+    def test_generic_failure_with_runtime_sync_collisions_rendered(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Generic failure path with runtime_sync_collisions renders collision summary."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+        from se3.engine.merge.runtime_sync import BypassedCollision
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature",
+            failure_reason="runtime_sync_os_error",
+            runtime_sync_collisions=[
+                BypassedCollision(
+                    branch="feature-a",
+                    original_rel_path="history/flow1.log",
+                    sidecar_rel_path="history/flow1.log.from-feature-a",
+                    src_hash="abcd1234" * 8,
+                    dest_hash="efgh5678" * 8,
+                ),
+            ],
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 1
+        assert len(captured) == 1
+        assert "Runtime sync collisions (sidecar bypass):" in captured[0]["content"]
+        assert "history/flow1.log" in captured[0]["content"]
+
+    def test_rollback_failed_with_runtime_sync_collisions_rendered(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Rollback-failed path with runtime_sync_collisions renders collision summary.
+
+        Defense-in-depth: collisions and rollback_failed are orthogonal in
+        practice, but the branch must still render them consistently.
+        """
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+        from se3.engine.merge.runtime_sync import BypassedCollision
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature",
+            failure_reason="rollback_failed",
+            rollback_failed=True,
+            runtime_sync_collisions=[
+                BypassedCollision(
+                    branch="feature",
+                    original_rel_path="history/flow1.log",
+                    sidecar_rel_path="history/flow1.log.from-feature",
+                    src_hash="abcd1234" * 8,
+                    dest_hash="efgh5678" * 8,
+                ),
+            ],
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 1
+        assert len(captured) == 1
+        assert "INCONSISTENT" in captured[0]["content"]
+        assert "Runtime sync collisions (sidecar bypass):" in captured[0]["content"]
+        assert "history/flow1.log" in captured[0]["content"]
+
+    def test_runtime_sync_collision_shows_colliding_path(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Strict-mode runtime_sync_collision surfaces the colliding path."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+
+        report = MergeReport(
+            success=False,
+            failed_branch="feature-b",
+            failure_reason="runtime_sync_collision",
+            runtime_sync_collision_path="history/run-007.json",
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature-b"], project_root=tmp_path)
+        assert exit_code == 1
+        assert len(captured) == 1
+        assert "Failed branch: feature-b" in captured[0]["content"]
+        assert "Colliding path: se3/history/run-007.json" in captured[0]["content"]
+
+    def test_audit_only_collision_renders_distinct_section(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Audit-only collision (written=False) uses a distinct rendered header.
+
+        Regression guard: an audit-only row in ``runtime_sync_collisions``
+        must NOT be presented under the "sidecar bypass" header that
+        implies the source data was preserved on disk.  The renderer must
+        split the two lists by ``written`` so operators can tell at a
+        glance which collisions are recoverable from disk and which are
+        bookkeeping-only.
+        """
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+        from se3.engine.merge.runtime_sync import BypassedCollision
+
+        report = MergeReport(
+            success=True,
+            merged_branches=["feature"],
+            runtime_sync_collisions=[
+                BypassedCollision(
+                    branch="feature",
+                    original_rel_path="history/lost.log",
+                    sidecar_rel_path="history/lost.log.from-feature",
+                    src_hash="deadbeef" * 8,
+                    dest_hash="unavailable",
+                    written=False,
+                ),
+            ],
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 0
+        assert len(captured) == 1
+        body = captured[0]["content"]
+        # Must NOT label this row as a successful sidecar bypass.
+        assert "Runtime sync collisions (sidecar bypass):" not in body
+        # Must surface the audit-only header so operators don't believe the
+        # source data is recoverable from disk.
+        assert (
+            "Runtime sync collisions (audit-only — sidecar NOT written; "
+            "source data is NOT recoverable from disk):"
+        ) in body
+        # Branch + paths still rendered for operators.
+        assert "feature" in body
+        assert "history/lost.log" in body
+        assert "history/lost.log.from-feature" in body
+        # The 'unavailable' dest_hash placeholder is rendered verbatim
+        # rather than truncated to 'unavail..' — the renderer should
+        # detect the placeholder and pass it through.
+        assert "dest_hash=unavailable" in body
+        assert "src_hash=deadbeef" in body
+
+    def test_mixed_written_and_audit_only_collisions_render_both_sections(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Both sections render when collisions contain a mix of written and audit-only rows."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+        from se3.engine.merge.runtime_sync import BypassedCollision
+
+        report = MergeReport(
+            success=True,
+            merged_branches=["feature-a", "feature-b"],
+            runtime_sync_collisions=[
+                BypassedCollision(
+                    branch="feature-a",
+                    original_rel_path="history/saved.log",
+                    sidecar_rel_path="history/saved.log.from-feature-a",
+                    src_hash="11111111" * 8,
+                    dest_hash="22222222" * 8,
+                    written=True,
+                ),
+                BypassedCollision(
+                    branch="feature-b",
+                    original_rel_path="history/lost.log",
+                    sidecar_rel_path="history/lost.log.from-feature-b",
+                    src_hash="33333333" * 8,
+                    dest_hash="unavailable",
+                    written=False,
+                ),
+            ],
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature-a", "feature-b"], project_root=tmp_path)
+        assert exit_code == 0
+        body = captured[0]["content"]
+        # Both headers are present.
+        assert "Runtime sync collisions (sidecar bypass):" in body
+        assert (
+            "Runtime sync collisions (audit-only — sidecar NOT written; "
+            "source data is NOT recoverable from disk):"
+        ) in body
+        # Each row appears under the correct branch label.
+        assert "feature-a" in body
+        assert "history/saved.log.from-feature-a" in body
+        assert "feature-b" in body
+        assert "history/lost.log.from-feature-b" in body
+        # Order: the 'sidecar bypass' (written=True) section MUST appear
+        # before the 'audit-only' section, so operators read the
+        # recoverable rows first.
+        assert body.index(
+            "Runtime sync collisions (sidecar bypass):"
+        ) < body.index(
+            "Runtime sync collisions (audit-only — sidecar NOT written"
+        )
+
+    def test_only_written_collisions_render_only_sidecar_bypass_section(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """When all collisions succeeded (written=True), the audit-only header is suppressed."""
+        _init_repo(tmp_path)
+        from se3.engine.merge.orchestrator import MergeReport
+        from se3.engine.merge.runtime_sync import BypassedCollision
+
+        report = MergeReport(
+            success=True,
+            merged_branches=["feature"],
+            runtime_sync_collisions=[
+                BypassedCollision(
+                    branch="feature",
+                    original_rel_path="history/saved.log",
+                    sidecar_rel_path="history/saved.log.from-feature",
+                    src_hash="11111111" * 8,
+                    dest_hash="22222222" * 8,
+                    written=True,
+                ),
+            ],
+        )
+        captured = self._mock_orchestrator_report(monkeypatch, report)
+        exit_code = run_merge(["feature"], project_root=tmp_path)
+        assert exit_code == 0
+        body = captured[0]["content"]
+        assert "Runtime sync collisions (sidecar bypass):" in body
+        # Audit-only header MUST be absent when no audit-only rows exist.
+        assert "audit-only" not in body

@@ -1007,6 +1007,270 @@ class TestExtractNarrativeFromRaw:
         """Empty string returns empty string."""
         assert _extract_narrative_from_raw("") == ""
 
+    def test_fenced_json_with_unescaped_ascii_quotes_stripped(self):
+        """Bug repro: fenced JSON with unescaped ASCII quotes inside values.
+
+        Strict json.loads fails on unescaped interior quotes, but the
+        lenient repair chain used by parse_json_response can recover it.
+        The narrative extractor must use the same lenient detection so
+        the block is stripped and does NOT appear alongside formatted content.
+        """
+        raw = 'Here is my analysis.\n\n```json\n{"content": "是否重写"discovery"步骤"}\n```'
+        result = _extract_narrative_from_raw(raw)
+        # Narrative should only contain the real non-JSON text
+        assert "Here is my analysis." in result
+        # The fenced JSON body must NOT appear in narrative
+        assert "```json" not in result
+        assert '"discovery"' not in result
+        assert "是否重写" not in result
+        assert result.strip() == "Here is my analysis."
+
+    def test_multiple_fenced_blocks_one_with_unescaped_quotes(self):
+        """Multiple fenced blocks: one strict-valid, one lenient-only.
+
+        Both must be recognized as JSON and stripped from narrative.
+        """
+        raw = (
+            "Intro text.\n\n"
+            "```json\n"
+            '{"mode": "question", "content": "hello"}\n'
+            "```\n\n"
+            "Middle narrative.\n\n"
+            "```json\n"
+            '{"content": "是否重写"discovery"步骤"}\n'
+            "```\n\n"
+            "Outro text."
+        )
+        result = _extract_narrative_from_raw(raw)
+        assert "Intro text." in result
+        assert "Middle narrative." in result
+        assert "Outro text." in result
+        assert "```json" not in result
+        assert '"discovery"' not in result
+        assert "mode" not in result
+
+    def test_trailing_bare_json_with_unescaped_quotes_stripped(self):
+        """Trailing bare JSON with unescaped quotes must be stripped.
+
+        After a fenced block is removed, the remaining text may be bare JSON
+        (not in fences). The lenient helper must recognize it so it is not
+        added to narrative.
+        """
+        raw = (
+            "Intro text.\n\n"
+            "```json\n"
+            '{"a": 1}\n'
+            "```\n\n"
+            '{"content": "是否重写"discovery"步骤"}'
+        )
+        result = _extract_narrative_from_raw(raw)
+        assert result == "Intro text."
+        assert '"discovery"' not in result
+        assert "是否重写" not in result
+
+    def test_chinese_fullwidth_punctuation_in_json_value(self):
+        """Chinese full-width quotes inside JSON string values should not break
+        the lenient detection; the block must be stripped."""
+        raw = 'Analysis here.\n\n```json\n{"key": "「中文内容」"}\n```'
+        result = _extract_narrative_from_raw(raw)
+        assert "Analysis here." in result
+        assert "```json" not in result
+        assert "「中文内容」" not in result
+
+    def test_cross_assertion_with_parse_json_response(self):
+        """The unescaped-quote sample that parse_json_response recovers must
+        also be recognized by the narrative extractor (semantic symmetry)."""
+        from se3.engine.utils.json_parser import parse_json_response
+
+        raw = '```json\n{"content": "是否重写"discovery"步骤"}\n```'
+        # Verify parse_json_response can recover it
+        parsed = parse_json_response(raw)
+        assert parsed is not None
+        assert "content" in parsed
+        # Now verify narrative extractor strips the same block
+        result = _extract_narrative_from_raw(raw)
+        assert result == ""
+
+    def test_narrative_with_trailing_bare_json_no_fence(self):
+        """No-fence text with trailing bare JSON: only narrative is kept.
+
+        When raw text contains NO fenced blocks and looks like
+        "narrative ... {JSON}", the trailing JSON must be stripped so the
+        narrative path does NOT return the whole string including the JSON
+        body (which would duplicate what parse_json_response already shows
+        as formatted content).
+        """
+        raw = 'Here is my analysis.\n\n{"mode": "confirmation", "content": "done"}'
+        result = _extract_narrative_from_raw(raw)
+        assert "Here is my analysis." in result
+        assert "mode" not in result
+        assert "confirmation" not in result
+        assert result.strip() == "Here is my analysis."
+
+    def test_narrative_with_trailing_bare_json_no_fence_unescaped_quotes(self):
+        """No-fence text with trailing bare JSON containing unescaped quotes."""
+        raw = 'Analysis here.\n\n{"content": "是否重写"discovery"步骤"}'
+        result = _extract_narrative_from_raw(raw)
+        assert "Analysis here." in result
+        assert "是否重写" not in result
+        assert '"discovery"' not in result
+        assert result.strip() == "Analysis here."
+
+    def test_narrative_before_and_after_bare_json_no_fence(self):
+        """Narrative both before and after bare JSON should both be kept."""
+        raw = 'Before narrative.\n\n{"mode": "confirmation", "content": "done"}\n\nAfter narrative.'
+        result = _extract_narrative_from_raw(raw)
+        assert "Before narrative." in result
+        assert "After narrative." in result
+        assert "mode" not in result
+        assert "confirmation" not in result
+
+    def test_bare_json_at_start_with_trailing_narrative(self):
+        """Bare JSON at the start followed by narrative: narrative is kept."""
+        raw = '{"mode": "question", "content": "hi"}\n\nTrailing narrative here.'
+        result = _extract_narrative_from_raw(raw)
+        assert "Trailing narrative here." in result
+        assert "mode" not in result
+        assert "question" not in result
+        assert result.strip() == "Trailing narrative here."
+
+    def test_fenced_block_containing_scalar_json_is_stripped(self):
+        """Fenced blocks containing scalar JSON should be stripped."""
+        raw = 'Some narrative.\n\n```json\n"just a string"\n```'
+        result = _extract_narrative_from_raw(raw)
+        assert result.strip() == "Some narrative."
+        assert "just a string" not in result
+        assert "```json" not in result
+
+    def test_multiple_bare_json_objects_without_fences(self):
+        """Two bare JSON objects in trailing text without fences.
+
+        Both JSON objects should be stripped entirely rather than leaving
+        the first one in narrative (which would duplicate formatted content).
+        """
+        raw = '{"a": 1}\n{"b": 2}'
+        result = _extract_narrative_from_raw(raw)
+        assert "a" not in result
+        assert "b" not in result
+        assert result == ""
+
+    def test_narrative_with_literal_braces_and_json(self):
+        """Narrative containing literal {/} characters outside JSON.
+
+        The literal braces (e.g. in '{{placeholder}}' or code samples) should
+        NOT confuse extraction — the actual JSON object must still be stripped.
+        """
+        raw = 'Use the {{x}} placeholder for {"json": 1}'
+        result = _extract_narrative_from_raw(raw)
+        assert "Use the {{x}} placeholder for" in result
+        assert '"json"' not in result
+        assert "1" not in result
+        # The literal {{x}} should remain; the JSON should be gone
+        assert "{{x}}" in result
+
+    def test_narrative_with_code_sample_braces(self):
+        """Narrative with code-like braces followed by actual JSON."""
+        raw = 'See `dict = {key: value}` for examples.\n\n{"mode": "confirmation"}'
+        result = _extract_narrative_from_raw(raw)
+        assert "See `dict = {key: value}` for examples." in result
+        assert "mode" not in result
+        assert "confirmation" not in result
+
+    def test_narrative_with_literal_braces_and_unescaped_quotes(self):
+        """Literal braces in narrative + trailing bare JSON with unescaped quotes.
+
+        Combines two edge cases: literal {placeholder} characters in narrative
+        should NOT confuse extraction, and the trailing JSON with unescaped
+        ASCII double quotes inside string values must still be recognized and
+        stripped (via lenient _try_parse_with_repairs in the backward walk).
+        """
+        raw = 'See {placeholder} for {"content": "是否重写"X"步骤"}'
+        result = _extract_narrative_from_raw(raw)
+        assert "See {placeholder} for" in result
+        assert "是否重写" not in result
+        assert '"X"' not in result
+        assert result.strip() == "See {placeholder} for"
+
+    def test_multiple_bare_jsons_with_narrative_prefix(self):
+        """Multiple bare JSONs preceded by narrative: ALL JSONs stripped.
+
+        With the recursive helper, both {"a": 1} and {"b": 2} are extracted
+        and stripped, leaving only the narrative prefix.
+        """
+        raw = 'Analysis here.\n\n{"a": 1}\n{"b": 2}'
+        result = _extract_narrative_from_raw(raw)
+        # Both JSON objects must be stripped (check for JSON syntax, not letters)
+        assert '"a"' not in result
+        assert '"b"' not in result
+        assert result.strip() == "Analysis here."
+
+    def test_multiple_bare_jsons_with_trailing_narrative(self):
+        """Multi-JSON followed by trailing narrative: all stripped.
+
+        Ensures that when bare JSON objects are not at the end (they have
+        trailing prose after them), the recursive rightmost extraction still
+        finds and strips every JSON object.
+        """
+        raw = 'foo\n{"a":1}\nmid\n{"b":2}\nbaz'
+        result = _extract_narrative_from_raw(raw)
+        assert "foo" in result
+        assert "mid" in result
+        assert "baz" in result
+        assert '"a"' not in result
+        assert '"b"' not in result
+
+    def test_inline_fenced_json_block_removed(self):
+        """Single-line fenced blocks like ```json {\"a\":1}``` must be stripped.
+
+        The regex previously required a newline after the opening fence and
+        before the closing fence, so inline fences survived into narrative.
+        """
+        raw = 'Before inline. ```json {"a": 1}``` After inline.'
+        result = _extract_narrative_from_raw(raw)
+        assert "Before inline." in result
+        assert "After inline." in result
+        assert "```json" not in result
+        assert '"a"' not in result
+
+    def test_inline_fenced_json_without_tag_removed(self):
+        """Inline bare fence ```{\"a\":1}``` must also be stripped."""
+        raw = 'Start ```{"b": 2}``` End'
+        result = _extract_narrative_from_raw(raw)
+        assert "Start" in result
+        assert "End" in result
+        assert "```" not in result
+        assert '"b"' not in result
+
+    def test_many_bare_json_objects_no_recursion_error(self):
+        """Many bare JSON objects should not hit recursion limit.
+
+        The previous recursive implementation could hit Python's default
+        recursion limit (~1000) for pathologically large inputs.
+        """
+        jsons = '\n'.join(f'{{"n": {i}}}' for i in range(1500))
+        raw = f'Narrative prefix.\n\n{jsons}'
+        result = _extract_narrative_from_raw(raw)
+        # Only the narrative prefix should remain
+        assert "Narrative prefix." in result
+        # All JSON objects stripped — check a representative key
+        assert '"n"' not in result
+        assert result.strip() == "Narrative prefix."
+
+    def test_many_identical_bare_jsons_all_stripped(self):
+        """Multiple identical bare JSON objects must all be stripped.
+
+        If _strip_all_trailing_jsons used rfind on the extracted string,
+        identical objects could cause index drift. The span-tracking fix
+        returns the exact start index from _extract_trailing_json_string,
+        avoiding any ambiguity when the same JSON literal appears multiple
+        times in the text.
+        """
+        raw = 'Prefix.\n\n{"x": 1}\n\n{"x": 1}\n\n{"x": 1}'
+        result = _extract_narrative_from_raw(raw)
+        assert "Prefix." in result
+        assert '"x"' not in result
+        assert result.strip() == "Prefix."
+
 
 class TestDisplayDiscoveryMessageWithNarrative:
     """Test _display_discovery_message renders narrative from raw_result_text."""

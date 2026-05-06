@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from ..engine.display import render_text
+from ..engine.merge.runtime_sync import DEST_HASH_UNAVAILABLE
 from ..engine.worktree import get_current_branch
 
 logger = logging.getLogger(__name__)
@@ -101,10 +102,113 @@ def _branch_exists(project_root: Path, branch: str) -> bool:
     return result.returncode == 0
 
 
+def _append_runtime_sync_lines(lines: list[str], report) -> None:
+    """Append runtime-sync rendering lines to *lines* in place.
+
+    Renders the full set of runtime-sync signals (skipped branches, skipped
+    files, idempotent bypasses, tier B discarded, tier A collisions) so that
+    failure branches do not lose visibility of partial-sync state. Each
+    section is gated by ``if`` so empty fields produce no output.
+
+    Called from every CLI branch (success, rollback_failed, pending_human,
+    generic-failure) to keep the rendered set consistent. A failure branch
+    that completed some tier-A syncs before halting still surfaces
+    idempotent-bypass and tier-B-discarded signals via this helper, rather
+    than only when ``report.success`` is True.
+    """
+    if report.runtime_sync_skipped_branches:
+        lines.append("")
+        lines.append(
+            "WARNING: Runtime data was not synced for these branches "
+            "(no bound worktree found):"
+        )
+        for b in report.runtime_sync_skipped_branches:
+            lines.append(f"  - {b}")
+    if report.runtime_sync_skipped_files:
+        lines.append("")
+        lines.append(
+            "WARNING: Runtime sync skipped files (some entries may "
+            "indicate data loss — e.g. destination path is a directory "
+            "or non-regular entry (FIFO/socket/device), sidecar name too "
+            "long, sidecar disambiguation exhausted, or sidecar path is "
+            "a directory; see log for details):"
+        )
+        for branch, files in report.runtime_sync_skipped_files:
+            lines.append(f"  - {branch}: {', '.join(files)}")
+    if report.runtime_sync_idempotent_bypasses:
+        lines.append("")
+        lines.append(
+            "Runtime sync idempotent bypasses (sidecar already matched "
+            "source content — possible stale sidecar leftovers from a "
+            "prior aborted run that may mask a new collision):"
+        )
+        for branch, count in report.runtime_sync_idempotent_bypasses:
+            lines.append(f"  - {branch}: {count} file(s)")
+        # Per-file paths (parallel to the audit-only collision rendering):
+        # without these, an operator investigating the stale-sidecar warning
+        # had to cross-reference logs or programmatically read
+        # ``report.runtime_sync_idempotent_records``.  Surface the rel_path
+        # and sidecar_rel_path inline so the summary is self-contained.
+        if report.runtime_sync_idempotent_records:
+            for record in report.runtime_sync_idempotent_records:
+                lines.append(
+                    f"      {record.branch}: {record.original_rel_path} "
+                    f"== {record.sidecar_rel_path}"
+                )
+    if report.runtime_sync_discarded:
+        lines.append("")
+        lines.append(
+            "Runtime sync discarded (tier B branch-side state preserved "
+            "by current branch):"
+        )
+        for branch, files in report.runtime_sync_discarded:
+            lines.append(f"  - {branch}: {len(files)} file(s)")
+    if report.runtime_sync_collisions:
+        written_collisions = [
+            c for c in report.runtime_sync_collisions if c.written
+        ]
+        audit_only_collisions = [
+            c for c in report.runtime_sync_collisions if not c.written
+        ]
+        if written_collisions:
+            lines.append("")
+            lines.append("Runtime sync collisions (sidecar bypass):")
+            for collision in written_collisions:
+                lines.append(
+                    f"  - {collision.branch}: {collision.original_rel_path} "
+                    f"-> {collision.sidecar_rel_path} "
+                    f"(src_hash={collision.src_hash[:8]}.. "
+                    f"dest_hash={collision.dest_hash[:8]}..)"
+                )
+        if audit_only_collisions:
+            lines.append("")
+            lines.append(
+                "Runtime sync collisions (audit-only — sidecar NOT written; "
+                "source data is NOT recoverable from disk):"
+            )
+            for collision in audit_only_collisions:
+                # dest_hash may be the DEST_HASH_UNAVAILABLE sentinel here
+                # when the destination file was unhashable; render it
+                # verbatim so operators can tell at a glance that the row
+                # is bookkeeping, not data.
+                dest_hash_render = (
+                    collision.dest_hash
+                    if collision.dest_hash == DEST_HASH_UNAVAILABLE
+                    else f"{collision.dest_hash[:8]}.."
+                )
+                lines.append(
+                    f"  - {collision.branch}: {collision.original_rel_path} "
+                    f"-> {collision.sidecar_rel_path} "
+                    f"(src_hash={collision.src_hash[:8]}.. "
+                    f"dest_hash={dest_hash_render})"
+                )
+
+
 def run_merge(
     branches: list[str],
     strategy: str = "default",
     delete_merged: bool = False,
+    strict_runtime_sync: bool = False,
     project_root: Optional[Path] = None,
 ) -> int:
     """Run the merge command.
@@ -113,6 +217,9 @@ def run_merge(
         branches: List of branch names to merge (in order).
         strategy: Conflict resolution strategy.
         delete_merged: Whether to delete merged branches afterward.
+        strict_runtime_sync: When True, tier A runtime sync collisions halt
+            the merge sequence. When False (default), collisions are bypassed
+            via sidecar files and the sequence continues.
         project_root: Project root directory. Auto-detected if None.
 
     Returns:
@@ -179,6 +286,7 @@ def run_merge(
         project_root=project_root,
         strategy=strategy,
         delete_merged=delete_merged,
+        strict_runtime_sync=strict_runtime_sync,
     )
     report = orchestrator.execute(branches)
 
@@ -201,22 +309,7 @@ def run_merge(
         if report.version_aggregation_error:
             lines.append("")
             lines.append(f"WARNING: Version aggregation failed: {report.version_aggregation_error}")
-        if report.runtime_sync_skipped_branches:
-            lines.append("")
-            lines.append(
-                "WARNING: Runtime data was not synced for these branches "
-                "(no bound worktree found):"
-            )
-            for b in report.runtime_sync_skipped_branches:
-                lines.append(f"  - {b}")
-        if report.runtime_sync_skipped_files:
-            lines.append("")
-            lines.append(
-                "WARNING: Runtime sync skipped files (cross-tree symlinks or "
-                "unreadable entries):"
-            )
-            for branch, files in report.runtime_sync_skipped_files:
-                lines.append(f"  - {branch}: {', '.join(files)}")
+        _append_runtime_sync_lines(lines, report)
         if report.cleanup_report:
             cr = report.cleanup_report
             lines.append("")
@@ -262,6 +355,14 @@ def run_merge(
             lines.append(f"Call file: {report.human_call_file}")
         if report.log_file:
             lines.append(f"Log file: {report.log_file}")
+        # Defense-in-depth: runtime_sync_collisions / idempotent / discarded
+        # are populated only by _sync_runtime in lenient mode after a
+        # successful git merge, while rollback_failed only arises from
+        # guardrail rollback errors before runtime sync runs. The two are
+        # orthogonal in practice, but surfacing the full runtime-sync signal
+        # set here ensures that if a future change ever makes them co-occur,
+        # the output remains consistent across CLI branches.
+        _append_runtime_sync_lines(lines, report)
         render_text("\n".join(lines), title="Merge Rollback Failed -- Repository May Be Corrupted")
         return 1
     elif report.pending_human:
@@ -287,6 +388,7 @@ def run_merge(
             lines.append(f"Call file: {report.human_call_file}")
         if report.log_file:
             lines.append(f"Log file: {report.log_file}")
+        _append_runtime_sync_lines(lines, report)
         render_text("\n".join(lines), title=title)
         return 130  # Interrupted by user / pending human
     else:
@@ -296,6 +398,10 @@ def run_merge(
         lines = [first_line, ""]
         if report.failed_branch:
             lines.append(f"Failed branch: {report.failed_branch}")
+        if report.runtime_sync_collision_path:
+            lines.append(
+                f"Colliding path: se3/{report.runtime_sync_collision_path}"
+            )
         # Only show the raw failure_reason when _failure_title_and_summary
         # fell back to the generic message (i.e. the reason has no dedicated
         # entry).  This removes the need to maintain a manual exclusion list.
@@ -312,6 +418,7 @@ def run_merge(
             )
         if report.log_file:
             lines.append(f"Log file: {report.log_file}")
+        _append_runtime_sync_lines(lines, report)
         render_text("\n".join(lines), title=title)
         return 1
 

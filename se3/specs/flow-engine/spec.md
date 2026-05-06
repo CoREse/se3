@@ -215,7 +215,7 @@ The `_display_discovery_message()` function SHALL render LLM-generated content f
 
 **Narrative prefix from raw LLM output:**
 
-When `raw_result_text` is provided (the raw LLM output from which JSON was extracted), `_display_discovery_message()` SHALL strip all fenced JSON code blocks (code fences whose first non-whitespace character inside is `{` or `[`) from the raw text. If the remaining narrative text is non-empty after stripping whitespace, it SHALL be rendered as `rich.markdown.Markdown` and placed before all other renderables in the Panel, separated by a blank line. If the remaining text is empty (e.g., Phase 2 pure-JSON output), the Panel renders exactly as before, with no additional prefix. This rule applies uniformly across all five rendering modes.
+When `raw_result_text` is provided (the raw LLM output from which JSON was extracted), `_display_discovery_message()` SHALL strip both (a) all fenced JSON code blocks and (b) any trailing bare JSON object that follows the last narrative line. JSON detection for both paths SHALL use the same lenient parse semantics as `parse_json_response` (full repair chain: `json.loads` → `_repair_json` → `_repair_unescaped_quotes` → combined), exposed via the shared helpers `looks_like_json` (fenced blocks; any JSON value type, including arrays and scalars) and `looks_like_json_object` (trailing bare JSON; dict-only, matching `parse_json_response`'s dict-only return contract). Strict `json.loads` MUST NOT be used for this detection: LLM responses commonly contain unescaped ASCII double quotes inside JSON string values (or analogous quirks) that the repair chain handles but strict parsing rejects — without this alignment, the same fenced block can be successfully extracted as `content` while simultaneously leaking back into the narrative prefix, causing the same data to render twice in the Panel (once formatted, once as a raw fenced block). If the remaining narrative text is non-empty after stripping whitespace, it SHALL be rendered as `rich.markdown.Markdown` and placed before all other renderables in the Panel, separated by a blank line. If the remaining text is empty (e.g., Phase 2 pure-JSON output), the Panel renders exactly as before, with no additional prefix. This rule applies uniformly across all five rendering modes.
 
 **Rendering rules by mode:**
 
@@ -258,6 +258,13 @@ When the discovery step enters the confirmation phase (`is_confirmation=True`), 
 - **WHEN** `_display_discovery_message()` renders the message with `raw_result_text` provided
 - **THEN** the Panel renders identically to the behavior before this change, with no additional prefix renderable
 - **AND** the `content` and other fields follow their existing mode-specific rules
+
+##### Scenario: Fenced JSON with unescaped quotes is stripped (no duplicate display)
+- **GIVEN** `last_raw_result` contains a fenced JSON block whose string values include unescaped ASCII double quotes (e.g., `content` referencing a phrase like `"是否重写..."`) — text that strict `json.loads` rejects but the `parse_json_response` repair chain successfully recovers as a dict
+- **WHEN** `_display_discovery_message()` renders the message with `raw_result_text` provided
+- **THEN** narrative extraction recognizes the fenced block as JSON via the same lenient parse helpers (`looks_like_json` / `looks_like_json_object`) used upstream, and strips it from the narrative prefix
+- **AND** the Panel shows only the formatted `content` once — the raw fenced block does NOT appear alongside it
+- **AND** the same alignment applies to a trailing bare JSON object after the last narrative line
 
 ### Requirement: 状态机驱动流程
 
@@ -986,7 +993,7 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - **GIVEN** update_spec 步骤以 full_spec 模式加载，看到所有现有 spec
 - **WHEN** 实现引入了一个新子系统（如 Issue Discovery）
 - **THEN** update_spec 的 LLM 在追加新 Requirement 前显式回答 4 项判据
-- **AND** 判据输出 `spec_decisions` 包含 `decision: new_spec` 及 reasoning
+- **AND** 判据结果指向 new_spec 时，在 `se3/specs/` 下创建新的 spec 目录和 `spec.md`
 - **AND** 新 spec 文件被创建在 `se3/specs/issue-discovery/spec.md`
 
 ### Requirement: Version Analyze 步骤

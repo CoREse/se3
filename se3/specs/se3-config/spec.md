@@ -461,6 +461,7 @@ The system SHALL support configuration of the `se3 merge` command via a top-leve
 **Merge section options:**
 - `merge.strategy`: Default conflict-resolution tier for `se3 merge` (default: `"default"`). Allowed values: `"default"`, `"strict"`, `"fast"`. The CLI flag `--strategy` overrides this value for a single invocation.
 - `merge.delete_merged_default`: Whether `se3 merge` defaults to deleting merged branches and their bound worktrees (default: `false`). The CLI flags `--delete-merged` / `--no-delete-merged` override this value for a single invocation.
+- `merge.strict_runtime_sync`: Whether `se3 merge` treats a tier A runtime sync collision as a fatal error that halts the merge sequence (default: `false`). When `true`, the old strict behavior is preserved: a collision raises `runtime_sync_collision` and stops the sequence. When `false` (default), collisions are bypassed by writing the source version to a sidecar file (`<dest>.from-<branch>`) and the sequence continues. Accepts boolean values and common string forms (`"true"`, `"false"`, `"1"`, `"0"`, `"yes"`, `"no"`); unrecognized strings fall back to the default `false`.
 
 **Orthogonality with `conflict_resolver.strategy`:**
 
@@ -471,11 +472,12 @@ The system SHALL support configuration of the `se3 merge` command via a top-leve
 merge:
   strategy: default            # default | strict | fast
   delete_merged_default: false # require --delete-merged on the command line
+  strict_runtime_sync: false   # true = halt on collision, false = bypass via sidecar
 ```
 
 #### Scenario: Default merge configuration
 - **WHEN** no `merge` section exists in se3.yaml
-- **THEN** `se3 merge` uses `strategy: default` and `delete_merged_default: false`
+- **THEN** `se3 merge` uses `strategy: default`, `delete_merged_default: false`, and `strict_runtime_sync: false`
 
 #### Scenario: Strategy override via CLI flag
 - **GIVEN** `merge.strategy: default` in se3.yaml
@@ -493,6 +495,21 @@ merge:
 - **WHEN** the user runs `se3 merge feat/x`
 - **THEN** the standalone merge command uses `merge.strategy = default`, NOT the `conflict_resolver` value
 - **AND** `se3 run --loop --merge` continues to honor `conflict_resolver.strategy: "llm"`
+
+#### Scenario: Strict runtime sync halts on collision
+- **GIVEN** `merge.strict_runtime_sync: true` in se3.yaml
+- **WHEN** `se3 merge feat/y` succeeds at the git level but a tier A runtime sync collision is detected
+- **THEN** the merge sequence halts with the `runtime_sync_collision` failure category
+- **AND** the merge commit is preserved (not rolled back)
+- **AND** subsequent branches in the argument list are NOT attempted
+
+#### Scenario: Lenient runtime sync bypasses collision via sidecar
+- **GIVEN** `merge.strict_runtime_sync: false` (or omitted) in se3.yaml
+- **WHEN** `se3 merge feat/y` succeeds at the git level but a tier A runtime sync collision is detected
+- **THEN** the source version is written to a sidecar file `<dest>.from-<branch>`
+- **AND** the target file remains unchanged
+- **AND** the collision is recorded in the merge report for auditability
+- **AND** the merge sequence continues with the next branch
 
 ### Requirement: Implement Configuration
 

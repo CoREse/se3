@@ -23,7 +23,13 @@ from .guardrails import (
 )
 from .human_call import HumanCallWriter
 from .orchestrator import MergeOrchestrator, MergeReport
-from .runtime_sync import RuntimeSyncCollision, SyncReport, sync_branch_runtime
+from .runtime_sync import (
+    DEST_HASH_UNAVAILABLE,
+    BypassedCollision,
+    RuntimeSyncCollision,
+    SyncReport,
+    sync_branch_runtime,
+)
 from .strategy import DecisionAction, StrategyDecider, StrategyDecision
 from .version_aggregator import (
     AggregateResult,
@@ -38,6 +44,7 @@ __all__ = [
     "aggregate_and_apply",
     "AggregateResult",
     "build",
+    "BypassedCollision",
     "check_spec_diff",
     "CleanupManager",
     "CleanupReport",
@@ -47,6 +54,7 @@ __all__ = [
     "ConflictHunk",
     "ConflictResolver",
     "DecisionAction",
+    "DEST_HASH_UNAVAILABLE",
     "FileResolution",
     "GuardrailReport",
     "GuardrailViolation",

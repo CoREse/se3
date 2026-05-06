@@ -613,26 +613,30 @@ def _extract_narrative_from_raw(raw_text: Optional[str]) -> str:
 
     import re
 
+    from ..utils.json_parser import (
+        _extract_trailing_json_string,
+        looks_like_json,
+        looks_like_json_object,
+    )
+
     # Pattern: ```json ... ``` or ``` ... ``` containing JSON
     # We remove fenced JSON blocks and keep everything else.
     text = raw_text
 
-    # Find all fenced code blocks
-    fence_pattern = r"```(?:json)?\s*\n(.*?)\n```"
+    # Find all fenced code blocks (supports both multi-line and inline).
+    # The opening fence may be followed by an optional json tag and optional
+    # whitespace; the closing fence may be on the same line or the next line.
+    fence_pattern = r"```(?:json)?\s*\n?(.*?)\n?```"
     parts = []
     last_end = 0
 
     for match in re.finditer(fence_pattern, text, re.DOTALL):
-        # Check if the block content looks like JSON
+        # Check if the block content looks like JSON (lenient, same as
+        # content extraction path to avoid strict-vs-lenient asymmetry).
+        # Use looks_like_json (includes scalars) for fenced blocks —
+        # any valid JSON inside a fence should be stripped.
         block_content = match.group(1).strip()
-        is_json = False
-        try:
-            json.loads(block_content)
-            is_json = True
-        except (json.JSONDecodeError, ValueError):
-            pass
-
-        if is_json:
+        if looks_like_json(block_content):
             # Keep the text before this JSON block
             before = text[last_end:match.start()].strip()
             if before:
@@ -640,16 +644,72 @@ def _extract_narrative_from_raw(raw_text: Optional[str]) -> str:
             last_end = match.end()
         # If not JSON, keep it (will be included in the trailing text)
 
+    def _strip_all_trailing_jsons(text: str, out_parts: list) -> None:
+        """Iteratively strip all JSON objects from text.
+
+        Appends narrative pieces to *out_parts* in left-to-right order.
+        Handles arbitrary mixes of narrative and bare JSON objects:
+        "narrative\n\n{JSON1}\n\n{JSON2}"  (both JSONs stripped)
+        "narrative\n\n{JSON1}\n\n{JSON2}\n\nnarrative"  (all stripped)
+
+        Works by repeatedly extracting the rightmost JSON (via the
+        lenient backward walk in `_extract_trailing_json_string`) and
+        processing the prefix; narrative text *after* any stripped
+        JSON is also preserved in order.
+        """
+        # Collect suffixes in reverse order, then reverse at end
+        suffixes = []
+        current = text
+
+        while current:
+            if looks_like_json_object(current):
+                # pure JSON dict, strip entirely
+                break
+
+            trailing_result = _extract_trailing_json_string(current)
+            if trailing_result is not None:
+                trailing_json, json_start = trailing_result
+                before = current[:json_start].strip()
+                after = current[json_start + len(trailing_json):].strip()
+                if after:
+                    suffixes.append(after)
+                current = before
+                continue
+
+            # Fallback: first { to last } for edge cases (e.g. text that doesn't
+            # end with } but contains a JSON object in the middle).
+            start = current.find("{")
+            end = current.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                candidate = current[start:end + 1].strip()
+                if looks_like_json_object(candidate):
+                    before = current[:start].strip()
+                    after = current[end + 1:].strip()
+                    if after:
+                        suffixes.append(after)
+                    current = before
+                    continue
+
+            # No JSON found — the entire text is narrative
+            suffixes.append(current)
+            break
+
+        # Reverse to get left-to-right order
+        out_parts.extend(reversed(suffixes))
+
     # Add any remaining text after the last JSON block
     remaining = text[last_end:].strip()
     if remaining:
-        # Check if remaining is bare JSON (not in fences)
-        try:
-            json.loads(remaining)
-            # It's pure JSON, don't add to narrative
+        # Use looks_like_json_object (dict-only) for the no-fence path,
+        # unlike fenced blocks which use looks_like_json (includes scalars
+        # and arrays).  This is intentional: a bare scalar like "42" or
+        # array like "[1,2]" in narrative should NOT be stripped as
+        # "JSON", but any valid JSON inside a fence should be.
+        if looks_like_json_object(remaining):
+            # Pure JSON object, strip entirely
             pass
-        except (json.JSONDecodeError, ValueError):
-            parts.append(remaining)
+        else:
+            _strip_all_trailing_jsons(remaining, parts)
 
     return "\n\n".join(parts)
 

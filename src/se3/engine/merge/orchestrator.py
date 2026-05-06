@@ -27,7 +27,12 @@ from .guardrails import (
     violation_set_hash,
 )
 from .human_call import HumanCallWriter
-from .runtime_sync import RuntimeSyncCollision, sync_branch_runtime
+from .runtime_sync import (
+    DEST_HASH_UNAVAILABLE,
+    BypassedCollision,
+    RuntimeSyncCollision,
+    sync_branch_runtime,
+)
 from .strategy import DecisionAction, StrategyDecider, StrategyDecision
 from .version_aggregator import (
     InferResult,
@@ -168,6 +173,11 @@ class MergeReport:
     """Result of a merge orchestration run."""
 
     success: bool = False
+    # NOTE: On a ``runtime_sync_collision`` halt in strict mode, the
+    # failed branch appears in BOTH ``merged_branches`` (the git merge
+    # commit is on HEAD) and ``failed_branch``. Programmatic consumers
+    # iterating ``merged_branches`` and assuming success may double-count
+    # the colliding branch; always pair with ``failure_reason`` checks.
     merged_branches: list[str] = field(default_factory=list)
     failed_branch: Optional[str] = None
     failure_reason: Optional[str] = None
@@ -184,6 +194,22 @@ class MergeReport:
     cleanup_skipped: bool = True
     runtime_sync_skipped_branches: list[str] = field(default_factory=list)
     runtime_sync_skipped_files: list[tuple[str, list[str]]] = field(default_factory=list)
+    runtime_sync_discarded: list[tuple[str, list[str]]] = field(default_factory=list)
+    runtime_sync_collisions: list[BypassedCollision] = field(default_factory=list)
+    runtime_sync_collision_path: Optional[str] = None
+    # Per-branch count of idempotent sidecar bypasses (sidecar file already
+    # existed with content matching source). Surfaced as a weak signal so a
+    # stale sidecar from a prior aborted run is not invisible to operators
+    # inheriting the worktree.
+    runtime_sync_idempotent_bypasses: list[tuple[str, int]] = field(default_factory=list)
+    # Per-file audit detail (BypassedCollision records) of idempotent
+    # bypasses, parallel to ``runtime_sync_collisions``. Operators
+    # investigating a stale-sidecar warning can inspect this list to see the
+    # exact sidecar paths without rerunning under DEBUG logging. The rendered
+    # ``se3 merge`` output continues to surface only the per-branch count via
+    # ``runtime_sync_idempotent_bypasses`` to keep the audit-noise concern
+    # contained to programmatic consumers.
+    runtime_sync_idempotent_records: list[BypassedCollision] = field(default_factory=list)
     rollback_failed: bool = False
     unattempted_branches: list[str] = field(default_factory=list)
 
@@ -206,6 +232,7 @@ class MergeOrchestrator:
         project_root: Path,
         strategy: str = "default",
         delete_merged: bool = False,
+        strict_runtime_sync: bool = False,
     ) -> None:
         self.project_root = project_root
         if strategy not in ("default", "strict", "fast"):
@@ -215,6 +242,7 @@ class MergeOrchestrator:
             )
         self.strategy = MergeStrategy(strategy)
         self.delete_merged = delete_merged
+        self.strict_runtime_sync = strict_runtime_sync
         self.log_file: Optional[Path] = None
         self._log_lines: list[str] = []
         self._resolver = ConflictResolver(project_root)
@@ -238,6 +266,16 @@ class MergeOrchestrator:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         self.log_file = logs_dir / f"merge_{ts}.log"
         self.log_file.write_text("\n".join(self._log_lines) + "\n", encoding="utf-8")
+
+    def _populate_unattempted(self, report: MergeReport, branches: list[str]) -> None:
+        """Compute unattempted branches when the loop exits early and log them."""
+        if report.failed_branch and report.failed_branch in branches:
+            failed_idx = branches.index(report.failed_branch)
+            report.unattempted_branches = branches[failed_idx + 1:]
+            if report.unattempted_branches:
+                self._log(
+                    f"Unattempted branches: {', '.join(report.unattempted_branches)}"
+                )
 
     def execute(self, branches: list[str]) -> MergeReport:
         """Execute sequential merge of all branches.
@@ -423,6 +461,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "merge_conflict"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -439,6 +478,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "pending_human"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -454,6 +494,7 @@ class MergeOrchestrator:
                 report.failed_branch = branch
                 report.failure_reason = "guardrail_violation"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -472,6 +513,7 @@ class MergeOrchestrator:
                 report.failed_branch = branch
                 report.failure_reason = "guardrail_violation_call_failed"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -492,6 +534,7 @@ class MergeOrchestrator:
                 report.failure_reason = "guardrail_violation_no_rollback"
                 report.rollback_failed = False
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -514,6 +557,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "guardrail_repair_stalled"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -532,6 +576,7 @@ class MergeOrchestrator:
                 report.failed_branch = branch
                 report.failure_reason = "rollback_failed"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -555,6 +600,7 @@ class MergeOrchestrator:
                 if report.human_call_file:
                     report.pending_human = True
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -570,6 +616,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "merge_failed"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -588,6 +635,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "resolution_commit_timeout"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -607,6 +655,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "incomplete_resolution_call_failed"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -626,6 +675,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "human_call_write_failed"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -655,6 +705,7 @@ class MergeOrchestrator:
                         f"but ROLLBACK FAILED. Working tree is in an inconsistent state. "
                         f"Manual intervention required."
                     )
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -675,6 +726,7 @@ class MergeOrchestrator:
                 if report.human_call_file:
                     report.pending_human = True
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -695,6 +747,7 @@ class MergeOrchestrator:
                 if report.human_call_file:
                     report.pending_human = True
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -712,6 +765,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "resolution_write_failed"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -729,6 +783,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "resolution_commit_failed"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -755,6 +810,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "runtime_sync_collision"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -779,6 +835,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "runtime_sync_os_error"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -803,6 +860,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "runtime_sync_timeout"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -818,6 +876,7 @@ class MergeOrchestrator:
                 if not report.failure_reason:
                     report.failure_reason = "unexpected"
                 report.version_aggregation_skipped = True
+                self._populate_unattempted(report, branches)
                 self._write_log()
                 report.log_file = self.log_file
                 return report
@@ -907,15 +966,7 @@ class MergeOrchestrator:
             elif not report.success:
                 self._log("Cleanup skipped: merge did not fully succeed")
 
-        # Compute unattempted branches when the loop exited early.
-        if report.failed_branch and report.failed_branch in branches:
-            failed_idx = branches.index(report.failed_branch)
-            report.unattempted_branches = branches[failed_idx + 1:]
-            if report.unattempted_branches:
-                self._log(
-                    f"Unattempted branches: {', '.join(report.unattempted_branches)}"
-                )
-
+        self._populate_unattempted(report, branches)
         self._write_log()
         report.log_file = self.log_file
         return report
@@ -1119,12 +1170,26 @@ class MergeOrchestrator:
     def _sync_runtime(self, branch: str, report: MergeReport) -> Optional[str]:
         """Sync runtime data from *branch*'s bound worktree into current se3/.
 
-        Returns ``None`` on success or when the source worktree is missing.
-        Returns ``"runtime_sync_collision"`` when a tier A file collides,
-        setting ``report.failure_reason``.
+        Returns ``None`` on success, when the source worktree is missing,
+        or when collisions are bypassed in lenient mode.
+        Returns ``"runtime_sync_collision"`` when a tier A file collides
+        and ``strict_runtime_sync`` is ``True``. In lenient mode,
+        collisions (including directory collisions) are bypassed via
+        sidecar files or recorded as skipped rather than halting.
+        Returns ``"runtime_sync_os_error"`` when an unrecoverable OS error
+        occurs during the sync.  In lenient mode, transient errors such as
+        disk full or permission denied are absorbed as ``skipped_files``
+        entries rather than reaching this return value.  An unexpected
+        OSError that escapes ``sync_branch_runtime`` is logged and treated
+        as a skipped branch (the merge sequence continues); this path only
+        halts the sequence when ``strict_runtime_sync`` is ``True``.
+        Returns ``"runtime_sync_timeout"`` when the sync operation times out.
         """
         try:
-            sync_report = sync_branch_runtime(self.project_root, branch)
+            sync_report = sync_branch_runtime(
+                self.project_root, branch,
+                strict=self.strict_runtime_sync,
+            )
             if sync_report.skipped:
                 self._log(f"Runtime sync skipped for '{branch}': no bound worktree")
                 report.runtime_sync_skipped_branches.append(branch)
@@ -1138,6 +1203,9 @@ class MergeOrchestrator:
                         f"Runtime sync discarded for '{branch}': "
                         f"{len(sync_report.discarded)} file(s)"
                     )
+                    report.runtime_sync_discarded.append(
+                        (branch, sync_report.discarded)
+                    )
                 if sync_report.skipped_files:
                     self._log(
                         f"Runtime sync skipped files for '{branch}': "
@@ -1146,16 +1214,58 @@ class MergeOrchestrator:
                     report.runtime_sync_skipped_files.append(
                         (branch, sync_report.skipped_files)
                     )
+                if sync_report.collisions:
+                    for collision in sync_report.collisions:
+                        marker = "[written]" if collision.written else "[audit-only]"
+                        dest_hash_render = (
+                            collision.dest_hash
+                            if collision.dest_hash == DEST_HASH_UNAVAILABLE
+                            else f"{collision.dest_hash[:8]}.."
+                        )
+                        self._log(
+                            f"Runtime sync collision {marker} for '{branch}': "
+                            f"{collision.original_rel_path} -> "
+                            f"{collision.sidecar_rel_path} "
+                            f"(src_hash={collision.src_hash[:8]}.. "
+                            f"dest_hash={dest_hash_render})"
+                        )
+                        report.runtime_sync_collisions.append(collision)
+                if sync_report.idempotent_bypasses:
+                    self._log(
+                        f"Runtime sync idempotent bypasses for '{branch}': "
+                        f"{sync_report.idempotent_bypasses} sidecar file(s) "
+                        f"already matched source content (possible stale "
+                        f"sidecar leftovers from prior aborted runs)"
+                    )
+                    report.runtime_sync_idempotent_bypasses.append(
+                        (branch, sync_report.idempotent_bypasses)
+                    )
+                    # Carry the per-file audit detail forward so callers
+                    # investigating a stale-sidecar warning have the exact
+                    # sidecar paths without rerunning under DEBUG logging.
+                    report.runtime_sync_idempotent_records.extend(
+                        sync_report.idempotent_bypass_records
+                    )
         except RuntimeSyncCollision as exc:
             self._log(f"Runtime sync collision for '{branch}': {exc}")
             report.failure_reason = "runtime_sync_collision"
+            report.runtime_sync_collision_path = exc.rel_path
             return "runtime_sync_collision"
         except OSError as exc:
             self._log(
                 f"Runtime sync OS error for '{branch}': {exc}"
             )
-            report.failure_reason = "runtime_sync_os_error"
-            return "runtime_sync_os_error"
+            if self.strict_runtime_sync:
+                report.failure_reason = "runtime_sync_os_error"
+                return "runtime_sync_os_error"
+            # In lenient mode, unexpected OSErrors are logged but do not halt
+            # the merge sequence — individual file-level errors are already
+            # absorbed as skipped_files inside sync_branch_runtime.
+            report.runtime_sync_skipped_branches.append(branch)
+            return None
+        # Defensive catch: sync_branch_runtime itself uses no subprocess
+        # timeouts, but _get_worktree_path_for_branch (called inside it)
+        # may raise TimeoutExpired from its internal git invocation.
         except subprocess.TimeoutExpired as exc:
             self._log(
                 f"Runtime sync timeout for '{branch}': {exc}"

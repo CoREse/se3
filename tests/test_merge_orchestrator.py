@@ -5313,7 +5313,9 @@ class TestRuntimeSyncIntegration:
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(
+            project_root=tmp_path, strict_runtime_sync=True,
+        )
         report = orch.execute(["feature-a", "feature-b"])
 
         # feature-a merged successfully, feature-b collided
@@ -5398,7 +5400,9 @@ class TestRuntimeSyncIntegration:
         (wt_b / "se3" / "history").mkdir(parents=True, exist_ok=True)
         (wt_b / "se3" / "history" / "h1.md").write_text("feature-b history")
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(
+            project_root=tmp_path, strict_runtime_sync=True,
+        )
         report = orch.execute(["feature-a", "feature-b"])
 
         # feature-a merged, feature-b collided
@@ -5518,8 +5522,8 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-    def test_runtime_sync_os_error_stops_merge(self, tmp_path: Path) -> None:
-        """Tier A copy OSError stops the merge sequence with correct failure_reason."""
+    def test_runtime_sync_os_error_skips_file(self, tmp_path: Path) -> None:
+        """Tier A copy OSError skips the file; merge sequence continues."""
         from pathlib import Path
 
         _init_repo(tmp_path)
@@ -5552,7 +5556,7 @@ class TestRuntimeSyncIntegration:
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
 
-        # Inject a PermissionError during os.open so the copy phase fails
+        # Inject a PermissionError during os.open so the copy phase skips
         import os
         original_open = os.open
         tier_a_file = str(wt_se3 / "history" / "flow1.log")
@@ -5568,18 +5572,20 @@ class TestRuntimeSyncIntegration:
         finally:
             os.open = original_open
 
-        # feature-a merged successfully, feature-b hit OS error
-        assert report.success is False
+        # Both branches merge successfully; the file is skipped
+        assert report.success is True
         assert "feature-a" in report.merged_branches
-        assert report.failed_branch == "feature-b"
-        # Must NOT be reported as collision or unexpected
-        assert report.failure_reason == "runtime_sync_os_error"
-        # feature-b IS recorded as merged (merge commit is on HEAD)
         assert "feature-b" in report.merged_branches
+        # File recorded as skipped, not as a failure
+        assert report.failure_reason is None
+        assert any(
+            branch == "feature-b" and "history/flow1.log" in files
+            for branch, files in report.runtime_sync_skipped_files
+        )
 
         # feature-a's file should exist
         assert (tmp_path / "a.txt").exists()
-        # feature-b's merge commit should still be on HEAD (not rolled back)
+        # feature-b's merge commit should still be on HEAD
         assert (tmp_path / "b.txt").exists()
 
         # Cleanup worktree
@@ -5669,8 +5675,10 @@ class TestRuntimeSyncIntegration:
         (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
 
-        # First merge attempt — should fail with collision
-        orch1 = MergeOrchestrator(project_root=tmp_path)
+        # First merge attempt — should fail with collision (strict mode)
+        orch1 = MergeOrchestrator(
+            project_root=tmp_path, strict_runtime_sync=True,
+        )
         report1 = orch1.execute(["feature-b"])
 
         assert report1.success is False
@@ -5762,7 +5770,9 @@ class TestRuntimeSyncIntegration:
         (wt_b_se3 / "history" / "flow1.log").write_text("feature-b log")
 
         # First attempt: merge B then C — B succeeds, runtime_sync collides
-        orch1 = MergeOrchestrator(project_root=tmp_path)
+        orch1 = MergeOrchestrator(
+            project_root=tmp_path, strict_runtime_sync=True,
+        )
         report1 = orch1.execute(["feature-b", "feature-c"])
 
         assert report1.success is False
@@ -6202,3 +6212,986 @@ class TestRuntimeSyncIntegration:
         # max(patch, minor) on 1.0.0 = 1.1.0 (not 1.2.0).
         assert report3.final_version == "1.1.0"
         assert _read_pyproject_version(tmp_path) == "1.1.0"
+
+    def test_runtime_sync_collision_lenient_bypasses_and_continues(
+        self, tmp_path: Path,
+    ) -> None:
+        """In lenient mode, tier A collision bypasses to sidecar and the
+        merge sequence continues with the next branch."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature-a: clean merge, no worktree
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-b: will have a collision (lenient mode)
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Set up target se3/ with an UNCOMMITTED file that will collide
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        # Create bound worktree for feature-b with a colliding file
+        wt_dir = tmp_path / ".." / "feature-b-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
+            check=True, capture_output=True,
+        )
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
+
+        # Default (lenient) mode — collision should be bypassed, sequence continues
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature-a", "feature-b"])
+
+        # Both branches should be merged successfully
+        assert report.success is True
+        assert "feature-a" in report.merged_branches
+        assert "feature-b" in report.merged_branches
+        assert report.failed_branch is None
+        assert report.failure_reason is None
+
+        # The colliding file in target should remain unchanged
+        assert (target_se3 / "history" / "flow1.log").read_text() == "target log"
+        # Sidecar should contain the source version
+        sidecar = target_se3 / "history" / "flow1.log.from-feature-b"
+        assert sidecar.exists()
+        assert sidecar.read_text() == "feature-b log"
+
+        # Collisions should be recorded in the report
+        assert len(report.runtime_sync_collisions) == 1
+        collision = report.runtime_sync_collisions[0]
+        assert collision.branch == "feature-b"
+        assert collision.original_rel_path == "history/flow1.log"
+        assert collision.sidecar_rel_path == "history/flow1.log.from-feature-b"
+
+        # Cleanup worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_collision_lenient_multi_branch_collisions(
+        self, tmp_path: Path,
+    ) -> None:
+        """In lenient mode, multiple branches with collisions all bypass
+        and the sequence completes with all collisions recorded."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # Set up target se3/ with a file that both branches will collide with
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        # feature-a: clean merge with colliding worktree
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-b: also collides at the same path
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Create worktrees for both branches
+        wt_a = tmp_path / ".." / "feature-a-wt"
+        wt_a = wt_a.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_a), "feature-a"],
+            check=True, capture_output=True,
+        )
+        (wt_a / "se3" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_a / "se3" / "history" / "flow1.log").write_text("feature-a log")
+
+        wt_b = tmp_path / ".." / "feature-b-wt"
+        wt_b = wt_b.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_b), "feature-b"],
+            check=True, capture_output=True,
+        )
+        (wt_b / "se3" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_b / "se3" / "history" / "flow1.log").write_text("feature-b log")
+
+        # Lenient mode — both collisions bypassed
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature-a", "feature-b"])
+
+        # Both branches merged successfully
+        assert report.success is True
+        assert "feature-a" in report.merged_branches
+        assert "feature-b" in report.merged_branches
+
+        # Target unchanged
+        assert (target_se3 / "history" / "flow1.log").read_text() == "target log"
+
+        # Both collisions recorded
+        assert len(report.runtime_sync_collisions) == 2
+        branches_with_collisions = {c.branch for c in report.runtime_sync_collisions}
+        assert branches_with_collisions == {"feature-a", "feature-b"}
+
+        # Sidecars exist for both
+        assert (target_se3 / "history" / "flow1.log.from-feature-a").exists()
+        assert (target_se3 / "history" / "flow1.log.from-feature-b").exists()
+        assert (
+            target_se3 / "history" / "flow1.log.from-feature-a"
+        ).read_text() == "feature-a log"
+        assert (
+            target_se3 / "history" / "flow1.log.from-feature-b"
+        ).read_text() == "feature-b log"
+
+        # Cleanup worktrees
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_a)],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_b)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_collision_lenient_logs_each_collision(
+        self, tmp_path: Path,
+    ) -> None:
+        """In lenient mode, each bypassed collision is logged in the merge log."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature: clean merge with colliding worktree
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Set up target se3/ with colliding file
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        # Create worktree with colliding file
+        wt_dir = tmp_path / ".." / "feature-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature"],
+            check=True, capture_output=True,
+        )
+        (wt_dir / "se3" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_dir / "se3" / "history" / "flow1.log").write_text("feature log")
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        assert report.success is True
+        assert report.log_file is not None
+        log_text = report.log_file.read_text()
+
+        # Log should contain collision bypass info
+        assert "Runtime sync collision" in log_text
+        assert "history/flow1.log" in log_text
+        assert "from-feature" in log_text
+
+        # Cleanup worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_strict_mode_stops_sequence_same_as_before(
+        self, tmp_path: Path,
+    ) -> None:
+        """Explicit strict=True preserves the old collision-stopping behavior."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature-a: clean merge, no worktree
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-b: will collide
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        wt_dir = tmp_path / ".." / "feature-b-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
+            check=True, capture_output=True,
+        )
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
+
+        # Strict mode — collision should stop the sequence
+        orch = MergeOrchestrator(
+            project_root=tmp_path, strict_runtime_sync=True,
+        )
+        report = orch.execute(["feature-a", "feature-b"])
+
+        assert report.success is False
+        assert "feature-a" in report.merged_branches
+        assert report.failed_branch == "feature-b"
+        assert report.failure_reason == "runtime_sync_collision"
+        # No collisions recorded (strict mode raises, doesn't bypass)
+        assert len(report.runtime_sync_collisions) == 0
+        # No sidecar created
+        assert not (target_se3 / "history" / "flow1.log.from-feature-b").exists()
+
+        # Cleanup worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_strict_mode_halts_before_subsequent_branches(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Strict mode with 3 branches: collision on middle branch halts sequence,
+        does not create sidecars, and leaves subsequent branches unattempted."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature-a: clean merge, no worktree
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-collide: will collide at runtime sync
+        _create_branch(tmp_path, "feature-collide")
+        _add_commit(tmp_path, "collide.txt", "collide", "Add collide")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-c: should never be attempted
+        _create_branch(tmp_path, "feature-c")
+        _add_commit(tmp_path, "c.txt", "c", "Add C")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        wt_dir = tmp_path / ".." / "feature-collide-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-collide"],
+            check=True, capture_output=True,
+        )
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (wt_se3 / "history" / "flow1.log").write_text("feature-collide log")
+
+        # Sentinel side-effect setup: bind a worktree to feature-c containing
+        # a unique runtime file. If the strict-mode halt logic regresses and
+        # feature-c IS attempted, sync_branch_runtime would copy this sentinel
+        # into the target project's se3/history/. Asserting the sentinel's
+        # absence is independent of the monkey-patch — even if the monkeypatch
+        # becomes a no-op due to a future call-site refactor, the file-system
+        # check below will still detect a regression.
+        wt_c_dir = tmp_path / ".." / "feature-c-wt"
+        wt_c_dir = wt_c_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_c_dir), "feature-c"],
+            check=True, capture_output=True,
+        )
+        wt_c_se3 = wt_c_dir / "se3"
+        (wt_c_se3 / "history").mkdir(parents=True, exist_ok=True)
+        sentinel_rel = "history/feature-c-sentinel.log"
+        (wt_c_se3 / "history" / "feature-c-sentinel.log").write_text(
+            "feature-c sentinel — must NOT be synced after strict halt"
+        )
+
+        # Track which branches `sync_branch_runtime` is called for so we can
+        # assert directly that feature-c's worktree was never even attempted
+        # (the loop must short-circuit after the strict-mode collision).
+        import se3.engine.merge.orchestrator as _orch
+        original_sync = _orch.sync_branch_runtime
+        sync_call_branches: list[str] = []
+
+        def _tracking_sync(project_root, branch, *, strict=False):
+            sync_call_branches.append(branch)
+            return original_sync(project_root, branch, strict=strict)
+
+        monkeypatch.setattr(_orch, "sync_branch_runtime", _tracking_sync)
+
+        orch = MergeOrchestrator(
+            project_root=tmp_path, strict_runtime_sync=True,
+        )
+        report = orch.execute(["feature-a", "feature-collide", "feature-c"])
+
+        # (a) feature-a merged successfully
+        assert "feature-a" in report.merged_branches
+        # (a.1) feature-collide git-merge succeeded; only post-merge sync
+        # raised, so it must still appear in merged_branches.
+        assert "feature-collide" in report.merged_branches
+        # (b) Middle branch failed with runtime sync collision
+        assert report.failed_branch == "feature-collide"
+        assert report.failure_reason == "runtime_sync_collision"
+        # (c) feature-c was never attempted
+        assert "feature-c" not in report.merged_branches
+        assert report.unattempted_branches == ["feature-c"]
+        # (c.1) Direct evidence: sync_branch_runtime was never invoked for
+        # feature-c. Together with unattempted_branches==['feature-c'], this
+        # proves the orchestrator returned without entering the loop body
+        # for feature-c — guards against a future regression that "attempts
+        # but skips" subsequent branches after a strict halt.
+        assert "feature-c" not in sync_call_branches
+        # (c.2) File-system side-effect check: independent of the monkey-patch
+        # above, the feature-c sentinel must not appear in the target. If a
+        # future refactor breaks the monkey-patch (e.g. orchestrator imports
+        # the symbol differently and `_orch.sync_branch_runtime` is no longer
+        # the call-site binding), the tracking list assertion (c.1) silently
+        # becomes a no-op — but this filesystem assertion still catches the
+        # regression because the sentinel file is observable on disk.
+        assert not (target_se3 / sentinel_rel).exists(), (
+            f"feature-c sentinel file was synced to target despite strict halt; "
+            f"orchestrator did not short-circuit after feature-collide failure"
+        )
+        # (d) No sidecar files created on target
+        assert not list((target_se3 / "history").glob("*.from-feature-collide*"))
+        # (e) No collision entries recorded (strict mode raises, doesn't bypass)
+        assert len(report.runtime_sync_collisions) == 0
+        # (f) The failed branch must not be recorded as skipped — a regression
+        # that incorrectly populates these in the strict-collision halt path
+        # would not be caught without this assertion.
+        assert "feature-collide" not in report.runtime_sync_skipped_branches
+        assert not any(
+            branch == "feature-collide"
+            for branch, _ in report.runtime_sync_skipped_files
+        )
+        # (g) Strict-mode halt must not populate idempotent-bypass tracking:
+        # ``runtime_sync_idempotent_bypasses`` records ``(branch, count)``
+        # tuples and ``runtime_sync_idempotent_records`` carries the per-file
+        # ``BypassedCollision`` audit detail.  A regression that incorrectly
+        # populated either field for a strict-halted branch (e.g. by running
+        # the lenient idempotent-bypass code path before raising) would not
+        # be caught by the collision/skipped assertions above, so assert
+        # them empty explicitly — paralleling assertions (e)/(f).
+        assert report.runtime_sync_idempotent_bypasses == []
+        assert report.runtime_sync_idempotent_records == []
+
+        # Cleanup worktrees
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_c_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_strict_mode_unattempted_branches_preserves_order(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Strict mode with 4 branches: collision on second branch leaves
+        TWO unattempted branches; assert order is preserved verbatim from
+        the input argument list (operator readability)."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature-a: clean merge, no worktree
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-collide: will collide at runtime sync
+        _create_branch(tmp_path, "feature-collide")
+        _add_commit(tmp_path, "collide.txt", "collide", "Add collide")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-c: should never be attempted
+        _create_branch(tmp_path, "feature-c")
+        _add_commit(tmp_path, "c.txt", "c", "Add C")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-d: should never be attempted (added to test multi-element
+        # ordering in unattempted_branches; with two elements, list-equality
+        # asserts a verifiable order rather than the implicit single-element
+        # "ordering" of the prior test).
+        _create_branch(tmp_path, "feature-d")
+        _add_commit(tmp_path, "d.txt", "d", "Add D")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        wt_dir = tmp_path / ".." / "feature-collide-mb-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-collide"],
+            check=True, capture_output=True,
+        )
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (wt_se3 / "history" / "flow1.log").write_text("feature-collide log")
+
+        # Track which branches `sync_branch_runtime` is called for so we can
+        # confirm neither feature-c nor feature-d is attempted.
+        import se3.engine.merge.orchestrator as _orch
+        original_sync = _orch.sync_branch_runtime
+        sync_call_branches: list[str] = []
+
+        def _tracking_sync(project_root, branch, *, strict=False):
+            sync_call_branches.append(branch)
+            return original_sync(project_root, branch, strict=strict)
+
+        monkeypatch.setattr(_orch, "sync_branch_runtime", _tracking_sync)
+
+        orch = MergeOrchestrator(
+            project_root=tmp_path, strict_runtime_sync=True,
+        )
+        report = orch.execute(
+            ["feature-a", "feature-collide", "feature-c", "feature-d"]
+        )
+
+        # feature-a and feature-collide reached merged_branches
+        assert "feature-a" in report.merged_branches
+        assert "feature-collide" in report.merged_branches
+        # feature-collide failed at runtime sync
+        assert report.failed_branch == "feature-collide"
+        assert report.failure_reason == "runtime_sync_collision"
+        # Multi-element unattempted_branches must preserve input order:
+        # feature-c was passed BEFORE feature-d, so the list MUST read
+        # exactly that way. List-equality enforces both membership and
+        # ordering. A regression that reordered, deduped, or sorted
+        # alphabetically would land identical members but different order.
+        assert report.unattempted_branches == ["feature-c", "feature-d"]
+        # Direct evidence: neither was even attempted.
+        assert "feature-c" not in sync_call_branches
+        assert "feature-d" not in sync_call_branches
+        # No sidecars were created (strict mode raised, did not bypass).
+        assert not list((target_se3 / "history").glob("*.from-feature-collide*"))
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_os_error_mid_bypass_orchestrator_level_lenient(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """In lenient mode, an unexpected OSError from sync_branch_runtime is
+        logged and the merge sequence continues — the branch is recorded as
+        skipped for runtime sync rather than halting the sequence.
+
+        Monkey-patches the ``sync_branch_runtime`` name imported into the
+        orchestrator module so the test exercises the exact call-site binding.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature-a: clean merge, no worktree
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-b: will trigger runtime sync OSError
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Mock sync_branch_runtime to raise OSError on feature-b
+        # Must patch the name imported into the orchestrator module.
+        import se3.engine.merge.orchestrator as _orch
+        original_sync = _orch.sync_branch_runtime
+
+        def _raising_sync(project_root, branch, *, strict=False):
+            if branch == "feature-b":
+                raise OSError(28, "No space left on device")
+            return original_sync(project_root, branch, strict=strict)
+
+        monkeypatch.setattr(_orch, "sync_branch_runtime", _raising_sync)
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature-a", "feature-b"])
+
+        # feature-a should merge successfully
+        assert "feature-a" in report.merged_branches
+        # In lenient mode, feature-b merge succeeds; OSError is treated as a
+        # skipped branch (runtime sync unavailable) rather than a failure.
+        assert report.success is True
+        assert "feature-b" in report.merged_branches
+        assert report.failed_branch is None
+        assert report.failure_reason is None
+        assert "feature-b" in report.runtime_sync_skipped_branches
+        # Merge commit for feature-b should be preserved on HEAD
+        assert (tmp_path / "b.txt").exists()
+        # Unattempted branches should be empty (feature-b was the last)
+        assert report.unattempted_branches == []
+        # No partial collision entries leaked
+        assert len(report.runtime_sync_collisions) == 0
+
+    def test_runtime_sync_os_error_mid_bypass_orchestrator_level_strict(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """In strict mode, an OSError from sync_branch_runtime still halts
+        the merge sequence with 'runtime_sync_os_error' category."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        import se3.engine.merge.orchestrator as _orch
+        original_sync = _orch.sync_branch_runtime
+
+        def _raising_sync(project_root, branch, *, strict=False):
+            if branch == "feature-b":
+                raise OSError(28, "No space left on device")
+            return original_sync(project_root, branch, strict=strict)
+
+        monkeypatch.setattr(_orch, "sync_branch_runtime", _raising_sync)
+
+        orch = MergeOrchestrator(
+            project_root=tmp_path, strict_runtime_sync=True,
+        )
+        report = orch.execute(["feature-a", "feature-b"])
+
+        assert "feature-a" in report.merged_branches
+        assert report.success is False
+        assert report.failed_branch == "feature-b"
+        assert report.failure_reason == "runtime_sync_os_error"
+        assert (tmp_path / "b.txt").exists()
+        assert report.unattempted_branches == []
+        assert len(report.runtime_sync_collisions) == 0
+
+    def test_runtime_sync_os_error_with_unattempted_branches_lenient(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """In lenient mode, an unexpected OSError mid-sequence does not halt;
+        the branch is recorded as skipped and subsequent branches continue."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature-a: clean merge
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-b: will trigger OSError
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-c: should still be attempted in lenient mode
+        _create_branch(tmp_path, "feature-c")
+        _add_commit(tmp_path, "c.txt", "c", "Add C")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        import se3.engine.merge.orchestrator as _orch
+        original_sync = _orch.sync_branch_runtime
+
+        def _raising_sync(project_root, branch, *, strict=False):
+            if branch == "feature-b":
+                raise OSError(28, "No space left on device")
+            return original_sync(project_root, branch, strict=strict)
+
+        monkeypatch.setattr(_orch, "sync_branch_runtime", _raising_sync)
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature-a", "feature-b", "feature-c"])
+
+        # All branches merge successfully at git level; lenient mode continues
+        assert report.success is True
+        assert report.failed_branch is None
+        assert report.failure_reason is None
+        assert "feature-a" in report.merged_branches
+        assert "feature-b" in report.merged_branches
+        assert "feature-c" in report.merged_branches
+        assert "feature-b" in report.runtime_sync_skipped_branches
+        assert report.unattempted_branches == []
+        assert (tmp_path / "b.txt").exists()
+
+    def test_runtime_sync_timeout_monkeypatch_stops_sequence(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """TimeoutExpired from sync_branch_runtime halts sequence, preserves merge.
+
+        Parallel to test_runtime_sync_os_error_mid_bypass_orchestrator_level
+        (monkeypatch of the sync_branch_runtime name imported into the
+        orchestrator module). Protects against future refactors that reorder
+        the catch order in the orchestrator's runtime-sync error handling.
+        """
+        import se3.engine.merge.orchestrator as _orch
+
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature-a: clean merge, no worktree
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-b: will trigger TimeoutExpired via monkeypatch
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-c: never attempted
+        _create_branch(tmp_path, "feature-c")
+        _add_commit(tmp_path, "c.txt", "c", "Add C")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        original_sync = _orch.sync_branch_runtime
+
+        def _raising_sync(project_root, branch, *, strict=False):
+            if branch == "feature-b":
+                raise subprocess.TimeoutExpired(
+                    cmd=["se3", "sync"], timeout=30,
+                )
+            return original_sync(project_root, branch, strict=strict)
+
+        monkeypatch.setattr(_orch, "sync_branch_runtime", _raising_sync)
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature-a", "feature-b", "feature-c"])
+
+        # feature-a merges successfully
+        assert "feature-a" in report.merged_branches
+        # feature-b merge succeeded at git level but runtime sync timed out
+        assert report.success is False
+        assert report.failed_branch == "feature-b"
+        assert report.failure_reason == "runtime_sync_timeout"
+        # Merge commit for feature-b IS on HEAD — branch recorded as merged
+        assert "feature-b" in report.merged_branches
+        assert report.unattempted_branches == ["feature-c"]
+        assert (tmp_path / "b.txt").exists()
+        # No partial collision entries leaked
+        assert len(report.runtime_sync_collisions) == 0
+
+    def test_runtime_sync_strict_collision_populates_unattempted(
+        self, tmp_path: Path,
+    ) -> None:
+        """When strict-mode runtime sync collision halts the sequence,
+        unattempted_branches is populated correctly."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature-a: clean merge, no worktree
+        _create_branch(tmp_path, "feature-a")
+        _add_commit(tmp_path, "a.txt", "a", "Add A")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-b: will collide
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-c: never attempted
+        _create_branch(tmp_path, "feature-c")
+        _add_commit(tmp_path, "c.txt", "c", "Add C")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        wt_dir = tmp_path / ".." / "feature-b-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
+            check=True, capture_output=True,
+        )
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
+
+        orch = MergeOrchestrator(
+            project_root=tmp_path, strict_runtime_sync=True,
+        )
+        report = orch.execute(["feature-a", "feature-b", "feature-c"])
+
+        assert report.success is False
+        assert "feature-a" in report.merged_branches
+        assert report.failed_branch == "feature-b"
+        assert report.failure_reason == "runtime_sync_collision"
+        # Critical: unattempted_branches must be populated
+        assert report.unattempted_branches == ["feature-c"]
+        # feature-c must NOT appear as merged — it was never attempted
+        assert "feature-c" not in report.merged_branches
+        # No collisions recorded (strict mode raises, doesn't bypass)
+        assert len(report.runtime_sync_collisions) == 0
+
+        # Filesystem-level assertion: strict mode raises before any sidecar
+        # is written. A regression that wrote a sidecar in strict mode
+        # would leave a `flow1.log.from-<branch>` file at the target —
+        # detect that directly rather than relying solely on the report's
+        # bookkeeping (which a buggy code path might also fail to update).
+        assert not list((target_se3 / "history").glob("flow1.log.from-*"))
+        # Recursive sweep across the entire target tree for any sidecar.
+        for sidecar in target_se3.rglob("*.from-*"):
+            raise AssertionError(
+                f"strict mode unexpectedly wrote sidecar at {sidecar}"
+            )
+
+        # Cleanup worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_lenient_disambiguation_exhausted_skipped_files(
+        self, tmp_path: Path, caplog,
+    ) -> None:
+        """Lenient mode: when both ``<dest>.from-<branch>`` and
+        ``<dest>.from-<branch>.<short_hash>`` already exist on the target
+        with different content, the file is reported via
+        ``runtime_sync_skipped_files`` (not ``runtime_sync_collisions``)
+        and the merge sequence still completes successfully.
+        """
+        import hashlib
+        import logging
+
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        # feature-b: will trigger lenient sync; both sidecars pre-exist
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Build worktree with the source flow1.log
+        wt_dir = tmp_path / ".." / "feature-b-disambig-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
+            check=True, capture_output=True,
+        )
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
+        src_content = "feature-b log content"
+        (wt_se3 / "history" / "flow1.log").write_text(src_content)
+        src_hash = hashlib.sha256(src_content.encode()).hexdigest()
+        short_hash = src_hash[:8]
+        long_hash = src_hash[:16]
+
+        # Pre-populate target with primary file AND all three sidecar paths
+        # so disambiguation exhausts.
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+        (target_se3 / "history" / "flow1.log.from-feature-b").write_text(
+            "old sidecar content"
+        )
+        (target_se3 / "history" / f"flow1.log.from-feature-b.{short_hash}").write_text(
+            "old hash-suffix sidecar content"
+        )
+        (target_se3 / "history" / f"flow1.log.from-feature-b.{long_hash}").write_text(
+            "old long-hash sidecar content"
+        )
+
+        with caplog.at_level(
+            logging.WARNING, logger="se3.engine.merge.runtime_sync"
+        ):
+            orch = MergeOrchestrator(project_root=tmp_path)
+            report = orch.execute(["feature-b"])
+
+        # Merge should still succeed (lenient mode)
+        assert report.success is True
+        assert "feature-b" in report.merged_branches
+
+        # The disambiguation-exhausted file is reported via skipped_files
+        skipped_paths = [
+            rel
+            for branch, paths in report.runtime_sync_skipped_files
+            for rel in paths
+            if branch == "feature-b"
+        ]
+        assert "history/flow1.log" in skipped_paths
+
+        # Collision is recorded for audit trail even when sidecar write
+        # failed, so operators see a uniform entry in runtime_sync_collisions.
+        assert any(
+            c.original_rel_path == "history/flow1.log"
+            for c in report.runtime_sync_collisions
+        )
+
+        # Original target and pre-existing sidecars are untouched
+        assert (target_se3 / "history" / "flow1.log").read_text() == "target log"
+        assert (
+            target_se3 / "history" / "flow1.log.from-feature-b"
+        ).read_text() == "old sidecar content"
+        assert (
+            target_se3 / "history" / f"flow1.log.from-feature-b.{short_hash}"
+        ).read_text() == "old hash-suffix sidecar content"
+
+        # Operator-visible warning distinguishes this skip from benign IO skips
+        assert any(
+            "sidecar disambiguation exhausted" in record.message
+            and "history/flow1.log" in record.message
+            for record in caplog.records
+        )
+
+        # Cleanup worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )
+
+    def test_runtime_sync_idempotent_records_propagated_to_merge_report(
+        self, tmp_path: Path,
+    ) -> None:
+        """Direct test: when ``sync_branch_runtime`` records an idempotent
+        sidecar match in ``SyncReport.idempotent_bypass_records``, the
+        orchestrator forwards every entry to
+        ``MergeReport.runtime_sync_idempotent_records``.
+
+        This protects against a future refactor that drops the ``extend()``
+        call at orchestrator.py:~1235 while still incrementing the
+        ``runtime_sync_idempotent_bypasses`` counter — the silent-drop
+        regression would not be caught by counter-only assertions.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _create_branch(tmp_path, "feature-b")
+        _add_commit(tmp_path, "b.txt", "b", "Add B")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Build worktree containing the source flow1.log with a known content.
+        wt_dir = tmp_path / ".." / "feature-b-idempotent-wt"
+        wt_dir = wt_dir.resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_dir), "feature-b"],
+            check=True, capture_output=True,
+        )
+        wt_se3 = wt_dir / "se3"
+        (wt_se3 / "history").mkdir(parents=True, exist_ok=True)
+        src_content = "feature-b idempotent log"
+        (wt_se3 / "history" / "flow1.log").write_text(src_content)
+
+        # Pre-populate target with primary file (different content) AND a
+        # sidecar that already matches source — triggers the idempotent path.
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+        (target_se3 / "history" / "flow1.log.from-feature-b").write_text(
+            src_content
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature-b"])
+
+        # Merge succeeds in lenient mode
+        assert report.success is True
+        assert "feature-b" in report.merged_branches
+
+        # Counter is incremented (existing rendered signal)
+        assert report.runtime_sync_idempotent_bypasses == [("feature-b", 1)]
+
+        # Per-file audit detail is forwarded to the orchestrator-level report:
+        # this is the regression guard for the propagation extend() call.
+        assert len(report.runtime_sync_idempotent_records) == 1
+        record = report.runtime_sync_idempotent_records[0]
+        assert record.branch == "feature-b"
+        assert record.original_rel_path == "history/flow1.log"
+        assert record.sidecar_rel_path == "history/flow1.log.from-feature-b"
+
+        # Cleanup worktree
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
+            check=True, capture_output=True,
+        )

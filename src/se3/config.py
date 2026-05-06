@@ -2330,6 +2330,7 @@ class MergeConfig:
 
     strategy: str = "default"
     delete_merged_default: bool = False
+    strict_runtime_sync: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> "MergeConfig":
@@ -2346,6 +2347,9 @@ class MergeConfig:
             strategy=strategy,
             delete_merged_default=_coerce_bool(
                 data.get("delete_merged_default", False), default=False,
+            ),
+            strict_runtime_sync=_coerce_bool(
+                data.get("strict_runtime_sync", False), default=False,
             ),
         )
 

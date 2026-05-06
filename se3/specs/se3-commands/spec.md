@@ -421,7 +421,7 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
   - `git merge conflict (could not be resolved)` — text conflicts the resolver could not handle
   - `post-merge guardrails violation` — spec guardrails rejected the merge result
   - `failed to build conflict context` — the resolver could not even prepare conflict input (strategy-neutral phrasing applies to default, strict, and fast)
-  - `runtime_sync_collision` — post-merge runtime data synchronization (see "`se3 merge` Runtime Data Synchronization") detected a tier A relative-path collision and halted the sequence
+  - `runtime_sync_collision` — post-merge runtime data synchronization (see "`se3 merge` Runtime Data Synchronization") detected a tier A relative-path collision in strict mode and halted the sequence
   - fast-mode aborts (`fast strategy could not resolve conflict`, `fast strategy could not auto-repair guardrails violation`, `fast strategy LLM resolution failed`)
 - **AND** the same category labels are used in the CLI summary and the corresponding log entry, so that users do not confuse a guardrails-driven failure with an unresolved git conflict
 
@@ -440,7 +440,8 @@ After each successful `git merge` of a branch, `se3 merge` SHALL synchronize git
 **Tier A — Append-with-collision (relative-path keyed, structure preserved):**
 - Paths: `se3/history/`, `se3/logs/`, `se3/state/archive/`, `se3/collab/tasks/`, plus the direct-children glob patterns `se3/state/summary-*` and `se3/calls/confirm_*`.
 - Semantics: For every file under these tier A paths in the source worktree, copy it into the same relative path under the current project root only if no file already exists at that target relative path. Collisions are tested at the **relative-path** level — files with the same base name in different subdirectories do NOT collide.
-- Collision policy: When a tier A relative path is already present in the current `se3/`, the entire `se3 merge` invocation SHALL halt with the `runtime_sync_collision` failure category. The just-completed git merge commit is NOT rolled back; subsequent branches in the argument list are NOT attempted.
+- Collision policy (lenient mode, default): When a tier A relative path is already present in the current `se3/` with different content, the source version SHALL be written to a sidecar file `<dest>.from-<branch>` in the same directory. The target file remains unchanged. The collision is recorded in the merge report with source branch, original path, sidecar path, and both content hashes for auditability. The merge sequence SHALL continue with the next branch. Sidecar self-collisions (the sidecar file already exists) are handled by idempotency check (identical content = no-op) or hash-suffix disambiguation (`<dest>.from-<branch>.<short_hash>`).
+- Collision policy (strict mode): When `merge.strict_runtime_sync: true` is configured, a tier A relative-path collision with different content SHALL halt the entire `se3 merge` invocation with the `runtime_sync_collision` failure category. The just-completed git merge commit is NOT rolled back; subsequent branches in the argument list are NOT attempted.
 - Idempotency: When the source and destination files have identical content (byte-for-byte), the destination is treated as already-synced and the file is skipped silently rather than being reported as a collision. This allows safe re-runs of `se3 merge` against the same branch.
 
 **Tier B — Discard branch-side (preserve current state):**
@@ -459,8 +460,18 @@ After each successful `git merge` of a branch, `se3 merge` SHALL synchronize git
 - **WHEN** `se3 merge feat/x` completes the git merge
 - **THEN** both files are copied into the current project root at their original relative paths
 
-#### Scenario: Tier A relative-path collision halts the sequence
+#### Scenario: Tier A collision bypassed by sidecar in lenient mode
 - **GIVEN** branch `feat/y` has `se3/history/run-001.json` in its worktree with different content from the current project's `se3/history/run-001.json`
+- **AND** `merge.strict_runtime_sync` is not set (defaults to lenient mode)
+- **WHEN** `se3 merge feat/y feat/z` runs and the git merge of `feat/y` succeeds
+- **THEN** the runtime sync detects the collision and writes the source version to `se3/history/run-001.json.from-feat/y` (with `/` in the branch name replaced by `__`)
+- **AND** the current project's `se3/history/run-001.json` remains unchanged
+- **AND** the collision is recorded in the merge report with branch `feat/y`, original path `history/run-001.json`, sidecar path, and both content hashes
+- **AND** the merge sequence continues to `feat/z`
+
+#### Scenario: Strict mode preserves halt behavior on tier A collision
+- **GIVEN** branch `feat/y` has `se3/history/run-001.json` in its worktree with different content from the current project's `se3/history/run-001.json`
+- **AND** `merge.strict_runtime_sync: true` is configured
 - **WHEN** `se3 merge feat/y feat/z` runs and the git merge of `feat/y` succeeds
 - **THEN** the runtime sync detects the collision and the entire invocation halts with the `runtime_sync_collision` failure category
 - **AND** the just-completed merge commit for `feat/y` is preserved (not aborted)
