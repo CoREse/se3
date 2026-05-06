@@ -1198,10 +1198,11 @@ class TestCallWithRetryDedup:
             prompt_idx = passed_args.index("-p")
             assert passed_args[prompt_idx + 1] == "test prompt"
 
-    def test_record_prompt_receives_deduped_prompt(self, tmp_path):
-        """Verify _record_prompt is called with the deduped prompt on retry,
-        not the raw duplicate."""
-        from unittest.mock import patch, MagicMock, call
+    def test_record_prompt_records_original_runner_gets_deduped(self, tmp_path):
+        """On retry, _record_prompt receives the ORIGINAL prompt (so the persistent
+        chat history stays free of retry-context bloat), but the runner still gets
+        the deduped effective_prompt."""
+        from unittest.mock import patch, MagicMock
 
         # A prompt that will actually change after dedup
         spec_block = "spec A\nspec B\nspec C"
@@ -1238,12 +1239,17 @@ class TestCallWithRetryDedup:
                 json_retry_count=0,
             )
 
+            # Recorded prompt is the raw original — no dedup applied to history
             mock_record.assert_called_once()
             recorded_prompt = mock_record.call_args[0][0]
-            # The recorded prompt should contain the dedup marker, not the raw duplicate
-            assert "DUPLICATED CONTENT" in recorded_prompt
-            # The second occurrence of spec_block should be replaced — check standalone lines
-            standalone_count = sum(1 for l in recorded_prompt.split("\n") if l == "spec A")
+            assert recorded_prompt == original_prompt
+            assert "DUPLICATED CONTENT" not in recorded_prompt
+
+            # Runner's -p argument received the deduped prompt
+            run_args = runner_inst.run_with_monitor.call_args.kwargs["args"]
+            sent_prompt = run_args[run_args.index("-p") + 1]
+            assert "DUPLICATED CONTENT" in sent_prompt
+            standalone_count = sum(1 for l in sent_prompt.split("\n") if l == "spec A")
             assert standalone_count == 1
 
     def test_dedup_with_continue_mode_retry_context(self, tmp_path):
@@ -1301,19 +1307,22 @@ class TestCallWithRetryDedup:
 
             mock_record.assert_called_once()
             recorded_prompt = mock_record.call_args[0][0]
-            # In continue mode, the effective_prompt is retry_context + continuation instruction.
-            # Verify the continue-mode structure: retry context header and continuation instruction.
-            assert "[Previous conversation context for this step]:" in recorded_prompt
-            assert "Continue the task from where you left off" in recorded_prompt
-            # The original prompt should NOT be re-appended after the retry context.
-            # "Begin work." appears once inside the retry context's historical user prompt,
-            # but NOT a second time as a re-appended original prompt.
-            assert recorded_prompt.count("Begin work.") == 1
-            # Spec content appears once (in the retry context's user prompt), no duplication
-            assert recorded_prompt.count("spec line 1") == 1
+            # Recorded prompt is the raw original_prompt — retry context lives only in
+            # what's sent to the runner, not in the persistent history record.
+            assert recorded_prompt == original_prompt
+            assert "[Previous conversation context for this step]:" not in recorded_prompt
+
+            # Runner-bound effective_prompt carries the continue-mode structure.
+            run_args = runner_inst.run_with_monitor.call_args.kwargs["args"]
+            sent_prompt = run_args[run_args.index("-p") + 1]
+            assert "[Previous conversation context for this step]:" in sent_prompt
+            assert "Continue the task from where you left off" in sent_prompt
+            # The original prompt is NOT re-appended after the retry context in continue mode.
+            assert sent_prompt.count("Begin work.") == 1
+            assert sent_prompt.count("spec line 1") == 1
             # Continue mode does not re-append the original prompt, so there is no
-            # duplicated content to deduplicate — no dedup markers should be present.
-            assert "DUPLICATED CONTENT" not in recorded_prompt
+            # duplicated content to deduplicate — no dedup markers in sent prompt either.
+            assert "DUPLICATED CONTENT" not in sent_prompt
 
     def test_dedup_with_retry_mode_deduplicates_spec(self, tmp_path):
         """Verify dedup removes repeated spec content in retry mode where
@@ -1368,11 +1377,15 @@ class TestCallWithRetryDedup:
 
             mock_record.assert_called_once()
             recorded_prompt = mock_record.call_args[0][0]
-            # In retry mode, effective_prompt = retry_context + "\n" + original_prompt
-            # This means the spec block appears twice — dedup should replace the second
-            assert "DUPLICATED CONTENT" in recorded_prompt
-            # The spec block text should appear only once (in its original position)
-            assert recorded_prompt.count("spec line 1") == 1
+            # Recorded prompt is the raw original_prompt — clean of retry context
+            assert recorded_prompt == original_prompt
+
+            # In retry mode, effective_prompt = retry_context + "\n" + original_prompt;
+            # the spec block appears twice in the runner-bound prompt, and dedup replaces the second.
+            run_args = runner_inst.run_with_monitor.call_args.kwargs["args"]
+            sent_prompt = run_args[run_args.index("-p") + 1]
+            assert "DUPLICATED CONTENT" in sent_prompt
+            assert sent_prompt.count("spec line 1") == 1
 
     def test_internal_retry_triggers_dedup(self, tmp_path):
         """Verify dedup runs on internal retry (external_attempt=0, internal_attempt=1).
@@ -1425,8 +1438,12 @@ class TestCallWithRetryDedup:
                 return retry_context
             return None
 
+        sent_prompts = []
+
         def fake_run_with_monitor(**kwargs):
             call_count[0] += 1
+            args = kwargs["args"]
+            sent_prompts.append(args[args.index("-p") + 1])
             result_obj = MagicMock()
             if call_count[0] == 1:
                 # First internal attempt fails
@@ -1458,13 +1475,18 @@ class TestCallWithRetryDedup:
                 json_retry_count=0,
             )
 
-            # Should have two recorded prompts (one per internal attempt)
+            # Both internal attempts record the raw original_prompt (no retry-context bloat
+            # leaked into history). Dedup behavior is verified on the runner-bound prompts.
             assert len(recorded_prompts) == 2
-            # First prompt: no dedup (total_attempt=0)
-            assert "DUPLICATED CONTENT" not in recorded_prompts[0]
-            # Second prompt: dedup applied (total_attempt=1), spec block deduplicated
-            assert "DUPLICATED CONTENT" in recorded_prompts[1]
-            assert recorded_prompts[1].count("spec line 1") == 1
+            assert recorded_prompts[0] == original_prompt
+            assert recorded_prompts[1] == original_prompt
+
+            assert len(sent_prompts) == 2
+            # First call: no dedup (total_attempt=0)
+            assert "DUPLICATED CONTENT" not in sent_prompts[0]
+            # Second call: dedup applied (total_attempt=1), spec block deduplicated
+            assert "DUPLICATED CONTENT" in sent_prompts[1]
+            assert sent_prompts[1].count("spec line 1") == 1
 
     def test_dedup_runs_as_noop_when_retry_context_is_none(self, tmp_path):
         """When total_attempt > 0 but _get_retry_context() returns None,

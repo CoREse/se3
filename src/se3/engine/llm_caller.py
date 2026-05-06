@@ -968,8 +968,13 @@ class LLMCaller:
                     if f.exists():
                         args.extend(["--file", str(f)])
 
-            # Record the prompt to chat history using external_attempt for grouping
-            self._record_prompt(effective_prompt, self.external_attempt)
+            # Record the original prompt (NOT effective_prompt) to chat history.
+            # effective_prompt on retries contains the retry-context block (marker..separator).
+            # If we recorded that, the next retry's format_history_for_retry would read it back
+            # as a user message and re-embed it inside a fresh retry-context, producing
+            # second-order recursive bloat across attempts. Recording original_prompt keeps
+            # the persistent record clean — the retry-context is rebuilt from history each call.
+            self._record_prompt(original_prompt, self.external_attempt)
 
             try:
                 current_runner = self._get_current_runner()
