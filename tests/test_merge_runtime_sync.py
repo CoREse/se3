@@ -755,16 +755,22 @@ class TestLenientCollision:
         assert (target_se3 / "history" / "flow1.log").read_text() == "target log"
 
     def test_source_contains_sidecar_named_file(self, tmp_path: Path) -> None:
-        """Source worktree has a tier-A file whose name looks like a sidecar
-        (e.g. ``history/x.log`` and ``history/x.log.from-feature``). Both are
-        tier-A candidates; the order of copy and bypass phases determines
-        whether the second file's sidecar uses a hash-suffix path."""
+        """Source-side files matching the sidecar filename pattern are
+        SKIPPED (Task 32 / E3): never propagate forward as if they were
+        real runtime data, otherwise re-runs accumulate
+        ``foo.from-A.from-B`` chains.  The ordinary tier-A file in the
+        same directory still runs through the normal collision path.
+        """
         source = tmp_path / "source"
         target = tmp_path / "target"
         source_se3 = source / "se3"
         target_se3 = target / "se3"
 
-        # Source has both a regular file and a sidecar-named file
+        # Source has both a regular file and a sidecar-named file.  The
+        # sidecar-named file represents output left over by a prior
+        # ``se3 merge`` invocation that ran into a collision and wrote
+        # to a sidecar slot.  Subsequent merges from this branch must
+        # not pick that sidecar back up as input data.
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "x.log").write_text("main file content")
         (source_se3 / "history" / "x.log.from-feature").write_text("sidecar-named source file")
@@ -776,27 +782,27 @@ class TestLenientCollision:
         call = _make_sync_call(source, target, strict=False)
         report = call("feature")
 
-        # x.log.from-feature should be copied normally (no collision in target)
-        assert "history/x.log.from-feature" in report.copied
-        assert (target_se3 / "history" / "x.log.from-feature").exists()
-        assert (target_se3 / "history" / "x.log.from-feature").read_text() == "sidecar-named source file"
+        # x.log.from-feature must NOT be copied — it matches the sidecar
+        # pattern and is filtered at collection time.
+        assert "history/x.log.from-feature" not in report.copied
+        # And it must NOT show up as a skipped file either: collection-
+        # time filtering removes it from the candidate set entirely.
+        assert "history/x.log.from-feature" not in report.skipped_files
 
-        # x.log should have a collision recorded with sidecar
+        # x.log should still have a collision recorded with sidecar (this
+        # is unchanged by the E3 filter — only the sidecar-named source
+        # file is filtered, the ordinary file still runs through).
         assert len(report.collisions) == 1
         assert report.collisions[0].original_rel_path == "history/x.log"
-        # The sidecar path is either the plain .from-feature suffix (when the
-        # bypass phase runs before the copy phase) or a hash-disambiguated
-        # .from-feature.<hash> path (when the copy phase already wrote
-        # x.log.from-feature into the target). Both are valid.
         sidecar_rel = report.collisions[0].sidecar_rel_path
-        # Must start with the expected prefix
-        assert sidecar_rel.startswith("history/x.log.from-feature"), (
-            f"sidecar path {sidecar_rel!r} does not start with "
-            f"'history/x.log.from-feature'"
-        )
+        assert sidecar_rel == "history/x.log.from-feature"
         sidecar_path = target_se3 / sidecar_rel
+        # The sidecar at the target must contain x.log's source content
+        # (created by the bypass loop), NOT the source-side
+        # x.log.from-feature content (which was filtered out).
         assert sidecar_path.exists(), f"sidecar {sidecar_path} does not exist"
         assert sidecar_path.read_text() == "main file content"
+        assert sidecar_path.read_text() != "sidecar-named source file"
         # Target x.log must remain unchanged
         assert (target_se3 / "history" / "x.log").read_text() == "target x.log content"
 
@@ -2481,25 +2487,25 @@ class TestSafeReadAndStatParentSymlinkBoundary:
 
 
 class TestAtomicWriteBytesDestinationSymlinkSwap:
-    """Document the destination-side TOCTOU gap in ``_atomic_write_bytes``.
+    """Verify ``_atomic_write_bytes`` refuses to overwrite a symlinked
+    destination (Task 30 / E1+E5).
 
-    ``temp_path.replace(dest_path)`` follows symlinks on the destination
-    side: if dest_path is swapped to a symlink between mkstemp and
-    replace, the symlink's target is overwritten rather than the symlink
-    itself.  The destination lives under ``project_root/se3/`` (user-
-    controlled), so the practical risk is low.  This test pins the
-    current behavior so a future ``renameat`` / fd-based defense flipping
-    the assertion is detectable.
+    Although ``os.rename(2)`` does not follow destination symlinks (it
+    atomically replaces the path entry, leaving the link's target file
+    untouched), a symlink at the destination is itself suspicious — it
+    implies someone planted a path-takeover gadget between collision
+    validation and the atomic write.  ``_atomic_write_bytes`` now
+    short-circuits with ``OSError(errno=ELOOP)`` so the attempt surfaces
+    loudly rather than silently consuming a tier-A or sidecar slot.
     """
 
-    def test_atomic_write_bytes_dest_symlink_swap_overwrites_target(
+    def test_atomic_write_bytes_rejects_symlink_destination(
         self, tmp_path: Path,
     ) -> None:
-        """If dest_path is a symlink to an external file at write time,
-        ``_atomic_write_bytes`` overwrites the symlink target rather than
-        the symlink itself.  Pins the documented TODO behavior at lines
-        517-524 of runtime_sync.py.
+        """When dest_path is a symlink at write time, ``_atomic_write_bytes``
+        raises ``OSError(ELOOP)`` and leaves the external target untouched.
         """
+        import errno
         import os
 
         import se3.engine.merge.runtime_sync as _rs
@@ -2509,32 +2515,27 @@ class TestAtomicWriteBytesDestinationSymlinkSwap:
         target_se3.mkdir(parents=True)
 
         # External file outside the destination tree; the symlink points
-        # here. After _atomic_write_bytes, this external file's content
-        # will be overwritten because Path.replace follows symlinks on
-        # the destination side.
+        # here.  The previous behavior would have happily replaced the
+        # symlink and gone on; the O_NOFOLLOW guard now refuses.
         external_target = tmp_path / "external_target.txt"
         external_target.write_text("ORIGINAL EXTERNAL")
 
-        # dest_path is a symlink pointing to the external file
+        # dest_path is a symlink pointing to the external file.
         dest_path = target_se3 / "victim.log"
         os.symlink(str(external_target), str(dest_path))
 
-        # Sanity: dest_path is a symlink and reads through to the external
+        # Sanity: dest_path is a symlink and reads through to the external.
         assert dest_path.is_symlink()
         assert dest_path.read_text() == "ORIGINAL EXTERNAL"
 
-        _rs._atomic_write_bytes(dest_path, b"NEW CONTENT")
+        with pytest.raises(OSError) as exc_info:
+            _rs._atomic_write_bytes(dest_path, b"NEW CONTENT")
+        assert exc_info.value.errno == errno.ELOOP
 
-        # Current behavior: dest_path is no longer a symlink (replace
-        # replaced the symlink with the temp file). The external file
-        # may or may not have been overwritten depending on the kernel/
-        # filesystem behavior of replace() on symlinks. Either way, the
-        # original symlink's content path is broken.
-        # The key invariant being pinned: dest_path now contains the new
-        # content (one way or another) — the test would catch a
-        # regression that makes _atomic_write_bytes raise on a symlink
-        # destination, signaling that a stricter defense kicked in.
-        assert dest_path.read_text() == "NEW CONTENT"
+        # The symlink remains intact — the external file is untouched
+        # and dest_path still resolves through it.
+        assert dest_path.is_symlink()
+        assert external_target.read_text() == "ORIGINAL EXTERNAL"
 
 
 class TestSafeBranchLabelTruncationPaths:
