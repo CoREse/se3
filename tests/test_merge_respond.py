@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+import warnings
 from pathlib import Path
 
 import pytest
 
-from se3.commands.merge_respond import process_merge_response
+from se3.commands.merge_respond import process_merge_response, _warn_deprecated_filename
 
 
 def _init_repo(path: Path) -> None:
@@ -510,3 +511,42 @@ class TestGuardrailsAfterAccept:
         exit_code = process_merge_response(call_file, project_root=tmp_path)
         # Should return 0 (warning, not fatal)
         assert exit_code == 0
+
+
+class TestDeprecatedFilenameWarning:
+    """F5: deprecation warning for old '-' style call file naming."""
+
+    def test_old_style_filename_warns(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """Old-style filenames (without T in timestamp) trigger a log warning."""
+        import logging
+        old_name = tmp_path / "merge_20240101_120000_000000_feature-branch.json"
+        old_name.write_text('{"type": "merge_conflict"}', encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="se3.commands.merge_respond"):
+            _warn_deprecated_filename(old_name)
+
+        assert "Deprecated call file naming" in caplog.text
+        assert "removed in the next release" in caplog.text
+
+    def test_new_style_filename_no_warning(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """New-style filenames (with T in timestamp) do not trigger a log warning."""
+        import logging
+        new_name = tmp_path / "merge_20240101T120000_000000_1234_0_a1b2c3d4_feature__branch.json"
+        new_name.write_text('{"type": "merge_conflict"}', encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="se3.commands.merge_respond"):
+            _warn_deprecated_filename(new_name)
+
+        assert "Deprecated call file naming" not in caplog.text
+
+    def test_non_merge_file_ignored(self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        """Non-merge filenames are silently ignored."""
+        import logging
+        other = tmp_path / "some_other_file.txt"
+        other.write_text("hello", encoding="utf-8")
+
+        with caplog.at_level(logging.WARNING, logger="se3.commands.merge_respond"):
+            _warn_deprecated_filename(other)
+
+        assert "Deprecated call file naming" not in caplog.text
+
