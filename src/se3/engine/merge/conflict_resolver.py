@@ -9,15 +9,55 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..json_extractor import extract_json_two_phase
+from ...commands.merge.secret_redact import redact_text
 from .conflict_context import ConflictContext, ConflictFile, ConflictHunk
 
+if TYPE_CHECKING:
+    from ..llm_caller import LLMCaller
+
 logger = logging.getLogger(__name__)
+
+
+# D2: cap resolved file content at 5 MiB by default.  An LLM that hands
+# back a multi-gigabyte string is either malfunctioning or attempting an
+# OOM; either way we refuse to apply it.
+DEFAULT_MAX_RESOLVED_CONTENT_BYTES = 5 * 1024 * 1024
+
+# D3: git accepts up to 7 leading spaces on conflict markers (used by
+# embedded diff blocks inside doc files).  Detect markers anywhere in
+# the line that come after at most 7 spaces.
+_CONFLICT_START_RE = re.compile(r"^[ ]{0,7}<<<<<<<", re.MULTILINE)
+_CONFLICT_MID_RE = re.compile(r"^[ ]{0,7}=======", re.MULTILINE)
+_CONFLICT_END_RE = re.compile(r"^[ ]{0,7}>>>>>>>", re.MULTILINE)
+
+
+def _has_conflict_markers(text: str) -> bool:
+    """Return True when ``text`` still contains conflict markers.
+
+    Recognises markers preceded by up to 7 spaces (git's tolerance);
+    a previous strict ``"<<<<<<<" in text`` check missed indented
+    markers and let unresolved content slip through.
+    """
+    return bool(
+        _CONFLICT_START_RE.search(text)
+        or _CONFLICT_END_RE.search(text)
+    )
+
+
+class HunkValidationError(ValueError):
+    """Raised when a HunkResolution payload is malformed."""
+
+
+class ResolvedContentTooLargeError(ValueError):
+    """Raised when an LLM resolution exceeds the configured size cap."""
 
 
 class Confidence(str, Enum):
@@ -38,12 +78,54 @@ class MergeStrategy(str, Enum):
 
 @dataclass
 class HunkResolution:
-    """Resolution result for a single conflict hunk."""
+    """Resolution result for a single conflict hunk.
+
+    ``start_line`` and ``end_line`` are 1-based and validated in
+    ``__post_init__``: both must be positive integers and
+    ``end_line >= start_line``.  Floats / strings / negatives /
+    overflowed values raise :class:`HunkValidationError` rather than
+    being silently coerced.
+    """
 
     start_line: int
     end_line: int
     confidence: Confidence = Confidence.LOW
     reasoning: str = ""
+
+    # Maximum line number we accept without an explicit file_lines
+    # bound.  Anything larger almost certainly came from a buggy LLM
+    # response and would be useless downstream.
+    _MAX_LINE_NUMBER = 10_000_000
+
+    def __post_init__(self) -> None:
+        self.start_line = self._validate_line("start_line", self.start_line)
+        self.end_line = self._validate_line("end_line", self.end_line)
+        if self.end_line < self.start_line:
+            raise HunkValidationError(
+                f"end_line ({self.end_line}) must be >= start_line "
+                f"({self.start_line})"
+            )
+
+    @classmethod
+    def _validate_line(cls, name: str, value: object) -> int:
+        # Reject None and any non-int / non-bool numeric type.  bool
+        # is a subclass of int in Python so we filter it explicitly.
+        if value is None:
+            raise HunkValidationError(f"{name} must be an int, got None")
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise HunkValidationError(
+                f"{name} must be an int, got {type(value).__name__}={value!r}"
+            )
+        if value < 1:
+            raise HunkValidationError(
+                f"{name} must be >= 1 (got {value})"
+            )
+        if value > cls._MAX_LINE_NUMBER:
+            raise HunkValidationError(
+                f"{name} exceeds maximum allowed line number "
+                f"({cls._MAX_LINE_NUMBER}); got {value}"
+            )
+        return value
 
 
 @dataclass
@@ -101,8 +183,42 @@ _RESOLUTION_SCHEMA = """{
 class ConflictResolver:
     """Resolve merge conflicts using LLM with structured JSON output."""
 
-    def __init__(self, project_root: Path) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        llm_caller: Optional["LLMCaller"] = None,
+        llm_trace: Optional[Any] = None,
+        max_resolved_content_bytes: int = DEFAULT_MAX_RESOLVED_CONTENT_BYTES,
+    ) -> None:
+        """Construct a resolver.
+
+        Args:
+            project_root: Repository root for git/log paths.
+            llm_caller: Optional pre-built :class:`LLMCaller` to share
+                across the merge pipeline (D9).  When supplied, every
+                conflict resolution call reuses the same caller so that
+                its prompt cache, retry budget, and trace stream remain
+                continuous with downstream guardrail repair calls.  When
+                ``None``, a fresh caller scoped to ``"merge_conflict"`` is
+                built lazily on first use.
+            llm_trace: Optional :class:`LLMTrace` for per-call jsonl
+                recording (K2).  When supplied, every LLM call is timed
+                and written to the trace file.
+            max_resolved_content_bytes: Hard upper bound on
+                ``resolved_content`` for any single file.  Defaults to
+                5 MiB; configurable to allow tests to assert the cap is
+                enforced (D2).
+        """
         self.project_root = project_root
+        self._llm_caller = llm_caller
+        self._llm_trace = llm_trace
+        if max_resolved_content_bytes <= 0:
+            raise ValueError(
+                "max_resolved_content_bytes must be positive, "
+                f"got {max_resolved_content_bytes}"
+            )
+        self.max_resolved_content_bytes = max_resolved_content_bytes
 
     def resolve(
         self,
@@ -139,16 +255,50 @@ class ConflictResolver:
         return self._parse_response(raw_response, context)
 
     def _call_llm(self, prompt: str) -> str:
-        """Call LLM with the given prompt."""
-        from ..llm_caller import LLMCaller
+        """Call LLM with the given prompt.
 
-        caller = LLMCaller(
-            project_root=self.project_root,
-            step_type="merge_conflict",
-            max_retries=2,
-            retry_delay=1.0,
-        )
-        return caller.call(prompt=prompt, require_json=False)
+        Reuses ``self._llm_caller`` when one was injected at construction
+        time, so prompt cache and retry budget stay shared with
+        :class:`GuardrailRepairer` and any other merge-pipeline caller
+        (see D9).  Falls back to a freshly-built caller when none was
+        supplied.
+
+        K2: If an :class:`LLMTrace` was injected, the call is timed and
+        recorded as a jsonl entry.
+        """
+        caller = self._llm_caller
+        if caller is None:
+            from ..llm_caller import LLMCaller
+
+            caller = LLMCaller(
+                project_root=self.project_root,
+                step_type="merge_conflict",
+                max_retries=2,
+                retry_delay=1.0,
+            )
+
+        t0 = time.monotonic()
+        result: str = ""
+        outcome: str = ""
+        error: Optional[str] = None
+        try:
+            result = caller.call(prompt=prompt, require_json=False)
+            outcome = "success"
+        except Exception as exc:
+            outcome = "error"
+            error = str(exc)
+            raise
+        finally:
+            if self._llm_trace is not None:
+                self._llm_trace.record(
+                    agent="conflict_resolver",
+                    prompt=redact_text(prompt),
+                    response=redact_text(result) if outcome == "success" else "",
+                    duration_sec=time.monotonic() - t0,
+                    outcome=outcome,
+                    error=error,
+                )
+        return result
 
     def _build_prompt(
         self,
@@ -345,6 +495,23 @@ class ConflictResolver:
 
             path = file_data.get("path", "")
             resolved_content = file_data.get("resolved_content", "")
+            if not isinstance(resolved_content, str):
+                # Coerce non-string types (LLMs sometimes hand back lists
+                # or numbers).  Raise instead of silently stringifying:
+                # the merge would otherwise commit garbage.
+                raise HunkValidationError(
+                    f"resolved_content for {path!r} must be a string, "
+                    f"got {type(resolved_content).__name__}"
+                )
+
+            # D2: enforce size cap before any further processing.
+            content_bytes = resolved_content.encode("utf-8", errors="replace")
+            if len(content_bytes) > self.max_resolved_content_bytes:
+                raise ResolvedContentTooLargeError(
+                    f"resolved_content for {path!r} is "
+                    f"{len(content_bytes)} bytes, exceeds cap of "
+                    f"{self.max_resolved_content_bytes} bytes"
+                )
 
             # Determine if this is a spec file by cross-referencing with context
             is_spec = False
@@ -353,28 +520,66 @@ class ConflictResolver:
                     is_spec = cf.is_spec
                     break
 
-            # Validate: no conflict markers in resolved content
+            # Validate: no conflict markers in resolved content (D3 —
+            # whitespace-tolerant detection).
             force_review = False
-            if "<<<<<<<" in resolved_content or ">>>>>>>" in resolved_content:
-                logger.warning("Resolved content for %s still contains conflict markers", path)
+            if _has_conflict_markers(resolved_content):
+                logger.warning(
+                    "Resolved content for %s still contains conflict markers",
+                    path,
+                )
                 force_review = True
 
             # Parse hunks
             hunks_data = file_data.get("hunks", [])
             hunks: list[HunkResolution] = []
             if isinstance(hunks_data, list):
+                resolved_line_count = (
+                    resolved_content.count("\n") + 1 if resolved_content else 0
+                )
                 for hunk_data in hunks_data:
-                    if isinstance(hunk_data, dict):
-                        hunks.append(
-                            HunkResolution(
-                                start_line=int(hunk_data.get("start_line", 0)),
-                                end_line=int(hunk_data.get("end_line", 0)),
-                                confidence=self._parse_confidence(
-                                    hunk_data.get("confidence", "low")
-                                ),
-                                reasoning=str(hunk_data.get("reasoning", "")),
-                            )
+                    if not isinstance(hunk_data, dict):
+                        continue
+                    try:
+                        hunk = HunkResolution(
+                            start_line=hunk_data.get("start_line", 0),
+                            end_line=hunk_data.get("end_line", 0),
+                            confidence=self._parse_confidence(
+                                hunk_data.get("confidence", "low")
+                            ),
+                            reasoning=str(hunk_data.get("reasoning", "")),
                         )
+                    except HunkValidationError as exc:
+                        # D1: surface the malformed hunk rather than
+                        # silently coercing nonsense values into the
+                        # resolution.  Tests assert that negatives /
+                        # huge / string values raise; production keeps
+                        # the resolution flagged for human review and
+                        # skips this hunk.
+                        logger.warning(
+                            "Discarding malformed hunk in %s: %s",
+                            path, exc,
+                        )
+                        force_review = True
+                        continue
+                    # When file_lines is known, log a warning when the
+                    # hunk's end_line points past the resolved file's
+                    # tail.  We keep the hunk (its line numbers may
+                    # refer to the working-tree version with markers,
+                    # which is longer than the resolved version) and
+                    # do not force review — but log so an operator can
+                    # spot suspicious metadata.
+                    if (
+                        resolved_line_count
+                        and hunk.end_line > resolved_line_count
+                    ):
+                        logger.debug(
+                            "Hunk end_line %d exceeds resolved-file line "
+                            "count %d for %s (likely refers to working-tree "
+                            "version with markers)",
+                            hunk.end_line, resolved_line_count, path,
+                        )
+                    hunks.append(hunk)
 
             file_flags = file_data.get("flags", {})
             if not isinstance(file_flags, dict):

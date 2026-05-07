@@ -32,6 +32,9 @@ def _init_repo(path: Path) -> None:
         check=True, capture_output=True,
     )
     (path / "README.md").write_text("# Test\n")
+    # Ignore se3/ runtime directory so that merge lock files and logs
+    # do not cause "untracked working tree files would be overwritten".
+    (path / ".gitignore").write_text("/se3/*\n!/se3/specs/\n!/se3/issues/\n")
     subprocess.run(["git", "-C", str(path), "add", "."], check=True, capture_output=True)
     subprocess.run(
         ["git", "-C", str(path), "commit", "-m", "initial"],
@@ -5414,10 +5417,11 @@ class TestRuntimeSyncIntegration:
         # The collided branch IS recorded as merged (git merge succeeded)
         assert "feature-b" in report.merged_branches
 
-        # Version aggregation was skipped because the sequence stopped early
-        assert report.version_aggregation_skipped is True
-        # No version bump was applied (aggregation skipped)
-        assert report.final_version is None
+        # Task 18 / B12: version aggregation still runs for successful merges
+        # even when runtime sync fails.  feature-a bumped patch (1.0.0→1.0.1).
+        assert report.version_aggregation_skipped is False
+        assert report.final_version == "1.0.1"
+        assert report.bump_type == "patch"
 
         # Log should contain retry warning
         assert report.log_file is not None
@@ -5703,12 +5707,9 @@ class TestRuntimeSyncIntegration:
         assert (target_se3 / "history" / "flow1.log").read_text() == "feature-b log"
         # Version must remain correct (from the original merge, not double-bumped)
         assert _read_pyproject_version(tmp_path) == "1.0.1"
-        # Aggregation runs (head != base path) but produces the same version
-        # because the branch's bump (patch on 1.0.0 = 1.0.1) matches what's
-        # already in HEAD.
-        assert report2.version_aggregation_skipped is False
-        assert report2.final_version == "1.0.1"
-        assert report2.bump_type == "patch"
+        # Task B2/B3/B4: already-merged branches skip bump inference, so
+        # version aggregation is skipped on retry (the version was already
+        # bumped in the first attempt).
 
         # Cleanup worktree
         subprocess.run(
@@ -6208,9 +6209,10 @@ class TestRuntimeSyncIntegration:
         assert report3.success is True
         assert "A" in report3.merged_branches
         assert "B" in report3.merged_branches
-        # Critical: must NOT over-bump. min-wins gives 1.0.0 as base.
-        # max(patch, minor) on 1.0.0 = 1.1.0 (not 1.2.0).
-        assert report3.final_version == "1.1.0"
+        # Both branches are already-merged: version aggregation is skipped
+        # because there are no new bumps to aggregate. The version in HEAD
+        # is already correct.
+        assert report3.version_aggregation_skipped is True
         assert _read_pyproject_version(tmp_path) == "1.1.0"
 
     def test_runtime_sync_collision_lenient_bypasses_and_continues(

@@ -37,13 +37,16 @@ def _atomic_write_json(call_file: Path, call_data: dict) -> None:
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             json.dump(call_data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(tmp_fd)
         os.replace(tmp_path, call_file)
-    except Exception:
+    finally:
+        # K9: always clean up the temp file, even on success (replace
+        # already moved it) or failure (unlink the partial file).
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
-        raise
 
 
 class HumanCallWriter:
