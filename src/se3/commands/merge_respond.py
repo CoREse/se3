@@ -8,9 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Optional
 
 from ..engine.display import render_text
@@ -18,6 +17,61 @@ from ..engine.display import render_text
 logger = logging.getLogger(__name__)
 
 _STRICT_SENTINEL = "[__SE3_STRICT_PLACEHOLDER__:"
+
+
+def _is_spec_path(path: str) -> bool:
+    """Return True when *path* points to a se3 spec file.
+
+    G2: Uses :class:`pathlib.PurePosixPath` so Windows-style backslashes
+    are normalised before the segment check.  The previous regex
+    (``re.match(r"^se3/specs/.+/spec\\.md$", path)``) silently returned
+    False for ``"se3\\specs\\foo\\spec.md"``.
+    """
+    if not path:
+        return False
+    # Normalise backslashes to forward slashes so PurePosixPath sees
+    # the expected segment structure on either platform.
+    normalised = path.replace("\\", "/")
+    parts = PurePosixPath(normalised).parts
+    return (
+        len(parts) >= 4
+        and parts[0] == "se3"
+        and parts[1] == "specs"
+        and parts[-1] == "spec.md"
+    )
+
+
+def _first_parent_sha(project_root: Path) -> str:
+    """Return the first-parent SHA of HEAD.
+
+    G1: Uses ``git rev-list --parents -n 1 HEAD`` instead of
+    ``git rev-parse HEAD^1`` so that octopus merges (>2 parents) are
+    handled by treating the first parent as the pre-merge ours-side
+    state, exactly the same as a 2-parent merge.
+
+    Raises:
+        RuntimeError: If git fails or HEAD has no parents (root commit).
+    """
+    result = subprocess.run(
+        ["git", "-C", str(project_root), "rev-list", "--parents", "-n", "1", "HEAD"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"git rev-list --parents -n 1 HEAD failed "
+            f"(rc={result.returncode}): {result.stderr.strip()}"
+        )
+    parts = result.stdout.strip().split()
+    # parts[0] is HEAD itself; parts[1:] are parents in order
+    if len(parts) < 2:
+        raise RuntimeError(
+            f"HEAD has no parents — cannot determine pre-merge SHA "
+            f"(rev-list output: {result.stdout!r})"
+        )
+    return parts[1]
 
 
 def process_merge_response(
@@ -124,12 +178,23 @@ def process_merge_response(
                     file_path.parent.mkdir(parents=True, exist_ok=True)
                     file_path.write_text(resolved, encoding="utf-8")
 
-                    # Stage the file
-                    subprocess.run(
+                    # G3: Stage the file with returncode validation.
+                    # Previously check=False with no returncode inspection
+                    # silently swallowed `git add` failures (e.g. invalid
+                    # path, locked index), leaving the merge half-staged.
+                    add_result = subprocess.run(
                         ["git", "-C", str(project_root), "add", f["path"]],
                         capture_output=True,
+                        text=True,
                         check=False,
+                        timeout=30,
                     )
+                    if add_result.returncode != 0:
+                        raise RuntimeError(
+                            f"git add {f['path']} failed "
+                            f"(rc={add_result.returncode}): "
+                            f"{add_result.stderr.strip() or 'unknown error'}"
+                        )
             except Exception as exc:
                 render_text(
                     f"Failed to write resolved content: {exc}",
@@ -156,18 +221,20 @@ def process_merge_response(
             # LLM-resolved and human-resolved merge paths.
             spec_paths = [
                 f["path"] for f in files
-                if re.match(r"^se3/specs/.+/spec\.md$", f.get("path", ""))
+                if _is_spec_path(f.get("path", ""))
             ]
             if spec_paths:
                 try:
                     post_sha = subprocess.run(
                         ["git", "-C", str(project_root), "rev-parse", "HEAD"],
                         capture_output=True, text=True, check=True,
+                        timeout=15,
                     ).stdout.strip()
-                    pre_sha = subprocess.run(
-                        ["git", "-C", str(project_root), "rev-parse", "HEAD^1"],
-                        capture_output=True, text=True, check=True,
-                    ).stdout.strip()
+                    # G1: Use first-parent walk via rev-list --parents so
+                    # octopus merges with >2 parents are handled
+                    # consistently (the first parent is always the
+                    # ours-side pre-merge state).
+                    pre_sha = _first_parent_sha(project_root)
 
                     from se3.engine.merge.guardrails import MergeGuardrailsCheck
                     guardrails = MergeGuardrailsCheck(project_root)
@@ -187,7 +254,8 @@ def process_merge_response(
                             title="SE3 Merge — Guardrail Violations Detected",
                         )
                         return 0
-                except Exception as exc:
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired,
+                        RuntimeError) as exc:
                     logger.warning(
                         "Guardrails check failed after merge-respond: %s", exc
                     )

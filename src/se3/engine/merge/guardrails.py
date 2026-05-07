@@ -15,11 +15,22 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from ..worktree import _run_git
+from ...commands.merge.result_model import EvidenceRecord
 
 logger = logging.getLogger(__name__)
+
+
+def _evidence_dict(**kwargs: Any) -> dict:
+    """Build an evidence dict with H4 typo-fail-fast validation.
+
+    Constructs an :class:`EvidenceRecord` (which raises ``TypeError`` for
+    unknown keyword arguments) and serialises to a dict so existing
+    consumers that perform ``"key" in evidence`` checks keep working.
+    """
+    return EvidenceRecord(**kwargs).to_dict()
 
 _SPEC_PATH_RE = re.compile(r"^se3/specs/.+/spec\.md$")
 
@@ -86,10 +97,19 @@ class GuardrailViolation:
 
 @dataclass
 class GuardrailReport:
-    """Result of a guardrails check."""
+    """Result of a guardrails check.
+
+    Attributes:
+        passed: True when no violations were found AND the check completed.
+        violations: List of detected guardrail violations.
+        incomplete: True when the check could not finish (e.g. one or more
+            spec files could not be read).  Callers SHOULD treat an
+            incomplete report as a fail-closed condition.
+    """
 
     passed: bool = True
     violations: list[GuardrailViolation] = field(default_factory=list)
+    incomplete: bool = False
 
 
 def _tokenize_for_pairing(line: str) -> set[str]:
@@ -347,13 +367,13 @@ def _compute_pairing_evidence(
                 })
             best = pairings[0]
             strong_idx, weak_idx, strong_text, weak_text, score = best
-            evidence = {
-                "strong_line": strong_text,
-                "weak_line": weak_text,
-                "pairing_score": round(score, 3),
-                "strong_line_no": missing_strong[strong_idx][0],
-                "weak_line_no": weak_only[weak_idx][0],
-            }
+            evidence = _evidence_dict(
+                strong_line=strong_text,
+                weak_line=weak_text,
+                pairing_score=round(score, 3),
+                strong_line_no=missing_strong[strong_idx][0],
+                weak_line_no=weak_only[weak_idx][0],
+            )
             if len(all_pairings) > 1:
                 evidence["all_pairings"] = all_pairings
             return evidence
@@ -467,13 +487,13 @@ def _compute_pairing_evidence(
                     pd["prefix_score"] = round(ps, 3)
                 all_pairings.append(pd)
             best = valid_pairings[0]
-            evidence = {
-                "strong_line": best[2],
-                "weak_line": best[3],
-                "pairing_score": round(best[4], 3),
-                "strong_line_no": missing_strong[best[0]][0],
-                "weak_line_no": mixed_lines[best[1]][0],
-            }
+            evidence = _evidence_dict(
+                strong_line=best[2],
+                weak_line=best[3],
+                pairing_score=round(best[4], 3),
+                strong_line_no=missing_strong[best[0]][0],
+                weak_line_no=mixed_lines[best[1]][0],
+            )
             if best[5] is not None:
                 evidence["prefix_score"] = round(best[5], 3)
             if len(all_pairings) > 1:
@@ -739,10 +759,10 @@ def check_spec_diff(original_text: str, new_text: str, file_path: str = "<unknow
                     file_path=file_path,
                     violation_type="DELETE",
                     message=f"Requirement deleted: {keyword} line removed",
-                    evidence={
-                        "deleted_line": del_line or "<unknown>",
-                        "deleted_line_no": del_ln,
-                    },
+                    evidence=_evidence_dict(
+                        deleted_line=del_line or "<unknown>",
+                        deleted_line_no=del_ln,
+                    ),
                 ))
             else:
                 violations.append(GuardrailViolation(
@@ -788,10 +808,10 @@ def check_spec_diff(original_text: str, new_text: str, file_path: str = "<unknow
                     file_path=file_path,
                     violation_type="DELETE",
                     message=f"Quantifier deleted: '{keyword}' line removed",
-                    evidence={
-                        "deleted_line": del_line or "<unknown>",
-                        "deleted_line_no": del_ln,
-                    },
+                    evidence=_evidence_dict(
+                        deleted_line=del_line or "<unknown>",
+                        deleted_line_no=del_ln,
+                    ),
                 ))
             else:
                 violations.append(GuardrailViolation(
@@ -818,10 +838,29 @@ def check_spec_diff(original_text: str, new_text: str, file_path: str = "<unknow
             file_path=file_path,
             violation_type="DELETE",
             message=f"Scenarios deleted: {len(missing_when)} WHEN clause(s) removed",
-            evidence={"when_clauses": missing_when},
+            evidence=_evidence_dict(when_clauses=missing_when),
         ))
 
     return violations
+
+
+def _next_non_blank_line(
+    lines: list[str], start: int,
+) -> tuple[int, str]:
+    """Advance from ``start`` to the next non-blank line.
+
+    Returns a ``(index, line)`` tuple.  Raises :class:`StopIteration` when
+    no further non-blank line exists.
+
+    A line is "blank" when it is empty *or* contains only whitespace.
+    Using ``StopIteration`` (rather than returning a sentinel like ``-1``)
+    lets callers wrap the call in a single ``try/except`` block instead
+    of guarding every access to ``lines[idx]``.
+    """
+    for idx in range(start, len(lines)):
+        if lines[idx].strip():
+            return idx, lines[idx]
+    raise StopIteration
 
 
 def _extract_when_clauses(lines: list[str]) -> list[str]:
@@ -835,6 +874,13 @@ def _extract_when_clauses(lines: list[str]) -> list[str]:
     Blank lines between the WHEN line and its indented continuations are
     skipped so that reflowed clauses that include paragraph breaks are still
     joined correctly.
+
+    H3 — Bounds protection: blank lines are skipped via
+    :func:`_next_non_blank_line` which uses ``StopIteration`` to signal
+    end-of-file, removing any chance that ``lines[j][0]`` is indexed on
+    an empty string.  An additional ``if not cur:`` guard protects against
+    pathological inputs (e.g. external tools that leave zero-length lines
+    that are not detected by ``.strip()``).
     """
     clauses: list[str] = []
     i = 0
@@ -843,17 +889,24 @@ def _extract_when_clauses(lines: list[str]) -> list[str]:
         if re.search(r'\bWHEN\b', line):
             parts = [line.strip()]
             j = i + 1
-            while j < len(lines):
-                if not lines[j].strip():
+            while True:
+                try:
+                    j, cur = _next_non_blank_line(lines, j)
+                except StopIteration:
+                    break
+                # Defensive: skip any zero-length residual lines that
+                # somehow survived strip() (should not happen, but a
+                # defence-in-depth guard against external corruption).
+                if not cur:
                     j += 1
                     continue
-                if lines[j][0] not in ' \t':
+                if cur[0] not in ' \t':
                     break
                 # A whitespace-indented line that starts its own WHEN clause
                 # (e.g. nested list item) is a new clause, not a continuation.
-                if re.search(r'\bWHEN\b', lines[j]):
+                if re.search(r'\bWHEN\b', cur):
                     break
-                parts.append(lines[j].strip())
+                parts.append(cur.strip())
                 j += 1
             clauses.append(' '.join(parts))
             i = j
@@ -942,9 +995,26 @@ def _check_spec_file_against_ref(
             )]
         try:
             new_content = full_path.read_text(encoding="utf-8")
-        except Exception as exc:
-            logger.warning("Could not read spec file %s: %s", rel_path, exc)
-            return []
+        except (OSError, UnicodeDecodeError) as exc:
+            # H5: Don't silently absorb file-read failures.  Log the
+            # specific exception type and return an INCOMPLETE marker so
+            # the report is flagged as not fully verified.
+            logger.warning(
+                "Could not read spec file %s (%s): %s",
+                rel_path, type(exc).__name__, exc,
+            )
+            return [GuardrailViolation(
+                file_path=rel_path,
+                violation_type="CHECK_INCOMPLETE",
+                message=(
+                    f"Spec file could not be read for guardrails check: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                evidence=_evidence_dict(
+                    exception_type=type(exc).__name__,
+                    exception_msg=str(exc),
+                ),
+            )]
     else:
         new_content = _read_file_from_ref(project_root, rel_path, new_ref)
         if new_content is None:
@@ -956,6 +1026,135 @@ def _check_spec_file_against_ref(
             )]
 
     return check_spec_diff(original_content, new_content, file_path=rel_path)
+
+
+def _check_merge_topology(
+    project_root: Path,
+    pre_sha: str,
+    post_sha: str,
+    *,
+    min_parents: int = 2,
+    timeout: int = 15,
+) -> list[GuardrailViolation]:
+    """Verify that ``post_sha`` is a valid merge result built on ``pre_sha``.
+
+    This catches a class of disasters where the merge commit was silently
+    dropped (e.g. ``git reset --soft HEAD~1`` on an amended merge) — the
+    spec content might match the expected post-merge text, but the
+    underlying commit is no longer a merge or is no longer a descendant
+    of the pre-merge HEAD.
+
+    Two checks:
+
+    1. **Ancestry**: ``pre_sha`` must be an ancestor of ``post_sha`` (i.e.
+       ``post_sha`` is a descendant of ``pre_sha``).  If not, the merge
+       commit was lost.
+
+    2. **Parent count**: ``post_sha`` must have at least ``min_parents``
+       parents (defaults to 2).  Octopus merges (>2 parents) are accepted
+       — a 3-parent merge has parents >= 2.
+
+    The no-op already-ancestor case (``pre_sha == post_sha``) is handled
+    by the caller; this function still returns a violation in that case
+    if invoked, because a same-commit pair cannot satisfy the merge-commit
+    requirement.
+
+    Returns:
+        List of CHECK_FAILURE violations.  Empty when the topology is
+        valid.
+    """
+    violations: list[GuardrailViolation] = []
+    if not pre_sha or not post_sha:
+        return violations  # Caller already validated; nothing to check.
+
+    # Check 1: ancestry — pre must be an ancestor of post.
+    try:
+        ancestry_result = _run_git(
+            project_root, "merge-base", "--is-ancestor", pre_sha, post_sha,
+            check=False, timeout=timeout,
+        )
+    except Exception as exc:
+        violations.append(GuardrailViolation(
+            file_path="N/A",
+            violation_type="CHECK_FAILURE",
+            message=(
+                f"Topology check failed: could not run "
+                f"`git merge-base --is-ancestor {pre_sha[:8]} {post_sha[:8]}`: {exc}"
+            ),
+        ))
+        return violations
+
+    if ancestry_result.returncode != 0:
+        violations.append(GuardrailViolation(
+            file_path="N/A",
+            violation_type="CHECK_FAILURE",
+            message=(
+                f"Merge topology violation: pre-merge SHA {pre_sha[:8]} is "
+                f"NOT an ancestor of post-merge SHA {post_sha[:8]}. "
+                f"The merge commit may have been lost (e.g. `git reset --soft HEAD~1` "
+                f"after amending the merge)."
+            ),
+            evidence=_evidence_dict(
+                pre_sha=pre_sha,
+                post_sha=post_sha,
+                topology_check="ancestry",
+            ),
+        ))
+        # If ancestry fails, the parent-count check is meaningless because
+        # we are likely on a disconnected commit graph.  Return early.
+        return violations
+
+    # Check 2: parent count — post must be a merge commit (>= min_parents).
+    try:
+        parents_result = _run_git(
+            project_root, "rev-list", "--parents", "-n", "1", post_sha,
+            check=False, timeout=timeout,
+        )
+    except Exception as exc:
+        violations.append(GuardrailViolation(
+            file_path="N/A",
+            violation_type="CHECK_FAILURE",
+            message=(
+                f"Topology check failed: could not run "
+                f"`git rev-list --parents -n 1 {post_sha[:8]}`: {exc}"
+            ),
+        ))
+        return violations
+
+    if parents_result.returncode != 0:
+        violations.append(GuardrailViolation(
+            file_path="N/A",
+            violation_type="CHECK_FAILURE",
+            message=(
+                f"Topology check failed: `git rev-list --parents -n 1 "
+                f"{post_sha[:8]}` returned {parents_result.returncode}: "
+                f"{parents_result.stderr.strip()}"
+            ),
+        ))
+        return violations
+
+    parts = parents_result.stdout.strip().split()
+    # parts[0] is post_sha itself; parts[1:] are the parents.
+    parent_count = max(0, len(parts) - 1)
+    if parent_count < min_parents:
+        violations.append(GuardrailViolation(
+            file_path="N/A",
+            violation_type="CHECK_FAILURE",
+            message=(
+                f"Merge topology violation: post-merge commit {post_sha[:8]} "
+                f"has {parent_count} parent(s), expected >= {min_parents}. "
+                f"HEAD is not a merge commit — the merge may have been "
+                f"squashed, fast-forwarded, or replaced by a single-parent commit."
+            ),
+            evidence=_evidence_dict(
+                post_sha=post_sha,
+                parent_count=parent_count,
+                min_parents=min_parents,
+                topology_check="parent_count",
+            ),
+        ))
+
+    return violations
 
 
 class MergeGuardrailsCheck:
@@ -989,6 +1188,8 @@ class MergeGuardrailsCheck:
         self,
         ours_before_sha: str,
         merge_commit_sha: str,
+        *,
+        enforce_topology: bool = True,
     ) -> GuardrailReport:
         """Check spec files changed between two commits for violations.
 
@@ -996,9 +1197,28 @@ class MergeGuardrailsCheck:
         fetches the pre-merge HEAD version and the merge-commit version,
         and runs :func:`check_spec_diff` on each.
 
+        Also performs **merge topology validation** (H1/H2):
+
+          * ``merge_commit_sha`` must be a descendant of ``ours_before_sha``;
+          * ``merge_commit_sha`` must have at least 2 parents (octopus merges
+            with more parents are accepted).
+
+        The topology check is skipped when ``ours_before_sha ==
+        merge_commit_sha`` (already-ancestor no-op path); the orchestrator
+        normally filters that case out before calling us.  Tests that want
+        to exercise only the spec-diff logic (without setting up a real
+        merge commit) can pass ``enforce_topology=False`` to skip the
+        topology assertions.
+
         Args:
             ours_before_sha: The SHA of HEAD before the merge started.
             merge_commit_sha: The SHA of the merge commit.
+            enforce_topology: When True (default) verify the merge
+                topology.  When False, skip the topology check — only
+                the spec-diff content checks run.  Tests that exercise
+                the spec-diff path with non-merge commits SHOULD set
+                this to False to avoid spurious CHECK_FAILURE
+                violations.
 
         Returns:
             GuardrailReport with pass/fail status and any violations.
@@ -1018,20 +1238,58 @@ class MergeGuardrailsCheck:
                     ),
                 ],
             )
+
+        violations: list[GuardrailViolation] = []
+        incomplete = False
+
+        # H1/H2 — merge topology check.  Skip when pre == post (already-ancestor
+        # no-op path); the orchestrator filters that case out before calling us.
+        if enforce_topology and ours_before_sha != merge_commit_sha:
+            topology_violations = _check_merge_topology(
+                self.project_root, ours_before_sha, merge_commit_sha,
+            )
+            violations.extend(topology_violations)
+
         spec_files = _get_changed_spec_files(
             self.project_root, ours_before_sha, merge_commit_sha,
         )
-        if not spec_files:
+        if not spec_files and not violations:
             return GuardrailReport(passed=True)
 
-        violations: list[GuardrailViolation] = []
         for rel_path in spec_files:
-            file_violations = _check_spec_file_against_ref(
-                self.project_root, rel_path, ours_before_sha, merge_commit_sha,
-            )
+            try:
+                file_violations = _check_spec_file_against_ref(
+                    self.project_root, rel_path, ours_before_sha, merge_commit_sha,
+                )
+            except (OSError, UnicodeDecodeError, ValueError) as exc:
+                # H5: Per-file iteration error must NOT silently abort the
+                # overall check.  Log, mark the report incomplete, and
+                # continue with the remaining files.
+                logger.warning(
+                    "Per-file guardrails check failed for %s (%s): %s",
+                    rel_path, type(exc).__name__, exc,
+                )
+                violations.append(GuardrailViolation(
+                    file_path=rel_path,
+                    violation_type="CHECK_INCOMPLETE",
+                    message=(
+                        f"Spec file iteration error: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                    evidence=_evidence_dict(
+                        exception_type=type(exc).__name__,
+                        exception_msg=str(exc),
+                    ),
+                ))
+                incomplete = True
+                continue
+            for v in file_violations:
+                if v.violation_type == "CHECK_INCOMPLETE":
+                    incomplete = True
             violations.extend(file_violations)
 
         return GuardrailReport(
             passed=len(violations) == 0,
             violations=violations,
+            incomplete=incomplete,
         )

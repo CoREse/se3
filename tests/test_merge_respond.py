@@ -510,3 +510,135 @@ class TestGuardrailsAfterAccept:
         exit_code = process_merge_response(call_file, project_root=tmp_path)
         # Should return 0 (warning, not fatal)
         assert exit_code == 0
+
+
+# =====================================================================
+# G8 — git add returncode check, octopus first-parent, spec-path
+# =====================================================================
+
+
+class TestGitAddReturncode:
+    """G8 task 43 (G3): git add failures must NOT be silently swallowed."""
+
+    def test_git_add_failure_returns_error(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """When git add fails, process_merge_response returns 1."""
+        import subprocess as subprocess_mod
+        _init_repo(tmp_path)
+        _start_merge_conflict(tmp_path)
+
+        call_file = _create_merge_call_file(
+            tmp_path,
+            files=[
+                {
+                    "path": "README.md",
+                    "llm_resolution": {"resolved_content": "resolved\n"},
+                },
+            ],
+        )
+        _create_response_file(call_file, "accept")
+
+        original_run = subprocess_mod.run
+
+        def fake_run(cmd, *args, **kwargs):
+            if isinstance(cmd, list) and len(cmd) >= 4 and cmd[3] == "add":
+                # Simulate git add failure
+                from subprocess import CompletedProcess
+                return CompletedProcess(
+                    args=cmd, returncode=128,
+                    stdout="", stderr="fatal: simulated git-add failure",
+                )
+            return original_run(cmd, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess_mod, "run", fake_run)
+        # The merge_respond module imported subprocess at the top, so we
+        # also need to patch it via the imported module's namespace.
+        from se3.commands import merge_respond as merge_respond_mod
+        monkeypatch.setattr(
+            merge_respond_mod.subprocess, "run", fake_run
+        )
+
+        exit_code = process_merge_response(call_file, project_root=tmp_path)
+        assert exit_code == 1
+
+
+class TestFirstParentSha:
+    """G8 task 42 (G1): _first_parent_sha helper for octopus-safe parent walk."""
+
+    def test_two_parent_merge_first_parent(self, tmp_path: Path) -> None:
+        from se3.commands.merge_respond import _first_parent_sha
+
+        _init_repo(tmp_path)
+        # Create a feature branch and merge it
+        first_parent_expected = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "feat"],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "feat.py").write_text("x")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "feat"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "main"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "merge", "--no-ff", "feat",
+             "-m", "Merge feat"],
+            check=True, capture_output=True,
+        )
+
+        first_parent = _first_parent_sha(tmp_path)
+        assert first_parent == first_parent_expected
+
+    def test_root_commit_raises_runtime_error(self, tmp_path: Path) -> None:
+        from se3.commands.merge_respond import _first_parent_sha
+
+        _init_repo(tmp_path)
+        # _init_repo only created the initial commit; HEAD has no parents
+        with pytest.raises(RuntimeError, match="no parents"):
+            _first_parent_sha(tmp_path)
+
+
+class TestIsSpecPath:
+    """G8 task 43 (G2): _is_spec_path uses pathlib.PurePosixPath."""
+
+    def test_forward_slash_path(self) -> None:
+        from se3.commands.merge_respond import _is_spec_path
+
+        assert _is_spec_path("se3/specs/base/spec.md") is True
+        assert _is_spec_path("se3/specs/foo/bar/spec.md") is True
+
+    def test_backslash_path_normalized(self) -> None:
+        """G2: Windows paths with backslashes are normalised before check."""
+        from se3.commands.merge_respond import _is_spec_path
+
+        assert _is_spec_path("se3\\specs\\base\\spec.md") is True
+        assert _is_spec_path("se3\\specs\\foo\\bar\\spec.md") is True
+
+    def test_mixed_separators(self) -> None:
+        from se3.commands.merge_respond import _is_spec_path
+
+        assert _is_spec_path("se3\\specs/base/spec.md") is True
+        assert _is_spec_path("se3/specs\\base\\spec.md") is True
+
+    def test_non_spec_paths_rejected(self) -> None:
+        from se3.commands.merge_respond import _is_spec_path
+
+        assert _is_spec_path("README.md") is False
+        assert _is_spec_path("se3/state/foo.json") is False
+        assert _is_spec_path("se3/specs/base/other.md") is False
+        assert _is_spec_path("specs/base/spec.md") is False  # missing se3 prefix
+        assert _is_spec_path("") is False
+
