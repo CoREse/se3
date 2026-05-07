@@ -498,3 +498,423 @@ class TestCleanupManagerDeleteMergedBranches:
         assert not wt_dir.exists()
         # Stale metadata must also be scrubbed
         assert not metadata_dir.exists()
+
+
+class TestParseWorktreePorcelain:
+    """Defect J1: porcelain parser rejects malformed blocks deterministically."""
+
+    def test_parses_valid_record(self) -> None:
+        from se3.engine.merge.cleanup import _parse_worktree_porcelain
+
+        sample = (
+            "worktree /path/to/wt\n"
+            "HEAD abc123\n"
+            "branch refs/heads/feature\n"
+            "\n"
+        )
+        records = _parse_worktree_porcelain(sample)
+        assert len(records) == 1
+        assert records[0].path == "/path/to/wt"
+        assert records[0].head == "abc123"
+        assert records[0].branch == "feature"
+        assert records[0].detached is False
+
+    def test_parses_detached_record(self) -> None:
+        from se3.engine.merge.cleanup import _parse_worktree_porcelain
+
+        sample = (
+            "worktree /path/to/wt\n"
+            "HEAD abc123\n"
+            "detached\n"
+            "\n"
+        )
+        records = _parse_worktree_porcelain(sample)
+        assert len(records) == 1
+        assert records[0].path == "/path/to/wt"
+        assert records[0].detached is True
+        assert records[0].branch is None
+
+    def test_drops_block_without_branch_or_detached(self, caplog) -> None:
+        """A worktree block missing both branch and detached MUST be dropped.
+
+        Regression guard against silent skip — if git's porcelain output
+        ever changes, we want a WARNING in the log so the test/operator
+        notices instead of a silently mis-parsed record.
+        """
+        from se3.engine.merge.cleanup import _parse_worktree_porcelain
+
+        sample = (
+            "worktree /path/to/wt\n"
+            "HEAD abc123\n"
+            "\n"
+        )
+        with caplog.at_level("WARNING"):
+            records = _parse_worktree_porcelain(sample)
+        assert records == []
+        assert any(
+            "neither 'branch' nor 'detached'/'bare' marker" in rec.message
+            for rec in caplog.records
+        )
+
+    def test_parses_multiple_blocks_one_malformed(self, caplog) -> None:
+        from se3.engine.merge.cleanup import _parse_worktree_porcelain
+
+        sample = (
+            "worktree /good\n"
+            "HEAD abc\n"
+            "branch refs/heads/main\n"
+            "\n"
+            "worktree /bad\n"
+            "HEAD def\n"
+            "\n"
+            "worktree /also-good\n"
+            "HEAD ghi\n"
+            "branch refs/heads/feature\n"
+            "\n"
+        )
+        with caplog.at_level("WARNING"):
+            records = _parse_worktree_porcelain(sample)
+        # The good ones survive.
+        assert {r.path for r in records} == {"/good", "/also-good"}
+        # The bad one is logged.
+        assert any("/bad" in rec.message for rec in caplog.records)
+
+    def test_handles_non_heads_ref(self) -> None:
+        """A branch ref that is not under refs/heads is preserved verbatim."""
+        from se3.engine.merge.cleanup import _parse_worktree_porcelain
+
+        sample = (
+            "worktree /path\n"
+            "HEAD abc\n"
+            "branch refs/remotes/origin/main\n"
+            "\n"
+        )
+        records = _parse_worktree_porcelain(sample)
+        assert len(records) == 1
+        # Branch is preserved verbatim (callers compare against local
+        # branch names so non-heads refs harmlessly fail to match).
+        assert records[0].branch == "refs/remotes/origin/main"
+
+
+class TestCleanupLocaleIndependence:
+    """Defect J2: cleanup git invocations must be locale-pinned to LC_ALL=C.
+
+    A user with a localized git build (e.g. ``LANG=zh_CN.UTF-8``) would
+    otherwise see translated stderr, which the previous substring matcher
+    would silently miss. The wrapper ``_run_git_locale`` forces ``LC_ALL=C``
+    so error matching stays deterministic.
+    """
+
+    def test_run_git_locale_sets_lc_all_c(self, tmp_path: Path, monkeypatch) -> None:
+        """``_run_git_locale`` invocations override LC_ALL to C."""
+        from se3.engine.merge import cleanup
+
+        captured_envs: list[dict] = []
+
+        original_run = subprocess.run
+
+        def tracking_run(*args, **kwargs):
+            env = kwargs.get("env")
+            captured_envs.append(env)
+            return original_run(*args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", tracking_run)
+
+        _init_repo(tmp_path)
+        cleanup._run_git_locale(
+            tmp_path, "rev-parse", "--abbrev-ref", "HEAD",
+            check=False, timeout=15,
+        )
+
+        assert len(captured_envs) >= 1
+        env = captured_envs[-1]
+        assert env is not None
+        assert env.get("LC_ALL") == "C"
+        assert env.get("LANG") == "C"
+        # LANGUAGE must be cleared (it can override LC_ALL on some systems).
+        assert "LANGUAGE" not in env
+
+    def test_localized_git_environment_does_not_leak(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Even when caller env has LANG=zh_CN.UTF-8, cleanup git runs LC_ALL=C."""
+        from se3.engine.merge import cleanup
+
+        # Simulate a localized parent environment.
+        monkeypatch.setenv("LANG", "zh_CN.UTF-8")
+        monkeypatch.setenv("LC_ALL", "zh_CN.UTF-8")
+        monkeypatch.setenv("LANGUAGE", "zh_CN")
+
+        env = cleanup._build_locale_env()
+        assert env["LC_ALL"] == "C"
+        assert env["LANG"] == "C"
+        assert "LANGUAGE" not in env
+
+
+class TestAncestorPreCheck:
+    """Defect J4: explicit ancestor verification before ``git branch -d``."""
+
+    def test_unmerged_branch_is_skipped_without_branch_d(
+        self, tmp_path: Path
+    ) -> None:
+        """An unmerged branch lands in skipped_not_merged via the ancestor check.
+
+        We verify by introspection: the branch must NOT be deleted, and
+        the report must record the locale-independent rejection reason
+        ``"not an ancestor of HEAD"`` (rather than git's localized
+        "not fully merged" message).
+        """
+        _init_repo(tmp_path)
+        default = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default],
+            check=True, capture_output=True,
+        )
+        # Add a different commit on default so feature is not an ancestor.
+        _add_commit(tmp_path, "other.txt", "other", "Add other")
+
+        mgr = CleanupManager(tmp_path)
+        report = mgr.delete_merged_branches(["feature"])
+
+        assert report.deleted == []
+        assert len(report.skipped_not_merged) == 1
+        assert report.skipped_not_merged[0][0] == "feature"
+        assert "ancestor" in report.skipped_not_merged[0][1].lower()
+        assert _branch_exists(tmp_path, "feature") is True
+
+    def test_indeterminate_ancestry_is_skipped_unknown_state(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """If merge-base --is-ancestor times out, fail closed with skipped_unknown_state.
+
+        Defect J4: we must not call ``branch -d`` when the ancestor check
+        cannot prove the branch is merged. The expected outcome is
+        ``skipped_unknown_state`` so an operator can investigate.
+        """
+        _init_repo(tmp_path)
+        default = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "merge", "feature", "--no-edit"],
+            check=True, capture_output=True,
+        )
+
+        from se3.engine.merge import cleanup as cleanup_mod
+
+        # Force the ancestor check to return None (cannot decide).
+        monkeypatch.setattr(
+            cleanup_mod, "_is_branch_ancestor_of_head",
+            lambda project_root, branch: None,
+        )
+
+        mgr = cleanup_mod.CleanupManager(tmp_path)
+        report = mgr.delete_merged_branches(["feature"])
+        assert report.deleted == []
+        assert len(report.skipped_unknown_state) == 1
+        assert report.skipped_unknown_state[0][0] == "feature"
+        # Branch must still exist — refusing to delete on indeterminacy.
+        assert _branch_exists(tmp_path, "feature") is True
+
+
+class TestWorktreeRemoveFailureResilience:
+    """Defect J3: worktree-remove failure must not skip the ``branch -d`` retry.
+
+    Regression guard for the scenario where a worktree removal fails (lock
+    held, filesystem error) but the branch itself is fully merged. The
+    previous implementation bailed out without retrying ``branch -d``,
+    leaving a merged branch behind even though git's safe ``-d`` flag would
+    have completed cleanup.
+    """
+
+    def test_worktree_remove_failure_followed_by_successful_branch_d(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Branch is deleted via retry even when worktree removal fails."""
+        from se3.engine.merge import cleanup as cleanup_mod
+
+        _init_repo(tmp_path)
+        default = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "merge", "feature", "--no-edit"],
+            check=True, capture_output=True,
+        )
+
+        # Pretend a worktree exists at a fake path.
+        fake_wt = tmp_path / "fake_wt"
+        monkeypatch.setattr(
+            cleanup_mod, "exists_for_branch",
+            lambda project_root, branch: True,
+        )
+        monkeypatch.setattr(
+            cleanup_mod, "_get_worktree_path_for_branch",
+            lambda project_root, branch: fake_wt,
+        )
+        # Treat the imaginary worktree as clean.
+        monkeypatch.setattr(
+            cleanup_mod, "_is_worktree_clean",
+            lambda wt_path: True,
+        )
+
+        run_calls: list[tuple] = []
+
+        def scripted_run_git_locale(
+            project_root, *args, check=False, timeout=30
+        ):
+            run_calls.append(args)
+
+            class FakeResult:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            res = FakeResult()
+            if args[:1] == ("rev-parse",):
+                res.stdout = default
+                res.returncode = 0
+                return res
+            if args[:3] == ("merge-base", "--is-ancestor", "feature"):
+                res.returncode = 0  # is an ancestor
+                return res
+            if args[:3] == ("branch", "-d", "feature"):
+                # First attempt: simulate "checked out" rejection so we
+                # take the worktree-removal branch. Second attempt
+                # (after worktree-remove fails): succeed via retry.
+                attempts = sum(
+                    1 for c in run_calls if c[:3] == ("branch", "-d", "feature")
+                )
+                if attempts == 1:
+                    res.returncode = 1
+                    res.stderr = (
+                        "error: Cannot delete branch 'feature' "
+                        "checked out at /tmp"
+                    )
+                    return res
+                # Second attempt — succeed
+                res.returncode = 0
+                return res
+            if args[:2] == ("worktree", "remove"):
+                # Simulate a transient worktree removal failure.
+                res.returncode = 128
+                res.stderr = "fatal: cannot remove worktree (lock held)"
+                return res
+            return res
+
+        monkeypatch.setattr(
+            cleanup_mod, "_run_git_locale", scripted_run_git_locale,
+        )
+        # No-op for metadata cleanup so the test does not touch real
+        # ``.git/worktrees`` of the repo.
+        monkeypatch.setattr(
+            cleanup_mod, "_cleanup_git_worktree_metadata",
+            lambda project_root, branch: None,
+        )
+
+        mgr = cleanup_mod.CleanupManager(tmp_path)
+        report = mgr.delete_merged_branches(["feature"])
+
+        # The retry must succeed and place the branch in `deleted`.
+        assert report.deleted == ["feature"]
+        assert report.skipped_worktree_remove_failed == []
+        # Verify both branch -d attempts and the worktree-remove call were
+        # actually invoked, so the resilience path is exercised.
+        branch_d_attempts = [
+            c for c in run_calls if c[:3] == ("branch", "-d", "feature")
+        ]
+        assert len(branch_d_attempts) == 2
+        assert any(c[:2] == ("worktree", "remove") for c in run_calls)
+
+    def test_worktree_remove_failure_and_branch_d_retry_failure_records_worktree_skip(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Both worktree removal AND retry branch -d fail → surface worktree error.
+
+        Preserves the existing behaviour under defect J3 — the resilience
+        addition only changes the case where the retry succeeds.
+        """
+        from se3.engine.merge import cleanup as cleanup_mod
+
+        _init_repo(tmp_path)
+        default = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "merge", "feature", "--no-edit"],
+            check=True, capture_output=True,
+        )
+
+        fake_wt = tmp_path / "fake_wt"
+        monkeypatch.setattr(
+            cleanup_mod, "exists_for_branch",
+            lambda project_root, branch: True,
+        )
+        monkeypatch.setattr(
+            cleanup_mod, "_get_worktree_path_for_branch",
+            lambda project_root, branch: fake_wt,
+        )
+        monkeypatch.setattr(
+            cleanup_mod, "_is_worktree_clean",
+            lambda wt_path: True,
+        )
+
+        def scripted_run_git_locale(
+            project_root, *args, check=False, timeout=30
+        ):
+            class FakeResult:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            res = FakeResult()
+            if args[:1] == ("rev-parse",):
+                res.stdout = default
+                res.returncode = 0
+                return res
+            if args[:3] == ("merge-base", "--is-ancestor", "feature"):
+                res.returncode = 0
+                return res
+            if args[:3] == ("branch", "-d", "feature"):
+                # All branch -d attempts fail with "checked out" rejection.
+                res.returncode = 1
+                res.stderr = (
+                    "error: Cannot delete branch 'feature' "
+                    "checked out at /tmp"
+                )
+                return res
+            if args[:2] == ("worktree", "remove"):
+                res.returncode = 128
+                res.stderr = "fatal: cannot remove worktree (lock held)"
+                return res
+            return res
+
+        monkeypatch.setattr(
+            cleanup_mod, "_run_git_locale", scripted_run_git_locale,
+        )
+        monkeypatch.setattr(
+            cleanup_mod, "_cleanup_git_worktree_metadata",
+            lambda project_root, branch: None,
+        )
+
+        mgr = cleanup_mod.CleanupManager(tmp_path)
+        report = mgr.delete_merged_branches(["feature"])
+
+        assert report.deleted == []
+        assert len(report.skipped_worktree_remove_failed) == 1
+        assert report.skipped_worktree_remove_failed[0][0] == "feature"
+        assert "lock held" in report.skipped_worktree_remove_failed[0][1]

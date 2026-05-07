@@ -180,6 +180,14 @@ class MergeReport:
     # iterating ``merged_branches`` and assuming success may double-count
     # the colliding branch; always pair with ``failure_reason`` checks.
     merged_branches: list[str] = field(default_factory=list)
+    # Defect I3 split: ``merged_branches`` is the legacy aggregate. The
+    # CLI render layer now distinguishes branches that produced a NEW
+    # merge commit (``newly_merged_branches``) from branches that were
+    # already an ancestor of HEAD before this invocation
+    # (``already_ancestor_branches``). The two are disjoint and their
+    # union (modulo dedup) equals ``merged_branches``.
+    newly_merged_branches: list[str] = field(default_factory=list)
+    already_ancestor_branches: list[str] = field(default_factory=list)
     failed_branch: Optional[str] = None
     failure_reason: Optional[str] = None
     pending_human: bool = False
@@ -344,6 +352,15 @@ class MergeOrchestrator:
             if result == "merged" or result == "already_merged":
                 self._log(f"Branch '{branch}' merged successfully")
                 report.merged_branches.append(branch)
+                # Defect I3: split bucket so the CLI can render
+                # newly-merged branches separately from already-ancestor
+                # ones. ``_merge_single_branch`` returns "already_merged"
+                # only for branches whose tips were already reachable
+                # from HEAD before this invocation.
+                if result == "already_merged":
+                    report.already_ancestor_branches.append(branch)
+                else:
+                    report.newly_merged_branches.append(branch)
                 if pre_merge_sha and pre_merge_version:
                     # Compute merge-base for end-to-end diff semantics
                     if result == "already_merged":
@@ -796,6 +813,7 @@ class MergeOrchestrator:
                 # Record the branch as merged so the report matches git state.
                 if branch not in report.merged_branches:
                     report.merged_branches.append(branch)
+                    report.newly_merged_branches.append(branch)
                 self._log(
                     f"WARNING: Branch '{branch}' merge commit is on HEAD but "
                     f"runtime sync failed. On retry, include '{branch}' again "
@@ -821,6 +839,7 @@ class MergeOrchestrator:
                 )
                 if branch not in report.merged_branches:
                     report.merged_branches.append(branch)
+                    report.newly_merged_branches.append(branch)
                 self._log(
                     f"WARNING: Branch '{branch}' merge commit is on HEAD but "
                     f"runtime sync failed. On retry, include '{branch}' again "
@@ -846,6 +865,7 @@ class MergeOrchestrator:
                 )
                 if branch not in report.merged_branches:
                     report.merged_branches.append(branch)
+                    report.newly_merged_branches.append(branch)
                 self._log(
                     f"WARNING: Branch '{branch}' merge commit is on HEAD but "
                     f"runtime sync failed. On retry, include '{branch}' again "

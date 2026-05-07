@@ -499,9 +499,28 @@ def merge_cmd(
         se3 merge feature-x feature-y --strategy=strict
         se3 merge feature-x --delete-merged
     """
-    from .commands.merge_cmd import run_merge
+    from .commands.merge_cmd import run_merge, validate_branch_names
     from .commands.run import get_project_root
     from .config import load_merge_config
+
+    # Defect I1: empty branch list must be rejected at CLI input level so a
+    # silent zero-iteration "success" is impossible. typer.BadParameter renders
+    # the standard click-style error including --help hint.
+    if not branches:
+        raise typer.BadParameter(
+            "At least one branch name is required.\n"
+            "Usage: se3 merge <branch> [<branch> ...]",
+            param_hint="branches",
+        )
+
+    # Defect I2: branch names with leading-dash or shell metachars must be
+    # rejected before any git command is constructed. Otherwise a name like
+    # ``-rf`` could be interpreted by git/shell as a flag, and metachars in
+    # logged command lines could mislead operators.
+    try:
+        validate_branch_names(branches)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc), param_hint="branches") from exc
 
     # Resolve project root first so config is loaded from the correct location
     # (not cwd, which may be a subdirectory of the project).
@@ -512,15 +531,6 @@ def merge_cmd(
         effective_delete = False
     else:
         effective_delete = delete_merged if delete_merged is not None else merge_cfg.delete_merged_default
-
-    if not branches:
-        render_full(
-            "Error: At least one branch name is required.\n\n"
-            "Usage: se3 merge <branch> [<branch> ...]\n"
-            "       se3 merge --help",
-            title="Error",
-        )
-        raise typer.Exit(1)
 
     if effective_strategy not in ("default", "strict", "fast"):
         render_text(

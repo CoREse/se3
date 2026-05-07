@@ -94,12 +94,145 @@ def _is_working_tree_clean(project_root: Path) -> bool:
 
 
 def _branch_exists(project_root: Path, branch: str) -> bool:
-    """Check if a local branch exists."""
-    result = _run_git(
-        project_root, "show-ref", "--verify", f"refs/heads/{branch}",
-        check=False,
-    )
+    """Check if a local branch exists.
+
+    Defect I4: ``git show-ref --verify`` is invoked with ``check=False`` so
+    that "does not exist" reports cleanly via returncode rather than raising.
+    We MUST inspect ``returncode`` (not just trust the call), and we MUST
+    treat any infrastructure error (git missing, timeout, OS error) as
+    "cannot determine" → ``False`` so the caller fails closed and refuses to
+    merge an indeterminate ref. Otherwise a non-existent branch could slip
+    past validation and surface as a misleading "merge failed" later.
+    """
+    try:
+        result = _run_git(
+            project_root, "show-ref", "--verify", "--quiet",
+            f"refs/heads/{branch}",
+            check=False,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        logger.warning(
+            "Cannot verify branch '%s' (treating as missing): %s", branch, exc,
+        )
+        return False
     return result.returncode == 0
+
+
+# Shell metacharacters that could be misinterpreted by a downstream shell or
+# git itself if a branch name ever leaked into a shell-interpreted context.
+# Keeping this list explicit makes intent visible: branch names that contain
+# any of these characters are rejected outright at CLI input. Subprocess
+# invocations in this codebase use ``subprocess.run`` with a list argv, so
+# these are about defense-in-depth and operator safety (avoiding misleading
+# log lines, ANSI tricks via control chars, etc.) rather than literal shell
+# injection.
+_BRANCH_METACHARACTERS = frozenset(
+    {
+        "$",
+        "`",
+        ";",
+        "&",
+        "|",
+        "<",
+        ">",
+        "(",
+        ")",
+        "{",
+        "}",
+        "[",
+        "]",
+        "*",
+        "?",
+        "!",
+        "\\",
+        '"',
+        "'",
+        "\n",
+        "\r",
+        "\t",
+    }
+)
+
+
+def validate_branch_names(branches: list[str]) -> None:
+    """Validate user-supplied branch names before any git command runs.
+
+    Rejects:
+      * empty list (defect I1)
+      * empty string entry
+      * leading-dash (so ``-rf`` cannot be passed to git as a flag) — defect I2
+      * shell metacharacters (defense-in-depth — defect I2)
+      * git-invalid characters: spaces, ``..``, ``~``, ``^``, ``:``,
+        characters below ASCII 0x20, trailing ``.lock``
+      * names ``HEAD`` or ``@`` which collide with git pseudo-refs
+
+    Raises:
+        ValueError: When at least one branch name is invalid. The message
+            lists each rejected name and the rule it violated, so the CLI
+            layer can wrap it in ``typer.BadParameter`` and the operator can
+            see exactly which input is rejected.
+    """
+    if not branches:
+        raise ValueError("At least one branch name is required.")
+
+    rejected: list[str] = []
+    for branch in branches:
+        if not isinstance(branch, str):
+            rejected.append(f"{branch!r}: not a string")
+            continue
+        if branch == "":
+            rejected.append("'' (empty string): branch name must be non-empty")
+            continue
+        if branch.startswith("-"):
+            rejected.append(
+                f"{branch!r}: branch names must not start with '-' "
+                "(could be misinterpreted as a CLI flag)"
+            )
+            continue
+        if branch in ("HEAD", "@"):
+            rejected.append(
+                f"{branch!r}: reserved git pseudo-ref"
+            )
+            continue
+        bad_chars = sorted({c for c in branch if c in _BRANCH_METACHARACTERS})
+        if bad_chars:
+            rejected.append(
+                f"{branch!r}: contains shell metacharacter(s) "
+                f"{''.join(repr(c) for c in bad_chars)}"
+            )
+            continue
+        if any(ord(c) < 0x20 for c in branch):
+            rejected.append(
+                f"{branch!r}: contains control character(s) (ASCII < 0x20)"
+            )
+            continue
+        if " " in branch:
+            rejected.append(
+                f"{branch!r}: branch names must not contain spaces"
+            )
+            continue
+        # git ref-format rules — minimal subset most likely to bite users
+        if (
+            ".." in branch
+            or branch.startswith(".")
+            or branch.startswith("/")
+            or branch.endswith("/")
+            or branch.endswith(".lock")
+            or "@{" in branch
+        ):
+            rejected.append(
+                f"{branch!r}: violates git ref-format rules "
+                "(see git check-ref-format)"
+            )
+            continue
+
+    if rejected:
+        message = (
+            "Invalid branch name(s):\n  - "
+            + "\n  - ".join(rejected)
+        )
+        raise ValueError(message)
 
 
 def _append_runtime_sync_lines(lines: list[str], report) -> None:
@@ -204,6 +337,48 @@ def _append_runtime_sync_lines(lines: list[str], report) -> None:
                 )
 
 
+def _split_merged_buckets(report) -> tuple[list[str], list[str]]:
+    """Return ``(newly_merged, already_ancestor)`` from a merge report.
+
+    Defect I3: the legacy ``merged_branches`` aggregate erased the distinction
+    between branches that produced a new merge commit and branches that were
+    already reachable from HEAD (a no-op). The orchestrator now populates two
+    parallel lists; this helper exposes them with a defensive fallback so that
+    legacy callers that fail to populate the new buckets still render
+    something useful instead of an empty section.
+    """
+    newly = list(getattr(report, "newly_merged_branches", []) or [])
+    already = list(getattr(report, "already_ancestor_branches", []) or [])
+    # Defensive fallback: if the orchestrator did not populate the new
+    # buckets (older code path or test stub), fall back to the legacy
+    # aggregate so we still render something useful rather than an empty
+    # list. Treat the legacy aggregate as "newly merged" for the
+    # fallback case — this matches the historical wording.
+    if not newly and not already and getattr(report, "merged_branches", None):
+        newly = list(report.merged_branches)
+    return newly, already
+
+
+def _append_split_branch_lines(
+    lines: list[str],
+    newly: list[str],
+    already: list[str],
+) -> None:
+    """Append per-bucket branch listings to *lines* in place."""
+    if newly:
+        lines.append(f"Newly merged ({len(newly)}):")
+        for b in newly:
+            lines.append(f"  - {b}")
+    if already:
+        if newly:
+            lines.append("")
+        lines.append(
+            f"Already an ancestor of HEAD — no new commit ({len(already)}):"
+        )
+        for b in already:
+            lines.append(f"  - {b}")
+
+
 def run_merge(
     branches: list[str],
     strategy: str = "default",
@@ -229,6 +404,15 @@ def run_merge(
         from .run import get_project_root
 
         project_root = get_project_root()
+
+    # Defense-in-depth: even when called programmatically (skipping the CLI
+    # layer that already validates), reject obviously-bad branch names so
+    # downstream code never sees ``-rf`` or shell metachars in a branch arg.
+    try:
+        validate_branch_names(branches)
+    except ValueError as exc:
+        render_text(str(exc), title="Merge Error")
+        return 1
 
     # Validate working tree is clean
     if not _is_working_tree_clean(project_root):
@@ -291,9 +475,16 @@ def run_merge(
     report = orchestrator.execute(branches)
 
     if report.success:
-        lines = [f"Successfully merged {len(report.merged_branches)} branch(es):", ""]
-        for b in report.merged_branches:
-            lines.append(f"  - {b}")
+        # Defect I3: split rendering by newly-merged vs already-ancestor.
+        # Operators care about the difference: a branch in "already" was
+        # already reachable from HEAD (no-op for this run), while a branch
+        # in "newly" produced a fresh merge commit. Older versions of the
+        # CLI lumped them together and made it impossible to tell whether
+        # a re-run actually made progress or was an idempotent no-op.
+        newly, already = _split_merged_buckets(report)
+        total = len(newly) + len(already)
+        lines = [f"Successfully merged {total} branch(es):", ""]
+        _append_split_branch_lines(lines, newly, already)
         if report.final_version:
             lines.append("")
             effective_base = report.effective_pre_merge_version or report.pre_merge_version or '?'
@@ -370,12 +561,16 @@ def run_merge(
             report.failure_reason, report.pending_human
         )
         lines = [first_line, ""]
-        if report.merged_branches:
+        # Defect I3: split the pre-failure merged-branches summary so
+        # operators can tell which branches produced new merge commits
+        # before the human-call escalation.
+        newly, already = _split_merged_buckets(report)
+        if newly or already:
+            total = len(newly) + len(already)
             lines.append(
-                f"Branches already merged ({len(report.merged_branches)}):"
+                f"Branches merged before pause ({total}):"
             )
-            for b in report.merged_branches:
-                lines.append(f"  - {b}")
+            _append_split_branch_lines(lines, newly, already)
             lines.append("")
         if report.unattempted_branches:
             lines.append(
