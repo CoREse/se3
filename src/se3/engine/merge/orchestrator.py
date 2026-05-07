@@ -53,10 +53,11 @@ logger = logging.getLogger(__name__)
 # but violations never clear.
 _MAX_REPAIR_ITERATIONS = 2
 
-assert _MAX_REPAIR_ITERATIONS >= 1, (
-    "_MAX_REPAIR_ITERATIONS must be >= 1 so the repair loop executes at least "
-    "once and the exhausted-path fallback is well-defined."
-)
+if _MAX_REPAIR_ITERATIONS < 1:
+    raise ValueError(
+        "_MAX_REPAIR_ITERATIONS must be >= 1 so the repair loop executes at least "
+        "once and the exhausted-path fallback is well-defined."
+    )
 
 
 class GuardrailRollbackError(RuntimeError):
