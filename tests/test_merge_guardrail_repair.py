@@ -689,13 +689,13 @@ class TestGuardrailRepairerFailures:
 
         monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
 
-        # Mock _run_git to raise TimeoutExpired on amend
-        original_run_git = None
-
+        # Mock _run_git to raise TimeoutExpired on both fix-up commit and amend.
+        # The fix-up commit path is tried first; when it fails we fall back to
+        # amend, which also fails.
         def mock_run_git(project_root, *args, check=True, timeout=30):
-            if len(args) >= 2 and args[0] == "commit" and args[1] == "--amend":
+            if len(args) >= 1 and args[0] == "commit":
                 raise subprocess.TimeoutExpired(
-                    cmd=["git", "commit", "--amend"], timeout=30,
+                    cmd=["git"] + list(args), timeout=30,
                 )
             # Fall through to real _run_git
             import se3.engine.worktree as _wt
