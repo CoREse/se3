@@ -20,6 +20,36 @@ logger = logging.getLogger(__name__)
 _STRICT_SENTINEL = "[__SE3_STRICT_PLACEHOLDER__:"
 
 
+def _warn_deprecated_filename(call_path: Path) -> None:
+    """Warn if call file uses deprecated naming convention.
+
+    Old-style filenames use ``-`` to replace ``/`` in branch names and
+    a timestamp format without the ``T`` separator (e.g.
+    ``merge_20240101_120000_000000_branch-name.json``).  New-style
+    filenames use ``__`` for ``/`` and ISO-8601-like timestamps with
+    ``T`` (e.g.
+    ``merge_20240101T120000_000000_1234_0_a1b2c3d4_branch__name.json``).
+
+    This compatibility layer will be removed in the next release.
+    """
+    name = call_path.name
+    if not name.startswith("merge_"):
+        return
+    # Extract the timestamp portion (first segment after 'merge_')
+    rest = name[6:]  # strip 'merge_'
+    if "_" not in rest:
+        return
+    timestamp_part = rest.split("_")[0]
+    # Old format: YYYYMMDD (8 digits, no T); new format: YYYYMMDDTHHMMSS
+    if len(timestamp_part) == 8 and timestamp_part.isdigit():
+        logger.warning(
+            "Deprecated call file naming '%s': old timestamp format without 'T' "
+            "separator and '-' for '/' in branch names. Use new format with '__' "
+            "instead. This compatibility will be removed in the next release.",
+            name,
+        )
+
+
 def process_merge_response(
     call_file: Path,
     project_root: Optional[Path] = None,
@@ -45,6 +75,8 @@ def process_merge_response(
     if not call_path.exists():
         render_text(f"Call file not found: {call_path}", title="SE3 Merge Error")
         return 1
+
+    _warn_deprecated_filename(call_path)
 
     response_path = Path(str(call_path) + ".response")
     if not response_path.exists():
@@ -112,6 +144,16 @@ def process_merge_response(
                     title="SE3 Merge — Strict Placeholder Detected",
                 )
                 return 1
+
+            # Check for orphan files with guardrail violations
+            orphan_violations = call_data.get("orphan_guardrails_violations", [])
+            if orphan_violations:
+                logger.warning(
+                    "Accepting merge with %d orphan file guardrail violation(s). "
+                    "These were pre-checked during call-file creation; the human "
+                    "reviewer has chosen to accept them.",
+                    len(orphan_violations),
+                )
 
             # Write resolved content back to files
             try:

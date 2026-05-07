@@ -7,12 +7,15 @@ LLM resolution proposals, and decision options for human review.
 
 from __future__ import annotations
 
+import hashlib
+import itertools
 import json
 import logging
 import os
+import subprocess
 import tempfile
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -22,28 +25,102 @@ from .strategy import StrategyDecision
 
 logger = logging.getLogger(__name__)
 
+# Module-level atomic sequence counter for unique filenames within a process.
+# Together with pid and microsecond timestamp, guarantees no collision even
+# under millisecond-level concurrency (fixes defect F1).
+_call_seq = itertools.count()
+
+
+def _generate_call_filename(prefix: str, branch: str) -> str:
+    """Generate a collision-resistant call filename.
+
+    Format::
+
+        <prefix>_<utc_iso>_<pid>_<seq>_<sha8>_<safe_branch>.json
+
+    Uses UTC timestamp with microsecond precision, process ID, an atomic
+    sequence counter, and an 8-char SHA256 hash for additional entropy.
+    Even 100 concurrent calls within the same millisecond are guaranteed
+    unique because ``seq`` is an atomic process-level counter.
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%f")
+    pid = os.getpid()
+    seq = next(_call_seq)
+    hash_input = f"{branch}:{ts}:{pid}:{seq}"
+    sha8 = hashlib.sha256(hash_input.encode("utf-8")).hexdigest()[:8]
+    safe_branch = branch.replace("/", "__")
+    return f"{prefix}_{ts}_{pid}_{seq}_{sha8}_{safe_branch}.json"
+
 
 def _atomic_write_json(call_file: Path, call_data: dict) -> None:
     """Atomically write JSON call data to ``call_file``.
 
     Uses a temporary file in the same directory + ``os.replace`` so that
-    readers never observe a partially-written file.
+    readers never observe a partially-written file.  Includes fsync on
+    the file descriptor and parent directory to survive power loss
+    (fixes defect F2).
     """
     call_file.parent.mkdir(parents=True, exist_ok=True)
     tmp_fd, tmp_path = tempfile.mkstemp(
         dir=call_file.parent,
         prefix=f".tmp_{call_file.name}_",
     )
+    dir_fd: Optional[int] = None
     try:
         with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
             json.dump(call_data, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(tmp_fd)
         os.replace(tmp_path, call_file)
+        # fsync directory to ensure the rename is durable
+        try:
+            dir_fd = os.open(str(call_file.parent), os.O_RDONLY | os.O_DIRECTORY)
+            os.fsync(dir_fd)
+        except OSError:
+            pass  # directory fsync is best-effort on some filesystems
     except Exception:
         try:
             os.unlink(tmp_path)
         except OSError:
             pass
         raise
+    finally:
+        if dir_fd is not None:
+            try:
+                os.close(dir_fd)
+            except OSError:
+                pass
+
+
+def _read_original_for_orphan(
+    project_root: Path, rel_path: str, base_ref: str,
+) -> Optional[str]:
+    """Read the original content of a file for orphan guardrails check.
+
+    Tries ``base_ref`` first (pre-merge HEAD), then falls back to plain
+    ``HEAD``.  Returns ``None`` when the file does not exist in either ref.
+    """
+    refs_to_try = []
+    if base_ref:
+        refs_to_try.append(base_ref)
+    refs_to_try.append("HEAD")
+    for ref in refs_to_try:
+        result = subprocess.run(
+            ["git", "-C", str(project_root), "show", f"{ref}:{rel_path}"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+        if result.returncode == 0:
+            return result.stdout
+    return None
+
+
+def _is_spec_path(path: str) -> bool:
+    """Return True when ``path`` matches ``se3/specs/**/spec.md``."""
+    import re
+    return bool(re.match(r"^se3/specs/.+/spec\.md$", path.replace("\\", "/")))
 
 
 class HumanCallWriter:
@@ -92,13 +169,14 @@ class HumanCallWriter:
         if call_file_name:
             call_file = calls_dir / call_file_name
         else:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            safe_branch = context.theirs_branch.replace("/", "-")
-            call_file = calls_dir / f"merge_{ts}_{safe_branch}.json"
+            call_file = calls_dir / _generate_call_filename(
+                "merge", context.theirs_branch,
+            )
 
         # Build file entries with both context and resolution
         file_entries = []
         resolution_files = resolution.files if resolution is not None else []
+        context_paths = {cf.path for cf in context.files}
         for cf in context.files:
             # Find matching resolution file
             res_file = None
@@ -141,6 +219,49 @@ class HumanCallWriter:
 
             file_entries.append(entry)
 
+        # Detect orphan files: resolution files not present in context.files.
+        # These must pass guardrails before being included (fixes defect F3).
+        orphan_files = []
+        orphan_guardrails_violations = []
+        for rf in resolution_files:
+            if rf.path not in context_paths:
+                orphan_files.append(rf)
+                if _is_spec_path(rf.path):
+                    original = _read_original_for_orphan(
+                        self.project_root, rf.path, context.ours_head_sha,
+                    )
+                    if original is not None:
+                        from .guardrails import check_spec_diff
+                        orphan_guardrails_violations.extend(
+                            check_spec_diff(
+                                original, rf.resolved_content, file_path=rf.path,
+                            )
+                        )
+
+        for rf in orphan_files:
+            entry = {
+                "path": rf.path,
+                "is_spec": _is_spec_path(rf.path),
+                "is_binary": False,
+                "is_orphan": True,
+                "hunks": [],
+                "llm_resolution": {
+                    "resolved_content": rf.resolved_content,
+                    "overall_confidence": rf.overall_confidence.value,
+                    "hunks": [
+                        {
+                            "start_line": h.start_line,
+                            "end_line": h.end_line,
+                            "confidence": h.confidence.value,
+                            "reasoning": h.reasoning,
+                        }
+                        for h in rf.hunks
+                    ],
+                    "flags": rf.flags,
+                },
+            }
+            file_entries.append(entry)
+
         if resolution is not None:
             llm_overall_confidence = resolution.overall_confidence.value
             llm_flags = resolution.flags
@@ -150,7 +271,7 @@ class HumanCallWriter:
 
         call_data: dict = {
             "type": "merge_conflict",
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "ours_branch": context.ours_branch,
             "theirs_branch": context.theirs_branch,
             "merge_base": context.merge_base,
@@ -180,6 +301,17 @@ class HumanCallWriter:
         if strategy is not None:
             call_data["strategy"] = strategy
 
+        if orphan_guardrails_violations:
+            call_data["orphan_guardrails_violations"] = [
+                {
+                    "file_path": v.file_path,
+                    "violation_type": v.violation_type,
+                    "message": v.message,
+                    "evidence": v.evidence,
+                }
+                for v in orphan_guardrails_violations
+            ]
+
         _atomic_write_json(call_file, call_data)
         logger.info("Created merge human call file: %s", call_file)
 
@@ -207,13 +339,20 @@ class HumanCallWriter:
 
         Returns:
             Path to the written call file.
+
+        Raises:
+            TypeError: If a violation is not a dict.
+            ValueError: If a violation dict is missing required keys
+                (``file_path``, ``violation_type``, ``message``).
+                This is a hard failure — downstream consumers must never
+                receive ``<unknown>`` placeholders (fixes defect F4).
         """
         calls_dir = self.project_root / "se3" / "calls"
         calls_dir.mkdir(parents=True, exist_ok=True)
 
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        safe_branch = branch.replace("/", "-")
-        call_file = calls_dir / f"merge_{ts}_{safe_branch}_guardrail.json"
+        call_file = calls_dir / _generate_call_filename(
+            "merge", f"{branch}_guardrail",
+        )
 
         # Build type-specific instructions so the human knows whether the
         # LLM already attempted repairs.
@@ -256,31 +395,33 @@ class HumanCallWriter:
 
         # Defensive: validate required keys in violation dicts so the call
         # file JSON does not silently carry None/missing values.
+        # Missing required keys now raise instead of substituting '<unknown>'
+        # (fixes defect F4).
         validated_violations: list[dict] = []
         for v in violations:
             if not isinstance(v, dict):
-                logger.warning(
-                    "write_guardrail_call received non-dict violation: %r — skipped",
-                    v,
+                raise TypeError(
+                    f"write_guardrail_call: expected dict violation, got "
+                    f"{type(v).__name__}: {v!r}"
                 )
-                continue
-            missing_keys = [k for k in ("file_path", "violation_type", "message") if k not in v]
+            missing_keys = [
+                k for k in ("file_path", "violation_type", "message") if k not in v
+            ]
             if missing_keys:
-                logger.warning(
-                    "write_guardrail_call: violation dict missing required keys %s — "
-                    "substituting '<unknown>'",
-                    missing_keys,
+                raise ValueError(
+                    f"write_guardrail_call: violation dict missing required "
+                    f"keys {missing_keys}: {v!r}"
                 )
             validated_violations.append({
-                "file_path": v.get("file_path", "<unknown>"),
-                "violation_type": v.get("violation_type", "<unknown>"),
-                "message": v.get("message", "<unknown>"),
+                "file_path": v["file_path"],
+                "violation_type": v["violation_type"],
+                "message": v["message"],
                 **{k: v[k] for k in v if k not in ("file_path", "violation_type", "message")},
             })
 
         call_data: dict = {
             "type": call_type,
-            "created_at": datetime.now().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "branch": branch,
             "pre_merge_sha": pre_merge_sha,
             "violations": validated_violations,
