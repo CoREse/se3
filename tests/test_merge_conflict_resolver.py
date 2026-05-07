@@ -546,7 +546,7 @@ class TestHumanCallWriter:
                 ),
             ],
         )
-        resolution = _make_resolution()
+        resolution = _make_resolution(path="foo.txt")
         decision = StrategyDecision(
             action=DecisionAction.HUMAN_CALL,
             reason="low confidence",
