@@ -34,6 +34,7 @@ from .strategy import DecisionAction, StrategyDecider, StrategyDecision
 from .version_aggregator import (
     AggregateResult,
     InferResult,
+    VersionNotAdvanced,
     aggregate_and_apply,
     infer_branch_bump,
     max_bump,
@@ -74,4 +75,5 @@ __all__ = [
     "StrategyDecision",
     "sync_branch_runtime",
     "SyncReport",
+    "VersionNotAdvanced",
 ]

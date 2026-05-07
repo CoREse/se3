@@ -912,6 +912,23 @@ class MergeOrchestrator:
                         f"Version aggregated: {effective_pre_merge_version} → {agg.new_version} "
                         f"({agg.bump_type.value if agg.bump_type else 'unknown'})"
                     )
+                elif agg.version_already_at_target:
+                    # G4 C1: aggregator detected the on-disk version was
+                    # already at or above the computed target.  This is
+                    # the "no work to do" state — record the disk value
+                    # as the final version and propagate the warning,
+                    # but do NOT mark the aggregation as a hard failure
+                    # since the version is in fact at the expected
+                    # state.  The version_aggregation_error field
+                    # surfaces the non-trivial origin so an operator
+                    # can still investigate.
+                    report.final_version = agg.new_version
+                    if agg.bump_type is not None:
+                        report.bump_type = agg.bump_type.value
+                    report.version_aggregation_error = agg.error
+                    self._log(
+                        f"Version aggregation no-op: {agg.error}"
+                    )
                 else:
                     report.version_aggregation_error = agg.error
                     report.version_aggregation_skipped = True
