@@ -15,11 +15,14 @@ import logging
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..json_extractor import extract_json_two_phase
 from ..worktree import _run_git
 from .guardrails import GuardrailViolation, MergeGuardrailsCheck, _is_spec_path
+
+if TYPE_CHECKING:
+    from ..llm_caller import LLMCaller
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +86,26 @@ class GuardrailRepairer:
     re-runs guardrails to verify.
     """
 
-    def __init__(self, project_root: Path) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        *,
+        llm_caller: Optional["LLMCaller"] = None,
+    ) -> None:
+        """Construct a repairer.
+
+        Args:
+            project_root: Repository root.
+            llm_caller: Optional pre-built :class:`LLMCaller` to share
+                across the merge pipeline (D9 / K7).  When supplied,
+                every repair iteration reuses the same caller so that
+                its prompt cache, retry budget, and trace stream remain
+                continuous with the upstream conflict-resolution call.
+                When ``None``, a fresh caller scoped to
+                ``"guardrail_repair"`` is built lazily on first use.
+        """
         self.project_root = project_root
+        self._llm_caller = llm_caller
 
     def repair_violations(
         self,
@@ -526,15 +547,23 @@ class GuardrailRepairer:
                 )
 
     def _call_llm(self, prompt: str) -> str | dict[str, Any]:
-        """Call LLM with the repair prompt."""
-        from ..llm_caller import LLMCaller
+        """Call LLM with the repair prompt.
 
-        caller = LLMCaller(
-            project_root=self.project_root,
-            step_type="guardrail_repair",
-            max_retries=2,
-            retry_delay=1.0,
-        )
+        Reuses ``self._llm_caller`` when one was injected at construction
+        time so the prompt cache and retry budget stay shared with
+        :class:`ConflictResolver` (see D9 / K7).
+        """
+        if self._llm_caller is not None:
+            caller = self._llm_caller
+        else:
+            from ..llm_caller import LLMCaller
+
+            caller = LLMCaller(
+                project_root=self.project_root,
+                step_type="guardrail_repair",
+                max_retries=2,
+                retry_delay=1.0,
+            )
         # Use two-phase extraction for robust JSON parsing
         raw = caller.call(
             prompt=prompt,

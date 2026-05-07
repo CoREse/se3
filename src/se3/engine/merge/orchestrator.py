@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from ..version_bumper import BumpType, Version
 from ..worktree import _run_git, get_conflicting_files, get_current_branch
@@ -33,6 +33,9 @@ from .runtime_sync import (
     RuntimeSyncCollision,
     sync_branch_runtime,
 )
+
+if TYPE_CHECKING:
+    from ..llm_caller import LLMCaller
 from .strategy import DecisionAction, StrategyDecider, StrategyDecision
 from .version_aggregator import (
     InferResult,
@@ -246,12 +249,46 @@ class MergeOrchestrator:
         self.strict_runtime_sync = strict_runtime_sync
         self.log_file: Optional[Path] = None
         self._log_lines: list[str] = []
-        self._resolver = ConflictResolver(project_root)
+        # D9 / K7: build a single shared LLMCaller so the conflict
+        # resolver and the guardrail repairer reuse the same prompt
+        # cache and retry budget across all phases of one merge.  We
+        # construct it lazily-via-helper so test code can swap in a
+        # stub without paying the agent-registry cost.
+        self._shared_llm_caller = self._build_shared_llm_caller()
+        self._resolver = ConflictResolver(
+            project_root, llm_caller=self._shared_llm_caller,
+        )
         self._decider = StrategyDecider()
         self._human_writer = HumanCallWriter(project_root)
         self._guardrails = MergeGuardrailsCheck(project_root)
-        self._repairer = GuardrailRepairer(project_root)
+        self._repairer = GuardrailRepairer(
+            project_root, llm_caller=self._shared_llm_caller,
+        )
         self._last_stall_iteration_count: Optional[int] = None
+
+    def _build_shared_llm_caller(self) -> Optional["LLMCaller"]:
+        """Create a single LLMCaller shared across the merge pipeline.
+
+        Returns ``None`` when the caller cannot be built (e.g. the
+        agent registry is unavailable in a test fixture).  In that
+        case downstream components fall back to their own per-step
+        callers, restoring pre-D9 behaviour.
+        """
+        try:
+            from ..llm_caller import LLMCaller
+
+            return LLMCaller(
+                project_root=self.project_root,
+                step_type="merge_pipeline",
+                max_retries=2,
+                retry_delay=1.0,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to build shared LLMCaller for merge pipeline: %s; "
+                "falling back to per-step callers", exc,
+            )
+            return None
 
     def _log(self, message: str) -> None:
         """Append a line to the internal log buffer and the logger."""
