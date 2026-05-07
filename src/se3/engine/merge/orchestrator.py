@@ -14,8 +14,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from ..llm_caller import LLMCaller
 from ..version_bumper import BumpType, Version
 from ..worktree import _run_git, get_conflicting_files, get_current_branch
+from ...commands.merge.postcondition import (
+    PostConditionViolated,
+    assert_branch_merged,
+)
 from .cleanup import CleanupManager, CleanupReport
 from .conflict_context import build as build_conflict_context
 from .conflict_resolver import ConflictResolver, LLMResolution, MergeStrategy
@@ -43,21 +48,54 @@ from .version_aggregator import (
 
 logger = logging.getLogger(__name__)
 
-# Maximum LLM repair iterations in fast mode before giving up.
+# Default maximum LLM repair iterations in fast mode before giving up.
 # Stall is detected when two *consecutive repair-iteration* hashes match.
 # The initial gr_report hash is intentionally NOT compared against
-# last_hash (initialised to ""), so a true stall requires
-# iter1_hash == iter2_hash, which is detected on iteration 2.  The value 2
-# provides exactly one repair attempt plus one verification round; the
-# max-iterations abort path is only reachable when hashes keep changing
-# but violations never clear.
-_MAX_REPAIR_ITERATIONS = 2
+# last_hash (initialised to None), so a true stall requires
+# iter1_hash == iter2_hash, which is detected on iteration 2.
+_DEFAULT_MAX_REPAIR_ITERATIONS = 2
 
-if _MAX_REPAIR_ITERATIONS < 1:
-    raise ValueError(
-        "_MAX_REPAIR_ITERATIONS must be >= 1 so the repair loop executes at least "
-        "once and the exhausted-path fallback is well-defined."
-    )
+
+def _load_max_repair_iterations(project_root: Path) -> int:
+    """Read max repair iterations from se3.yaml, with safe fallback.
+
+    Looks under ``merge.guardrail_repair.max_iterations``.
+    Invalid or missing values fall back to the default.
+    """
+    from ...config import load_project_yaml
+
+    try:
+        data, _src = load_project_yaml(project_root)
+    except Exception:
+        return _DEFAULT_MAX_REPAIR_ITERATIONS
+    if not data:
+        return _DEFAULT_MAX_REPAIR_ITERATIONS
+    merge_data = data.get("merge", {})
+    if not isinstance(merge_data, dict):
+        return _DEFAULT_MAX_REPAIR_ITERATIONS
+    gr_data = merge_data.get("guardrail_repair", {})
+    if not isinstance(gr_data, dict):
+        return _DEFAULT_MAX_REPAIR_ITERATIONS
+    raw = gr_data.get("max_iterations")
+    if raw is None:
+        return _DEFAULT_MAX_REPAIR_ITERATIONS
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "merge.guardrail_repair.max_iterations=%r is not a valid integer; "
+            "using default %d",
+            raw, _DEFAULT_MAX_REPAIR_ITERATIONS,
+        )
+        return _DEFAULT_MAX_REPAIR_ITERATIONS
+    if val < 1:
+        logger.warning(
+            "merge.guardrail_repair.max_iterations=%d must be >= 1; "
+            "using default %d",
+            val, _DEFAULT_MAX_REPAIR_ITERATIONS,
+        )
+        return _DEFAULT_MAX_REPAIR_ITERATIONS
+    return val
 
 
 class GuardrailRollbackError(RuntimeError):
@@ -250,7 +288,19 @@ class MergeOrchestrator:
         self._decider = StrategyDecider()
         self._human_writer = HumanCallWriter(project_root)
         self._guardrails = MergeGuardrailsCheck(project_root)
-        self._repairer = GuardrailRepairer(project_root)
+        # Task 12 / A13: shared LLMCaller for prompt cache reuse across
+        # conflict resolution and guardrail repair.
+        self._llm_caller = LLMCaller(
+            project_root=project_root,
+            step_type="guardrail_repair",
+            max_retries=2,
+            retry_delay=1.0,
+        )
+        self._repairer = GuardrailRepairer(
+            project_root,
+            llm_caller=self._llm_caller,
+        )
+        self._max_repair_iterations = _load_max_repair_iterations(project_root)
         self._last_stall_iteration_count: Optional[int] = None
 
     def _log(self, message: str) -> None:
@@ -2342,7 +2392,7 @@ class MergeOrchestrator:
                 self._log(
                     f"Fast strategy: attempting LLM repair of "
                     f"{len(current_violations)} guardrail violation(s) "
-                    f"(max {_MAX_REPAIR_ITERATIONS} iterations)"
+                    f"(max {self._max_repair_iterations} iterations)"
                 )
 
                 # Track the previous violation-set hash to detect stalls.
@@ -2352,7 +2402,10 @@ class MergeOrchestrator:
                 # all prior hashes) so that oscillating patterns which happen
                 # to revisit an earlier state after making progress are not
                 # falsely classified as stalled.
-                last_hash: str = ""
+                # Task 10 / A9 fix: use None instead of "" so the first
+                # iteration's hash is never spuriously compared against an
+                # empty string.
+                last_hash: Optional[str] = None
 
                 # Gather original and merged spec contents.
                 # original_specs is read once (pre_sha never changes).
@@ -2374,7 +2427,7 @@ class MergeOrchestrator:
                         orig = f"[Content unavailable at ref {pre_sha}]"
                     original_specs[sp] = orig
 
-                for iteration in range(1, _MAX_REPAIR_ITERATIONS + 1):
+                for iteration in range(1, self._max_repair_iterations + 1):
                     # Refresh merged specs from current HEAD so the LLM sees
                     # the latest state after any amendments from previous repair
                     # rounds. Falls back to post_sha if HEAD cannot be read.
@@ -2412,7 +2465,7 @@ class MergeOrchestrator:
 
                     self._log(
                         f"Fast strategy: repair iteration {iteration}/"
-                        f"{_MAX_REPAIR_ITERATIONS}"
+                        f"{self._max_repair_iterations}"
                     )
 
                     repair_result = self._repairer.repair_violations(
@@ -2430,6 +2483,22 @@ class MergeOrchestrator:
                             f"iteration {iteration}: "
                             f"{len(repair_result.repaired_files)} file(s) corrected"
                         )
+                        # Task 11 / A11 fix: after repair success, verify
+                        # the branch is actually merged (ancestry check).
+                        # This catches the case where the merge commit was
+                        # silently lost during the repair process.
+                        try:
+                            assert_branch_merged(self.project_root, branch)
+                        except PostConditionViolated as pcv:
+                            self._log(
+                                f"Post-condition failed after guardrail repair: "
+                                f"{pcv.detail}"
+                            )
+                            raise GuardrailRepairFailed(
+                                f"Guardrail repair succeeded but post-condition failed: "
+                                f"{pcv.detail}",
+                                failure_reason="postcond_branch_not_merged",
+                            ) from pcv
                         return None
 
                     # Repair failed — re-run guardrails to get fresh violations
@@ -2505,7 +2574,7 @@ class MergeOrchestrator:
                         f"({len(fresh_report.violations)} violation(s))"
                     )
 
-                    if current_hash == last_hash:
+                    if last_hash is not None and current_hash == last_hash:
                         # Stalled — violation set unchanged from previous
                         # repair iteration (consecutive identical hash).
                         self._log(
@@ -2593,7 +2662,7 @@ class MergeOrchestrator:
                     # changing. Escalate to human call consistently with the stall
                     # path instead of aborting outright.
                     self._log(
-                        f"Guardrail repair exhausted after {_MAX_REPAIR_ITERATIONS} "
+                        f"Guardrail repair exhausted after {self._max_repair_iterations} "
                         f"iterations — escalating to human review"
                     )
                     rollback_exc = None
@@ -2624,12 +2693,12 @@ class MergeOrchestrator:
                         )
                         if rollback_exc is None:
                             raise GuardrailRepairFailed(
-                                f"Guardrail repair exhausted after {_MAX_REPAIR_ITERATIONS} "
+                                f"Guardrail repair exhausted after {self._max_repair_iterations} "
                                 f"iterations and call file could not be written: {exc}",
                                 failure_reason="guardrail_repair_exhausted_call_failed",
                             ) from exc
                         raise GuardrailRollbackError(
-                            f"Guardrail repair exhausted after {_MAX_REPAIR_ITERATIONS} "
+                            f"Guardrail repair exhausted after {self._max_repair_iterations} "
                             f"iterations. Rollback failed: {rollback_exc}. "
                             f"Additionally, the human call file could not be written: {exc}. "
                             f"Working tree may be in an inconsistent state. "
@@ -2647,14 +2716,14 @@ class MergeOrchestrator:
 
                     if rollback_exc is not None:
                         raise GuardrailRollbackError(
-                            f"Guardrail repair exhausted after {_MAX_REPAIR_ITERATIONS} "
+                            f"Guardrail repair exhausted after {self._max_repair_iterations} "
                             f"iterations but rollback failed. The human call file "
                             f"was written at {call_file} for diagnostic evidence.",
                             call_file=call_file,
                         ) from rollback_exc
 
                     raise GuardrailRepairExhausted(
-                        f"Guardrail repair exhausted after {_MAX_REPAIR_ITERATIONS} "
+                        f"Guardrail repair exhausted after {self._max_repair_iterations} "
                         f"iteration(s): LLM could not reduce violations",
                         call_file=call_file,
                         iteration_count=iteration,

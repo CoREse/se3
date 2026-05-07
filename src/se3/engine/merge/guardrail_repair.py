@@ -2,10 +2,17 @@
 
 When post-merge guardrails detect violations in ``fast`` strategy, this module
 constructs a repair prompt, calls the LLM, parses the corrected spec content,
-writes it back to the working tree, amends the merge commit, and re-runs the
-guardrails check to verify the fix.
+writes it back to the working tree, commits the fix (preferring a fix-up
+commit on top of the merge commit, with amend as a fallback), and re-runs
+the guardrails check to verify the fix.
 
 All write-back paths are restricted to ``se3/specs/**/spec.md``.
+
+**Amend safety contract** (defense against the user-accident root cause A1-A4):
+All amend operations MUST save ``pre_amend_sha`` before ``git commit --amend``.
+If rollback is needed, ``git reset --soft <pre_amend_sha>`` is used instead of
+``git reset --soft HEAD~1``.  The ``HEAD^2`` existence check confirms HEAD is
+still a merge commit before amending.
 """
 
 from __future__ import annotations
@@ -18,6 +25,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..json_extractor import extract_json_two_phase
+from ..llm_caller import LLMCaller
 from ..worktree import _run_git
 from .guardrails import GuardrailViolation, MergeGuardrailsCheck, _is_spec_path
 
@@ -79,12 +87,24 @@ class GuardrailRepairer:
 
     Used in ``fast`` strategy when post-merge guardrails detect violations.
     The repairer sends the violation list + spec contents to the LLM, receives
-    corrected file contents, writes them back, amends the merge commit, and
-    re-runs guardrails to verify.
+    corrected file contents, writes them back, commits the fix, and re-runs
+    guardrails to verify.
+
+    Args:
+        project_root: Path to the project root.
+        llm_caller: Optional shared :class:`LLMCaller` instance. When provided,
+            the repairer reuses it (sharing prompt cache and retry state).
+            When ``None``, the repairer creates its own per-call instance
+            (legacy behavior).
     """
 
-    def __init__(self, project_root: Path) -> None:
+    def __init__(
+        self,
+        project_root: Path,
+        llm_caller: Optional[LLMCaller] = None,
+    ) -> None:
         self.project_root = project_root
+        self._llm_caller = llm_caller
 
     def repair_violations(
         self,
@@ -100,7 +120,9 @@ class GuardrailRepairer:
         Args:
             branch: The branch being merged (for logging).
             pre_sha: SHA of HEAD before the merge.
-            post_sha: SHA of the merge commit.
+            post_sha: SHA of the merge commit. Used as the safe rollback target
+                when the fix-up-commit path is used; callers should refresh
+                this if amend is used.
             violations: List of detected GuardrailViolation objects.
             original_spec_contents: Dict mapping spec file paths to their
                 original content (from pre_sha).
@@ -135,11 +157,18 @@ class GuardrailRepairer:
                 error=f"LLM call failed: {exc}",
             )
 
-        if raw_response == "" or raw_response is None:
+        # A7 fix: distinguish None from empty string
+        if raw_response is None:
+            return RepairResult(
+                success=False,
+                error="LLM returned None for guardrail repair",
+            )
+        if raw_response == "" or raw_response == "":
             return RepairResult(
                 success=False,
                 error="LLM returned empty response for guardrail repair",
             )
+        # A7 fix: distinguish {} from None
         if raw_response == {} or raw_response == {"files": []}:
             return RepairResult(
                 success=False,
@@ -153,6 +182,12 @@ class GuardrailRepairer:
                 success=False,
                 error="Failed to parse LLM repair response as JSON",
             )
+        # A7 fix: distinguish parsed being {} from None
+        if parsed == {}:
+            return RepairResult(
+                success=False,
+                error="LLM repair response parsed to empty dict",
+            )
 
         # Write corrected files back
         files_data = parsed.get("files", [])
@@ -162,7 +197,9 @@ class GuardrailRepairer:
                 error=f"LLM repair response 'files' is not a list: {type(files_data).__name__}",
             )
 
-        # Build the set of spec files that were actually changed in the merge
+        # Build the set of spec files that were actually changed in the merge.
+        # This set is refreshed after every _restore_merged_content call so
+        # that stale reads (defect A8) cannot occur.
         allowed_paths = set(original_spec_contents.keys()) | set(merged_spec_contents.keys())
 
         repaired_files: list[str] = []
@@ -193,6 +230,8 @@ class GuardrailRepairer:
                     path,
                 )
                 self._restore_merged_content(repaired_files, merged_spec_contents)
+                # Refresh allowed_paths after restore (A8)
+                allowed_paths = set(original_spec_contents.keys()) | set(merged_spec_contents.keys())
                 return RepairResult(
                     success=False,
                     error=f"Guardrail repair attempted to write outside spec dir: {path}",
@@ -205,6 +244,7 @@ class GuardrailRepairer:
                     path,
                 )
                 self._restore_merged_content(repaired_files, merged_spec_contents)
+                allowed_paths = set(original_spec_contents.keys()) | set(merged_spec_contents.keys())
                 return RepairResult(
                     success=False,
                     error=f"Guardrail repair attempted to write non-spec path: {path}",
@@ -221,6 +261,7 @@ class GuardrailRepairer:
                     ", ".join(sorted(allowed_paths)),
                 )
                 self._restore_merged_content(repaired_files, merged_spec_contents)
+                allowed_paths = set(original_spec_contents.keys()) | set(merged_spec_contents.keys())
                 return RepairResult(
                     success=False,
                     error=(
@@ -237,6 +278,7 @@ class GuardrailRepairer:
                     path,
                 )
                 self._restore_merged_content(repaired_files, merged_spec_contents)
+                allowed_paths = set(original_spec_contents.keys()) | set(merged_spec_contents.keys())
                 return RepairResult(
                     success=False,
                     error=(
@@ -253,6 +295,7 @@ class GuardrailRepairer:
                 logger.info("Guardrail repair wrote corrected spec: %s", path)
             except Exception as exc:
                 self._restore_merged_content(repaired_files, merged_spec_contents)
+                allowed_paths = set(original_spec_contents.keys()) | set(merged_spec_contents.keys())
                 return RepairResult(
                     success=False,
                     error=f"Failed to write repaired spec {path}: {exc}",
@@ -272,10 +315,11 @@ class GuardrailRepairer:
                 error="LLM repair returned no valid spec files to write",
             )
 
-        # Stage, amend, and re-check — catch timeouts so the orchestrator
+        # Stage, commit, and re-check — catch timeouts so the orchestrator
         # knows the failure mode precisely instead of misattributing it as a
         # guardrails-check crash.
-        amend_succeeded = False
+        commit_succeeded = False
+        pre_amend_sha: Optional[str] = None
         try:
             # Stage repaired files
             for path in repaired_files:
@@ -296,91 +340,129 @@ class GuardrailRepairer:
                         error=f"Failed to stage repaired spec {path}: {add_result.stderr.strip()}",
                     )
 
-            # Amend the merge commit with repaired specs
-            amend_result = _run_git(
+            # --- PREFERRED PATH: fix-up commit on top of merge commit ---
+            # This avoids the amend/reset footgun entirely.  It creates a
+            # separate commit that fixes the spec files, leaving the original
+            # merge commit intact.
+            fixup_result = _run_git(
                 self.project_root,
                 "commit",
-                "--amend",
-                "--no-edit",
+                "-m",
+                f"fix(specs): repair guardrail violations from '{branch}'",
                 check=False, timeout=30,
             )
-            if amend_result.returncode != 0:
-                # Unstage repaired files so the repairer is self-contained
-                for path in repaired_files:
-                    _run_git(
-                        self.project_root, "reset", "HEAD", path,
-                        check=False, timeout=15,
-                    )
-                self._restore_merged_content(repaired_files, merged_spec_contents)
-                return RepairResult(
-                    success=False,
-                    error=f"Failed to amend merge commit with repaired specs: {amend_result.stderr.strip()}",
+            if fixup_result.returncode == 0:
+                commit_succeeded = True
+                logger.info(
+                    "Created fix-up commit for '%s' with %d repaired spec file(s)",
+                    branch, len(repaired_files),
+                )
+            else:
+                # --- FALLBACK PATH: amend the merge commit ---
+                # This is the legacy path.  Before amending, assert HEAD is
+                # still a merge commit, and save pre_amend_sha for safe
+                # rollback.
+                logger.warning(
+                    "Fix-up commit failed (%s), falling back to amend: %s",
+                    fixup_result.returncode,
+                    fixup_result.stderr.strip() or "unknown error",
                 )
 
-            amend_succeeded = True
-            logger.info("Amended merge commit with repaired spec files for '%s'", branch)
+                # A5: assert HEAD is still a merge commit before amending
+                head_parent2 = _run_git(
+                    self.project_root, "rev-parse", "--verify", "HEAD^2",
+                    check=False, timeout=15,
+                )
+                if head_parent2.returncode != 0:
+                    # HEAD is no longer a merge commit — cannot safely amend.
+                    # Unstage and restore.
+                    for path in repaired_files:
+                        _run_git(
+                            self.project_root, "reset", "HEAD", path,
+                            check=False, timeout=15,
+                        )
+                    self._restore_merged_content(repaired_files, merged_spec_contents)
+                    return RepairResult(
+                        success=False,
+                        error=(
+                            f"Cannot amend: HEAD is not a merge commit "
+                            f"(HEAD^2 check failed: {head_parent2.stderr.strip()})"
+                        ),
+                    )
 
-            # Re-run guardrails on the amended commit
+                # Save pre_amend_sha before any amend operation (A1 fix).
+                pre_sha_result = _run_git(
+                    self.project_root, "rev-parse", "HEAD",
+                    check=False, timeout=15,
+                )
+                if pre_sha_result.returncode != 0:
+                    for path in repaired_files:
+                        _run_git(
+                            self.project_root, "reset", "HEAD", path,
+                            check=False, timeout=15,
+                        )
+                    self._restore_merged_content(repaired_files, merged_spec_contents)
+                    return RepairResult(
+                        success=False,
+                        error="Cannot save pre_amend_sha: git rev-parse HEAD failed",
+                    )
+                pre_amend_sha = pre_sha_result.stdout.strip()
+
+                amend_result = _run_git(
+                    self.project_root,
+                    "commit",
+                    "--amend",
+                    "--no-edit",
+                    check=False, timeout=30,
+                )
+                if amend_result.returncode != 0:
+                    # Unstage repaired files so the repairer is self-contained
+                    for path in repaired_files:
+                        _run_git(
+                            self.project_root, "reset", "HEAD", path,
+                            check=False, timeout=15,
+                        )
+                    self._restore_merged_content(repaired_files, merged_spec_contents)
+                    return RepairResult(
+                        success=False,
+                        error=f"Failed to amend merge commit with repaired specs: {amend_result.stderr.strip()}",
+                    )
+
+                commit_succeeded = True
+                logger.info("Amended merge commit with repaired spec files for '%s'", branch)
+
+            # Re-run guardrails on the commit (fix-up or amended)
             guardrails = MergeGuardrailsCheck(self.project_root)
             rev_parse_result = _run_git(
                 self.project_root, "rev-parse", "HEAD",
                 check=False, timeout=15,
             )
             if rev_parse_result.returncode != 0:
-                self._restore_merged_content(repaired_files, merged_spec_contents)
+                self._rollback_commit(pre_amend_sha, repaired_files, merged_spec_contents)
                 return RepairResult(
                     success=False,
-                    error=f"Failed to get amended commit SHA: {rev_parse_result.stderr.strip() or 'git rev-parse HEAD failed'}",
+                    error=f"Failed to get post-repair commit SHA: {rev_parse_result.stderr.strip() or 'git rev-parse HEAD failed'}",
                 )
-            amended_sha = rev_parse_result.stdout.strip()
-            gr_report = guardrails.check_merge_result(pre_sha, amended_sha)
+            new_sha = rev_parse_result.stdout.strip()
+            gr_report = guardrails.check_merge_result(pre_sha, new_sha)
         except subprocess.TimeoutExpired as exc:
             # Defensive: un-amend the commit before restoring working-tree
             # files so that if the process crashes before the caller's
-            # rollback, HEAD won't be left on an unverified amended commit.
-            # Only un-amend if the amend actually succeeded; otherwise we
-            # would accidentally undo the original merge commit.
-            if amend_succeeded:
-                reset_result = _run_git(
-                    self.project_root, "reset", "--soft", "HEAD~1",
-                    check=False, timeout=15,
-                )
-                if reset_result.returncode != 0:
-                    # TODO: A failed un-amend leaves HEAD on an unverified amended
-                    # commit. The orchestrator's subsequent _rollback_to(pre_sha)
-                    # will move HEAD regardless, masking this failure. If the
-                    # orchestrator were to return success unexpectedly, the repo
-                    # would be left in an inconsistent state. Consider raising
-                    # here instead of only logging.
-                    logger.warning(
-                        "Un-amend (reset --soft HEAD~1) failed after timeout: %s",
-                        reset_result.stderr.strip() or "unknown error",
-                    )
-                # Unstage repaired files so index and working tree stay in sync
-                for path in repaired_files:
-                    _run_git(
-                        self.project_root, "reset", "HEAD", path,
-                        check=False, timeout=15,
-                    )
-            self._restore_merged_content(repaired_files, merged_spec_contents)
+            # rollback, HEAD won't be left on an unverified commit.
+            if commit_succeeded:
+                self._rollback_commit(pre_amend_sha, repaired_files, merged_spec_contents)
+            else:
+                self._restore_merged_content(repaired_files, merged_spec_contents)
             return RepairResult(
                 success=False,
                 error=f"Timeout during guardrail repair git operation: {exc}",
             )
         except Exception as exc:
             # Defensive: un-amend the commit (same reasoning as above).
-            if amend_succeeded:
-                reset_result = _run_git(
-                    self.project_root, "reset", "--soft", "HEAD~1",
-                    check=False, timeout=15,
-                )
-                if reset_result.returncode != 0:
-                    # TODO: See matching TODO above in the TimeoutExpired path.
-                    logger.warning(
-                        "Un-amend (reset --soft HEAD~1) failed after exception: %s",
-                        reset_result.stderr.strip() or "unknown error",
-                    )
-            self._restore_merged_content(repaired_files, merged_spec_contents)
+            if commit_succeeded:
+                self._rollback_commit(pre_amend_sha, repaired_files, merged_spec_contents)
+            else:
+                self._restore_merged_content(repaired_files, merged_spec_contents)
             return RepairResult(
                 success=False,
                 error=f"Guardrails re-check failed after repair: {exc}",
@@ -388,22 +470,15 @@ class GuardrailRepairer:
 
         if not gr_report.passed:
             # Still has violations after repair — restore and report failure.
-            # Reorder: (a) soft-reset to undo the amend, (b) unstage repaired
+            # Reorder: (a) rollback the commit, (b) unstage repaired
             # files from the new HEAD so index and working tree stay in sync,
             # (c) restore the original merged content.  This makes the repairer
             # self-contained regardless of whether the caller performs a
             # downstream hard reset.
-            if amend_succeeded:
-                _run_git(
-                    self.project_root, "reset", "--soft", "HEAD~1",
-                    check=False, timeout=15,
-                )
-                for path in repaired_files:
-                    _run_git(
-                        self.project_root, "reset", "HEAD", path,
-                        check=False, timeout=15,
-                    )
-            self._restore_merged_content(repaired_files, merged_spec_contents)
+            if commit_succeeded:
+                self._rollback_commit(pre_amend_sha, repaired_files, merged_spec_contents)
+            else:
+                self._restore_merged_content(repaired_files, merged_spec_contents)
             remaining = [
                 f"[{v.violation_type}] {v.file_path}: {v.message}"
                 for v in gr_report.violations
@@ -422,6 +497,37 @@ class GuardrailRepairer:
             "Guardrail repair succeeded for '%s': %d file(s) corrected",
             branch, len(repaired_files),
         )
+
+        # A11 fix / Task 11: after repair success, verify the original merge
+        # commit (post_sha) is still an ancestor of HEAD.  This catches the
+        # case where the merge was silently lost during the repair process
+        # (e.g. amend reset went to the wrong parent).  We use ancestry
+        # rather than parent-counting so the check works regardless of
+        # whether the repair path created a fix-up commit or amended.
+        # The check is skipped when post_sha is not a valid ref (e.g. tests
+        # with mocked SHAs) to avoid false failures.
+        if post_sha:
+            verify_ref = _run_git(
+                self.project_root, "rev-parse", "--verify", post_sha,
+                check=False, timeout=15,
+            )
+            if verify_ref.returncode == 0:
+                ancestor_check = _run_git(
+                    self.project_root,
+                    "merge-base", "--is-ancestor", post_sha, "HEAD",
+                    check=False, timeout=15,
+                )
+                if ancestor_check.returncode != 0:
+                    self._rollback_commit(pre_amend_sha, repaired_files, merged_spec_contents)
+                    return RepairResult(
+                        success=False,
+                        error=(
+                            "Post-repair post-condition failed: the original merge "
+                            f"commit ({post_sha[:8]}) is no longer an ancestor of HEAD. "
+                            "The merge may have been silently lost."
+                        ),
+                    )
+
         return RepairResult(
             success=True,
             repaired_files=repaired_files,
@@ -507,6 +613,11 @@ class GuardrailRepairer:
         working tree in the same state it was before ``repair_violations`` was
         called.  This makes the repairer self-contained: callers do not have
         to perform their own cleanup.
+
+        Raises:
+            OSError: If a file cannot be written back.  Previously (defect A6)
+            this was silently swallowed; now it is re-raised so the caller
+            knows the working tree may be inconsistent.
         """
         for path in repaired_files:
             merged_content = merged_spec_contents.get(path)
@@ -515,26 +626,83 @@ class GuardrailRepairer:
                 try:
                     full_path.write_text(merged_content, encoding="utf-8")
                     logger.info("Restored merged content for %s", path)
-                except Exception as exc:
-                    logger.warning(
+                except OSError as exc:
+                    logger.error(
                         "Failed to restore merged content for %s: %s",
                         path, exc,
                     )
+                    raise  # A6 fix: re-raise, do not swallow
             else:
                 logger.warning(
                     "No merged content available to restore for %s", path,
                 )
 
-    def _call_llm(self, prompt: str) -> str | dict[str, Any]:
-        """Call LLM with the repair prompt."""
-        from ..llm_caller import LLMCaller
+    def _rollback_commit(
+        self,
+        pre_amend_sha: Optional[str],
+        repaired_files: list[str],
+        merged_spec_contents: dict[str, str],
+    ) -> None:
+        """Rollback a commit created by the repair process.
 
-        caller = LLMCaller(
-            project_root=self.project_root,
-            step_type="guardrail_repair",
-            max_retries=2,
-            retry_delay=1.0,
-        )
+        When the fix-up-commit path was used (pre_amend_sha is None), roll
+        back one commit via ``git reset --soft HEAD~1``.
+
+        When the amend path was used (pre_amend_sha is set), reset to
+        ``pre_amend_sha`` instead of ``HEAD~1`` so the original merge commit
+        is not lost (defect A1-A4 fix).
+
+        After resetting, unstages repaired files and restores merged content.
+        """
+        if pre_amend_sha:
+            # Amend path: rollback to the saved pre-amend SHA.
+            reset_result = _run_git(
+                self.project_root, "reset", "--soft", pre_amend_sha,
+                check=False, timeout=15,
+            )
+            if reset_result.returncode != 0:
+                logger.warning(
+                    "Rollback to pre_amend_sha %s failed: %s",
+                    pre_amend_sha[:8] if pre_amend_sha else "<none>",
+                    reset_result.stderr.strip() or "unknown error",
+                )
+        else:
+            # Fix-up commit path: rollback one commit.
+            reset_result = _run_git(
+                self.project_root, "reset", "--soft", "HEAD~1",
+                check=False, timeout=15,
+            )
+            if reset_result.returncode != 0:
+                logger.warning(
+                    "Rollback of fix-up commit (HEAD~1) failed: %s",
+                    reset_result.stderr.strip() or "unknown error",
+                )
+
+        # Unstage repaired files so index and working tree stay in sync
+        for path in repaired_files:
+            _run_git(
+                self.project_root, "reset", "HEAD", path,
+                check=False, timeout=15,
+            )
+
+        # Restore merged content
+        self._restore_merged_content(repaired_files, merged_spec_contents)
+
+    def _call_llm(self, prompt: str) -> str | dict[str, Any]:
+        """Call LLM with the repair prompt.
+
+        Uses the injected :attr:`_llm_caller` if available (Task 12 / A13 fix),
+        otherwise falls back to creating a per-call :class:`LLMCaller`.
+        """
+        caller = self._llm_caller
+        if caller is None:
+            caller = LLMCaller(
+                project_root=self.project_root,
+                step_type="guardrail_repair",
+                max_retries=2,
+                retry_delay=1.0,
+            )
+
         # Use two-phase extraction for robust JSON parsing
         raw = caller.call(
             prompt=prompt,

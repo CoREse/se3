@@ -2247,20 +2247,22 @@ class TestRunGuardrailsFastBranch:
         _git(tmp_path, "merge", "feature-amend", "--no-edit", "-m", "Merge feature-amend")
         post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
-        # Mock repairer to actually fix the file and amend
+        # Mock repairer to actually fix the file and create a fix-up commit
+        # (the preferred repair path since amend on merge commits can lose
+        # merge parents).
         def mock_repair(self, branch, pre_sha, post_sha, violations,
                         original_spec_contents, merged_spec_contents):
             # Fix the spec file
             content = spec_path.read_text()
             content = content.replace("SHOULD", "SHALL")
             spec_path.write_text(content)
-            # Stage and amend
+            # Stage and create fix-up commit
             _git(self.project_root, "add", "se3/specs/base/spec.md")
-            amend_result = _git(
-                self.project_root, "commit", "--amend", "--no-edit", check=False,
+            fixup_result = _git(
+                self.project_root, "commit", "-m", "fix(specs): repair guardrail violations", check=False,
             )
-            if amend_result.returncode != 0:
-                raise RuntimeError(f"git amend failed: {amend_result.stderr}")
+            if fixup_result.returncode != 0:
+                raise RuntimeError(f"git fix-up commit failed: {fixup_result.stderr}")
             from se3.engine.merge.guardrail_repair import RepairResult
             return RepairResult(success=True, repaired_files=["se3/specs/base/spec.md"])
 
@@ -2277,9 +2279,17 @@ class TestRunGuardrailsFastBranch:
         # Should return None (repair succeeded)
         assert result is None
 
-        # HEAD should have changed due to amend
-        amended_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
-        assert amended_head != post_head
+        # HEAD should have changed due to fix-up commit
+        new_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        assert new_head != post_head
+
+        # The original merge commit must still be an ancestor
+        ancestor_check = _git(
+            tmp_path, "merge-base", "--is-ancestor", post_head, "HEAD", check=False,
+        )
+        assert ancestor_check.returncode == 0, (
+            "Original merge commit must still be an ancestor after fix-up"
+        )
 
         # Spec should be fixed
         assert "SHALL" in spec_path.read_text()
