@@ -526,6 +526,7 @@ def _atomic_write_bytes(dest_path: Path, content: bytes) -> None:
             offset = 0
             while offset < len(content):
                 offset += os.write(fd, content[offset:])
+            os.fsync(fd)
         finally:
             os.close(fd)
         # TODO(defense-in-depth): replace() follows symlinks on the
@@ -537,12 +538,13 @@ def _atomic_write_bytes(dest_path: Path, content: bytes) -> None:
         # a fully robust fix requires destination-side O_NOFOLLOW or
         # fd-based renameat (openat + renameat).
         temp_path.replace(dest_path)
-    except Exception:
+    finally:
+        # K9: always attempt cleanup; on success replace() already
+        # removed the source, so unlink is a no-op (FileNotFound).
         try:
             temp_path.unlink()
         except OSError:
             pass
-        raise
 
 
 def _write_sidecar(

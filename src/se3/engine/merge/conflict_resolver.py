@@ -10,12 +10,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from ..json_extractor import extract_json_two_phase
+from ...commands.merge.secret_redact import redact_text
 from .conflict_context import ConflictContext, ConflictFile, ConflictHunk
 
 if TYPE_CHECKING:
@@ -186,6 +188,7 @@ class ConflictResolver:
         project_root: Path,
         *,
         llm_caller: Optional["LLMCaller"] = None,
+        llm_trace: Optional[Any] = None,
         max_resolved_content_bytes: int = DEFAULT_MAX_RESOLVED_CONTENT_BYTES,
     ) -> None:
         """Construct a resolver.
@@ -199,6 +202,9 @@ class ConflictResolver:
                 continuous with downstream guardrail repair calls.  When
                 ``None``, a fresh caller scoped to ``"merge_conflict"`` is
                 built lazily on first use.
+            llm_trace: Optional :class:`LLMTrace` for per-call jsonl
+                recording (K2).  When supplied, every LLM call is timed
+                and written to the trace file.
             max_resolved_content_bytes: Hard upper bound on
                 ``resolved_content`` for any single file.  Defaults to
                 5 MiB; configurable to allow tests to assert the cap is
@@ -206,6 +212,7 @@ class ConflictResolver:
         """
         self.project_root = project_root
         self._llm_caller = llm_caller
+        self._llm_trace = llm_trace
         if max_resolved_content_bytes <= 0:
             raise ValueError(
                 "max_resolved_content_bytes must be positive, "
@@ -255,19 +262,43 @@ class ConflictResolver:
         :class:`GuardrailRepairer` and any other merge-pipeline caller
         (see D9).  Falls back to a freshly-built caller when none was
         supplied.
+
+        K2: If an :class:`LLMTrace` was injected, the call is timed and
+        recorded as a jsonl entry.
         """
-        if self._llm_caller is not None:
-            return self._llm_caller.call(prompt=prompt, require_json=False)
+        caller = self._llm_caller
+        if caller is None:
+            from ..llm_caller import LLMCaller
 
-        from ..llm_caller import LLMCaller
+            caller = LLMCaller(
+                project_root=self.project_root,
+                step_type="merge_conflict",
+                max_retries=2,
+                retry_delay=1.0,
+            )
 
-        caller = LLMCaller(
-            project_root=self.project_root,
-            step_type="merge_conflict",
-            max_retries=2,
-            retry_delay=1.0,
-        )
-        return caller.call(prompt=prompt, require_json=False)
+        t0 = time.monotonic()
+        result: str = ""
+        outcome: str = ""
+        error: Optional[str] = None
+        try:
+            result = caller.call(prompt=prompt, require_json=False)
+            outcome = "success"
+        except Exception as exc:
+            outcome = "error"
+            error = str(exc)
+            raise
+        finally:
+            if self._llm_trace is not None:
+                self._llm_trace.record(
+                    agent="conflict_resolver",
+                    prompt=redact_text(prompt),
+                    response=redact_text(result) if outcome == "success" else "",
+                    duration_sec=time.monotonic() - t0,
+                    outcome=outcome,
+                    error=error,
+                )
+        return result
 
     def _build_prompt(
         self,
