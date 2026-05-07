@@ -1191,7 +1191,7 @@ class TestMergeGuardrailsCheck:
         head_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         checker = MergeGuardrailsCheck(tmp_path)
-        report = checker.check_merge_result(base_sha, head_sha)
+        report = checker.check_merge_result(base_sha, head_sha, enforce_topology=False)
         assert report.passed is True
         assert report.violations == []
 
@@ -1239,7 +1239,7 @@ class TestMergeGuardrailsCheck:
         head_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         checker = MergeGuardrailsCheck(tmp_path)
-        report = checker.check_merge_result(base_sha, head_sha)
+        report = checker.check_merge_result(base_sha, head_sha, enforce_topology=False)
         assert report.passed is False
         assert len(report.violations) == 1
         assert report.violations[0].violation_type == "WEAKENING"
@@ -1259,7 +1259,7 @@ class TestMergeGuardrailsCheck:
         head_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         checker = MergeGuardrailsCheck(tmp_path)
-        report = checker.check_merge_result(base_sha, head_sha)
+        report = checker.check_merge_result(base_sha, head_sha, enforce_topology=False)
         assert report.passed is True
 
     def test_when_deletion_detected(self, tmp_path: Path) -> None:
@@ -1282,7 +1282,7 @@ class TestMergeGuardrailsCheck:
         head_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         checker = MergeGuardrailsCheck(tmp_path)
-        report = checker.check_merge_result(base_sha, head_sha)
+        report = checker.check_merge_result(base_sha, head_sha, enforce_topology=False)
         assert report.passed is False
         assert any(v.violation_type == "DELETE" for v in report.violations)
 
@@ -1299,7 +1299,7 @@ class TestMergeGuardrailsCheck:
         head_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         checker = MergeGuardrailsCheck(tmp_path)
-        report = checker.check_merge_result(base_sha, head_sha)
+        report = checker.check_merge_result(base_sha, head_sha, enforce_topology=False)
         assert report.passed is False
         assert any("quantifier" in v.message for v in report.violations)
 
@@ -1317,7 +1317,7 @@ class TestMergeGuardrailsCheck:
         head_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         checker = MergeGuardrailsCheck(tmp_path)
-        report = checker.check_merge_result(base_sha, head_sha)
+        report = checker.check_merge_result(base_sha, head_sha, enforce_topology=False)
         assert report.passed is False
         assert any("quantifier" in v.message for v in report.violations)
 
@@ -1335,7 +1335,7 @@ class TestMergeGuardrailsCheck:
         head_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         checker = MergeGuardrailsCheck(tmp_path)
-        report = checker.check_merge_result(base_sha, head_sha)
+        report = checker.check_merge_result(base_sha, head_sha, enforce_topology=False)
         assert report.passed is False
         assert any("quantifier" in v.message for v in report.violations)
 
@@ -1370,7 +1370,7 @@ class TestMergeGuardrailsCheck:
         head_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         checker = MergeGuardrailsCheck(tmp_path)
-        report = checker.check_merge_result(base_sha, head_sha)
+        report = checker.check_merge_result(base_sha, head_sha, enforce_topology=False)
         assert report.passed is True, (
             f"Expected no violations, got: {report.violations}"
         )
@@ -1403,7 +1403,7 @@ class TestMergeGuardrailsCheck:
         head_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         checker = MergeGuardrailsCheck(tmp_path)
-        report = checker.check_merge_result(base_sha, head_sha)
+        report = checker.check_merge_result(base_sha, head_sha, enforce_topology=False)
         assert report.passed is True, (
             f"Expected no violations, got: {report.violations}"
         )
@@ -2048,7 +2048,7 @@ class TestOrchestratorGuardrailsIntegration:
         (spec_dir / "spec.md").write_text("The system MUST do X.\n")
 
         checker = MergeGuardrailsCheck(tmp_path)
-        report = checker.check_merge_result(base_sha, head_sha)
+        report = checker.check_merge_result(base_sha, head_sha, enforce_topology=False)
 
         # Should still detect the SHALL→SHOULD weakening from the commits,
         # NOT be confused by the working tree MUST
@@ -2445,3 +2445,456 @@ class TestRunGuardrailsFastBranch:
         # HEAD should be rolled back to pre-merge state
         current_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
         assert current_head == pre_head
+
+
+# =====================================================================
+# G8 — Topology validation, EvidenceRecord, WHEN-clause bounds, H5 errors
+# =====================================================================
+
+
+class TestMergeTopologyValidation:
+    """G8 task 38 (H1/H2): check_merge_result enforces merge topology.
+
+    The topology check catches the class of disasters where the merge
+    commit was silently dropped (e.g. ``git reset --soft HEAD~1`` on an
+    amended merge): even if the spec content matches, the underlying
+    commit is no longer a merge.
+    """
+
+    def _make_two_branches(self, tmp_path: Path) -> tuple[str, str, str]:
+        """Set up a repo with master and a feature branch.
+
+        Returns ``(default_branch, feature_branch, pre_merge_sha)``.
+        """
+        _init_repo(tmp_path)
+        (tmp_path / "README.md").write_text("# initial\n")
+        _commit(tmp_path, "initial")
+        default = _current_branch(tmp_path)
+        pre = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        _git(tmp_path, "checkout", "-b", "feature")
+        (tmp_path / "feature.py").write_text("# feature\n")
+        _commit(tmp_path, "add feature")
+
+        _git(tmp_path, "checkout", default)
+        return default, "feature", pre
+
+    def test_real_merge_topology_passes(self, tmp_path: Path) -> None:
+        """A real --no-ff merge satisfies both ancestry and parent-count."""
+        default, feature, pre = self._make_two_branches(tmp_path)
+        _git(tmp_path, "merge", "--no-ff", feature, "-m", "Merge feature")
+        post = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        checker = MergeGuardrailsCheck(tmp_path)
+        report = checker.check_merge_result(pre, post)
+        assert report.passed is True, f"violations: {report.violations}"
+
+    def test_lost_merge_detected_by_ancestry_check(self, tmp_path: Path) -> None:
+        """Simulate the G8 disaster: merge commit lost via reset.
+
+        Sequence:
+          1. Real merge → post_sha1 has 2 parents.
+          2. ``git reset --hard pre_sha`` (the disaster) → HEAD == pre_sha.
+          3. check_merge_result(pre, post_sha1) where post_sha1 is dangling.
+             Actually, we test the inverse: present a post_sha that is NOT
+             a descendant of pre_sha.
+        """
+        default, feature, pre = self._make_two_branches(tmp_path)
+
+        # Make an unrelated commit on default that is not ancestor of feature
+        (tmp_path / "other.py").write_text("# other\n")
+        _commit(tmp_path, "unrelated commit")
+        unrelated = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        # Now imagine pre-merge SHA was the unrelated commit, and post-merge
+        # is on a different branch (feature). feature is NOT a descendant of
+        # unrelated. Topology check should fail.
+        feature_sha = _git(tmp_path, "rev-parse", feature).stdout.strip()
+
+        checker = MergeGuardrailsCheck(tmp_path)
+        report = checker.check_merge_result(unrelated, feature_sha)
+        assert report.passed is False
+        assert any(
+            v.violation_type == "CHECK_FAILURE"
+            and "NOT an ancestor" in v.message
+            for v in report.violations
+        ), f"violations: {report.violations}"
+
+    def test_single_parent_commit_fails_parent_count(self, tmp_path: Path) -> None:
+        """A commit with only 1 parent fails the merge-commit check."""
+        default, feature, pre = self._make_two_branches(tmp_path)
+        # Make a regular fast-forward commit on default (not a merge)
+        (tmp_path / "fastforward.py").write_text("# ff\n")
+        _commit(tmp_path, "fast forward")
+        post = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        checker = MergeGuardrailsCheck(tmp_path)
+        report = checker.check_merge_result(pre, post)
+        assert report.passed is False
+        assert any(
+            v.violation_type == "CHECK_FAILURE"
+            and "1 parent(s)" in v.message
+            and "expected >= 2" in v.message
+            for v in report.violations
+        ), f"violations: {report.violations}"
+
+    def test_octopus_merge_passes_topology(self, tmp_path: Path) -> None:
+        """A 3-parent octopus merge satisfies parent_count >= 2."""
+        _init_repo(tmp_path)
+        (tmp_path / "README.md").write_text("# initial\n")
+        _commit(tmp_path, "initial")
+        default = _current_branch(tmp_path)
+        pre = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        # Create three feature branches diverged from initial commit
+        for branch in ("f1", "f2", "f3"):
+            _git(tmp_path, "checkout", "-b", branch, default)
+            (tmp_path / f"{branch}.py").write_text(f"# {branch}\n")
+            _commit(tmp_path, f"add {branch}")
+
+        _git(tmp_path, "checkout", default)
+        # Octopus merge of all three (all touch unique files, no conflicts)
+        _git(tmp_path, "merge", "--no-ff", "f1", "f2", "f3", "-m", "Octopus")
+        post = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        # Verify it is indeed an octopus (>2 parents).
+        # `git merge f1 f2 f3` produces a merge commit with 4 parents:
+        # the current branch + the 3 merged branches.
+        parents_result = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-list", "--parents", "-n", "1", post],
+            capture_output=True, text=True, check=True,
+        )
+        parts = parents_result.stdout.strip().split()
+        assert len(parts) - 1 == 4  # current + f1 + f2 + f3 = 4 parents
+
+        checker = MergeGuardrailsCheck(tmp_path)
+        report = checker.check_merge_result(pre, post)
+        assert report.passed is True, f"violations: {report.violations}"
+
+    def test_topology_skipped_when_pre_equals_post(self, tmp_path: Path) -> None:
+        """When pre_sha == post_sha (already-ancestor no-op), skip topology."""
+        _init_repo(tmp_path)
+        (tmp_path / "README.md").write_text("# initial\n")
+        _commit(tmp_path, "initial")
+        sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        checker = MergeGuardrailsCheck(tmp_path)
+        report = checker.check_merge_result(sha, sha)
+        assert report.passed is True
+
+    def test_enforce_topology_false_skips_check(self, tmp_path: Path) -> None:
+        """enforce_topology=False bypasses the merge topology assertions."""
+        default, feature, pre = self._make_two_branches(tmp_path)
+        # Regular non-merge commit
+        (tmp_path / "fastforward.py").write_text("# ff\n")
+        _commit(tmp_path, "fast forward")
+        post = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        checker = MergeGuardrailsCheck(tmp_path)
+        report = checker.check_merge_result(pre, post, enforce_topology=False)
+        assert report.passed is True
+
+
+class TestWhenClauseBounds:
+    """G8 task 39 (H3): _extract_when_clauses must not IndexError on
+    unusual whitespace patterns.
+    """
+
+    def test_when_clause_followed_by_blank_lines(self) -> None:
+        """A WHEN clause followed by trailing blank lines does not crash."""
+        from se3.engine.merge.guardrails import _extract_when_clauses
+        lines = [
+            "#### Scenario: A",
+            "- WHEN something happens",
+            "",
+            "",
+            "",
+        ]
+        clauses = _extract_when_clauses(lines)
+        # Should extract the WHEN line without crashing
+        assert len(clauses) == 1
+        assert "WHEN something happens" in clauses[0]
+
+    def test_when_clause_continuation_with_blank_lines_between(self) -> None:
+        """Blank lines between WHEN and indented continuations are skipped."""
+        from se3.engine.merge.guardrails import _extract_when_clauses
+        lines = [
+            "- WHEN user does X",
+            "",
+            "  with detail Y",
+            "",
+            "  and Z",
+        ]
+        clauses = _extract_when_clauses(lines)
+        assert len(clauses) == 1
+        assert "with detail Y" in clauses[0]
+        assert "and Z" in clauses[0]
+
+    def test_only_blank_lines_after_when_no_crash(self) -> None:
+        """File ending with only whitespace lines after a WHEN doesn't crash."""
+        from se3.engine.merge.guardrails import _extract_when_clauses
+        lines = [
+            "- WHEN end of file",
+            "   ",
+            "\t",
+            "",
+        ]
+        # This MUST NOT raise IndexError or any other exception
+        clauses = _extract_when_clauses(lines)
+        assert len(clauses) == 1
+
+    def test_empty_string_lines_handled(self) -> None:
+        """Lines that are exactly empty strings don't crash."""
+        from se3.engine.merge.guardrails import _extract_when_clauses
+        lines = ["- WHEN x", "", "", "  cont"]
+        clauses = _extract_when_clauses(lines)
+        assert len(clauses) == 1
+        assert "cont" in clauses[0]
+
+
+class TestEvidenceRecordTypoFailFast:
+    """G8 task 40 (H4): EvidenceRecord rejects unknown fields at construction."""
+
+    def test_known_field_construction_succeeds(self) -> None:
+        from se3.commands.merge.result_model import EvidenceRecord
+
+        rec = EvidenceRecord(strong_line="x", weak_line="y", pairing_score=0.9)
+        assert rec.strong_line == "x"
+        assert rec.weak_line == "y"
+        assert rec.pairing_score == 0.9
+
+    def test_unknown_field_raises_typeerror(self) -> None:
+        """Typo in field name → TypeError at construction (fail-fast)."""
+        from se3.commands.merge.result_model import EvidenceRecord
+
+        with pytest.raises(TypeError):
+            EvidenceRecord(strng_line="x")  # typo: strng_line vs strong_line
+
+    def test_to_dict_omits_none_values(self) -> None:
+        """to_dict() drops None-valued fields for compact serialization."""
+        from se3.commands.merge.result_model import EvidenceRecord
+
+        rec = EvidenceRecord(strong_line="x", pairing_score=0.5)
+        d = rec.to_dict()
+        assert d == {"strong_line": "x", "pairing_score": 0.5}
+        assert "weak_line" not in d
+        assert "deleted_line" not in d
+
+    def test_from_dict_with_unknown_key_raises(self) -> None:
+        """from_dict({}) with unknown key → TypeError."""
+        from se3.commands.merge.result_model import EvidenceRecord
+
+        with pytest.raises(TypeError):
+            EvidenceRecord.from_dict({"unknown_key": "x"})
+
+    def test_from_dict_empty_returns_none(self) -> None:
+        from se3.commands.merge.result_model import EvidenceRecord
+
+        assert EvidenceRecord.from_dict(None) is None
+        assert EvidenceRecord.from_dict({}) is None
+
+    def test_from_dict_round_trip(self) -> None:
+        from se3.commands.merge.result_model import EvidenceRecord
+
+        original = EvidenceRecord(
+            strong_line="SHALL X",
+            weak_line="SHOULD X",
+            pairing_score=0.8,
+            strong_line_no=42,
+            weak_line_no=44,
+        )
+        d = original.to_dict()
+        roundtrip = EvidenceRecord.from_dict(d)
+        assert roundtrip == original
+
+    def test_evidence_dict_helper_validates_keys(self) -> None:
+        """_evidence_dict() typos fail fast."""
+        from se3.engine.merge.guardrails import _evidence_dict
+
+        with pytest.raises(TypeError):
+            _evidence_dict(strng_line="x")
+
+    def test_topology_evidence_fields_recognized(self) -> None:
+        """Topology check fields (pre_sha, post_sha, etc.) are valid."""
+        from se3.engine.merge.guardrails import _evidence_dict
+
+        d = _evidence_dict(
+            pre_sha="abc",
+            post_sha="def",
+            parent_count=1,
+            min_parents=2,
+            topology_check="parent_count",
+        )
+        assert d == {
+            "pre_sha": "abc",
+            "post_sha": "def",
+            "parent_count": 1,
+            "min_parents": 2,
+            "topology_check": "parent_count",
+        }
+
+
+class TestSpecIterationExceptionHandling:
+    """G8 task 41 (H5): per-file iteration errors do not silently abort."""
+
+    def test_file_read_error_returns_check_incomplete(self, tmp_path: Path, monkeypatch) -> None:
+        """An OSError during file read → CHECK_INCOMPLETE, report.incomplete=True."""
+        from se3.engine.merge import guardrails as guardrails_mod
+
+        _init_repo(tmp_path)
+        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "spec.md").write_text("The system SHALL X.\n")
+        _commit(tmp_path, "initial")
+        base_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        (spec_dir / "spec.md").write_text("The system SHALL Y.\n")
+        _commit(tmp_path, "update")
+        head_sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        # Monkey-patch _check_spec_file_against_ref to raise OSError
+        original = guardrails_mod._check_spec_file_against_ref
+
+        def fake_check(*args, **kwargs):
+            raise OSError("simulated read error")
+
+        monkeypatch.setattr(
+            guardrails_mod, "_check_spec_file_against_ref", fake_check
+        )
+
+        checker = MergeGuardrailsCheck(tmp_path)
+        report = checker.check_merge_result(
+            base_sha, head_sha, enforce_topology=False,
+        )
+        assert report.passed is False
+        assert report.incomplete is True
+        assert any(
+            v.violation_type == "CHECK_INCOMPLETE" for v in report.violations
+        )
+        # The exception type should be in the evidence
+        check_incomplete = [
+            v for v in report.violations
+            if v.violation_type == "CHECK_INCOMPLETE"
+        ][0]
+        assert check_incomplete.evidence.get("exception_type") == "OSError"
+
+
+class TestMergeRespondSpecPath:
+    """G8 task 43 (G2): merge_respond._is_spec_path uses pathlib."""
+
+    def test_forward_slash_path_detected(self) -> None:
+        from se3.commands.merge_respond import _is_spec_path
+
+        assert _is_spec_path("se3/specs/base/spec.md") is True
+        assert _is_spec_path("se3/specs/foo/bar/spec.md") is True
+
+    def test_backslash_path_detected(self) -> None:
+        """Windows-style backslash paths are normalized and detected."""
+        from se3.commands.merge_respond import _is_spec_path
+
+        assert _is_spec_path("se3\\specs\\base\\spec.md") is True
+        assert _is_spec_path("se3\\specs\\foo\\bar\\spec.md") is True
+
+    def test_non_spec_path_rejected(self) -> None:
+        from se3.commands.merge_respond import _is_spec_path
+
+        assert _is_spec_path("README.md") is False
+        assert _is_spec_path("se3/state/foo.json") is False
+        assert _is_spec_path("se3/specs/base/other.md") is False
+        assert _is_spec_path("") is False
+
+
+class TestMergeRespondFirstParent:
+    """G8 task 42 (G1): merge_respond._first_parent_sha handles octopus."""
+
+    def test_first_parent_of_two_parent_merge(self, tmp_path: Path) -> None:
+        from se3.commands.merge_respond import _first_parent_sha
+
+        _init_repo(tmp_path)
+        (tmp_path / "a.py").write_text("a")
+        _commit(tmp_path, "initial")
+        default = _current_branch(tmp_path)
+        first_parent_expected = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        _git(tmp_path, "checkout", "-b", "feature")
+        (tmp_path / "b.py").write_text("b")
+        _commit(tmp_path, "feature")
+
+        _git(tmp_path, "checkout", default)
+        _git(tmp_path, "merge", "--no-ff", "feature", "-m", "Merge feature")
+
+        first_parent = _first_parent_sha(tmp_path)
+        assert first_parent == first_parent_expected
+
+    def test_first_parent_of_octopus_merge(self, tmp_path: Path) -> None:
+        from se3.commands.merge_respond import _first_parent_sha
+
+        _init_repo(tmp_path)
+        (tmp_path / "a.py").write_text("a")
+        _commit(tmp_path, "initial")
+        default = _current_branch(tmp_path)
+        first_parent_expected = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        # Create 3 branches
+        for branch in ("f1", "f2", "f3"):
+            _git(tmp_path, "checkout", "-b", branch, default)
+            (tmp_path / f"{branch}.py").write_text(branch)
+            _commit(tmp_path, f"add {branch}")
+
+        _git(tmp_path, "checkout", default)
+        _git(tmp_path, "merge", "--no-ff", "f1", "f2", "f3", "-m", "Octopus")
+
+        # First parent must be the pre-merge HEAD (default branch)
+        first_parent = _first_parent_sha(tmp_path)
+        assert first_parent == first_parent_expected
+
+    def test_first_parent_root_commit_raises(self, tmp_path: Path) -> None:
+        """A root commit (no parents) → RuntimeError."""
+        from se3.commands.merge_respond import _first_parent_sha
+
+        _init_repo(tmp_path)
+        (tmp_path / "a.py").write_text("a")
+        _commit(tmp_path, "initial")
+
+        with pytest.raises(RuntimeError, match="no parents"):
+            _first_parent_sha(tmp_path)
+
+
+class TestGuardrailReportIncomplete:
+    """The new ``incomplete`` field on GuardrailReport tracks unresolved checks."""
+
+    def test_default_incomplete_is_false(self) -> None:
+        from se3.engine.merge.guardrails import GuardrailReport
+
+        report = GuardrailReport()
+        assert report.incomplete is False
+        assert report.passed is True
+
+    def test_incomplete_field_set_when_iteration_error(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        from se3.engine.merge import guardrails as guardrails_mod
+
+        _init_repo(tmp_path)
+        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "spec.md").write_text("The system SHALL X.\n")
+        _commit(tmp_path, "initial")
+        base = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        (spec_dir / "spec.md").write_text("The system SHALL Y.\n")
+        _commit(tmp_path, "update")
+        head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        def boom(*args, **kwargs):
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "test")
+
+        monkeypatch.setattr(
+            guardrails_mod, "_check_spec_file_against_ref", boom
+        )
+
+        checker = MergeGuardrailsCheck(tmp_path)
+        report = checker.check_merge_result(base, head, enforce_topology=False)
+        assert report.incomplete is True
+        assert report.passed is False
+

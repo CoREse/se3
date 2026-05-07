@@ -15,11 +15,94 @@ New code SHOULD import from this module.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields as dataclass_fields
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from .failure_reason import FailureReason
+
+
+@dataclass
+class EvidenceRecord:
+    """Typed evidence payload attached to a guardrail violation.
+
+    The legacy code attached a ``dict`` to ``GuardrailViolation.evidence``
+    which made field typos invisible at construction time —
+    ``evidence={"strng_line": "..."}`` would silently produce a
+    violation with a missing strong-line message downstream.
+
+    H4: This dataclass enumerates every recognised evidence field and
+    fails fast at construction (``TypeError`` from the dataclass
+    constructor) when an unknown keyword is supplied.  Every field is
+    optional so a single class can carry evidence for any violation
+    type — see the ``violation_type`` discriminator on
+    :class:`GuardrailViolation`.
+
+    Backward-compatibility: :meth:`to_dict` serialises the record back
+    to a plain dict (omitting ``None``-valued fields) so existing
+    consumers that rely on dict-style access (e.g.
+    ``evidence.get("strong_line")``) continue to work without changes.
+    """
+
+    # --- Pairing evidence (WEAKENING) ---
+    strong_line: Optional[str] = None
+    weak_line: Optional[str] = None
+    strong_line_no: Optional[int] = None
+    weak_line_no: Optional[int] = None
+    pairing_score: Optional[float] = None
+    prefix_score: Optional[float] = None
+    all_pairings: Optional[list[dict]] = None
+
+    # --- Deletion evidence (DELETE) ---
+    deleted_line: Optional[str] = None
+    deleted_line_no: Optional[int] = None
+    when_clause: Optional[str] = None
+    when_clauses: Optional[list[str]] = None
+
+    # --- Branch / detector context ---
+    branch_name: Optional[str] = None
+    trigger_branch: Optional[str] = None
+    branch_kind: Optional[str] = None  # e.g. "primary", "corner-case"
+
+    # --- Topology evidence (CHECK_FAILURE from H1/H2) ---
+    pre_sha: Optional[str] = None
+    post_sha: Optional[str] = None
+    parent_count: Optional[int] = None
+    min_parents: Optional[int] = None
+    topology_check: Optional[str] = None  # "ancestry" | "parent_count"
+
+    # --- Incomplete-check evidence (H5) ---
+    exception_type: Optional[str] = None
+    exception_msg: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize to a dict, omitting fields whose value is ``None``.
+
+        Designed to round-trip with :meth:`from_dict`; consumers that
+        store the dict in JSON (call files, log entries) will see only
+        the populated keys.
+        """
+        result: dict[str, Any] = {}
+        for f in dataclass_fields(self):
+            value = getattr(self, f.name)
+            if value is not None:
+                result[f.name] = value
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict[str, Any]]) -> Optional["EvidenceRecord"]:
+        """Build an :class:`EvidenceRecord` from a dict.
+
+        Unknown keys are NOT silently dropped — they become a
+        ``TypeError`` from the dataclass constructor, which is the H4
+        fail-fast behaviour the spec calls for.
+
+        Returns ``None`` when *data* is ``None`` or empty so callers
+        can transparently handle the no-evidence case.
+        """
+        if not data:
+            return None
+        return cls(**data)
 
 
 @dataclass
