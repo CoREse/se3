@@ -83,6 +83,11 @@ class FailureReason(IntEnum):
     GUARDRAIL_REPAIR_STALLED_CALL_FAILED = 512
     GUARDRAIL_REPAIR_EXHAUSTED = 513
     GUARDRAIL_REPAIR_EXHAUSTED_CALL_FAILED = 514
+    # Inconsistent state: a repair commit exists on HEAD but rollback was
+    # refused because pre_repair_sha was missing. The working tree was
+    # restored but HEAD still contains the repair commit — manual
+    # intervention is required and subsequent branches must not run.
+    INCONSISTENT_REPAIR_STATE = 520
 
     # --- 6xx: rollback failures -----------------------------------------
     ROLLBACK_FAILED = 600
@@ -99,9 +104,34 @@ class FailureReason(IntEnum):
     POSTCOND_BRANCH_NOT_MERGED = 900
     POSTCOND_HEAD_NOT_MERGE_COMMIT = 901
     POSTCOND_VERSION_NOT_BUMPED = 902
+    POSTCOND_BRANCH_UNRESOLVABLE = 903
+
+    # --- 91x: silent merge loss / timeout variants ----------------------
+    SILENT_MERGE_LOSS = 910
+    POSTCOND_CHECK_TIMEOUT = 911
+
+    # --- 92x: version anomaly (on-disk version > computed target) --------
+    VERSION_HIGHER_THAN_TARGET = 920
+    # On-disk version equals computed target before aggregator can write —
+    # the bump came from somewhere other than this aggregator run (prior
+    # manual bump or a branch tip whose pyproject.toml already had the
+    # target). Fail-loud so a silent no-op cannot be confused with a
+    # successful aggregator-driven bump. See version_aggregator.py C1
+    # docs and orchestrator.py equal-version handling.
+    VERSION_ALREADY_AT_TARGET = 921
+
+    # --- 93x: unsupported repository state (K5/K6 fail-fast) --------------
+    REPO_EMPTY = 930
+    REPO_DETACHED_HEAD = 931
+    REPO_SHALLOW = 932
+    REPO_UNSUPPORTED_STATE = 933
+
+    # --- 98x: input validation ------------------------------------------
+    NO_BRANCHES = 980
 
     # --- 99x: lock contention -------------------------------------------
     LOCK_BUSY = 990
+    LOCK_STALE = 991
 
     # --- catch-all -------------------------------------------------------
     UNEXPECTED = 9999
@@ -176,6 +206,7 @@ _LEGACY_STRING_MAP: dict[str, FailureReason] = {
     "guardrail_repair_exhausted_call_failed": (
         FailureReason.GUARDRAIL_REPAIR_EXHAUSTED_CALL_FAILED
     ),
+    "inconsistent_repair_state": FailureReason.INCONSISTENT_REPAIR_STATE,
     # 6xx
     "rollback_failed": FailureReason.ROLLBACK_FAILED,
     # 7xx
@@ -188,20 +219,86 @@ _LEGACY_STRING_MAP: dict[str, FailureReason] = {
     "postcond_branch_not_merged": FailureReason.POSTCOND_BRANCH_NOT_MERGED,
     "postcond_head_not_merge_commit": FailureReason.POSTCOND_HEAD_NOT_MERGE_COMMIT,
     "postcond_version_not_bumped": FailureReason.POSTCOND_VERSION_NOT_BUMPED,
+    "postcond_branch_unresolvable": FailureReason.POSTCOND_BRANCH_UNRESOLVABLE,
+    # 91x
+    "silent_merge_loss": FailureReason.SILENT_MERGE_LOSS,
+    "silent_merge_loss_branch_unresolvable": FailureReason.POSTCOND_BRANCH_UNRESOLVABLE,
+    "postcond_check_timeout": FailureReason.POSTCOND_CHECK_TIMEOUT,
+    # 92x
+    "version_higher_than_target": FailureReason.VERSION_HIGHER_THAN_TARGET,
+    "version_already_at_target": FailureReason.VERSION_ALREADY_AT_TARGET,
+    # 93x
+    "repo_empty": FailureReason.REPO_EMPTY,
+    "repo_detached_head": FailureReason.REPO_DETACHED_HEAD,
+    "repo_shallow": FailureReason.REPO_SHALLOW,
+    "repo_unsupported_state": FailureReason.REPO_UNSUPPORTED_STATE,
+    # Legacy spellings derived from exception class names.  Older code
+    # paths derived these strings via ``type(exc).__name__.replace(
+    # "Error", "").lower()``; the explicit alias keeps the on-disk
+    # surface stable across exception-class renames.
+    "emptyrepo": FailureReason.REPO_EMPTY,
+    "detachedhead": FailureReason.REPO_DETACHED_HEAD,
+    "shallowrepo": FailureReason.REPO_SHALLOW,
+    "unsupportedrepostate": FailureReason.REPO_UNSUPPORTED_STATE,
+    # 98x
+    "no_branches": FailureReason.NO_BRANCHES,
     # 99x
     "lock_busy": FailureReason.LOCK_BUSY,
+    "lock_stale": FailureReason.LOCK_STALE,
     # catch-all
     "unexpected": FailureReason.UNEXPECTED,
 }
 
-# Compound prefixes that carry diagnostic detail after a colon.
-# Order matters: the longest matching prefix wins, so list specific
-# variants before their shorter siblings.
-_COMPOUND_PREFIXES: tuple[tuple[str, FailureReason], ...] = (
-    ("fast_failure", FailureReason.FAST_FAILURE),
-    ("fast_abort", FailureReason.FAST_ABORT),
-    ("merge_failed", FailureReason.MERGE_FAILED),
+# Compound prefixes auto-derived from _LEGACY_STRING_MAP so that every
+# key is a potential compound prefix.  A contributor adding a new legacy
+# string does not need to remember to dual-register it in a separate
+# tuple — the key is automatically eligible for compound matching.
+# Order matters: the longest matching prefix wins so a contributor
+# adding a longer prefix that shares a head with a shorter one (e.g.
+# ``"merge_failed_detached"`` shadowing ``"merge_failed"``) cannot
+# accidentally introduce shadowing.  We sort by descending prefix
+# length at module-load time so the iteration in
+# :func:`from_legacy_string` always tests longest-first regardless of
+# how a contributor wrote the source list.
+_COMPOUND_PREFIXES: tuple[tuple[str, FailureReason], ...] = tuple(
+    sorted(
+        ((k, v) for k, v in _LEGACY_STRING_MAP.items() if k),
+        key=lambda entry: len(entry[0]),
+        reverse=True,
+    )
 )
+
+
+def _assert_compound_prefix_order_longest_first() -> None:
+    """Defensive assertion: longer prefixes precede shorter prefixes
+    that they share a head with.
+
+    Importable from tests; raises :class:`AssertionError` on violation
+    so a future contributor's hand-curated insertion that breaks the
+    longest-first invariant is caught before it produces silent
+    shadowing.
+    """
+    by_index = list(_COMPOUND_PREFIXES)
+    for i, (a_prefix, _) in enumerate(by_index):
+        for b_prefix, _ in by_index[i + 1:]:
+            # In a longest-first sorted list, a_prefix (earlier) is always
+            # longer than or equal to b_prefix (later).  The only shadowing
+            # risk is when b_prefix is longer than a_prefix but appears later
+            # — impossible with descending-length sort, but we keep the check
+            # as a safety net against manual reordering or a future bug.
+            if b_prefix.startswith(a_prefix) and len(b_prefix) > len(a_prefix):
+                raise AssertionError(
+                    f"_COMPOUND_PREFIXES ordering broken: "
+                    f"{b_prefix!r} (len {len(b_prefix)}) is longer than "
+                    f"{a_prefix!r} (len {len(a_prefix)}) but appears later — "
+                    f"shorter prefix would shadow longer prefix at iteration "
+                    f"time."
+                )
+
+
+# Run the assertion at module load so any developer who edits the
+# tuple sees the error immediately rather than waiting for a test run.
+_assert_compound_prefix_order_longest_first()
 
 
 def from_legacy_string(

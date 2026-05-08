@@ -1661,7 +1661,9 @@ class TestOrchestratorGuardrailsIntegration:
         report = orch.execute(["feature-stall"])
 
         # Fast mode: repair stalled (same hash in two consecutive iterations)
-        # → escalated to human call at iteration 2.
+        # → escalated to human call at iteration 1 (last_hash is seeded with
+        # the initial violation-set hash, so a no-op repair on the first
+        # iteration is immediately detected as a stall).
         assert report.success is False
         assert report.failure_reason == "guardrail_repair_stalled"
         assert report.pending_human is True
@@ -1670,7 +1672,7 @@ class TestOrchestratorGuardrailsIntegration:
 
         data = json.loads(report.human_call_file.read_text())
         assert data["type"] == "guardrail_repair_stalled"
-        assert data["iteration_count"] == 2
+        assert data["iteration_count"] == 1
         assert len(data["violations"]) >= 1
 
         # HEAD restored
@@ -2191,7 +2193,7 @@ class TestRunGuardrailsFastBranch:
 
         # Merge feature-fast (creates merge commit with violation)
         pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
-        _git(tmp_path, "merge", "feature-fast", "--no-edit", "-m", "Merge feature-fast")
+        _git(tmp_path, "merge", "--no-ff", "feature-fast", "--no-edit", "-m", "Merge feature-fast")
         post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         # Track repairer calls
@@ -2244,7 +2246,7 @@ class TestRunGuardrailsFastBranch:
         _git(tmp_path, "checkout", default_branch)
 
         pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
-        _git(tmp_path, "merge", "feature-amend", "--no-edit", "-m", "Merge feature-amend")
+        _git(tmp_path, "merge", "--no-ff", "feature-amend", "--no-edit", "-m", "Merge feature-amend")
         post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         # Mock repairer to actually fix the file and create a fix-up commit
@@ -2310,7 +2312,7 @@ class TestRunGuardrailsFastBranch:
         _git(tmp_path, "checkout", default_branch)
 
         pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
-        _git(tmp_path, "merge", "feature-stall", "--no-edit", "-m", "Merge feature-stall")
+        _git(tmp_path, "merge", "--no-ff", "feature-stall", "--no-edit", "-m", "Merge feature-stall")
         post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         # Mock repairer to always fail without changing violations
@@ -2334,15 +2336,17 @@ class TestRunGuardrailsFastBranch:
                 pre_head, post_head, "feature-stall", strategy=MergeStrategy.FAST,
             )
 
-        # Should stall at iteration 2 (same hash in two consecutive iterations)
-        assert exc_info.value.iteration_count == 2
+        # Should stall at iteration 1 (last_hash is seeded with the initial
+        # violation-set hash, so a no-op repair on the first iteration is
+        # immediately detected as a stall).
+        assert exc_info.value.iteration_count == 1
         assert exc_info.value.call_file is not None
         assert exc_info.value.call_file.exists()
 
         # Call file should be the stalled type with evidence
         data = json.loads(exc_info.value.call_file.read_text())
         assert data["type"] == "guardrail_repair_stalled"
-        assert data["iteration_count"] == 2
+        assert data["iteration_count"] == 1
         assert len(data["violations"]) >= 1
 
         # HEAD should be rolled back to pre-merge state
@@ -2371,7 +2375,7 @@ class TestRunGuardrailsFastBranch:
         _git(tmp_path, "checkout", default_branch)
 
         pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
-        _git(tmp_path, "merge", "feature-change", "--no-edit", "-m", "Merge feature-change")
+        _git(tmp_path, "merge", "--no-ff", "feature-change", "--no-edit", "-m", "Merge feature-change")
         post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
         call_count = [0]
@@ -2571,8 +2575,20 @@ class TestMergeTopologyValidation:
         report = checker.check_merge_result(pre, post)
         assert report.passed is True, f"violations: {report.violations}"
 
-    def test_topology_skipped_when_pre_equals_post(self, tmp_path: Path) -> None:
-        """When pre_sha == post_sha (already-ancestor no-op), skip topology."""
+    def test_topology_fails_loud_when_pre_equals_post(self, tmp_path: Path) -> None:
+        """When pre_sha == post_sha with topology enforcement on, fail loud.
+
+        G3 fix (high): the prior behaviour was to silently skip the
+        topology check on equal SHAs and return ``passed=True`` (the
+        diff would also be empty, so the spec-content check trivially
+        passed). That hid a class of silent-success bugs — a caller that
+        accidentally passed the pre-merge SHA twice would get a green
+        light. The contract now requires callers to either filter the
+        already-ancestor no-op path before calling ``check_merge_result``
+        or invoke it with ``enforce_topology=False``. Reaching the
+        topology branch with equal SHAs is treated as a contract
+        violation and surfaces as ``CHECK_FAILURE``.
+        """
         _init_repo(tmp_path)
         (tmp_path / "README.md").write_text("# initial\n")
         _commit(tmp_path, "initial")
@@ -2580,6 +2596,24 @@ class TestMergeTopologyValidation:
 
         checker = MergeGuardrailsCheck(tmp_path)
         report = checker.check_merge_result(sha, sha)
+        assert report.passed is False
+        assert any(
+            v.violation_type == "CHECK_FAILURE"
+            and "pre_sha == post_sha" in v.message
+            for v in report.violations
+        ), [v.message for v in report.violations]
+
+    def test_topology_skipped_when_pre_equals_post_and_enforce_false(
+        self, tmp_path: Path,
+    ) -> None:
+        """Equal SHAs with enforce_topology=False still pass."""
+        _init_repo(tmp_path)
+        (tmp_path / "README.md").write_text("# initial\n")
+        _commit(tmp_path, "initial")
+        sha = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        checker = MergeGuardrailsCheck(tmp_path)
+        report = checker.check_merge_result(sha, sha, enforce_topology=False)
         assert report.passed is True
 
     def test_enforce_topology_false_skips_check(self, tmp_path: Path) -> None:

@@ -31,24 +31,93 @@ logger = logging.getLogger(__name__)
 # OOM; either way we refuse to apply it.
 DEFAULT_MAX_RESOLVED_CONTENT_BYTES = 5 * 1024 * 1024
 
-# D3: git accepts up to 7 leading spaces on conflict markers (used by
-# embedded diff blocks inside doc files).  Detect markers anywhere in
-# the line that come after at most 7 spaces.
-_CONFLICT_START_RE = re.compile(r"^[ ]{0,7}<<<<<<<", re.MULTILINE)
-_CONFLICT_MID_RE = re.compile(r"^[ ]{0,7}=======", re.MULTILINE)
-_CONFLICT_END_RE = re.compile(r"^[ ]{0,7}>>>>>>>", re.MULTILINE)
+# D3: git accepts up to 7 leading whitespace characters (spaces or tabs)
+# on conflict markers (used by embedded diff blocks inside doc files).
+# Detect markers anywhere in the line that come after at most 7
+# space-or-tab characters; widening from `[ ]{0,7}` to `[ \t]{0,7}` so
+# a `\t<<<<<<<` line cannot evade detection.  ``\s`` would be too
+# broad (matches CR/LF and would let a multi-line marker slip), so we
+# stay character-explicit but also accept a small handful of Unicode
+# whitespace characters that LLMs occasionally emit (NBSP and the
+# zero-width set) — see ``_has_conflict_markers`` for the rationale.
+_CONFLICT_START_RE = re.compile(r"^[ \t]{0,7}<<<<<<<", re.MULTILINE)
+_CONFLICT_MID_RE = re.compile(r"^[ \t]{0,7}={7,}\s*$", re.MULTILINE)
+_CONFLICT_END_RE = re.compile(r"^[ \t]{0,7}>>>>>>>", re.MULTILINE)
+
+# Unicode whitespace characters that LLMs occasionally emit by accident
+# (or that get auto-substituted by some terminals / clipboard managers).
+# Stripping these BEFORE the regex check means a ``" <<<<<<<"`` or
+# ``"​<<<<<<<"`` evasion attempt is detected — closing a documented
+# intent gap (the original implementation only tolerated ASCII space
+# and tab).
+_UNICODE_WHITESPACE_PREFIX_CHARS = (
+    " "  # NO-BREAK SPACE
+    " "  # OGHAM SPACE MARK
+    " "  # EN QUAD
+    " "  # EM QUAD
+    " "  # EN SPACE
+    " "  # EM SPACE
+    " "  # THREE-PER-EM SPACE
+    " "  # FOUR-PER-EM SPACE
+    " "  # SIX-PER-EM SPACE
+    " "  # FIGURE SPACE
+    " "  # PUNCTUATION SPACE
+    " "  # THIN SPACE
+    " "  # HAIR SPACE
+    "​"  # ZERO WIDTH SPACE
+    " "  # NARROW NO-BREAK SPACE
+    " "  # MEDIUM MATHEMATICAL SPACE
+    "　"  # IDEOGRAPHIC SPACE
+    "﻿"  # ZERO WIDTH NO-BREAK SPACE / BOM
+)
+
+
+def _normalize_unicode_whitespace_for_marker_detection(text: str) -> str:
+    """Replace each Unicode whitespace prefix character with an ASCII space.
+
+    The conflict-marker regexes match ``[ \\t]{0,7}`` before the
+    ``<<<<<<<`` / ``>>>>>>>`` / ``=======`` triggers.  An LLM that emits
+    a NBSP-prefixed marker would otherwise slip through.  We do NOT
+    rewrite the original buffer that gets written to disk — only this
+    detection scan sees the normalised form, so legitimate Unicode
+    whitespace inside resolved content is preserved.
+    """
+    if not any(ch in text for ch in _UNICODE_WHITESPACE_PREFIX_CHARS):
+        return text
+    table = {ord(ch): " " for ch in _UNICODE_WHITESPACE_PREFIX_CHARS}
+    return text.translate(table)
 
 
 def _has_conflict_markers(text: str) -> bool:
     """Return True when ``text`` still contains conflict markers.
 
-    Recognises markers preceded by up to 7 spaces (git's tolerance);
-    a previous strict ``"<<<<<<<" in text`` check missed indented
-    markers and let unresolved content slip through.
+    Recognises markers preceded by up to 7 spaces or tabs (git's
+    tolerance); a previous strict ``"<<<<<<<" in text`` check missed
+    indented markers and let unresolved content slip through.
+
+    Defense-in-depth: also recognises a stray ``=======`` divider line
+    (the conflict-mid marker). A partial LLM edit that removes the
+    surrounding ``<<<<<<<`` / ``>>>>>>>`` pair but leaves the divider
+    behind would otherwise sneak through the start/end-only check;
+    catching the divider closes that gap.
+
+    The ``=======`` regex requires the seven equals to be the entire
+    line content (after any leading whitespace) so that legitimate
+    documentation prose like ``"the ======= notation"`` does not
+    produce a false positive.
+
+    Unicode whitespace tolerance: a subset of Unicode whitespace
+    characters (NBSP, zero-width, ideographic space, BOM, etc.) is
+    normalised to ASCII space before regex matching so a
+    ``"\\u00a0<<<<<<<"`` or ``"\\ufeff<<<<<<<"`` evasion artifact is
+    still detected.  The original buffer is NOT mutated; only the
+    detection scan sees the normalised form.
     """
+    scan_text = _normalize_unicode_whitespace_for_marker_detection(text)
     return bool(
-        _CONFLICT_START_RE.search(text)
-        or _CONFLICT_END_RE.search(text)
+        _CONFLICT_START_RE.search(scan_text)
+        or _CONFLICT_MID_RE.search(scan_text)
+        or _CONFLICT_END_RE.search(scan_text)
     )
 
 
@@ -112,6 +181,20 @@ class HunkResolution:
         # is a subclass of int in Python so we filter it explicitly.
         if value is None:
             raise HunkValidationError(f"{name} must be an int, got None")
+        # Accept stringified integers from LLM JSON output (e.g. "5").
+        # Restrict to ASCII digits — `str.isdigit()` is True for many
+        # non-ASCII numerals (e.g. Arabic-Indic ٠) on which int() raises
+        # ValueError, and we don't want a malformed LLM response to
+        # propagate ValueError out of conflict resolution.
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped and all("0" <= ch <= "9" for ch in stripped):
+                try:
+                    value = int(stripped)
+                except ValueError as exc:
+                    raise HunkValidationError(
+                        f"{name} could not be parsed as int: {value!r}"
+                    ) from exc
         if isinstance(value, bool) or not isinstance(value, int):
             raise HunkValidationError(
                 f"{name} must be an int, got {type(value).__name__}={value!r}"
@@ -279,25 +362,30 @@ class ConflictResolver:
 
         t0 = time.monotonic()
         result: str = ""
-        outcome: str = ""
+        outcome: str = "success"
         error: Optional[str] = None
         try:
             result = caller.call(prompt=prompt, require_json=False)
-            outcome = "success"
         except Exception as exc:
             outcome = "error"
             error = str(exc)
             raise
         finally:
             if self._llm_trace is not None:
-                self._llm_trace.record(
-                    agent="conflict_resolver",
-                    prompt=redact_text(prompt),
-                    response=redact_text(result) if outcome == "success" else "",
-                    duration_sec=time.monotonic() - t0,
-                    outcome=outcome,
-                    error=error,
-                )
+                try:
+                    self._llm_trace.record(
+                        agent="conflict_resolver",
+                        prompt=redact_text(prompt),
+                        response=redact_text(result) if outcome == "success" else "",
+                        duration_sec=time.monotonic() - t0,
+                        outcome=outcome,
+                        error=error,
+                    )
+                except Exception as trace_exc:
+                    logger.warning(
+                        "LLM trace record failed (non-fatal): %s",
+                        trace_exc,
+                    )
         return result
 
     def _build_prompt(
@@ -515,9 +603,11 @@ class ConflictResolver:
 
             # Determine if this is a spec file by cross-referencing with context
             is_spec = False
+            decoding_lossy = False
             for cf in context.files:
                 if cf.path == path:
                     is_spec = cf.is_spec
+                    decoding_lossy = bool(getattr(cf, "decoding_lossy", False))
                     break
 
             # Validate: no conflict markers in resolved content (D3 —
@@ -526,6 +616,22 @@ class ConflictResolver:
             if _has_conflict_markers(resolved_content):
                 logger.warning(
                     "Resolved content for %s still contains conflict markers",
+                    path,
+                )
+                force_review = True
+            # G3 fix (medium): when conflict_context flagged the file
+            # as decoded with errors='replace' (binary-adjacent or
+            # non-UTF-8 input), the decoded text may have been
+            # corrupted before the LLM ever saw it. Auto-accepting a
+            # high-confidence resolution would commit garbage. Force
+            # human review so the operator inspects the file rather
+            # than letting a confident LLM mask data loss.
+            if decoding_lossy:
+                logger.warning(
+                    "Forcing human review for %s: source content was "
+                    "decoded with errors='replace' (decoding_lossy=True). "
+                    "Auto-acceptance would risk committing corrupted "
+                    "bytes back to disk.",
                     path,
                 )
                 force_review = True
@@ -562,23 +668,30 @@ class ConflictResolver:
                         )
                         force_review = True
                         continue
-                    # When file_lines is known, log a warning when the
-                    # hunk's end_line points past the resolved file's
-                    # tail.  We keep the hunk (its line numbers may
-                    # refer to the working-tree version with markers,
-                    # which is longer than the resolved version) and
-                    # do not force review — but log so an operator can
-                    # spot suspicious metadata.
-                    if (
+                    # When file_lines is known, validate the hunk's
+                    # end_line is within the resolved file's tail.
+                    # If end_line points strictly past the resolved
+                    # line count, the LLM likely produced metadata
+                    # referring to the marker-decorated working tree
+                    # — but the resolved file is what gets committed
+                    # and the human-call file's hunk-localised view
+                    # would point at garbage line numbers, defeating
+                    # the operator's ability to inspect a localised
+                    # hunk.  Force ``requires_human_review`` so the
+                    # auto-accept path is rejected and the human-call
+                    # file is written with a proper warning.
+                    out_of_range = bool(
                         resolved_line_count
                         and hunk.end_line > resolved_line_count
-                    ):
-                        logger.debug(
+                    )
+                    if out_of_range:
+                        logger.warning(
                             "Hunk end_line %d exceeds resolved-file line "
-                            "count %d for %s (likely refers to working-tree "
-                            "version with markers)",
+                            "count %d for %s — forcing human review because "
+                            "downstream metadata would be misleading",
                             hunk.end_line, resolved_line_count, path,
                         )
+                        force_review = True
                     hunks.append(hunk)
 
             file_flags = file_data.get("flags", {})
@@ -638,26 +751,74 @@ class ConflictResolver:
         context: ConflictContext,
         parse_error: str,
     ) -> LLMResolution:
-        """Create a fallback low-confidence resolution on parse failure."""
+        """Create a fallback low-confidence resolution on parse failure.
+
+        Defense-in-depth: when ``cf.working_content`` still contains
+        conflict markers (the LLM produced no usable response, so we
+        fell back to the unresolved working tree), the per-file flag
+        ``contains_conflict_markers`` is set in addition to
+        ``requires_human_review``.  Strategy gates SHOULD treat this
+        as an unrecoverable failure rather than silently committing the
+        working tree with ``<<<<<<<``/``=======``/``>>>>>>>`` markers.
+        """
         files: list[FileResolution] = []
+        any_markers = False
         for cf in context.files:
-            files.append(
-                FileResolution(
-                    path=cf.path,
-                    resolved_content=cf.working_content,
-                    hunks=[
+            has_markers = _has_conflict_markers(cf.working_content)
+            if has_markers:
+                any_markers = True
+                logger.warning(
+                    "Fallback resolution for %s contains unresolved conflict "
+                    "markers — flagging for human review (parse_error=%s)",
+                    cf.path, parse_error,
+                )
+            # Defense-in-depth: a malformed ``git diff --cc`` parse may
+            # produce a ``ConflictHunk`` with non-positive line numbers.
+            # Building a ``HunkResolution`` from those would raise
+            # :class:`HunkValidationError` and escape the outer
+            # ``_parse_response`` ``except``, crashing the resolver.
+            # We swap such hunks for a placeholder ``(1, 1)`` so the
+            # fallback path can always produce a valid LLMResolution
+            # routed to human review.
+            safe_hunks: list[HunkResolution] = []
+            for h in cf.hunks:
+                try:
+                    safe_hunks.append(
                         HunkResolution(
                             start_line=h.start_line,
                             end_line=h.end_line,
                             confidence=Confidence.LOW,
                             reasoning="Parse failure — human review required",
                         )
-                        for h in cf.hunks
-                    ],
+                    )
+                except HunkValidationError as h_exc:
+                    logger.warning(
+                        "Fallback resolution: hunk in %s has invalid line "
+                        "numbers (start=%r end=%r): %s — substituting "
+                        "placeholder hunk (1,1).",
+                        cf.path, h.start_line, h.end_line, h_exc,
+                    )
+                    safe_hunks.append(
+                        HunkResolution(
+                            start_line=1,
+                            end_line=1,
+                            confidence=Confidence.LOW,
+                            reasoning=(
+                                "Parse failure — human review required "
+                                "(original hunk had invalid line numbers)"
+                            ),
+                        )
+                    )
+            files.append(
+                FileResolution(
+                    path=cf.path,
+                    resolved_content=cf.working_content,
+                    hunks=safe_hunks,
                     overall_confidence=Confidence.LOW,
                     flags={
                         "requires_human_review": True,
                         "spec_guardrail_concern": cf.is_spec,
+                        "contains_conflict_markers": has_markers,
                     },
                     is_spec=cf.is_spec,
                 )
@@ -669,6 +830,7 @@ class ConflictResolver:
             flags={
                 "requires_human_review": True,
                 "spec_guardrail_concern": context.has_spec_files,
+                "contains_conflict_markers": any_markers,
             },
             parse_error=parse_error,
         )

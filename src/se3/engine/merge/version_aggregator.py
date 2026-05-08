@@ -35,9 +35,11 @@ G4 hardening:
 
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import re
+import stat
 import subprocess
 import tempfile
 from dataclasses import dataclass
@@ -138,6 +140,103 @@ def _slice_to_next_section(content: str, section_start: int) -> str:
     return content[section_start:]
 
 
+# Regex that matches a section header ONLY when it appears at the start
+# of a line (after optional whitespace), so ``# [project]`` or text
+# inside a string literal does NOT match.
+_SECTION_HEADER_RE = {
+    "[project]": re.compile(r'(?m)^[ \t]*\[project\]'),
+    "[tool.poetry]": re.compile(r'(?m)^[ \t]*\[tool\.poetry\]'),
+}
+
+
+def _strip_triple_quoted_strings(content: str) -> str:
+    """Return *content* with all triple-quoted string blocks removed.
+
+    This is used before regex-searching for a ``version`` field so that
+    a version string embedded inside a multi-line literal (e.g. a
+    description, license text, or readme blob) is NOT matched.
+    """
+    pos = 0
+    in_triple: str | None = None
+    parts: list[str] = []
+    block_start = 0
+
+    while pos < len(content):
+        if in_triple is None:
+            if content.startswith('"""', pos) or content.startswith("'''", pos):
+                # Record content before the quote
+                parts.append(content[block_start:pos])
+                in_triple = content[pos:pos + 3]
+                pos += 3
+                block_start = pos
+                continue
+            pos += 1
+        else:
+            if content.startswith(in_triple, pos):
+                # Skip the quoted block (do not include it in output)
+                in_triple = None
+                pos += 3
+                block_start = pos
+            else:
+                pos += 1
+
+    # Append any trailing content
+    parts.append(content[block_start:])
+    return "".join(parts)
+
+
+def _find_triple_quoted_regions(content: str) -> list[tuple[int, int]]:
+    """Return a list of (start, end) offsets for triple-quoted blocks.
+
+    Each region is half-open: ``[start, end)``.  Nested triple quotes
+    (the same delimiter inside a larger block) are NOT supported —
+    they are vanishingly rare in real-world TOML.
+    """
+    pos = 0
+    in_triple: str | None = None
+    block_start = 0
+    regions: list[tuple[int, int]] = []
+
+    while pos < len(content):
+        if in_triple is None:
+            if content.startswith('"""', pos):
+                in_triple = '"""'
+                block_start = pos
+                pos += 3
+                continue
+            if content.startswith("'''", pos):
+                in_triple = "'''"
+                block_start = pos
+                pos += 3
+                continue
+            pos += 1
+        else:
+            if content.startswith(in_triple, pos):
+                regions.append((block_start, pos + 3))
+                in_triple = None
+                pos += 3
+            else:
+                pos += 1
+
+    return regions
+
+
+def _find_version_match_in_section(section_content: str):
+    """Search for the first ``version = "..."`` match outside triple quotes.
+
+    Returns the regex ``Match`` object, or ``None`` when no match is
+    found or every match is inside a triple-quoted string literal.
+    """
+    regions = _find_triple_quoted_regions(section_content)
+
+    for m in _VERSION_FIELD_RE.finditer(section_content):
+        # Check whether the match start lies inside any triple-quoted region
+        inside = any(r_start <= m.start() < r_end for r_start, r_end in regions)
+        if not inside:
+            return m
+    return None
+
+
 def _parse_pyproject_version(content: str) -> Optional[str]:
     """Extract the version string from pyproject.toml content.
 
@@ -148,16 +247,27 @@ def _parse_pyproject_version(content: str) -> Optional[str]:
     handled correctly, as are multi-line string values that contain
     ``[`` on a line by themselves.
 
+    Commented-out section headers (e.g. ``# [project]``) are NOT
+    treated as the start of a section.  Triple-quoted string literals
+    inside a section are stripped before the version regex runs so a
+    version string embedded as example text (e.g. in a description or
+    license blob) is NOT matched.
+
     Returns ``None`` when no version field is found.
     """
     for section_header in ("[project]", "[tool.poetry]"):
-        idx = content.find(section_header)
-        if idx == -1:
+        pattern = _SECTION_HEADER_RE[section_header]
+        m = pattern.search(content)
+        if m is None:
             continue
+        # Start slice *after* the matched header so the regex itself
+        # does not appear inside section_content.
         section_content = _slice_to_next_section(
-            content, idx + len(section_header)
+            content, m.end()
         )
-        match = _VERSION_FIELD_RE.search(section_content)
+        # Find the first version match that is NOT inside a triple-quoted
+        # string literal (e.g. a description or license blob).
+        match = _find_version_match_in_section(section_content)
         if match:
             return match.group(1)
     return None
@@ -323,45 +433,184 @@ class AggregateResult:
             Callers SHOULD treat this as a warning rather than a hard
             error if they have other evidence that the target was
             legitimately reached.
+        version_higher_than_target: When ``True``, the on-disk version
+            is strictly *higher* than the computed target (as opposed
+            to merely equal).  This is a stronger anomaly signal: it
+            may indicate a stale ``pre_merge_version`` or a manual
+            bump that skipped the computed target.  Callers should
+            surface this in the merge report so operators can
+            investigate without grepping logs.
     """
 
     success: bool = False
     pre_version: Optional[str] = None
     new_version: Optional[str] = None
     bump_type: Optional[BumpType] = None
+    # True only when the bump was actually written to disk and
+    # committed/amended.  When version_already_at_target is True this
+    # remains False because no modification was performed.
+    bump_applied: bool = False
     error: Optional[str] = None
     version_already_at_target: bool = False
+    version_higher_than_target: bool = False
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
+def _atomic_write_text(
+    path: Path, content: str, *, durability_critical: bool = False
+) -> None:
     """Write *content* to *path* atomically.
 
     Uses a temp file in the same directory + ``os.replace`` so the
     file is either fully old or fully new — never partial.  An fsync
     on the temp file flushes the bytes before rename so a crash
     between rename and shutdown can't lose the write.
+
+    Preserves the original file's permission mode when replacing an
+    existing file (``tempfile.mkstemp`` creates at mode 0600 by
+    default, which would silently make world-readable files private).
+
+    Args:
+        path: Target file path.
+        content: Bytes (as str) to write.
+        durability_critical: When ``True``, fsync failures are logged
+            at WARNING level rather than DEBUG.  Set this on rollback
+            paths (e.g. restoring ``pyproject.toml`` after an
+            aggregation failure): durability of a rollback matters
+            more than a normal write because the operator is already
+            recovering from one fault and needs visibility into a
+            second fault stacking on top.
     """
     parent = path.parent
+    # Symlink-refusal guard (defense-in-depth, symmetric with
+    # human_call._atomic_write_json and runtime_sync._atomic_write_bytes).
+    # ``os.replace`` itself does NOT follow destination symlinks, but
+    # capturing ``original_mode`` via the symlink-following ``path.stat()``
+    # would read mode bits from an unrelated file and apply them to the new
+    # pyproject.toml via fchmod before rename — surface the symlink loudly
+    # rather than silently inheriting an unrelated file's mode.
+    original_mode: Optional[int] = None
+    try:
+        lst = os.lstat(str(path))
+    except FileNotFoundError:
+        lst = None
+    except OSError:
+        lst = None
+    if lst is not None:
+        if stat.S_ISLNK(lst.st_mode):
+            raise OSError(
+                errno.ELOOP,
+                "Refusing to overwrite symlink at destination "
+                "(O_NOFOLLOW-equivalent guard)",
+                str(path),
+            )
+        original_mode = lst.st_mode
+
     fd, tmp_name = tempfile.mkstemp(
         prefix=path.name + ".",
         suffix=".tmp",
         dir=str(parent),
     )
     tmp_path = Path(tmp_name)
+    # Wrap fdopen in its own try/except so that an early failure (e.g.
+    # os.fdopen raising before the with-block is entered) does not
+    # leak the raw fd from mkstemp.  Once fdopen succeeds, the with
+    # statement owns the fd's lifetime.  The narrow except catches
+    # OSError (the realistic ENOMEM/ENFILE/EMFILE family) plus
+    # MemoryError (interpreter-level allocation failure) without
+    # falling into a bare-Exception swallow that would mask logic
+    # bugs in this code path.
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh = os.fdopen(fd, "w", encoding="utf-8")
+    except (OSError, MemoryError):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+    try:
+        with fh:
             fh.write(content)
             fh.flush()
+            if original_mode is not None:
+                try:
+                    os.fchmod(fh.fileno(), original_mode)
+                except OSError:
+                    pass
             try:
                 os.fsync(fh.fileno())
-            except OSError:
+            except OSError as fsync_exc:
                 # Some filesystems (e.g. tmpfs) do not support fsync;
-                # log at debug level and continue — the write itself
-                # succeeded, only durability is reduced.
-                logger.debug(
-                    "fsync not supported for %s; skipping flush", tmp_path
+                # log and continue — the write itself succeeded, only
+                # durability is reduced.  Rollback paths set
+                # ``durability_critical=True`` so the operator sees
+                # cascaded fsync failures during recovery.
+                if durability_critical:
+                    logger.warning(
+                        "fsync failed for %s during durability-critical "
+                        "write: %s; durability of the rollback is reduced",
+                        tmp_path, fsync_exc,
+                    )
+                else:
+                    logger.debug(
+                        "fsync not supported for %s; skipping flush",
+                        tmp_path,
+                    )
+        # Re-check destination immediately before rename to narrow the
+        # TOCTOU window between the initial lstat and the rename.  An
+        # adversary cannot guarantee the symlink survives both checks
+        # plus the rename, so this is best-effort defence-in-depth
+        # consistent with runtime_sync._atomic_write_bytes.
+        try:
+            recheck_stat = os.lstat(str(path))
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+        else:
+            if stat.S_ISLNK(recheck_stat.st_mode):
+                raise OSError(
+                    errno.ELOOP,
+                    "Refusing to overwrite symlink at destination "
+                    "(O_NOFOLLOW-equivalent guard, post-write recheck)",
+                    str(path),
                 )
         os.replace(tmp_path, path)
+        # Durability: fsync the parent directory so the rename metadata
+        # is flushed.  A crash between os.replace and the next implicit
+        # dir flush could undo the rename, leaving pyproject.toml at its
+        # original content even though the temp file was durably written.
+        # (See merge_lock._write_pid for the same pattern.)
+        try:
+            dir_fd = os.open(str(parent), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        except OSError as exc:
+            # Some filesystems (e.g. tmpfs, certain FUSE mounts) reject
+            # directory fsync.  Log at debug so test environments with
+            # non-fsyncable filesystems are still observable; the
+            # failure mode would otherwise be invisible until a crash
+            # actually undid the rename.  On rollback paths
+            # (``durability_critical=True``) escalate to WARNING — the
+            # rollback itself may not be durable, which is exactly the
+            # cascaded fault the operator needs to see.
+            if durability_critical:
+                logger.warning(
+                    "Parent-directory fsync failed for %s during "
+                    "durability-critical write: %s "
+                    "(rename durability of the rollback reduced)",
+                    parent, exc,
+                )
+            else:
+                logger.debug(
+                    "Parent-directory fsync failed for %s: %s "
+                    "(rename durability reduced)", parent, exc,
+                )
     finally:
         # Clean up the temp file if it still exists (os.replace
         # consumed it on success, so this only fires on failure).
@@ -380,6 +629,8 @@ def _atomic_write_text(path: Path, content: str) -> None:
 def _safe_write_version(
     pyproject: Path,
     new_version: str,
+    *,
+    content: Optional[str] = None,
 ) -> None:
     """Run ``TomlVersionHandler.write_version`` atomically.
 
@@ -388,11 +639,22 @@ def _safe_write_version(
     partially written and unparseable.  We call the handler to find
     the exact byte offset of the version field, build the new content
     in-memory, then write it atomically via :func:`_atomic_write_text`.
+
+    *content* MAY be supplied by the caller to avoid a second on-disk
+    read.  When ``aggregate_and_apply`` already captured the file's
+    bytes for rollback, passing the same buffer here ensures byte
+    offsets, the new content built around them, AND the rollback
+    buffer all describe the SAME snapshot.  Without this, a hook /
+    parallel writer that mutated pyproject.toml between
+    ``aggregate_and_apply``'s read and this re-read would compute
+    offsets against newer bytes while rollback restored older bytes,
+    producing a Frankensteined file on failure.
     """
     # We re-implement the handler's logic locally so we can write
     # atomically.  The handler keeps its own ``write_version``
     # method for callers that don't need atomic semantics.
-    content = pyproject.read_text(encoding="utf-8")
+    if content is None:
+        content = pyproject.read_text(encoding="utf-8")
 
     # Try [project] section first (PEP 621), then [tool.poetry].
     # The handler's regex pattern uses [^\[]* which can fail on
@@ -400,12 +662,15 @@ def _safe_write_version(
     # we use the section-aware _slice_to_next_section helper
     # together with _VERSION_FIELD_RE to avoid that bug.
     for section_header in ("[project]", "[tool.poetry]"):
-        idx = content.find(section_header)
-        if idx == -1:
+        pattern = _SECTION_HEADER_RE[section_header]
+        m = pattern.search(content)
+        if m is None:
             continue
-        section_start = idx + len(section_header)
+        section_start = m.end()
         section_content = _slice_to_next_section(content, section_start)
-        match = _VERSION_FIELD_RE.search(section_content)
+        # Use the triple-quote-aware search so a version literal inside a
+        # multi-line description / license-text is NOT replaced.
+        match = _find_version_match_in_section(section_content)
         if not match:
             continue
         # Compute absolute offsets for the captured version string
@@ -426,7 +691,15 @@ def _safe_write_version(
 
 
 def _reset_staged_pyproject(project_root: Path) -> Optional[str]:
-    """Run ``git reset HEAD pyproject.toml``.  Returns error string on failure."""
+    """Run ``git reset HEAD pyproject.toml``.  Returns error string on failure.
+
+    G3 fix: ``check=False`` means a non-zero returncode does NOT raise
+    a CalledProcessError — the caller MUST inspect the result. We log
+    a warning at WARNING level (matching the timeout/OSError paths) so
+    the operator sees stderr details immediately rather than relying on
+    callers to surface the returned error string. The returned string
+    keeps the caller-side flow control unchanged.
+    """
     try:
         result = _run_git(
             project_root, "reset", "HEAD", "pyproject.toml",
@@ -443,7 +716,19 @@ def _reset_staged_pyproject(project_root: Path) -> Optional[str]:
         )
         return f"git reset HEAD raised OSError: {exc}"
     if result.returncode != 0:
-        return f"git reset HEAD failed: {result.stderr.strip()}"
+        # Surface stderr at WARNING level so the operator sees
+        # locked-index / not-a-git-repo / similar failure modes
+        # immediately. Previously the function only returned an
+        # error string, leaving callers to log it — which several
+        # call sites failed to do, leaving pyproject.toml staged
+        # after a failed amend with no visible signal.
+        stderr_text = result.stderr.strip() if result.stderr else "<empty stderr>"
+        logger.warning(
+            "git reset HEAD pyproject.toml failed (rc=%d): %s",
+            result.returncode,
+            stderr_text,
+        )
+        return f"git reset HEAD failed (rc={result.returncode}): {stderr_text}"
     return None
 
 
@@ -474,6 +759,20 @@ def aggregate_and_apply(
         ``version_already_at_target`` is ``True``, and ``error`` starts
         with ``"VersionNotAdvanced: "``.  Callers SHOULD distinguish
         this from real failure modes (write/git errors).
+
+    **Spec departure for fix-up-on-top-of-merge layouts**: when the
+    last branch's guardrail repair created a fix-up commit on top of
+    the merge commit (so HEAD is the fix-up, HEAD^1 is the merge),
+    ``amend=True`` runs ``git commit --amend --no-edit`` against the
+    fix-up commit — NOT against the merge commit underneath.  The
+    pyproject.toml change is therefore attached to the fix-up commit
+    while the merge commit (HEAD^1) is preserved untouched.  This is a
+    practical departure from the spec wording ``amended onto the last
+    merge commit``: rewriting the merge commit and re-creating the
+    fix-up on top would require interactive-rebase machinery and is
+    deliberately out of scope.  The merge commit itself is NEVER lost
+    and post-condition checks accept this layout via
+    ``allow_fixup_parent=True``.
     """
     result = AggregateResult(pre_version=pre_merge_version)
 
@@ -542,16 +841,17 @@ def aggregate_and_apply(
             result.success = False
             result.new_version = current_version
             result.version_already_at_target = True
-            if current_v == new_version:
-                detail = (
-                    f"current version {current_version} already matches "
-                    f"target {new_version}; aggregator did not run"
-                )
-            else:
+            if current_v > new_version:
+                result.version_higher_than_target = True
                 detail = (
                     f"current version {current_version} is higher than "
                     f"aggregated target {new_version}; possible manual "
                     f"bump or anomalous state — aggregator did not run"
+                )
+            else:
+                detail = (
+                    f"current version {current_version} already matches "
+                    f"target {new_version}; aggregator did not run"
                 )
             result.error = f"VersionNotAdvanced: {detail}"
             logger.warning(
@@ -568,7 +868,12 @@ def aggregate_and_apply(
     # fsyncs, then ``os.replace``s atomically.  A crash mid-write
     # leaves the file either fully old or fully new — never partial.
     try:
-        _safe_write_version(pyproject, str(new_version))
+        # Pass the already-read content through so offset math and the
+        # rollback buffer (`original_content`) describe the SAME
+        # snapshot — closes the cross-read drift window.
+        _safe_write_version(
+            pyproject, str(new_version), content=original_content,
+        )
     except (OSError, ValueError) as exc:
         # C7: on write failure, restore the original content (the
         # atomic write would have left the file untouched on failure
@@ -578,7 +883,9 @@ def aggregate_and_apply(
             "failed to write pyproject.toml: %s", exc
         )
         try:
-            pyproject.write_text(original_content, encoding="utf-8")
+            _atomic_write_text(
+                pyproject, original_content, durability_critical=True,
+            )
         except OSError as restore_exc:
             logger.warning(
                 "failed to restore pyproject.toml after write failure: %s",
@@ -593,11 +900,13 @@ def aggregate_and_apply(
         return result
 
     # Helper to restore pyproject.toml content on failure.
-    # Wrapped in try/except so a restore failure does not mask the original
-    # error and does not leave the file in a partially-written state.
+    # Uses _atomic_write_text so a crash mid-restore cannot leave the
+    # source-of-truth version file partially written / unparseable.
     def _restore_content() -> Optional[str]:
         try:
-            pyproject.write_text(original_content, encoding="utf-8")
+            _atomic_write_text(
+                pyproject, original_content, durability_critical=True,
+            )
         except OSError as restore_exc:
             logger.warning(
                 "failed to restore pyproject.toml: %s", restore_exc
@@ -683,21 +992,27 @@ def aggregate_and_apply(
         return result
 
     if commit_result.returncode != 0:
+        # Symmetric with the timeout/OSError branches above: build a
+        # base message from the primary failure, then append restore /
+        # reset failures (if any) using the same separator. This avoids
+        # an asymmetric "Rollback also failed" template that would leave
+        # operators with three different error string shapes for the
+        # same logical class of failure.
+        logger.warning(
+            "git %s failed: %s",
+            "amend" if amend else "commit",
+            commit_result.stderr.strip(),
+        )
         restore_err = _restore_content()
         reset_err = _reset_staged_pyproject(project_root)
         verb = "amend" if amend else "commit"
-        if reset_err:
-            result.error = (
-                f"git {verb} failed: {commit_result.stderr.strip()}. "
-                f"Rollback also failed (git reset HEAD): {reset_err}. "
-            )
-        else:
-            result.error = f"git {verb} failed: {commit_result.stderr.strip()}"
+        result.error = f"git {verb} failed: {commit_result.stderr.strip()}"
         if restore_err:
-            result.error += f" {restore_err}"
+            result.error += f". {restore_err}"
         if reset_err:
-            result.error += " Working tree/index may be in an inconsistent state."
+            result.error += f". {reset_err}"
         return result
 
     result.success = True
+    result.bump_applied = True
     return result

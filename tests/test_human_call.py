@@ -229,7 +229,15 @@ class TestAtomicWriteJson:
 
 class TestOrphanFileHandling:
     def test_orphan_file_detected_and_flagged(self, tmp_path: Path) -> None:
-        """Resolution files not in context.files are flagged as orphan."""
+        """Non-spec orphans are rejected and recorded under
+        ``rejected_orphans`` rather than passed through to ``files``.
+
+        F3 (extended): orphan files not in context.files cannot be
+        guardrails-validated for non-spec paths, and the LLM should
+        never invent paths outside the conflict context.  The
+        rejected orphan is surfaced via ``rejected_orphans`` so the
+        operator can audit what the LLM tried to write.
+        """
         writer = HumanCallWriter(tmp_path)
         ctx = _make_context(
             tmp_path,
@@ -257,13 +265,15 @@ class TestOrphanFileHandling:
         call_file = writer.write_call(ctx, res, decision)
         data = json.loads(call_file.read_text(encoding="utf-8"))
 
-        assert len(data["files"]) == 2
-        # First file is the matching one
+        # Only the matching file is included; the non-spec orphan is rejected.
+        assert len(data["files"]) == 1
         assert data["files"][0]["path"] == "foo.txt"
         assert "is_orphan" not in data["files"][0]
-        # Second file is the orphan
-        assert data["files"][1]["path"] == "orphan.txt"
-        assert data["files"][1].get("is_orphan") is True
+        # The non-spec orphan is recorded for the operator to audit.
+        assert "rejected_orphans" in data
+        assert any(
+            r["path"] == "orphan.txt" for r in data["rejected_orphans"]
+        ), data.get("rejected_orphans")
 
     def test_no_orphan_when_all_match(self, tmp_path: Path) -> None:
         """When all resolution files match context files, no orphan flag."""

@@ -130,6 +130,39 @@ class TestLLMTraceRotation:
         assert len(lines) == 1
         assert json.loads(lines[0])["prompt_preview"].startswith("x")
 
+    def test_rotation_filenames_unique_in_same_microsecond(
+        self, tmp_project: Path, monkeypatch
+    ) -> None:
+        """Regression: two rotations in the same microsecond must not
+        collide on filename. The original implementation reused the
+        record-counter as the filename suffix, so the same ``self._seq``
+        could produce identical names if the timestamp (microsecond
+        granular) matched. We pin ``datetime.now`` to a fixed instant
+        and force three rotations to verify uniqueness.
+        """
+        import se3.commands.merge.llm_trace as trace_mod
+
+        # Freeze the clock so every _new_file_path() sees the same ts.
+        class _FrozenDatetime:
+            @classmethod
+            def now(cls, tz=None):  # noqa: ANN001
+                from datetime import datetime as real_dt
+                return real_dt(2026, 1, 1, 0, 0, 0, 0, tzinfo=tz)
+
+        monkeypatch.setattr(trace_mod, "datetime", _FrozenDatetime)
+
+        trace = LLMTrace(tmp_project, max_file_bytes=50)
+        seen_paths: list[Path] = []
+        with trace:
+            for _ in range(3):
+                trace.record(agent="a", prompt="x" * 100)
+                if trace._current_path not in seen_paths:
+                    seen_paths.append(trace._current_path)
+
+        assert len(seen_paths) == len(set(seen_paths)), (
+            f"rotation produced duplicate filenames: {seen_paths}"
+        )
+
 
 class TestLLMCallRecord:
     """Dataclass serialization."""

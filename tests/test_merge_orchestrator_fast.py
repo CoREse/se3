@@ -15,6 +15,7 @@ import pytest
 from se3.engine.merge.conflict_resolver import MergeStrategy
 from se3.engine.merge.guardrails import GuardrailReport, GuardrailViolation
 from se3.engine.merge.orchestrator import (
+    GuardrailRepairExhausted,
     GuardrailRepairFailed,
     GuardrailRepairStalled,
     GuardrailRollbackError,
@@ -135,15 +136,17 @@ class TestRunGuardrailsFastRepairLoop:
                 pre_head, post_head, "feature-stall", strategy=MergeStrategy.FAST,
             )
 
-        # Should stall at iteration 2 (same hash in two consecutive iterations)
-        assert exc_info.value.iteration_count == 2
+        # Should stall at iteration 1 because last_hash is initialised with
+        # the initial violation-set hash, so a no-op repair on the first
+        # iteration is immediately detected as a stall.
+        assert exc_info.value.iteration_count == 1
         assert exc_info.value.call_file is not None
         assert exc_info.value.call_file.exists()
 
         # Call file type and content assertions
         data = json.loads(exc_info.value.call_file.read_text())
         assert data["type"] == "guardrail_repair_stalled"
-        assert data["iteration_count"] == 2
+        assert data["iteration_count"] == 1
         assert len(data["violations"]) >= 1
         assert data["branch"] == "feature-stall"
         assert data["pre_merge_sha"] == pre_head
@@ -239,8 +242,9 @@ class TestRunGuardrailsFastRepairLoop:
             )
 
         # Should exhaust at iteration 2 (max iterations)
+        from se3.commands.merge.failure_reason import FailureReason
         assert exc_info.value.iteration_count == 2
-        assert exc_info.value.failure_reason == "guardrail_repair_exhausted"
+        assert exc_info.value.failure_reason is FailureReason.GUARDRAIL_REPAIR_EXHAUSTED
         assert exc_info.value.last_violation_hash != ""
         assert exc_info.value.call_file is not None
         assert exc_info.value.call_file.exists()
@@ -679,6 +683,251 @@ class TestRunGuardrailsFastRepairLoop:
         assert data["type"] == "guardrail_repair_exhausted"
         assert len(data["violations"]) >= 1
 
+    def test_repair_exhausted_is_exactly_guardrail_repair_exhausted_type(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Hash changes every iteration → for...else clause runs →
+        GuardrailRepairExhausted (exact type, not just the parent class).
+
+        This catches a regression where a future contributor adds a
+        ``break`` inside the repair loop, which would silently skip
+        the ``else`` clause and the exhausted-iterations escalation.
+        """
+        default_branch = _setup_spec_repo(tmp_path)
+
+        _git(tmp_path, "checkout", "-b", "feature-exhaust-type")
+        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path.write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        _commit(tmp_path, "weaken spec")
+
+        _git(tmp_path, "checkout", default_branch)
+
+        pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        _git(tmp_path, "merge", "feature-exhaust-type", "--no-edit",
+             "-m", "Merge feature-exhaust-type")
+        post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        def mock_repair(self, branch, pre_sha, post_sha, violations,
+                        original_spec_contents, merged_spec_contents):
+            from se3.engine.merge.guardrail_repair import RepairResult
+            return RepairResult(success=False, error="LLM could not fix")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            mock_repair,
+        )
+
+        check_call_count = [0]
+
+        def mock_check(self, pre_sha: str, post_sha: str):
+            check_call_count[0] += 1
+            # Each call returns a different strong_line so the hash changes
+            # every iteration, ensuring the loop reaches the else clause.
+            return GuardrailReport(
+                passed=False,
+                violations=[
+                    GuardrailViolation(
+                        file_path="se3/specs/base/spec.md",
+                        violation_type="WEAKENING",
+                        message="SHALL weakened to SHOULD",
+                        evidence={
+                            "strong_line": (
+                                f"The system SHALL validate inputs "
+                                f"hash{check_call_count[0]}."
+                            ),
+                            "weak_line": (
+                                f"The system SHOULD validate inputs "
+                                f"hash{check_call_count[0]}."
+                            ),
+                            "pairing_score": 0.9,
+                        },
+                    ),
+                ],
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            mock_check,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        # Must use the exact subclass, not the parent GuardrailRepairStalled,
+        # to prove the for...else clause executed.
+        with pytest.raises(GuardrailRepairExhausted) as exc_info:
+            orch._run_guardrails(
+                pre_head, post_head, "feature-exhaust-type",
+                strategy=MergeStrategy.FAST,
+            )
+
+        assert exc_info.value.iteration_count == 2
+        assert exc_info.value.call_file is not None
+
+        # HEAD should be rolled back to pre-merge state
+        current_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        assert current_head == pre_head
+
+    def test_topology_violation_fast_short_circuits_to_human_call(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """CHECK_FAILURE topology violations in fast mode skip LLM repair
+        and route directly to rollback + human call."""
+        default_branch = _setup_spec_repo(tmp_path)
+
+        _git(tmp_path, "checkout", "-b", "feature-topo")
+        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path.write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        _commit(tmp_path, "weaken spec")
+
+        _git(tmp_path, "checkout", default_branch)
+
+        pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        _git(tmp_path, "merge", "feature-topo", "--no-edit",
+             "-m", "Merge feature-topo")
+        post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        # Track whether the LLM repairer was invoked — it must NOT be.
+        repair_invoked = [False]
+
+        def mock_repair(self, branch, pre_sha, post_sha, violations,
+                        original_spec_contents, merged_spec_contents):
+            repair_invoked[0] = True
+            from se3.engine.merge.guardrail_repair import RepairResult
+            return RepairResult(success=False, error="should not be called")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            mock_repair,
+        )
+
+        def mock_check(self, pre_sha: str, post_sha: str):
+            return GuardrailReport(
+                passed=False,
+                violations=[
+                    # Topology violation: CHECK_FAILURE with file_path="N/A"
+                    GuardrailViolation(
+                        file_path="N/A",
+                        violation_type="CHECK_FAILURE",
+                        message=(
+                            "Merge topology violation: pre-merge SHA is NOT "
+                            "an ancestor of post-merge SHA."
+                        ),
+                        evidence={
+                            "pre_sha": pre_sha,
+                            "post_sha": post_sha,
+                            "topology_check": "ancestry",
+                        },
+                    ),
+                    # Plus a normal spec violation
+                    GuardrailViolation(
+                        file_path="se3/specs/base/spec.md",
+                        violation_type="WEAKENING",
+                        message="SHALL weakened to SHOULD",
+                    ),
+                ],
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            mock_check,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        result = orch._run_guardrails(
+            pre_head, post_head, "feature-topo",
+            strategy=MergeStrategy.FAST,
+        )
+
+        # The LLM repairer must NOT have been invoked because topology
+        # violations short-circuited to the default-strategy human-call path.
+        assert repair_invoked[0] is False
+        # _run_guardrails returns the call file Path for default/strict path
+        assert result is not None
+        assert isinstance(result, Path)
+        assert result.exists()
+
+        # HEAD should be rolled back to pre-merge state
+        current_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        assert current_head == pre_head
+
+    def test_incomplete_short_circuits_for_default_strategy(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """CHECK_INCOMPLETE in default strategy skips LLM repair and routes
+        directly to rollback + human call."""
+        default_branch = _setup_spec_repo(tmp_path)
+
+        _git(tmp_path, "checkout", "-b", "feature-incomplete")
+        spec_path = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec_path.write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        _commit(tmp_path, "weaken spec")
+
+        _git(tmp_path, "checkout", default_branch)
+
+        pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        _git(tmp_path, "merge", "feature-incomplete", "--no-edit",
+             "-m", "Merge feature-incomplete")
+        post_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        # Track whether the LLM repairer was invoked — it must NOT be.
+        repair_invoked = [False]
+
+        def mock_repair(self, branch, pre_sha, post_sha, violations,
+                        original_spec_contents, merged_spec_contents):
+            repair_invoked[0] = True
+            from se3.engine.merge.guardrail_repair import RepairResult
+            return RepairResult(success=False, error="should not be called")
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            mock_repair,
+        )
+
+        def mock_check(self, pre_sha: str, post_sha: str):
+            return GuardrailReport(
+                passed=False,
+                violations=[
+                    GuardrailViolation(
+                        file_path="se3/specs/base/spec.md",
+                        violation_type="CHECK_INCOMPLETE",
+                        message="Spec file iteration error: OSError",
+                        evidence={"exception_type": "OSError"},
+                    ),
+                ],
+                incomplete=True,
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            mock_check,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        result = orch._run_guardrails(
+            pre_head, post_head, "feature-incomplete",
+            strategy=MergeStrategy.DEFAULT,
+        )
+
+        # The LLM repairer must NOT have been invoked because incomplete
+        # short-circuits to the default-strategy human-call path.
+        assert repair_invoked[0] is False
+        # _run_guardrails returns the call file Path for default/strict path
+        assert result is not None
+        assert isinstance(result, Path)
+        assert result.exists()
+
+        # HEAD should be rolled back to pre-merge state
+        current_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        assert current_head == pre_head
+
 
 class TestExecuteFastStalledEscalation:
     """Tests for execute() routing when fast mode repair stalls."""
@@ -745,7 +994,9 @@ class TestExecuteFastStalledEscalation:
         # Call file should have correct type
         data = json.loads(report.human_call_file.read_text())
         assert data["type"] == "guardrail_repair_stalled"
-        assert data["iteration_count"] == 2
+        # Stall detected at iteration 1 because last_hash is seeded with
+        # the initial violation-set hash.
+        assert data["iteration_count"] == 1
         assert data["branch"] == "feature-stall-exec"
 
         # HEAD should be restored
@@ -862,7 +1113,8 @@ class TestExecuteFastStalledEscalation:
                 strategy=MergeStrategy.FAST,
             )
 
-        assert exc_info.value.failure_reason == "guardrail_missing_post_sha"
+        from se3.commands.merge.failure_reason import FailureReason
+        assert exc_info.value.failure_reason is FailureReason.GUARDRAIL_MISSING_POST_SHA
         assert "missing post_sha" in str(exc_info.value)
         # No rollback needed when post_sha is missing (nothing to roll back to).
         current_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
@@ -884,7 +1136,8 @@ class TestExecuteFastStalledEscalation:
                 strategy=MergeStrategy.FAST,
             )
 
-        assert exc_info.value.failure_reason == "guardrail_missing_pre_sha"
+        from se3.commands.merge.failure_reason import FailureReason
+        assert exc_info.value.failure_reason is FailureReason.GUARDRAIL_MISSING_PRE_SHA
         assert "missing pre_sha" in str(exc_info.value)
         # No rollback attempted because pre_merge_sha is missing.
         current_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
@@ -908,9 +1161,10 @@ class TestExecuteFastStalledEscalation:
                 strategy=MergeStrategy.FAST,
             )
 
+        from se3.commands.merge.failure_reason import FailureReason
         assert (
             exc_info.value.failure_reason
-            == "guardrail_missing_pre_and_post_sha"
+            is FailureReason.GUARDRAIL_MISSING_PRE_AND_POST_SHA
         )
         assert "pre and post SHA" in str(exc_info.value)
 
@@ -1491,3 +1745,76 @@ class TestExecuteFastStalledEscalation:
         data = json.loads(report.human_call_file.read_text())
         assert data["type"] == "guardrail_repair_exhausted"
         assert len(data["violations"]) >= 1
+
+
+class TestMaxRepairIterationsClamp:
+    """Regression tests for the orchestrator's defense-in-depth clamp on
+    ``_max_repair_iterations``.
+
+    The loader (`_load_max_repair_iterations`) already clamps invalid
+    values to the module default, but the orchestrator's exhausted-path
+    correctness depends on the for-loop body running at least once
+    (otherwise the after-loop reference to the ``iteration`` variable
+    would raise UnboundLocalError before reaching the explicit
+    ``iteration_completed`` counter introduced for the same defense).
+    These tests pin the clamp at the orchestrator level so a future
+    refactor / monkeypatched loader that returns 0 still produces a
+    clean repair-loop instead of an undefined-name crash.
+    """
+
+    def test_orchestrator_clamps_loader_returning_zero(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """If the loader returns 0 (clamp bypassed), the orchestrator
+        re-clamps to the module default so the for-loop body runs at
+        least once."""
+        _setup_spec_repo(tmp_path)
+
+        # Force the loader to return 0 — emulates a future refactor
+        # that drops the loader's own ``< 1`` clamp.
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._load_max_repair_iterations",
+            lambda project_root: 0,
+        )
+
+        from se3.engine.merge.orchestrator import (
+            _DEFAULT_MAX_REPAIR_ITERATIONS,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        # The orchestrator's defensive clamp must promote the 0 to a
+        # positive value (the module default).  A test that asserts
+        # ``> 0`` rather than ``== _DEFAULT_MAX_REPAIR_ITERATIONS``
+        # tolerates a future change to the default constant.
+        assert orch._max_repair_iterations >= 1
+        assert orch._max_repair_iterations == _DEFAULT_MAX_REPAIR_ITERATIONS
+
+    def test_orchestrator_clamps_loader_returning_negative(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Negative values from a hypothetical buggy loader are also
+        clamped — the for-loop body must execute at least once."""
+        _setup_spec_repo(tmp_path)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._load_max_repair_iterations",
+            lambda project_root: -3,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        assert orch._max_repair_iterations >= 1
+
+    def test_orchestrator_preserves_loader_returning_positive(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A positive value from the loader is preserved verbatim — the
+        clamp only kicks in for non-positive values."""
+        _setup_spec_repo(tmp_path)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator._load_max_repair_iterations",
+            lambda project_root: 7,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        assert orch._max_repair_iterations == 7

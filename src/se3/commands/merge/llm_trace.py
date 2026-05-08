@@ -19,7 +19,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -102,6 +102,12 @@ class LLMTrace:
             self.trace_dir = self.project_root / self.trace_dir
         self.max_file_bytes = max_file_bytes
         self._seq: int = 0
+        # Per-file rotation counter, incremented on every new path.
+        # Decoupling this from ``self._seq`` (which counts records, not
+        # rotations) guarantees uniqueness even if two rotations land in
+        # the same microsecond — without it the filename collides on
+        # repeated rotations between record writes.
+        self._rotation_seq: int = 0
         self._lock = threading.RLock()
         self._file: Optional = None  # type: ignore[type-arg]
         self._current_path: Optional[Path] = None
@@ -111,8 +117,12 @@ class LLMTrace:
         self.trace_dir.mkdir(parents=True, exist_ok=True)
 
     def _new_file_path(self) -> Path:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        return self.trace_dir / f"merge_{ts}_{self._seq:06d}.jsonl"
+        # UTC for timestamp stability across DST shifts and machines in
+        # different time zones; per-file rotation counter for uniqueness.
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+        rotation = self._rotation_seq
+        self._rotation_seq += 1
+        return self.trace_dir / f"merge_{ts}_{rotation:06d}.jsonl"
 
     def _rotate_if_needed(self) -> None:
         if self._file is None:

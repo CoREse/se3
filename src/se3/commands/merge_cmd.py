@@ -140,19 +140,30 @@ _BRANCH_METACHARACTERS = frozenset(
         ")",
         "{",
         "}",
-        "[",
-        "]",
-        "*",
-        "?",
         "!",
         "\\",
         '"',
         "'",
+        # NOTE: `=` is intentionally NOT in this set.  Git permits ``=``
+        # in branch names (e.g. ``feature/v=1.2``), and our subprocess
+        # calls always use list-form argv (never a shell), so an ``=``
+        # cannot be misinterpreted as a key/value separator by argparse.
+        # Rejecting it would produce a misleading "shell metacharacter"
+        # error for legitimately-named branches.
         "\n",
         "\r",
         "\t",
     }
 )
+
+# Glob-pattern characters that git-check-ref-format ALSO rejects ("?",
+# "*", "[", "]" — see https://git-scm.com/docs/git-check-ref-format).
+# Kept in a separate set from ``_BRANCH_METACHARACTERS`` so the rejection
+# message says "git-ref-invalid" rather than "shell metacharacter": both
+# would technically be true, but the user-facing surprise (the issue
+# being addressed) is that an operator typing a git-style branch name
+# gets an error mentioning shells.
+_BRANCH_GIT_REF_GLOB_CHARS = frozenset({"*", "?", "[", "]"})
 
 
 def validate_branch_names(branches: list[str]) -> None:
@@ -202,6 +213,17 @@ def validate_branch_names(branches: list[str]) -> None:
                 f"{''.join(repr(c) for c in bad_chars)}"
             )
             continue
+        glob_chars = sorted(
+            {c for c in branch if c in _BRANCH_GIT_REF_GLOB_CHARS}
+        )
+        if glob_chars:
+            rejected.append(
+                f"{branch!r}: contains git-ref-invalid character(s) "
+                f"{''.join(repr(c) for c in glob_chars)} "
+                "(see git check-ref-format — `?`, `*`, `[`, `]` are not "
+                "permitted in branch names)"
+            )
+            continue
         if any(ord(c) < 0x20 for c in branch):
             rejected.append(
                 f"{branch!r}: contains control character(s) (ASCII < 0x20)"
@@ -213,6 +235,14 @@ def validate_branch_names(branches: list[str]) -> None:
             )
             continue
         # git ref-format rules — minimal subset most likely to bite users
+        # I4 fix: ``:``, ``~``, ``^`` are git-ref-invalid AND
+        # interpreted by ``git show-ref --verify refs/heads/<name>`` as
+        # revision expressions (e.g. ``foo~1`` walks parents). Without
+        # rejecting them, a branch name slips past validation and
+        # produces unpredictable behaviour on the existence check
+        # downstream. ``?``, ``*``, ``[``, ``]`` are caught above by
+        # the dedicated git-ref-invalid set so the user-facing message
+        # cleanly distinguishes shell metachars from ref-invalid chars.
         if (
             ".." in branch
             or branch.startswith(".")
@@ -220,6 +250,9 @@ def validate_branch_names(branches: list[str]) -> None:
             or branch.endswith("/")
             or branch.endswith(".lock")
             or "@{" in branch
+            or ":" in branch
+            or "~" in branch
+            or "^" in branch
         ):
             rejected.append(
                 f"{branch!r}: violates git ref-format rules "
@@ -337,7 +370,10 @@ def _append_runtime_sync_lines(lines: list[str], report) -> None:
                 )
 
 
-def _split_merged_buckets(report) -> tuple[list[str], list[str]]:
+def _split_merged_buckets(
+    report,
+    project_root: Optional[Path] = None,
+) -> tuple[list[str], list[str]]:
     """Return ``(newly_merged, already_ancestor)`` from a merge report.
 
     Defect I3: the legacy ``merged_branches`` aggregate erased the distinction
@@ -346,16 +382,68 @@ def _split_merged_buckets(report) -> tuple[list[str], list[str]]:
     parallel lists; this helper exposes them with a defensive fallback so that
     legacy callers that fail to populate the new buckets still render
     something useful instead of an empty section.
+
+    When *project_root* is provided, the fallback queries git ancestry so
+    that already-ancestor branches are not misclassified as newly merged.
+
+    Branches in ``merged_with_warnings`` (fast-mode guardrail repair ran)
+    are included in the ``newly_merged`` bucket here because they DID
+    produce a new merge commit — the bucket separation in the report is
+    for downstream consumers that want to filter on repaired-vs-clean.
     """
     newly = list(getattr(report, "newly_merged_branches", []) or [])
     already = list(getattr(report, "already_ancestor_branches", []) or [])
+    warnings = list(getattr(report, "merged_with_warnings", []) or [])
+    # Append warnings-repaired branches to the newly-merged bucket so the
+    # CLI rendering reports the correct total. The orchestrator splits
+    # these out into a dedicated list so structured consumers (e.g.
+    # ``to_legacy_dict``) can render the distinction; the textual CLI
+    # output keeps them in the same line block to match existing UX.
+    for branch in warnings:
+        if branch not in newly and branch not in already:
+            newly.append(branch)
     # Defensive fallback: if the orchestrator did not populate the new
     # buckets (older code path or test stub), fall back to the legacy
     # aggregate so we still render something useful rather than an empty
-    # list. Treat the legacy aggregate as "newly merged" for the
-    # fallback case — this matches the historical wording.
+    # list. When project_root is available, use git merge-base to
+    # correctly classify each branch instead of treating all as newly
+    # merged.
     if not newly and not already and getattr(report, "merged_branches", None):
-        newly = list(report.merged_branches)
+        if project_root is not None:
+            for branch in report.merged_branches:
+                result = subprocess.run(
+                    [
+                        "git", "-C", str(project_root),
+                        "merge-base", "--is-ancestor", branch, "HEAD",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=15,
+                )
+                if result.returncode == 0:
+                    already.append(branch)
+                elif result.returncode == 1:
+                    # rc=1 is the documented "branch is not an ancestor"
+                    # signal — bucket as newly merged.
+                    newly.append(branch)
+                else:
+                    # rc=128 (or any other unexpected rc) means git could
+                    # not evaluate the relationship — typically because
+                    # the branch ref no longer exists (e.g. after
+                    # ``--delete-merged`` removed it). Re-classifying a
+                    # missing branch as "newly merged" would mis-describe
+                    # the CLI summary; leave it unbucketed instead so the
+                    # caller can still surface the merged_branches list
+                    # without a misleading "newly merged" label.
+                    logger.debug(
+                        "merge-base --is-ancestor for '%s' returned rc=%d "
+                        "(branch likely missing, e.g. after --delete-merged). "
+                        "Skipping bucket classification.",
+                        branch, result.returncode,
+                    )
+        else:
+            newly = list(report.merged_branches)
     return newly, already
 
 
@@ -463,16 +551,49 @@ def run_merge(
             )
             return 1
 
-    # Run the orchestrator
+    # Run the orchestrator under an exclusive merge lock so that two
+    # `se3 merge` invocations cannot mutate the same working tree, index,
+    # and runtime sync targets simultaneously (K1 / G1).
     from ..engine.merge.orchestrator import MergeOrchestrator
+    from .merge.merge_lock import MergeLock, MergeLockBusy, MergeLockStale
 
-    orchestrator = MergeOrchestrator(
-        project_root=project_root,
-        strategy=strategy,
-        delete_merged=delete_merged,
-        strict_runtime_sync=strict_runtime_sync,
-    )
-    report = orchestrator.execute(branches)
+    try:
+        with MergeLock(project_root):
+            orchestrator = MergeOrchestrator(
+                project_root=project_root,
+                strategy=strategy,
+                delete_merged=delete_merged,
+                strict_runtime_sync=strict_runtime_sync,
+                # The CLI wrapper already holds the merge lock via the
+                # surrounding ``with`` block, so the orchestrator must
+                # NOT re-acquire — fcntl.flock on a second fd of the
+                # same file from the same process would surface as
+                # ``MergeLockBusy`` (the legacy contract here was that
+                # lock acquisition lived only in this wrapper).
+                acquire_lock=False,
+            )
+            report = orchestrator.execute(branches)
+    except MergeLockBusy as exc:
+        render_text(
+            f"Another `se3 merge` is in progress (lock held by pid={exc.holder_pid}).\n"
+            f"Lock file: {exc.lock_file}\n\n"
+            f"Wait for the in-progress merge to finish before retrying.",
+            title="Merge Already In Progress",
+        )
+        return 1
+    except MergeLockStale as exc:
+        if exc.holder_pid is None:
+            pid_msg = "(unparseable pid)"
+        else:
+            pid_msg = f"(holder pid={exc.holder_pid} no longer exists)"
+        render_text(
+            f"Merge lock appears stale {pid_msg}.\n"
+            f"Lock file: {exc.lock_file}\n\n"
+            f"Remove the stale lock file and retry:\n"
+            f"  rm {exc.lock_file}",
+            title="Merge Lock Stale",
+        )
+        return 1
 
     if report.success:
         # Defect I3: split rendering by newly-merged vs already-ancestor.
@@ -481,7 +602,7 @@ def run_merge(
         # in "newly" produced a fresh merge commit. Older versions of the
         # CLI lumped them together and made it impossible to tell whether
         # a re-run actually made progress or was an idempotent no-op.
-        newly, already = _split_merged_buckets(report)
+        newly, already = _split_merged_buckets(report, project_root)
         total = len(newly) + len(already)
         lines = [f"Successfully merged {total} branch(es):", ""]
         _append_split_branch_lines(lines, newly, already)
@@ -496,6 +617,11 @@ def run_merge(
             ):
                 lines.append(
                     f"  (HEAD already at {report.pre_merge_version} from prior merges)"
+                )
+            if getattr(report, "version_higher_than_target", False):
+                lines.append(
+                    "  WARNING: On-disk version is HIGHER than the aggregated target. "
+                    "Possible manual bump or anomalous state."
                 )
         if report.version_aggregation_error:
             lines.append("")
@@ -564,7 +690,7 @@ def run_merge(
         # Defect I3: split the pre-failure merged-branches summary so
         # operators can tell which branches produced new merge commits
         # before the human-call escalation.
-        newly, already = _split_merged_buckets(report)
+        newly, already = _split_merged_buckets(report, project_root)
         if newly or already:
             total = len(newly) + len(already)
             lines.append(
@@ -818,6 +944,12 @@ def _failure_title_and_summary(
             "Merge failed",
             "Merge failed: runtime sync collision — a tier A file already exists in se3/. "
             "Check se3/ for the colliding file and resolve manually.",
+        )
+    if failure_reason == "version_higher_than_target":
+        return (
+            "Merge failed",
+            "Merge failed: on-disk version is higher than the aggregated target — "
+            "possible manual bump or stale pre-merge version",
         )
     if failure_reason == "runtime_sync_os_error":
         return (

@@ -119,6 +119,7 @@ class TestC1VersionNotAdvanced:
         )
         assert result.success is False
         assert result.version_already_at_target is True
+        assert result.version_higher_than_target is False
         assert result.error is not None
         assert "VersionNotAdvanced" in result.error
         # new_version is set to the on-disk value (4.7.0), not the
@@ -135,6 +136,9 @@ class TestC1VersionNotAdvanced:
         )
         assert result.success is False
         assert result.version_already_at_target is True
+        # The higher-than-target case sets the additional flag so
+        # callers (and merge reports) can distinguish this anomaly.
+        assert result.version_higher_than_target is True
         assert result.error is not None
         assert "VersionNotAdvanced" in result.error
         assert "higher" in result.error
@@ -240,6 +244,60 @@ class TestC2RegexTolerance:
         content = '[project]\n    version = "1.2.3"\n'
         assert _parse_pyproject_version(content) == "1.2.3"
 
+    def test_version_inside_triple_quoted_string_ignored(self) -> None:
+        """A version string inside a triple-quoted literal must NOT match."""
+        content = (
+            '[project]\n'
+            'name = "x"\n'
+            'description = """\n'
+            'An example: version = "9.9.9"\n'
+            '"""\n'
+            'version = "1.2.3"\n'
+        )
+        assert _parse_pyproject_version(content) == "1.2.3"
+
+    def test_single_triple_quote_variant_ignored(self) -> None:
+        """Triple-single-quoted strings are also respected."""
+        content = (
+            "[project]\n"
+            "name = 'x'\n"
+            "description = '''\n"
+            "An example: version = '9.9.9'\n"
+            "'''\n"
+            "version = '1.2.3'\n"
+        )
+        assert _parse_pyproject_version(content) == "1.2.3"
+
+    def test_commented_section_header_ignored(self) -> None:
+        """A commented-out section header must NOT be treated as real."""
+        content = (
+            '# [project]\n'
+            '# version = "9.9.9"\n'
+            '[project]\n'
+            'version = "1.2.3"\n'
+        )
+        assert _parse_pyproject_version(content) == "1.2.3"
+
+    def test_commented_tool_poetry_ignored(self) -> None:
+        """A commented-out [tool.poetry] must be skipped."""
+        content = (
+            '# [tool.poetry]\n'
+            '# version = "9.9.9"\n'
+            '[tool.poetry]\n'
+            'version = "1.2.3"\n'
+        )
+        assert _parse_pyproject_version(content) == "1.2.3"
+
+    def test_commented_project_prefers_real(self) -> None:
+        """When [project] is commented out, fall back to [tool.poetry]."""
+        content = (
+            '# [project]\n'
+            '# version = "9.9.9"\n'
+            '[tool.poetry]\n'
+            'version = "1.2.3"\n'
+        )
+        assert _parse_pyproject_version(content) == "1.2.3"
+
 
 # ---------- C3: Version.parse fail-loud ---------- #
 
@@ -317,7 +375,7 @@ class TestC4AtomicWrite:
         _write_pyproject(tmp_path, "1.0.0")
         captured = []
 
-        def fake_atomic(path, content):
+        def fake_atomic(path, content, *, durability_critical=False):
             captured.append((path, content))
             # Actually do the write so subsequent steps see it
             path.write_text(content)
@@ -372,7 +430,7 @@ class TestC4AtomicWrite:
         original_disk = _read_disk_version(tmp_path)
         assert original_disk == "4.4.0"
 
-        def boom(path, content):
+        def boom(path, content, *, durability_critical=False):
             raise OSError("simulated disk error")
 
         monkeypatch.setattr(vagg, "_atomic_write_text", boom)
@@ -519,7 +577,7 @@ class TestC7AmendExceptionRestore:
         # Save original content for comparison
         original = (tmp_path / "pyproject.toml").read_text(encoding="utf-8")
 
-        def boom(path, content):
+        def boom(path, version, *, content=None):
             # Write something garbage to the file BEFORE raising,
             # to simulate a partial write
             path.write_text("garbage\nnot a TOML\n")
@@ -550,3 +608,166 @@ class TestAggregateResultDefaults:
         assert r.bump_type is None
         assert r.error is None
         assert r.version_already_at_target is False
+        assert r.version_higher_than_target is False
+
+
+# ---------- amend=False path (HEAD already published) ---------- #
+
+
+class TestAmendFalsePath:
+    """Coverage for ``aggregate_and_apply(amend=False)``.
+
+    When HEAD has been published to a remote, the orchestrator passes
+    ``amend=False`` to avoid rewriting public history.  The bump is
+    applied as a NEW single-parent commit on top of the merge commit
+    (HEAD topology is parent_count == 1).
+
+    These tests exercise that path so future post-aggregation HEAD
+    topology checks (e.g. defensive ``assert_head_is_merge_commit``
+    re-verification) cannot silently regress this branch.
+    """
+
+    def test_amend_false_creates_new_commit_on_top(self, tmp_path: Path) -> None:
+        """amend=False produces a NEW commit; HEAD has 1 parent."""
+        _setup_with_pyproject(tmp_path, "4.4.0")
+        # Capture the SHA of the would-be merge commit (the amendable
+        # tip), so we can assert that amend=False produced a NEW
+        # commit on top.
+        merge_sha = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        result = aggregate_and_apply(
+            tmp_path, [BumpType.PATCH], "4.4.0", amend=False,
+        )
+        assert result.success is True
+        assert result.new_version == "4.4.1"
+        assert _read_disk_version(tmp_path) == "4.4.1"
+
+        # HEAD must have advanced (a new commit was created).
+        new_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert new_head != merge_sha, (
+            "amend=False must create a new commit, not amend the existing one"
+        )
+
+        # The new commit's parent is the original merge commit.
+        parent = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD^1"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert parent == merge_sha, (
+            "amend=False's new commit should sit on top of the merge "
+            "commit (parent == merge_sha)"
+        )
+
+        # HEAD has parent_count == 1 (single-parent commit, NOT a merge).
+        rev_list = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-list", "--parents", "-n", "1", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        # Format: "<commit_sha> <parent1_sha>" — exactly 2 SHAs, meaning
+        # parent_count is 1.
+        parts = rev_list.split()
+        assert len(parts) == 2, (
+            f"HEAD on amend=False path should have exactly 1 parent, "
+            f"got rev-list output: {rev_list!r}"
+        )
+
+    def test_amend_false_commit_message_includes_version(
+        self, tmp_path: Path,
+    ) -> None:
+        """The new commit's subject must reference the bumped version."""
+        _setup_with_pyproject(tmp_path, "4.4.0")
+        result = aggregate_and_apply(
+            tmp_path, [BumpType.MINOR], "4.4.0", amend=False,
+        )
+        assert result.success is True
+        assert result.new_version == "4.5.0"
+
+        subject = subprocess.run(
+            ["git", "-C", str(tmp_path), "log", "-1", "--format=%s"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        # Commit message format from version_aggregator:
+        #   "chore: bump version to <version>"
+        assert "4.5.0" in subject
+        assert "version" in subject.lower() or "bump" in subject.lower()
+
+    def test_amend_false_failure_restores_disk(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """When the amend=False commit fails, pyproject.toml is restored."""
+        _setup_with_pyproject(tmp_path, "4.4.0")
+        orig_run_git = vagg._run_git
+
+        def fake_run_git(project_root, *args, **kwargs):
+            # Fail the new commit (no --amend) — distinct from the
+            # amend-path failure already covered by C7.
+            if args[:2] == ("commit", "-m"):
+                return subprocess.CompletedProcess(
+                    args=args, returncode=1,
+                    stdout="", stderr="hook rejected commit",
+                )
+            return orig_run_git(project_root, *args, **kwargs)
+
+        monkeypatch.setattr(vagg, "_run_git", fake_run_git)
+
+        result = aggregate_and_apply(
+            tmp_path, [BumpType.PATCH], "4.4.0", amend=False,
+        )
+        assert result.success is False
+        assert "hook rejected commit" in (result.error or "")
+        # Disk version restored
+        assert _read_disk_version(tmp_path) == "4.4.0"
+        # Index restored — no staged pyproject.toml
+        status = subprocess.run(
+            ["git", "-C", str(tmp_path), "diff", "--cached", "--name-only"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert "pyproject.toml" not in status
+
+    def test_amend_false_skipped_when_already_at_target(
+        self, tmp_path: Path,
+    ) -> None:
+        """C1 fail-loud applies even on the amend=False branch."""
+        _setup_with_pyproject(tmp_path, "4.7.0")
+        _write_pyproject(tmp_path, "4.7.0")
+        result = aggregate_and_apply(
+            tmp_path, [BumpType.MINOR], "4.6.1", amend=False,
+        )
+        assert result.success is False
+        assert result.version_already_at_target is True
+
+    def test_amend_false_preserves_merge_commit_below_head(
+        self, tmp_path: Path,
+    ) -> None:
+        """The merge commit remains as HEAD^1 — its topology is intact.
+
+        Future code that needs to inspect the merge commit on the
+        amend=False branch can read HEAD^1 and find a commit whose
+        parent_count >= 2 (when an actual merge produced it).  The
+        ``_setup_with_pyproject`` helper produces a 1-parent stand-in
+        merge commit so this test verifies that HEAD^1 IS the original
+        commit, even if it's not strictly a 2-parent merge.
+        """
+        _setup_with_pyproject(tmp_path, "4.4.0")
+        merge_sha = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        result = aggregate_and_apply(
+            tmp_path, [BumpType.PATCH], "4.4.0", amend=False,
+        )
+        assert result.success is True
+
+        # HEAD^1 still resolves to the original merge commit.
+        head_parent = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD^1"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert head_parent == merge_sha

@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -928,23 +929,73 @@ def _normalize_when_clause(line: str) -> str:
 
 
 def _is_spec_path(path: str) -> bool:
-    """Return True when path matches se3/specs/**/spec.md."""
+    """Return True when path matches ``se3/specs/**/spec.md``.
+
+    Canonical implementation shared by the merge subsystem (orchestrator,
+    human_call, merge_respond).  Rejects empty intermediate path
+    segments such as ``se3/specs//spec.md`` so that malformed inputs
+    cannot bypass guardrail enforcement.
+    """
+    if not path:
+        return False
     normalized = path.replace("\\", "/")
-    return bool(_SPEC_PATH_RE.match(normalized))
+    if not _SPEC_PATH_RE.match(normalized):
+        return False
+    # Reject paths with empty segments (``//`` anywhere) — the regex
+    # accepts these because ``.+`` is greedy enough to span an empty
+    # middle segment.
+    if "//" in normalized:
+        return False
+    return True
+
+
+class ChangedSpecFilesIncomplete(RuntimeError):
+    """Raised when ``_get_changed_spec_files`` cannot complete the diff.
+
+    G3 fix (medium): the original implementation returned ``[]`` on any
+    ``git diff`` failure, which the caller interpreted as "no spec
+    files changed, nothing to check" — letting a guardrails-bypass via
+    git tooling failure go silently unreported. We now distinguish a
+    real empty diff (``returncode == 0`` with empty stdout) from a
+    failed/timed-out diff by raising this exception. Callers SHOULD
+    catch it and mark the guardrails report as ``incomplete=True``.
+    """
 
 
 def _get_changed_spec_files(project_root: Path, base_ref: str, head_ref: str) -> list[str]:
-    """Get list of spec files changed between base_ref and head_ref."""
+    """Get list of spec files changed between base_ref and head_ref.
+
+    Raises:
+        ValueError: if either ref is empty.
+        ChangedSpecFilesIncomplete: if the git diff invocation itself
+            fails (non-zero rc with stderr, OSError, or
+            subprocess.TimeoutExpired). Callers should treat this as a
+            CHECK_INCOMPLETE rather than "no spec files changed".
+    """
     if not base_ref or not head_ref:
         raise ValueError(
             f"Cannot diff spec files: empty ref "
             f"(base_ref={base_ref!r}, head_ref={head_ref!r})"
         )
-    result = _run_git(
-        project_root, "diff", "--name-only", f"{base_ref}..{head_ref}",
-        check=False, timeout=30,
-    )
-    if result.returncode != 0 or not result.stdout.strip():
+    try:
+        result = _run_git(
+            project_root, "diff", "--name-only", f"{base_ref}..{head_ref}",
+            check=False, timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ChangedSpecFilesIncomplete(
+            f"git diff --name-only {base_ref}..{head_ref} timed out: {exc}"
+        ) from exc
+    except OSError as exc:
+        raise ChangedSpecFilesIncomplete(
+            f"git diff --name-only {base_ref}..{head_ref} raised OSError: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        raise ChangedSpecFilesIncomplete(
+            f"git diff --name-only {base_ref}..{head_ref} returned "
+            f"{result.returncode}: {result.stderr.strip() or '<no stderr>'}"
+        )
+    if not result.stdout.strip():
         return []
     changed = [line.strip() for line in result.stdout.splitlines() if line.strip()]
     return [p for p in changed if _is_spec_path(p)]
@@ -1034,6 +1085,7 @@ def _check_merge_topology(
     post_sha: str,
     *,
     min_parents: int = 2,
+    max_fixup_depth: int = 0,
     timeout: int = 15,
 ) -> list[GuardrailViolation]:
     """Verify that ``post_sha`` is a valid merge result built on ``pre_sha``.
@@ -1053,6 +1105,14 @@ def _check_merge_topology(
     2. **Parent count**: ``post_sha`` must have at least ``min_parents``
        parents (defaults to 2).  Octopus merges (>2 parents) are accepted
        — a 3-parent merge has parents >= 2.
+
+    **Fix-up tolerance** (opt-in): when ``max_fixup_depth > 0``, accept a
+    layout where ``post_sha`` is a single-parent commit on top of a
+    merge commit (e.g. a guardrail-repair fix-up commit).  Walks back
+    up to ``max_fixup_depth`` linear ancestors looking for a commit
+    whose parent count satisfies ``min_parents``.  Default ``0`` keeps
+    the strict behavior so callers that haven't reasoned about fix-up
+    layouts cannot accidentally accept a stray hook commit.
 
     The no-op already-ancestor case (``pre_sha == post_sha``) is handled
     by the caller; this function still returns a violation in that case
@@ -1136,23 +1196,87 @@ def _check_merge_topology(
     parts = parents_result.stdout.strip().split()
     # parts[0] is post_sha itself; parts[1:] are the parents.
     parent_count = max(0, len(parts) - 1)
-    if parent_count < min_parents:
+    if parent_count >= min_parents:
+        return violations
+
+    # Opt-in fix-up tolerance: walk linear ancestors looking for a merge
+    # commit.  The intermediate ancestors must each be single-parent
+    # (otherwise we'd be skipping over a real merge boundary).
+    if max_fixup_depth > 0 and parent_count == 1:
+        cursor = post_sha
+        chain_summary: list[str] = [f"{post_sha[:8]} parents={parent_count}"]
+        for depth in range(1, max_fixup_depth + 1):
+            cursor_ref = f"{cursor}^1"
+            try:
+                anc_result = _run_git(
+                    project_root, "rev-list", "--parents", "-n", "1",
+                    cursor_ref,
+                    check=False, timeout=timeout,
+                )
+            except Exception as exc:
+                violations.append(GuardrailViolation(
+                    file_path="N/A",
+                    violation_type="CHECK_FAILURE",
+                    message=(
+                        f"Topology check failed: could not walk fix-up "
+                        f"chain at depth {depth} from {post_sha[:8]}: {exc}"
+                    ),
+                ))
+                return violations
+            if anc_result.returncode != 0:
+                break
+            anc_parts = anc_result.stdout.strip().split()
+            if not anc_parts:
+                break
+            anc_sha = anc_parts[0]
+            anc_parent_count = max(0, len(anc_parts) - 1)
+            chain_summary.append(
+                f"{anc_sha[:8]} parents={anc_parent_count}"
+            )
+            if anc_parent_count >= min_parents:
+                # Found a merge commit within the allowed fix-up depth.
+                return violations
+            if anc_parent_count != 1:
+                # Hit an initial commit (0 parents) or anomalous shape;
+                # cannot continue walking linearly.
+                break
+            cursor = anc_sha
+
         violations.append(GuardrailViolation(
             file_path="N/A",
             violation_type="CHECK_FAILURE",
             message=(
                 f"Merge topology violation: post-merge commit {post_sha[:8]} "
-                f"has {parent_count} parent(s), expected >= {min_parents}. "
-                f"HEAD is not a merge commit — the merge may have been "
-                f"squashed, fast-forwarded, or replaced by a single-parent commit."
+                f"has {parent_count} parent(s); fix-up chain up to depth "
+                f"{max_fixup_depth} did not reach a merge commit "
+                f"({' -> '.join(chain_summary)})."
             ),
             evidence=_evidence_dict(
                 post_sha=post_sha,
                 parent_count=parent_count,
                 min_parents=min_parents,
-                topology_check="parent_count",
+                max_fixup_depth=max_fixup_depth,
+                topology_check="parent_count_with_fixup",
             ),
         ))
+        return violations
+
+    violations.append(GuardrailViolation(
+        file_path="N/A",
+        violation_type="CHECK_FAILURE",
+        message=(
+            f"Merge topology violation: post-merge commit {post_sha[:8]} "
+            f"has {parent_count} parent(s), expected >= {min_parents}. "
+            f"HEAD is not a merge commit — the merge may have been "
+            f"squashed, fast-forwarded, or replaced by a single-parent commit."
+        ),
+        evidence=_evidence_dict(
+            post_sha=post_sha,
+            parent_count=parent_count,
+            min_parents=min_parents,
+            topology_check="parent_count",
+        ),
+    ))
 
     return violations
 
@@ -1190,6 +1314,7 @@ class MergeGuardrailsCheck:
         merge_commit_sha: str,
         *,
         enforce_topology: bool = True,
+        topology_max_fixup_depth: int = 0,
     ) -> GuardrailReport:
         """Check spec files changed between two commits for violations.
 
@@ -1244,15 +1369,74 @@ class MergeGuardrailsCheck:
 
         # H1/H2 — merge topology check.  Skip when pre == post (already-ancestor
         # no-op path); the orchestrator filters that case out before calling us.
-        if enforce_topology and ours_before_sha != merge_commit_sha:
+        # G3 fix (high): when topology enforcement is requested AND the caller
+        # passed equal SHAs, the original guard would skip the topology check
+        # AND produce an empty diff, returning passed=True. That hides a
+        # silent-success bug class — a caller that should be presenting a
+        # post-merge SHA but accidentally passed the pre-merge SHA twice
+        # would get a green light. Surface this explicitly as CHECK_FAILURE
+        # so the orchestrator (or any other caller) sees the inconsistency
+        # rather than silently passing. The legitimate no-op path filters
+        # this case BEFORE invoking check_merge_result; reaching here with
+        # equal SHAs and topology enforcement on is a contract violation.
+        if enforce_topology and ours_before_sha == merge_commit_sha:
+            violations.append(GuardrailViolation(
+                file_path="N/A",
+                violation_type="CHECK_FAILURE",
+                message=(
+                    "Topology check failed: pre_sha == post_sha "
+                    f"({ours_before_sha[:8]}). Caller should have "
+                    "filtered already-ancestor no-op merges before "
+                    "invoking check_merge_result, or invoked it with "
+                    "enforce_topology=False. Refusing to silently "
+                    "pass on equal SHAs."
+                ),
+                evidence=_evidence_dict(
+                    pre_sha=ours_before_sha,
+                    post_sha=merge_commit_sha,
+                    topology_check="equal_sha",
+                ),
+            ))
+        elif enforce_topology and ours_before_sha != merge_commit_sha:
             topology_violations = _check_merge_topology(
                 self.project_root, ours_before_sha, merge_commit_sha,
+                max_fixup_depth=topology_max_fixup_depth,
             )
             violations.extend(topology_violations)
 
-        spec_files = _get_changed_spec_files(
-            self.project_root, ours_before_sha, merge_commit_sha,
-        )
+        try:
+            spec_files = _get_changed_spec_files(
+                self.project_root, ours_before_sha, merge_commit_sha,
+            )
+        except ChangedSpecFilesIncomplete as exc:
+            # G3 fix (medium): a git tooling failure is NOT "no spec
+            # files changed" — surface as CHECK_INCOMPLETE so the
+            # caller knows the guardrails check did not run to
+            # completion rather than silently bypassing it.
+            logger.warning(
+                "Could not enumerate changed spec files: %s — "
+                "marking guardrails report incomplete",
+                exc,
+            )
+            violations.append(GuardrailViolation(
+                file_path="N/A",
+                violation_type="CHECK_INCOMPLETE",
+                message=(
+                    f"Could not enumerate changed spec files between "
+                    f"{ours_before_sha[:8]}..{merge_commit_sha[:8]}: {exc}"
+                ),
+                evidence=_evidence_dict(
+                    pre_sha=ours_before_sha,
+                    post_sha=merge_commit_sha,
+                    exception_type=type(exc).__name__,
+                    exception_msg=str(exc),
+                ),
+            ))
+            return GuardrailReport(
+                passed=False,
+                violations=violations,
+                incomplete=True,
+            )
         if not spec_files and not violations:
             return GuardrailReport(passed=True)
 

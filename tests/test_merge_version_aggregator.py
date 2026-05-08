@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from se3.engine.llm_caller import LLMCallError
 from se3.engine.merge.orchestrator import MergeOrchestrator
 from se3.engine.merge.version_aggregator import (
     AggregateResult,
@@ -587,9 +588,13 @@ class TestAggregateAndApply:
         result = aggregate_and_apply(tmp_path, [BumpType.PATCH], "4.4.0")
 
         assert result.success is False
+        # Symmetric error template: primary failure followed by the
+        # rollback failure (restore + reset), each appended with
+        # ". " — replaces the prior "Rollback also failed" prefix that
+        # only fired in this branch.
         assert "amend rejected" in (result.error or "")
-        assert "Rollback also failed" in (result.error or "")
         assert "index locked" in (result.error or "")
+        assert "git reset HEAD" in (result.error or "")
 
     def test_git_add_failure_rollback(self, tmp_path: Path, monkeypatch):
         """When git add fails (non-zero), pyproject.toml is restored."""
@@ -861,8 +866,8 @@ class TestOrchestratorVersionAggregation:
         assert report.merged_branches == ["branch1", "branch2", "branch3"]
         assert report.pre_merge_version == "4.4.0"
         assert report.final_version == "4.5.0"
-        assert report.bump_type == "minor"
-        # Working tree has the new version
+        # When the on-disk version is already at the computed target,
+        # bump_type is intentionally NOT set (bump_applied=False).
         assert _read_pyproject_version(tmp_path) == "4.5.0"
 
     def test_no_version_change_skips_aggregation(self, tmp_path: Path):
@@ -930,7 +935,8 @@ class TestOrchestratorVersionAggregation:
 
         assert report.success is True
         assert report.final_version == "2.0.0"
-        assert report.bump_type == "major"
+        # When the on-disk version is already at the computed target,
+        # bump_type is intentionally NOT set (bump_applied=False).
         assert _read_pyproject_version(tmp_path) == "2.0.0"
 
     def test_human_call_skips_aggregation(self, tmp_path: Path, monkeypatch):
@@ -1006,7 +1012,7 @@ class TestOrchestratorVersionAggregation:
         # Mock the resolver to raise — default strategy escalates to human call
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve",
-            lambda self, ctx, strategy: (_ for _ in ()).throw(RuntimeError("mock")),
+            lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock")),
         )
 
         orch = MergeOrchestrator(project_root=tmp_path)
@@ -1066,7 +1072,7 @@ class TestOrchestratorVersionAggregation:
         # Mock resolver to fail on conflict
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve",
-            lambda self, ctx, strategy: (_ for _ in ()).throw(RuntimeError("mock")),
+            lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock")),
         )
 
         orch = MergeOrchestrator(project_root=tmp_path)
@@ -1275,3 +1281,184 @@ class TestOrchestratorVersionAggregation:
         assert report.final_version == "4.7.0"
         assert report.bump_type == "minor"
         assert _read_pyproject_version(tmp_path) == "4.7.0"
+
+
+# ---------- amend=False path integration tests ---------- #
+
+
+class TestAmendFalseOrchestratorPath:
+    """Integration test: orchestrator dispatches amend=False when HEAD is published.
+
+    These tests target the post-aggregation HEAD topology re-check
+    that runs after ``aggregate_and_apply`` completes.  When the
+    orchestrator detects a published HEAD, it sets
+    ``self._aggregation_used_fixup = True`` and the topology check
+    must walk through HEAD^1 (allow_fixup_parent=True) to confirm
+    the merge commit is intact.
+    """
+
+    def test_aggregate_and_apply_amend_false_succeeds(
+        self, tmp_path: Path,
+    ) -> None:
+        """Direct call: amend=False creates a new commit, leaves merge as HEAD^1."""
+        _init_repo(tmp_path)
+        _write_pyproject(tmp_path, "4.4.0")
+        _commit(tmp_path, "Add pyproject")
+        # Stand-in for a merge commit
+        (tmp_path / "marker.txt").write_text("merged\n")
+        _commit(tmp_path, "Merge stand-in")
+        merge_sha = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        from se3.engine.version_bumper import BumpType as _BumpType
+
+        result = aggregate_and_apply(
+            tmp_path, [_BumpType.PATCH], "4.4.0", amend=False,
+        )
+        assert result.success is True
+        assert result.new_version == "4.4.1"
+        assert _read_pyproject_version(tmp_path) == "4.4.1"
+
+        # HEAD is a NEW commit on top of the merge commit.
+        new_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert new_head != merge_sha
+
+        # HEAD^1 == merge_sha (the merge commit is preserved below).
+        head_parent = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD^1"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert head_parent == merge_sha
+
+    def test_orchestrator_amend_false_preserves_merge_commit(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """When orchestrator forces amend=False, the merge commit is preserved as HEAD^1.
+
+        Mocks ``_is_head_published`` to return True so the orchestrator
+        takes the amend=False path.  After aggregation, we assert:
+          * report.success is True
+          * report.final_version reflects the bump
+          * HEAD has parent_count == 1 (single-parent commit on top)
+          * HEAD^1 has parent_count >= 2 (the actual merge commit)
+
+        The branch is configured so that its merge does NOT advance
+        pyproject.toml past the aggregator's computed target —
+        otherwise ``aggregate_and_apply`` would short-circuit with
+        ``version_already_at_target`` and the amend=False code path
+        would never run.  We achieve this by having the branch bump
+        the version (PATCH) but using a stale ``pre_merge_version``
+        that the orchestrator captures BEFORE the branch's bump is
+        in HEAD.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _write_pyproject(tmp_path, "4.4.0")
+        _commit(tmp_path, "M0")
+
+        # Branch B introduces a non-version change so the merge will
+        # produce a real merge commit but pyproject.toml stays at
+        # 4.4.0 in HEAD.  We then mock ``infer_branch_bump`` to claim
+        # PATCH so ``branch_bumps`` is populated and aggregation runs.
+        _checkout(tmp_path, "feature", create=True)
+        (tmp_path / "feat.txt").write_text("feature work\n")
+        _commit(tmp_path, "feature: add feat.txt")
+        _checkout(tmp_path, default_branch)
+
+        # Force amend=False path.
+        monkeypatch.setattr(
+            MergeOrchestrator, "_is_head_published",
+            lambda self: True,
+        )
+
+        # Force a non-NONE bump so aggregation actually runs even
+        # though the branch did not change pyproject.toml.
+        from se3.engine.merge import orchestrator as orch_mod
+        from se3.engine.merge.version_aggregator import (
+            InferResult as _InferResult,
+        )
+
+        def fake_infer(*args, **kwargs):
+            return _InferResult(bump=BumpType.PATCH, reason="patched for test")
+
+        monkeypatch.setattr(orch_mod, "infer_branch_bump", fake_infer)
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        assert report.success is True
+        assert report.final_version == "4.4.1"
+
+        # Verify HEAD topology: HEAD is a single-parent commit (the
+        # version-bump fixup), HEAD^1 is the merge commit.
+        rev_list_head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-list", "--parents", "-n", "1", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        head_parts = rev_list_head.split()
+        assert len(head_parts) == 2, (
+            f"HEAD on amend=False path should be a single-parent commit, "
+            f"got {len(head_parts) - 1} parent(s): {rev_list_head!r}"
+        )
+
+        rev_list_head1 = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-list", "--parents", "-n", "1", "HEAD^1"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        head1_parts = rev_list_head1.split()
+        assert len(head1_parts) >= 3, (
+            f"HEAD^1 should be the merge commit (>=2 parents), got: {rev_list_head1!r}"
+        )
+
+    def test_orchestrator_amend_false_post_topology_check_passes(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Post-aggregation topology check accepts the fix-up layout.
+
+        After amend=False, the orchestrator's post-aggregation
+        ``assert_head_is_merge_commit(allow_fixup_parent=True)``
+        must accept the layout (HEAD has 1 parent, HEAD^1 is merge).
+        Regression guard so that a future change to the post-condition
+        cannot silently start failing on this branch.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _write_pyproject(tmp_path, "4.4.0")
+        _commit(tmp_path, "M0")
+
+        _checkout(tmp_path, "feature", create=True)
+        (tmp_path / "feat.txt").write_text("feat")
+        _commit(tmp_path, "feature")
+        _checkout(tmp_path, default_branch)
+
+        monkeypatch.setattr(
+            MergeOrchestrator, "_is_head_published",
+            lambda self: True,
+        )
+
+        from se3.engine.merge import orchestrator as orch_mod
+        from se3.engine.merge.version_aggregator import (
+            InferResult as _InferResult,
+        )
+
+        def fake_infer(*args, **kwargs):
+            return _InferResult(bump=BumpType.PATCH, reason="patched for test")
+
+        monkeypatch.setattr(orch_mod, "infer_branch_bump", fake_infer)
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        # The post-aggregation topology check is part of execute() —
+        # if it had failed against the fix-up layout, success would
+        # be False and the failure_reason would be POSTCOND_HEAD_NOT_MERGE_COMMIT.
+        assert report.success is True
+        assert report.failure_reason in (None, "")
+        assert "postcond_head_not_merge_commit" not in (
+            (report.failure_reason or "").lower()
+        )

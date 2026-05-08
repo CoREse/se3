@@ -180,11 +180,15 @@ class TestConflictResolverPrompt:
 class TestConflictResolverParse:
     def test_parse_valid_json(self, tmp_path: Path) -> None:
         resolver = ConflictResolver(tmp_path)
+        # Use a multi-line resolved_content so the hunk's end_line=5 is
+        # within bounds; end_line beyond the resolved file's line count
+        # forces human review (a separate bug-fix described in the
+        # high-severity bounds-check issue).
         raw = json.dumps({
             "files": [
                 {
                     "path": "foo.txt",
-                    "resolved_content": "resolved text",
+                    "resolved_content": "line1\nline2\nline3\nline4\nline5\n",
                     "hunks": [
                         {
                             "start_line": 1,
@@ -220,7 +224,7 @@ class TestConflictResolverParse:
         assert result.overall_confidence == Confidence.HIGH
         assert len(result.files) == 1
         assert result.files[0].path == "foo.txt"
-        assert result.files[0].resolved_content == "resolved text"
+        assert result.files[0].resolved_content == "line1\nline2\nline3\nline4\nline5\n"
         assert len(result.files[0].hunks) == 1
         assert result.files[0].hunks[0].confidence == Confidence.HIGH
         assert result.files[0].flags["requires_human_review"] is False

@@ -297,6 +297,94 @@ class TestSplitMergedBuckets:
         assert newly == []
         assert already == []
 
+    def test_fallback_uses_git_ancestry_when_project_root_provided(
+        self, tmp_path: Path
+    ) -> None:
+        """When new buckets are empty and project_root is given, the legacy
+        fallback checks git ancestry instead of treating all as newly merged."""
+        import subprocess
+        from se3.commands.merge_cmd import _split_merged_buckets
+
+        # Init repo
+        subprocess.run(
+            ["git", "init", str(tmp_path), "--initial-branch=main"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.email", "t@t.com"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "config", "user.name", "T"],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "README.md").write_text("# init\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "init"],
+            check=True, capture_output=True,
+        )
+
+        # Create a branch that will be an ancestor
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "ancestor"],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "feat.md").write_text("feat\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "feat"],
+            check=True, capture_output=True,
+        )
+
+        # Merge ancestor into main (so ancestor becomes an ancestor of HEAD)
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "main"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "merge", "--no-ff", "ancestor", "-m", "merge"],
+            check=True, capture_output=True,
+        )
+
+        # Create a non-ancestor branch
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "newbranch"],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "other.md").write_text("other\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "other"],
+            check=True, capture_output=True,
+        )
+
+        # Go back to main
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "main"],
+            check=True, capture_output=True,
+        )
+
+        class StubReport:
+            newly_merged_branches: list = []
+            already_ancestor_branches: list = []
+            merged_branches = ["ancestor", "newbranch"]
+
+        newly, already = _split_merged_buckets(StubReport(), tmp_path)
+        # "ancestor" is already an ancestor of HEAD on main
+        assert "ancestor" in already
+        # "newbranch" is NOT an ancestor of HEAD on main
+        assert "newbranch" in newly
+
 
 class TestCliRendersBucketSplit:
     """Defect I3: end-to-end run_merge rendering separates the two buckets."""
@@ -507,3 +595,135 @@ class TestCliMergeBadInput:
         """Defect I2: shell metachars in branch names trigger rejection."""
         result = self._invoke(tmp_path, ["feat;ls"])
         assert result.exit_code != 0
+
+
+class TestRunMergeEndToEndAcceptance:
+    """End-to-end acceptance: ``run_merge`` must produce a real merge commit
+    AND advance the version file.
+
+    This exercises the silent-merge-loss class of bug that motivated the
+    self-check finding: a successful CLI exit MUST be accompanied by:
+
+      (a) HEAD parent_count >= 2 (a true merge commit), AND
+      (b) the merged branch is reachable from HEAD, AND
+      (c) the version file (pyproject.toml) has actually advanced.
+
+    Without (a)+(b)+(c) the silent-loss scenario reported by the user
+    ("Successfully merged 2 branch(es)" but git log shows no new merge
+    commit and version stays at 4.7.0) cannot be detected by unit tests
+    that mock the orchestrator.
+    """
+
+    def _init_versioned_repo(self, path: Path) -> str:
+        subprocess.run(
+            ["git", "init", str(path)], check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "config", "user.email", "test@test.com"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "config", "user.name", "Test"],
+            check=True, capture_output=True,
+        )
+        (path / ".gitignore").write_text(
+            "/se3/*\n!/se3/specs/\n!/se3/issues/\n"
+        )
+        (path / "pyproject.toml").write_text(
+            '[build-system]\nrequires = ["setuptools"]\n\n'
+            '[project]\nname = "test-pkg"\nversion = "1.0.0"\n'
+        )
+        (path / "README.md").write_text("# Test\n")
+        subprocess.run(
+            ["git", "-C", str(path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(path), "commit", "-m", "initial 1.0.0"],
+            check=True, capture_output=True,
+        )
+        result = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+        return result.stdout.strip()
+
+    def _git(self, path: Path, *args: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["git", "-C", str(path), *args],
+            capture_output=True, text=True, check=True,
+        )
+
+    def test_e2e_merge_advances_head_and_version(
+        self, tmp_path: Path,
+    ) -> None:
+        """A clean merge of a feature branch produces:
+
+          * HEAD parent_count >= 2 (merge commit)
+          * the feature branch is reachable from HEAD
+          * pyproject.toml's version has advanced (1.0.0 -> 1.0.x or 1.x.0)
+        """
+        default = self._init_versioned_repo(tmp_path)
+        pre_head = self._git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+
+        # Create a feature branch with a non-conflicting change and a
+        # version bump on the branch tip so the aggregator has a
+        # bump-source to consume; without this it would compute "no bump"
+        # and the version-advance assertion would be a no-op.
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "feat-e2e"],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "pyproject.toml").write_text(
+            '[build-system]\nrequires = ["setuptools"]\n\n'
+            '[project]\nname = "test-pkg"\nversion = "1.0.1"\n'
+        )
+        (tmp_path / "feat.txt").write_text("feature content\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "-A"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "feat: bump 1.0.1"],
+            check=True, capture_output=True,
+        )
+
+        # Return to the default branch for the merge.
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default],
+            check=True, capture_output=True,
+        )
+
+        from se3.commands.merge_cmd import run_merge
+
+        exit_code = run_merge(["feat-e2e"], project_root=tmp_path)
+        assert exit_code == 0, f"run_merge exited {exit_code}, expected 0"
+
+        # (a) HEAD has parent_count >= 2 — a real merge commit was created.
+        post_head = self._git(tmp_path, "rev-parse", "HEAD").stdout.strip()
+        assert post_head != pre_head, (
+            "HEAD did not advance — silent merge loss (this is exactly "
+            "the bug the self-check was added to catch)."
+        )
+        parents = self._git(
+            tmp_path, "rev-list", "--parents", "-n", "1", "HEAD",
+        ).stdout.strip().split()
+        # parents[0] is HEAD itself; remainder are the parents.
+        parent_count = len(parents) - 1
+        assert parent_count >= 2, (
+            f"HEAD has parent_count={parent_count}, expected >= 2 "
+            f"(merge commit). Output: {parents!r}"
+        )
+
+        # (b) The feature branch is reachable from HEAD.
+        # check=True so a non-zero rc raises before we get here.
+        self._git(
+            tmp_path, "merge-base", "--is-ancestor", "feat-e2e", "HEAD",
+        )
+
+        # (c) Version advanced.
+        new_version_text = (tmp_path / "pyproject.toml").read_text()
+        assert 'version = "1.0.0"' not in new_version_text, (
+            "pyproject.toml is still at 1.0.0 — version bump silently "
+            "dropped after a successful merge."
+        )

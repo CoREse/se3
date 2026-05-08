@@ -440,9 +440,10 @@ class TestRunMergeSuccess:
         )
 
         # Mock LLM resolver to fail — default strategy escalates to human call
+        from se3.engine.llm_caller import LLMCallError
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve",
-            lambda self, ctx, strategy: (_ for _ in ()).throw(RuntimeError("mock llm fail")),
+            lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock llm fail")),
         )
 
         exit_code = run_merge(["feature"], project_root=tmp_path)

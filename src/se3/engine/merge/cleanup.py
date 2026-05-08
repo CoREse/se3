@@ -49,6 +49,69 @@ logger = logging.getLogger(__name__)
 _PROTECTED_BRANCHES = frozenset({"main", "master"})
 
 
+def _read_init_default_branch(project_root: Path) -> Optional[str]:
+    """Return ``init.defaultBranch`` from git config, or ``None``.
+
+    Used to dynamically widen the protected-branch set so projects that
+    set ``init.defaultBranch`` to a non-default name (``develop``,
+    ``trunk``, ``main-line``) automatically protect their integration
+    branch from accidental ``--delete-merged`` removal.
+    """
+    try:
+        result = _run_git_locale(
+            project_root, "config", "--get", "init.defaultBranch",
+            check=False, timeout=15,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    branch = result.stdout.strip()
+    return branch or None
+
+
+def _load_protected_branches(project_root: Path) -> frozenset[str]:
+    """Return the effective protected-branch set for this project.
+
+    Combines:
+      * The hardcoded baseline (``main``, ``master``) for repos that
+        rely on git defaults without overriding them.
+      * ``init.defaultBranch`` from git config (auto-detected so a repo
+        that uses ``develop`` or ``trunk`` as its integration branch is
+        protected without extra configuration).
+      * ``merge.protected_branches`` from ``se3.yaml`` (a list of
+        additional branch names operators want to protect).
+
+    Loader failures fall back to the hardcoded baseline rather than
+    failing closed: protection is defense-in-depth, but a config-load
+    error MUST NOT block the cleanup (operators can always remove
+    branches manually with ``git branch -d``).
+    """
+    protected = set(_PROTECTED_BRANCHES)
+    default_branch = _read_init_default_branch(project_root)
+    if default_branch:
+        protected.add(default_branch)
+    try:
+        from ...config import load_project_yaml  # local import: avoid cycles
+        data, _src = load_project_yaml(project_root)
+    except (ImportError, OSError, ValueError, TypeError, AttributeError) as exc:
+        logger.debug(
+            "load_project_yaml failed for protected-branch lookup: %s — "
+            "using baseline {main, master%s}",
+            exc, f", {default_branch}" if default_branch else "",
+        )
+        return frozenset(protected)
+    if isinstance(data, dict):
+        merge_data = data.get("merge", {})
+        if isinstance(merge_data, dict):
+            extra = merge_data.get("protected_branches", [])
+            if isinstance(extra, list):
+                for entry in extra:
+                    if isinstance(entry, str) and entry:
+                        protected.add(entry)
+    return frozenset(protected)
+
+
 # Locale-independent environment for git invocations. Required for J2:
 # git's user-facing stderr (e.g. "Cannot delete branch 'X' checked out at
 # /path") is translated to the user's LANG/LC_MESSAGES locale, which makes
@@ -114,6 +177,16 @@ class _WorktreeRecord:
     branch: Optional[str] = None
     detached: bool = False
     bare: bool = False
+    # J7: True when the parsed ``branch`` field came from a non
+    # ``refs/heads/`` reference (e.g. ``refs/remotes/origin/foo``,
+    # ``refs/tags/foo``).  The cleanup machinery only operates on local
+    # branches, so a record with this flag set must NOT be matched
+    # against a target branch — otherwise a user-provided ref like
+    # ``refs/remotes/origin/foo`` could collide with a remote-tracking
+    # porcelain row and be silently treated as a bound worktree.  The
+    # ``branch`` field still preserves the verbatim ref so callers can
+    # render it for diagnostics.
+    branch_is_non_local: bool = False
 
 
 def _parse_worktree_porcelain(stdout: str) -> list[_WorktreeRecord]:
@@ -193,10 +266,22 @@ def _parse_worktree_porcelain(stdout: str) -> list[_WorktreeRecord]:
             if ref.startswith("refs/heads/"):
                 current.branch = ref[len("refs/heads/"):]
             else:
-                # An unexpected ref shape — record it verbatim. Detection
-                # paths key off branch == <our_branch> so a non-heads ref
-                # never matches a target branch and the record is harmless.
+                # Non-``refs/heads/`` shape (e.g. ``refs/remotes/origin/foo``,
+                # ``refs/tags/foo``). J7: preserve the verbatim ref for
+                # diagnostic rendering, but flag the record so the
+                # matching path in ``_get_worktree_path_for_branch`` skips
+                # it. Cleanup only operates on local branches; without
+                # the flag, a user-provided ref could collide with a
+                # remote-tracking porcelain row and be silently treated
+                # as a bound worktree.
+                logger.warning(
+                    "Worktree porcelain record points to non-`refs/heads/` "
+                    "ref %r; flagging as non-local (cleanup operates only "
+                    "on local branches)",
+                    ref,
+                )
                 current.branch = ref
+                current.branch_is_non_local = True
         elif line == "detached":
             current.detached = True
         elif line == "bare":
@@ -234,6 +319,13 @@ def _get_worktree_path_for_branch(
 
     records = _parse_worktree_porcelain(result.stdout)
     for record in records:
+        # J7: skip records whose ``branch`` field came from a
+        # non-``refs/heads/`` ref. Cleanup only operates on local
+        # branches; treating a remote-tracking record as a bound
+        # worktree for a user-provided branch would silently match a
+        # ref the operator never intended.
+        if record.branch_is_non_local:
+            continue
         if record.branch == branch and record.path:
             return Path(record.path)
     return None
@@ -316,6 +408,13 @@ class CleanupManager:
 
     def __init__(self, project_root: Path) -> None:
         self.project_root = project_root
+        # Exposed so callers (orchestrator's `except Exception` handler)
+        # can read the partial report when ``delete_merged_branches``
+        # raises mid-way.  Without this, the report-being-built would
+        # be local to the method and lost on exception, leaving the
+        # operator with no record of which branches were deleted before
+        # the failure.
+        self._current_report: Optional[CleanupReport] = None
 
     def delete_merged_branches(self, branches: list[str]) -> CleanupReport:
         """Safely delete *branches* that have been merged into the current branch.
@@ -341,8 +440,18 @@ class CleanupManager:
         Returns:
             CleanupReport summarising which branches were deleted, skipped
             due to dirty worktrees, or skipped because they are protected.
+
+        Note: the in-progress report is also kept on
+        ``self._current_report`` so callers can recover partial progress
+        if this method raises.
         """
         report = CleanupReport()
+        # Publish the in-progress report so an exception handler in the
+        # caller can still see what was deleted before the raise.  The
+        # cleanup loop appends to ``report`` as it goes, so reading
+        # ``self._current_report`` after a partial failure yields the
+        # correct snapshot of completed work.
+        self._current_report = report
 
         try:
             current_branch_result = _run_git_locale(
@@ -378,9 +487,21 @@ class CleanupManager:
 
         current_branch = current_branch_result.stdout.strip()
 
+        # G3 fix (low): widen the protected-branch set beyond the
+        # hardcoded ('main', 'master') tuple. Includes git's
+        # ``init.defaultBranch`` plus any names the operator listed in
+        # ``merge.protected_branches`` in se3.yaml. Repositories using
+        # ``develop`` / ``trunk`` / a custom default branch are now
+        # protected from accidental deletion without needing extra
+        # configuration when the default is set in git config.
+        effective_protected = _load_protected_branches(self.project_root)
+
         for branch in branches:
-            if branch in _PROTECTED_BRANCHES:
-                logger.info("Skipping protected branch '%s'", branch)
+            if branch in effective_protected:
+                logger.info(
+                    "Skipping protected branch '%s' (effective set: %s)",
+                    branch, sorted(effective_protected),
+                )
                 report.skipped_protected.append(branch)
                 continue
 
@@ -483,6 +604,29 @@ class CleanupManager:
                             if has_wt:
                                 _cleanup_git_worktree_metadata(
                                     self.project_root, branch,
+                                )
+                            # J3 follow-up: branch deleted and metadata
+                            # scrubbed, but the orphaned worktree
+                            # directory on disk remains. Emit an explicit
+                            # WARNING so the operator knows manual
+                            # ``rm -rf`` is needed before a future
+                            # ``git worktree add`` at the same path will
+                            # succeed; without this, that future failure
+                            # presents with no obvious cause.
+                            if wt_path is not None and wt_path.exists():
+                                logger.warning(
+                                    "Orphan worktree directory left on disk "
+                                    "for branch '%s': %s. Branch was deleted "
+                                    "and .git/worktrees metadata scrubbed, "
+                                    "but the directory itself could not be "
+                                    "removed (worktree-remove returned: %s). "
+                                    "Run `rm -rf %s` manually to reclaim the "
+                                    "path; otherwise a future "
+                                    "`git worktree add` at the same location "
+                                    "will fail.",
+                                    branch, wt_path,
+                                    remove_result.stderr.strip(),
+                                    wt_path,
                                 )
                             continue
                         # Both worktree removal AND the retry failed —

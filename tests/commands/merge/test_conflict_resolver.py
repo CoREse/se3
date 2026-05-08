@@ -83,13 +83,39 @@ class TestHunkResolutionValidation:
         with pytest.raises(HunkValidationError, match=r"exceeds maximum"):
             HunkResolution(start_line=1, end_line=10**12)
 
-    def test_string_start_line_raises(self) -> None:
-        with pytest.raises(HunkValidationError, match=r"must be an int"):
-            HunkResolution(start_line="5", end_line=10)  # type: ignore[arg-type]
+    def test_string_start_line_accepts_digits(self) -> None:
+        h = HunkResolution(start_line="5", end_line=10)  # type: ignore[arg-type]
+        assert h.start_line == 5
 
-    def test_string_end_line_raises(self) -> None:
+    def test_string_start_line_rejects_non_digit(self) -> None:
+        with pytest.raises(HunkValidationError, match=r"must be an int"):
+            HunkResolution(start_line="abc", end_line=10)  # type: ignore[arg-type]
+
+    def test_string_end_line_accepts_digits(self) -> None:
+        h = HunkResolution(start_line=1, end_line="5")  # type: ignore[arg-type]
+        assert h.end_line == 5
+
+    def test_string_end_line_rejects_non_digit(self) -> None:
         with pytest.raises(HunkValidationError, match=r"must be an int"):
             HunkResolution(start_line=1, end_line="abc")  # type: ignore[arg-type]
+
+    def test_arabic_indic_digit_rejected_as_validation_error(self) -> None:
+        # Regression: ``str.isdigit()`` returns True for Arabic-Indic
+        # numerals (and many other Unicode digits) on which ``int()``
+        # raises ``ValueError``. We must demote that to
+        # HunkValidationError so the per-hunk failure path catches it
+        # rather than crashing the whole merge.
+        with pytest.raises(HunkValidationError, match=r"must be an int"):
+            HunkResolution(start_line="٠١", end_line=10)  # type: ignore[arg-type]
+        with pytest.raises(HunkValidationError, match=r"must be an int"):
+            HunkResolution(start_line=1, end_line="٠١")  # type: ignore[arg-type]
+
+    def test_string_with_whitespace_accepts_after_strip(self) -> None:
+        # Whitespace-padded ASCII digits should still parse cleanly,
+        # mirroring lenient JSON-from-LLM input handling.
+        h = HunkResolution(start_line=" 5 ", end_line="10")  # type: ignore[arg-type]
+        assert h.start_line == 5
+        assert h.end_line == 10
 
     def test_float_start_line_raises(self) -> None:
         with pytest.raises(HunkValidationError, match=r"must be an int"):

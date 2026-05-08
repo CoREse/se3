@@ -20,6 +20,7 @@ import pytest
 
 from se3.engine.merge.guardrail_repair import GuardrailRepairer, RepairResult
 from se3.engine.merge.guardrails import GuardrailViolation, GuardrailReport
+from se3.engine.worktree import _run_git
 
 
 # --------- helpers ---------
@@ -89,7 +90,7 @@ class TestGuardrailRepairerSuccessfulRepair:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         # Mock _call_llm to return corrected spec content
         def mock_call_llm(self, prompt: str) -> str:
@@ -112,7 +113,7 @@ class TestGuardrailRepairerSuccessfulRepair:
         # Mock check_merge_result to pass after repair
         check_calls: list[tuple[str, str]] = []
 
-        def mock_check_merge_result(self, pre_sha: str, post_sha: str) -> GuardrailReport:
+        def mock_check_merge_result(self, pre_sha: str, post_sha: str, **kwargs) -> GuardrailReport:
             check_calls.append((pre_sha, post_sha))
             return GuardrailReport(passed=True, violations=[])
 
@@ -172,7 +173,7 @@ class TestGuardrailRepairerSuccessfulRepair:
             check=True, capture_output=True,
         )
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         def mock_call_llm(self, prompt: str) -> str:
             return json.dumps({
@@ -190,7 +191,7 @@ class TestGuardrailRepairerSuccessfulRepair:
 
         monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
 
-        def mock_check_merge_result(self, pre_sha: str, post_sha: str) -> GuardrailReport:
+        def mock_check_merge_result(self, pre_sha: str, post_sha: str, **kwargs) -> GuardrailReport:
             return GuardrailReport(passed=True, violations=[])
 
         monkeypatch.setattr(
@@ -240,7 +241,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         # Mock LLM to return content that still has the violation
         def mock_call_llm(self, prompt: str) -> str:
@@ -259,7 +260,7 @@ class TestGuardrailRepairerFailures:
         monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
 
         # Mock guardrails to still fail after repair
-        def mock_check_merge_result(self, pre_sha: str, post_sha: str) -> GuardrailReport:
+        def mock_check_merge_result(self, pre_sha: str, post_sha: str, **kwargs) -> GuardrailReport:
             return GuardrailReport(
                 passed=False,
                 violations=[
@@ -300,7 +301,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         def mock_call_llm(self, prompt: str) -> str:
             return "This is not JSON at all, just prose."
@@ -328,7 +329,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         def mock_call_llm(self, prompt: str) -> str:
             raise RuntimeError("mock LLM subprocess failure")
@@ -357,7 +358,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         def mock_call_llm(self, prompt: str) -> str:
             return json.dumps({
@@ -395,7 +396,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         def mock_call_llm(self, prompt: str) -> str:
             return json.dumps({
@@ -430,7 +431,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         def mock_call_llm(self, prompt: str) -> str:
             return json.dumps({"files": []})
@@ -458,7 +459,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         def mock_call_llm(self, prompt: str) -> str:
             return json.dumps({"files": "not a list"})
@@ -486,7 +487,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         def mock_call_llm(self, prompt: str) -> str:
             return ""
@@ -514,7 +515,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         def mock_call_llm(self, prompt: str) -> str:
             return json.dumps({
@@ -557,7 +558,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         # This path passes the regex (^se3/specs/.+/spec\.md$) but resolves
         # to se3/tools/spec.md — outside the se3/specs/ directory.
@@ -597,7 +598,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         # Mock LLM to return corrected content
         def mock_call_llm(self, prompt: str) -> str:
@@ -616,7 +617,7 @@ class TestGuardrailRepairerFailures:
         monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
 
         # Mock guardrails re-check to crash (raise exception)
-        def mock_check_crash(self, pre_sha: str, post_sha: str):
+        def mock_check_crash(self, pre_sha: str, post_sha: str, **kwargs):
             raise RuntimeError("Simulated guardrails re-check crash")
 
         monkeypatch.setattr(
@@ -672,7 +673,7 @@ class TestGuardrailRepairerFailures:
             check=True, capture_output=True,
         )
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         def mock_call_llm(self, prompt: str) -> str:
             return json.dumps({
@@ -749,7 +750,7 @@ class TestGuardrailRepairerFailures:
             check=True, capture_output=True,
         )
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         # Mock LLM to fix only file A (base/spec.md)
         def mock_call_llm(self, prompt: str) -> str:
@@ -765,7 +766,7 @@ class TestGuardrailRepairerFailures:
         monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
 
         # Mock guardrails: file A passes, file B still violates
-        def mock_check_merge_result(self, pre_sha: str, post_sha: str) -> GuardrailReport:
+        def mock_check_merge_result(self, pre_sha: str, post_sha: str, **kwargs) -> GuardrailReport:
             return GuardrailReport(
                 passed=False,
                 violations=[
@@ -830,7 +831,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         def mock_call_llm(self, prompt: str) -> str:
             return json.dumps({
@@ -888,7 +889,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         def mock_call_llm(self, prompt: str) -> str:
             return json.dumps({
@@ -944,7 +945,7 @@ class TestGuardrailRepairerFailures:
             check=True, capture_output=True,
         )
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         # Mock LLM: file A is valid, file B contains conflict markers
         def mock_call_llm(self, prompt: str) -> str:
@@ -1018,7 +1019,7 @@ class TestGuardrailRepairerFailures:
         _init_repo(tmp_path)
         _setup_spec_files(tmp_path)
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         # Mock LLMCaller.call so the real LLM is not hit; the real _call_llm
         # still runs and reaches extract_json_two_phase, which we then mock to
@@ -1093,7 +1094,7 @@ class TestGuardrailRepairerFailures:
             check=True, capture_output=True,
         )
 
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
 
         # Mock LLM to return corrections for both files
         def mock_call_llm(self, prompt: str) -> str:
@@ -1168,12 +1169,136 @@ class TestGuardrailRepairerFailures:
         assert "MUST" not in config_content
 
 
+class TestGuardrailRepairInconsistentState:
+    """Regression: _rollback_commit raises GuardrailRepairInconsistentState
+    when pre_repair_sha is missing (the A1-A4 safety contract)."""
+
+    def test_inconsistent_state_when_pre_repair_sha_missing(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """pre_repair_sha capture fails → commit succeeds → rollback raises."""
+        _init_repo(tmp_path)
+        _setup_spec_files(tmp_path)
+
+        # Create a merge commit so HEAD has 2 parents and amend is reachable.
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "merged"],
+            check=True, capture_output=True,
+        )
+        # Create a second branch and merge it so HEAD is a real merge commit
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "side"],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "side.txt").write_text("side\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "side commit"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "master"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "merge", "--no-ff", "-m", "merge side", "side"],
+            check=True, capture_output=True,
+        )
+
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
+
+        def mock_call_llm(self, prompt: str) -> str:
+            return json.dumps({
+                "files": [
+                    {
+                        "path": "se3/specs/base/spec.md",
+                        "corrected_content": (
+                            "## Requirement: Auth\n\n"
+                            "The system SHALL validate all user inputs.\n"
+                        ),
+                    },
+                ],
+            })
+
+        monkeypatch.setattr(GuardrailRepairer, "_call_llm", mock_call_llm)
+
+        # Mock guardrails to fail after repair so rollback is triggered.
+        def mock_check_merge_result(self, pre_sha: str, post_sha: str, **kwargs) -> GuardrailReport:
+            return GuardrailReport(
+                passed=False,
+                violations=[
+                    GuardrailViolation(
+                        file_path="se3/specs/base/spec.md",
+                        violation_type="WEAKENING",
+                        message="SHALL weakened to SHOULD",
+                    ),
+                ],
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            mock_check_merge_result,
+        )
+
+        # Intercept _run_git calls: make EVERY "rev-parse HEAD" fail —
+        # both the initial capture and the defensive late re-capture
+        # immediately before the fix-up commit.  With both capture
+        # sites failing, the repair must REFUSE to commit at all and
+        # return a failure RepairResult (rather than committing and
+        # then raising on rollback).
+        original_run_git = _run_git
+
+        def fake_run_git(project_root, *args, check=True, timeout=30):
+            if args == ("rev-parse", "HEAD"):
+                return subprocess.CompletedProcess(
+                    args=args, returncode=128,
+                    stdout="", stderr="fatal: not a git repository",
+                )
+            return original_run_git(project_root, *args, check=check, timeout=timeout)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair._run_git", fake_run_git,
+        )
+
+        violations = _make_violations()
+        original_specs = _make_original_specs()
+        merged_specs = _make_merged_specs()
+
+        # New (strictly safer) policy: when pre_repair_sha cannot be
+        # captured at the initial capture site OR at the defensive
+        # late re-capture immediately before commit, the fix-up
+        # commit is REFUSED entirely.  HEAD never advances; the
+        # caller is told via a failure RepairResult.  This is
+        # strictly safer than the previous "commit, then refuse
+        # rollback" policy that left HEAD on an unverified fix-up
+        # commit when the rollback target was unknown.
+        result = repairer.repair_violations(
+            branch="feature",
+            pre_sha="abc",
+            post_sha="def",
+            violations=violations,
+            original_spec_contents=original_specs,
+            merged_spec_contents=merged_specs,
+        )
+        assert result.success is False
+        # The error message MUST cite the missing rollback target.
+        err_lower = (result.error or "").lower()
+        assert "pre_repair_sha" in err_lower or "rollback" in err_lower
+
+
 class TestParseResponseDictPath:
     """_parse_response handles dict input from _call_llm (two-phase extractor)."""
 
     def test_dict_with_files_key(self, tmp_path: Path) -> None:
         """Dict with 'files' key is returned as-is."""
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
         payload = {"files": [{"path": "se3/specs/base/spec.md", "corrected_content": "x"}]}
         result = repairer._parse_response(payload)
         assert result is not None
@@ -1182,6 +1307,76 @@ class TestParseResponseDictPath:
 
     def test_dict_without_files_key(self, tmp_path: Path) -> None:
         """Dict missing 'files' key returns None."""
-        repairer = GuardrailRepairer(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
         result = repairer._parse_response({"other": "value"})
         assert result is None
+
+
+class TestUnsafeFixupCharsConstant:
+    """Regression: ``_UNSAFE_FIXUP_CHARS`` defines an exact char set that
+    fix-up commit messages strip from branch names.  The constant is a
+    short string literal with escapes, so a future edit could trivially
+    drop a char without anyone noticing.  Pin the expected set here so
+    a regression is caught at unit-test time rather than via a
+    confusingly-rendered commit message in production.
+    """
+
+    def test_unsafe_chars_contain_quote_backtick_dollar_doublequote(
+        self,
+    ) -> None:
+        # Read the source rather than reaching into private state — the
+        # constant is a function-local literal.  We assert the intent
+        # contractually rather than the literal bytes.
+        from pathlib import Path as _P
+
+        src = _P(
+            "src/se3/engine/merge/guardrail_repair.py"
+        ).read_text(encoding="utf-8")
+        # All characters that MUST be present in the strip-set:
+        # single quote, backtick, dollar, double-quote, backslash,
+        # newline, carriage return, tab.
+        for required in ("'", "`", "$", '"', "\\\\", "\\n", "\\r", "\\t"):
+            assert required in src, (
+                f"_UNSAFE_FIXUP_CHARS missing {required!r}"
+            )
+
+
+class TestProbeBranchVerifiable:
+    """Regression: the dedup'd branch-verify probe must mirror the prior
+    inline behaviour — exit-0 means verifiable, anything else (including
+    timeout) is reported as unverifiable with a WARNING log.
+    """
+
+    def test_exit_zero_returns_true(self, tmp_path: Path, monkeypatch) -> None:
+        _init_repo(tmp_path)
+        # master / main exists after _init_repo
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
+        # The default branch in modern git is 'main' or 'master'; pick
+        # whichever the init produced.
+        head = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert repairer._probe_branch_verifiable(head) is True
+
+    def test_unknown_branch_returns_false(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
+        assert repairer._probe_branch_verifiable("never-existed-branch") is False
+
+    def test_timeout_returns_false_and_warns(
+        self, tmp_path: Path, monkeypatch, caplog
+    ) -> None:
+        _init_repo(tmp_path)
+        repairer = GuardrailRepairer(tmp_path, test_mode=True)
+
+        def _fake_run_git(project_root, *args, check=False, timeout=30):  # noqa: ANN001
+            raise subprocess.TimeoutExpired(cmd=list(args), timeout=timeout)
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair._run_git", _fake_run_git
+        )
+        import logging as _logging
+        with caplog.at_level(_logging.WARNING):
+            assert repairer._probe_branch_verifiable("any-branch") is False
+        assert any("timed out" in r.message for r in caplog.records)

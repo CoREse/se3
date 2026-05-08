@@ -9,12 +9,20 @@ from pathlib import Path
 
 import pytest
 
+from pathlib import Path
+
+import se3
+
 from se3.commands.merge.merge_lock import (
     MergeLock,
     MergeLockBusy,
     MergeLockStale,
     acquire_merge_lock,
 )
+
+# Dynamically resolve the src/ root so subprocess imports work regardless
+# of the current working directory or worktree layout.
+_SRC_ROOT = str(Path(se3.__file__).resolve().parent.parent)
 
 
 @pytest.fixture
@@ -117,6 +125,42 @@ class TestMergeLockStale:
         assert int(pid_str) == os.getpid()
         lock.release()
 
+    def test_unparseable_pid_raises_stale_with_none(self, tmp_project: Path) -> None:
+        """When the lock file contains an unparseable PID and another process
+        holds the flock, MergeLockStale carries holder_pid=None (not the
+        ambiguous sentinel 0)."""
+        lock_path = tmp_project / "se3" / "state" / "merge.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text("not-a-number\n", encoding="utf-8")
+
+        # Hold the lock in a subprocess so the main-process acquire fails.
+        script = f"""
+import fcntl, os, time
+fd = os.open({str(lock_path)!r}, os.O_RDWR | os.O_CREAT)
+fcntl.flock(fd, fcntl.LOCK_EX)
+os.write(fd, b"999999\\n")
+os.fsync(fd)
+time.sleep(5)
+"""
+        holder = subprocess.Popen(
+            [sys.executable, "-c", script],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        try:
+            # Wait for the subprocess to acquire the lock.
+            import time
+            time.sleep(0.3)
+
+            lock = MergeLock(tmp_project)
+            with pytest.raises(MergeLockStale) as exc_info:
+                lock.acquire()
+            assert exc_info.value.holder_pid is None
+            assert "unparseable" in str(exc_info.value).lower()
+        finally:
+            holder.terminate()
+            holder.wait(timeout=5)
+
 
 class TestMergeLockSubprocess:
     """Verify lock is actually exclusive across subprocesses."""
@@ -128,7 +172,7 @@ class TestMergeLockSubprocess:
             # Run a small Python script in a subprocess that tries to acquire.
             script = f"""
 import sys
-sys.path.insert(0, "/data/cre/workspace/se3.0/se3/worktrees/impl-20260507-101152_5f945094-G1/src")
+sys.path.insert(0, {_SRC_ROOT!r})
 from se3.commands.merge.merge_lock import MergeLock, MergeLockBusy
 lock = MergeLock({str(tmp_project)!r})
 try:

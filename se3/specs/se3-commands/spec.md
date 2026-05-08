@@ -530,6 +530,190 @@ The fast-strategy post-merge guardrail repair loop SHALL detect when the LLM is 
 - **THEN** the merge is aborted with the standard fast-mode "could not auto-repair guardrails violation" failure
 - **AND** no human call file is created (stall escalation does not apply)
 
+### Requirement: `se3 merge` Concurrency Lock
+
+`se3 merge` SHALL serialize concurrent invocations within the same project root via an exclusive non-blocking file lock at `se3/state/merge.lock`. A second `se3 merge` invoked while another is in progress SHALL fail immediately with the `lock_busy` failure category rather than queue or wait.
+
+**Lock contract:**
+- The lock file records the holder process's PID.
+- A new invocation acquires the lock with `fcntl.flock(LOCK_EX | LOCK_NB)`; on contention, the call surfaces `MergeLockBusy` and the CLI exits with the general-failure code.
+- A lock file whose recorded PID no longer exists is considered stale and MAY be reclaimed (with jittered backoff to avoid thundering herd) and the failure category is `lock_stale` if reclamation itself fails.
+- The lock is released automatically on process exit, context-manager exit, or explicit release.
+- An inner caller (e.g. the orchestrator) that detects the lock is already held by the *same* process MUST skip re-acquisition rather than risk a same-process flock collision.
+
+#### Scenario: Concurrent merge rejected
+- **GIVEN** an `se3 merge` invocation is in progress and currently holds `se3/state/merge.lock`
+- **WHEN** a second `se3 merge` is launched in the same project root
+- **THEN** the second invocation exits immediately with the `lock_busy` failure category
+- **AND** the first invocation continues unaffected
+
+#### Scenario: Stale lock reclaimed
+- **GIVEN** `se3/state/merge.lock` records a holder PID that no longer exists in the OS process table
+- **WHEN** a new `se3 merge` is invoked
+- **THEN** the stale lock is reclaimed and the merge proceeds normally
+
+### Requirement: `se3 merge` Success Post-Conditions
+
+Every branch that `se3 merge` reports as successfully merged SHALL pass three independent post-condition checks before the per-branch outcome is finalized. A violation produces a typed failure in the `postcond_*` family and halts the sequence; subsequent branches SHALL NOT be attempted.
+
+**Post-conditions:**
+1. **Ancestry** — `git merge-base --is-ancestor <branch> HEAD` returns 0 (the branch is reachable from HEAD). A `1` returncode produces `postcond_branch_not_merged`; any other non-zero returncode (git error, signalled child) produces `postcond_branch_unresolvable` rather than a definitive merge-loss diagnosis.
+2. **Merge commit** — HEAD has at least 2 parents. This check is skipped when the branch was already an ancestor of HEAD before the merge attempt (a no-op produces no merge commit). A failure is reported as `postcond_head_not_merge_commit`.
+3. **Version bumped** — when version aggregation ran, the on-disk version (read with size and duration caps via O_NOFOLLOW) is strictly greater than the pre-merge version. A failure is reported as `postcond_version_not_bumped`.
+
+A timeout while reading the version file or running `git merge-base --is-ancestor` produces `postcond_check_timeout` rather than a silent skip.
+
+#### Scenario: Branch reported merged but is not an ancestor of HEAD
+- **GIVEN** a merge step reports success for branch `feat/x`
+- **AND** post-condition checks find `git merge-base --is-ancestor feat/x HEAD` returns 1
+- **WHEN** the orchestrator finalizes the per-branch outcome
+- **THEN** the outcome is failed with `postcond_branch_not_merged`
+- **AND** subsequent branches in the argument list are NOT attempted
+
+#### Scenario: Merge commit lost after guardrail repair
+- **GIVEN** a guardrail repair step produces a HEAD that has only one parent (the merge commit was overwritten)
+- **WHEN** the post-condition check runs
+- **THEN** the outcome is failed with `postcond_head_not_merge_commit`
+
+#### Scenario: Version aggregation reports success but on-disk version unchanged
+- **GIVEN** the version aggregator returns `success=True` but the on-disk version equals the pre-merge version
+- **WHEN** the post-condition check runs
+- **THEN** the outcome is failed with `postcond_version_not_bumped`
+
+### Requirement: `se3 merge` Repository State Preconditions
+
+`se3 merge` SHALL fail-fast — before attempting any merge — when the repository is in an unsupported state. Each rejection produces a typed failure category drawn from `repo_empty`, `repo_detached_head`, `repo_shallow`, `repo_unsupported_state`.
+
+**Rejected states:**
+- **Empty repository** — no commits on the current branch.
+- **Detached HEAD** — `git symbolic-ref HEAD` fails to resolve a branch name.
+- **Shallow clone** — `.git/shallow` exists, since `git merge-base` and ancestry post-conditions cannot give correct verdicts on truncated history.
+
+#### Scenario: Detached HEAD rejected
+- **GIVEN** the project root has detached HEAD
+- **WHEN** the user runs `se3 merge feat/x`
+- **THEN** the command exits with `repo_detached_head` failure category
+- **AND** no git merge is attempted
+
+#### Scenario: Shallow clone rejected
+- **GIVEN** the project root is a shallow clone (`.git/shallow` exists)
+- **WHEN** the user runs `se3 merge feat/x`
+- **THEN** the command exits with `repo_shallow` failure category
+
+### Requirement: `se3 merge` Input Validation
+
+`se3 merge` SHALL validate branch arguments before invoking any git command and reject malformed or unsafe inputs with typed failure categories.
+
+**Validation rules:**
+- An empty branch list exits with `no_branches` failure category. Pass-through to the orchestrator with zero loops is NOT permitted (it would falsely report success on no-op input).
+- Branch names beginning with `-` (which git would interpret as an option) are rejected.
+- Branch names containing shell metacharacters or unprintable characters that could be exploited via subprocess invocation are rejected.
+- Branch existence is validated via `git show-ref --verify` whose returncode is explicitly checked; a non-existent branch is rejected before the merge step is entered.
+
+#### Scenario: Empty branch list rejected
+- **WHEN** the user runs `se3 merge` with no branch arguments
+- **THEN** the command exits with `no_branches` failure category and a non-zero exit code
+- **AND** no merge work is performed
+
+#### Scenario: Leading-dash branch name rejected
+- **WHEN** the user runs `se3 merge -- --force` or `se3 merge -delete`
+- **THEN** the command rejects the branch name without invoking git
+- **AND** the failure message identifies the unsafe argument
+
+#### Scenario: Output distinguishes newly-merged from already-merged
+- **GIVEN** an `se3 merge` invocation that includes both branches that produced new merge commits and branches that were already ancestors of HEAD
+- **WHEN** the CLI prints the summary
+- **THEN** newly-merged branches and already-ancestor branches are listed in distinct buckets
+- **AND** the wording does not conflate the two categories
+
+### Requirement: `se3 merge` LLM Call Tracing
+
+Every LLM call issued during `se3 merge` (conflict resolution, guardrail repair, version analysis prompts, etc.) SHALL be recorded as a JSON-Lines record under `se3/logs/llm/`. Trace files SHALL be named `merge_<timestamp>_<seq>.jsonl` and rotate when a single file exceeds an implementation-defined size cap so a long-running merge does not produce an unbounded single file.
+
+**Per-record fields (minimum):**
+- Sequence number, ISO timestamp, agent identifier.
+- Prompt preview and response preview (truncated; full prompts live elsewhere if needed).
+- Duration in seconds.
+- Outcome (`success`, `error`, `timeout`, `retry`, `cancelled`).
+- Optional error detail.
+- Free-form metadata dict (model name, temperature, etc.).
+
+Trace files SHALL be append-only and fsync'd after each record. Concurrent writes within a single process SHALL be serialized via a threading lock; cross-process concurrency is prevented by the merge lock requirement above.
+
+The orchestrator SHALL share a single `LLMCaller` instance across `ConflictResolver` and `GuardrailRepairer` so that prompt-cache reuse and per-call quota are shared across steps.
+
+#### Scenario: Each LLM call produces a trace record
+- **GIVEN** a merge whose conflict resolution and guardrail repair each issue one LLM call
+- **WHEN** the merge completes
+- **THEN** `se3/logs/llm/merge_<timestamp>_<seq>.jsonl` contains at least two records, one per call
+- **AND** each record carries the agent name, duration, and outcome fields
+
+### Requirement: `se3 merge` Secret Redaction in Logs
+
+Diffs, prompts, and trace records written by `se3 merge` SHALL pass through a secret redactor before persistence. The redactor masks common credential patterns including API keys (`sk-...`, `ak-...`), GitHub personal access tokens (`ghp_...`), PyPI / npm tokens, Bearer header values, and `password` fields in TOML / JSON / YAML.
+
+An optional allowlist MAY exempt specific keys or patterns from redaction (e.g. test fixtures that intentionally contain dummy tokens).
+
+#### Scenario: API key in diff is redacted before logging
+- **GIVEN** a conflict diff that contains the literal string `sk-1234567890abcdef`
+- **WHEN** the diff is written to the merge log file or LLM trace record
+- **THEN** the persisted text replaces the secret with a masked form (e.g. `sk-***`)
+
+### Requirement: `se3 merge` Amend Safety Contract
+
+Any `git commit --amend` performed by `se3 merge` (version aggregation, guardrail repair, etc.) SHALL save the pre-amend HEAD SHA before the amend so that rollback uses `git reset --soft <pre_amend_sha>` rather than `git reset --soft HEAD~1`. Direct `git reset --soft HEAD~1` after amending a merge commit is prohibited because `HEAD~1` then points to the merge commit's first parent (the pre-merge HEAD) rather than to the merge commit itself, silently discarding the entire merge.
+
+**Repair-path preference:**
+- The guardrail repair step SHALL prefer creating a *fix-up commit* on top of the merge commit (a new commit whose parent is the merge commit). The amend path is reserved as a last-resort.
+- Before any amend, the repair step SHALL assert that HEAD is still a merge commit (`git rev-parse HEAD^2` succeeds) and abort with `inconsistent_repair_state` if not.
+- The repair-stall detector SHALL initialize the stall-tracking hash to a sentinel value (not the empty string) so that the first iteration's hash cannot accidentally match it and bypass the stall check.
+
+A new Requirement (the version aggregator) similarly atomic-writes `pyproject.toml` via temp-file + `os.replace` and restores the original file content + `git reset HEAD pyproject.toml` on every failure path.
+
+#### Scenario: Guardrail repair rollback uses pre-amend SHA
+- **GIVEN** the guardrail repair step uses the amend path on a merge commit
+- **AND** the repair fails the post-repair guardrails re-check
+- **WHEN** the orchestrator rolls back
+- **THEN** rollback uses `git reset --soft <pre_amend_sha>` (the SHA captured before the amend)
+- **AND** the merge commit is preserved (not discarded by `HEAD~1` over-reset)
+
+#### Scenario: Repair detects HEAD is no longer a merge commit
+- **GIVEN** an external process modified HEAD between merge and repair
+- **AND** HEAD now has only one parent
+- **WHEN** the guardrail repair step attempts to amend
+- **THEN** the step refuses to amend and reports `inconsistent_repair_state`
+
+### Requirement: `se3 merge` Typed Failure Reasons
+
+`se3 merge` SHALL report failures via a closed enumeration (typed `FailureReason`). Each reason has a stable lower-case string spelling for legacy compatibility and a numeric grouping by subsystem so new values can be added without renumbering existing ones.
+
+**Subsystem groupings:**
+| Range | Family |
+|-------|--------|
+| `0xx` | Clean exit / no failure |
+| `1xx` | Pending-human (paused) |
+| `2xx` | Git-level merge failures |
+| `3xx` | Conflict resolution / LLM resolution |
+| `4xx` | Fast-strategy aborts |
+| `5xx` | Guardrail violations and repair |
+| `6xx` | Rollback failures |
+| `7xx` | Human-call write failures |
+| `8xx` | Runtime data sync failures |
+| `9xx` | Post-condition violations |
+| `91x` | Silent merge loss / timeout variants |
+| `92x` | Version anomaly (already-at-target / higher-than-target) |
+| `93x` | Unsupported repository state |
+| `98x` | Input validation |
+| `99x` | Lock contention |
+
+`MergeReport` SHALL expose both the legacy string and the typed enum (`failure_reason_enum` property) so consumers can switch on the typed value while persistence keeps the stable string surface. Compound diagnostic strings (e.g. `"fast_abort: <stderr>"`) SHALL be decomposed into a base reason plus a separate `failure_detail` string rather than embedded in the reason field. `MergeReport` SHALL also expose three semantically distinct branch-outcome buckets — `newly_merged_branches`, `already_ancestor_branches`, `merged_with_warnings` — replacing the legacy overloaded `merged_branches` aggregate (which is preserved as a backward-compatible aggregate).
+
+#### Scenario: Failure reason carries typed enum and string spelling
+- **GIVEN** a merge fails with a guardrail violation that the LLM repair could not fix
+- **WHEN** the report is persisted
+- **THEN** the persisted JSON contains the legacy string `guardrail_repair_failed`
+- **AND** the in-memory `MergeReport.failure_reason_enum` returns `FailureReason.GUARDRAIL_REPAIR_FAILED`
+
 ### Requirement: `se3 merge-respond` Command
 
 The `se3 merge-respond` command SHALL process an MCP call response file produced by `se3 merge` when conflicts were escalated for human decision.

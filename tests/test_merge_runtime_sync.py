@@ -1078,15 +1078,17 @@ class TestOSErrorPropagation:
 
         call_count = 0
         original_open = os.open
+        # E1/E5 TOCTOU hardening: ``_atomic_write_bytes`` now opens the
+        # parent directory with ``O_DIRECTORY|O_NOFOLLOW`` so the rename
+        # is pinned to a specific dirfd. This adds one extra ``os.open``
+        # call per write. Per-file os.open count: 1 (read source) +
+        # 1 (mkstemp) + 1 (parent dir_fd) = 3.  Fail from the 4th call
+        # onward so the first file's read+write completes (3 calls),
+        # then the second file's first os.open trips.
         def _intermittent_open(path, flags, *args, **kwargs):
             nonlocal call_count
             call_count += 1
-            # The first file's read+write consumes 2 os.open calls
-            # (read via _safe_read_and_stat, write via _atomic_write_bytes
-            # with O_NOFOLLOW). Failing from the third call onward makes
-            # the second file's read fail — preserving the original test
-            # intent: earlier file persists, later file is skipped.
-            if call_count >= 3:
+            if call_count >= 4:
                 raise PermissionError(13, "Permission denied", str(path))
             return original_open(path, flags, *args, **kwargs)
 
@@ -1146,7 +1148,7 @@ class TestOSErrorPropagation:
         (source_se3 / "history").mkdir(parents=True)
         (source_se3 / "history" / "flow1.log").write_text("log content")
 
-        def _failing_atomic(dest_path: Path, content: bytes) -> None:
+        def _failing_atomic(dest_path: Path, content: bytes, **kwargs) -> None:
             raise OSError(28, "No space left on device")
 
         monkeypatch.setattr(_rs, "_atomic_write_bytes", _failing_atomic)
@@ -1879,7 +1881,7 @@ class TestBypassOSError:
         original_atomic = _rs._atomic_write_bytes
         call_count = 0
 
-        def _failing_atomic(dest_path: Path, content: bytes) -> None:
+        def _failing_atomic(dest_path: Path, content: bytes, **kwargs) -> None:
             nonlocal call_count
             call_count += 1
             if "collides.log.from-feature" in str(dest_path):
@@ -1919,7 +1921,7 @@ class TestBypassOSError:
         (target_se3 / "history").mkdir(parents=True)
         (target_se3 / "history" / "collides.log").write_text("target content")
 
-        def _failing_atomic(dest_path: Path, content: bytes) -> None:
+        def _failing_atomic(dest_path: Path, content: bytes, **kwargs) -> None:
             if "collides.log.from-feature" in str(dest_path):
                 raise OSError(36, "File name too long", str(dest_path))
             return None  # Other writes treated as no-op (shouldn't be hit)
@@ -2056,7 +2058,7 @@ class TestBypassOSError:
 
         original_atomic = _rs._atomic_write_bytes
 
-        def _failing_atomic(dest_path: Path, content: bytes) -> None:
+        def _failing_atomic(dest_path: Path, content: bytes, **kwargs) -> None:
             if "collides.log.from-feature" in str(dest_path):
                 raise OSError(28, "No space left on device")
             return original_atomic(dest_path, content)
@@ -2438,22 +2440,70 @@ class TestSafeReadAndStatParentSymlinkBoundary:
         # the report-list inspection.
         assert not (target_se3 / "history" / "sym.log").exists()
 
-    def test_safe_read_and_stat_parent_symlink_evades_lexical_check(
+    def test_collect_files_filters_symlink_to_parent_inside_target(
         self, tmp_path: Path,
     ) -> None:
-        """Documents the lexical-normpath gap directly: when
-        ``_safe_read_and_stat`` is called with a symlink path whose
-        target lexically lands inside ``source_se3`` but whose actual
-        parent is a symlink pointing outside, the lexical
-        ``relative_to`` check passes and the function returns the
-        external content.
+        """Self-check Fix #6 fixture: a malicious source worktree with a
+        parent-component symlink pointing INTO the target_se3 tree must
+        not produce a write under target via the read-then-copy flow.
 
-        This pins the current behavior so a future stricter check (e.g.
-        fd-based traversal via ``openat`` per component) flips this
-        assertion and the test must be updated alongside the code.  The
-        practical risk is low because the source worktree is
-        user-controlled; ``_collect_files_under`` already filters this
-        case out at the public-API layer (see the test above).
+        ``_is_outside_source_symlink`` only catches the case where a
+        symlink's resolved target leaves source_se3.  A symlink whose
+        intermediate parent points into target_se3 (so reading the
+        resolved file would actually be reading from target itself)
+        could either confuse the copy semantics or, after a careless
+        change, ricochet target content back into the runtime sync
+        report.  This test pins the documented behavior: such entries
+        are rejected at collection time and never produce a target-side
+        write.
+        """
+        import os
+
+        source = tmp_path / "source"
+        target = tmp_path / "target"
+        source_se3 = source / "se3"
+        target_se3 = target / "se3"
+
+        (source_se3 / "history").mkdir(parents=True)
+        (target_se3 / "history").mkdir(parents=True)
+        (target_se3 / "history" / "preexisting.log").write_text(
+            "TARGET_PREEXISTING"
+        )
+
+        # parent_sym in source's history points INTO target_se3/history
+        parent_sym = source_se3 / "history" / "into_target"
+        os.symlink(str(target_se3 / "history"), str(parent_sym))
+
+        # sym whose lexical target lands inside source_se3 but whose
+        # parent (into_target) is actually target_se3/history.
+        sym = source_se3 / "history" / "sneaky.log"
+        os.symlink("into_target/preexisting.log", str(sym))
+
+        call = _make_sync_call(source, target)
+        report = call("feature")
+
+        # The malicious entry must NOT appear in the copied set; the
+        # target's original file MUST remain untouched.
+        assert "history/sneaky.log" not in report.copied
+        # The target's existing file is preserved verbatim.
+        assert (
+            (target_se3 / "history" / "preexisting.log").read_text()
+            == "TARGET_PREEXISTING"
+        )
+        # No spurious sneaky.log at target.
+        assert not (target_se3 / "history" / "sneaky.log").exists()
+
+    def test_safe_read_and_stat_parent_symlink_blocked_by_realpath(
+        self, tmp_path: Path,
+    ) -> None:
+        """With ``os.path.realpath`` (replaced from ``os.path.normpath``),
+        a symlink whose target lexically lands inside ``source_se3`` but
+        whose actual parent is a symlink pointing outside is now caught
+        by the boundary check and rejected with OSError.
+
+        Previously ``os.path.normpath`` was purely lexical and did not
+        resolve symlinks in parent components, allowing external content
+        to leak through.  The switch to ``realpath`` closes this gap.
         """
         import os
 
@@ -2477,13 +2527,10 @@ class TestSafeReadAndStatParentSymlinkBoundary:
         sym = source_se3 / "history" / "sym.log"
         os.symlink("parent_sym/leak.txt", str(sym))
 
-        # Direct call to _safe_read_and_stat exercises the fallback in
-        # isolation, bypassing the higher-level _collect_files_under
-        # filter. Pin the current behavior: the function follows the
-        # parent symlink and returns the external content. A future
-        # tighter check should make this raise OSError instead.
-        content, _stat_info = _rs._safe_read_and_stat(sym, source_se3)
-        assert content == b"LEAKED"
+        # Realpath resolves the parent symlink, so the resolved path is
+        # outside source_se3 and the boundary check raises OSError.
+        with pytest.raises(OSError):
+            _rs._safe_read_and_stat(sym, source_se3)
 
 
 class TestAtomicWriteBytesDestinationSymlinkSwap:
@@ -2734,3 +2781,144 @@ class TestSafeBranchLabelTruncationPaths:
         # The recorded sidecar path uses the truncated label even though
         # the actual file was never written (preflight rejected it).
         assert ".from-" in audit_rows[0].sidecar_rel_path
+
+
+# =====================================================================
+# Lenient-mode exception propagation: already-synced files preserved
+# =====================================================================
+
+
+class TestLenientModePreservesSyncedFilesOnUnexpectedException:
+    """When an unexpected exception escapes the per-file handlers in lenient
+    mode, already-synced files MUST be preserved (not rolled back)."""
+
+    def test_lenient_preserves_already_copied_files(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """RuntimeSyncCollision escaping the copy loop preserves prior copies."""
+        import se3.engine.merge.runtime_sync as _rs
+
+        source = tmp_path / "source"
+        target = tmp_path / "target"
+        source_se3 = source / "se3"
+        target_se3 = target / "se3"
+
+        # Two tier A files in source
+        (source_se3 / "history").mkdir(parents=True)
+        (source_se3 / "history" / "flow1.log").write_text("log1")
+        (source_se3 / "history" / "flow2.log").write_text("log2")
+
+        call = _make_sync_call(source, target, strict=False)
+
+        original_atomic_write = _rs._atomic_write_bytes
+        call_count = 0
+
+        def fake_atomic_write(dest: Path, content: bytes) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # First call succeeds
+                return original_atomic_write(dest, content)
+            # Second call raises RuntimeSyncCollision, which escapes the
+            # inner OSError-only handler and hits the outer handler.
+            raise _rs.RuntimeSyncCollision(
+                rel_path=str(dest.name),
+                reason="injected_test_exception",
+                sidecar_path=str(dest),
+            )
+
+        monkeypatch.setattr(_rs, "_atomic_write_bytes", fake_atomic_write)
+
+        with pytest.raises(_rs.RuntimeSyncCollision):
+            call("feature")
+
+        # First file must be preserved despite the second file failing
+        assert (target_se3 / "history" / "flow1.log").exists()
+        assert (
+            target_se3 / "history" / "flow1.log"
+        ).read_text() == "log1"
+        # Second file should not exist (write was aborted)
+        assert not (target_se3 / "history" / "flow2.log").exists()
+
+    def test_strict_rolls_back_on_exception(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """In strict mode, the same exception triggers rollback of all copies."""
+        import se3.engine.merge.runtime_sync as _rs
+
+        source = tmp_path / "source"
+        target = tmp_path / "target"
+        source_se3 = source / "se3"
+        target_se3 = target / "se3"
+
+        (source_se3 / "history").mkdir(parents=True)
+        (source_se3 / "history" / "flow1.log").write_text("log1")
+        (source_se3 / "history" / "flow2.log").write_text("log2")
+
+        call = _make_sync_call(source, target, strict=True)
+
+        original_atomic_write = _rs._atomic_write_bytes
+        call_count = 0
+
+        def fake_atomic_write(dest: Path, content: bytes) -> None:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return original_atomic_write(dest, content)
+            raise _rs.RuntimeSyncCollision(
+                rel_path=str(dest.name),
+                reason="injected_test_exception",
+                sidecar_path=str(dest),
+            )
+
+        monkeypatch.setattr(_rs, "_atomic_write_bytes", fake_atomic_write)
+
+        with pytest.raises(_rs.RuntimeSyncCollision):
+            call("feature")
+
+        # In strict mode, the first file is rolled back
+        assert not (target_se3 / "history" / "flow1.log").exists()
+        assert not (target_se3 / "history" / "flow2.log").exists()
+
+
+# =====================================================================
+# Idempotent bypass records separation correctness
+# =====================================================================
+
+
+class TestIdempotentBypassRecordsSeparation:
+    """Idempotent sidecar matches MUST go to idempotent_bypass_records
+    and MUST NOT appear in collisions.  A bug that conflates the two
+    lists would produce spurious warnings on every re-run."""
+
+    def test_idempotent_match_never_appears_in_collisions(
+        self, tmp_path: Path
+    ) -> None:
+        """Exact sidecar content match is recorded only in idempotent lists."""
+        source = tmp_path / "source"
+        target = tmp_path / "target"
+        source_se3 = source / "se3"
+        target_se3 = target / "se3"
+
+        (source_se3 / "history").mkdir(parents=True)
+        (source_se3 / "history" / "flow1.log").write_text("same content")
+        (target_se3 / "history").mkdir(parents=True)
+        (target_se3 / "history" / "flow1.log").write_text("target content")
+        # Pre-existing sidecar with IDENTICAL content to source
+        (target_se3 / "history" / "flow1.log.from-feature").write_text(
+            "same content"
+        )
+
+        call = _make_sync_call(source, target, strict=False)
+        report = call("feature")
+
+        # The critical invariant: idempotent matches do NOT pollute collisions
+        assert len(report.collisions) == 0, (
+            "idempotent match was incorrectly recorded in collisions — "
+            "this would cause spurious warnings on every re-run"
+        )
+        assert report.idempotent_bypasses == 1
+        assert len(report.idempotent_bypass_records) == 1
+        record = report.idempotent_bypass_records[0]
+        assert record.original_rel_path == "history/flow1.log"
+        assert record.sidecar_rel_path == "history/flow1.log.from-feature"

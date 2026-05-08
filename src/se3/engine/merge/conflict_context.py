@@ -234,11 +234,68 @@ def _looks_binary(data: bytes) -> bool:
     NUL bytes inside the first 8 KiB header.  We therefore check both:
     a leading magic prefix (cheap, very specific) and NUL presence
     (catches arbitrary executables and embedded resources).
+
+    G3: the original implementation only used ``data.startswith(magic)``
+    which misses ZIP-based formats with prepended headers (DOCX, XLSX,
+    self-extracting archives) and files with leading shebang/garbage
+    before the actual magic. We additionally scan the first 512 bytes
+    for any known signature so embedded magic at non-zero offsets is
+    detected. The 512-byte budget is small enough to be cheap on every
+    file but large enough to catch shebang-prefixed or prepended-header
+    archives.
+
+    For ZIP-based document formats (DOCX, XLSX) whose first 8 KiB may
+    compress text-heavy XML without a NUL byte, the magic-byte scan
+    almost always fires on the leading ``PK\\x03\\x04`` signature; the
+    scan-first-512 extension also catches the rare case where the file
+    is a self-extracting archive with a non-zero-offset PK header.
     """
     if not data:
         return False
+    # G3 fix (medium): magic-byte detection runs at offset 0 first
+    # (cheap, very specific) and additionally scans the first 512 bytes
+    # for known signatures so self-extracting archives and shebang-
+    # prefixed binaries (whose PK / ELF headers sit a few bytes into the
+    # file) are caught instead of being treated as text. We restrict the
+    # scan to a SHORTLIST of high-confidence binary archive/executable
+    # signatures to avoid the false-positive class that the original
+    # offset-0-only check was protecting against (text fixtures that
+    # legitimately embed magic bytes inside string literals like
+    # ``b"PK\\x03\\x04"``).
+    #
+    # Shortlist policy:
+    #   * Include: archive / executable signatures whose appearance at
+    #     a non-zero offset overwhelmingly indicates a real binary
+    #     (PK\\x03\\x04 ZIP container, ELF, Mach-O, gzip, xz, 7z).
+    #   * Exclude: signatures common in test fixtures or that already
+    #     have low base-rate at non-zero offsets (PNG, JPEG, GIF, PDF,
+    #     BMP, RIFF, OggS, ID3, SQLite, MZ, Java class). Their offset-0
+    #     check above is already high-confidence; a wide scan here
+    #     would only re-introduce false positives without catching
+    #     realistic binary edge cases.
+    # The wider scan still costs O(512) per file — small enough to run
+    # on every conflicting file.
     for magic in _BINARY_MAGIC_BYTES:
         if data.startswith(magic):
+            return True
+    # Shortlist: archive/executable magics that strongly indicate a
+    # real binary even when prepended by a small text/shell preamble.
+    _NON_ZERO_OFFSET_SHORTLIST = (
+        b"PK\x03\x04",          # ZIP / DOCX / XLSX / JAR
+        b"PK\x05\x06",          # ZIP (empty)
+        b"PK\x07\x08",          # ZIP (spanned)
+        b"\x7fELF",             # ELF executable
+        b"\x1f\x8b",            # gzip
+        b"BZh",                 # bzip2
+        b"\xfd7zXZ\x00",        # xz
+        b"7z\xbc\xaf\x27\x1c",  # 7z
+    )
+    head = data[:512]
+    for magic in _NON_ZERO_OFFSET_SHORTLIST:
+        # Skip the zero-offset case (already covered above) by
+        # searching from byte 1 onwards. ``head.find(magic, 1)``
+        # returns -1 when not found.
+        if head.find(magic, 1) != -1:
             return True
     return b"\x00" in data[:8192]
 

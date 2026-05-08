@@ -305,6 +305,20 @@ version:
 - **AND** the comparison base is each branch's git merge-base with the pre-merge HEAD, NOT the pre-merge HEAD itself — so a branch tip that is below the pre-merge version still produces a valid bump rather than being skipped
 - **AND** the aggregated `max(PATCH, MINOR) = MINOR` is applied to the pre-merge version `4.6.0`, producing `4.7.0`
 
+#### Scenario: Aggregator fails loud when on-disk version already at or above target
+- **GIVEN** the version aggregator computes a target version `X.Y.Z` for the current merge
+- **AND** the on-disk `pyproject.toml` already records a version equal to or greater than `X.Y.Z`
+- **WHEN** the aggregator attempts to apply the bump
+- **THEN** the aggregator does NOT silently no-op as success — instead it returns `success=False` with `version_already_at_target=True` (when equal) or `version_higher_than_target=True` (when strictly greater)
+- **AND** the merge orchestrator surfaces the typed failure reasons `version_already_at_target` or `version_higher_than_target`
+- **AND** a partial pyproject.toml write that fails midway (or whose `git add` fails) restores the original file content and clears any staged change before the failure is reported
+
+#### Scenario: Aggregator tolerates flexible TOML version formatting
+- **GIVEN** `pyproject.toml` records the version as `version="1.2.3"` (no spaces around `=`)
+- **WHEN** the aggregator parses the version field
+- **THEN** the field is recognised and the version is read correctly
+- **AND** tools that emit either `version = "1.2.3"` or `version="1.2.3"` are accepted equivalently
+
 ### Requirement: Documentation Updates
 
 SE3 SHALL automatically update README.md and VERSIONS.md when version changes.

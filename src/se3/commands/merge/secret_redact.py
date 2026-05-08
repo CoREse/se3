@@ -63,19 +63,56 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"\b(npm_[A-Za-z0-9]{36,})\b"),
         "npm_***",
     ),
-    # Bearer token header value
+    # Bearer token header value.
+    #
+    # The character class includes the URL-safe base64 alphabet plus
+    # the standard base64 padding/extra characters (``+``, ``/``, ``=``)
+    # so legacy OAuth2 access tokens and PASETO tokens with traditional
+    # base64 padding are also redacted, not just JWT-style URL-safe
+    # tokens.  Without ``+/=`` a base64 token like
+    # ``Bearer abc+def/ghi=`` would leak past the ``+``/``/``/``=``
+    # boundary into log output.
+    #
+    # G3: also accept ``;`` and ``,`` so cookie-style or multi-token
+    # Bearer values (e.g. ``Bearer abc;path=/`` or
+    # ``Bearer t1, Bearer t2`` with comma-separated tokens) are
+    # redacted in their entirety. The greedy ``+`` length match
+    # combined with the {10,500} bound prevents over-redaction past
+    # the line boundary.
     (
-        re.compile(r"(Bearer\s+)[A-Za-z0-9_\-\.]{10,500}", re.IGNORECASE),
+        re.compile(r"(Bearer\s+)[A-Za-z0-9_\-\.+/=;,]{10,500}", re.IGNORECASE),
         r"\1***",
     ),
     # Generic token=... query param or form field
+    #
+    # Trade-off: the value-length lower bound is intentionally {8,500}
+    # rather than the {1,500} used by the TOML/JSON-quoted patterns
+    # above.  The unquoted form has no quote-delimiter to bound the
+    # match, so a {1,500} lower bound would over-redact (e.g. it would
+    # eat ``api_key = 'sk-abc...'`` before the dedicated ``sk-`` pattern
+    # gets a chance to match).  The cost is that very short
+    # human-chosen passwords like ``password=secret`` (6 chars) leak
+    # verbatim into logs.  Mitigation: the structured TOML/JSON
+    # patterns above redact ``password = 'secret'`` and
+    # ``"password": "secret"`` regardless of value length, so
+    # short-password leaks only occur when the source format is
+    # unquoted ``key=value`` text — which is itself rare in our
+    # logs/traces.  Tighten or lengthen the regex if usage patterns
+    # shift.
     (
         re.compile(r"((?:token|api_key|apikey|secret|password|passwd)\s*=\s*)['\"]?[A-Za-z0-9_\-\.]{8,500}['\"]?", re.IGNORECASE),
         r"\1***",
     ),
-    # Authorization header (any scheme)
+    # Authorization header (any scheme).
+    #
+    # G3: extend the character class to include ``;`` and ``,`` so
+    # cookie-style multi-token Authorization values (rare but
+    # RFC-permitted) and comma-separated credentials are redacted as
+    # a single span. Without ``;,`` a value like
+    # ``Authorization: Basic abc=; path=/`` would leak the cookie
+    # attributes after the ``;``.
     (
-        re.compile(r"(Authorization\s*:\s*\S+\s+)[A-Za-z0-9_\-\.=/+]{10,500}", re.IGNORECASE),
+        re.compile(r"(Authorization\s*:\s*\S+\s+)[A-Za-z0-9_\-\.=/+;,]{10,500}", re.IGNORECASE),
         r"\1***",
     ),
 ]

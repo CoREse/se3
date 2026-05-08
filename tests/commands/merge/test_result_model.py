@@ -73,8 +73,8 @@ class TestMergeReportDefaults:
     def test_empty_report(self) -> None:
         r = MergeReport()
         assert r.success is False
-        assert r.newly_merged == []
-        assert r.already_merged_branches == []
+        assert r.newly_merged_branches == []
+        assert r.already_ancestor_branches == []
         assert r.merged_with_warnings == []
         assert r.failed_branch is None
         assert r.failure_reason is None
@@ -96,17 +96,21 @@ class TestMergeReportAddOutcome:
     def test_add_newly_merged(self) -> None:
         r = MergeReport()
         r.add_outcome(MergeOutcome(branch="feat/a", success=True))
-        assert "feat/a" in r.newly_merged
-        assert "feat/a" not in r.already_merged_branches
+        assert "feat/a" in r.newly_merged_branches
+        assert "feat/a" not in r.already_ancestor_branches
         assert "feat/a" not in r.merged_with_warnings
         assert r.all_merged_branches == ["feat/a"]
+        # Alias property
+        assert r.newly_merged == ["feat/a"]
 
     def test_add_already_ancestor(self) -> None:
         r = MergeReport()
         r.add_outcome(MergeOutcome(branch="feat/a", already_ancestor=True))
-        assert "feat/a" in r.already_merged_branches
-        assert "feat/a" not in r.newly_merged
+        assert "feat/a" in r.already_ancestor_branches
+        assert "feat/a" not in r.newly_merged_branches
         assert r.all_merged_branches == ["feat/a"]
+        # Alias property
+        assert r.already_merged == ["feat/a"]
 
     def test_add_merged_with_warnings(self) -> None:
         r = MergeReport()
@@ -114,16 +118,27 @@ class TestMergeReportAddOutcome:
             MergeOutcome(branch="feat/a", success=True, warnings_repaired=True)
         )
         assert "feat/a" in r.merged_with_warnings
-        assert "feat/a" not in r.newly_merged
+        assert "feat/a" not in r.newly_merged_branches
         assert r.all_merged_branches == ["feat/a"]
+
+    def test_add_failure_sets_failed_branch(self) -> None:
+        r = MergeReport()
+        r.add_outcome(
+            MergeOutcome(branch="feat/a", failure_reason=FailureReason.MERGE_CONFLICT)
+        )
+        assert r.failed_branch == "feat/a"
+        assert "feat/a" not in r.newly_merged_branches
+        assert "feat/a" not in r.already_ancestor_branches
+        assert "feat/a" not in r.merged_with_warnings
+        assert r.all_merged_branches == []
 
     def test_add_failure_not_in_any_bucket(self) -> None:
         r = MergeReport()
         r.add_outcome(
             MergeOutcome(branch="feat/a", failure_reason=FailureReason.MERGE_CONFLICT)
         )
-        assert "feat/a" not in r.newly_merged
-        assert "feat/a" not in r.already_merged_branches
+        assert "feat/a" not in r.newly_merged_branches
+        assert "feat/a" not in r.already_ancestor_branches
         assert "feat/a" not in r.merged_with_warnings
         assert r.all_merged_branches == []
 
@@ -132,9 +147,11 @@ class TestMergeReportAddOutcome:
         r.add_outcome(
             MergeOutcome(branch="feat/a", failure_reason=FailureReason.PENDING_HUMAN)
         )
-        assert "feat/a" not in r.newly_merged
-        assert "feat/a" not in r.already_merged_branches
+        assert "feat/a" not in r.newly_merged_branches
+        assert "feat/a" not in r.already_ancestor_branches
         assert r.all_merged_branches == []
+        # Pending-human does NOT set failed_branch
+        assert r.failed_branch is None
 
     def test_multiple_outcomes(self) -> None:
         r = MergeReport()
@@ -146,10 +163,10 @@ class TestMergeReportAddOutcome:
         r.add_outcome(
             MergeOutcome(branch="feat/d", failure_reason=FailureReason.MERGE_CONFLICT)
         )
-        assert r.newly_merged == ["feat/a"]
-        assert r.already_merged_branches == ["feat/b"]
+        assert r.newly_merged_branches == ["feat/a"]
+        assert r.already_ancestor_branches == ["feat/b"]
         assert r.merged_with_warnings == ["feat/c"]
-        assert r.failed_branch is None  # only set by orchestrator
+        assert r.failed_branch == "feat/d"
 
 
 class TestMergeReportLegacyCompatibility:
@@ -158,8 +175,8 @@ class TestMergeReportLegacyCompatibility:
     def test_to_legacy_dict_shape(self) -> None:
         r = MergeReport(
             success=True,
-            newly_merged=["feat/a"],
-            already_merged_branches=["feat/b"],
+            newly_merged_branches=["feat/a"],
+            already_ancestor_branches=["feat/b"],
             merged_with_warnings=["feat/c"],
             pre_merge_version="1.0.0",
             final_version="1.1.0",
@@ -167,8 +184,8 @@ class TestMergeReportLegacyCompatibility:
         )
         d = r.to_legacy_dict()
         assert d["success"] is True
-        assert d["newly_merged"] == ["feat/a"]
-        assert d["already_merged_branches"] == ["feat/b"]
+        assert d["newly_merged_branches"] == ["feat/a"]
+        assert d["already_ancestor_branches"] == ["feat/b"]
         assert d["merged_with_warnings"] == ["feat/c"]
         assert d["merged_branches"] == ["feat/a", "feat/b", "feat/c"]
         assert d["pre_merge_version"] == "1.0.0"
@@ -199,4 +216,8 @@ class TestMergeReportLegacyCompatibility:
         r = MergeReport()
         r.add_outcome(MergeOutcome(branch="feat/a", success=True))
         r.add_outcome(MergeOutcome(branch="feat/b", already_ancestor=True))
-        assert r.merged_branches == ["feat/a", "feat/b"]
+        # When merged_branches field is empty, all_merged_branches returns
+        # the semantic buckets.
+        assert r.all_merged_branches == ["feat/a", "feat/b"]
+        # Legacy field is also accessible for backward compatibility.
+        assert r.merged_branches == []

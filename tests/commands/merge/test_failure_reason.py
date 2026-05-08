@@ -118,6 +118,46 @@ class TestLegacyString:
             assert parsed is member, f"Round-trip failed for {member.name}"
             assert detail is None
 
+    def test_every_member_has_legacy_map_entry(self) -> None:
+        """Each enum member's ``legacy_string`` MUST be a key in
+        ``_LEGACY_STRING_MAP`` and resolve back to the same member.
+
+        Catches typos in future enum additions: a member named
+        ``POSTCOND_VERSION_NOT_BUMPPED`` (typo) whose
+        ``legacy_string`` of ``"postcond_version_not_bumpped"`` is not
+        in the map would silently resolve to ``FailureReason.UNEXPECTED``
+        at runtime. This test fails loudly on such drift.
+        """
+        from se3.commands.merge.failure_reason import _LEGACY_STRING_MAP
+
+        for member in FailureReason:
+            if member is FailureReason.NONE:
+                # NONE has both "" and "none" entries; legacy_string
+                # returns "none" but to_legacy_string returns "".
+                assert _LEGACY_STRING_MAP.get("none") is FailureReason.NONE
+                assert _LEGACY_STRING_MAP.get("") is FailureReason.NONE
+                continue
+            if member is FailureReason.UNEXPECTED:
+                # UNEXPECTED is the catch-all; its legacy_string must
+                # round-trip too so explicitly recorded "unexpected"
+                # diagnostics survive serialization.
+                assert (
+                    _LEGACY_STRING_MAP.get(member.legacy_string) is member
+                ), f"UNEXPECTED missing legacy map entry"
+                continue
+            legacy = member.legacy_string
+            assert legacy in _LEGACY_STRING_MAP, (
+                f"FailureReason.{member.name}.legacy_string={legacy!r} is "
+                f"not in _LEGACY_STRING_MAP — adding the enum without the "
+                f"corresponding map entry would silently route to "
+                f"FailureReason.UNEXPECTED at runtime."
+            )
+            assert _LEGACY_STRING_MAP[legacy] is member, (
+                f"FailureReason.{member.name}.legacy_string={legacy!r} "
+                f"maps to {_LEGACY_STRING_MAP[legacy].name}, not "
+                f"{member.name} — the map and the enum disagree."
+            )
+
 
 class TestFailureReasonComparison:
     """IntEnum supports numeric comparison."""

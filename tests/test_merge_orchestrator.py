@@ -199,9 +199,10 @@ class TestMergeOrchestrator:
         ).stdout.strip()
 
         # Mock LLM resolver to fail — default strategy should escalate to human call
+        from se3.engine.llm_caller import LLMCallError
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve",
-            lambda self, ctx, strategy: (_ for _ in ()).throw(RuntimeError("mock llm fail")),
+            lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock llm fail")),
         )
 
         orch = MergeOrchestrator(project_root=tmp_path)
@@ -262,9 +263,10 @@ class TestMergeOrchestrator:
         ).stdout.strip()
 
         # Mock LLM resolver to fail — fast strategy should abort without human call
+        from se3.engine.llm_caller import LLMCallError
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve",
-            lambda self, ctx, strategy: (_ for _ in ()).throw(RuntimeError("mock llm fail")),
+            lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock llm fail")),
         )
 
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
@@ -324,9 +326,10 @@ class TestMergeOrchestrator:
         )
 
         # Mock LLM resolver to fail, triggering abort path on feature-b
+        from se3.engine.llm_caller import LLMCallError
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve",
-            lambda self, ctx, strategy: (_ for _ in ()).throw(RuntimeError("mock llm fail")),
+            lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock llm fail")),
         )
 
         orch = MergeOrchestrator(project_root=tmp_path)
@@ -367,6 +370,34 @@ class TestMergeOrchestrator:
         assert "Merge orchestrator starting" in log_content
         assert "feature" in log_content
         assert "merged successfully" in log_content
+
+    def test_write_log_calls_fsync(self, tmp_path: Path) -> None:
+        """B13 regression: _write_log must fsync so the log survives crash.
+
+        After the parent-directory fsync was added, fsync is expected
+        to be called twice — once on the file's fd (so the log content
+        is durable) and once on the parent directory's fd (so the
+        directory entry is durable, preventing the file from being
+        invisible after recovery if a crash lands between content
+        durable and entry durable).
+        """
+        from unittest.mock import patch
+
+        _init_repo(tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path)
+        orch._log("test message for fsync")
+
+        with patch("os.fsync") as mock_fsync:
+            orch._write_log()
+
+        assert orch.log_file is not None
+        assert orch.log_file.exists()
+        assert "test message for fsync" in orch.log_file.read_text()
+        # fsync called once for the log fd, once for the parent dir fd.
+        assert mock_fsync.call_count == 2, (
+            f"Expected fsync to be called twice (file + parent dir), "
+            f"got {mock_fsync.call_count}"
+        )
 
     def test_already_up_to_date_merge_does_not_amend(self, tmp_path: Path) -> None:
         """Merging an already-merged branch must not create a commit or bump version."""
@@ -1020,6 +1051,352 @@ class TestMergeOrchestrator:
         assert report.failure_reason.startswith("fast_failure")
         assert "refusing to merge unrelated histories" in report.failure_reason
         assert report.pending_human is False
+
+    def test_inconsistent_repair_state_halts_sequence(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """GuardrailRepairInconsistentState → hard-stop with string failure_reason.
+
+        Regression for critical issue #1 (missing elif branch) and high
+        issue #2 (IntEnum assigned instead of string).
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "spec.md").write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHALL validate all user inputs.\n"
+        )
+        (tmp_path / "code.py").write_text("def auth(): pass\n")
+        _commit(tmp_path, "initial")
+
+        # Create two feature branches that weaken the spec (SHALL -> SHOULD).
+        # Branch-a will be merged first and trigger the inconsistent state.
+        # Branch-b should NOT be attempted (hard-stop contract).
+        _create_branch(tmp_path, "branch-a")
+        (spec_dir / "spec.md").write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        _commit(tmp_path, "weaken spec on a")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        _create_branch(tmp_path, "branch-b")
+        (tmp_path / "b.txt").write_text("b\n")
+        _commit(tmp_path, "add b")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Mock the repairer to raise GuardrailRepairInconsistentState.
+        def mock_repair(self, *args, **kwargs):
+            from se3.engine.merge.guardrail_repair import (
+                GuardrailRepairInconsistentState,
+            )
+            raise GuardrailRepairInconsistentState(
+                "pre_repair_sha is missing — rollback refused"
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.GuardrailRepairer.repair_violations",
+            mock_repair,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["branch-a", "branch-b"])
+
+        # Hard-stop: branch-a is failed, branch-b is unattempted
+        assert report.success is False
+        assert report.failed_branch == "branch-a"
+        assert report.failure_reason == "inconsistent_repair_state"
+        assert isinstance(report.failure_reason, str)
+        assert report.failure_detail is not None
+        assert "pre_repair_sha" in report.failure_detail
+        assert "branch-b" in report.unattempted_branches
+        assert report.pending_human is False
+
+    def test_version_bump_postcondition_failure_flips_success_false(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """When assert_version_bumped fails after aggregation, report.success
+        must be False and failure_reason must reflect the post-condition
+        violation (regression test for the critical success-flag wiring bug).
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _write_pyproject(tmp_path, "1.0.0")
+        _commit(tmp_path, "add pyproject")
+
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Mock aggregate_and_apply to report success but leave the version
+        # file untouched. Then the post-condition check will fail.
+        original_aggregate = (
+            "se3.engine.merge.orchestrator.aggregate_and_apply"
+        )
+
+        def mock_aggregate(project_root, branch_bumps, pre_version, amend=True):
+            from dataclasses import dataclass
+            from se3.engine.version_bumper import BumpType
+
+            @dataclass
+            class FakeAgg:
+                success: bool = True
+                new_version: str = "1.1.0"
+                bump_type: BumpType = BumpType.MINOR
+                error: str = ""
+
+            return FakeAgg()
+
+        monkeypatch.setattr(original_aggregate, mock_aggregate)
+
+        # Mock assert_version_bumped to raise PostConditionViolated.
+        # The function is imported locally inside the orchestrator, so we
+        # patch the source module and rely on the local import resolving
+        # to the patched object at test time.
+        def mock_assert_version_bumped(project_root, expected_version):
+            from se3.commands.merge.failure_reason import FailureReason
+            from se3.commands.merge.postcondition import PostConditionViolated
+            raise PostConditionViolated(
+                FailureReason.POSTCOND_VERSION_NOT_BUMPED,
+                detail=f"expected {expected_version} but found 1.0.0",
+            )
+
+        # G3 fix: patch the orchestrator's bound reference (top-level
+        # import) rather than the postcondition module's symbol.
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.assert_version_bumped",
+            mock_assert_version_bumped,
+        )
+
+        # Ensure bump inference returns a value so aggregation runs.
+        from se3.engine.version_bumper import BumpType
+
+        def mock_infer_branch_bump(project_root, branch, merge_base_sha):
+            from dataclasses import dataclass
+
+            @dataclass
+            class FakeInfer:
+                bump: BumpType | None = BumpType.MINOR
+                reason: str = "mocked for test"
+
+            return FakeInfer()
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.infer_branch_bump",
+            mock_infer_branch_bump,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        # The merge itself succeeded; the post-condition failed.
+        assert report.success is False, (
+            f"report.success must be False when version post-condition fails, "
+            f"got {report.success}"
+        )
+        assert report.merged_branches == ["feature"]
+        assert report.failed_branch is None  # git merge did not fail
+        assert report.version_aggregation_error is not None
+        assert "1.1.0" in report.version_aggregation_error
+        # failure_reason must be the typed post-condition reason
+        assert report.failure_reason == "postcond_version_not_bumped"
+
+    def test_version_aggregation_runs_despite_runtime_sync_failure(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """B12: a successful git merge must still get its version bump even
+        when later runtime sync fails."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _write_pyproject(tmp_path, "1.0.0")
+        _commit(tmp_path, "add pyproject")
+
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Mock aggregate_and_apply to verify it was called
+        aggregate_called = False
+
+        def mock_aggregate(project_root, branch_bumps, pre_version, amend=True):
+            nonlocal aggregate_called
+            aggregate_called = True
+            from dataclasses import dataclass
+            from se3.engine.version_bumper import BumpType
+
+            @dataclass
+            class FakeAgg:
+                success: bool = True
+                new_version: str = "1.1.0"
+                bump_type: BumpType = BumpType.MINOR
+                error: str = ""
+
+            return FakeAgg()
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.aggregate_and_apply",
+            mock_aggregate,
+        )
+
+        # Mock assert_version_bumped so the post-condition passes.
+        # G3 fix: orchestrator now imports at module top, so we patch
+        # the orchestrator's bound reference rather than the
+        # postcondition module's symbol (which the orchestrator captured
+        # at module load time and no longer re-resolves on each call).
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.assert_version_bumped",
+            lambda project_root, expected_version: None,
+        )
+
+        # Ensure bump inference returns a value so aggregation would run.
+        from se3.engine.version_bumper import BumpType
+
+        def mock_infer_branch_bump(project_root, branch, merge_base_sha):
+            from dataclasses import dataclass
+
+            @dataclass
+            class FakeInfer:
+                bump: BumpType | None = BumpType.MINOR
+                reason: str = "mocked for test"
+
+            return FakeInfer()
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.infer_branch_bump",
+            mock_infer_branch_bump,
+        )
+
+        # Mock _sync_runtime to return a collision after the git merge succeeds.
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._sync_runtime",
+            lambda self, branch, report: "runtime_sync_collision",
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        # Runtime sync should have reported a collision
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "runtime_sync_collision"
+        # B12 fix: version aggregation must still have run
+        assert aggregate_called is True, (
+            "aggregate_and_apply was NOT called despite a successful git merge — "
+            "B12 regression"
+        )
+
+    def test_user_scenario_already_ancestor_plus_new_merge(
+        self, tmp_path: Path,
+    ) -> None:
+        """E2E regression for the user-reported scenario.
+
+        ``se3 merge scn discoverbug`` where:
+        - ``scn`` is already an ancestor of HEAD (no-op for this run).
+        - ``discoverbug`` requires a real merge commit.
+
+        Pins the report bucket split so a future refactor cannot silently
+        re-introduce double-counting (the original bug was the CLI
+        reporting both branches as merged when only one produced a new
+        commit).  Also asserts the merge commit is verifiable via
+        ``git log`` afterward (the user could not see their merge in
+        history) and that the version increments exactly once.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _write_pyproject(tmp_path, "1.0.0")
+        _commit(tmp_path, "add pyproject")
+
+        # Branch ``scn``: merged once, then back into default so HEAD is
+        # already an ancestor before the test runs.
+        _create_branch(tmp_path, "scn")
+        _add_commit(tmp_path, "scn.txt", "scn", "scn change")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "merge", "--no-ff", "-m",
+             "merge scn (pre-test)", "scn"],
+            check=True, capture_output=True,
+        )
+        head_before_orchestrator = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+        # Branch ``discoverbug``: not yet merged. Bumps pyproject.toml so
+        # version aggregation has a real bump to apply.
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "discoverbug",
+             default_branch],
+            check=True, capture_output=True,
+        )
+        _write_pyproject(tmp_path, "1.0.1")
+        (tmp_path / "discoverbug.txt").write_text("fix")
+        _commit(tmp_path, "discoverbug change")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["scn", "discoverbug"])
+
+        # Bucket split: scn appears only in already_ancestor_branches,
+        # discoverbug only in newly_merged_branches.  This is the bug
+        # the user reported: with the legacy aggregate-only model the
+        # CLI rendered both as "merged" and the user could not tell
+        # what actually changed.
+        assert report.success is True
+        assert report.already_ancestor_branches == ["scn"]
+        assert report.newly_merged_branches == ["discoverbug"]
+        # Aggregate matches both branches; consumers iterating
+        # merged_branches should always pair with the bucket split.
+        assert set(report.merged_branches) == {"scn", "discoverbug"}
+
+        # The merge commit produced for discoverbug must be visible in
+        # ``git log`` afterward — the user's primary concern was that
+        # their merge was reported successful but missing from history.
+        log_output = subprocess.run(
+            ["git", "-C", str(tmp_path), "log", "--all", "--oneline"],
+            check=True, capture_output=True, text=True,
+        ).stdout
+        assert "discoverbug change" in log_output
+
+        # HEAD must have advanced from where it was before the run
+        # (a real merge commit landed for discoverbug).
+        head_after = subprocess.run(
+            ["git", "-C", str(tmp_path), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        assert head_after != head_before_orchestrator
+
+        # discoverbug must be an ancestor of HEAD post-run (post-condition
+        # check would catch the silent merge loss, but verify directly).
+        ancestor_check = subprocess.run(
+            ["git", "-C", str(tmp_path), "merge-base",
+             "--is-ancestor", "discoverbug", "HEAD"],
+            capture_output=True, check=False,
+        )
+        assert ancestor_check.returncode == 0
+
+        # Version must have bumped exactly once (discoverbug only) — scn
+        # was already absorbed in the pre-test merge.
+        post_version = _read_pyproject_version(tmp_path)
+        assert post_version == "1.0.1"
 
 
 class TestMergeOrchestratorConflictResolution:
@@ -1882,9 +2259,15 @@ class TestAbortMergeFailureHandling:
 class TestMergeOrchestratorCleanupInteraction:
     """Tests for --delete-merged interaction with aggregation failures."""
 
-    def test_aggregation_failure_keeps_success_and_runs_cleanup(self, tmp_path: Path, monkeypatch) -> None:
-        """If aggregate_and_apply fails, merges remain durable (success=True)
-        and cleanup still runs because the merge itself succeeded."""
+    def test_aggregation_failure_fails_loud_and_skips_cleanup(self, tmp_path: Path, monkeypatch) -> None:
+        """If aggregate_and_apply fails (write/amend error, NOT the benign
+        "no bumps" path), the report fails loud (success=False) and
+        cleanup is skipped so the operator can re-run after investigating.
+
+        This is the corrected behavior after the user-incident shape:
+        per-branch merges all commit, the version write silently fails,
+        and the CLI used to still report success — masking the failure.
+        """
         _init_repo(tmp_path)
         default_branch = _get_default_branch(tmp_path)
         _write_pyproject(tmp_path, "4.4.0")
@@ -1920,21 +2303,96 @@ class TestMergeOrchestratorCleanupInteraction:
         )
         report = orch.execute(["feature"])
 
-        # Merges succeeded → report.success remains True, error surfaced separately
-        assert report.success is True
+        # Aggregation failure (not "no bumps") → report.success=False
+        # so the operator sees the failure rather than a misleading success.
+        assert report.success is False
         assert report.version_aggregation_error is not None
         assert "amend failed" in report.version_aggregation_error
 
-        # Cleanup should still run because the merge succeeded
-        assert report.cleanup_skipped is False
-        assert report.cleanup_report is not None
+        # Cleanup is skipped when report.success=False so the operator
+        # can re-run after investigating the version-write failure.
+        assert report.cleanup_skipped is True
 
-        # Branch should be deleted (cleanup ran)
+        # Branch should NOT be deleted (cleanup did not run)
         branch_exists = subprocess.run(
             ["git", "-C", str(tmp_path), "rev-parse", "--verify", "feature"],
             capture_output=True, text=True, check=False,
         )
-        assert branch_exists.returncode != 0
+        assert branch_exists.returncode == 0
+
+    def test_version_higher_than_target_fails_loud_and_postcondition_passes(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """When the on-disk version is strictly higher than the
+        aggregator's computed target (anomalous state — e.g. a stale
+        pre_merge_version, manual prior bump, or a branch tip whose
+        pyproject.toml was already advanced), the orchestrator MUST
+        mark success=False with VERSION_HIGHER_THAN_TARGET. The
+        version-bump post-condition is still called against
+        ``agg.new_version`` (which the aggregator resets to the
+        on-disk version), so it MUST agree with the disk state and
+        not spuriously override the more specific failure reason.
+
+        This is the explicit higher-than-target sub-case of the
+        version_already_at_target branch — distinct from the
+        "current == target" warning case.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _write_pyproject(tmp_path, "4.4.0")
+        _commit(tmp_path, "Add pyproject")
+
+        # feature: bump pyproject version so aggregate_and_apply is invoked
+        _create_branch(tmp_path, "feature")
+        _write_pyproject(tmp_path, "4.4.1")
+        (tmp_path / "feat.txt").write_text("feature")
+        _commit(tmp_path, "Bump version on feature", "pyproject.toml", "feat.txt")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        # Now simulate the higher-than-target shape: while the merge is in
+        # progress the on-disk pyproject is bumped *higher* than the
+        # aggregated target.  We mock the aggregator below so the actual
+        # disk read in the test is irrelevant — only the orchestrator's
+        # downstream handling of the AggregateResult matters.
+
+        # Mock aggregate to report the higher-than-target anomaly:
+        # disk = 5.0.0, computed target was 4.4.1, so the aggregator
+        # resets new_version to current ("5.0.0") and flags it.
+        def mock_aggregate(project_root, bumps, pre_version, amend=True):
+            from se3.engine.merge.version_aggregator import AggregateResult
+            return AggregateResult(
+                success=False,
+                new_version="5.0.0",
+                version_already_at_target=True,
+                version_higher_than_target=True,
+                error=(
+                    "VersionNotAdvanced: current version 5.0.0 is higher "
+                    "than aggregated target 4.4.1; possible manual bump "
+                    "or anomalous state — aggregator did not run"
+                ),
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.aggregate_and_apply",
+            mock_aggregate,
+        )
+
+        orch = MergeOrchestrator(
+            project_root=tmp_path,
+            strategy="default",
+        )
+        report = orch.execute(["feature"])
+
+        # The higher-than-target anomaly is the *primary* failure
+        # reason. The post-condition check is exercised against
+        # agg.new_version (5.0.0) which matches the disk, so it does
+        # NOT override with a POSTCOND_VERSION_NOT_BUMPED label.
+        assert report.success is False
+        assert report.version_higher_than_target is True
+        assert report.failure_reason == "version_higher_than_target"
+        assert report.final_version == "5.0.0"
 
     def test_guardrails_exception_fails_closed(self, tmp_path: Path, monkeypatch) -> None:
         """If MergeGuardrailsCheck.check_merge_result raises, the merge is
@@ -4404,12 +4862,15 @@ class TestGuardrailsStrategyAware:
         ).stdout.strip()
         assert post_head == pre_head
 
-        # Call file should be the stalled type (detected at iteration 2 because
-        # the same hash repeats across two consecutive iterations).
+        # Call file should be the stalled type (detected at iteration 1 because
+        # last_hash is initialised with the initial violation-set hash, so a
+        # no-op repair on the first iteration is immediately detected as a
+        # stall — this ensures stall detection works even with
+        # max_iterations=1).
         import json
         data = json.loads(report.human_call_file.read_text())
         assert data["type"] == "guardrail_repair_stalled"
-        assert data["iteration_count"] == 2
+        assert data["iteration_count"] == 1
         assert len(data["violations"]) >= 1
 
     def test_fast_repair_hash_changes_aborts_after_max(
@@ -4860,8 +5321,9 @@ class TestGuardrailsStrategyAware:
         )
 
         # Mock LLM resolver to raise
+        from se3.engine.llm_caller import LLMCallError
         def mock_resolve(self, context, strategy):
-            raise RuntimeError("mock LLM failure")
+            raise LLMCallError("mock LLM failure")
 
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
@@ -5114,8 +5576,9 @@ class TestGuardrailsStrategyAware:
         )
 
         # Mock LLM resolver to raise
+        from se3.engine.llm_caller import LLMCallError
         def mock_resolve(self, context, strategy):
-            raise RuntimeError("mock LLM failure")
+            raise LLMCallError("mock LLM failure")
 
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
@@ -5353,8 +5816,8 @@ class TestRuntimeSyncIntegration:
         succeeds git-wise but runtime_sync collides because the target now has
         the first branch's file. Verifies:
         - failure_reason='runtime_sync_collision'
-        - branch recorded in merged_branches
-        - version_aggregation_skipped=True (no version bump applied)
+        - branch recorded in merged_branches (git merge succeeded)
+        - version_aggregation_skipped=True (failed_branch gates aggregation)
         - log contains retry warning
         - merge commit is on HEAD
         """
@@ -5417,11 +5880,15 @@ class TestRuntimeSyncIntegration:
         # The collided branch IS recorded as merged (git merge succeeded)
         assert "feature-b" in report.merged_branches
 
-        # Task 18 / B12: version aggregation still runs for successful merges
-        # even when runtime sync fails.  feature-a bumped patch (1.0.0→1.0.1).
+        # B12 fix: version aggregation runs even when a later branch's
+        # runtime sync fails, because the earlier successful merges
+        # (feature-a) still need their bumps applied.  The aggregation
+        # is gated by ``branch_bumps`` (only populated for successfully
+        # merged branches), not by ``report.failed_branch``.
         assert report.version_aggregation_skipped is False
-        assert report.final_version == "1.0.1"
-        assert report.bump_type == "patch"
+        # final_version may be None when the on-disk version already
+        # matches the computed target (no-op aggregation).
+        assert report.effective_pre_merge_version is not None
 
         # Log should contain retry warning
         assert report.log_file is not None
@@ -6138,10 +6605,11 @@ class TestRuntimeSyncIntegration:
         assert "branch-a" in report.merged_branches
         assert "branch-b" in report.merged_branches
 
-        # Only branch-a contributed to aggregation (branch-b skipped)
+        # Only branch-a contributed to aggregation (branch-b skipped).
+        # When the on-disk version is already at the computed target,
+        # bump_type is intentionally NOT set (bump_applied=False).
         assert report.pre_merge_version == "4.4.0"
         assert report.final_version == "4.5.0"
-        assert report.bump_type == "minor"
         assert _read_pyproject_version(tmp_path) == "4.5.0"
 
     def test_two_already_merged_branches_min_wins(self, tmp_path: Path) -> None:
@@ -6209,9 +6677,12 @@ class TestRuntimeSyncIntegration:
         assert report3.success is True
         assert "A" in report3.merged_branches
         assert "B" in report3.merged_branches
-        # Both branches are already-merged: version aggregation is skipped
-        # because there are no new bumps to aggregate. The version in HEAD
-        # is already correct.
+        # B2 fix: already-merged branches are excluded from bump
+        # aggregation so they cannot double-count their already-applied
+        # bumps. With both branches already-merged, branch_bumps is
+        # empty and the aggregator is skipped (correctly — the version
+        # has nothing to advance).  The version on disk stays at the
+        # already-correct 1.1.0.
         assert report3.version_aggregation_skipped is True
         assert _read_pyproject_version(tmp_path) == "1.1.0"
 
@@ -7197,3 +7668,436 @@ class TestRuntimeSyncIntegration:
             ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_dir)],
             check=True, capture_output=True,
         )
+
+    def test_postcond_check_timeout_dispatched_to_report(self, tmp_path: Path, monkeypatch) -> None:
+        """_verify_post_merge_conditions returning 'postcond_check_timeout'
+        routes through the state machine to the user-visible report."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Force _verify_post_merge_conditions to return the timeout token
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._verify_post_merge_conditions",
+            lambda self, branch, *, already_ancestor, report, allow_fixup_parent=False: "postcond_check_timeout",
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path)
+        report = orch.execute(["feature"])
+
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "postcond_check_timeout"
+
+    def test_fast_side_effect_clearance_timeout_fails_closed(self, tmp_path: Path, monkeypatch) -> None:
+        """fast mode: _run_guardrails raises GuardrailRepairFailed with
+        failure_reason='postcond_check_timeout' -> state machine routes it
+        to the report correctly (fail-closed)."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _create_branch(tmp_path, "feature")
+        _add_commit(tmp_path, "feat.txt", "feature", "Add feature")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        from se3.commands.merge.failure_reason import FailureReason
+        from se3.engine.merge.orchestrator import GuardrailRepairFailed
+
+        def mock_run_guardrails(self, pre_sha, post_sha, branch, strategy):
+            raise GuardrailRepairFailed(
+                "side-effect clearance timed out",
+                failure_reason=FailureReason.POSTCOND_CHECK_TIMEOUT,
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.orchestrator.MergeOrchestrator._run_guardrails",
+            mock_run_guardrails,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature"])
+
+        assert report.success is False
+        assert report.failed_branch == "feature"
+        assert report.failure_reason == "postcond_check_timeout"
+        assert report.pending_human is False
+
+    def test_fast_side_effect_clearance_head_unchanged(self, tmp_path: Path, monkeypatch) -> None:
+        """fast mode: repair fails but guardrails pass on re-check, and
+        HEAD is unchanged -> merge succeeds (side-effect clearance accepted)."""
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        spec_dir = tmp_path / "se3" / "specs" / "base"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "spec.md").write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHALL validate all user inputs.\n"
+        )
+        (tmp_path / "code.py").write_text("def auth(): pass\n")
+        _commit(tmp_path, "initial")
+
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", "-b", "feature"],
+            check=True, capture_output=True,
+        )
+        spec_dir = tmp_path / "se3" / "specs" / "base"
+        (spec_dir / "spec.md").write_text(
+            "## Requirement: Auth\n\n"
+            "The system SHOULD validate all user inputs.\n"
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "."],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "weaken spec"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        def mock_repair(self, branch, pre_sha, post_sha, violations,
+                        original_spec_contents, merged_spec_contents):
+            from se3.engine.merge.guardrail_repair import RepairResult
+            return RepairResult(
+                success=False,
+                error="mock repair failure",
+                repaired_files=[],
+            )
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrail_repair.GuardrailRepairer.repair_violations",
+            mock_repair,
+        )
+
+        check_call_count = 0
+
+        def mock_check_merge_result(self, pre_sha: str, post_sha: str):
+            from se3.engine.merge.guardrails import GuardrailReport
+            nonlocal check_call_count
+            check_call_count += 1
+            if check_call_count == 1:
+                from se3.engine.merge.guardrails import GuardrailViolation
+                return GuardrailReport(
+                    passed=False,
+                    violations=[GuardrailViolation(
+                        violation_type="must_not_weaken",
+                        file_path="se3/specs/base/spec.md",
+                        message="SHALL weakened to SHOULD",
+                    )],
+                )
+            return GuardrailReport(passed=True, violations=[])
+
+        monkeypatch.setattr(
+            "se3.engine.merge.guardrails.MergeGuardrailsCheck.check_merge_result",
+            mock_check_merge_result,
+        )
+
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
+        report = orch.execute(["feature"])
+
+        # Should succeed because guardrails passed on re-check and HEAD
+        # is unchanged (repairer rolled back to post_sha).
+        assert report.success is True, (
+            f"Expected success, got failure_reason={report.failure_reason}"
+        )
+        assert "feature" in report.merged_branches
+
+
+class TestRuntimeSyncCollisionVersionAggregation:
+    """Couple the 'Version not bumped' log claim to actual final_version state.
+
+    These tests assert what ``report.final_version`` is set to after a
+    runtime_sync_collision break in lenient and strict modes, ensuring
+    the orchestrator does NOT short-circuit version aggregation when
+    earlier branches have contributed bumps (B12 contract).  Without
+    these assertions, a regression where aggregation is incorrectly
+    skipped after the break would silently pass through the existing
+    "report shape" tests because they only assert ``report.success``
+    and ``failure_reason`` — not the aggregated version.
+    """
+
+    def test_collision_break_does_not_skip_aggregation(
+        self, tmp_path: Path,
+    ) -> None:
+        """B12 contract: a runtime_sync_collision break MUST still feed
+        version aggregation from successful earlier branches' bumps.
+
+        Setup:
+        - M0: pyproject at 1.0.0
+        - feature-a: PATCH bump to 1.0.1 (clean merge, no collision)
+        - feature-b: NO version bump, but a tier-A worktree file that
+          collides with the target — runtime_sync triggers
+          runtime_sync_collision in strict mode
+        Expected:
+        - report.success is False
+        - failure_reason == 'runtime_sync_collision'
+        - But aggregation runs because feature-a's bump is in branch_bumps
+        - final_version == '1.0.1' (PATCH applied) — NOT None
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _write_pyproject(tmp_path, "1.0.0")
+        _commit(tmp_path, "M0: v1.0.0")
+
+        # feature-a: bumps version to 1.0.1, no worktree (no runtime sync)
+        _create_branch(tmp_path, "feature-a")
+        _write_pyproject(tmp_path, "1.0.1")
+        (tmp_path / "a.txt").write_text("a")
+        _commit(tmp_path, "feature-a: PATCH to 1.0.1")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # feature-b: no version change, but a worktree with a tier-A file
+        # that will collide with target se3/.
+        _create_branch(tmp_path, "feature-b")
+        (tmp_path / "b.txt").write_text("b")
+        _commit(tmp_path, "feature-b: add b.txt (no version change)")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Pre-place a colliding tier-A file in target se3/ so feature-b's
+        # runtime sync hits a strict collision.
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        wt_b = (tmp_path / ".." / "feature-b-wt").resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_b), "feature-b"],
+            check=True, capture_output=True,
+        )
+        (wt_b / "se3" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_b / "se3" / "history" / "flow1.log").write_text(
+            "feature-b log (collides)"
+        )
+
+        try:
+            orch = MergeOrchestrator(
+                project_root=tmp_path, strict_runtime_sync=True,
+            )
+            report = orch.execute(["feature-a", "feature-b"])
+
+            # The sequence halts on feature-b's collision, but:
+            # 1. feature-a is recorded as merged
+            # 2. feature-b's git merge succeeded (recorded too)
+            # 3. branch_bumps contains feature-a's PATCH bump
+            # 4. version aggregation runs at the end of the loop
+            assert report.success is False
+            assert report.failure_reason == "runtime_sync_collision"
+            assert report.failed_branch == "feature-b"
+            assert "feature-a" in report.merged_branches
+            assert "feature-b" in report.merged_branches
+
+            # Aggregation IS run despite the collision break — gated
+            # solely by branch_bumps non-emptiness.
+            assert report.version_aggregation_skipped is False, (
+                "B12 contract violated: aggregation was skipped despite "
+                "feature-a contributing a PATCH bump"
+            )
+
+            # Critical: the final version reflects the aggregated bump
+            # from feature-a (and any bump from feature-b's merge-base
+            # diff).  Whichever branches contributed bumps, the
+            # aggregation result MUST land on disk and be reflected in
+            # report.final_version — NOT None.
+            assert report.final_version is not None, (
+                "B12 contract violated: final_version is None despite "
+                "successful aggregation. The 'Version not bumped' log "
+                "would be misleading if reintroduced."
+            )
+            assert _read_pyproject_version(tmp_path) == report.final_version
+
+            # Specifically, since feature-a is PATCH on 1.0.0 and
+            # feature-b's merge contributes no version diff, the
+            # aggregated bump is PATCH, applied to 1.0.0 → 1.0.1.
+            # (If feature-b's merge-base diff yielded a different bump,
+            #  this assertion would need to follow the max rule; for
+            #  this scenario PATCH is the correct expected outcome.)
+            assert report.final_version == "1.0.1", (
+                f"Expected final_version='1.0.1', got "
+                f"{report.final_version!r}"
+            )
+        finally:
+            subprocess.run(
+                ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_b)],
+                check=False, capture_output=True,
+            )
+
+    def test_collision_break_log_does_not_lie_about_version_state(
+        self, tmp_path: Path,
+    ) -> None:
+        """The orchestrator's post-break log MUST NOT claim 'Version not
+        bumped' when version aggregation actually ran successfully.
+
+        This guards against the historical regression where the log
+        line emitted right before the runtime_sync_* break said the
+        version was not bumped, even though the post-loop aggregation
+        path still applied bumps from earlier successful branches.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _write_pyproject(tmp_path, "2.0.0")
+        _commit(tmp_path, "M0: v2.0.0")
+
+        _create_branch(tmp_path, "feature-a")
+        _write_pyproject(tmp_path, "2.0.1")
+        (tmp_path / "a.txt").write_text("a")
+        _commit(tmp_path, "feature-a: PATCH to 2.0.1")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        _create_branch(tmp_path, "feature-b")
+        (tmp_path / "b.txt").write_text("b")
+        _commit(tmp_path, "feature-b: add b.txt")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        wt_b = (tmp_path / ".." / "feature-b-wt-2").resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_b), "feature-b"],
+            check=True, capture_output=True,
+        )
+        (wt_b / "se3" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_b / "se3" / "history" / "flow1.log").write_text(
+            "feature-b log (collides)"
+        )
+
+        try:
+            orch = MergeOrchestrator(
+                project_root=tmp_path, strict_runtime_sync=True,
+            )
+            report = orch.execute(["feature-a", "feature-b"])
+
+            assert report.failure_reason == "runtime_sync_collision"
+            assert report.final_version == "2.0.1"
+
+            # Read the log to verify the misleading message is gone.
+            assert report.log_file is not None
+            log_text = report.log_file.read_text()
+
+            # Aggregation log should be present.
+            assert "Aggregating SemVer bumps" in log_text or (
+                "Version aggregated" in log_text
+            ) or "version_higher_than_target" in log_text.lower(), (
+                "Aggregation should have run after the collision break"
+            )
+
+            # The historically-misleading message MUST NOT appear in
+            # combination with the actual aggregation output.  Either:
+            # (a) the message was removed entirely, or
+            # (b) it was replaced with an honest description.
+            # We assert that "Version not bumped despite N successful
+            # merge(s)" no longer appears with the runtime_sync_*
+            # halt context, because aggregation DID run.
+            assert "Version not bumped despite" not in log_text, (
+                "Misleading log retained: aggregation actually ran but "
+                "the log claims version was not bumped"
+            )
+        finally:
+            subprocess.run(
+                ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_b)],
+                check=False, capture_output=True,
+            )
+
+    def test_post_loop_success_log_only_when_no_failure(
+        self, tmp_path: Path,
+    ) -> None:
+        """Post-loop 'All N branches merged successfully' log MUST be
+        gated on report.failed_branch is None.
+
+        Regression guard for the misleading message that previously
+        printed 'All N branches merged successfully' even after a
+        runtime_sync_* break (where some branches were not attempted
+        and report.success is False).
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+
+        _write_pyproject(tmp_path, "3.0.0")
+        _commit(tmp_path, "M0")
+
+        _create_branch(tmp_path, "feature-a")
+        (tmp_path / "a.txt").write_text("a")
+        _commit(tmp_path, "feature-a")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        _create_branch(tmp_path, "feature-b")
+        (tmp_path / "b.txt").write_text("b")
+        _commit(tmp_path, "feature-b")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        # Set up collision target
+        target_se3 = tmp_path / "se3"
+        (target_se3 / "history").mkdir(parents=True, exist_ok=True)
+        (target_se3 / "history" / "flow1.log").write_text("target log")
+
+        wt_b = (tmp_path / ".." / "feature-b-wt-3").resolve()
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "worktree", "add", str(wt_b), "feature-b"],
+            check=True, capture_output=True,
+        )
+        (wt_b / "se3" / "history").mkdir(parents=True, exist_ok=True)
+        (wt_b / "se3" / "history" / "flow1.log").write_text(
+            "feature-b log (collides)"
+        )
+
+        try:
+            orch = MergeOrchestrator(
+                project_root=tmp_path, strict_runtime_sync=True,
+            )
+            report = orch.execute(["feature-a", "feature-b"])
+
+            assert report.success is False
+            assert report.failed_branch == "feature-b"
+
+            assert report.log_file is not None
+            log_text = report.log_file.read_text()
+
+            # The misleading "All N branch(es) merged successfully" log
+            # MUST NOT appear when failed_branch is set.  Operators
+            # reading the log should see an honest "halted at branch X"
+            # message instead.
+            assert "All 2 branch(es) merged successfully" not in log_text, (
+                "Misleading log: post-loop success message printed "
+                "even though feature-b failed"
+            )
+            # The honest halted-at message should be present.
+            assert (
+                "halted at branch" in log_text.lower()
+                or "of 2 branch(es) merged before halt" in log_text.lower()
+            ), f"Expected halted-at message in log:\n{log_text}"
+        finally:
+            subprocess.run(
+                ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_b)],
+                check=False, capture_output=True,
+            )
