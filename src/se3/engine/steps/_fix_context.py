@@ -45,7 +45,10 @@ def extract_issue_display_fields(issue: dict) -> tuple[str, str, str]:
     """
     if not isinstance(issue, dict):
         return ("", "", "")
-    severity = str(issue.get("severity", "high"))
+    # ``or "high"`` (rather than ``.get(..., "high")``) so an explicit
+    # ``None`` value is also treated as missing — otherwise ``str(None)``
+    # would render as the literal string ``"None"`` in the prompt.
+    severity = str(issue.get("severity") or "high")
 
     # Description: prefer new schema (actual_behavior + divergence joined
     # with em-dash). Fall back to legacy ``description`` / ``message``.

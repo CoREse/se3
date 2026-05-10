@@ -79,18 +79,47 @@ def _normalize_for_quote_match(s: str) -> str:
 def _build_source_pool(step_inputs: dict) -> list[str]:
     """Collect strings against which verbatim_quote is validated.
 
-    Includes ``task_description`` (which post-Commit 2 already inlines
-    user_interjections), ``original_task_description`` if the discovery
-    step produced a refined version, and project-specific specs.
+    Pool composition:
 
-    Excludes the ``base`` spec entry: its content is generic project
-    boilerplate (PEP 8, "代码应当健壮") that any nit can hang off of.
+    1. ``task_description_base`` — the clean, un-decorated effective task
+       description (refined-if-discovery-ran, else canonical), populated
+       by ``state_machine._build_step_inputs`` for SELF_CHECK steps.
+       Falls back to ``task_description`` for legacy callers that don't
+       set the base separately.
+    2. ``original_task_description`` — the canonical pre-discovery user
+       input, when discovery produced a refined override.
+    3. Each entry of ``user_interjections`` — its ``text`` field added
+       individually, so an LLM that wants to cite a specific Ctrl-C
+       instruction can substring-match against the bare interjection
+       text (NOT against our ``## Additional Instructions`` boilerplate
+       header which would otherwise be a free-pass quote).
+    4. Project-specific spec_content entries — excluding ``base`` (its
+       content is generic project boilerplate like PEP 8 conventions
+       that any nit can hang off of).
     """
     pool: list[str] = []
-    for key in ("task_description", "original_task_description"):
-        val = step_inputs.get(key)
-        if isinstance(val, str) and val:
-            pool.append(val)
+
+    # Prefer the clean base; fall back to the composed task_description
+    # for older inputs (e.g. unit tests or pre-upgrade resumes).
+    base = step_inputs.get("task_description_base")
+    if not (isinstance(base, str) and base):
+        base = step_inputs.get("task_description")
+    if isinstance(base, str) and base:
+        pool.append(base)
+
+    orig = step_inputs.get("original_task_description")
+    if isinstance(orig, str) and orig:
+        pool.append(orig)
+
+    interjections = step_inputs.get("user_interjections") or []
+    if isinstance(interjections, list):
+        for entry in interjections:
+            if not isinstance(entry, dict):
+                continue
+            text = entry.get("text")
+            if isinstance(text, str) and text.strip():
+                pool.append(text)
+
     spec_content = step_inputs.get("spec_content") or {}
     if isinstance(spec_content, dict):
         for spec_name, content in spec_content.items():

@@ -1270,6 +1270,19 @@ class StateMachine:
                 inputs["fix_iteration"] = fix_iteration
                 inputs["fix_history"] = copy.deepcopy(flow.state.fix_history)
 
+            # Pass through the un-decorated task_description base (refined
+            # or canonical, NO interjection section) and the structured
+            # user_interjections list so ``_build_source_pool`` can build
+            # a verbatim-quote source pool from clean inputs. Without these
+            # the source pool would only have the COMPOSED task_description
+            # — which contains our own ``## Additional Instructions`` boiler-
+            # plate header that an LLM could quote verbatim to slip an
+            # ungrounded issue past validation.
+            inputs["task_description_base"] = _effective_task_description_base(flow)
+            inputs["user_interjections"] = copy.deepcopy(
+                flow.state.context.get("user_interjections", [])
+            )
+
             # Inject prev_self_check_issues whenever this is the first pass
             # of a fix-loop round (pass_index == 1 AND fix_iteration > 0).
             # The earlier ``self_check_convergence_enabled`` gate has been

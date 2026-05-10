@@ -246,6 +246,18 @@ class TestExtractIssueDisplayFields:
         sev, _, _ = extract_issue_display_fields(issue)
         assert sev == "high"
 
+    def test_explicit_none_severity_falls_back_to_high(self):
+        """Regression: ``issue["severity"] = None`` (explicit null, not
+        missing) previously rendered as the literal string ``"None"`` via
+        ``str(issue.get("severity", "high"))`` because ``.get()`` returned
+        None and ``str(None) == "None"``. The fix uses ``or "high"`` so
+        the falsy None gets coerced to the default."""
+        from se3.engine.steps._fix_context import extract_issue_display_fields
+        issue = {"severity": None, "actual_behavior": "x",
+                 "evidence_lines": ["a:1"]}
+        sev, _, _ = extract_issue_display_fields(issue)
+        assert sev == "high"
+
     def test_non_dict_returns_empty_tuple(self):
         from se3.engine.steps._fix_context import extract_issue_display_fields
         assert extract_issue_display_fields(None) == ("", "", "")

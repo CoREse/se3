@@ -808,6 +808,71 @@ class TestBuildSourcePool:
     def test_empty_inputs_returns_empty_pool(self):
         from se3.engine.steps.self_check import _build_source_pool
         assert _build_source_pool({}) == []
+
+    def test_prefers_clean_base_over_composed(self):
+        """When ``task_description_base`` is provided (the un-decorated
+        version state_machine populates for SELF_CHECK steps), it takes
+        priority over the composed ``task_description``. This excludes
+        our ``## Additional Instructions`` boilerplate header from the
+        pool, blocking the attack where an LLM uses the header text
+        itself as a verbatim_quote."""
+        from se3.engine.steps.self_check import _build_source_pool
+        pool = _build_source_pool({
+            "task_description_base": "task X",
+            "task_description": (
+                "task X\n\n## Additional Instructions (added during run)\n"
+                "\n- [analyze@t1] use Postgres"
+            ),
+        })
+        assert "task X" in pool
+        # Composed value with section is NOT added.
+        assert not any(
+            "## Additional Instructions (added during run)" in p
+            for p in pool
+        )
+
+    def test_includes_each_interjection_text_separately(self):
+        """Each user_interjection's ``text`` is added as its own pool
+        entry, so a quote citing only the interjection content (without
+        the bullet/timestamp prefix or section header) substring-
+        matches."""
+        from se3.engine.steps.self_check import _build_source_pool
+        pool = _build_source_pool({
+            "task_description_base": "task X",
+            "user_interjections": [
+                {"text": "use Postgres not SQLite",
+                 "step_type": "analyze", "timestamp": "t1"},
+                {"text": "skip the cache layer",
+                 "step_type": "implement", "timestamp": "t2"},
+            ],
+        })
+        assert "use Postgres not SQLite" in pool
+        assert "skip the cache layer" in pool
+
+    def test_falls_back_to_task_description_when_base_missing(self):
+        """Older inputs without ``task_description_base`` still work via
+        the composed ``task_description``. (Forward-compat for unit
+        tests / tests of pre-upgrade state.)"""
+        from se3.engine.steps.self_check import _build_source_pool
+        pool = _build_source_pool({"task_description": "legacy task"})
+        assert "legacy task" in pool
+
+    def test_user_interjections_non_dict_entries_skipped(self):
+        """Defensive: malformed interjection entries don't crash the
+        pool builder."""
+        from se3.engine.steps.self_check import _build_source_pool
+        pool = _build_source_pool({
+            "task_description_base": "task",
+            "user_interjections": [
+                None, "not a dict", 42,
+                {"text": "real one", "step_type": "x", "timestamp": "y"},
+                {"text": "", "step_type": "x", "timestamp": "y"},  # empty text
+                {"step_type": "x"},  # missing text
+            ],
+        })
+        assert "real one" in pool
+        # Empty / missing text not added — would have produced `""` or KeyError.
+        assert "" not in pool
         assert _build_source_pool({"task_description": ""}) == []
 
 
@@ -918,6 +983,50 @@ class TestValidateAndFilterIssues:
         inputs = self._inputs(task_description='Implement "reliable" retry policy')
         good = self._good_issue()
         good["expectation_source"]["verbatim_quote"] = "“reliable” retry policy"
+        kept, stats = _validate_and_filter_issues([good], inputs)
+        assert len(kept) == 1
+
+    def test_section_header_boilerplate_quote_rejected(self):
+        """Regression: an LLM cannot use the ``## Additional Instructions``
+        section header (which we inject when interjections exist) as a
+        verbatim_quote to slip an ungrounded issue past validation. The
+        source pool uses ``task_description_base`` (the un-decorated
+        base), not the composed ``task_description``, so the header
+        text is not in the pool."""
+        from se3.engine.steps.self_check import _validate_and_filter_issues
+        inputs = self._inputs()
+        inputs["task_description_base"] = inputs["task_description"]
+        # Composed task_description (what the LLM sees in its prompt)
+        # contains the boilerplate. The base in the pool does not.
+        inputs["task_description"] = (
+            inputs["task_description"]
+            + "\n\n## Additional Instructions (added during run)\n"
+            + "\n- [analyze@t1] use Postgres"
+        )
+        bad = self._good_issue()
+        bad["expectation_source"]["verbatim_quote"] = (
+            "## Additional Instructions (added during run)"
+        )
+        kept, stats = _validate_and_filter_issues([bad], inputs)
+        assert kept == []
+        assert stats["quote_not_in_source_count"] == 1
+
+    def test_legitimate_interjection_quote_passes(self):
+        """The companion contract: an LLM legitimately citing an
+        interjection's content (without the boilerplate header) MUST
+        still pass validation."""
+        from se3.engine.steps.self_check import _validate_and_filter_issues
+        inputs = self._inputs()
+        inputs["task_description_base"] = inputs["task_description"]
+        inputs["user_interjections"] = [
+            {"text": "use Postgres not SQLite",
+             "step_type": "analyze", "timestamp": "t1"},
+        ]
+        good = self._good_issue()
+        good["expectation_source"] = {
+            "type": "user_interjection",
+            "verbatim_quote": "use Postgres not SQLite",
+        }
         kept, stats = _validate_and_filter_issues([good], inputs)
         assert len(kept) == 1
 
