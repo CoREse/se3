@@ -580,3 +580,134 @@ class TestHandleResumeInteractiveFailedFlows:
         # Check render was called with "failed" label
         render_calls = mock_render.call_args_list
         assert any("failed" in str(call) for call in render_calls)
+
+
+class TestHandleStepInterrupt:
+    """Test cases for ``_handle_step_interrupt`` persisting Ctrl-C user
+    interjections into ``flow.state.context["user_interjections"]`` and
+    inlining them into the current step's ``inputs["task_description"]``.
+    """
+
+    def _make_flow_and_step(self, base_task: str = "do the thing"):
+        flow = FlowInstance(
+            flow_id="iflow-1",
+            task_description=base_task,
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+        )
+        step = Step(
+            step_id="01_implement_abc",
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            inputs={"task_description": base_task},
+        )
+        flow.state.steps[step.step_id] = step
+        flow.state.step_history.append(step.step_id)
+        return flow, step
+
+    @patch("se3.commands.run._read_multiline_input")
+    def test_user_input_persists_to_context_and_step_inputs(
+        self, mock_read, tmp_path,
+    ):
+        """A non-empty interjection writes into both the durable
+        ``flow.state.context["user_interjections"]`` and the current step's
+        ``inputs["task_description"]`` (so the immediate re-run sees it)."""
+        from se3.commands.run import _handle_step_interrupt
+
+        mock_read.return_value = "actually use Postgres not SQLite"
+        flow, step = self._make_flow_and_step()
+        persistence = MagicMock(spec=PersistenceManager)
+
+        result = _handle_step_interrupt(flow, step, persistence)
+
+        # Persistence saved
+        persistence.save_flow.assert_called_once_with(flow)
+        # Step status reset for re-run
+        assert step.status == StepStatus.PENDING
+        assert result == StepStatus.PENDING
+        # Interjection persisted to flow context
+        interjections = flow.state.context.get("user_interjections", [])
+        assert len(interjections) == 1
+        assert interjections[0]["text"] == "actually use Postgres not SQLite"
+        assert interjections[0]["step_id"] == "01_implement_abc"
+        assert interjections[0]["step_type"] == "implement"
+        assert interjections[0]["timestamp"]  # ISO timestamp set
+        # Current step's inputs.task_description got the section appended
+        td = step.inputs["task_description"]
+        assert td.startswith("do the thing")
+        assert "## Additional Instructions" in td
+        assert "actually use Postgres not SQLite" in td
+        # Pre-interjection base preserved under the magic key for repeat
+        # interjections to compose against
+        assert step.inputs["_task_description_base"] == "do the thing"
+
+    @patch("se3.commands.run._read_multiline_input")
+    def test_repeated_interjections_compose_against_original_base(
+        self, mock_read, tmp_path,
+    ):
+        """A second Ctrl-C must not produce nested
+        ``## Additional Instructions`` sections — the second composer call
+        sees the original base, not the post-first-interjection prose."""
+        from se3.commands.run import _handle_step_interrupt
+
+        flow, step = self._make_flow_and_step()
+        persistence = MagicMock(spec=PersistenceManager)
+
+        mock_read.return_value = "first instruction"
+        _handle_step_interrupt(flow, step, persistence)
+        mock_read.return_value = "second instruction"
+        _handle_step_interrupt(flow, step, persistence)
+
+        interjections = flow.state.context["user_interjections"]
+        assert len(interjections) == 2
+        assert interjections[0]["text"] == "first instruction"
+        assert interjections[1]["text"] == "second instruction"
+
+        td = step.inputs["task_description"]
+        # Exactly ONE section header
+        assert td.count("## Additional Instructions") == 1
+        # Both bullets present, in order
+        pos1 = td.find("first instruction")
+        pos2 = td.find("second instruction")
+        assert 0 < pos1 < pos2
+
+    @patch("se3.commands.run._read_multiline_input")
+    def test_empty_input_does_not_persist_or_modify(
+        self, mock_read, tmp_path,
+    ):
+        """An empty user_input (just Enter / Esc-Enter with no text) reverts
+        to "retry as-is": no interjection persisted, no task_description
+        change, but step still reset to PENDING for retry."""
+        from se3.commands.run import _handle_step_interrupt
+
+        mock_read.return_value = ""
+        flow, step = self._make_flow_and_step()
+        persistence = MagicMock(spec=PersistenceManager)
+
+        result = _handle_step_interrupt(flow, step, persistence)
+
+        assert result == StepStatus.PENDING
+        assert step.status == StepStatus.PENDING
+        # No interjection persisted
+        assert "user_interjections" not in flow.state.context
+        # task_description unchanged
+        assert step.inputs["task_description"] == "do the thing"
+
+    @patch("se3.commands.run._read_multiline_input")
+    def test_cancelled_input_returns_none(self, mock_read, tmp_path):
+        """user_input is None when user cancels with Ctrl-C inside the input
+        prompt. _handle_step_interrupt saves and returns None to exit."""
+        from se3.commands.run import _handle_step_interrupt
+
+        mock_read.return_value = None
+        flow, step = self._make_flow_and_step()
+        persistence = MagicMock(spec=PersistenceManager)
+
+        result = _handle_step_interrupt(flow, step, persistence)
+
+        assert result is None
+        persistence.save_flow.assert_called_once_with(flow)
+        # Step status NOT changed
+        assert step.status == StepStatus.RUNNING
+        # No interjection persisted
+        assert "user_interjections" not in flow.state.context

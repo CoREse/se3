@@ -172,3 +172,96 @@ class TestVersionAnalyzeForwarding:
         assert inputs["reasoning"] is None
         assert inputs["confidence"] is None
         assert inputs["suggested_version"] is None
+
+
+class TestUserInterjectionsInTaskDescription:
+    """Test cases for ``flow.state.context["user_interjections"]`` being
+    composed onto every step's effective ``inputs["task_description"]``
+    by ``_build_step_inputs``.
+
+    The composer is unit-tested in ``test_task_description_composer.py``;
+    these tests pin the integration with state_machine — that the section
+    appears in every downstream step regardless of step type, that the
+    refined_description overwrite still happens first, and that the
+    section is absent when no interjections exist.
+    """
+
+    def test_no_interjections_leaves_task_description_untouched(self, tmp_path):
+        sm = StateMachine(tmp_path)
+        flow = FlowInstance(task_description="original task")
+        flow.state.selected_steps = [StepType.IMPLEMENT]
+        # No interjections in context
+
+        inputs = sm._build_step_inputs(flow, StepType.IMPLEMENT)
+
+        assert inputs["task_description"] == "original task"
+        assert "## Additional Instructions" not in inputs["task_description"]
+
+    def test_interjections_appended_to_task_description(self, tmp_path):
+        sm = StateMachine(tmp_path)
+        flow = FlowInstance(task_description="original task")
+        flow.state.selected_steps = [StepType.IMPLEMENT]
+        flow.state.context["user_interjections"] = [
+            {"text": "redirect to using SQLAlchemy",
+             "step_id": "01_analyze_xxx", "step_type": "analyze",
+             "timestamp": "2026-05-10T10:00:00"},
+        ]
+
+        inputs = sm._build_step_inputs(flow, StepType.IMPLEMENT)
+
+        assert inputs["task_description"].startswith("original task")
+        assert "## Additional Instructions (added during run)" in inputs["task_description"]
+        assert "redirect to using SQLAlchemy" in inputs["task_description"]
+        assert "[analyze@2026-05-10T10:00:00]" in inputs["task_description"]
+
+    def test_interjections_appended_after_refined_description_overwrite(self, tmp_path):
+        """When discovery has produced a refined_description, the
+        interjections must be appended onto the REFINED text, not the
+        original — so users always see the interjection on top of the
+        currently-effective task wording.
+        """
+        sm = StateMachine(tmp_path)
+        flow = FlowInstance(task_description="original task")
+        flow.state.selected_steps = [StepType.DISCOVERY, StepType.PLAN]
+        # Add a completed DISCOVERY step whose outputs include a
+        # refined_description; state_machine forwards it into
+        # ``inputs["refined_description"]`` for downstream steps.
+        discovery_step = Step(
+            step_type=StepType.DISCOVERY,
+            status=StepStatus.COMPLETED,
+            outputs={"refined_description": "refined task scope"},
+        )
+        flow.state.add_step(discovery_step)
+        flow.state.context["user_interjections"] = [
+            {"text": "extra constraint", "step_type": "plan",
+             "timestamp": "2026-05-10T10:00:00"},
+        ]
+
+        inputs = sm._build_step_inputs(flow, StepType.PLAN)
+
+        # original_task_description preserved for traceability
+        assert inputs["original_task_description"] == "original task"
+        # task_description starts with refined (not original)
+        assert inputs["task_description"].startswith("refined task scope")
+        # And gets the interjection section appended
+        assert "## Additional Instructions" in inputs["task_description"]
+        assert "extra constraint" in inputs["task_description"]
+
+    def test_interjections_propagate_across_step_types(self, tmp_path):
+        """The same interjection list must be applied to every step type
+        that goes through ``_build_step_inputs``."""
+        sm = StateMachine(tmp_path)
+        flow = FlowInstance(task_description="task")
+        flow.state.selected_steps = [
+            StepType.ANALYZE, StepType.PLAN, StepType.IMPLEMENT,
+        ]
+        flow.state.context["user_interjections"] = [
+            {"text": "instruction A", "step_type": "analyze",
+             "timestamp": "t1"},
+        ]
+
+        for step_type in (StepType.ANALYZE, StepType.PLAN, StepType.IMPLEMENT):
+            inputs = sm._build_step_inputs(flow, step_type)
+            assert "instruction A" in inputs["task_description"], (
+                f"interjection must reach {step_type.value} step"
+            )

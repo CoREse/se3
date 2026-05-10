@@ -1085,6 +1085,19 @@ class StateMachine:
             inputs["original_task_description"] = inputs["task_description"]
             inputs["task_description"] = inputs["refined_description"]
 
+        # Append any persisted user-Ctrl-C interjections as a structured
+        # ``## Additional Instructions`` section onto the effective task
+        # description. Done AFTER the refined_description overwrite so the
+        # interjections always sit on top of whichever description (refined
+        # or original) is in flight.
+        interjections = flow.state.context.get("user_interjections", [])
+        if interjections:
+            from .task_description import compose_task_description_with_interjections
+            inputs["task_description"] = compose_task_description_with_interjections(
+                base=inputs.get("task_description", ""),
+                interjections=interjections,
+            )
+
         # Special handling for CONFIRM step
         if step_type == StepType.CONFIRM:
             # Determine which step we're confirming

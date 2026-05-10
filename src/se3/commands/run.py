@@ -353,6 +353,13 @@ def handle_resume_interactive(project_root: Path) -> Optional[str]:
 def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: PersistenceManager, prompt_history: Any = None) -> Optional[StepStatus]:
     """Handle KeyboardInterrupt during step execution.
 
+    A non-empty user-typed instruction is persisted to
+    ``flow.state.context["user_interjections"]`` and inlined into the
+    current step's ``inputs["task_description"]`` so the immediate re-run
+    sees it. Downstream steps pick up the same interjections via
+    ``state_machine._build_step_inputs`` (which composes them onto every
+    new step's task_description on construction).
+
     Returns:
         StepStatus to continue, or None to exit
     """
@@ -371,8 +378,44 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
         )
         return None
     if user_input:
-        set_extra_prompt(user_input)
-        get_console().print("[dim]Extra prompt set, retrying step...[/dim]")
+        from datetime import datetime
+        from ..engine.task_description import compose_task_description_with_interjections
+
+        step_type_value = (
+            current_step.step_type.value
+            if hasattr(current_step.step_type, "value")
+            else str(current_step.step_type)
+        )
+        entry = {
+            "text": user_input,
+            "step_id": current_step.step_id,
+            "step_type": step_type_value,
+            "timestamp": datetime.now().isoformat(),
+        }
+        flow.state.context.setdefault("user_interjections", []).append(entry)
+
+        # Mutate the current step's inputs in-place so the immediate re-run
+        # sees the new instruction without waiting for _build_step_inputs to
+        # re-compose. We rebuild from the original (pre-interjection) base by
+        # composing against the FULL interjections list — this stays correct
+        # if ``_handle_step_interrupt`` is invoked twice in a row.
+        original_base = current_step.inputs.get("_task_description_base")
+        if original_base is None:
+            # First interjection on this step instance: snapshot the current
+            # value as the base. (state_machine never writes the magic key,
+            # so its absence reliably marks the pre-interjection state.)
+            original_base = current_step.inputs.get("task_description", "")
+            current_step.inputs["_task_description_base"] = original_base
+        current_step.inputs["task_description"] = (
+            compose_task_description_with_interjections(
+                base=original_base,
+                interjections=flow.state.context["user_interjections"],
+            )
+        )
+        get_console().print(
+            "[dim]Additional instruction recorded — retrying step "
+            "with persistent interjection.[/dim]"
+        )
     else:
         get_console().print("[dim]Retrying step as-is...[/dim]")
     # Reset step to PENDING so it re-runs
