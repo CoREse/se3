@@ -1850,12 +1850,17 @@ def _format_fix_history(fix_history: list) -> str:
         lines.append(f"- Iteration {it}: triggered by {trigger} ({reason})")
         issues = entry.get("issues", [])
         if issues:
+            from ._fix_context import extract_issue_display_fields
             for issue in issues[:5]:
-                # Issues are normalized by state_machine._normalize_issue_fields
-                # to always carry a "severity" key.
-                sev = issue.get("severity", "?")
-                desc = issue.get("description") or issue.get("message", "")
-                loc = issue.get("location", "")
+                # Schema-compat: post-Commit-3 self_check stores new schema
+                # (actual_behavior / divergence / evidence_lines) into
+                # fix_history; verify_spec still uses legacy
+                # (description / message / location). The extractor handles
+                # both. severity is normalized upstream by
+                # state_machine._normalize_issue_fields.
+                sev, desc, loc = extract_issue_display_fields(issue)
+                if not sev:
+                    sev = "?"
                 loc_str = f" @ {loc}" if loc else ""
                 lines.append(f"  - [{sev}] {desc}{loc_str}")
             if len(issues) > 5:

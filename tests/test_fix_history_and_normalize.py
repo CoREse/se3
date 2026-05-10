@@ -177,3 +177,54 @@ class TestFormatFixHistory:
         assert "Iteration 2" in result
         assert "first" in result
         assert "second" in result
+
+    def test_renders_new_schema_self_check_issues(self):
+        """Regression: post-Commit-3 self_check stores new-schema issues
+        (actual_behavior / divergence / evidence_lines) in fix_history.
+        ``_format_fix_history`` must extract those — otherwise every
+        historical issue line is empty (``  - [high]`` with no
+        description or location), giving the next implement iteration
+        no useful signal about prior bugs."""
+        history = [
+            {
+                "iteration": 1,
+                "reason": "self_check",
+                "trigger_step_type": "self_check",
+                "issues": [
+                    {
+                        "severity": "high",
+                        "actual_behavior": "returns None on missing key",
+                        "expected_behavior": "raises KeyError",
+                        "divergence": "callers crash on iteration",
+                        "evidence_lines": ["src/lookup.py:42"],
+                        "missing_in": [],
+                    },
+                ],
+            },
+        ]
+        result = _format_fix_history(history)
+        assert "returns None on missing key" in result
+        assert "callers crash on iteration" in result
+        assert "src/lookup.py:42" in result
+        assert "[high]" in result
+
+    def test_renders_legacy_message_field(self):
+        """verify_spec issues use legacy schema with ``message`` instead of
+        ``description``. The extractor falls back to ``message``."""
+        history = [
+            {
+                "iteration": 1,
+                "reason": "spec_compliance",
+                "trigger_step_type": "verify_spec",
+                "issues": [
+                    {
+                        "severity": "high",
+                        "message": "missing endpoint",
+                        "location": "api.py:10",
+                    },
+                ],
+            },
+        ]
+        result = _format_fix_history(history)
+        assert "missing endpoint" in result
+        assert "api.py:10" in result
