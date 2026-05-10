@@ -151,23 +151,14 @@ def _validate_evidence(issue: dict, changed: set[str]) -> bool:
 def _describe_issue(issue: dict) -> str:
     """Render a kept issue as a single bullet line for fix_instructions.
 
-    Uses the new schema fields. Falls back to legacy ``description`` /
-    ``location`` if the issue somehow lacks the new fields (defensive —
-    validation should have rejected such issues already).
+    Goes beyond ``extract_issue_display_fields`` to expose
+    ``expected_behavior`` separately — the implement step benefits from
+    seeing actual vs expected explicitly when fixing the issue.
     """
-    primary_loc = ""
-    evidence = issue.get("evidence_lines") or []
-    if isinstance(evidence, list) and evidence:
-        primary_loc = next(
-            (e for e in evidence if isinstance(e, str) and e.strip()),
-            "",
-        )
-    if not primary_loc:
-        missing = issue.get("missing_in") or []
-        if isinstance(missing, list) and missing:
-            primary_loc = f"missing_in: {missing[0]}"
-    if not primary_loc:
-        primary_loc = issue.get("location", "?")
+    from ._fix_context import extract_issue_display_fields
+
+    _severity, _desc, location = extract_issue_display_fields(issue)
+    primary_loc = location or "?"
 
     actual = issue.get("actual_behavior") or issue.get("description") or ""
     expected = issue.get("expected_behavior", "")

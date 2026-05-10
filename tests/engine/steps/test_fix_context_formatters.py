@@ -189,6 +189,93 @@ class TestFormatFixContext:
         assert "real" in result
 
 
+class TestExtractIssueDisplayFields:
+    """The shared schema-compat extractor used by every issue-display
+    consumer (fix_context prompt, _describe_issue, implement.py
+    fix_context_structured, step_renderers CLI display).
+    """
+
+    def test_new_schema_full(self):
+        from se3.engine.steps._fix_context import extract_issue_display_fields
+        issue = {
+            "severity": "high",
+            "actual_behavior": "returns None",
+            "divergence": "callers crash",
+            "evidence_lines": ["src/foo.py:42"],
+        }
+        sev, desc, loc = extract_issue_display_fields(issue)
+        assert sev == "high"
+        assert "returns None" in desc
+        assert "callers crash" in desc
+        # Em-dash separator
+        assert " — " in desc
+        assert loc == "src/foo.py:42"
+
+    def test_legacy_schema_full(self):
+        from se3.engine.steps._fix_context import extract_issue_display_fields
+        issue = {
+            "severity": "medium",
+            "description": "old style desc",
+            "location": "old/path.py:5",
+        }
+        sev, desc, loc = extract_issue_display_fields(issue)
+        assert sev == "medium"
+        assert desc == "old style desc"
+        assert loc == "old/path.py:5"
+
+    def test_message_field_used_when_no_description(self):
+        """verify_spec issues use ``message`` rather than ``description``."""
+        from se3.engine.steps._fix_context import extract_issue_display_fields
+        issue = {"severity": "low", "message": "from message field"}
+        _sev, desc, _loc = extract_issue_display_fields(issue)
+        assert desc == "from message field"
+
+    def test_missing_in_used_when_no_evidence_lines(self):
+        from se3.engine.steps._fix_context import extract_issue_display_fields
+        issue = {
+            "severity": "high",
+            "actual_behavior": "auth missing",
+            "missing_in": ["src/auth.py"],
+        }
+        _sev, _desc, loc = extract_issue_display_fields(issue)
+        assert loc == "missing_in: src/auth.py"
+
+    def test_default_severity_high(self):
+        from se3.engine.steps._fix_context import extract_issue_display_fields
+        issue = {"description": "x"}
+        sev, _, _ = extract_issue_display_fields(issue)
+        assert sev == "high"
+
+    def test_non_dict_returns_empty_tuple(self):
+        from se3.engine.steps._fix_context import extract_issue_display_fields
+        assert extract_issue_display_fields(None) == ("", "", "")
+        assert extract_issue_display_fields("string") == ("", "", "")
+        assert extract_issue_display_fields(42) == ("", "", "")
+
+    def test_only_actual_no_divergence_no_em_dash(self):
+        from se3.engine.steps._fix_context import extract_issue_display_fields
+        issue = {
+            "severity": "high",
+            "actual_behavior": "lone actual",
+            "evidence_lines": ["x.py:1"],
+        }
+        _, desc, _ = extract_issue_display_fields(issue)
+        assert desc == "lone actual"
+        assert " — " not in desc
+
+    def test_evidence_lines_first_non_empty(self):
+        """When evidence_lines has empty/whitespace entries followed by a
+        real entry, the helper picks the first real one."""
+        from se3.engine.steps._fix_context import extract_issue_display_fields
+        issue = {
+            "severity": "high",
+            "actual_behavior": "x",
+            "evidence_lines": ["", "  ", "src/real.py:10"],
+        }
+        _, _, loc = extract_issue_display_fields(issue)
+        assert loc == "src/real.py:10"
+
+
 class TestFormatPreviousVerification:
 
     def test_empty_issues(self):
@@ -274,6 +361,51 @@ class TestFormatFixContextStructured:
         assert "self_check" in result
         assert "SQL injection" in result
         assert "api.py:42" in result
+
+    def test_self_check_reason_with_new_schema(self):
+        """Regression: self_check now persists kept issues in the new
+        schema; the implement step's fix-context renderer must pull
+        ``actual_behavior`` / ``divergence`` / ``evidence_lines`` so the
+        downstream LLM sees actionable bullets, not empty ``- [high] ``."""
+        ctx = {
+            "reason": "self_check",
+            "issues": [
+                {
+                    "severity": "high",
+                    "actual_behavior": "raises KeyError when key absent",
+                    "expected_behavior": "returns None default",
+                    "divergence": "lookup of unknown user crashes",
+                    "evidence_lines": ["src/lookup.py:42"],
+                    "missing_in": [],
+                },
+            ],
+        }
+        result = _format_fix_context_structured(ctx)
+        assert "self_check" in result
+        assert "raises KeyError when key absent" in result
+        assert "lookup of unknown user crashes" in result
+        assert "src/lookup.py:42" in result
+        assert "[high]" in result
+        # No empty bullet
+        assert "- [high] \n" not in result
+        assert "- [high]  @" not in result
+
+    def test_self_check_reason_with_missing_in(self):
+        """``missing_in`` issue type renders the missing path."""
+        ctx = {
+            "reason": "self_check",
+            "issues": [
+                {
+                    "severity": "medium",
+                    "actual_behavior": "auth check absent",
+                    "divergence": "anonymous access reaches /admin",
+                    "missing_in": ["src/admin/router.py"],
+                },
+            ],
+        }
+        result = _format_fix_context_structured(ctx)
+        assert "auth check absent" in result
+        assert "missing_in: src/admin/router.py" in result
 
     def test_unknown_reason_returns_reason_line(self):
         ctx = {"reason": "custom_reason"}

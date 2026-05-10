@@ -29,6 +29,58 @@ def format_fix_iteration_display(fix_iteration: int, max_iterations: int) -> str
     return f"{fix_iteration}/{max_iterations}"
 
 
+def extract_issue_display_fields(issue: dict) -> tuple[str, str, str]:
+    """Schema-compatible extraction of (severity, description, location)
+    from an issue dict, regardless of whether it's in the new self_check
+    schema (Commit 3+) or the legacy schema still used by verify_spec.
+
+    Returns a tuple of three strings; any field not derivable is "".
+
+    Used by every site that needs to display or render an issue: the
+    fix-context prompt block, ``_describe_issue`` for fix_instructions,
+    implement.py's ``_format_fix_context_structured`` for downstream
+    fix-loop prompts, and step_renderers.py for CLI history display.
+    Centralizing the schema-compat read prevents the same drift bug
+    surfacing in every consumer.
+    """
+    if not isinstance(issue, dict):
+        return ("", "", "")
+    severity = str(issue.get("severity", "high"))
+
+    # Description: prefer new schema (actual_behavior + divergence joined
+    # with em-dash). Fall back to legacy ``description`` / ``message``.
+    actual = (issue.get("actual_behavior") or "").strip()
+    divergence = (issue.get("divergence") or "").strip()
+    new_desc_parts = [p for p in (actual, divergence) if p]
+    new_desc = " — ".join(new_desc_parts)
+    description = (
+        new_desc
+        or (issue.get("description") or "")
+        or (issue.get("message") or "")
+    )
+
+    # Location: prefer new schema's evidence_lines[0]; fall back to
+    # missing_in[0] (with explicit prefix) and finally legacy ``location``.
+    location = ""
+    evidence = issue.get("evidence_lines")
+    if isinstance(evidence, list):
+        for ev in evidence:
+            if isinstance(ev, str) and ev.strip():
+                location = ev.strip()
+                break
+    if not location:
+        missing = issue.get("missing_in")
+        if isinstance(missing, list):
+            for m in missing:
+                if isinstance(m, str) and m.strip():
+                    location = f"missing_in: {m.strip()}"
+                    break
+    if not location:
+        location = str(issue.get("location") or "")
+
+    return (severity, description, location)
+
+
 def render_fix_context(
     fix_iteration: int,
     max_iterations: int,
@@ -89,34 +141,7 @@ def render_fix_context(
         for issue in prev_issues[:PREV_ISSUES_RENDER_TAIL]:
             if not isinstance(issue, dict):
                 continue
-            severity = issue.get("severity", "high")
-            # Schema compatibility: new self_check schema (actual_behavior /
-            # divergence / evidence_lines) post-Commit-3, falling back to
-            # legacy verify_spec schema (description / location) for
-            # ungraded callers.
-            actual = issue.get("actual_behavior", "").strip()
-            divergence = issue.get("divergence", "").strip()
-            new_desc_parts = [p for p in (actual, divergence) if p]
-            new_desc = " — ".join(new_desc_parts)
-            desc = new_desc or issue.get("description", "") or issue.get("message", "")
-
-            evidence = issue.get("evidence_lines") or []
-            location = ""
-            if isinstance(evidence, list):
-                for ev in evidence:
-                    if isinstance(ev, str) and ev.strip():
-                        location = ev
-                        break
-            if not location:
-                missing = issue.get("missing_in") or []
-                if isinstance(missing, list):
-                    for m in missing:
-                        if isinstance(m, str) and m.strip():
-                            location = f"missing_in: {m}"
-                            break
-            if not location:
-                location = issue.get("location", "")
-
+            severity, desc, location = extract_issue_display_fields(issue)
             loc_suffix = f" @ {location}" if location else ""
             lines.append(f"- [{severity}] {desc}{loc_suffix}")
         if len(prev_issues) > PREV_ISSUES_RENDER_TAIL:

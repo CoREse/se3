@@ -1928,11 +1928,12 @@ def _format_fix_context_structured(fix_context: dict | str | None) -> str:
     if reason == "self_check":
         issues = fix_context.get("issues", [])
         if issues:
+            from ._fix_context import extract_issue_display_fields
             lines.append("Self-check findings:")
             for issue in issues:
-                severity = issue.get("severity", "high")
-                desc = issue.get("description", "")
-                location = issue.get("location", "")
+                if not isinstance(issue, dict):
+                    continue
+                severity, desc, location = extract_issue_display_fields(issue)
                 loc_suffix = f" @ {location}" if location else ""
                 lines.append(f"  - [{severity}] {desc}{loc_suffix}")
 

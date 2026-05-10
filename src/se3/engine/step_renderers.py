@@ -518,6 +518,8 @@ def _render_self_check(step: Step) -> None:
         lines.append("[dim]" + "─" * 50 + "[/dim]")
         lines.append("")
 
+        from .steps._fix_context import extract_issue_display_fields
+
         for severity in ("critical", "high", "medium", "low"):
             group = [i for i in issues if isinstance(i, dict) and i.get("severity") == severity]
             if not group:
@@ -525,8 +527,8 @@ def _render_self_check(step: Step) -> None:
             _label, color = severity_styles.get(severity, ("[dim]?[/dim]", "[dim]"))
             lines.append(f"{color}{severity}[/{color[1:-1]}]  [dim]({len(group)})[/dim]")
             for issue in group:
-                desc = issue.get("description", "")
-                location = issue.get("location", "")
+                # Schema-compat: new self_check schema vs legacy verify_spec.
+                _sev, desc, location = extract_issue_display_fields(issue)
                 loc_suffix = f" [dim]@ {location}[/dim]" if location else ""
                 lines.append(f"  {color}•[/{color[1:-1]}] {desc}{loc_suffix}")
             lines.append("")
