@@ -113,6 +113,81 @@ class TestFormatFixContext:
         )
         assert "earlier entries (truncated)" not in result
 
+    def test_prev_issues_renders_new_schema_fields(self):
+        """Regression: prev_issues from a post-Commit-3 self_check carry
+        the new schema (actual_behavior / divergence / evidence_lines).
+        ``render_fix_context`` must read those — otherwise the rendered
+        bullet was empty (just "- [high] ") and the LLM saw no signal.
+        """
+        new_issue = {
+            "severity": "high",
+            "actual_behavior": "returns None on missing key",
+            "expected_behavior": "raises KeyError",
+            "divergence": "callers crash on iteration",
+            "evidence_lines": ["src/feature.py:42"],
+            "missing_in": [],
+        }
+        result = render_fix_context(
+            fix_iteration=2,
+            max_iterations=10,
+            step_label="self-check",
+            prev_issues=[new_issue],
+        )
+        assert "returns None on missing key" in result
+        assert "callers crash on iteration" in result
+        assert "src/feature.py:42" in result
+        # No empty bullet ("- [high] " followed by space-only).
+        assert "- [high] \n" not in result
+        assert "- [high]  @" not in result
+
+    def test_prev_issues_renders_legacy_schema_fields(self):
+        """verify_spec still uses the legacy schema (description / location);
+        render_fix_context must keep handling those for back-compat."""
+        legacy_issue = {
+            "severity": "high",
+            "description": "missing null check",
+            "location": "src/feature.py:55",
+        }
+        result = render_fix_context(
+            fix_iteration=2,
+            max_iterations=10,
+            step_label="verification",
+            prev_issues=[legacy_issue],
+        )
+        assert "missing null check" in result
+        assert "src/feature.py:55" in result
+
+    def test_prev_issues_renders_missing_in_when_no_evidence_lines(self):
+        """Issues using ``missing_in`` (should-have-edited but didn't) must
+        surface that path in the location suffix."""
+        issue = {
+            "severity": "medium",
+            "actual_behavior": "no auth check",
+            "divergence": "anonymous access to /admin",
+            "missing_in": ["src/auth.py"],
+        }
+        result = render_fix_context(
+            fix_iteration=2,
+            max_iterations=10,
+            step_label="self-check",
+            prev_issues=[issue],
+        )
+        assert "no auth check" in result
+        assert "anonymous access to /admin" in result
+        assert "missing_in: src/auth.py" in result
+
+    def test_prev_issues_skips_non_dict_entries(self):
+        """Defensive: malformed entries don't crash the renderer."""
+        result = render_fix_context(
+            fix_iteration=2,
+            max_iterations=10,
+            step_label="self-check",
+            prev_issues=[None, "string", 42, {"severity": "high",
+                                              "actual_behavior": "real",
+                                              "evidence_lines": ["x.py:1"]}],
+        )
+        assert "real" in result
+
 
 class TestFormatPreviousVerification:
 

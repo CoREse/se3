@@ -87,9 +87,36 @@ def render_fix_context(
         lines.append("Do NOT re-report issues that have been successfully fixed.")
         lines.append("")
         for issue in prev_issues[:PREV_ISSUES_RENDER_TAIL]:
+            if not isinstance(issue, dict):
+                continue
             severity = issue.get("severity", "high")
-            desc = issue.get("description", "")
-            location = issue.get("location", "")
+            # Schema compatibility: new self_check schema (actual_behavior /
+            # divergence / evidence_lines) post-Commit-3, falling back to
+            # legacy verify_spec schema (description / location) for
+            # ungraded callers.
+            actual = issue.get("actual_behavior", "").strip()
+            divergence = issue.get("divergence", "").strip()
+            new_desc_parts = [p for p in (actual, divergence) if p]
+            new_desc = " — ".join(new_desc_parts)
+            desc = new_desc or issue.get("description", "") or issue.get("message", "")
+
+            evidence = issue.get("evidence_lines") or []
+            location = ""
+            if isinstance(evidence, list):
+                for ev in evidence:
+                    if isinstance(ev, str) and ev.strip():
+                        location = ev
+                        break
+            if not location:
+                missing = issue.get("missing_in") or []
+                if isinstance(missing, list):
+                    for m in missing:
+                        if isinstance(m, str) and m.strip():
+                            location = f"missing_in: {m}"
+                            break
+            if not location:
+                location = issue.get("location", "")
+
             loc_suffix = f" @ {location}" if location else ""
             lines.append(f"- [{severity}] {desc}{loc_suffix}")
         if len(prev_issues) > PREV_ISSUES_RENDER_TAIL:
