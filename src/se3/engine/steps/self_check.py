@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,233 @@ from ...config import DEFAULT_MAX_FIX_ITERATIONS
 from ._fix_context import format_fix_iteration_display, render_fix_context
 
 logger = logging.getLogger(__name__)
+
+
+# -----------------------------------------------------------------------
+# Issue validation: structural defenses against ungrounded "nit" issues
+# -----------------------------------------------------------------------
+#
+# The legacy schema let the LLM list any concern as an "issue" with a
+# free-text description. Because self_check.py routes any non-empty
+# ``issues`` list to REVISION_NEEDED, even a low-severity "observation
+# only" suggestion would trigger a new fix-loop iteration. Across many
+# iterations this produced orphan tests and runaway scope creep.
+#
+# The new schema requires each issue to carry:
+#   - actual_behavior / expected_behavior / divergence (concrete, non-empty)
+#   - expectation_source.verbatim_quote — a literal substring of the
+#     project's task_description / non-base spec_content. The handler
+#     normalizes both sides identically (unicode NFKC, smart-quote
+#     replacement, whitespace collapse, literal ``\n`` → real newline)
+#     before comparison so the LLM cannot rely on cosmetic drift.
+#   - evidence_lines pointing at changes_made.files_changed paths, or
+#     missing_in for "should-have-been-edited but wasn't" cases.
+#   - out_of_scope=True as an explicit release valve for non-actionable
+#     observations; handler discards out_of_scope items with telemetry.
+#
+# Items failing any check are dropped from the issue list and tallied in
+# ``validation_stats`` (also surfaced via outputs and a single log line)
+# for post-hoc inspection of LLM behavior.
+
+_EVIDENCE_LINE_RE = re.compile(r"^[\w/.\-]+:\d+$")
+
+
+def _normalize_for_quote_match(s: str) -> str:
+    """Symmetric normalization for verbatim_quote ↔ source pool comparison.
+
+    Order matters: literal ``\\n`` → real newline FIRST so subsequent
+    whitespace collapse can flatten it. Smart-quote replacement and NFKC
+    handle unicode drift between LLM paraphrase and source verbatim.
+    """
+    if not isinstance(s, str):
+        return ""
+    s = s.replace("\\n", "\n")
+    s = unicodedata.normalize("NFKC", s)
+    for smart, plain in (
+        ("“", '"'), ("”", '"'),
+        ("‘", "'"), ("’", "'"),
+    ):
+        s = s.replace(smart, plain)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
+
+
+def _build_source_pool(step_inputs: dict) -> list[str]:
+    """Collect strings against which verbatim_quote is validated.
+
+    Includes ``task_description`` (which post-Commit 2 already inlines
+    user_interjections), ``original_task_description`` if the discovery
+    step produced a refined version, and project-specific specs.
+
+    Excludes the ``base`` spec entry: its content is generic project
+    boilerplate (PEP 8, "代码应当健壮") that any nit can hang off of.
+    """
+    pool: list[str] = []
+    for key in ("task_description", "original_task_description"):
+        val = step_inputs.get(key)
+        if isinstance(val, str) and val:
+            pool.append(val)
+    spec_content = step_inputs.get("spec_content") or {}
+    if isinstance(spec_content, dict):
+        for spec_name, content in spec_content.items():
+            if spec_name == "base":
+                continue
+            if isinstance(content, str) and content:
+                pool.append(content)
+    return pool
+
+
+def _changed_paths(step_inputs: dict) -> set[str]:
+    """Set of paths from ``changes_made.files_changed`` for evidence_lines
+    validation. Returns an empty set if the field is missing or malformed.
+    """
+    out: set[str] = set()
+    changes = step_inputs.get("changes_made") or {}
+    if not isinstance(changes, dict):
+        return out
+    files_changed = changes.get("files_changed") or []
+    if not isinstance(files_changed, list):
+        return out
+    for entry in files_changed:
+        if isinstance(entry, str):
+            out.add(entry)
+        elif isinstance(entry, dict):
+            p = entry.get("path") or entry.get("file_path")
+            if isinstance(p, str) and p:
+                out.add(p)
+    return out
+
+
+def _validate_evidence(issue: dict, changed: set[str]) -> bool:
+    """Return True when the issue carries usable evidence — at least one
+    well-formed ``path:N`` entry whose path is in ``changed``, OR at
+    least one non-empty ``missing_in`` entry. ``missing_in`` covers
+    "the implementation should have edited X but didn't" cases that
+    naturally cannot point at a changed line.
+    """
+    evidence = issue.get("evidence_lines") or []
+    if isinstance(evidence, list):
+        for ev in evidence:
+            if not isinstance(ev, str):
+                continue
+            ev = ev.strip()
+            if not _EVIDENCE_LINE_RE.match(ev):
+                continue
+            path = ev.rsplit(":", 1)[0]
+            if path in changed:
+                return True
+    missing_in = issue.get("missing_in") or []
+    if isinstance(missing_in, list):
+        for mp in missing_in:
+            if isinstance(mp, str) and mp.strip():
+                return True
+    return False
+
+
+def _describe_issue(issue: dict) -> str:
+    """Render a kept issue as a single bullet line for fix_instructions.
+
+    Uses the new schema fields. Falls back to legacy ``description`` /
+    ``location`` if the issue somehow lacks the new fields (defensive —
+    validation should have rejected such issues already).
+    """
+    primary_loc = ""
+    evidence = issue.get("evidence_lines") or []
+    if isinstance(evidence, list) and evidence:
+        primary_loc = next(
+            (e for e in evidence if isinstance(e, str) and e.strip()),
+            "",
+        )
+    if not primary_loc:
+        missing = issue.get("missing_in") or []
+        if isinstance(missing, list) and missing:
+            primary_loc = f"missing_in: {missing[0]}"
+    if not primary_loc:
+        primary_loc = issue.get("location", "?")
+
+    actual = issue.get("actual_behavior") or issue.get("description") or ""
+    expected = issue.get("expected_behavior", "")
+    divergence = issue.get("divergence", "")
+
+    parts = [primary_loc]
+    if actual:
+        parts.append(f"actual: {actual}")
+    if expected:
+        parts.append(f"expected: {expected}")
+    if divergence:
+        parts.append(f"divergence: {divergence}")
+    return " | ".join(parts)
+
+
+def _validate_and_filter_issues(
+    raw_issues: list,
+    step_inputs: dict,
+) -> tuple[list[dict], dict]:
+    """Run the structural validation pipeline against each raw issue.
+
+    Returns a tuple ``(kept_issues, stats)`` where ``stats`` is a dict
+    of per-rejection-reason counts. The pipeline is:
+
+    1. ``out_of_scope == True`` → drop (counted in ``out_of_scope_count``)
+    2. ``verbatim_quote`` empty after normalize → drop
+    3. ``verbatim_quote`` not a substring of any source-pool entry → drop
+    4. ``evidence_lines`` / ``missing_in`` provides no real grounding → drop
+    5. ``actual_behavior`` / ``expected_behavior`` / ``divergence`` empty → drop
+    """
+    stats = {
+        "input_count": 0,
+        "kept_count": 0,
+        "out_of_scope_count": 0,
+        "empty_quote_count": 0,
+        "quote_not_in_source_count": 0,
+        "bad_evidence_count": 0,
+        "empty_field_count": 0,
+        "non_dict_count": 0,
+    }
+    kept: list[dict] = []
+
+    if not isinstance(raw_issues, list):
+        return kept, stats
+
+    pool_normalized = [_normalize_for_quote_match(s) for s in _build_source_pool(step_inputs)]
+    pool_normalized = [p for p in pool_normalized if p]
+    changed = _changed_paths(step_inputs)
+
+    for issue in raw_issues:
+        stats["input_count"] += 1
+        if not isinstance(issue, dict):
+            stats["non_dict_count"] += 1
+            continue
+        if issue.get("out_of_scope") is True:
+            stats["out_of_scope_count"] += 1
+            continue
+
+        source = issue.get("expectation_source") or {}
+        quote = (
+            source.get("verbatim_quote", "")
+            if isinstance(source, dict) else ""
+        )
+        norm_quote = _normalize_for_quote_match(quote)
+        if not norm_quote:
+            stats["empty_quote_count"] += 1
+            continue
+        if not any(norm_quote in p for p in pool_normalized):
+            stats["quote_not_in_source_count"] += 1
+            continue
+
+        if not _validate_evidence(issue, changed):
+            stats["bad_evidence_count"] += 1
+            continue
+
+        for field in ("actual_behavior", "expected_behavior", "divergence"):
+            if not _normalize_for_quote_match(issue.get(field, "")):
+                stats["empty_field_count"] += 1
+                break
+        else:
+            kept.append(issue)
+            stats["kept_count"] += 1
+
+    return kept, stats
 
 
 SELF_CHECK_PROMPT = """You are an expert code reviewer. Review the implementation for logic completeness, robustness, and potential issues that tests may not have caught.
@@ -63,21 +291,62 @@ Focus your review on these dimensions. Do NOT check spec compliance — that is 
 - **medium**: Defensive improvement that would prevent issues in edge cases, or a minor gap in test coverage.
 - **low**: Nice-to-have improvement, minor robustness enhancement, or additional test suggestion.
 
+## Issue Schema (HARD requirements — handler validates and drops violators)
+
+Each issue MUST be a JSON object with these fields:
+
+- `severity`: one of "critical" / "high" / "medium" / "low"
+- `actual_behavior`: what the code in `changes_made` currently does (concrete, observable; non-empty)
+- `expected_behavior`: what the code SHOULD do (non-empty)
+- `divergence`: under what specific input / sequence / state does `actual_behavior` produce a wrong result (concrete failure scenario; non-empty)
+- `expectation_source`: where "should do" comes from. Must be:
+    {{ "type": "task_description" | "spec" | "user_interjection",
+       "verbatim_quote": "<a literal substring from the project's task_description or non-base spec_content above>" }}
+  The handler normalizes both the quote and the source pool (NFKC + smart-quote replacement + whitespace collapse + literal `\\n` → newline) and drops any issue whose normalized quote is not a substring of any normalized source-pool entry. Quote a substantive phrase, NOT a single generic noun.
+- `evidence_lines`: array of `"path:N"` strings, where `path` MUST appear in `changes_made.files_changed` (the handler verifies). At least one entry required UNLESS `missing_in` is non-empty.
+- `missing_in`: array of file paths that should have been edited but were not. Use this for "missed integration point" issues that cannot point at a changed line.
+- `out_of_scope`: boolean. Set to `true` if the concern is a suggestion / observation rather than an actionable bug — the handler will discard out_of_scope items, so this is the correct release valve. Do NOT downgrade observations to `low` severity; use this field instead.
+
+## Previous Issue Resolutions (HARD requirement when prev_issues are listed)
+
+If the Fix Context above includes "Previously Reported Issues", you MUST emit a `previous_issue_resolutions` array. For EACH previously-reported issue, include exactly one entry:
+  {{ "prev_issue_summary": "<short paraphrase identifying which prev issue>",
+     "status": "fixed" | "still_present" }}
+- "fixed" — the change in `changes_made` resolves it; do NOT also list it again under `issues`.
+- "still_present" — the change did not resolve it; ALSO list it again under `issues` with full schema.
+
+## Soft guidance (handler does not enforce, but this is the team's preference)
+
+- If you're unsure whether something is a real bug or just a preference, prefer `out_of_scope=true` over a low-severity issue.
+- Avoid tentative phrasing in `actual_behavior` / `expected_behavior` / `divergence` ("could fail", "may not handle", "consider", "observation only"). State the failure as a concrete fact ("returns 0 instead of None when X", "raises KeyError when Y", "silently overwrites Z").
+- A `verbatim_quote` of one or two generic words is unlikely to ground a real issue. Quote a substantive phrase that pins down what the user actually asked for.
+
 Respond in JSON format:
 ```json
 {{
     "issues": [
         {{
             "severity": "critical|high|medium|low",
-            "description": "Clear description of the issue",
-            "location": "File path and/or function name where the issue exists"
+            "actual_behavior": "...",
+            "expected_behavior": "...",
+            "divergence": "...",
+            "expectation_source": {{
+                "type": "task_description",
+                "verbatim_quote": "..."
+            }},
+            "evidence_lines": ["src/foo.py:42"],
+            "missing_in": [],
+            "out_of_scope": false
         }}
+    ],
+    "previous_issue_resolutions": [
+        {{ "prev_issue_summary": "...", "status": "fixed" }}
     ],
     "summary": "Brief overall assessment of the implementation quality"
 }}
 ```
 
-If the implementation is solid with no issues found, return an empty issues array.
+If the implementation is solid with no issues found, return an empty issues array (and an empty previous_issue_resolutions array if there were no prev_issues).
 """
 
 
@@ -245,7 +514,15 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         response = caller.call(
             prompt=prompt,
             json_mode="two_phase",
-            json_schema_hint='{"issues": [{"severity": "critical|high|medium|low", "description": "...", "location": "..."}], "summary": "..."}',
+            json_schema_hint=(
+                '{"issues": [{"severity": "critical|high|medium|low", '
+                '"actual_behavior": "...", "expected_behavior": "...", '
+                '"divergence": "...", '
+                '"expectation_source": {"type": "task_description|spec|user_interjection", "verbatim_quote": "..."}, '
+                '"evidence_lines": ["path:N"], "missing_in": [], "out_of_scope": false}], '
+                '"previous_issue_resolutions": [{"prev_issue_summary": "...", "status": "fixed|still_present"}], '
+                '"summary": "..."}'
+            ),
             required_keys=["issues"],
         )
 
@@ -255,15 +532,53 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step.error_message = "Failed to parse self-check result from LLM response"
             return StepStatus.FAILED
 
-        issues = result.get("issues", [])
+        raw_issues = result.get("issues", [])
+        prev_issue_resolutions = result.get("previous_issue_resolutions", [])
 
+        # Run structural validation; drop issues that fail any check.
+        kept_issues, validation_stats = _validate_and_filter_issues(
+            raw_issues, step.inputs,
+        )
+
+        # Single-line observability log so on-call can see at a glance how
+        # many issues the LLM proposed vs how many survived validation, and
+        # which rejection reasons fired.
+        dropped = validation_stats["input_count"] - validation_stats["kept_count"]
+        if dropped > 0:
+            reasons = ", ".join(
+                f"{k}={v}" for k, v in validation_stats.items()
+                if k.endswith("_count") and v > 0 and k != "kept_count"
+                and k != "input_count"
+            )
+            logger.info(
+                f"Self-check validation: {validation_stats['input_count']} raw → "
+                f"{validation_stats['kept_count']} kept (dropped {dropped}: {reasons})"
+            )
+
+        # Use ``kept_issues`` for the fix-loop decision; preserve ``raw_issues``
+        # under a separate key for debugging / audit. Existing callers that
+        # read ``issues`` get the validated list to avoid revision triggers
+        # from non-grounded reports.
         step.outputs["self_check_result"] = result
-        step.outputs["issues"] = issues
-        step.outputs["actionable_count"] = len(issues)
+        step.outputs["raw_issues"] = raw_issues
+        step.outputs["issues"] = kept_issues
+        step.outputs["actionable_count"] = len(kept_issues)
+        step.outputs["validation_stats"] = validation_stats
+        step.outputs["previous_issue_resolutions"] = prev_issue_resolutions
 
-        if not issues:
-            logger.info(f"Self-check #{pass_index}/{passes_required} passed (no issues found)")
+        if not kept_issues:
+            if dropped > 0:
+                logger.info(
+                    f"Self-check #{pass_index}/{passes_required} passed "
+                    f"(no validated issues; {dropped} raw issue(s) dropped by validation)"
+                )
+            else:
+                logger.info(
+                    f"Self-check #{pass_index}/{passes_required} passed (no issues found)"
+                )
             return StepStatus.COMPLETED
+
+        issues = kept_issues  # alias for the rest of the function
 
         # NOTE: When convergence_enabled=True and N>1, pass #1 may return
         # COMPLETED via the convergence shortcut. Pass #2+ deliberately strips
@@ -292,8 +607,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
         )
 
         issue_details = "\n".join(
-            f"- [{i.get('severity', 'high')}] {i.get('location', '?')}: "
-            f"{i.get('description', '')}"
+            f"- [{i.get('severity', 'high')}] {_describe_issue(i)}"
             for i in issues
         )
         fix_instructions = (
@@ -352,13 +666,46 @@ def _issue_signature(issues: list) -> set:
     Location is stripped and lowercased. Description is token-normalized via
     _normalize_description so LLM paraphrasing of the same logical issue still
     hashes to the same signature.
+
+    Schema compatibility: handles both the new schema (``evidence_lines`` /
+    ``actual_behavior`` / ``divergence``) and the legacy schema
+    (``location`` / ``description``). New-schema reads pick the first
+    evidence_line (or first missing_in entry) for the location component
+    and concatenate ``actual_behavior`` + ``divergence`` for the
+    description component.
     """
     sigs = set()
     for i in issues:
         if not isinstance(i, dict):
             continue
-        loc = str(i.get("location", "")).strip().lower()
-        desc = _normalize_description(str(i.get("description", "")))
+        # Location: prefer new schema's evidence_lines[0] / missing_in[0];
+        # fall back to legacy ``location``.
+        loc_raw = ""
+        evidence = i.get("evidence_lines") or []
+        if isinstance(evidence, list) and evidence:
+            for ev in evidence:
+                if isinstance(ev, str) and ev.strip():
+                    loc_raw = ev
+                    break
+        if not loc_raw:
+            missing = i.get("missing_in") or []
+            if isinstance(missing, list) and missing:
+                for m in missing:
+                    if isinstance(m, str) and m.strip():
+                        loc_raw = m
+                        break
+        if not loc_raw:
+            loc_raw = str(i.get("location", ""))
+        loc = loc_raw.strip().lower()
+        # Description: prefer new schema's ``actual_behavior`` + ``divergence``;
+        # fall back to legacy ``description``.
+        new_parts = [
+            str(i.get("actual_behavior", "")).strip(),
+            str(i.get("divergence", "")).strip(),
+        ]
+        new_desc = " ".join(p for p in new_parts if p)
+        desc_raw = new_desc or str(i.get("description", ""))
+        desc = _normalize_description(desc_raw)
         if loc or desc:
             sigs.add((loc, desc))
     return sigs

@@ -1219,15 +1219,17 @@ class StateMachine:
                 inputs["fix_iteration"] = fix_iteration
                 inputs["fix_history"] = copy.deepcopy(flow.state.fix_history)
 
-            # Inject prev_self_check_issues ONLY when convergence is enabled,
-            # this is the first pass of the current round (pass_index == 1),
-            # AND we are in a fix loop (fix_iteration > 0). Cross-round
-            # convergence by definition requires a prior round to compare against.
-            if (
-                workflow_cfg.self_check_convergence_enabled
-                and pass_index == 1
-                and fix_iteration > 0
-            ):
+            # Inject prev_self_check_issues whenever this is the first pass
+            # of a fix-loop round (pass_index == 1 AND fix_iteration > 0).
+            # The earlier ``self_check_convergence_enabled`` gate has been
+            # dropped: with the new schema (verbatim_quote + evidence_lines
+            # + previous_issue_resolutions), the LLM is required to
+            # explicitly declare each prev_issue as fixed/still_present, so
+            # passing prev_issues is essential for correct review whether or
+            # not the fuzzy ``_issues_converged`` shortcut is enabled.
+            # Pass 2+ deliberately omits prev_issues to provide an
+            # independent fresh review (N-pass invariant unchanged).
+            if pass_index == 1 and fix_iteration > 0:
                 for step_id in reversed(flow.state.step_history):
                     step = flow.state.steps.get(step_id)
                     if not step or step.status == StepStatus.FAILED:

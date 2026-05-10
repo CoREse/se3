@@ -12,6 +12,7 @@ Verifies:
 
 from __future__ import annotations
 
+import json
 import pytest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -539,35 +540,47 @@ class TestConvergenceGateDefaultOff:
         )
 
     def test_convergence_disabled_same_issues_still_revision_needed(self, sm, tmp_path):
-        """Even with identical issues across rounds, REVISION_NEEDED is returned."""
+        """Even with identical issues across rounds, REVISION_NEEDED is returned
+        when ``self_check_convergence_enabled`` is False."""
         from se3.engine.steps.self_check import self_check_handler
+
+        valid_issue = {
+            "severity": "high",
+            "actual_behavior": "missing null check",
+            "expected_behavior": "validates input",
+            "divergence": "crashes on None input",
+            "expectation_source": {
+                "type": "task_description",
+                "verbatim_quote": "convergence gate test",
+            },
+            "evidence_lines": ["a.py:1"],
+            "missing_in": [],
+            "out_of_scope": False,
+        }
 
         flow = _make_flow(tmp_path)
         step = Step(
             step_type=StepType.SELF_CHECK,
             status=StepStatus.PENDING,
             inputs={
-                "task_description": "test",
-                "changes_made": {},
+                "task_description": "convergence gate test",
+                "changes_made": {"files_changed": [{"path": "a.py", "action": "modify"}]},
                 "test_results": {},
                 "spec_content": {},
                 "self_check_convergence_enabled": False,
                 "self_check_pass_index": 1,
                 "self_check_passes_required": 1,
                 # Same issues as "previous" — without the gate this would converge
-                "prev_self_check_issues": [
-                    {"severity": "high", "description": "Missing check", "location": "a.py:1"}
-                ],
+                "prev_self_check_issues": [valid_issue],
             },
         )
 
-        # Mock LLMCaller to return the same issues
         with patch("se3.engine.steps.self_check.LLMCaller") as mock_caller_cls:
             mock_caller = Mock()
-            mock_caller.call.return_value = (
-                '{"issues": [{"severity": "high", "description": "Missing check", "location": "a.py:1"}], '
-                '"summary": "same issue"}'
-            )
+            mock_caller.call.return_value = json.dumps({
+                "issues": [valid_issue],
+                "summary": "same issue",
+            })
             mock_caller_cls.return_value = mock_caller
 
             result = self_check_handler(step, flow)
@@ -595,30 +608,42 @@ class TestConvergenceGateEnabled:
     def test_convergence_enabled_same_issues_returns_completed(self, sm, tmp_path):
         from se3.engine.steps.self_check import self_check_handler
 
+        valid_issue = {
+            "severity": "high",
+            "actual_behavior": "missing null check",
+            "expected_behavior": "validates input",
+            "divergence": "crashes on None input",
+            "expectation_source": {
+                "type": "task_description",
+                "verbatim_quote": "convergence gate test",
+            },
+            "evidence_lines": ["a.py:1"],
+            "missing_in": [],
+            "out_of_scope": False,
+        }
+
         flow = _make_flow(tmp_path)
         step = Step(
             step_type=StepType.SELF_CHECK,
             status=StepStatus.PENDING,
             inputs={
-                "task_description": "test",
-                "changes_made": {},
+                "task_description": "convergence gate test",
+                "changes_made": {"files_changed": [{"path": "a.py", "action": "modify"}]},
                 "test_results": {},
                 "spec_content": {},
                 "self_check_convergence_enabled": True,
                 "self_check_pass_index": 1,
                 "self_check_passes_required": 1,
-                "prev_self_check_issues": [
-                    {"severity": "high", "description": "Missing check", "location": "a.py:1"}
-                ],
+                "prev_self_check_issues": [valid_issue],
             },
         )
 
         with patch("se3.engine.steps.self_check.LLMCaller") as mock_caller_cls:
             mock_caller = Mock()
-            mock_caller.call.return_value = (
-                '{"issues": [{"severity": "high", "description": "Missing check", "location": "a.py:1"}], '
-                '"summary": "same issue"}'
-            )
+            mock_caller.call.return_value = json.dumps({
+                "issues": [valid_issue],
+                "summary": "same issue",
+            })
             mock_caller_cls.return_value = mock_caller
 
             result = self_check_handler(step, flow)
@@ -752,9 +777,13 @@ class TestPassIndexInOutputs:
         )
 
     def _make_step(self, pass_index=1, passes_required=1, **extra_inputs) -> Step:
+        # Substantive task_description + matching changes_made path so any
+        # new-schema test issues survive ``_validate_and_filter_issues``.
         inputs = {
-            "task_description": "test",
-            "changes_made": {},
+            "task_description": "Pass-index propagation regression test",
+            "changes_made": {
+                "files_changed": [{"path": "a.py", "action": "modify"}],
+            },
             "test_results": {"passed": True, "returncode": 0},
             "spec_content": {},
             "self_check_pass_index": pass_index,
@@ -787,12 +816,25 @@ class TestPassIndexInOutputs:
             pass_index=2, passes_required=3,
             fix_iteration=1, max_fix_iterations=10,
         )
+        valid_issue = {
+            "severity": "medium",
+            "actual_behavior": "broken behavior",
+            "expected_behavior": "correct behavior",
+            "divergence": "concrete failure",
+            "expectation_source": {
+                "type": "task_description",
+                "verbatim_quote": "Pass-index propagation regression test",
+            },
+            "evidence_lines": ["a.py:1"],
+            "missing_in": [],
+            "out_of_scope": False,
+        }
         with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
-            mock_caller.call.return_value = (
-                '{"issues": [{"severity": "medium", "description": "x", "location": "a.py"}],'
-                ' "summary": "Issues found"}'
-            )
+            mock_caller.call.return_value = json.dumps({
+                "issues": [valid_issue],
+                "summary": "Issues found",
+            })
             mock_cls.return_value = mock_caller
 
             result = self_check_handler(step, flow)

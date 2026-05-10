@@ -867,15 +867,19 @@ class TestBuildStepInputsSelfCheck:
         # Pin to exact configured default (no se3.yaml override in fixture).
         assert inputs["max_fix_iterations"] == DEFAULT_MAX_FIX_ITERATIONS
 
-    def test_no_prev_self_check_issues_when_convergence_disabled(self, state_machine, flow_in_fix_loop):
-        """With convergence disabled (default), prev_self_check_issues is NOT injected."""
+    def test_propagates_prev_self_check_issues_on_fix_iteration_pass_one(self, state_machine, flow_in_fix_loop):
+        """``prev_self_check_issues`` is injected unconditionally on
+        ``pass_index == 1 and fix_iteration > 0`` regardless of
+        ``self_check_convergence_enabled``. The schema-rewrite commit
+        relies on prev_issues being available so the LLM can produce the
+        ``previous_issue_resolutions`` array; gating on convergence_enabled
+        would leave the new contract under-served when the flag is off."""
         inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.SELF_CHECK)
-        assert "prev_self_check_issues" not in inputs
+        assert len(inputs["prev_self_check_issues"]) == 1
+        assert inputs["prev_self_check_issues"][0]["description"] == "Missing null check"
 
-    def test_propagates_prev_self_check_issues_when_convergence_enabled(self, state_machine, flow_in_fix_loop):
-        """When convergence is enabled, prev_self_check_issues is injected on pass_index==1."""
-        # Temporarily enable convergence for this flow by injecting the flag
-        # into the state machine's workflow config path
+    def test_propagates_prev_self_check_issues_with_convergence_enabled(self, state_machine, flow_in_fix_loop):
+        """Same behavior with convergence_enabled=True (no longer gated)."""
         from se3.config import WorkflowConfig
         with patch.object(WorkflowConfig, 'load', return_value=WorkflowConfig(
             self_check_convergence_enabled=True,
@@ -1423,14 +1427,16 @@ class TestUnlimitedAndConvergenceInteraction:
     ) -> FlowInstance:
         flow = FlowInstance(
             flow_id="unlimited-convergence-e2e",
-            task_description="Test",
+            # Substantive task_description so verbatim_quote validation
+            # can substring-match against the source pool.
+            task_description="Test fix loop with convergence safety",
             status=FlowStatus.RUNNING,
         )
         flow.state.increment_fix_iteration(fix_context={"reason": "self_check"})
         flow.state.add_step(Step(
             step_type=StepType.IMPLEMENT,
             status=StepStatus.COMPLETED,
-            outputs={"files_changed": ["a.py"]},
+            outputs={"files_changed": ["a.py", "b.py"]},
         ))
         flow.state.add_step(Step(
             step_type=StepType.TEST,
@@ -1444,6 +1450,25 @@ class TestUnlimitedAndConvergenceInteraction:
         ))
         return flow
 
+    def _new_schema_issue(
+        self, severity: str, path: str, line: int,
+        actual: str = "broken behavior", expected: str = "correct behavior",
+        divergence: str = "concrete failure",
+    ) -> dict:
+        return {
+            "severity": severity,
+            "actual_behavior": actual,
+            "expected_behavior": expected,
+            "divergence": divergence,
+            "expectation_source": {
+                "type": "task_description",
+                "verbatim_quote": "Test fix loop with convergence safety",
+            },
+            "evidence_lines": [f"{path}:{line}"],
+            "missing_in": [],
+            "out_of_scope": False,
+        }
+
     def test_convergence_fires_under_unlimited_mode(self, tmp_path):
         """End-to-end: unlimited cap + convergence enabled + LLM repeats the
         previous self-check issues → COMPLETED (loop breaks). Without
@@ -1453,27 +1478,23 @@ class TestUnlimitedAndConvergenceInteraction:
         import json
 
         prev_issues = [
-            {"severity": "high", "location": "a.py:1", "description": "x"},
-            {"severity": "medium", "location": "b.py:2", "description": "y"},
+            self._new_schema_issue("high", "a.py", 1,
+                                   actual="x", divergence="x crashes"),
+            self._new_schema_issue("medium", "b.py", 2,
+                                   actual="y", divergence="y leaks"),
         ]
 
         self._write_yaml(tmp_path)
         sm = StateMachine(project_root=tmp_path)
         flow = self._flow_in_fix_loop_with_prev_self_check(prev_issues)
 
-        # 1. Real config path produces 0 (unlimited).
         assert sm._get_max_fix_iterations() == 0
-        # 2. _build_step_inputs propagates 0 AND injects prev_self_check_issues
-        #    on pass_index==1 because convergence is enabled and we are in a
-        #    fix loop. This is the conjunction the test is locking.
         inputs = sm._build_step_inputs(flow, StepType.SELF_CHECK)
         assert inputs["max_fix_iterations"] == 0
         assert inputs["self_check_convergence_enabled"] is True
         assert inputs["prev_self_check_issues"] == prev_issues
         assert inputs["self_check_pass_index"] == 1
 
-        # 3. LLM re-reports the same issues — convergence must short-circuit
-        #    the otherwise-infinite unlimited loop.
         step = Step(step_type=StepType.SELF_CHECK, status=StepStatus.PENDING, inputs=inputs)
         flow.change_path = tmp_path
         mock_response = json.dumps({"issues": prev_issues, "summary": "same as before"})
@@ -1500,12 +1521,18 @@ class TestUnlimitedAndConvergenceInteraction:
         the LLM repeating the same issues does NOT short-circuit — the loop
         keeps going. This is the regression risk the previous test guards
         against: convergence must be the explicit mechanism that breaks it.
+
+        Note: prev_self_check_issues is now injected unconditionally (the
+        ``convergence_enabled`` gate has been removed for the schema-rewrite
+        commit so the new ``previous_issue_resolutions`` schema works).
+        Convergence as a runtime *short-circuit* still requires the flag.
         """
         from se3.engine.steps.self_check import self_check_handler
         import json
 
         prev_issues = [
-            {"severity": "high", "location": "a.py:1", "description": "x"},
+            self._new_schema_issue("high", "a.py", 1,
+                                   actual="x", divergence="x crashes"),
         ]
 
         # convergence_enabled defaults to False — only set unlimited
@@ -1518,8 +1545,9 @@ class TestUnlimitedAndConvergenceInteraction:
         inputs = sm._build_step_inputs(flow, StepType.SELF_CHECK)
         assert inputs["max_fix_iterations"] == 0
         assert inputs["self_check_convergence_enabled"] is False
-        # Without convergence, prev_self_check_issues is NOT injected.
-        assert "prev_self_check_issues" not in inputs
+        # prev_self_check_issues IS injected (gate dropped) — but
+        # convergence_enabled=False means the short-circuit won't fire.
+        assert inputs["prev_self_check_issues"] == prev_issues
 
         step = Step(step_type=StepType.SELF_CHECK, status=StepStatus.PENDING, inputs=inputs)
         flow.change_path = tmp_path
@@ -1531,10 +1559,9 @@ class TestUnlimitedAndConvergenceInteraction:
             mock_cls.return_value = mock_caller
             result = self_check_handler(step, flow)
 
-        # Without convergence the handler reports REVISION_NEEDED, which would
-        # drive another fix-loop iteration. Under unlimited mode this would
-        # loop forever — that's exactly why convergence exists as the safety
-        # mechanism.
+        # Without the convergence_enabled flag the short-circuit doesn't
+        # fire — handler reports REVISION_NEEDED. Under unlimited mode this
+        # would loop forever — exactly the regression this test is locking.
         assert result == StepStatus.REVISION_NEEDED
         assert not step.outputs.get("converged")
 
@@ -1613,7 +1640,8 @@ class TestUnlimitedOutputDiskShape:
 
         flow = FlowInstance(
             flow_id="disk-shape-sc",
-            task_description="t",
+            # Substantive task_description for verbatim_quote validation.
+            task_description="Disk shape sentinel preservation test",
             task_type="feature",
             status=FlowStatus.RUNNING,
             change_path=tmp_path / "changes" / "c",
@@ -1624,16 +1652,34 @@ class TestUnlimitedOutputDiskShape:
             step_type=StepType.SELF_CHECK,
             status=StepStatus.PENDING,
             inputs={
-                "task_description": "t",
-                "changes_made": {},
+                "task_description": "Disk shape sentinel preservation test",
+                "changes_made": {
+                    "files_changed": [{"path": "a.py", "action": "modify"}],
+                },
                 "test_results": {"passed": True, "returncode": 0},
                 "spec_content": {},
                 "fix_iteration": 11,
                 "max_fix_iterations": 0,  # the unlimited sentinel
             },
         )
+        # New-schema valid issue so it survives validation and triggers
+        # the REVISION_NEEDED branch (where outputs["max_fix_iterations"]
+        # is written).
+        valid_issue = {
+            "severity": "low",
+            "actual_behavior": "broken on disk shape edge case",
+            "expected_behavior": "sentinel preserved as int 0",
+            "divergence": "consumer would div-by-zero",
+            "expectation_source": {
+                "type": "task_description",
+                "verbatim_quote": "Disk shape sentinel preservation test",
+            },
+            "evidence_lines": ["a.py:1"],
+            "missing_in": [],
+            "out_of_scope": False,
+        }
         response = _json.dumps({
-            "issues": [{"severity": "low", "location": "a.py", "description": "fix me"}],
+            "issues": [valid_issue],
             "summary": "issue",
         })
 

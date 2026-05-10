@@ -97,18 +97,14 @@ def render_fix_context(
                 f"- ... and {len(prev_issues) - PREV_ISSUES_RENDER_TAIL} more issues (truncated)"
             )
 
-    if fix_history:
-        lines.append("")
-        lines.append("## Fix History")
-        history_total = len(fix_history)
-        for entry in fix_history[-FIX_HISTORY_RENDER_TAIL:]:
-            it = entry.get("iteration", "?")
-            reason = entry.get("reason", "unknown")
-            trigger = entry.get("trigger_step_type", "unknown")
-            lines.append(f"- Iteration {it}: triggered by {trigger} ({reason})")
-        if history_total > FIX_HISTORY_RENDER_TAIL:
-            lines.append(
-                f"- ... and {history_total - FIX_HISTORY_RENDER_TAIL} earlier entries (truncated)"
-            )
+    # The ``fix_history`` parameter is intentionally NOT rendered. Its
+    # iteration-count + trigger-type metadata bias self_check / verify_spec
+    # reviewers toward over-flagging ("we've been at this N rounds, surely
+    # something is still wrong"). The implement step has its own
+    # ``_format_fix_history`` (implement.py) that does need the history,
+    # but for review steps the signal is more harmful than helpful. The
+    # parameter is kept in the signature for back-compat with existing
+    # callers; remove after a deprecation cycle if no other consumer arises.
+    _ = fix_history  # explicit no-op consumer for static analyzers
 
     return "\n".join(lines)

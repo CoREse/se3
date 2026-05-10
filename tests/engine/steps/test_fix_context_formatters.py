@@ -35,14 +35,19 @@ class TestFormatFixContext:
         assert "final fix-loop iteration" in result or "WARNING" in result
 
     def test_with_fix_history(self):
+        """fix_history is intentionally NOT rendered into the prompt context
+        for self_check / verify_spec — its iteration count + trigger
+        metadata bias the LLM reviewer toward over-flagging. The parameter
+        is accepted (back-compat) but no ``Fix History`` section appears.
+        """
         history = [
             {"iteration": 1, "reason": "test_failure", "trigger_step_type": "test"},
             {"iteration": 2, "reason": "spec_compliance", "trigger_step_type": "verify_spec"},
         ]
         result = _format_fix_context(2, 5, fix_history=history)
-        assert "Fix History" in result
-        assert "test_failure" in result
-        assert "spec_compliance" in result
+        assert "Fix History" not in result
+        assert "test_failure" not in result
+        assert "spec_compliance" not in result
 
     def test_with_empty_fix_history(self):
         result = _format_fix_context(1, 3, fix_history=[])
@@ -70,10 +75,10 @@ class TestFormatFixContext:
         # Sanity: previous-fix-attempts counter still rendered.
         assert "Previous fix attempts: 7" in result
 
-    def test_fix_history_tail_truncation(self):
-        # Drive >FIX_HISTORY_RENDER_TAIL entries through render_fix_context
-        # and assert (a) only the last N iteration numbers appear and
-        # (b) the truncation marker is present.
+    def test_fix_history_no_iteration_lines_rendered(self):
+        """A large fix_history list passed in must produce zero ``Iteration N:``
+        lines in the rendered output (back-compat invariant for the dropped
+        rendering: the parameter is silently consumed, not displayed)."""
         total = 38
         history = [
             {
@@ -89,22 +94,13 @@ class TestFormatFixContext:
             step_label="verification",
             fix_history=history,
         )
-        # The first (total - FIX_HISTORY_RENDER_TAIL) iterations must be elided.
-        kept_start = total - FIX_HISTORY_RENDER_TAIL + 1
-        for elided in range(1, kept_start):
-            assert f"Iteration {elided}:" not in result, (
-                f"Iteration {elided} should be truncated"
-            )
-        for kept in range(kept_start, total + 1):
-            assert f"Iteration {kept}:" in result, (
-                f"Iteration {kept} should be present"
-            )
-        # Truncation marker
-        truncated_count = total - FIX_HISTORY_RENDER_TAIL
-        assert f"{truncated_count} earlier entries (truncated)" in result
+        # No iteration lines appear regardless of list length.
+        for i in range(1, total + 1):
+            assert f"Iteration {i}:" not in result
+        assert "earlier entries (truncated)" not in result
+        assert "Fix History" not in result
 
     def test_fix_history_no_truncation_marker_at_or_below_tail(self):
-        # When length is exactly FIX_HISTORY_RENDER_TAIL, no marker.
         history = [
             {"iteration": i, "reason": "r", "trigger_step_type": "test"}
             for i in range(1, FIX_HISTORY_RENDER_TAIL + 1)

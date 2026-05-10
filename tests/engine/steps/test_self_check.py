@@ -20,6 +20,40 @@ from se3.engine.steps.self_check import (
 )
 
 
+def _valid_issue(
+    severity: str = "high",
+    quote: str = "Implement feature X",
+    path: str = "src/feature.py",
+    line: int = 42,
+    actual: str = "returns None when input is empty",
+    expected: str = "returns an empty list",
+    divergence: str = "callers iterating the result get TypeError",
+    out_of_scope: bool = False,
+) -> dict:
+    """Build a fully-populated issue dict matching the new self_check
+    schema. Used by tests that exercise the post-validation revision
+    path (issues that should survive ``_validate_and_filter_issues``).
+
+    Defaults align with the standard ``flow`` / ``step`` fixtures:
+    ``task_description`` contains "Implement feature X" so the verbatim
+    quote substring-matches; ``changes_made.files_changed`` contains
+    ``src/feature.py`` so evidence_lines validate.
+    """
+    return {
+        "severity": severity,
+        "actual_behavior": actual,
+        "expected_behavior": expected,
+        "divergence": divergence,
+        "expectation_source": {
+            "type": "task_description",
+            "verbatim_quote": quote,
+        },
+        "evidence_lines": [f"{path}:{line}"],
+        "missing_in": [],
+        "out_of_scope": out_of_scope,
+    }
+
+
 class TestSelfCheckHandler:
     """Test cases for self_check_handler."""
 
@@ -78,8 +112,14 @@ class TestSelfCheckHandler:
         step.inputs["fix_iteration"] = 0
         response = json.dumps({
             "issues": [
-                {"severity": "medium", "description": "Could add defensive check", "location": "src/feature.py:42"},
-                {"severity": "low", "description": "Consider logging here", "location": "src/feature.py:10"},
+                _valid_issue(severity="medium", line=42,
+                             actual="lacks defensive check",
+                             expected="validates the input length",
+                             divergence="empty input crashes downstream"),
+                _valid_issue(severity="low", line=10,
+                             actual="silent failure path",
+                             expected="logs at WARNING level",
+                             divergence="bugs are invisible in production"),
             ],
             "summary": "Minor suggestions only.",
         })
@@ -100,7 +140,10 @@ class TestSelfCheckHandler:
         step.inputs["fix_iteration"] = 0
         response = json.dumps({
             "issues": [
-                {"severity": "critical", "description": "Missing null check causes crash", "location": "src/feature.py:30"},
+                _valid_issue(severity="critical", line=30,
+                             actual="dereferences None on missing key",
+                             expected="returns default sentinel",
+                             divergence="AttributeError crashes the request handler"),
             ],
             "summary": "Critical issue found.",
         })
@@ -123,8 +166,14 @@ class TestSelfCheckHandler:
         step.inputs["fix_iteration"] = 0
         response = json.dumps({
             "issues": [
-                {"severity": "high", "description": "Unhandled error path", "location": "src/feature.py:55"},
-                {"severity": "medium", "description": "Suggestion", "location": "src/feature.py:10"},
+                _valid_issue(severity="high", line=55,
+                             actual="unhandled error path on disk full",
+                             expected="catches OSError and retries",
+                             divergence="long-running uploads crash partway"),
+                _valid_issue(severity="medium", line=10,
+                             actual="suggestion-level concern",
+                             expected="documented invariant",
+                             divergence="future drift risk"),
             ],
             "summary": "Issues found.",
         })
@@ -139,7 +188,7 @@ class TestSelfCheckHandler:
         assert result == StepStatus.REVISION_NEEDED
         assert step.outputs["actionable_count"] == 2
         assert step.outputs["fix_instructions"]
-        assert "Unhandled error path" in step.outputs["fix_instructions"]
+        assert "unhandled error path on disk full" in step.outputs["fix_instructions"]
 
     def test_returns_revision_needed_at_max_iterations(self, flow, step):
         """self_check returns REVISION_NEEDED even at max iterations.
@@ -149,7 +198,10 @@ class TestSelfCheckHandler:
         step.inputs["fix_iteration"] = 3
         response = json.dumps({
             "issues": [
-                {"severity": "critical", "description": "Still broken", "location": "src/feature.py:30"},
+                _valid_issue(severity="critical", line=30,
+                             actual="bug from prev iteration still present",
+                             expected="bug fixed",
+                             divergence="same crash continues"),
             ],
             "summary": "Issue persists.",
         })
@@ -189,12 +241,31 @@ class TestSelfCheckHandler:
 
     def test_fix_context_contains_all_issues(self, flow, step):
         step.inputs["fix_iteration"] = 0
+        # Multiple files in changes_made so each issue's evidence_lines
+        # path validates.
+        step.inputs["changes_made"] = {
+            "files_changed": [
+                {"path": "src/feature.py", "action": "create"},
+                {"path": "a.py", "action": "modify"},
+                {"path": "b.py", "action": "modify"},
+                {"path": "c.py", "action": "modify"},
+                {"path": "d.py", "action": "modify"},
+            ]
+        }
         response = json.dumps({
             "issues": [
-                {"severity": "critical", "description": "Critical bug", "location": "a.py"},
-                {"severity": "medium", "description": "Suggestion", "location": "b.py"},
-                {"severity": "high", "description": "Missing handler", "location": "c.py"},
-                {"severity": "low", "description": "Nit", "location": "d.py"},
+                _valid_issue(severity="critical", path="a.py", line=1,
+                             actual="critical bug", expected="works",
+                             divergence="crash"),
+                _valid_issue(severity="medium", path="b.py", line=1,
+                             actual="medium concern", expected="addressed",
+                             divergence="edge case"),
+                _valid_issue(severity="high", path="c.py", line=1,
+                             actual="missing handler", expected="handled",
+                             divergence="error swallowed"),
+                _valid_issue(severity="low", path="d.py", line=1,
+                             actual="nit", expected="cleaned",
+                             divergence="readability"),
             ],
             "summary": "Mixed.",
         })
@@ -266,7 +337,9 @@ class TestSelfCheckHandler:
         step.inputs["max_fix_iterations"] = 0
         response = json.dumps({
             "issues": [
-                {"severity": "high", "description": "needs fix", "location": "x.py"},
+                _valid_issue(severity="high",
+                             actual="returns wrong type", expected="returns dict",
+                             divergence="callers crash"),
             ],
             "summary": "issue",
         })
@@ -544,26 +617,49 @@ class TestSelfCheckConvergence:
         ]
         return flow
 
+    def _make_inputs(self, fix_iteration=2, **extra):
+        """Build a step.inputs dict whose source pool ("Fix bug") and
+        changes_made paths support the new validation schema."""
+        inp = {
+            "task_description": "Fix bug in production handler",
+            "changes_made": {
+                "files_changed": [
+                    {"path": "a.py", "action": "modify"},
+                    {"path": "b.py", "action": "modify"},
+                    {"path": "new.py", "action": "create"},
+                ],
+            },
+            "test_results": {"passed": True, "returncode": 0},
+            "spec_content": {},
+            "fix_iteration": fix_iteration,
+            "max_fix_iterations": 10,
+        }
+        inp.update(extra)
+        return inp
+
     def test_converges_when_issues_repeat(self, flow):
-        prev_issues = [
-            {"severity": "low", "location": "a.py:1", "description": "x"},
-            {"severity": "medium", "location": "b.py:2", "description": "y"},
+        # Both prev and current carry the same two issues — converged.
+        repeated = [
+            _valid_issue(severity="low", quote="Fix bug",
+                         path="a.py", line=1,
+                         actual="returns None on missing key",
+                         expected="raises KeyError",
+                         divergence="silent failure"),
+            _valid_issue(severity="medium", quote="Fix bug",
+                         path="b.py", line=2,
+                         actual="leaks file handle on error",
+                         expected="closes via finally",
+                         divergence="ResourceWarning under load"),
         ]
         step = Step(
             step_type=StepType.SELF_CHECK,
             status=StepStatus.PENDING,
-            inputs={
-                "task_description": "Fix bug",
-                "changes_made": {},
-                "test_results": {"passed": True, "returncode": 0},
-                "spec_content": {},
-                "fix_iteration": 2,
-                "max_fix_iterations": 10,
-                "prev_self_check_issues": prev_issues,
-                "self_check_convergence_enabled": True,
-            },
+            inputs=self._make_inputs(
+                prev_self_check_issues=repeated,
+                self_check_convergence_enabled=True,
+            ),
         )
-        response = json.dumps({"issues": prev_issues, "summary": "same"})
+        response = json.dumps({"issues": repeated, "summary": "same"})
 
         with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
             mock_caller = Mock()
@@ -575,25 +671,22 @@ class TestSelfCheckConvergence:
         assert result == StepStatus.COMPLETED
         assert step.outputs.get("converged") is True
         assert "convergence_reason" in step.outputs
-        # Unresolved issues must still be surfaced to downstream steps
-        # even when the loop short-circuits.
-        assert step.outputs.get("unresolved_issues") == prev_issues
+        assert step.outputs.get("unresolved_issues") == repeated
 
     def test_does_not_converge_on_first_iteration(self, flow):
         step = Step(
             step_type=StepType.SELF_CHECK,
             status=StepStatus.PENDING,
-            inputs={
-                "task_description": "Fix bug",
-                "changes_made": {},
-                "test_results": {"passed": True, "returncode": 0},
-                "spec_content": {},
-                "fix_iteration": 0,
-                "max_fix_iterations": 10,
-            },
+            inputs=self._make_inputs(fix_iteration=0),
         )
         response = json.dumps({
-            "issues": [{"severity": "low", "location": "a", "description": "x"}],
+            "issues": [
+                _valid_issue(severity="low", quote="Fix bug",
+                             path="a.py", line=1,
+                             actual="initial finding",
+                             expected="resolved",
+                             divergence="initial path"),
+            ],
             "summary": "first",
         })
 
@@ -608,24 +701,28 @@ class TestSelfCheckConvergence:
         assert not step.outputs.get("converged")
 
     def test_does_not_converge_when_new_issue_appears(self, flow):
-        prev_issues = [{"severity": "low", "location": "a", "description": "x"}]
+        prev_issues = [
+            _valid_issue(severity="low", quote="Fix bug",
+                         path="a.py", line=1,
+                         actual="leaks fd", expected="closed",
+                         divergence="OSError"),
+        ]
         step = Step(
             step_type=StepType.SELF_CHECK,
             status=StepStatus.PENDING,
-            inputs={
-                "task_description": "Fix bug",
-                "changes_made": {},
-                "test_results": {"passed": True, "returncode": 0},
-                "spec_content": {},
-                "fix_iteration": 2,
-                "max_fix_iterations": 10,
-                "prev_self_check_issues": prev_issues,
-            },
+            inputs=self._make_inputs(prev_self_check_issues=prev_issues),
         )
         response = json.dumps({
             "issues": [
-                {"severity": "low", "location": "a", "description": "x"},
-                {"severity": "medium", "location": "new.py", "description": "new"},
+                _valid_issue(severity="low", quote="Fix bug",
+                             path="a.py", line=1,
+                             actual="leaks fd", expected="closed",
+                             divergence="OSError"),
+                _valid_issue(severity="medium", quote="Fix bug",
+                             path="new.py", line=1,
+                             actual="new issue site",
+                             expected="resolved",
+                             divergence="new failure mode"),
             ],
             "summary": "new issue found",
         })
@@ -639,3 +736,287 @@ class TestSelfCheckConvergence:
 
         assert result == StepStatus.REVISION_NEEDED
         assert not step.outputs.get("converged")
+
+
+# ---------------------------------------------------------------------------
+# Schema validation helpers
+# ---------------------------------------------------------------------------
+
+class TestNormalizeForQuoteMatch:
+    """Symmetric normalization for verbatim_quote ↔ source pool comparison."""
+
+    def test_basic_passthrough(self):
+        from se3.engine.steps.self_check import _normalize_for_quote_match
+        assert _normalize_for_quote_match("hello world") == "hello world"
+
+    def test_literal_backslash_n_becomes_real_newline_then_space(self):
+        from se3.engine.steps.self_check import _normalize_for_quote_match
+        assert _normalize_for_quote_match("a\\nb") == "a b"
+
+    def test_smart_quotes_replaced_with_ascii(self):
+        from se3.engine.steps.self_check import _normalize_for_quote_match
+        assert _normalize_for_quote_match("“hello” ‘world’") == '"hello" \'world\''
+
+    def test_whitespace_collapsed(self):
+        from se3.engine.steps.self_check import _normalize_for_quote_match
+        assert _normalize_for_quote_match("a  \n\t  b\n\nc") == "a b c"
+
+    def test_nfkc_normalizes_compatibility_codepoints(self):
+        from se3.engine.steps.self_check import _normalize_for_quote_match
+        # Fullwidth digit "１" becomes "1" under NFKC.
+        assert _normalize_for_quote_match("１") == "1"
+
+    def test_non_string_input_returns_empty(self):
+        from se3.engine.steps.self_check import _normalize_for_quote_match
+        assert _normalize_for_quote_match(None) == ""
+        assert _normalize_for_quote_match(123) == ""
+        assert _normalize_for_quote_match(["list"]) == ""
+
+
+class TestBuildSourcePool:
+    """Source pool collection for verbatim_quote validation."""
+
+    def test_includes_task_description(self):
+        from se3.engine.steps.self_check import _build_source_pool
+        pool = _build_source_pool({"task_description": "user wants X"})
+        assert "user wants X" in pool
+
+    def test_includes_original_task_description(self):
+        from se3.engine.steps.self_check import _build_source_pool
+        pool = _build_source_pool({
+            "task_description": "refined: implement X",
+            "original_task_description": "raw user input",
+        })
+        assert "refined: implement X" in pool
+        assert "raw user input" in pool
+
+    def test_excludes_base_spec(self):
+        """``base`` spec content is too generic — any nit can hang off
+        it. Excluded from source pool."""
+        from se3.engine.steps.self_check import _build_source_pool
+        pool = _build_source_pool({
+            "task_description": "task X",
+            "spec_content": {
+                "base": "Code must be PEP 8 compliant",
+                "feature_x": "feature X spec details",
+            },
+        })
+        assert "task X" in pool
+        assert "feature X spec details" in pool
+        assert "Code must be PEP 8 compliant" not in pool
+
+    def test_empty_inputs_returns_empty_pool(self):
+        from se3.engine.steps.self_check import _build_source_pool
+        assert _build_source_pool({}) == []
+        assert _build_source_pool({"task_description": ""}) == []
+
+
+class TestValidateAndFilterIssues:
+    """The structural validation pipeline that drops ungrounded issues."""
+
+    def _inputs(self, **overrides):
+        base = {
+            "task_description": "Implement reliable async retry policy",
+            "changes_made": {
+                "files_changed": [
+                    {"path": "src/retry.py", "action": "create"},
+                    {"path": "src/policy.py", "action": "modify"},
+                ],
+            },
+            "spec_content": {"base": "PEP 8 etc"},
+        }
+        base.update(overrides)
+        return base
+
+    def _good_issue(self, **overrides):
+        issue = {
+            "severity": "high",
+            "actual_behavior": "raises on backoff = 0",
+            "expected_behavior": "treats 0 as immediate retry",
+            "divergence": "valid config crashes init",
+            "expectation_source": {
+                "type": "task_description",
+                "verbatim_quote": "reliable async retry policy",
+            },
+            "evidence_lines": ["src/retry.py:42"],
+            "missing_in": [],
+            "out_of_scope": False,
+        }
+        issue.update(overrides)
+        return issue
+
+    def test_kept_when_all_checks_pass(self):
+        from se3.engine.steps.self_check import _validate_and_filter_issues
+        kept, stats = _validate_and_filter_issues(
+            [self._good_issue()], self._inputs()
+        )
+        assert len(kept) == 1
+        assert stats["kept_count"] == 1
+        assert stats["input_count"] == 1
+
+    def test_out_of_scope_dropped(self):
+        from se3.engine.steps.self_check import _validate_and_filter_issues
+        kept, stats = _validate_and_filter_issues(
+            [self._good_issue(out_of_scope=True)], self._inputs()
+        )
+        assert kept == []
+        assert stats["out_of_scope_count"] == 1
+
+    def test_empty_quote_dropped(self):
+        from se3.engine.steps.self_check import _validate_and_filter_issues
+        bad = self._good_issue()
+        bad["expectation_source"]["verbatim_quote"] = "  "
+        kept, stats = _validate_and_filter_issues([bad], self._inputs())
+        assert kept == []
+        assert stats["empty_quote_count"] == 1
+
+    def test_quote_not_in_source_dropped(self):
+        from se3.engine.steps.self_check import _validate_and_filter_issues
+        bad = self._good_issue()
+        bad["expectation_source"]["verbatim_quote"] = "this phrase is not in the task"
+        kept, stats = _validate_and_filter_issues([bad], self._inputs())
+        assert kept == []
+        assert stats["quote_not_in_source_count"] == 1
+
+    def test_evidence_path_not_in_changes_dropped(self):
+        from se3.engine.steps.self_check import _validate_and_filter_issues
+        bad = self._good_issue(evidence_lines=["unrelated/file.py:1"], missing_in=[])
+        kept, stats = _validate_and_filter_issues([bad], self._inputs())
+        assert kept == []
+        assert stats["bad_evidence_count"] == 1
+
+    def test_missing_in_substitutes_for_evidence_lines(self):
+        from se3.engine.steps.self_check import _validate_and_filter_issues
+        good = self._good_issue(
+            evidence_lines=[],
+            missing_in=["src/auth.py"],
+        )
+        kept, stats = _validate_and_filter_issues([good], self._inputs())
+        assert len(kept) == 1
+        assert stats["bad_evidence_count"] == 0
+
+    def test_empty_required_field_dropped(self):
+        from se3.engine.steps.self_check import _validate_and_filter_issues
+        bad = self._good_issue(actual_behavior="")
+        kept, stats = _validate_and_filter_issues([bad], self._inputs())
+        assert kept == []
+        assert stats["empty_field_count"] == 1
+
+    def test_non_dict_entry_skipped(self):
+        from se3.engine.steps.self_check import _validate_and_filter_issues
+        kept, stats = _validate_and_filter_issues(
+            [None, "not a dict", 42, self._good_issue()],
+            self._inputs(),
+        )
+        assert len(kept) == 1
+        assert stats["non_dict_count"] == 3
+
+    def test_smart_quote_drift_in_quote_still_matches(self):
+        """LLM paraphrasing with curly quotes still substring-matches
+        against an ASCII-quoted source via the symmetric normalize."""
+        from se3.engine.steps.self_check import _validate_and_filter_issues
+        inputs = self._inputs(task_description='Implement "reliable" retry policy')
+        good = self._good_issue()
+        good["expectation_source"]["verbatim_quote"] = "“reliable” retry policy"
+        kept, stats = _validate_and_filter_issues([good], inputs)
+        assert len(kept) == 1
+
+
+class TestPreviousIssueResolutions:
+    """The ``previous_issue_resolutions`` array is captured into outputs."""
+
+    @pytest.fixture
+    def flow(self, tmp_path):
+        return FlowInstance(
+            flow_id="prev-issue-resolutions-flow",
+            task_description="Test prev issue resolutions tracking",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+            change_path=tmp_path / "changes" / "c",
+        )
+
+    def _make_step(self):
+        return Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs={
+                "task_description": "Test prev issue resolutions tracking",
+                "changes_made": {"files_changed": [{"path": "a.py", "action": "modify"}]},
+                "test_results": {"passed": True, "returncode": 0},
+                "spec_content": {},
+                "fix_iteration": 1,
+                "max_fix_iterations": 10,
+            },
+        )
+
+    def test_resolutions_written_to_outputs(self, flow):
+        step = self._make_step()
+        response = json.dumps({
+            "issues": [],
+            "previous_issue_resolutions": [
+                {"prev_issue_summary": "missing null check", "status": "fixed"},
+                {"prev_issue_summary": "leak on timeout", "status": "still_present"},
+            ],
+            "summary": "one fixed, one not",
+        })
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+            self_check_handler(step, flow)
+
+        resolutions = step.outputs["previous_issue_resolutions"]
+        assert len(resolutions) == 2
+        assert resolutions[0]["status"] == "fixed"
+        assert resolutions[1]["status"] == "still_present"
+
+    def test_missing_resolutions_field_defaults_to_empty_list(self, flow):
+        step = self._make_step()
+        response = json.dumps({"issues": [], "summary": "ok"})
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+            self_check_handler(step, flow)
+        assert step.outputs["previous_issue_resolutions"] == []
+
+    def test_validation_stats_in_outputs(self, flow):
+        """``validation_stats`` per-rejection-reason counts surface in
+        outputs for post-hoc inspection of LLM behavior."""
+        step = self._make_step()
+        valid = {
+            "severity": "high",
+            "actual_behavior": "x", "expected_behavior": "y",
+            "divergence": "z",
+            "expectation_source": {
+                "type": "task_description",
+                "verbatim_quote": "Test prev issue resolutions tracking",
+            },
+            "evidence_lines": ["a.py:1"],
+            "missing_in": [],
+            "out_of_scope": False,
+        }
+        empty_quote = dict(valid)
+        empty_quote["expectation_source"] = {
+            "type": "task_description", "verbatim_quote": "",
+        }
+        out_of_scope = dict(valid)
+        out_of_scope["out_of_scope"] = True
+
+        response = json.dumps({
+            "issues": [valid, empty_quote, out_of_scope],
+            "summary": "mixed",
+        })
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+            self_check_handler(step, flow)
+
+        stats = step.outputs["validation_stats"]
+        assert stats["input_count"] == 3
+        assert stats["kept_count"] == 1
+        assert stats["empty_quote_count"] == 1
+        assert stats["out_of_scope_count"] == 1
+        assert len(step.outputs["raw_issues"]) == 3
+        assert len(step.outputs["issues"]) == 1
