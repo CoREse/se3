@@ -38,7 +38,7 @@ def _make_state_machine(tmp_path, workflow_cfg=None):
     with patch("se3.engine.state_machine.PersistenceManager"):
         sm = StateMachine(project_root=tmp_path)
     # Patch _get_workflow_config so the override survives across method calls
-    sm._get_workflow_config = lambda: cfg
+    sm._get_workflow_config = lambda **kwargs: cfg
     return sm
 
 
@@ -1032,7 +1032,7 @@ class TestResumeMidNPass:
         # Use a real PersistenceManager (not mocked) so save/load round-trips
         sm = StateMachine(project_root=tmp_path)
         # Override _get_workflow_config after real init
-        sm._get_workflow_config = lambda: WorkflowConfig(
+        sm._get_workflow_config = lambda **kwargs: WorkflowConfig(
             self_check_passes_required=3
         )
 

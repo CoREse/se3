@@ -12,6 +12,31 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
+# Sliding-window cap on State.fix_history to keep memory / engine.json size /
+# per-transition deepcopy cost bounded under unlimited mode
+# (max_fix_iterations=0). Held at the *default* value of
+# ``DEFAULT_MAX_FIX_ITERATIONS`` so a flow that runs the default cap never
+# silently drops fix_history entries.
+#
+# DOCUMENTED TRADE-OFF for users who raise ``workflow.max_fix_iterations``
+# above this floor (e.g. 200): when iteration count crosses
+# ``FIX_HISTORY_MAX_ENTRIES``, the oldest entries are trimmed. The impact is
+# bounded:
+#   - verify_spec / self_check fix-context renderers tail-truncate to 20
+#     entries, so the LLM's prompt context is unaffected once iteration
+#     count > 20 regardless of cap.
+#   - implement.py's ``_format_fix_history`` iterates the *full* persisted
+#     list, so iterations beyond ~100 lose early-iteration entries from
+#     the implement-step prompt. In practice this is acceptable: a fix
+#     loop running >100 iterations on the same task is already a stuck
+#     loop where ancient history adds noise rather than signal.
+# If the trade-off ever becomes actually painful, the right fix is to
+# plumb the resolved ``WorkflowConfig`` into ``State`` and use
+# ``max(default, max_fix_iterations)`` here. For now, the current cap is
+# the simpler choice — see the inline note in
+# ``State.increment_fix_iteration``.
+FIX_HISTORY_MAX_ENTRIES = 100
+
 
 class StepType(Enum):
     """Types of workflow steps in the step pool."""
@@ -258,6 +283,15 @@ class State:
         if fix_context:
             history_entry.update(fix_context)
         self.fix_history.append(history_entry)
+        # Sliding-window cap so the list cannot grow unboundedly under unlimited
+        # mode (max_fix_iterations=0). The full list is persisted to engine.json
+        # on every save and deep-copied into step.inputs each transition; without
+        # a cap, a degenerate stuck loop would inflate memory, file size, and
+        # deepcopy cost linearly with iteration count. Keep the most recent
+        # entries because every consumer (verify_spec/self_check tail-truncate to
+        # 20, issue_discovery uses last 5) cares about recency.
+        if len(self.fix_history) > FIX_HISTORY_MAX_ENTRIES:
+            self.fix_history = self.fix_history[-FIX_HISTORY_MAX_ENTRIES:]
 
         # Also store in context for easy access by steps
         self.context["fix_iterations"] = self.fix_iterations
@@ -309,6 +343,15 @@ class State:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> State:
         """Deserialize state from dictionary."""
+        # Retroactively apply the sliding-window cap: an engine.json written
+        # by an older build (or a build with a higher cap) may carry more than
+        # ``FIX_HISTORY_MAX_ENTRIES`` entries, and without clamping the
+        # oversized list would be deepcopied per transition and re-persisted
+        # on every save until the next append finally trims it. Mirror the
+        # tail-keep policy used in ``increment_fix_iteration``.
+        loaded_history = data.get("fix_history", [])
+        if len(loaded_history) > FIX_HISTORY_MAX_ENTRIES:
+            loaded_history = loaded_history[-FIX_HISTORY_MAX_ENTRIES:]
         state = cls(
             current_step_id=data.get("current_step_id"),
             step_history=data.get("step_history", []),
@@ -317,8 +360,14 @@ class State:
             current_step_index=data.get("current_step_index", 0),
             review_iterations=data.get("review_iterations", {}),
             fix_iterations=data.get("fix_iterations", 0),
-            fix_history=data.get("fix_history", []),
+            fix_history=loaded_history,
         )
+        # Keep ``state.context['fix_history']`` consistent with the clamped
+        # list — ``increment_fix_iteration`` mirrors fix_history into context,
+        # so a resumed flow whose context still holds the oversized copy
+        # would see two diverging sources of truth.
+        if "fix_history" in state.context:
+            state.context["fix_history"] = loaded_history
         state.steps = {
             sid: Step.from_dict(step_data) for sid, step_data in data.get("steps", {}).items()
         }

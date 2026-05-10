@@ -1849,7 +1849,7 @@ def load_conflict_resolver_config(project_root: Optional[Path] = None) -> Confli
         project_root = Path.cwd()
     return ConflictResolverConfig.load(project_root)
 
-DEFAULT_MAX_FIX_ITERATIONS = 20
+DEFAULT_MAX_FIX_ITERATIONS = 100
 DEFAULT_SELF_CHECK_PASSES_REQUIRED = 1
 DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED = False
 
@@ -1881,7 +1881,8 @@ class WorkflowConfig:
                 config dict, in which case the ``workflow`` key is extracted).
 
         Raises:
-            ConfigError: If ``self_check_passes_required`` is < 1.
+            ConfigError: If ``self_check_passes_required`` is < 1 or
+                ``max_fix_iterations`` is negative.
         """
         if not data:
             return cls()
@@ -1890,27 +1891,77 @@ class WorkflowConfig:
         if not isinstance(workflow_data, dict):
             return cls()
 
-        max_fix = workflow_data.get("max_fix_iterations", DEFAULT_MAX_FIX_ITERATIONS)
-        try:
-            max_fix = int(max_fix)
-        except (TypeError, ValueError):
-            logger.warning(
-                f"workflow.max_fix_iterations={max_fix!r} is not a valid integer; "
-                f"falling back to default {DEFAULT_MAX_FIX_ITERATIONS}"
+        # Sentinel: None/null is normalized to 0 (= unlimited). 0 is a valid
+        # value meaning "no upper bound". Non-integer types (bool/float/
+        # arbitrary strings) warn and fall back to the default — symmetric
+        # with ``self_check_passes_required`` below. Negative integers are
+        # rejected fail-fast so a typo cannot silently disable exhaustion;
+        # only an explicit 0 (or null) opts into unlimited.
+        if "max_fix_iterations" in workflow_data and workflow_data["max_fix_iterations"] is None:
+            max_fix = 0
+        else:
+            raw_max_fix = workflow_data.get(
+                "max_fix_iterations", DEFAULT_MAX_FIX_ITERATIONS
             )
-            max_fix = DEFAULT_MAX_FIX_ITERATIONS
+            if isinstance(raw_max_fix, bool) or isinstance(raw_max_fix, float):
+                # Floats fall back even when numerically integral (0.0, 5.0,
+                # ...) — the spec requires literal int per ``Workflow
+                # Configuration`` so YAML readers don't silently accept
+                # ``max_fix_iterations: 0.0`` as the unlimited sentinel.
+                # Surface the float case explicitly so users typing 0.0
+                # expecting unlimited see why they got the default cap.
+                if isinstance(raw_max_fix, float) and raw_max_fix == 0.0:
+                    logger.warning(
+                        f"workflow.max_fix_iterations={raw_max_fix!r} is a float, "
+                        f"not an integer; the unlimited sentinel must be the literal "
+                        f"int 0 or null/None, not 0.0. Falling back to default "
+                        f"{DEFAULT_MAX_FIX_ITERATIONS} — write `max_fix_iterations: 0` "
+                        f"or `max_fix_iterations: null` to opt into unlimited."
+                    )
+                else:
+                    logger.warning(
+                        f"workflow.max_fix_iterations={raw_max_fix!r} is not a valid integer; "
+                        f"falling back to default {DEFAULT_MAX_FIX_ITERATIONS}"
+                    )
+                max_fix = DEFAULT_MAX_FIX_ITERATIONS
+            else:
+                try:
+                    max_fix = int(raw_max_fix)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        f"workflow.max_fix_iterations={raw_max_fix!r} is not a valid integer; "
+                        f"falling back to default {DEFAULT_MAX_FIX_ITERATIONS}"
+                    )
+                    max_fix = DEFAULT_MAX_FIX_ITERATIONS
+        if max_fix < 0:
+            raise ConfigError(
+                f"workflow.max_fix_iterations={max_fix!r} must be >= 0 "
+                f"(use 0 or null for unlimited)"
+            )
 
         raw_passes = workflow_data.get(
             "self_check_passes_required", DEFAULT_SELF_CHECK_PASSES_REQUIRED
         )
-        try:
-            passes = int(raw_passes)
-        except (TypeError, ValueError):
+        # Tolerant parsing: bool/float/non-integer types warn and fall back
+        # to the default. Out-of-scope of the unlimited-sentinel work; we
+        # only fail-fast on the explicit < 1 case below (preserved per spec
+        # Scenario "self_check_passes_required=0 fail-fast"), since that
+        # case is the documented invariant users opted into.
+        if isinstance(raw_passes, bool) or isinstance(raw_passes, float):
             logger.warning(
                 f"workflow.self_check_passes_required={raw_passes!r} is not a valid integer; "
                 f"falling back to default {DEFAULT_SELF_CHECK_PASSES_REQUIRED}"
             )
             passes = DEFAULT_SELF_CHECK_PASSES_REQUIRED
+        else:
+            try:
+                passes = int(raw_passes)
+            except (TypeError, ValueError):
+                logger.warning(
+                    f"workflow.self_check_passes_required={raw_passes!r} is not a valid integer; "
+                    f"falling back to default {DEFAULT_SELF_CHECK_PASSES_REQUIRED}"
+                )
+                passes = DEFAULT_SELF_CHECK_PASSES_REQUIRED
         if passes < 1:
             raise ConfigError(
                 f"workflow.self_check_passes_required={passes!r} must be >= 1"
@@ -1950,7 +2001,8 @@ class WorkflowConfig:
             project_root: Project root directory.
 
         Raises:
-            ConfigError: If ``self_check_passes_required`` is < 1.
+            ConfigError: If ``self_check_passes_required`` is < 1 or
+                ``max_fix_iterations`` is negative.
         """
         data, _src = load_project_yaml(project_root)
         if not data:
@@ -1979,7 +2031,6 @@ class TestConfig:
     command: Optional[str] = None
     timeout: int = 1800
     phases: list[dict] = field(default_factory=list)
-    fix_loop_max_iterations: int = DEFAULT_MAX_FIX_ITERATIONS
     timeout_multiplier: float = 2.0
     min_dynamic_timeout: int = 30
     # Upper sanity cap on computed dynamic timeout. Without this, repeated
@@ -1997,7 +2048,6 @@ class TestConfig:
             test_data = data.get("test", {})
             if not test_data:
                 return cls()
-            fix_loop = test_data.get("fix_loop", {})
 
             # Validate timeout_multiplier: clamp to >= 1.0 so a typo like
             # 0 / negative / 0.1 does not silently disable the feature.
@@ -2062,7 +2112,6 @@ class TestConfig:
                 command=test_data.get("command"),
                 timeout=timeout,
                 phases=test_data.get("phases", []),
-                fix_loop_max_iterations=fix_loop.get("max_iterations", DEFAULT_MAX_FIX_ITERATIONS),
                 timeout_multiplier=multiplier,
                 min_dynamic_timeout=min_dyn,
                 max_dynamic_timeout=max_dyn,
@@ -2310,11 +2359,15 @@ def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
 
     Reads from se3.yaml workflow.max_fix_iterations, defaults to {DEFAULT_MAX_FIX_ITERATIONS}.
 
+    A return value of ``0`` is the sentinel for "unlimited" — fix-loop
+    comparison points must treat ``max_iter == 0`` as no upper bound.
+    Negative values are rejected at config load time.
+
     Args:
         project_root: Project root directory. If None, uses current working directory.
 
     Returns:
-        Maximum number of fix iterations allowed.
+        Maximum number of fix iterations allowed (0 == unlimited).
     """
     if project_root is None:
         project_root = Path.cwd()

@@ -357,7 +357,7 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 - **AND** 触发现有 fix loop 机制回到 IMPLEMENT 步骤
 - **AND** 本轮剩余的 self_check 实例（若 pass_index < N）不会被创建，当前 fix-loop 立即转入修复
 - **AND** 修复后重跑 TEST → SELF_CHECK 直到遗漏列表为空或达到 max_fix_iterations 上限
-- **NOTE** fix_iterations 是全局计数器，TEST、SELF_CHECK、VERIFY_SPEC 三者共享，总循环次数不超过 max_fix_iterations（默认 20）
+- **NOTE** fix_iterations 是全局计数器，TEST、SELF_CHECK、VERIFY_SPEC 三者共享，总循环次数不超过 max_fix_iterations（默认 100；配置为 `0` 或 `null` 表示 unlimited，跳过上限检查）
 - **NOTE** self_check handler 始终返回 REVISION_NEEDED（不在 handler 内判断耗尽），耗尽检测统一由 state_machine.transition_to_next() 处理
 - **NOTE** 当 fix loop 耗尽时，state_machine 将 flow 状态设为 FAILED 并停止执行，同时通过 A-class issue discovery 生成 issue
 
@@ -1231,7 +1231,8 @@ The `verify_spec` step SHALL use the unified issue priority system (`critical/hi
 **REVISION_NEEDED Logic:**
 - Triggered when `in_scope_count > 0` (spec compliance issues) OR `tests_passed == False` (test failures)
 - verify_spec handler always returns REVISION_NEEDED when issues are found (does not check exhaustion internally)
-- Exhaustion detection is centralized in `state_machine.transition_to_next()`: when `fix_iteration >= max_fix_iterations` (default 20), the flow is set to FAILED status, an A-class issue is generated, and execution stops
+- Exhaustion detection is centralized in `state_machine.transition_to_next()`: when `fix_iteration >= max_fix_iterations` (default 100), the flow is set to FAILED status, an A-class issue is generated, and execution stops
+- **Sentinel:** when `max_fix_iterations == 0` (i.e. user configured `0` or `null`, both normalized to `0`), the exhaustion check is skipped entirely — the flow continues to dispatch fix loops indefinitely, prompts/log lines render the iteration as `N (unlimited)` rather than `N of M`, and no A-class fix-loop-exhaustion issue is filed. Negative integers are rejected fail-fast at config load (must be `>= 0`); only an explicit `0`/`null` opts into unlimited mode. The default `100` keeps the bound finite to avoid surprising token consumption; users opt into unlimited mode explicitly.
 
 **Out-of-Scope Issue Filing:**
 - Out-of-scope issues are deterministically filed via `IssueManager.create()` with the issue's priority, tagged with `auto-discovered`, `source:verify-spec`, and `out-of-scope`

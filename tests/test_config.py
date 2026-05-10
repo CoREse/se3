@@ -18,6 +18,7 @@ from se3.config import (
     DEFAULT_MAX_FIX_ITERATIONS,
     DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED,
     DEFAULT_SELF_CHECK_PASSES_REQUIRED,
+    TestConfig,
     WorkflowConfig,
     get_max_fix_iterations,
     load_workflow_config,
@@ -104,6 +105,42 @@ class TestWorkflowConfigFromDict:
                 {"workflow": {"self_check_passes_required": "0"}}
             )
 
+    def test_passes_required_float_falls_back_to_default(self, caplog):
+        """Floats for self_check_passes_required warn and fall back to the
+        default. Out-of-scope of the unlimited-sentinel work, so we keep
+        the historical tolerant behavior rather than tightening to fail-fast.
+        """
+        import logging as _logging
+
+        with caplog.at_level(_logging.WARNING):
+            cfg = WorkflowConfig.from_dict(
+                {"workflow": {"self_check_passes_required": 0.5}}
+            )
+        assert cfg.self_check_passes_required == DEFAULT_SELF_CHECK_PASSES_REQUIRED
+
+        with caplog.at_level(_logging.WARNING):
+            cfg = WorkflowConfig.from_dict(
+                {"workflow": {"self_check_passes_required": 2.0}}
+            )
+        assert cfg.self_check_passes_required == DEFAULT_SELF_CHECK_PASSES_REQUIRED
+
+    def test_passes_required_bool_falls_back_to_default(self, caplog):
+        """Booleans for self_check_passes_required warn and fall back to the
+        default rather than coercing to int (True -> 1 / False -> 0)."""
+        import logging as _logging
+
+        with caplog.at_level(_logging.WARNING):
+            cfg = WorkflowConfig.from_dict(
+                {"workflow": {"self_check_passes_required": True}}
+            )
+        assert cfg.self_check_passes_required == DEFAULT_SELF_CHECK_PASSES_REQUIRED
+
+        with caplog.at_level(_logging.WARNING):
+            cfg = WorkflowConfig.from_dict(
+                {"workflow": {"self_check_passes_required": False}}
+            )
+        assert cfg.self_check_passes_required == DEFAULT_SELF_CHECK_PASSES_REQUIRED
+
     def test_all_fields_custom(self):
         cfg = WorkflowConfig.from_dict(
             {
@@ -123,6 +160,60 @@ class TestWorkflowConfigFromDict:
         cfg = WorkflowConfig.from_dict(
             {"workflow": {"max_fix_iterations": "not_a_number"}}
         )
+        assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
+
+    def test_default_value_is_100(self):
+        """The default value for max_fix_iterations is 100."""
+        assert DEFAULT_MAX_FIX_ITERATIONS == 100
+        assert WorkflowConfig().max_fix_iterations == 100
+
+    def test_max_fix_iterations_zero_sentinel(self):
+        """0 is a valid sentinel meaning 'unlimited' — preserved as-is."""
+        cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": 0}})
+        assert cfg.max_fix_iterations == 0
+
+    def test_max_fix_iterations_null_sentinel(self):
+        """null/None is normalized to the sentinel 0."""
+        cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": None}})
+        assert cfg.max_fix_iterations == 0
+
+    def test_max_fix_iterations_string_zero_preserved(self):
+        """String '0' is coerced to int 0 (sentinel)."""
+        cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": "0"}})
+        assert cfg.max_fix_iterations == 0
+
+    def test_max_fix_iterations_negative_raises(self):
+        """Negative max_fix_iterations is rejected fail-fast (mirrors
+        self_check_passes_required); negatives must NOT be silently treated
+        as the unlimited sentinel.
+        """
+        with pytest.raises(ConfigError, match="must be >= 0"):
+            WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": -1}})
+
+    def test_max_fix_iterations_negative_string_raises(self):
+        """String-shaped negatives are also rejected."""
+        with pytest.raises(ConfigError, match="must be >= 0"):
+            WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": "-5"}})
+
+    def test_max_fix_iterations_bool_warns_and_falls_back(self):
+        """bool max_fix_iterations warns and falls back to default —
+        symmetric with self_check_passes_required."""
+        cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": True}})
+        assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
+
+        cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": False}})
+        assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
+
+    def test_max_fix_iterations_float_warns_and_falls_back(self):
+        """Float max_fix_iterations warns and falls back to default —
+        symmetric with self_check_passes_required."""
+        cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": 0.5}})
+        assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
+
+        cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": -0.5}})
+        assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
+
+        cfg = WorkflowConfig.from_dict({"workflow": {"max_fix_iterations": 5.0}})
         assert cfg.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
 
     def test_workflow_section_is_non_dict(self):

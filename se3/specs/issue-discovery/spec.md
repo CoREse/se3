@@ -15,10 +15,11 @@ The system SHALL support two classes of issue discovery:
 - **B-class (Prompt injection + collection):** Probabilistic, achieved by injecting issue discovery instructions into LLM prompts for whitelisted steps and extracting reported issues from LLM responses.
 
 #### Scenario: A-class trigger on fix loop exhaustion
-- **WHEN** the test→verify_spec→implement fix loop reaches `max_fix_iterations` (default 20)
+- **WHEN** the test→verify_spec→implement fix loop reaches `max_fix_iterations` (default 100)
 - **THEN** `IssueDiscovery.create_from_fix_loop_exhaustion()` creates a `high` priority issue
 - **AND** the issue includes fix history (last 5 entries), last test output (tail 1000 chars), and fix instructions (first 1500 chars)
 - **AND** the flow is set to FAILED status and execution stops (the flow does NOT continue to the next step)
+- **NOTE** when `max_fix_iterations == 0` (the user-configured `0`/`null` sentinel for "unlimited"), this A-class trigger never fires because the state machine skips the exhaustion check entirely. Negative values are rejected at config load, so they cannot reach this code path.
 
 #### Scenario: A-class trigger on pre-existing test failures
 - **WHEN** the test step detects failures that exist in `se3/state/known_test_failures.json` (not introduced by the current change)

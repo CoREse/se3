@@ -110,7 +110,7 @@ would silently ignore the developer's main-repo override.
 - `conflict_resolver.strategy`: Merge conflict resolution strategy — `"human"` or `"llm"` (default: `"human"`)
 - `implement.group_loc_threshold`: LOC threshold for collapsing task groups into a single LLM call (default: 300)
 - `implement.use_worktree`: Whether the implement step may use per-group worktrees and `impl/*` branches on the DAG parallel path (default: true). Set to `false` to force fully sequential execution on the original branch regardless of DAG topology.
-- `workflow.max_fix_iterations`: Max fix loop iterations before FAILED (default: 20)
+- `workflow.max_fix_iterations`: Max fix loop iterations before FAILED (default: 100). A value of `0` (or `null`) is the sentinel for "unlimited" — the fix loop will never exit due to the iteration upper bound.
 - `workflow.self_check_passes_required`: Number of consecutive clean self_check passes required within a fix-loop round before advancing to the next step (default: 1, must be >= 1 — startup fail-fast otherwise)
 - `workflow.self_check_convergence_enabled`: Enable cross-fix-loop convergence detection in self_check (default: false). When true, the first self_check instance of each fix-loop round (pass_index=1) compares its issues against the last self_check instance of the previous fix-loop round; identical issues short-circuit to COMPLETED. Same-round self_check instances never compare against each other.
 - `spec_loading.steps.<step_name>`: Per-step spec loading mode — `"items"` (default, header + selected requirements only) or `"full_spec"` (entire spec file). `update_spec` defaults to `full_spec`; all other steps default to `items`.
@@ -563,21 +563,25 @@ implement:
 The system SHALL support workflow-level configuration for the fix loop mechanism and the self_check N-pass / convergence behavior.
 
 **Workflow section options:**
-- `workflow.max_fix_iterations`: Maximum number of fix loop iterations before the flow is marked FAILED (default: 20). The fix loop counter is shared across TEST, SELF_CHECK, and VERIFY_SPEC steps. When exhausted, the state machine sets the flow to FAILED status, generates an A-class issue, and stops execution.
+- `workflow.max_fix_iterations`: Maximum number of fix loop iterations before the flow is marked FAILED (default: 100). The fix loop counter is shared across TEST, SELF_CHECK, and VERIFY_SPEC steps. When exhausted, the state machine sets the flow to FAILED status, generates an A-class issue, and stops execution. **Sentinel:** a value of exactly `0` (or `null`, which is normalized to `0` at load time) means "unlimited" — every fix-loop comparison point treats `max_iter == 0` as no upper bound, so the flow is never marked FAILED purely on iteration count and prompts/log lines render the iteration as `N (unlimited)` rather than `N of M`. **Negative values are rejected fail-fast** at config load (mirrors the `< 1` rejection on `self_check_passes_required`), so a typo like `-1` cannot silently disable exhaustion. The default deliberately remains finite (100) to avoid new users accidentally burning tokens; users must set `0`/`null` explicitly to opt into unlimited mode.
 - `workflow.self_check_passes_required`: Number of consecutive clean self_check passes required within a single fix-loop round before advancing to the next step (default: 1). MUST be an integer `>= 1`. When set to N>1, each fix-loop round repeats the self_check step up to N times: any single instance reporting issues short-circuits to fix-loop immediately (remaining instances are not created). Only after N consecutive clean instances does the flow advance. Values `< 1` (including 0 and negatives) trigger startup fail-fast in `WorkflowConfig` loading.
 - `workflow.self_check_convergence_enabled`: Toggle for the cross-fix-loop self_check convergence shortcut (default: `false`). When `false`, the state machine never compares the current round's issues against the previous round's issues, and `_issues_converged` is not invoked. When `true`, only the first self_check instance of a new fix-loop round (pass_index=1) receives `prev_self_check_issues` and participates in the comparison; instances #2..#N within the same round never participate. **NOTE:** the default flipped from on to off in this revision; this flip is intentionally not announced via changelog or startup log because the project requires every issue to be resolved, making convergence-based early exit a no-op on the happy path.
+
+**Engine.json output schema:**
+
+When the fix loop branches in `verify_spec` or `self_check`, the step writes `max_fix_iterations` (int) into `step.outputs` for downstream renderers. `0` is the documented sentinel for "unlimited" and SHOULD be displayed as `N (unlimited)` rather than `N of 0`. Negatives never appear here (rejected at config load). The field is written only on the fix-loop trigger branch (when the step returns `REVISION_NEEDED`); downstream renderers MUST treat the key as optional on success-path steps.
 
 **Example configuration:**
 ```yaml
 workflow:
-  max_fix_iterations: 20                # Allow up to 20 fix loop iterations
+  max_fix_iterations: 100               # Allow up to 100 fix loop iterations (default; use 0 or null for unlimited)
   self_check_passes_required: 3         # Require 3 consecutive clean self_check passes per round
   self_check_convergence_enabled: false # Disable cross-round convergence shortcut (default)
 ```
 
 #### Scenario: Default workflow configuration
 - **WHEN** no `workflow` section exists in se3.yaml
-- **THEN** the framework uses `max_fix_iterations=20`, `self_check_passes_required=1`, and `self_check_convergence_enabled=false`
+- **THEN** the framework uses `max_fix_iterations=100`, `self_check_passes_required=1`, and `self_check_convergence_enabled=false`
 - **AND** self_check executes once per fix-loop round (legacy behavior, single pass)
 - **AND** convergence detection is OFF — even when current and previous round issues are identical, the flow still enters fix-loop
 
@@ -586,6 +590,32 @@ workflow:
 - **WHEN** the fix loop reaches 10 iterations without resolving all issues
 - **THEN** the state machine sets the flow to FAILED status
 - **AND** an A-class issue is generated describing the unresolved problems
+
+#### Scenario: max_fix_iterations=0 disables exhaustion
+- **GIVEN** `workflow.max_fix_iterations: 0` in se3.yaml
+- **WHEN** the fix loop has completed any number of iterations (including values much larger than the default 100)
+- **THEN** the state machine never sets the flow to FAILED solely because of iteration count
+- **AND** no A-class fix-loop-exhaustion issue is generated by exhaustion alone
+- **AND** prompts and log lines render the iteration display as `N (unlimited)` instead of `N of M`
+
+#### Scenario: max_fix_iterations=null treated as unlimited
+- **GIVEN** `workflow.max_fix_iterations: null` (or omitting the value but keeping the key) in se3.yaml
+- **WHEN** `WorkflowConfig.from_dict` parses the value
+- **THEN** the value is normalized to the sentinel `0`
+- **AND** the runtime behaves identically to `max_fix_iterations: 0` — the fix loop never exits because of an iteration upper bound
+
+#### Scenario: Negative max_fix_iterations fail-fast
+- **GIVEN** `workflow.max_fix_iterations: -1` (or any negative integer) in se3.yaml
+- **WHEN** the framework loads `WorkflowConfig` at startup
+- **THEN** a `ConfigError` is raised before any flow runs
+- **AND** the error message identifies the offending key and value (e.g., "max_fix_iterations=-1 must be >= 0 (use 0 or null for unlimited)")
+- **AND** the flow is not allowed to start; negatives are NOT silently treated as unlimited (only `0`/`null` opt into that mode)
+
+#### Scenario: Boolean / float max_fix_iterations warns and falls back
+- **GIVEN** `workflow.max_fix_iterations: true` (or `false`/`yes`/`no`/`on`/`off`, all parsed as YAML booleans, or any float like `0.5`) in se3.yaml
+- **WHEN** the framework loads `WorkflowConfig` at startup
+- **THEN** a WARNING is logged identifying the offending value
+- **AND** `max_fix_iterations` falls back to the default (100) — symmetric with `self_check_passes_required` handling of the same types
 
 #### Scenario: Custom N-pass self_check
 - **GIVEN** `workflow.self_check_passes_required: 3` in se3.yaml
@@ -619,7 +649,6 @@ The system SHALL support configuration for the test step's execution, including 
 - `min_dynamic_timeout`: Lower bound in seconds on the computed dynamic timeout (default: 30)
 - `max_dynamic_timeout`: Upper bound in seconds on the computed dynamic timeout (default: 14400). When the user's `test.timeout` is larger than the default ceiling, the framework raises the ceiling to at least `test.timeout` so an explicit high fallback is never silently capped.
 - `phases`: List of additional test phases. Each phase's own `timeout` is always used; the dynamic timeout mechanism does NOT apply to phases.
-- `fix_loop.max_iterations`: Per-step override for the fix loop iteration budget (defaults to `workflow.max_fix_iterations`)
 
 **Example configuration:**
 ```yaml

@@ -12,7 +12,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional
 
 from .models import (
     FlowInstance,
@@ -224,8 +224,13 @@ class StateMachine:
             ConfigError: If workflow configuration is invalid (e.g.
                 self_check_passes_required < 1).
         """
-        # Fail-fast: validate workflow configuration before creating the flow
-        WorkflowConfig.load(self.project_root)
+        # Fail-fast: validate workflow configuration before creating the flow.
+        # Reset the cache first so we are not reusing a stale value from a
+        # prior flow on the same StateMachine instance, then go through
+        # ``_get_workflow_config`` so ``create_flow`` and the first
+        # ``transition_to_next`` cannot disagree about what the yaml said.
+        self._workflow_config_cache = None
+        workflow_cfg = self._get_workflow_config()
 
         # Determine initial step sequence
         selected_steps = get_default_step_sequence(task_type)
@@ -421,6 +426,34 @@ class StateMachine:
         # but within a single transition _get_workflow_config is memoized.
         self._workflow_config_cache = None
 
+        # Resume-with-invalid-yaml safety net: when this StateMachine instance
+        # has no ``_workflow_config_last_good`` (e.g. first transition after
+        # a fresh process resume) and the yaml is invalid, ``_get_workflow_config``
+        # re-raises ``ConfigError``. Without this guard the exception would
+        # propagate while the on-disk flow remains in ``RUNNING`` status,
+        # leaving the user with a stuck flow they cannot easily recover. Mark
+        # the flow ``FAILED`` and persist BEFORE re-raising so the on-disk
+        # state matches reality. Subsequent transitions that hit a hot-edit
+        # mid-flow are unaffected — those have ``last_good`` cached and never
+        # raise here.
+        try:
+            max_fix_iterations = self._get_max_fix_iterations()
+        except ConfigError as e:
+            logger.error(
+                "Workflow config invalid on resume (no prior good config "
+                "cached); marking flow FAILED before re-raising: %s", e,
+            )
+            flow.status = FlowStatus.FAILED
+            flow.completed_at = datetime.now()
+            try:
+                self.persistence.save_flow(flow)
+            except Exception:
+                logger.exception(
+                    "Failed to persist FAILED status while handling ConfigError; "
+                    "the flow may remain RUNNING on disk"
+                )
+            raise
+
         current_step = flow.state.get_current_step()
 
         if not current_step:
@@ -438,11 +471,13 @@ class StateMachine:
             current_step.step_type in (StepType.TEST, StepType.SELF_CHECK, StepType.VERIFY_SPEC)
             and current_step.status == StepStatus.REVISION_NEEDED
         ):
-            # Check if max iterations reached
-            max_fix_iterations = self._get_max_fix_iterations()
+            # max_fix_iterations <= 0 is the sentinel for "unlimited" — skip
+            # the exhaustion check entirely. Config rejects negatives at
+            # load time, so in practice the sentinel is exactly 0.
             current_iteration = flow.state.get_fix_iteration()
+            is_unlimited = max_fix_iterations <= 0
 
-            if current_iteration >= max_fix_iterations:
+            if not is_unlimited and current_iteration >= max_fix_iterations:
                 logger.error(
                     f"Max fix iterations ({max_fix_iterations}) reached — stopping flow as FAILED"
                 )
@@ -750,35 +785,96 @@ class StateMachine:
         """Get the maximum number of fix iterations allowed.
 
         Returns:
-            Maximum fix iterations (default: 20)
+            Maximum fix iterations (defaults to
+            ``config.DEFAULT_MAX_FIX_ITERATIONS``). A return value of 0 is
+            the sentinel for "unlimited". Negatives are rejected at config
+            load time, so callers can assume the result is always ``>= 0``.
         """
-        try:
-            from ..config import get_max_fix_iterations
-            return get_max_fix_iterations(self.project_root)
-        except ImportError:
-            return 20
+        return self._get_workflow_config().max_fix_iterations
 
     def _get_workflow_config(self) -> "WorkflowConfig":
-        """Load and cache workflow configuration for the current flow.
+        """Load and cache workflow configuration for the current transition.
 
-        The result is memoized on the instance to avoid re-reading se3.yaml
-        within a single transition cycle.
+        Memoized on the instance to avoid re-reading se3.yaml within a
+        single transition cycle. The cache is invalidated at the top of
+        ``transition_to_next`` so each transition starts fresh.
 
-        Returns:
-            WorkflowConfig instance with loaded or default settings.
+        ``IOError``/``OSError``/``ImportError`` are caught defensively
+        and degrade to defaults. ``load_project_yaml`` is documented as
+        never-raising, but a future loader regression that lets an
+        OS-level error escape — or a partial install / test mock that
+        breaks the ``WorkflowConfig`` import path at runtime — should
+        not crash the flow mid-transition; the fix loop is more useful
+        with conservative defaults than with a hard failure.
 
-        Raises:
-            ConfigError: If the workflow configuration is invalid (e.g.
-                self_check_passes_required < 1).
+        ``ConfigError`` (e.g. a mid-flow yaml hot-edit to a negative
+        ``max_fix_iterations``) is caught here ONLY when a previously-
+        loaded config is cached on the instance via
+        ``_workflow_config_last_good``. Fail-fast applies whenever
+        ``last_good is None``, which covers two cases:
+
+        1. Startup via ``create_flow`` — the canonical fail-fast path.
+           The user must fix se3.yaml before the flow starts.
+        2. The first transition of a freshly resumed flow on a brand-new
+           ``StateMachine`` instance (e.g. after process restart). The
+           on-disk config is re-validated and an invalid value still
+           halts the resume rather than running with silent defaults.
+           This is intentional: a hot-edit to invalid yaml between the
+           original run and the resume should be visible.
+
+        After at least one successful load, a ``ConfigError`` from a
+        subsequent hot-edit is logged and the flow continues on the
+        last-known-good config — propagating the error out of a mid-flow
+        transition would leave the flow ``RUNNING`` on disk because the
+        persistence write happens before the exception, which is worse
+        than continuing with stale-but-valid config.
+
+        IMPORTANT: an ``IOError``/``OSError``/``ImportError`` on the
+        very first load does NOT count as a successful load. The
+        defaults used as a transient fallback are cached for the current
+        transition only; ``_workflow_config_last_good`` stays ``None``
+        so a subsequent ``ConfigError`` on the next transition still
+        propagates. Otherwise an early IO race during ``create_flow``
+        would silently promote defaults to "last good" and disable
+        startup-style fail-fast for the rest of this StateMachine's
+        lifetime.
         """
         cached = getattr(self, "_workflow_config_cache", None)
         if cached is not None:
             return cached
+        last_good = getattr(self, "_workflow_config_last_good", None)
         try:
             cfg = WorkflowConfig.load(self.project_root)
-        except (IOError, OSError):
-            cfg = WorkflowConfig()
+        except (IOError, OSError, ImportError) as e:
+            logger.warning(
+                "Failed to load workflow config (%s); falling back to defaults", e
+            )
+            cfg = last_good if last_good is not None else WorkflowConfig()
+            # Cache for this transition cycle only. Do NOT update
+            # ``_workflow_config_last_good`` — IO/Import failure is not
+            # a successful load, and treating fallback defaults as
+            # last-known-good would let a later ConfigError be silently
+            # swallowed.
+            self._workflow_config_cache = cfg
+            return cfg
+        except ConfigError as e:
+            if last_good is None:
+                # No prior successful load on this StateMachine instance:
+                # silently substituting defaults would mask a genuine
+                # yaml error from the user. Re-raise. See the docstring
+                # for the two cases this covers (startup and fresh
+                # resume).
+                raise
+            logger.warning(
+                "Workflow config became invalid mid-flow (%s); "
+                "continuing with previously-loaded config to avoid "
+                "leaving the flow in an inconsistent state. Fix "
+                "se3.yaml to clear the warning.",
+                e,
+            )
+            cfg = last_good
         self._workflow_config_cache = cfg
+        self._workflow_config_last_good = cfg
         return cfg
 
     def _count_consecutive_self_check_completed(self, flow: FlowInstance) -> int:
@@ -1098,11 +1194,17 @@ class StateMachine:
             inputs["self_check_passes_required"] = workflow_cfg.self_check_passes_required
             inputs["self_check_convergence_enabled"] = workflow_cfg.self_check_convergence_enabled
 
+            # Always populate max_fix_iterations so the handler never has to
+            # re-load WorkflowConfig on the initial pass (the per-transition
+            # cache covers the second call within the same transition, but
+            # the handler runs in a different code path and would re-parse
+            # se3.yaml otherwise). Treat the input as a hard contract: the
+            # handler may now assume it is always present and an int.
+            inputs["max_fix_iterations"] = self._get_max_fix_iterations()
             fix_iteration = flow.state.get_fix_iteration()
             if fix_iteration > 0:
                 inputs["fix_iteration"] = fix_iteration
                 inputs["fix_history"] = copy.deepcopy(flow.state.fix_history)
-                inputs["max_fix_iterations"] = self._get_max_fix_iterations()
 
             # Inject prev_self_check_issues ONLY when convergence is enabled,
             # this is the first pass of the current round (pass_index == 1),
@@ -1140,11 +1242,13 @@ class StateMachine:
 
         # Special handling for VERIFY_SPEC step when in fix iteration
         if step_type == StepType.VERIFY_SPEC:
+            # Always populate max_fix_iterations (see SELF_CHECK comment above
+            # for rationale: avoids extra YAML parse on the initial pass).
+            inputs["max_fix_iterations"] = self._get_max_fix_iterations()
             fix_iteration = flow.state.get_fix_iteration()
             if fix_iteration > 0:
                 inputs["fix_iteration"] = fix_iteration
                 inputs["fix_history"] = copy.deepcopy(flow.state.fix_history)
-                inputs["max_fix_iterations"] = self._get_max_fix_iterations()
                 # Find previous VERIFY_SPEC with REVISION_NEEDED
                 for step_id in reversed(flow.state.step_history):
                     step = flow.state.steps.get(step_id)

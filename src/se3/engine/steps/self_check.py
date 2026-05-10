@@ -20,7 +20,8 @@ from ..truncation import (
     SELF_CHECK_TASK_GROUPS_MAX_CHARS,
 )
 from ..utils.json_parser import parse_json_response
-from .verify_spec import _get_max_fix_iterations
+from ...config import DEFAULT_MAX_FIX_ITERATIONS
+from ._fix_context import format_fix_iteration_display, render_fix_context
 
 logger = logging.getLogger(__name__)
 
@@ -183,7 +184,10 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     task_groups = step.inputs.get("task_groups")
 
     fix_iteration = step.inputs.get("fix_iteration", 0)
-    max_iterations = step.inputs.get("max_fix_iterations") or _get_max_fix_iterations(flow)
+    # Honor an explicit 0 from inputs (the unlimited sentinel); fall back to
+    # the default only when the input is genuinely missing.
+    raw_max = step.inputs.get("max_fix_iterations")
+    max_iterations = raw_max if isinstance(raw_max, int) and not isinstance(raw_max, bool) else DEFAULT_MAX_FIX_ITERATIONS
     prev_issues = step.inputs.get("prev_self_check_issues", [])
     fix_history = step.inputs.get("fix_history", [])
     convergence_enabled = step.inputs.get("self_check_convergence_enabled", False)
@@ -280,9 +284,10 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step.outputs["unresolved_issues"] = list(issues)
             return StepStatus.COMPLETED
 
+        iter_display = format_fix_iteration_display(fix_iteration, max_iterations)
         logger.warning(
             f"Self-check #{pass_index}/{passes_required} found {len(issues)} "
-            f"issue(s) (fix iteration {fix_iteration}/{max_iterations})"
+            f"issue(s) (fix iteration {iter_display})"
         )
 
         issue_details = "\n".join(
@@ -298,6 +303,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         step.outputs["fix_needed"] = True
         step.outputs["fix_iteration"] = fix_iteration
+        # ``max_fix_iterations <= 0`` is the unlimited sentinel.
         step.outputs["max_fix_iterations"] = max_iterations
         step.outputs["fix_instructions"] = fix_instructions
         step.outputs["fix_context"] = {
@@ -489,41 +495,17 @@ def _format_fix_context(
     prev_issues: list | None = None,
     fix_history: list | None = None,
 ) -> str:
-    if fix_iteration == 0:
-        return "This is the initial self-check (no previous fix attempts)."
+    """Format fix context for inclusion in the self_check prompt.
 
-    lines = [
-        f"Fix iteration: {fix_iteration} of {max_iterations}",
-        f"Previous fix attempts: {fix_iteration}",
-    ]
-
-    if fix_iteration >= max_iterations:
-        lines.append(
-            "WARNING: This is the final fix attempt. "
-            "If issues remain, the flow will proceed with outstanding issues."
-        )
-
-    if prev_issues:
-        lines.append("")
-        lines.append("## Previously Reported Issues")
-        lines.append("The following issues were reported in the previous self-check.")
-        lines.append("Only report issues that STILL EXIST after the fix attempt.")
-        lines.append("Do NOT re-report issues that have been successfully fixed.")
-        lines.append("")
-        for issue in prev_issues:
-            severity = issue.get("severity", "high")
-            desc = issue.get("description", "")
-            location = issue.get("location", "")
-            loc_suffix = f" @ {location}" if location else ""
-            lines.append(f"- [{severity}] {desc}{loc_suffix}")
-
-    if fix_history:
-        lines.append("")
-        lines.append("## Fix History")
-        for entry in fix_history:
-            it = entry.get("iteration", "?")
-            reason = entry.get("reason", "unknown")
-            trigger = entry.get("trigger_step_type", "unknown")
-            lines.append(f"- Iteration {it}: triggered by {trigger} ({reason})")
-
-    return "\n".join(lines)
+    Thin wrapper around the shared ``render_fix_context`` helper —
+    delegates all branching/copy to a single source of truth shared with
+    verify_spec. prev_issues are rendered inline here (self_check has no
+    separate "Previous Verification" slot in its prompt).
+    """
+    return render_fix_context(
+        fix_iteration,
+        max_iterations,
+        step_label="self-check",
+        prev_issues=prev_issues,
+        fix_history=fix_history,
+    )

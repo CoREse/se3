@@ -11,11 +11,6 @@ import logging
 from pathlib import Path
 from typing import Any
 
-try:
-    import yaml
-except ImportError:
-    yaml = None
-
 from ..issue_manager import IssueManager
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
@@ -26,11 +21,14 @@ from ..truncation import (
     PHASE_STDOUT_TAIL_CHARS,
 )
 from ..utils.json_parser import parse_json_response
+from ...config import DEFAULT_MAX_FIX_ITERATIONS
+from ._fix_context import (
+    format_fix_iteration_display,
+    render_fix_context,
+)
 from .test import _extract_failures_section
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_MAX_FIX_ITERATIONS = 20
 
 
 VERIFY_PROMPT = """You are an expert software quality assurance engineer. Verify that the implementation matches the specifications.
@@ -143,7 +141,10 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     # Get fix iteration count from inputs
     fix_iteration = step.inputs.get("fix_iteration", 0)
-    max_iterations = step.inputs.get("max_fix_iterations") or _get_max_fix_iterations(flow)
+    # Honor an explicit 0 from inputs (the unlimited sentinel); fall back to
+    # the default only when the input is genuinely missing.
+    raw_max = step.inputs.get("max_fix_iterations")
+    max_iterations = raw_max if isinstance(raw_max, int) and not isinstance(raw_max, bool) else DEFAULT_MAX_FIX_ITERATIONS
     prev_issues = step.inputs.get("prev_issues", [])
     prev_fix_instructions = step.inputs.get("prev_fix_instructions", "")
     fix_history = step.inputs.get("fix_history", [])
@@ -254,11 +255,13 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         # Determine if we need to fix — tests failure path
         if not tests_passed:
-            logger.warning(f"TESTS FAILED - fix iteration {fix_iteration}/{max_iterations}")
+            iter_display = format_fix_iteration_display(fix_iteration, max_iterations)
+            logger.warning(f"TESTS FAILED - fix iteration {iter_display}")
             logger.info(f"Returning REVISION_NEEDED - will attempt fix (iteration {fix_iteration + 1})")
 
             step.outputs["fix_needed"] = True
             step.outputs["fix_iteration"] = fix_iteration
+            # ``max_fix_iterations <= 0`` is the unlimited sentinel.
             step.outputs["max_fix_iterations"] = max_iterations
             step.outputs["fix_context"] = {
                 "test_results": test_results,
@@ -347,40 +350,26 @@ def _file_out_of_scope_issues(
 
 
 def _get_max_fix_iterations(flow: FlowInstance) -> int:
-    """Get max fix iterations from config or use default.
+    """Disk-reload helper preserved for tests/external callers.
 
-    Args:
-        flow: Current flow instance
+    Production code receives ``max_fix_iterations`` via
+    ``state_machine._build_step_inputs``; this helper exists for tests
+    that exercise the disk-reload semantics directly.
 
-    Returns:
-        Maximum number of fix iterations (default: 20)
+    Returns ``DEFAULT_MAX_FIX_ITERATIONS`` when the project root cannot
+    be determined. A value of 0 is the sentinel meaning "unlimited".
     """
-    # Try to get from flow context first
-    max_iter = flow.state.context.get("max_fix_iterations")
-    if max_iter is not None:
-        return int(max_iter)
+    from ...config import WorkflowConfig
 
-    # Try to load from the active project config via WorkflowConfig for
-    # consistency with the rest of the loaders.
-    try:
-        project_root_str = flow.state.context.get("project_root")
-        if project_root_str:
-            project_root = Path(project_root_str)
-        elif flow.change_path:
-            # Fallback: derive from change_path (parent of change_path.parent)
-            # change_path is typically openspec/changes/change_name
-            # so we need to go up 3 levels to get project root
-            project_root = flow.change_path.parent.parent.parent
-        else:
-            project_root = Path.cwd()
+    project_root_str = flow.state.context.get("project_root") if flow.state else None
+    if project_root_str:
+        project_root = Path(project_root_str)
+    elif flow.change_path:
+        project_root = flow.change_path.parent
+    else:
+        return DEFAULT_MAX_FIX_ITERATIONS
 
-        from ...config import WorkflowConfig
-
-        return WorkflowConfig.load(project_root).max_fix_iterations
-    except (IOError, OSError) as e:
-        logger.debug(f"Could not load max_fix_iterations from config: {e}")
-
-    return DEFAULT_MAX_FIX_ITERATIONS
+    return WorkflowConfig.load(project_root).max_fix_iterations
 
 
 def _format_spec_content(spec_content) -> str:
@@ -512,32 +501,19 @@ def _format_fix_context(
     max_iterations: int,
     fix_history: list | None = None,
 ) -> str:
-    """Format fix context for inclusion in prompt.
+    """Format fix context for inclusion in the verify_spec prompt.
 
-    Note: prev_issues are rendered by _format_previous_verification()
-    into the {previous_verification} slot to avoid duplication.
+    Thin wrapper around the shared ``render_fix_context`` helper —
+    delegates all branching/copy to a single source of truth shared with
+    self_check. prev_issues are rendered by _format_previous_verification()
+    into the {previous_verification} slot, so they're not passed here.
     """
-    if fix_iteration == 0:
-        return "This is the initial verification (no previous fix attempts)."
-
-    lines = [
-        f"Fix iteration: {fix_iteration} of {max_iterations}",
-        f"Previous fix attempts: {fix_iteration}",
-    ]
-
-    if fix_iteration >= max_iterations:
-        lines.append("WARNING: This is the final fix attempt. If tests still fail, the flow will be marked as FAILED.")
-
-    if fix_history:
-        lines.append("")
-        lines.append("## Fix History")
-        for entry in fix_history:
-            it = entry.get("iteration", "?")
-            reason = entry.get("reason", "unknown")
-            trigger = entry.get("trigger_step_type", "unknown")
-            lines.append(f"- Iteration {it}: triggered by {trigger} ({reason})")
-
-    return "\n".join(lines)
+    return render_fix_context(
+        fix_iteration,
+        max_iterations,
+        step_label="verification",
+        fix_history=fix_history,
+    )
 
 
 def _format_previous_verification(

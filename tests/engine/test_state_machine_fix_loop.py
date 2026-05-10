@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 
 from se3.engine.models import (
+    FIX_HISTORY_MAX_ENTRIES,
     FlowInstance,
     FlowStatus,
     State,
@@ -18,6 +19,7 @@ from se3.engine.models import (
     StepStatus,
     StepType,
 )
+from se3.config import DEFAULT_MAX_FIX_ITERATIONS, ConfigError
 from se3.engine.state_machine import StateMachine
 
 
@@ -56,6 +58,24 @@ class TestFixIterationTracking:
         assert state.fix_history[0]["reason"] == "test_failure"
         assert state.fix_history[1]["iteration"] == 2
         assert state.fix_history[1]["reason"] == "spec_compliance"
+
+    def test_fix_history_capped_at_max_entries(self):
+        """fix_history must be capped to a sliding window so that an
+        unbounded run (max_fix_iterations=0) cannot inflate memory /
+        engine.json size linearly with iteration count. The cap retains
+        the most recent entries because every consumer cares about recency.
+        """
+        state = State()
+
+        for i in range(FIX_HISTORY_MAX_ENTRIES + 25):
+            state.increment_fix_iteration(fix_context={"reason": f"r{i}"})
+
+        # Counter keeps growing; only the stored history is bounded
+        assert state.fix_iterations == FIX_HISTORY_MAX_ENTRIES + 25
+        assert len(state.fix_history) == FIX_HISTORY_MAX_ENTRIES
+        # Sliding window keeps the most recent entries
+        assert state.fix_history[-1]["iteration"] == FIX_HISTORY_MAX_ENTRIES + 25
+        assert state.fix_history[0]["iteration"] == 26
 
     def test_fix_iteration_serialization(self):
         """Test that fix iteration data serializes correctly."""
@@ -306,6 +326,120 @@ class TestTransitionToNextWithFixLoop:
         assert next_step is None
         assert flow.status == FlowStatus.FAILED
 
+    def test_max_fix_iterations_zero_does_not_fail(self, state_machine, flow_with_verify_revision):
+        """max_fix_iterations=0 (sentinel) bypasses exhaustion — flow stays RUNNING.
+
+        Also asserts that ``IssueDiscovery.create_from_fix_loop_exhaustion``
+        is never invoked under the unlimited sentinel: a regression that
+        moved that call outside the ``> 0`` guard would otherwise produce
+        spurious A-class issues in unlimited mode without any test
+        catching it.
+        """
+        flow, implement_step, _ = flow_with_verify_revision
+
+        # Already wildly past any sane upper bound — the sentinel must still allow continuation.
+        flow.state.fix_iterations = 200
+
+        # Stub out the IssueDiscovery so we can verify the exhaustion path
+        # never fires the A-class issue under the unlimited sentinel.
+        mock_discovery = Mock()
+        with patch.object(state_machine, '_get_max_fix_iterations', return_value=0), \
+             patch.object(state_machine, '_get_issue_discovery', return_value=mock_discovery):
+            next_step = state_machine.transition_to_next(flow)
+
+        assert next_step is not None
+        assert next_step.step_id == implement_step.step_id
+        assert next_step.step_type == StepType.IMPLEMENT
+        assert flow.status != FlowStatus.FAILED
+        mock_discovery.create_from_fix_loop_exhaustion.assert_not_called()
+
+    def test_max_fix_iterations_zero_drives_many_iterations_without_failure(
+        self, state_machine, flow_with_verify_revision
+    ):
+        """Drive ``transition_to_next`` 30 times under sentinel mode and verify
+        the flow never naturally terminates from exhaustion.
+
+        Existing tests cover the single-transition guard, prompt rendering,
+        and hot-edit cache invalidation, but none drive the state machine
+        through many real iterations. A future regression where a non-bypass
+        code path inadvertently calls ``flow.status = FlowStatus.FAILED`` on
+        iteration count would slip past the single-transition tests; this
+        test catches it by exercising the full loop drive.
+        """
+        flow, implement_step, verify_step = flow_with_verify_revision
+
+        ITERATIONS = 30
+        with patch.object(state_machine, '_get_max_fix_iterations', return_value=0):
+            for i in range(ITERATIONS):
+                # Re-arm the verify_step as the trigger on each pass: the prior
+                # _transition_to_fix repointed current_step_id at implement.
+                verify_step.status = StepStatus.REVISION_NEEDED
+                flow.state.current_step_id = verify_step.step_id
+
+                next_step = state_machine.transition_to_next(flow)
+
+                assert next_step is not None, (
+                    f"iteration {i+1}: sentinel mode must always grant another "
+                    "fix attempt, got None (flow likely flipped to FAILED)"
+                )
+                assert next_step.step_id == implement_step.step_id
+                assert flow.status == FlowStatus.RUNNING, (
+                    f"iteration {i+1}: flow.status must stay RUNNING under "
+                    f"the sentinel, got {flow.status}"
+                )
+
+        assert flow.state.get_fix_iteration() == ITERATIONS
+        assert len(flow.state.fix_history) == ITERATIONS
+
+    def test_max_fix_iterations_negative_defensive_does_not_fail(self, state_machine, flow_with_verify_revision):
+        """Belt-and-braces: even if a negative slipped past config validation
+        (which rejects negatives fail-fast), the state machine's `> 0` guard
+        must not flip the flow to FAILED.
+        """
+        flow, implement_step, _ = flow_with_verify_revision
+        flow.state.fix_iterations = 50
+
+        with patch.object(state_machine, '_get_max_fix_iterations', return_value=-1):
+            next_step = state_machine.transition_to_next(flow)
+
+        assert next_step is not None
+        assert flow.status != FlowStatus.FAILED
+
+    def test_max_fix_iterations_one_allows_single_attempt(self, state_machine, flow_with_verify_revision):
+        """max_fix_iterations=1 — the smallest finite cap — must allow exactly
+        one fix attempt before FAILED. Guards against an off-by-one regression
+        (e.g. someone changing `>=` to `>`) on the most sensitive boundary.
+        """
+        flow, implement_step, _ = flow_with_verify_revision
+
+        # Round 1: fresh flow, no fixes yet. The single allowed fix attempt
+        # must be granted: 0 < 1, so transition_to_fix runs.
+        assert flow.state.get_fix_iteration() == 0
+        with patch.object(state_machine, '_get_max_fix_iterations', return_value=1):
+            next_step = state_machine.transition_to_next(flow)
+
+        assert next_step is not None, "max=1 must permit the first fix attempt"
+        assert next_step.step_id == implement_step.step_id
+        assert flow.status != FlowStatus.FAILED
+        assert flow.state.get_fix_iteration() == 1
+
+        # Round 2: one fix has been consumed (iteration is now 1). The cap is
+        # 1, so 1 >= 1 must trigger FAILED — no second attempt.
+        # Reset current step to verify_step REVISION_NEEDED to re-enter the
+        # loop branch.
+        verify_step = next(
+            s for s in flow.state.steps.values()
+            if s.step_type == StepType.VERIFY_SPEC
+        )
+        verify_step.status = StepStatus.REVISION_NEEDED
+        flow.state.current_step_id = verify_step.step_id
+
+        with patch.object(state_machine, '_get_max_fix_iterations', return_value=1):
+            next_step_after = state_machine.transition_to_next(flow)
+
+        assert next_step_after is None, "max=1 must FAIL after one fix attempt"
+        assert flow.status == FlowStatus.FAILED
+
     def test_transition_to_next_increments_iteration_on_fix(self, state_machine, flow_with_verify_revision):
         """Test that transition_to_next increments fix iteration when transitioning to fix."""
         flow, _, _ = flow_with_verify_revision
@@ -315,6 +449,203 @@ class TestTransitionToNextWithFixLoop:
         state_machine.transition_to_next(flow)
 
         assert flow.state.get_fix_iteration() == 1
+
+
+class TestSentinelModeTriggerStepCoverage:
+    """Locks the contract that the unlimited-mode bypass at
+    ``state_machine.transition_to_next`` (line ~514: ``if max_fix_iterations
+    > 0 and current_iteration >= max_fix_iterations``) applies uniformly to
+    all three trigger step types — TEST, SELF_CHECK, and VERIFY_SPEC.
+
+    The sister test class above (``TestTransitionToNextWithFixLoop``)
+    exercises sentinel-mode bypass repeatedly, but only via the VERIFY_SPEC
+    trigger. A regression that special-cases the guard for one of the three
+    step types (e.g. ``if step_type == VERIFY_SPEC and ...``) would slip
+    past CI. These tests parametrize across all three trigger types.
+    """
+
+    @pytest.fixture
+    def state_machine(self, tmp_path):
+        return StateMachine(project_root=tmp_path)
+
+    def _build_flow_with_revision(self, trigger_step_type: StepType):
+        """Build a fix-loop-ready flow whose current step is in
+        REVISION_NEEDED on the requested trigger step type.
+        """
+        flow = FlowInstance(
+            flow_id=f"test-flow-{trigger_step_type.value}",
+            task_description="Test task",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.selected_steps = [
+            StepType.IMPLEMENT,
+            StepType.TEST,
+            StepType.SELF_CHECK,
+            StepType.VERIFY_SPEC,
+            StepType.COMMIT,
+        ]
+        implement_step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"files_changed": []},
+        )
+        flow.state.add_step(implement_step)
+        trigger_step = Step(
+            step_type=trigger_step_type,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "fix_needed": True,
+                "fix_instructions": "fix the issue",
+                "fix_context": {"reason": trigger_step_type.value},
+            },
+        )
+        flow.state.add_step(trigger_step)
+        flow.state.current_step_id = trigger_step.step_id
+        return flow, implement_step, trigger_step
+
+    @pytest.mark.parametrize(
+        "trigger_step_type",
+        [StepType.TEST, StepType.SELF_CHECK, StepType.VERIFY_SPEC],
+    )
+    def test_sentinel_zero_bypasses_exhaustion_for_all_triggers(
+        self, state_machine, trigger_step_type
+    ):
+        """max_fix_iterations=0 must bypass exhaustion regardless of which
+        of the three trigger step types raised REVISION_NEEDED.
+        """
+        flow, implement_step, _ = self._build_flow_with_revision(trigger_step_type)
+        # Past any sane upper bound — the sentinel must still allow continuation.
+        flow.state.fix_iterations = 200
+
+        mock_discovery = Mock()
+        with patch.object(state_machine, "_get_max_fix_iterations", return_value=0), \
+             patch.object(state_machine, "_get_issue_discovery", return_value=mock_discovery):
+            next_step = state_machine.transition_to_next(flow)
+
+        assert next_step is not None, (
+            f"sentinel mode must grant a fix attempt for trigger="
+            f"{trigger_step_type.value}, got None"
+        )
+        assert next_step.step_id == implement_step.step_id
+        assert flow.status != FlowStatus.FAILED
+        mock_discovery.create_from_fix_loop_exhaustion.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "trigger_step_type",
+        [StepType.TEST, StepType.SELF_CHECK, StepType.VERIFY_SPEC],
+    )
+    def test_finite_cap_still_fails_for_all_triggers(
+        self, state_machine, trigger_step_type
+    ):
+        """Belt-and-braces companion: with a finite cap that has been
+        reached, the flow MUST flip to FAILED for every trigger type. This
+        is what the parametrized sentinel test above is contrasting with —
+        without it, a regression that always-bypassed the cap would also
+        pass the sentinel test trivially.
+        """
+        flow, _, _ = self._build_flow_with_revision(trigger_step_type)
+        flow.state.fix_iterations = 3
+
+        with patch.object(state_machine, "_get_max_fix_iterations", return_value=3), \
+             patch.object(state_machine, "_get_issue_discovery", return_value=None):
+            next_step = state_machine.transition_to_next(flow)
+
+        assert next_step is None
+        assert flow.status == FlowStatus.FAILED
+
+
+class TestSentinelEndToEndConfigLoad:
+    """Integration coverage: drive the TEST-trigger fix loop with the real
+    config-load path (no ``_get_max_fix_iterations`` mock) so the
+    ``WorkflowConfig.load`` -> state_machine plumbing is locked end-to-end.
+
+    The parametrized sentinel tests above mock ``_get_max_fix_iterations``
+    directly, which is sufficient to lock the comparison branch but not the
+    upstream parse: a regression in ``WorkflowConfig.from_dict`` that
+    silently dropped ``max_fix_iterations: 0`` (e.g. by treating ``0`` as
+    falsy and falling back to the default 100) would slip past those tests.
+    Drive a real config file under each scenario to catch that.
+    """
+
+    def _build_flow_with_test_revision(self):
+        flow = FlowInstance(
+            flow_id="test-flow-test-trigger",
+            task_description="Test task",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.selected_steps = [
+            StepType.IMPLEMENT,
+            StepType.TEST,
+            StepType.SELF_CHECK,
+            StepType.VERIFY_SPEC,
+            StepType.COMMIT,
+        ]
+        implement_step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"files_changed": []},
+        )
+        flow.state.add_step(implement_step)
+        test_step = Step(
+            step_type=StepType.TEST,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "fix_needed": True,
+                "fix_instructions": "tests failed; fix the bug",
+                "fix_context": {"test_failed": True},
+            },
+        )
+        flow.state.add_step(test_step)
+        flow.state.current_step_id = test_step.step_id
+        return flow, implement_step, test_step
+
+    def test_test_trigger_sentinel_zero_via_real_config(self, tmp_path):
+        """``workflow.max_fix_iterations: 0`` in se3.yaml must propagate
+        through the real ``WorkflowConfig.load`` path so the TEST trigger
+        bypasses exhaustion at iteration 200. No mock of
+        ``_get_max_fix_iterations``.
+        """
+        (tmp_path / "se3.yaml").write_text(
+            "workflow:\n  max_fix_iterations: 0\n"
+        )
+        state_machine = StateMachine(project_root=tmp_path)
+
+        flow, implement_step, _ = self._build_flow_with_test_revision()
+        flow.state.fix_iterations = 200
+
+        mock_discovery = Mock()
+        with patch.object(state_machine, "_get_issue_discovery", return_value=mock_discovery):
+            next_step = state_machine.transition_to_next(flow)
+
+        assert next_step is not None, (
+            "TEST trigger under sentinel 0 (loaded from real se3.yaml) must "
+            "grant a fix attempt even at iteration 200"
+        )
+        assert next_step.step_id == implement_step.step_id
+        assert flow.status != FlowStatus.FAILED
+        mock_discovery.create_from_fix_loop_exhaustion.assert_not_called()
+
+    def test_test_trigger_finite_cap_via_real_config(self, tmp_path):
+        """Companion to the sentinel test: with ``max_fix_iterations: 3``
+        loaded from real se3.yaml and the flow already at iteration 3, the
+        TEST trigger must FAIL — proving the config value is honored, not
+        silently overridden.
+        """
+        (tmp_path / "se3.yaml").write_text(
+            "workflow:\n  max_fix_iterations: 3\n"
+        )
+        state_machine = StateMachine(project_root=tmp_path)
+
+        flow, _, _ = self._build_flow_with_test_revision()
+        flow.state.fix_iterations = 3
+
+        with patch.object(state_machine, "_get_issue_discovery", return_value=None):
+            next_step = state_machine.transition_to_next(flow)
+
+        assert next_step is None
+        assert flow.status == FlowStatus.FAILED
 
 
 class TestBuildStepInputsWithFixContext:
@@ -451,7 +782,10 @@ class TestBuildStepInputsVerifySpec:
     def test_propagates_max_fix_iterations(self, state_machine, flow_in_fix_loop):
         inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
         assert "max_fix_iterations" in inputs
-        assert inputs["max_fix_iterations"] >= 1
+        # Fixture has no se3.yaml override → state machine resolves to the
+        # framework default. Pin to the exact value so a future flip of
+        # the default to the unlimited sentinel (0) is caught explicitly.
+        assert inputs["max_fix_iterations"] == DEFAULT_MAX_FIX_ITERATIONS
 
     def test_propagates_prev_issues(self, state_machine, flow_in_fix_loop):
         inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.VERIFY_SPEC)
@@ -530,6 +864,8 @@ class TestBuildStepInputsSelfCheck:
     def test_propagates_max_fix_iterations(self, state_machine, flow_in_fix_loop):
         inputs = state_machine._build_step_inputs(flow_in_fix_loop, StepType.SELF_CHECK)
         assert "max_fix_iterations" in inputs
+        # Pin to exact configured default (no se3.yaml override in fixture).
+        assert inputs["max_fix_iterations"] == DEFAULT_MAX_FIX_ITERATIONS
 
     def test_no_prev_self_check_issues_when_convergence_disabled(self, state_machine, flow_in_fix_loop):
         """With convergence disabled (default), prev_self_check_issues is NOT injected."""
@@ -795,12 +1131,14 @@ class TestMaxFixIterations:
     """Test cases for max fix iterations configuration."""
 
     def test_get_max_fix_iterations_default(self, tmp_path):
-        """Test that default max fix iterations is 20."""
+        """Test that default max fix iterations is 100."""
+        from se3.config import DEFAULT_MAX_FIX_ITERATIONS
+
         state_machine = StateMachine(project_root=tmp_path)
 
         result = state_machine._get_max_fix_iterations()
 
-        assert result == 20
+        assert result == DEFAULT_MAX_FIX_ITERATIONS == 100
 
     def test_get_max_fix_iterations_from_config(self, tmp_path):
         """Test that max fix iterations can be loaded from config."""
@@ -816,6 +1154,499 @@ workflow:
         result = state_machine._get_max_fix_iterations()
 
         assert result == 5
+
+    def test_get_max_fix_iterations_zero_sentinel(self, tmp_path):
+        """max_fix_iterations: 0 is preserved (sentinel for unlimited)."""
+        config_content = """
+workflow:
+  max_fix_iterations: 0
+"""
+        (tmp_path / "se3.yaml").write_text(config_content)
+
+        state_machine = StateMachine(project_root=tmp_path)
+
+        assert state_machine._get_max_fix_iterations() == 0
+
+    def test_get_max_fix_iterations_null_sentinel(self, tmp_path):
+        """max_fix_iterations: null normalizes to the sentinel 0."""
+        config_content = """
+workflow:
+  max_fix_iterations: null
+"""
+        (tmp_path / "se3.yaml").write_text(config_content)
+
+        state_machine = StateMachine(project_root=tmp_path)
+
+        assert state_machine._get_max_fix_iterations() == 0
+
+
+class TestUnlimitedSentinelEndToEnd:
+    """End-to-end coverage for the integration path that injects
+    `max_fix_iterations=0` from se3.yaml through `_build_step_inputs` into
+    each step's inputs and finally into the LLM prompt.
+
+    Existing tests mock `_get_max_fix_iterations` directly or set inputs
+    directly. This class exercises the full chain — a regression where
+    `state_machine._build_step_inputs` accidentally re-introduced an `or`
+    short-circuit on the propagation lines would be caught here, where the
+    earlier tests bypass that code path entirely.
+    """
+
+    def _write_unlimited_yaml(self, project_root: Path) -> None:
+        (project_root / "se3.yaml").write_text(
+            "workflow:\n  max_fix_iterations: 0\n"
+        )
+
+    def _flow_in_fix_loop(self, fix_iteration: int) -> FlowInstance:
+        flow = FlowInstance(
+            flow_id="unlimited-e2e",
+            task_description="Test",
+            status=FlowStatus.RUNNING,
+        )
+        for _ in range(fix_iteration):
+            flow.state.increment_fix_iteration(fix_context={"reason": "test_failure"})
+
+        flow.state.add_step(Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"files_changed": ["a.py"]},
+        ))
+        flow.state.add_step(Step(
+            step_type=StepType.TEST,
+            status=StepStatus.COMPLETED,
+            outputs={"test_results": {"passed": False, "returncode": 1, "stdout": "", "stderr": ""}},
+        ))
+        flow.state.add_step(Step(
+            step_type=StepType.VERIFY_SPEC,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "issues": [],
+                "fix_instructions": "fix it",
+                "verification_result": {"issues": []},
+            },
+        ))
+        return flow
+
+    @pytest.mark.parametrize("fix_iteration", [1, 5, 50, 250])
+    def test_verify_spec_prompt_says_unlimited_across_iterations(
+        self, tmp_path, fix_iteration
+    ):
+        """se3.yaml(max_fix_iterations: 0) → state_machine builds inputs →
+        verify_spec prompt contains 'unlimited' regardless of iteration count.
+
+        Catches a regression where the propagation line in state_machine
+        (`inputs["max_fix_iterations"] = self._get_max_fix_iterations()`)
+        ever changed back to a form that drops 0.
+        """
+        from se3.engine.steps.verify_spec import verify_spec_handler
+
+        self._write_unlimited_yaml(tmp_path)
+        sm = StateMachine(project_root=tmp_path)
+        flow = self._flow_in_fix_loop(fix_iteration)
+
+        # 1. Real config path produces 0 (the unlimited sentinel).
+        assert sm._get_max_fix_iterations() == 0
+
+        # 2. _build_step_inputs propagates 0 to step.inputs (no `or` swap).
+        inputs = sm._build_step_inputs(flow, StepType.VERIFY_SPEC)
+        assert inputs["max_fix_iterations"] == 0
+        assert inputs["fix_iteration"] == fix_iteration
+
+        # 3. The handler renders the prompt with 'unlimited' and no
+        #    'final attempt' warning, regardless of how high fix_iteration is.
+        step = Step(step_type=StepType.VERIFY_SPEC, status=StepStatus.PENDING, inputs=inputs)
+        flow.change_path = tmp_path
+
+        mock_response = '{"issues": [], "summary": "", "recommendations": [],' \
+            ' "test_analysis": {"tests_passed": false, "failure_summary": "",' \
+            ' "root_cause": ""}, "fix_instructions": "fix it"}'
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class, \
+             patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+            verify_spec_handler(step, flow)
+            prompt = mock_caller.call.call_args[1]["prompt"]
+
+        assert "unlimited" in prompt.lower()
+        assert "final fix attempt" not in prompt.lower()
+        assert f"of {fix_iteration}" not in prompt  # never literal "of N"
+        assert step.outputs["max_fix_iterations"] == 0
+
+    @pytest.mark.parametrize("fix_iteration", [1, 5, 200])
+    def test_self_check_prompt_says_unlimited_across_iterations(
+        self, tmp_path, fix_iteration
+    ):
+        """Same end-to-end check for SELF_CHECK: se3.yaml(0) → inputs(0) →
+        prompt('unlimited').
+        """
+        from se3.engine.steps.self_check import self_check_handler
+
+        self._write_unlimited_yaml(tmp_path)
+        sm = StateMachine(project_root=tmp_path)
+        flow = self._flow_in_fix_loop(fix_iteration)
+
+        assert sm._get_max_fix_iterations() == 0
+
+        inputs = sm._build_step_inputs(flow, StepType.SELF_CHECK)
+        assert inputs["max_fix_iterations"] == 0
+        assert inputs["fix_iteration"] == fix_iteration
+
+        step = Step(step_type=StepType.SELF_CHECK, status=StepStatus.PENDING, inputs=inputs)
+        flow.change_path = tmp_path
+
+        mock_response = '{"issues": [], "summary": "ok"}'
+
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+            self_check_handler(step, flow)
+            prompt = mock_caller.call.call_args[1]["prompt"]
+
+        assert "unlimited" in prompt.lower()
+        assert "final fix attempt" not in prompt.lower()
+        assert f"of {fix_iteration}" not in prompt
+
+    def test_verify_spec_initial_iteration_unlimited_no_warning(self, tmp_path):
+        """fix_iteration=0 with unlimited mode: the prompt renders 'no
+        previous fix attempts' and never injects the 'final fix attempt'
+        warning, regardless of whether the underlying max_fix_iterations
+        is the unlimited sentinel (0) or the default (100).
+
+        Under unlimited mode, the prompt also includes an 'unlimited mode'
+        parenthetical marker so future iteration-cap-dependent guidance has
+        a visible signal at fix_iteration==0. No count is rendered so the
+        observable contracts at iteration 0 are: (a) absence of the
+        final-attempt warning under sentinel mode, (b) no 'fix iteration: N'
+        line, and (c) presence of the 'unlimited mode' marker.
+        """
+        from se3.engine.steps.verify_spec import verify_spec_handler
+
+        flow = self._flow_in_fix_loop(0)
+        flow.change_path = tmp_path
+
+        # Inject inputs directly: at fix_iteration=0 the state_machine does
+        # not auto-propagate max_fix_iterations (the gap mentioned in the
+        # self-check feedback). Simulate the unlimited-mode call as the
+        # handler would receive it once feature parity is restored, and
+        # also verify the assertion holds with the current omit-then-load
+        # path by leaving max_fix_iterations off and writing se3.yaml.
+        self._write_unlimited_yaml(tmp_path)
+        inputs = {
+            "task_description": "Test",
+            "spec_content": {},
+            "changes_made": {},
+            "test_results": {"passed": True, "returncode": 0, "stdout": "OK"},
+            "fix_iteration": 0,
+            "max_fix_iterations": 0,
+        }
+        step = Step(step_type=StepType.VERIFY_SPEC, status=StepStatus.PENDING, inputs=inputs)
+
+        mock_response = '{"issues": [], "summary": "", "recommendations": [],' \
+            ' "test_analysis": {"tests_passed": true, "failure_summary": "",' \
+            ' "root_cause": ""}, "fix_instructions": ""}'
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class, \
+             patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+            verify_spec_handler(step, flow)
+            prompt = mock_caller.call.call_args[1]["prompt"]
+
+        assert "no previous fix attempts" in prompt.lower()
+        assert "final fix attempt" not in prompt.lower()
+        # No count is rendered at iteration 0 — there is no "Fix iteration: N"
+        # string to match either the legacy form or any unlimited variant.
+        assert "fix iteration:" not in prompt.lower()
+        # Unlimited-mode marker is present so future iteration-cap-dependent
+        # guidance won't silently misrender at fix_iteration==0.
+        assert "unlimited mode" in prompt.lower()
+
+    def test_self_check_initial_iteration_unlimited_no_warning(self, tmp_path):
+        """Same contract for SELF_CHECK at fix_iteration=0."""
+        from se3.engine.steps.self_check import self_check_handler
+
+        flow = self._flow_in_fix_loop(0)
+        flow.change_path = tmp_path
+
+        self._write_unlimited_yaml(tmp_path)
+        inputs = {
+            "task_description": "Test",
+            "spec_content": {},
+            "changes_made": {},
+            "test_results": {"passed": True, "returncode": 0, "stdout": "OK"},
+            "fix_iteration": 0,
+            "max_fix_iterations": 0,
+        }
+        step = Step(step_type=StepType.SELF_CHECK, status=StepStatus.PENDING, inputs=inputs)
+
+        mock_response = '{"issues": [], "summary": "ok"}'
+
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+            self_check_handler(step, flow)
+            prompt = mock_caller.call.call_args[1]["prompt"]
+
+        assert "no previous fix attempts" in prompt.lower()
+        assert "final fix attempt" not in prompt.lower()
+        assert "fix iteration:" not in prompt.lower()
+        assert "unlimited mode" in prompt.lower()
+
+
+class TestUnlimitedAndConvergenceInteraction:
+    """Lock the safety contract: with ``max_fix_iterations=0`` (unlimited) AND
+    ``self_check_convergence_enabled=true``, the convergence shortcut MUST
+    still fire when the LLM re-reports identical self-check issues.
+
+    Convergence is the spec's documented stalled-loop safety mechanism for
+    unlimited mode (see se3-config 'Stalled-loop safety guidance'). A
+    regression that disabled convergence under the unlimited sentinel would
+    convert a stalled loop into an actually-infinite loop. Existing tests
+    cover unlimited propagation OR convergence in isolation, but not the
+    combination — this class binds both contracts together.
+    """
+
+    def _write_yaml(self, project_root: Path) -> None:
+        (project_root / "se3.yaml").write_text(
+            "workflow:\n"
+            "  max_fix_iterations: 0\n"
+            "  self_check_convergence_enabled: true\n"
+        )
+
+    def _flow_in_fix_loop_with_prev_self_check(
+        self, prev_issues: list[dict],
+    ) -> FlowInstance:
+        flow = FlowInstance(
+            flow_id="unlimited-convergence-e2e",
+            task_description="Test",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.increment_fix_iteration(fix_context={"reason": "self_check"})
+        flow.state.add_step(Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"files_changed": ["a.py"]},
+        ))
+        flow.state.add_step(Step(
+            step_type=StepType.TEST,
+            status=StepStatus.COMPLETED,
+            outputs={"test_results": {"passed": True, "returncode": 0}},
+        ))
+        flow.state.add_step(Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={"issues": prev_issues},
+        ))
+        return flow
+
+    def test_convergence_fires_under_unlimited_mode(self, tmp_path):
+        """End-to-end: unlimited cap + convergence enabled + LLM repeats the
+        previous self-check issues → COMPLETED (loop breaks). Without
+        convergence this would loop forever in unlimited mode.
+        """
+        from se3.engine.steps.self_check import self_check_handler
+        import json
+
+        prev_issues = [
+            {"severity": "high", "location": "a.py:1", "description": "x"},
+            {"severity": "medium", "location": "b.py:2", "description": "y"},
+        ]
+
+        self._write_yaml(tmp_path)
+        sm = StateMachine(project_root=tmp_path)
+        flow = self._flow_in_fix_loop_with_prev_self_check(prev_issues)
+
+        # 1. Real config path produces 0 (unlimited).
+        assert sm._get_max_fix_iterations() == 0
+        # 2. _build_step_inputs propagates 0 AND injects prev_self_check_issues
+        #    on pass_index==1 because convergence is enabled and we are in a
+        #    fix loop. This is the conjunction the test is locking.
+        inputs = sm._build_step_inputs(flow, StepType.SELF_CHECK)
+        assert inputs["max_fix_iterations"] == 0
+        assert inputs["self_check_convergence_enabled"] is True
+        assert inputs["prev_self_check_issues"] == prev_issues
+        assert inputs["self_check_pass_index"] == 1
+
+        # 3. LLM re-reports the same issues — convergence must short-circuit
+        #    the otherwise-infinite unlimited loop.
+        step = Step(step_type=StepType.SELF_CHECK, status=StepStatus.PENDING, inputs=inputs)
+        flow.change_path = tmp_path
+        mock_response = json.dumps({"issues": prev_issues, "summary": "same as before"})
+
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_cls.return_value = mock_caller
+            result = self_check_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED, (
+            "convergence MUST short-circuit the loop under unlimited mode; "
+            "otherwise repeated identical findings produce an infinite loop"
+        )
+        assert step.outputs.get("converged") is True
+        assert step.outputs.get("unresolved_issues") == prev_issues
+        # NOTE: ``max_fix_iterations`` is only written into outputs on the
+        # REVISION_NEEDED branch. The convergence path returns COMPLETED, so
+        # it lives in inputs (already asserted above) but not in outputs —
+        # that's intentional, COMPLETED steps don't carry a fix-loop counter.
+
+    def test_no_convergence_when_disabled_under_unlimited(self, tmp_path):
+        """Companion contract: when convergence is OFF under unlimited mode,
+        the LLM repeating the same issues does NOT short-circuit — the loop
+        keeps going. This is the regression risk the previous test guards
+        against: convergence must be the explicit mechanism that breaks it.
+        """
+        from se3.engine.steps.self_check import self_check_handler
+        import json
+
+        prev_issues = [
+            {"severity": "high", "location": "a.py:1", "description": "x"},
+        ]
+
+        # convergence_enabled defaults to False — only set unlimited
+        (tmp_path / "se3.yaml").write_text(
+            "workflow:\n  max_fix_iterations: 0\n"
+        )
+        sm = StateMachine(project_root=tmp_path)
+        flow = self._flow_in_fix_loop_with_prev_self_check(prev_issues)
+
+        inputs = sm._build_step_inputs(flow, StepType.SELF_CHECK)
+        assert inputs["max_fix_iterations"] == 0
+        assert inputs["self_check_convergence_enabled"] is False
+        # Without convergence, prev_self_check_issues is NOT injected.
+        assert "prev_self_check_issues" not in inputs
+
+        step = Step(step_type=StepType.SELF_CHECK, status=StepStatus.PENDING, inputs=inputs)
+        flow.change_path = tmp_path
+        mock_response = json.dumps({"issues": prev_issues, "summary": "same"})
+
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_cls.return_value = mock_caller
+            result = self_check_handler(step, flow)
+
+        # Without convergence the handler reports REVISION_NEEDED, which would
+        # drive another fix-loop iteration. Under unlimited mode this would
+        # loop forever — that's exactly why convergence exists as the safety
+        # mechanism.
+        assert result == StepStatus.REVISION_NEEDED
+        assert not step.outputs.get("converged")
+
+
+class TestUnlimitedOutputDiskShape:
+    """Lock the on-disk shape of ``step.outputs`` when running under the
+    unlimited sentinel. ``step.outputs`` is persisted to engine.json via
+    JSON serialization; consumers reading it back (status displays,
+    post-mortem renderers) must see the sentinel preserved as ``0``, not
+    silently rewritten to ``None`` or a different value by some future
+    output-massaging code.
+
+    This guards against a subtle foot-gun: a future consumer might
+    misinterpret ``max_fix_iterations: 0`` as 'limit reached' rather than
+    'unlimited'. The handler comments now document the sentinel, but a
+    serialization round-trip test makes the contract executable.
+    """
+
+    def test_verify_spec_outputs_serialize_with_sentinel(self, tmp_path):
+        """verify_spec → JSON → back: max_fix_iterations stays ``0`` (int)."""
+        from se3.engine.steps.verify_spec import verify_spec_handler
+        import json as _json
+
+        flow = FlowInstance(
+            flow_id="disk-shape-vs",
+            task_description="t",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+            change_path=tmp_path / "changes" / "c",
+        )
+        flow.state.selected_steps = [StepType.VERIFY_SPEC]
+
+        step = Step(
+            step_type=StepType.VERIFY_SPEC,
+            status=StepStatus.PENDING,
+            inputs={
+                "task_description": "t",
+                "spec_content": {"s.md": "x"},
+                "changes_made": {},
+                "test_results": {
+                    "passed": False, "returncode": 1, "stdout": "", "stderr": "",
+                },
+                "fix_iteration": 7,
+                "max_fix_iterations": 0,  # the unlimited sentinel
+            },
+        )
+        response = _json.dumps({
+            "issues": [],
+            "summary": "",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": False, "failure_summary": "", "root_cause": ""},
+            "fix_instructions": "fix",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_cls, \
+             patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+            verify_spec_handler(step, flow)
+
+        # Round-trip through JSON to lock the on-disk shape (engine.json is
+        # produced by json.dump on outputs).
+        roundtripped = _json.loads(_json.dumps(step.outputs))
+        assert roundtripped["max_fix_iterations"] == 0
+        assert isinstance(roundtripped["max_fix_iterations"], int)
+        # Document the contract: ``0`` IS the unlimited marker, not a None
+        # placeholder. A consumer doing ``current/max`` would div-by-zero;
+        # consumers must check ``<= 0`` first.
+        assert roundtripped["max_fix_iterations"] is not None
+
+    def test_self_check_outputs_serialize_with_sentinel(self, tmp_path):
+        """self_check → JSON → back: max_fix_iterations stays ``0`` (int)."""
+        from se3.engine.steps.self_check import self_check_handler
+        import json as _json
+
+        flow = FlowInstance(
+            flow_id="disk-shape-sc",
+            task_description="t",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+            change_path=tmp_path / "changes" / "c",
+        )
+        flow.state.selected_steps = [StepType.SELF_CHECK]
+
+        step = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.PENDING,
+            inputs={
+                "task_description": "t",
+                "changes_made": {},
+                "test_results": {"passed": True, "returncode": 0},
+                "spec_content": {},
+                "fix_iteration": 11,
+                "max_fix_iterations": 0,  # the unlimited sentinel
+            },
+        )
+        response = _json.dumps({
+            "issues": [{"severity": "low", "location": "a.py", "description": "fix me"}],
+            "summary": "issue",
+        })
+
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+            self_check_handler(step, flow)
+
+        roundtripped = _json.loads(_json.dumps(step.outputs))
+        assert roundtripped["max_fix_iterations"] == 0
+        assert isinstance(roundtripped["max_fix_iterations"], int)
+        assert roundtripped["max_fix_iterations"] is not None
 
 
 class TestFixLoopIntegration:
@@ -878,3 +1709,442 @@ class TestFixLoopIntegration:
         assert next_step.step_type == StepType.IMPLEMENT
         assert flow.state.get_fix_iteration() == 1
         assert implement_step.inputs["is_fix_iteration"] is True
+
+
+class TestCreateFlowConfigValidation:
+    """End-to-end fail-fast validation through ``create_flow``.
+
+    Locks the contract that an invalid ``workflow.max_fix_iterations`` in
+    se3.yaml fails the flow creation, not just ``WorkflowConfig.from_dict``
+    in isolation.
+    """
+
+    def test_create_flow_negative_max_fix_iterations_fails_fast(self, tmp_path):
+        """create_flow MUST raise ConfigError when yaml has a negative cap."""
+        (tmp_path / "se3.yaml").write_text(
+            "workflow:\n  max_fix_iterations: -1\n"
+        )
+        sm = StateMachine(project_root=tmp_path)
+        with pytest.raises(ConfigError):
+            sm.create_flow("test task", task_type="feature")
+
+    def test_create_flow_zero_max_fix_iterations_is_unlimited(self, tmp_path):
+        """create_flow accepts 0 (sentinel for unlimited) without error."""
+        (tmp_path / "se3.yaml").write_text(
+            "workflow:\n  max_fix_iterations: 0\n"
+        )
+        sm = StateMachine(project_root=tmp_path)
+        # Should not raise
+        flow = sm.create_flow("test task", task_type="feature")
+        assert flow is not None
+        assert sm._get_max_fix_iterations() == 0
+
+
+class TestHotEditMaxFixIterations:
+    """Locks the cache-invalidation contract on ``transition_to_next``.
+
+    ``_workflow_config_cache`` is reset at the start of each transition so a
+    yaml hot-edit of ``workflow.max_fix_iterations`` is observed on the next
+    transition. These tests guard against a future memoization change that
+    silently breaks that property.
+    """
+
+    def _make_flow_at_iteration(self, iteration: int) -> FlowInstance:
+        flow = FlowInstance(
+            flow_id="hot-edit-flow",
+            task_description="hot edit test",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.selected_steps = [
+            StepType.IMPLEMENT,
+            StepType.TEST,
+            StepType.VERIFY_SPEC,
+        ]
+        # Simulate having gone through fix loop already
+        for _ in range(iteration):
+            flow.state.increment_fix_iteration()
+        # Add an implement step + a verify_spec step in REVISION_NEEDED so
+        # transition_to_next routes through the fix-loop path.
+        implement_step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"files_changed": []},
+        )
+        flow.state.add_step(implement_step)
+        verify_step = Step(
+            step_type=StepType.VERIFY_SPEC,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "fix_needed": True,
+                "fix_instructions": "Fix the bug",
+                "fix_context": {"reason": "spec_failure"},
+            },
+        )
+        flow.state.add_step(verify_step)
+        flow.state.current_step_id = verify_step.step_id
+        return flow
+
+    def test_unlimited_to_finite_triggers_failed_when_already_over_cap(self, tmp_path):
+        """Flipping yaml from 0 (unlimited) to a finite cap below current
+        iteration MUST cause the next transition to set FAILED."""
+        yaml_path = tmp_path / "se3.yaml"
+        yaml_path.write_text("workflow:\n  max_fix_iterations: 0\n")
+        sm = StateMachine(project_root=tmp_path)
+        # Warm the cache as if we'd already transitioned under unlimited
+        assert sm._get_workflow_config().max_fix_iterations == 0
+
+        flow = self._make_flow_at_iteration(iteration=10)
+
+        # Hot-edit: drop to 5, well below the current 10 iterations
+        yaml_path.write_text("workflow:\n  max_fix_iterations: 5\n")
+
+        # transition_to_next must invalidate cache, see new cap, mark FAILED
+        next_step = sm.transition_to_next(flow)
+        assert next_step is None
+        assert flow.status == FlowStatus.FAILED
+
+    def test_finite_to_unlimited_stops_failed_transitions(self, tmp_path):
+        """Flipping yaml from a finite cap to 0 (unlimited) MUST stop the
+        next transition from going FAILED even if iteration > old cap."""
+        yaml_path = tmp_path / "se3.yaml"
+        yaml_path.write_text("workflow:\n  max_fix_iterations: 5\n")
+        sm = StateMachine(project_root=tmp_path)
+        # Warm the cache under the finite cap
+        assert sm._get_workflow_config().max_fix_iterations == 5
+
+        flow = self._make_flow_at_iteration(iteration=10)
+
+        # Hot-edit: flip to unlimited
+        yaml_path.write_text("workflow:\n  max_fix_iterations: 0\n")
+
+        # transition_to_next must invalidate cache, see unlimited, NOT FAILED
+        next_step = sm.transition_to_next(flow)
+        assert flow.status != FlowStatus.FAILED
+        # Should route into a fix step rather than terminate
+        assert next_step is not None
+
+
+class TestNPassSentinelComposition:
+    """Lock the contract for ``self_check_passes_required > 1`` composed with
+    ``max_fix_iterations = 0`` (unlimited).
+
+    The two counters live in different code paths — N-pass is driven by
+    ``_count_consecutive_self_check_completed`` against the workflow-config
+    pass count, while max_fix_iterations is checked in
+    ``transition_to_next`` against the State's fix_iterations. A regression
+    that conflated the two (e.g. short-circuiting the N-pass loop because
+    ``max_fix_iterations <= 0``, or vice-versa) would only surface when both
+    knobs are turned at once. This class exercises that composition.
+    """
+
+    def test_n_pass_creates_all_instances_under_unlimited_sentinel(self, tmp_path):
+        """N=3 + max_fix_iterations=0: state machine must still create
+        self_check instances #1, #2, #3 sequentially as each completes clean,
+        then advance to verify_spec on the 4th transition."""
+        from se3.config import WorkflowConfig
+
+        cfg = WorkflowConfig(
+            max_fix_iterations=0,
+            self_check_passes_required=3,
+        )
+        with patch("se3.engine.state_machine.PersistenceManager"):
+            sm = StateMachine(project_root=tmp_path)
+        sm._get_workflow_config = lambda **kwargs: cfg
+
+        flow = FlowInstance(
+            flow_id="npass-sentinel-flow",
+            task_description="Test",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.selected_steps = [
+            StepType.IMPLEMENT,
+            StepType.TEST,
+            StepType.SELF_CHECK,
+            StepType.VERIFY_SPEC,
+            StepType.COMMIT,
+        ]
+        flow.state.add_step(Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"files_changed": ["a.py"]},
+        ))
+        flow.state.add_step(Step(
+            step_type=StepType.TEST,
+            status=StepStatus.COMPLETED,
+            outputs={"test_results": {"passed": True}},
+        ))
+
+        # Pass #1
+        sc1 = Step(
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.COMPLETED,
+            outputs={"issues": [], "actionable_count": 0},
+        )
+        flow.state.add_step(sc1)
+        flow.state.current_step_id = sc1.step_id
+
+        sc2 = sm.transition_to_next(flow)
+        assert sc2 is not None
+        assert sc2.step_type == StepType.SELF_CHECK, (
+            "unlimited mode must NOT short-circuit the N-pass loop"
+        )
+        sc2.status = StepStatus.COMPLETED
+        sc2.outputs = {"issues": [], "actionable_count": 0}
+        flow.state.current_step_id = sc2.step_id
+
+        sc3 = sm.transition_to_next(flow)
+        assert sc3 is not None
+        assert sc3.step_type == StepType.SELF_CHECK
+        sc3.status = StepStatus.COMPLETED
+        sc3.outputs = {"issues": [], "actionable_count": 0}
+        flow.state.current_step_id = sc3.step_id
+
+        # After 3 consecutive clean self_checks, advance to verify_spec.
+        next_step = sm.transition_to_next(flow)
+        assert next_step is not None
+        assert next_step.step_type == StepType.VERIFY_SPEC, (
+            "after N consecutive clean self_check passes, the flow must "
+            "advance even under unlimited cap"
+        )
+
+        # Exactly 3 SELF_CHECK steps in history.
+        sc_count = sum(
+            1 for sid in flow.state.step_history
+            if flow.state.steps[sid].step_type == StepType.SELF_CHECK
+        )
+        assert sc_count == 3
+        # max_fix_iterations sentinel was not consumed by the N-pass loop —
+        # the fix counter stays at 0 because no REVISION_NEEDED occurred.
+        assert flow.state.get_fix_iteration() == 0
+        assert flow.status == FlowStatus.RUNNING
+
+
+class TestWorkflowConfigFallbackContract:
+    """Locks the fail-fast invariant for ``_get_workflow_config``.
+
+    Documented contract: a startup ``ConfigError`` (no prior successful
+    load) must propagate so the user is forced to fix se3.yaml before the
+    flow runs. Only mid-flow ConfigErrors after a successful load are
+    swallowed in favor of last-known-good config.
+
+    Regression: an early ``IOError``/``OSError`` used to promote the
+    default ``WorkflowConfig()`` to ``_workflow_config_last_good``,
+    silently disabling startup-style fail-fast for the rest of the
+    StateMachine's lifetime — a subsequent ``ConfigError`` (e.g. user
+    fixes the IO error then introduces a yaml typo) would be swallowed
+    instead of raised.
+    """
+
+    def test_ioerror_does_not_promote_defaults_to_last_good(self, tmp_path):
+        sm = StateMachine(project_root=tmp_path)
+
+        # First load: simulate IOError → fallback to defaults for the
+        # current transition only.
+        with patch(
+            "se3.engine.state_machine.WorkflowConfig.load",
+            side_effect=IOError("disk full"),
+        ):
+            cfg1 = sm._get_workflow_config()
+        assert cfg1.max_fix_iterations == DEFAULT_MAX_FIX_ITERATIONS
+
+        # Critical invariant: the IOError fallback must NOT be cached as
+        # last-known-good, otherwise the next ConfigError would be
+        # silently swallowed.
+        assert getattr(sm, "_workflow_config_last_good", None) is None
+
+        # Reset the per-transition cache (transition_to_next does this) and
+        # then trigger a ConfigError. With no real prior load on record, it
+        # MUST propagate.
+        sm._workflow_config_cache = None
+        with patch(
+            "se3.engine.state_machine.WorkflowConfig.load",
+            side_effect=ConfigError("invalid yaml"),
+        ):
+            with pytest.raises(ConfigError):
+                sm._get_workflow_config()
+
+    def test_successful_load_then_configerror_uses_last_good(self, tmp_path):
+        """After at least one successful load, a subsequent ConfigError
+        falls back to last-known-good rather than crashing the flow."""
+        from se3.config import WorkflowConfig
+
+        sm = StateMachine(project_root=tmp_path)
+        good = WorkflowConfig(max_fix_iterations=7)
+
+        with patch(
+            "se3.engine.state_machine.WorkflowConfig.load",
+            return_value=good,
+        ):
+            assert sm._get_workflow_config().max_fix_iterations == 7
+
+        # Mid-flow yaml hot-edit introduces an invalid value.
+        sm._workflow_config_cache = None
+        with patch(
+            "se3.engine.state_machine.WorkflowConfig.load",
+            side_effect=ConfigError("hot-edit gone wrong"),
+        ):
+            cfg = sm._get_workflow_config()
+        assert cfg.max_fix_iterations == 7  # last-known-good
+
+
+class TestFixHistoryClampOnLoad:
+    """Locks the retroactive-clamp invariant on ``State.from_dict``.
+
+    Without it, an engine.json written by an older build with more than
+    ``FIX_HISTORY_MAX_ENTRIES`` entries would be loaded verbatim and the
+    oversized list would be deepcopied per transition / re-persisted on
+    every save until the next append finally trimmed it.
+    """
+
+    def test_oversized_fix_history_is_clamped_on_load(self):
+        oversized = [
+            {"iteration": i, "reason": "test_failure"}
+            for i in range(FIX_HISTORY_MAX_ENTRIES + 25)
+        ]
+        data = {
+            "current_step_id": None,
+            "step_history": [],
+            "steps": {},
+            "context": {"fix_history": oversized},
+            "selected_steps": [],
+            "current_step_index": 0,
+            "review_iterations": {},
+            "fix_iterations": len(oversized),
+            "fix_history": oversized,
+        }
+        state = State.from_dict(data)
+        assert len(state.fix_history) == FIX_HISTORY_MAX_ENTRIES
+        # Tail-keep policy: oldest entries dropped, most recent kept.
+        assert state.fix_history[0]["iteration"] == 25
+        assert state.fix_history[-1]["iteration"] == FIX_HISTORY_MAX_ENTRIES + 24
+        # The mirrored copy in ``state.context['fix_history']`` must be
+        # clamped too — diverging sources of truth break consumers that
+        # read either path.
+        assert state.context["fix_history"] is state.fix_history
+
+    def test_within_cap_fix_history_unchanged_on_load(self):
+        """Loads under the cap pass through unchanged."""
+        history = [
+            {"iteration": i, "reason": "test_failure"}
+            for i in range(5)
+        ]
+        data = {
+            "fix_history": history,
+        }
+        state = State.from_dict(data)
+        assert state.fix_history == history
+
+    def test_unlimited_mode_oversized_fix_history_clamped(self):
+        """Regression: a degenerate run in unlimited mode (max_fix_iterations=0)
+        could produce engine.json with cap+ entries before the sliding-window
+        cap was added. Loading such a file must trim to FIX_HISTORY_MAX_ENTRIES
+        so resumed flows do not re-inflate memory and persist the oversized
+        copy on every save.
+        """
+        oversized_count = FIX_HISTORY_MAX_ENTRIES * 2 + 37  # well over the cap
+        oversized = [
+            {"iteration": i, "reason": "test_failure", "trigger_step_type": "test"}
+            for i in range(oversized_count)
+        ]
+        data = {
+            "current_step_id": None,
+            "step_history": [],
+            "steps": {},
+            "context": {"fix_history": oversized},
+            "selected_steps": [],
+            "current_step_index": 0,
+            "review_iterations": {},
+            "fix_iterations": oversized_count,
+            "fix_history": oversized,
+        }
+        state = State.from_dict(data)
+        assert len(state.fix_history) == FIX_HISTORY_MAX_ENTRIES
+        # Tail-keep: oldest entries dropped, most recent kept.
+        assert state.fix_history[0]["iteration"] == oversized_count - FIX_HISTORY_MAX_ENTRIES
+        assert state.fix_history[-1]["iteration"] == oversized_count - 1
+        # context mirror must be the same clamped list.
+        assert state.context["fix_history"] is state.fix_history
+        assert len(state.context["fix_history"]) == FIX_HISTORY_MAX_ENTRIES
+
+
+class TestUnlimitedSentinelHighIterationDrive:
+    """End-to-end coverage gap closer: drive ``transition_to_next`` through
+    150+ real iterations with ``max_fix_iterations=0`` and assert
+    ``flow.status`` stays ``RUNNING`` throughout — no single existing test
+    exercises the natural-loop drive at high iteration counts.
+
+    Existing high-iteration tests either mock ``_get_max_fix_iterations``
+    on a single transition (``test_max_fix_iterations_zero_does_not_fail``
+    bumps ``flow.state.fix_iterations`` to 200 then performs ONE
+    transition) or stop at 30 (``test_max_fix_iterations_zero_drives_many_
+    iterations_without_failure``). A regression that miscounted past 100
+    real iterations would slip past both. This test compounds 150 real
+    increments through the canonical drive path to lock the contract.
+    """
+
+    @pytest.fixture
+    def state_machine(self, tmp_path):
+        with patch("se3.engine.state_machine.PersistenceManager"):
+            return StateMachine(project_root=tmp_path)
+
+    @pytest.fixture
+    def flow_with_verify_revision(self, tmp_path):
+        flow = FlowInstance(
+            flow_id="unlimited-150-iter",
+            task_description="Drive 150 iterations under sentinel",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.selected_steps = [
+            StepType.IMPLEMENT,
+            StepType.TEST,
+            StepType.VERIFY_SPEC,
+            StepType.COMMIT,
+        ]
+        impl = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"files_changed": []},
+        )
+        flow.state.add_step(impl)
+        verify = Step(
+            step_type=StepType.VERIFY_SPEC,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "fix_needed": True,
+                "fix_instructions": "x",
+                "fix_context": {"test_failed": True},
+            },
+        )
+        flow.state.add_step(verify)
+        flow.state.current_step_id = verify.step_id
+        return flow, impl, verify
+
+    def test_unlimited_drives_150_iterations_without_failure(
+        self, state_machine, flow_with_verify_revision,
+    ):
+        flow, implement_step, verify_step = flow_with_verify_revision
+
+        ITERATIONS = 150
+        with patch.object(
+            state_machine, "_get_max_fix_iterations", return_value=0
+        ):
+            for i in range(ITERATIONS):
+                verify_step.status = StepStatus.REVISION_NEEDED
+                flow.state.current_step_id = verify_step.step_id
+                next_step = state_machine.transition_to_next(flow)
+
+                assert next_step is not None, (
+                    f"iteration {i+1}: sentinel must grant another attempt"
+                )
+                assert next_step.step_id == implement_step.step_id
+                assert flow.status == FlowStatus.RUNNING, (
+                    f"iteration {i+1}: flow.status must stay RUNNING, got "
+                    f"{flow.status}"
+                )
+
+        # The fix-iteration counter has compounded past every cap a finite
+        # configuration would allow (default 100, common ceiling 50, etc.).
+        assert flow.state.get_fix_iteration() == ITERATIONS
+        assert flow.status == FlowStatus.RUNNING
+

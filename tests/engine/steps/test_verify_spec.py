@@ -126,6 +126,106 @@ class TestVerifySpecHandler:
             assert step.outputs["in_scope_count"] == 0
             assert step.outputs["out_of_scope_count"] == 0
 
+    def test_zero_sentinel_in_inputs_is_honored(self, flow, step):
+        """An explicit max_fix_iterations=0 in inputs must survive to outputs and prompt.
+
+        Regression: the previous `or` short-circuit silently fell back to config
+        whenever inputs supplied 0 (the unlimited sentinel), letting an
+        upstream/config skew go undetected.
+        """
+        step.inputs["fix_iteration"] = 7
+        step.inputs["max_fix_iterations"] = 0
+        # Tests must fail to enter the fix-loop path that surfaces
+        # max_fix_iterations into outputs.
+        step.inputs["test_results"] = {
+            "passed": False, "returncode": 1, "stdout": "FAIL", "stderr": "",
+        }
+        mock_response = json.dumps({
+            "issues": [],
+            "summary": "tests broken",
+            "recommendations": [],
+            "test_analysis": {
+                "tests_passed": False,
+                "failure_summary": "boom",
+                "root_cause": "x",
+            },
+            "fix_instructions": "fix tests",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            with patch(
+                "se3.engine.steps.verify_spec._get_max_fix_iterations",
+                return_value=42,
+            ):
+                result = verify_spec_handler(step, flow)
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs["max_fix_iterations"] == 0
+        prompt = mock_caller.call.call_args[1]["prompt"]
+        assert "unlimited" in prompt.lower()
+        assert "of 42" not in prompt
+
+    def test_zero_sentinel_preserved_through_in_scope_issue_path(self, flow, step):
+        """Sentinel preservation contract for the in-scope-issue REVISION_NEEDED branch.
+
+        verify_spec_handler has two REVISION_NEEDED branches that both write
+        ``step.outputs['max_fix_iterations']``: the test-failure branch (covered
+        by ``test_zero_sentinel_in_inputs_is_honored``) and the in-scope spec
+        compliance branch. A regression that fixed sentinel propagation in one
+        branch but not the other would not be caught by either test alone.
+
+        Locks the contract that an explicit ``max_fix_iterations=0`` (the
+        unlimited sentinel) supplied via inputs survives unchanged into outputs
+        when the spec_compliance branch fires (tests passed but in-scope issues
+        exist), without silent fallback to config.
+        """
+        step.inputs["fix_iteration"] = 4
+        step.inputs["max_fix_iterations"] = 0
+        # Tests pass — this routes the handler to the spec_compliance branch
+        # (lines 303-332), NOT the test_failure branch.
+        step.inputs["test_results"] = {
+            "passed": True, "returncode": 0, "stdout": "ok", "stderr": "",
+        }
+        mock_response = json.dumps({
+            "issues": [
+                {
+                    "priority": "high",
+                    "scope": "in_scope",
+                    "message": "Missing implementation of feature X",
+                },
+            ],
+            "summary": "spec compliance gap",
+            "recommendations": [],
+            "test_analysis": {"tests_passed": True},
+            "fix_instructions": "Implement feature X per spec",
+        })
+
+        with patch("se3.engine.steps.verify_spec.LLMCaller") as mock_caller_class:
+            mock_caller = Mock()
+            mock_caller.call.return_value = mock_response
+            mock_caller_class.return_value = mock_caller
+
+            with patch("se3.engine.steps.verify_spec._file_out_of_scope_issues"):
+                with patch(
+                    "se3.engine.steps.verify_spec._get_max_fix_iterations",
+                    return_value=42,
+                ):
+                    result = verify_spec_handler(step, flow)
+
+        assert result == StepStatus.REVISION_NEEDED
+        # Confirm we hit the spec_compliance branch, not test_failure.
+        assert step.outputs["fix_context"]["reason"] == "spec_compliance"
+        assert step.outputs["in_scope_count"] == 1
+        # Sentinel must propagate untouched into outputs (no silent fallback to 42).
+        assert step.outputs["max_fix_iterations"] == 0
+        prompt = mock_caller.call.call_args[1]["prompt"]
+        assert "unlimited" in prompt.lower()
+        assert "of 42" not in prompt
+
     def test_verified_is_rule_based_not_from_llm(self, flow, step):
         """Test that verified is computed from rule, ignoring LLM's verified field."""
         # LLM says verified=True but has in_scope issues → rule says False
@@ -564,7 +664,58 @@ class TestFormatFixContext:
     def test_max_iterations_warning(self):
         result = _format_fix_context(3, 3)
         assert "WARNING" in result
-        assert "final fix attempt" in result
+        assert "final fix-loop iteration" in result
+
+    def test_unlimited_sentinel_zero(self):
+        """max_iterations=0 means unlimited — display 'unlimited' and skip warning."""
+        result = _format_fix_context(5, 0)
+        assert "unlimited" in result
+        assert "WARNING" not in result
+        assert "final fix-loop iteration" not in result
+
+    def test_unlimited_sentinel_zero_at_initial(self):
+        """max_iterations=0 at fix_iteration=0 must not show the final-attempt warning."""
+        result = _format_fix_context(0, 0)
+        assert "WARNING" not in result
+        assert "final fix-loop iteration" not in result
+
+    def test_warning_suppressed_before_boundary(self):
+        """Warning must NOT fire while iteration is below the cap."""
+        result = _format_fix_context(4, 5)
+        assert "WARNING" not in result
+        assert "final fix-loop iteration" not in result
+
+    def test_negative_treated_as_unlimited(self):
+        """Negatives are rejected at config load, but if one slips through
+        (e.g. via tests that mock max_iterations directly), the format
+        helper treats ``<= 0`` as unlimited so rendering matches the
+        state_machine's ``> 0`` exhaustion guard exactly. Otherwise a
+        negative would render misleadingly as "N of -M" while the flow
+        behaves as unlimited.
+        """
+        result = _format_fix_context(50, -1)
+        assert "unlimited" in result
+        assert "WARNING" not in result
+        assert "of -1" not in result
+
+    def test_final_attempt_warning_at_boundary(self):
+        """When fix_iteration == max_iterations, the final-iteration warning
+        text must appear verbatim (handler-level prompt-rendering branch).
+
+        Wording note: the warning intentionally says "final fix-loop iteration"
+        rather than "final fix attempt" because by the time verify_spec sees
+        the boundary the IMPLEMENT step already ran for this iteration; what
+        remains is the verification decision (COMPLETED vs. REVISION_NEEDED),
+        not another fix.
+        """
+        result = _format_fix_context(5, 5)
+        assert "WARNING: This is the final fix-loop iteration before exhaustion." in result
+        assert "the flow will be marked as FAILED" in result
+        # The misleading "fix attempt" wording must NOT reappear.
+        assert "final fix attempt" not in result
+        # past_final warning must NOT appear at the on-boundary case
+        assert "Iteration cap exceeded" not in result
+
 
 
 class TestFormatSpecChanges:
@@ -627,21 +778,15 @@ class TestFormatSpecChanges:
 class TestGetMaxFixIterations:
     """Test cases for _get_max_fix_iterations."""
 
-    def test_from_flow_context(self, tmp_path):
-        flow = Mock()
-        flow.state.context = {"max_fix_iterations": 5}
-        flow.change_path = tmp_path
-
-        result = _get_max_fix_iterations(flow)
-        assert result == 5
-
     def test_default_value(self, tmp_path):
+        from se3.config import DEFAULT_MAX_FIX_ITERATIONS
+
         flow = Mock()
         flow.state.context = {}
         flow.change_path = tmp_path / "nonexistent"
 
         result = _get_max_fix_iterations(flow)
-        assert result == 20  # Default
+        assert result == DEFAULT_MAX_FIX_ITERATIONS == 100
 
     def test_from_config_file(self, tmp_path):
         # Create project root and change path
@@ -662,6 +807,7 @@ workflow:
 
         result = _get_max_fix_iterations(flow)
         assert result == 7
+
 
 
 class TestIntegration:

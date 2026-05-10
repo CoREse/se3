@@ -159,8 +159,7 @@ class TestSelfCheckHandler:
             mock_caller.call.return_value = response
             mock_cls.return_value = mock_caller
 
-            with patch("se3.engine.steps.self_check._get_max_fix_iterations", return_value=3):
-                result = self_check_handler(step, flow)
+            result = self_check_handler(step, flow)
 
         assert result == StepStatus.REVISION_NEEDED
         assert step.outputs["actionable_count"] == 1
@@ -256,6 +255,40 @@ class TestSelfCheckHandler:
             prompt = mock_caller.call.call_args[1]["prompt"]
             assert "Fix iteration: 2" in prompt
 
+    def test_zero_sentinel_in_inputs_is_honored(self, flow, step):
+        """An explicit max_fix_iterations=0 in inputs must survive to outputs and prompt.
+
+        Regression: the previous `or` short-circuit silently fell back to config
+        whenever inputs supplied 0 (the unlimited sentinel), letting an
+        upstream/config skew go undetected.
+        """
+        step.inputs["fix_iteration"] = 5
+        step.inputs["max_fix_iterations"] = 0
+        response = json.dumps({
+            "issues": [
+                {"severity": "high", "description": "needs fix", "location": "x.py"},
+            ],
+            "summary": "issue",
+        })
+
+        with patch("se3.engine.steps.self_check.LLMCaller") as mock_cls:
+            mock_caller = Mock()
+            mock_caller.call.return_value = response
+            mock_cls.return_value = mock_caller
+
+            # The handler must honor an explicit ``max_fix_iterations=0`` from
+            # inputs rather than silently falling back to config. The fallback
+            # path (_fallback_max_fix_iterations) would return DEFAULT
+            # (currently 100), so a regression would surface as "of 100"
+            # in the prompt and a non-zero value in outputs.
+            result = self_check_handler(step, flow)
+
+        assert result == StepStatus.REVISION_NEEDED
+        assert step.outputs["max_fix_iterations"] == 0
+        prompt = mock_caller.call.call_args[1]["prompt"]
+        assert "unlimited" in prompt.lower()
+        assert "of 100" not in prompt
+
     def test_stores_self_check_result(self, flow, step):
         llm_result = {
             "issues": [{"severity": "low", "description": "Minor", "location": "x.py"}],
@@ -341,7 +374,54 @@ class TestFormatFixContext:
     def test_max_reached(self):
         result = _format_fix_context(3, 3)
         assert "WARNING" in result
-        assert "final fix attempt" in result
+        assert "final fix-loop iteration" in result
+
+    def test_unlimited_sentinel_zero(self):
+        """max_iterations=0 sentinel: render 'unlimited', skip final-attempt warning."""
+        result = _format_fix_context(7, 0)
+        assert "unlimited" in result
+        assert "WARNING" not in result
+        assert "final fix-loop iteration" not in result
+
+    def test_negative_treated_as_unlimited(self):
+        """Negatives are rejected at config load, but if one slips through
+        (e.g. via tests that mock max_iterations directly), the format
+        helper treats ``<= 0`` as unlimited so rendering matches the
+        state_machine's ``> 0`` exhaustion guard exactly.
+        """
+        result = _format_fix_context(99, -5)
+        assert "unlimited" in result
+        assert "WARNING" not in result
+        assert "of -5" not in result
+
+    def test_unlimited_sentinel_zero_at_initial(self):
+        """max_iterations=0 at fix_iteration=0 must not show the final-attempt warning."""
+        result = _format_fix_context(0, 0)
+        assert "WARNING" not in result
+        assert "final fix-loop iteration" not in result
+
+    def test_warning_suppressed_before_boundary(self):
+        """Warning must NOT fire while iteration is below the cap."""
+        result = _format_fix_context(4, 5)
+        assert "WARNING" not in result
+        assert "final fix-loop iteration" not in result
+
+    def test_final_attempt_warning_at_boundary(self):
+        """When fix_iteration == max_iterations, the final-iteration warning
+        text must appear verbatim (handler-level prompt-rendering branch).
+
+        Wording note: the warning intentionally says "final fix-loop iteration"
+        rather than "final fix attempt" because by the time self_check sees
+        the boundary the IMPLEMENT step already ran for this iteration; what
+        remains is the self-check decision (clean vs. issues), not another fix.
+        """
+        result = _format_fix_context(5, 5)
+        assert "WARNING: This is the final fix-loop iteration before exhaustion." in result
+        assert "the flow will be marked as FAILED" in result
+        # The misleading "fix attempt" wording must NOT reappear.
+        assert "final fix attempt" not in result
+        # past_final warning must NOT appear at the on-boundary case
+        assert "Iteration cap exceeded" not in result
 
 
 class TestIssueSignature:

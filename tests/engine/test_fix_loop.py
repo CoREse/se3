@@ -510,6 +510,11 @@ class TestMaxIterationEnforcement:
             task_description="Test task",
             status=FlowStatus.RUNNING,
         )
+
+        # Restore an explicit max_fix_iterations cap matching fix_iteration
+        # so the test actually exercises the cap-exhaustion edge. With the
+        # default raised to 100, fix_iteration=3 alone is no longer at the
+        # cap; the inline comment would otherwise be misleading.
         flow.state.context["max_fix_iterations"] = 3
 
         step = Step(
@@ -525,7 +530,8 @@ class TestMaxIterationEnforcement:
                     "stdout": "Failed",
                     "stderr": "Error",
                 },
-                "fix_iteration": 3,  # At max iterations
+                "fix_iteration": 3,  # At max iterations (cap=3 set above)
+                "max_fix_iterations": 3,
             },
         )
 
@@ -654,17 +660,17 @@ workflow:
 
     def test_max_fix_iterations_default(self, tmp_path):
         """Test default max_fix_iterations when not configured."""
-        from se3.config import get_max_fix_iterations
+        from se3.config import DEFAULT_MAX_FIX_ITERATIONS, get_max_fix_iterations
 
         result = get_max_fix_iterations(tmp_path)
 
-        assert result == 20
+        assert result == DEFAULT_MAX_FIX_ITERATIONS == 100
 
     def test_max_fix_iterations_no_config_file(self, tmp_path):
         """Test default when se3.yaml doesn't exist."""
-        from se3.config import get_max_fix_iterations
+        from se3.config import DEFAULT_MAX_FIX_ITERATIONS, get_max_fix_iterations
 
         non_existent_path = tmp_path / "non_existent"
         result = get_max_fix_iterations(non_existent_path)
 
-        assert result == 20
+        assert result == DEFAULT_MAX_FIX_ITERATIONS == 100

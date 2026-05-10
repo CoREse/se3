@@ -8,6 +8,10 @@ Covers:
 
 from __future__ import annotations
 
+from se3.engine.steps._fix_context import (
+    FIX_HISTORY_RENDER_TAIL,
+    render_fix_context,
+)
 from se3.engine.steps.verify_spec import (
     _format_fix_context,
     _format_previous_verification,
@@ -28,7 +32,7 @@ class TestFormatFixContext:
 
     def test_final_iteration_warning(self):
         result = _format_fix_context(3, 3)
-        assert "final fix attempt" in result.upper() or "WARNING" in result
+        assert "final fix-loop iteration" in result or "WARNING" in result
 
     def test_with_fix_history(self):
         history = [
@@ -47,6 +51,71 @@ class TestFormatFixContext:
     def test_with_none_fix_history(self):
         result = _format_fix_context(1, 3, fix_history=None)
         assert "Fix History" not in result
+
+    def test_unlimited_mid_loop_renders_unlimited_marker(self):
+        # max_iterations=0 (unlimited sentinel) with fix_iteration > 0:
+        # the iteration line MUST render as "Fix iteration: N (unlimited)"
+        # and NEITHER the on-boundary "final fix-loop iteration" warning
+        # NOR the past-final "Iteration cap exceeded" warning may appear.
+        # This is the most user-visible payoff of the unlimited mode and
+        # locks the rendering against a future copy-edit regression.
+        result = render_fix_context(
+            fix_iteration=7,
+            max_iterations=0,
+            step_label="verification",
+        )
+        assert "Fix iteration: 7 (unlimited)" in result
+        assert "final fix-loop iteration" not in result
+        assert "Iteration cap exceeded" not in result
+        # Sanity: previous-fix-attempts counter still rendered.
+        assert "Previous fix attempts: 7" in result
+
+    def test_fix_history_tail_truncation(self):
+        # Drive >FIX_HISTORY_RENDER_TAIL entries through render_fix_context
+        # and assert (a) only the last N iteration numbers appear and
+        # (b) the truncation marker is present.
+        total = 38
+        history = [
+            {
+                "iteration": i,
+                "reason": "test_failure",
+                "trigger_step_type": "test",
+            }
+            for i in range(1, total + 1)
+        ]
+        result = render_fix_context(
+            fix_iteration=total,
+            max_iterations=0,
+            step_label="verification",
+            fix_history=history,
+        )
+        # The first (total - FIX_HISTORY_RENDER_TAIL) iterations must be elided.
+        kept_start = total - FIX_HISTORY_RENDER_TAIL + 1
+        for elided in range(1, kept_start):
+            assert f"Iteration {elided}:" not in result, (
+                f"Iteration {elided} should be truncated"
+            )
+        for kept in range(kept_start, total + 1):
+            assert f"Iteration {kept}:" in result, (
+                f"Iteration {kept} should be present"
+            )
+        # Truncation marker
+        truncated_count = total - FIX_HISTORY_RENDER_TAIL
+        assert f"{truncated_count} earlier entries (truncated)" in result
+
+    def test_fix_history_no_truncation_marker_at_or_below_tail(self):
+        # When length is exactly FIX_HISTORY_RENDER_TAIL, no marker.
+        history = [
+            {"iteration": i, "reason": "r", "trigger_step_type": "test"}
+            for i in range(1, FIX_HISTORY_RENDER_TAIL + 1)
+        ]
+        result = render_fix_context(
+            fix_iteration=FIX_HISTORY_RENDER_TAIL,
+            max_iterations=0,
+            step_label="verification",
+            fix_history=history,
+        )
+        assert "earlier entries (truncated)" not in result
 
 
 class TestFormatPreviousVerification:
