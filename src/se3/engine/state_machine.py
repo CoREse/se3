@@ -97,6 +97,45 @@ def _infer_fix_reason(trigger_step_type: str) -> str:
     return reason_map.get(trigger_step_type, trigger_step_type or "unknown")
 
 
+def _compose_effective_task_description(flow: "FlowInstance") -> str:
+    """Compute the effective task_description for any step in the flow.
+
+    Resolution order (matches ``_build_step_inputs``):
+      1. ``flow.task_description`` is the canonical original.
+      2. If a completed DISCOVERY step produced ``refined_description``,
+         that overrides #1.
+      3. If ``flow.state.context["user_interjections"]`` is non-empty,
+         the composer appends the ``## Additional Instructions`` section.
+
+    Used by both ``_build_step_inputs`` (creating fresh inputs) and
+    ``_transition_to_fix`` (re-entering implement on fix loop). Without
+    this shared helper, the fix loop would silently revert to the raw
+    original task_description, dropping any discovery refinement and any
+    Ctrl-C interjections — making mid-flow corrections invisible to every
+    fix iteration.
+    """
+    base = flow.task_description or ""
+    # Walk step_history in reverse to pick up the latest completed
+    # DISCOVERY step's refined_description.
+    for sid in reversed(flow.state.step_history):
+        s = flow.state.steps.get(sid)
+        if (
+            s
+            and s.step_type == StepType.DISCOVERY
+            and s.status in (StepStatus.COMPLETED, StepStatus.PARTIAL)
+        ):
+            refined = s.outputs.get("refined_description")
+            if isinstance(refined, str) and refined:
+                base = refined
+            break
+
+    interjections = flow.state.context.get("user_interjections", [])
+    if interjections:
+        from .task_description import compose_task_description_with_interjections
+        base = compose_task_description_with_interjections(base, interjections)
+    return base
+
+
 # Cap on serialized previous_output size (bytes) to prevent unbounded
 # accumulation across many fix iterations.
 _PREVIOUS_OUTPUT_MAX_BYTES = 20_000
@@ -711,7 +750,12 @@ class StateMachine:
 
         # Update the existing implement step for the fix iteration
         implement_step.status = StepStatus.PENDING
-        implement_step.inputs["task_description"] = flow.task_description
+        # Use the effective task_description (refined + interjections) so
+        # fix iterations see the same task content downstream steps see.
+        # Reverting to ``flow.task_description`` here would drop any
+        # discovery-refined wording and any Ctrl-C user interjections —
+        # making mid-flow corrections invisible to every fix iteration.
+        implement_step.inputs["task_description"] = _compose_effective_task_description(flow)
         implement_step.inputs["fix_instructions"] = fix_instructions
         implement_step.inputs["fix_context"] = fix_context
         implement_step.inputs["is_fix_iteration"] = True
@@ -1079,24 +1123,15 @@ class StateMachine:
         # Ensure selected_items is always present in inputs (may be empty)
         inputs["selected_items"] = selected_items
 
-        # When discovery produced a refined_description, use it as the task_description
-        # for all downstream steps (preserving original for traceability)
+        # When discovery produced a refined_description, preserve original
+        # for traceability and override the effective task_description.
+        # Then apply any persisted user-Ctrl-C interjections.
+        # ``_compose_effective_task_description`` encapsulates the same
+        # priority chain (refined > original, then interjections) used by
+        # ``_transition_to_fix`` so the two paths cannot diverge.
         if "refined_description" in inputs and inputs["refined_description"]:
             inputs["original_task_description"] = inputs["task_description"]
-            inputs["task_description"] = inputs["refined_description"]
-
-        # Append any persisted user-Ctrl-C interjections as a structured
-        # ``## Additional Instructions`` section onto the effective task
-        # description. Done AFTER the refined_description overwrite so the
-        # interjections always sit on top of whichever description (refined
-        # or original) is in flight.
-        interjections = flow.state.context.get("user_interjections", [])
-        if interjections:
-            from .task_description import compose_task_description_with_interjections
-            inputs["task_description"] = compose_task_description_with_interjections(
-                base=inputs.get("task_description", ""),
-                interjections=interjections,
-            )
+        inputs["task_description"] = _compose_effective_task_description(flow)
 
         # Special handling for CONFIRM step
         if step_type == StepType.CONFIRM:

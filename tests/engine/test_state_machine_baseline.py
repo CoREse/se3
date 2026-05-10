@@ -265,3 +265,175 @@ class TestUserInterjectionsInTaskDescription:
             assert "instruction A" in inputs["task_description"], (
                 f"interjection must reach {step_type.value} step"
             )
+
+
+class TestComposeEffectiveTaskDescription:
+    """The ``_compose_effective_task_description`` helper must produce the
+    same effective task_description for fresh-step construction
+    (``_build_step_inputs``) and fix-loop re-entry (``_transition_to_fix``).
+    Otherwise fix iterations of implement see a different task than the
+    other steps — the bug this helper was extracted to prevent.
+    """
+
+    def test_no_discovery_no_interjections_returns_canonical(self, tmp_path):
+        from se3.engine.state_machine import _compose_effective_task_description
+        flow = FlowInstance(task_description="raw user input")
+        assert _compose_effective_task_description(flow) == "raw user input"
+
+    def test_picks_up_refined_description_from_discovery(self, tmp_path):
+        from se3.engine.state_machine import _compose_effective_task_description
+        flow = FlowInstance(task_description="raw user input")
+        flow.state.add_step(Step(
+            step_type=StepType.DISCOVERY,
+            status=StepStatus.COMPLETED,
+            outputs={"refined_description": "refined: do X with constraint Y"},
+        ))
+        result = _compose_effective_task_description(flow)
+        assert result.startswith("refined: do X with constraint Y")
+        assert "raw user input" not in result
+
+    def test_appends_interjections(self, tmp_path):
+        from se3.engine.state_machine import _compose_effective_task_description
+        flow = FlowInstance(task_description="task")
+        flow.state.context["user_interjections"] = [
+            {"text": "redirect to Postgres", "step_type": "implement",
+             "timestamp": "t1"},
+        ]
+        result = _compose_effective_task_description(flow)
+        assert result.startswith("task")
+        assert "## Additional Instructions" in result
+        assert "redirect to Postgres" in result
+
+    def test_combines_refined_plus_interjections(self, tmp_path):
+        from se3.engine.state_machine import _compose_effective_task_description
+        flow = FlowInstance(task_description="raw")
+        flow.state.add_step(Step(
+            step_type=StepType.DISCOVERY,
+            status=StepStatus.COMPLETED,
+            outputs={"refined_description": "refined task"},
+        ))
+        flow.state.context["user_interjections"] = [
+            {"text": "extra constraint", "step_type": "plan",
+             "timestamp": "t1"},
+        ]
+        result = _compose_effective_task_description(flow)
+        # Refined sits on top
+        assert result.startswith("refined task")
+        # Then interjections appended
+        assert "## Additional Instructions" in result
+        assert "extra constraint" in result
+        # Original raw is NOT inlined (only original_task_description in
+        # _build_step_inputs preserves it; the helper itself returns
+        # only the effective composition).
+        assert "raw" not in result.split("## Additional Instructions")[0]
+
+
+class TestFixLoopReentryUsesEffectiveTaskDescription:
+    """Regression: ``_transition_to_fix`` previously hard-coded
+    ``flow.task_description`` for the implement step's task_description,
+    which dropped any discovery refinement and any user_interjections on
+    every fix iteration. The helper now ensures fix iterations see the
+    same task content as the original build.
+    """
+
+    def _setup_flow_at_fix_loop_entry(self, tmp_path) -> tuple[StateMachine, FlowInstance]:
+        sm = StateMachine(tmp_path)
+        flow = FlowInstance(
+            flow_id="fix-loop-task-desc-test",
+            task_description="raw user input",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.selected_steps = [
+            StepType.DISCOVERY,
+            StepType.IMPLEMENT,
+            StepType.TEST,
+            StepType.SELF_CHECK,
+        ]
+        # Discovery produced refined description.
+        flow.state.add_step(Step(
+            step_type=StepType.DISCOVERY,
+            status=StepStatus.COMPLETED,
+            outputs={"refined_description": "refined: produce a balanced JSON tree"},
+        ))
+        # Implement step (will be re-entered by fix loop).
+        impl = Step(
+            step_id="01_implement_xxx",
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            inputs={"task_description": "refined: produce a balanced JSON tree"},
+            outputs={
+                "files_changed": ["src/tree.py"],
+                "summary": "first attempt",
+            },
+        )
+        flow.state.add_step(impl)
+        # Trigger step (self_check found something).
+        trigger = Step(
+            step_id="03_self_check_yyy",
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "fix_instructions": "fix the unbalanced node",
+                "fix_context": {"reason": "self_check", "issues": []},
+            },
+        )
+        flow.state.add_step(trigger)
+        flow.state.current_step_id = trigger.step_id
+        return sm, flow
+
+    def test_fix_loop_implement_sees_refined_description(self, tmp_path):
+        """Without the helper, fix iteration would see "raw user input"
+        instead of the discovery-refined version."""
+        sm, flow = self._setup_flow_at_fix_loop_entry(tmp_path)
+        impl_step = sm._transition_to_fix(flow, flow.state.steps["03_self_check_yyy"])
+        assert impl_step is not None
+        td = impl_step.inputs["task_description"]
+        assert "refined: produce a balanced JSON tree" in td
+        # Original raw input should not leak through.
+        assert "raw user input" not in td
+
+    def test_fix_loop_implement_sees_user_interjections(self, tmp_path):
+        sm, flow = self._setup_flow_at_fix_loop_entry(tmp_path)
+        flow.state.context["user_interjections"] = [
+            {"text": "use AVL not red-black", "step_type": "implement",
+             "timestamp": "t1"},
+        ]
+        impl_step = sm._transition_to_fix(flow, flow.state.steps["03_self_check_yyy"])
+        assert impl_step is not None
+        td = impl_step.inputs["task_description"]
+        assert "## Additional Instructions" in td
+        assert "use AVL not red-black" in td
+
+    def test_fix_loop_with_no_discovery_uses_canonical_task(self, tmp_path):
+        """When discovery never ran, ``flow.task_description`` is the
+        right effective value — no regression for the simple case."""
+        sm = StateMachine(tmp_path)
+        flow = FlowInstance(
+            flow_id="simple",
+            task_description="canonical task",
+            status=FlowStatus.RUNNING,
+        )
+        flow.state.selected_steps = [
+            StepType.IMPLEMENT, StepType.TEST, StepType.SELF_CHECK,
+        ]
+        impl = Step(
+            step_id="01_impl",
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={"files_changed": ["a.py"]},
+        )
+        flow.state.add_step(impl)
+        trigger = Step(
+            step_id="02_sc",
+            step_type=StepType.SELF_CHECK,
+            status=StepStatus.REVISION_NEEDED,
+            outputs={
+                "fix_instructions": "fix",
+                "fix_context": {"reason": "self_check", "issues": []},
+            },
+        )
+        flow.state.add_step(trigger)
+
+        impl_step = sm._transition_to_fix(flow, trigger)
+        assert impl_step is not None
+        assert impl_step.inputs["task_description"] == "canonical task"
