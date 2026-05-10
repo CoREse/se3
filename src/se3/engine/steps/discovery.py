@@ -532,6 +532,7 @@ def _run_discovery_round(
         step_id=step.step_id,
         step_type=step.step_type.value,
         external_attempt=retry_count,
+        fix_iteration=step.inputs.get("fix_iteration", 0),
     )
     response = caller.call(prompt=prompt, json_mode="two_phase")
 

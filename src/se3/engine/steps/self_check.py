@@ -240,6 +240,7 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
             step_id=step.step_id,
             step_type=step.step_type.value,
             external_attempt=retry_count,
+            fix_iteration=fix_iteration,
         )
         response = caller.call(
             prompt=prompt,

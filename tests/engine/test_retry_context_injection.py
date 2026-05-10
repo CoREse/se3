@@ -302,3 +302,186 @@ class TestExtractConversationFromNDJSONResilience:
         messages = extract_conversation_from_ndjson(ndjson)
         assert len(messages) >= 1
         assert messages[0].content == "ok"
+
+
+# ---------------------------------------------------------------------------
+# Fix-iteration boundary filtering for format_history_for_retry
+# ---------------------------------------------------------------------------
+
+class TestFormatHistoryFixIterationBoundary:
+    """Verify format_history_for_retry filters by current_fix_iteration so
+    cross-iteration messages do not leak into retry context.
+
+    Backward-compat: messages tagged with ``fix_iteration == 0`` are wildcard
+    and always included (covers legacy jsonl predating this field).
+    """
+
+    def _msg(self, content, attempt=0, fix_iteration=0, role="user", ts="2026-05-10T10:00:00"):
+        return ChatMessage(
+            role=role,
+            content=content,
+            raw_json=[],
+            timestamp=ts,
+            step_type="implement",
+            attempt=attempt,
+            fix_iteration=fix_iteration,
+        )
+
+    @patch("se3.engine.chat_history.get_step_history")
+    def test_filters_to_current_iteration_when_set(self, mock_get):
+        """Messages with mismatching non-zero fix_iteration must be excluded."""
+        sess = _make_session([
+            self._msg("iter1 user", fix_iteration=1, role="user"),
+            self._msg("iter1 reply", fix_iteration=1, role="assistant"),
+            self._msg("iter2 user", fix_iteration=2, role="user"),
+            self._msg("iter2 reply", fix_iteration=2, role="assistant"),
+            self._msg("iter3 user", fix_iteration=3, role="user"),
+        ])
+        mock_get.return_value = sess
+
+        result = format_history_for_retry(
+            Path("/tmp"), "flow", "step", current_fix_iteration=2,
+        )
+        assert result is not None
+        assert "iter2 user" in result
+        assert "iter2 reply" in result
+        assert "iter1 user" not in result
+        assert "iter1 reply" not in result
+        assert "iter3 user" not in result
+
+    @patch("se3.engine.chat_history.get_step_history")
+    def test_zero_fix_iteration_messages_act_as_wildcard(self, mock_get):
+        """Legacy / unmarked messages (fix_iteration=0) are included regardless
+        of current_fix_iteration so a chat_history written before the upgrade
+        is not silently filtered out after deploy.
+        """
+        sess = _make_session([
+            self._msg("legacy user", fix_iteration=0, role="user"),
+            self._msg("legacy reply", fix_iteration=0, role="assistant"),
+            self._msg("iter5 user", fix_iteration=5, role="user"),
+        ])
+        mock_get.return_value = sess
+
+        result = format_history_for_retry(
+            Path("/tmp"), "flow", "step", current_fix_iteration=5,
+        )
+        assert result is not None
+        assert "legacy user" in result
+        assert "legacy reply" in result
+        assert "iter5 user" in result
+
+    @patch("se3.engine.chat_history.get_step_history")
+    def test_current_zero_means_no_filtering(self, mock_get):
+        """When current_fix_iteration=0 (default / non-fix-loop callers), no
+        iteration filter applies — all messages included.
+        """
+        sess = _make_session([
+            self._msg("a", fix_iteration=1, role="user"),
+            self._msg("b", fix_iteration=2, role="user"),
+            self._msg("c", fix_iteration=3, role="user"),
+        ])
+        mock_get.return_value = sess
+
+        result = format_history_for_retry(
+            Path("/tmp"), "flow", "step", current_fix_iteration=0,
+        )
+        assert result is not None
+        assert "a" in result
+        assert "b" in result
+        assert "c" in result
+
+    @patch("se3.engine.chat_history.get_step_history")
+    def test_returns_none_when_filter_drops_everything(self, mock_get):
+        """If the iteration filter excludes every message, return None
+        (caller treats None as 'no retry context')."""
+        sess = _make_session([
+            self._msg("a", fix_iteration=1, role="user"),
+            self._msg("b", fix_iteration=2, role="user"),
+        ])
+        mock_get.return_value = sess
+
+        result = format_history_for_retry(
+            Path("/tmp"), "flow", "step", current_fix_iteration=99,
+        )
+        assert result is None
+
+    @patch("se3.engine.chat_history.get_step_history")
+    def test_default_argument_preserves_pre_upgrade_behavior(self, mock_get):
+        """Callers that don't pass current_fix_iteration get all messages
+        (default 0 acts as wildcard)."""
+        sess = _make_session([
+            self._msg("x", fix_iteration=1, role="user"),
+            self._msg("y", fix_iteration=2, role="user"),
+        ])
+        mock_get.return_value = sess
+
+        # No current_fix_iteration kwarg.
+        result = format_history_for_retry(Path("/tmp"), "flow", "step")
+        assert result is not None
+        assert "x" in result
+        assert "y" in result
+
+
+# ---------------------------------------------------------------------------
+# record_prompt / record_response accept fix_iteration
+# ---------------------------------------------------------------------------
+
+class TestRecordAPIAcceptsFixIteration:
+    """Verify record_prompt / record_response persist fix_iteration."""
+
+    def test_record_prompt_persists_fix_iteration(self, tmp_path):
+        from se3.engine.chat_history import record_prompt, get_step_history
+
+        record_prompt(
+            tmp_path, "f1", "s1", "implement",
+            prompt="hello", attempt=0, fix_iteration=7,
+        )
+        sess = get_step_history(tmp_path, "f1", "s1")
+        assert sess is not None
+        assert len(sess.messages) == 1
+        assert sess.messages[0].fix_iteration == 7
+
+    def test_record_response_persists_fix_iteration(self, tmp_path):
+        from se3.engine.chat_history import record_response, get_step_history
+
+        record_response(
+            tmp_path, "f1", "s2", "implement",
+            raw_ndjson='{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}',
+            attempt=0, fix_iteration=4,
+        )
+        sess = get_step_history(tmp_path, "f1", "s2")
+        assert sess is not None
+        assert len(sess.messages) == 1
+        assert sess.messages[0].fix_iteration == 4
+
+    def test_record_prompt_default_fix_iteration_zero(self, tmp_path):
+        """Old callers passing positional/kwargs without fix_iteration get 0."""
+        from se3.engine.chat_history import record_prompt, get_step_history
+
+        record_prompt(tmp_path, "f1", "s3", "analyze", prompt="x", attempt=0)
+        sess = get_step_history(tmp_path, "f1", "s3")
+        assert sess is not None
+        assert sess.messages[0].fix_iteration == 0
+
+
+# ---------------------------------------------------------------------------
+# ChatMessage.from_dict backward-compat for legacy jsonl without fix_iteration
+# ---------------------------------------------------------------------------
+
+class TestChatMessageBackwardCompat:
+    """Legacy ChatMessage records (no fix_iteration field) deserialize cleanly
+    with default 0."""
+
+    def test_from_dict_missing_fix_iteration_defaults_to_zero(self):
+        legacy = {
+            "role": "user",
+            "content": "old prompt",
+            "raw_json": [],
+            "timestamp": "2026-01-01T00:00:00",
+            "step_type": "analyze",
+            "attempt": 0,
+            # Note: no fix_iteration key
+        }
+        msg = ChatMessage.from_dict(legacy)
+        assert msg.fix_iteration == 0
+        assert msg.content == "old prompt"

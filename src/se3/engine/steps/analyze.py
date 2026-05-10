@@ -133,7 +133,7 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     try:
         # --- LLM call: task classification + spec selection ---
         retry_count = step.inputs.get("retry_count", 0)
-        caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count)
+        caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count, fix_iteration=step.inputs.get("fix_iteration", 0))
         response = caller.call(prompt=prompt, json_mode="two_phase")
 
         # Parse JSON response

@@ -47,6 +47,17 @@ class ChatMessage:
     timestamp: str  # ISO format
     step_type: str  # e.g. "analyze", "plan"
     attempt: int  # 0-based attempt number
+    # Fix-loop iteration the message belongs to. Distinct from ``attempt``,
+    # which counts LLMCaller-internal retries within one logical call. A
+    # single step_id (e.g. an implement step reused across fix iterations)
+    # can collect messages from multiple iterations; retry-context
+    # construction must filter to the current iteration to avoid
+    # cross-iteration bleed-through.
+    #
+    # Backward-compat: messages predating this field deserialize with
+    # ``fix_iteration=0``. ``format_history_for_retry`` treats 0 as a
+    # wildcard so legacy jsonl is not filtered out after upgrade.
+    fix_iteration: int = 0
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -83,8 +94,15 @@ def record_prompt(
     step_type: str,
     prompt: str,
     attempt: int,
+    fix_iteration: int = 0,
 ) -> None:
-    """Record a user prompt sent to the LLM."""
+    """Record a user prompt sent to the LLM.
+
+    ``fix_iteration`` (default 0) tags the message with the current
+    fix-loop iteration so retry-context construction can filter messages
+    by iteration boundary. Default 0 keeps the API backward-compatible
+    for non-fix-loop callers.
+    """
     msg = ChatMessage(
         role="user",
         content=prompt,
@@ -92,6 +110,7 @@ def record_prompt(
         timestamp=datetime.now().isoformat(),
         step_type=step_type,
         attempt=attempt,
+        fix_iteration=fix_iteration,
     )
     _append_message(project_root, flow_id, step_id, msg)
 
@@ -103,8 +122,12 @@ def record_response(
     step_type: str,
     raw_ndjson: str,
     attempt: int,
+    fix_iteration: int = 0,
 ) -> None:
-    """Record an LLM response (raw NDJSON output)."""
+    """Record an LLM response (raw NDJSON output).
+
+    See :func:`record_prompt` for the ``fix_iteration`` semantics.
+    """
     text = extract_assistant_text(raw_ndjson)
     # Parse NDJSON string into list of dicts for storage
     raw_json: list[dict] = []
@@ -126,6 +149,7 @@ def record_response(
         timestamp=datetime.now().isoformat(),
         step_type=step_type,
         attempt=attempt,
+        fix_iteration=fix_iteration,
     )
     _append_message(project_root, flow_id, step_id, msg)
 
@@ -540,7 +564,11 @@ def format_conversation_for_llm(messages: List[ConversationMessage]) -> str:
 
 
 def format_history_for_retry(
-    project_root: Path, flow_id: str, step_id: str, mode: str = "continue"
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    mode: str = "continue",
+    current_fix_iteration: int = 0,
 ) -> Optional[str]:
     """Format previous conversation attempts for retry context injection.
 
@@ -559,6 +587,16 @@ def format_history_for_retry(
               In 'continue' mode: assistant responses with tool calls are not
               truncated, and a continuation instruction is appended.
               In 'retry' mode: preserves original behavior.
+        current_fix_iteration: The fix-loop iteration of the in-flight LLM
+              call. Messages tagged with a different non-zero
+              ``fix_iteration`` are excluded from the retry context to
+              prevent cross-iteration bleed-through (the implement step
+              re-uses the same step_id across fix iterations, so its
+              chat_history accumulates messages from all prior iterations).
+              Messages with ``fix_iteration == 0`` are always included as a
+              wildcard so legacy jsonl predating this field is not filtered
+              out, and so non-fix-loop callers (default value) see the
+              complete history.
 
     Returns a string to prepend to the retry prompt, or None if no history.
     """
@@ -566,9 +604,21 @@ def format_history_for_retry(
     if not session or not session.messages:
         return None
 
+    # Filter by fix-iteration boundary. ``fix_iteration == 0`` is a wildcard
+    # match (covers legacy data and non-fix-loop callers); otherwise must
+    # match the in-flight iteration exactly.
+    filtered = [
+        m for m in session.messages
+        if m.fix_iteration == 0
+        or current_fix_iteration == 0
+        or m.fix_iteration == current_fix_iteration
+    ]
+    if not filtered:
+        return None
+
     # Group messages by attempt
     attempts: dict[int, list[ChatMessage]] = {}
-    for msg in session.messages:
+    for msg in filtered:
         attempts.setdefault(msg.attempt, []).append(msg)
 
     if not attempts:

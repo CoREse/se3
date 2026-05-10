@@ -479,3 +479,62 @@ class TestCallWithRetryInvokesSafetyCap:
             )
 
         spy.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Dedup-time literal \n preprocessing
+# ---------------------------------------------------------------------------
+
+class TestDedupLiteralNewlinePreprocessing:
+    """In retry-context, JSON-encoded tool_result previews stash multi-line
+    file content as single huge "lines" with embedded literal ``\\n`` (two
+    chars: backslash + n). Without preprocessing, ``str.split("\\n")`` in
+    deduplicate_prompt_lines treats each as one line and dedup misses
+    massive repetition. The fix in ``LLMCaller._call_with_retry`` does
+    ``effective_prompt.replace('\\n', '\n')`` before dedup so the embedded
+    content gets sliced into real lines first.
+    """
+
+    def test_replace_lets_dedup_collapse_embedded_blocks(self):
+        """Two JSON-encoded tool_results carrying identical embedded multi-line
+        content should collapse to a single dedup marker after the
+        backslash-n preprocessing."""
+        # Embedded payload: ten identical-looking lines (sufficient to clear
+        # min_block_lines=3 with margin).
+        embedded = "\\n".join([f"line{i}: shared embedded content" for i in range(10)])
+        prompt = (
+            "## Header\n"
+            "first\n"
+            f'tool_result_a: {{"content":"{embedded}"}}\n'
+            "second\n"
+            f'tool_result_b: {{"content":"{embedded}"}}\n'
+            "third\n"
+        )
+        # Without preprocessing, dedup sees two single huge "lines" — no
+        # match (min_block_lines == 3 requires multi-line repetition).
+        before = deduplicate_prompt_lines(prompt)
+        assert "DUPLICATED CONTENT" not in before, (
+            "expected dedup to MISS without \\n preprocessing"
+        )
+
+        # After preprocessing, each tool_result's payload becomes ten real
+        # lines, and the second occurrence collapses to a marker.
+        preprocessed = prompt.replace('\\n', '\n')
+        after = deduplicate_prompt_lines(preprocessed)
+        assert "DUPLICATED CONTENT" in after, (
+            "expected dedup to HIT after \\n preprocessing"
+        )
+
+    def test_replace_does_not_touch_real_newlines(self):
+        """Real newlines must remain real newlines — the replace is idempotent
+        on a string that has no literal \\n escape."""
+        s = "line1\nline2\nline3"
+        assert s.replace('\\n', '\n') == s
+
+    def test_replace_does_not_touch_other_escapes(self):
+        """Only ``\\n`` is converted; ``\\t`` / ``\\\\`` / ``\\\"`` left alone
+        so legitimate code samples in retry-context (e.g. a Python string
+        literal containing ``\\t``) are not garbled."""
+        s = r"keep \t and \\ and \" intact"
+        result = s.replace('\\n', '\n')
+        assert result == s

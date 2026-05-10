@@ -196,6 +196,7 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
             step_id=step.step_id,
             step_type="confirm_llm_review",
             agents=agents,
+            fix_iteration=step.inputs.get("fix_iteration", 0),
         )
         response = caller.call(prompt=prompt, json_mode="two_phase")
 

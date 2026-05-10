@@ -571,6 +571,7 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 step_type=step.step_type.value,
                 external_attempt=retry_count,
                 stream_prefix=f'[{group_id}] ',
+                fix_iteration=step.inputs.get("fix_iteration", 0),
             )
             response = caller.call(
                 prompt=prompt,
@@ -948,6 +949,7 @@ def _make_execute_fn(
                 step_type=step.step_type.value,
                 external_attempt=retry_count,
                 stream_prefix=f'[{group_id}] ',
+                fix_iteration=step.inputs.get("fix_iteration", 0),
             )
             response = caller.call(
                 prompt=prompt,
@@ -1535,6 +1537,7 @@ def _run_single_llm_call(
             step_type=step.step_type.value,
             external_attempt=retry_count,
             stream_prefix=stream_prefix,
+            fix_iteration=step.inputs.get("fix_iteration", 0),
         )
         response = caller.call(
             prompt=prompt,

@@ -418,6 +418,7 @@ class LLMCaller:
         retry_mode: str = "continue",
         agents: Optional[List[Dict[str, Any]]] = None,
         stream_prefix: str = '',
+        fix_iteration: int = 0,
     ):
         self.project_root = Path(project_root) if project_root else Path.cwd()
         self.max_retries = max_retries
@@ -428,6 +429,11 @@ class LLMCaller:
         self.external_attempt = external_attempt  # Track external retry (e.g., from implement.py)
         self.retry_mode = retry_mode  # 'continue' (resume from breakpoint) or 'retry' (restart)
         self.stream_prefix = stream_prefix
+        # Tag chat_history records with this iteration and filter retry-context
+        # to messages from the same iteration, so reusing one step_id across
+        # fix-loop iterations (implement step) does not leak prior iterations'
+        # full conversations into the next call's prompt.
+        self.fix_iteration = fix_iteration
 
         # Last raw result text from `type: "result"` NDJSON message.
         # Available after call() returns, for callers that need the full
@@ -874,6 +880,7 @@ class LLMCaller:
             record_prompt(
                 self.project_root, self.flow_id, self.step_id,
                 self.step_type, prompt, attempt,
+                fix_iteration=self.fix_iteration,
             )
         except Exception as e:
             logger.debug(f"Failed to record prompt to history: {e}")
@@ -887,6 +894,7 @@ class LLMCaller:
             record_response(
                 self.project_root, self.flow_id, self.step_id,
                 self.step_type, raw_ndjson, attempt,
+                fix_iteration=self.fix_iteration,
             )
         except Exception as e:
             logger.debug(f"Failed to record response to history: {e}")
@@ -900,6 +908,7 @@ class LLMCaller:
             return format_history_for_retry(
                 self.project_root, self.flow_id, self.step_id,
                 mode=self.retry_mode,
+                current_fix_iteration=self.fix_iteration,
             )
         except Exception as e:
             logger.warning(f"Failed to get retry context (falling back to original prompt): {e}")
@@ -955,6 +964,15 @@ class LLMCaller:
             # Deduplicate repeated line blocks (e.g. spec content repeated across retry attempts).
             # Only on retries — first call has no internal repetition by definition.
             if is_retry:
+                # Convert literal two-char ``\n`` escape sequences (left over from
+                # JSON-encoded tool_result previews in the retry-context body)
+                # into real newlines BEFORE dedup. Without this, multi-line file
+                # content embedded in tool previews stays as single huge "lines"
+                # to ``str.split("\n")`` and dedup misses it. Limit to ``\n``
+                # only — leaving ``\t`` / ``\\`` / ``\"`` intact since they don't
+                # affect line-level dedup and re-interpreting them risks garbling
+                # legitimate code samples.
+                effective_prompt = effective_prompt.replace('\\n', '\n')
                 try:
                     effective_prompt = deduplicate_prompt_lines(effective_prompt)
                 except Exception:
