@@ -637,9 +637,8 @@ class TestHandleStepInterrupt:
         assert td.startswith("do the thing")
         assert "## Additional Instructions" in td
         assert "actually use Postgres not SQLite" in td
-        # Pre-interjection base preserved under the magic key for repeat
-        # interjections to compose against
-        assert step.inputs["_task_description_base"] == "do the thing"
+        # Exactly one section header (no doubling).
+        assert td.count("## Additional Instructions") == 1
 
     @patch("se3.commands.run._read_multiline_input")
     def test_repeated_interjections_compose_against_original_base(
@@ -692,6 +691,64 @@ class TestHandleStepInterrupt:
         assert "user_interjections" not in flow.state.context
         # task_description unchanged
         assert step.inputs["task_description"] == "do the thing"
+
+    @patch("se3.commands.run._read_multiline_input")
+    def test_interrupt_on_later_step_does_not_double_section(
+        self, mock_read, tmp_path,
+    ):
+        """Regression: when an interrupt happens on step A, a second
+        interrupt on step B (whose inputs.task_description already
+        carries the section composed by ``_build_step_inputs`` for the
+        first interjection) must NOT produce a doubled
+        ``## Additional Instructions`` section.
+        """
+        from se3.commands.run import _handle_step_interrupt
+
+        flow = FlowInstance(
+            flow_id="iflow-2",
+            task_description="do the thing",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+        )
+
+        # Simulate: first interrupt happened on step_A, list has interjection_1
+        flow.state.context["user_interjections"] = [
+            {"text": "first instruction", "step_id": "01_analyze",
+             "step_type": "analyze", "timestamp": "t1"},
+        ]
+        # Step B was built via _build_step_inputs, which composed the
+        # task_description with the existing first interjection. We
+        # simulate that here directly.
+        from se3.engine.task_description import compose_task_description_with_interjections
+        step_b_td = compose_task_description_with_interjections(
+            "do the thing", flow.state.context["user_interjections"],
+        )
+        step_b = Step(
+            step_id="03_implement_yyy",
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            inputs={"task_description": step_b_td},
+        )
+        flow.state.steps[step_b.step_id] = step_b
+        flow.state.step_history.append(step_b.step_id)
+
+        persistence = MagicMock(spec=PersistenceManager)
+        mock_read.return_value = "second instruction"
+
+        _handle_step_interrupt(flow, step_b, persistence)
+
+        td = step_b.inputs["task_description"]
+        # Exactly ONE section header — no doubling.
+        assert td.count("## Additional Instructions") == 1, (
+            f"interjection section was doubled. Full td:\n{td}"
+        )
+        # Each interjection appears exactly once.
+        assert td.count("first instruction") == 1
+        assert td.count("second instruction") == 1
+        # Both bullets present.
+        pos1 = td.find("first instruction")
+        pos2 = td.find("second instruction")
+        assert 0 < pos1 < pos2
 
     @patch("se3.commands.run._read_multiline_input")
     def test_cancelled_input_returns_none(self, mock_read, tmp_path):

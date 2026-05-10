@@ -97,6 +97,36 @@ def _infer_fix_reason(trigger_step_type: str) -> str:
     return reason_map.get(trigger_step_type, trigger_step_type or "unknown")
 
 
+def _effective_task_description_base(flow: "FlowInstance") -> str:
+    """Pre-interjection base of the effective task_description.
+
+    Returns ``flow.task_description`` unless a completed DISCOVERY step
+    produced ``refined_description``, in which case the refined version
+    overrides. Does NOT apply user_interjections — that's the
+    ``_compose_effective_task_description`` step. Exposed separately so
+    callers that need to RE-compose after appending an interjection
+    (e.g. ``run.py:_handle_step_interrupt`` on a step whose inputs
+    already carry a previously-composed task_description) can recover
+    the un-decorated base without double-counting prior interjections
+    that are already in the persisted list.
+    """
+    base = flow.task_description or ""
+    # Walk step_history in reverse to pick up the latest completed
+    # DISCOVERY step's refined_description.
+    for sid in reversed(flow.state.step_history):
+        s = flow.state.steps.get(sid)
+        if (
+            s
+            and s.step_type == StepType.DISCOVERY
+            and s.status in (StepStatus.COMPLETED, StepStatus.PARTIAL)
+        ):
+            refined = s.outputs.get("refined_description")
+            if isinstance(refined, str) and refined:
+                base = refined
+            break
+    return base
+
+
 def _compose_effective_task_description(flow: "FlowInstance") -> str:
     """Compute the effective task_description for any step in the flow.
 
@@ -114,21 +144,7 @@ def _compose_effective_task_description(flow: "FlowInstance") -> str:
     Ctrl-C interjections — making mid-flow corrections invisible to every
     fix iteration.
     """
-    base = flow.task_description or ""
-    # Walk step_history in reverse to pick up the latest completed
-    # DISCOVERY step's refined_description.
-    for sid in reversed(flow.state.step_history):
-        s = flow.state.steps.get(sid)
-        if (
-            s
-            and s.step_type == StepType.DISCOVERY
-            and s.status in (StepStatus.COMPLETED, StepStatus.PARTIAL)
-        ):
-            refined = s.outputs.get("refined_description")
-            if isinstance(refined, str) and refined:
-                base = refined
-            break
-
+    base = _effective_task_description_base(flow)
     interjections = flow.state.context.get("user_interjections", [])
     if interjections:
         from .task_description import compose_task_description_with_interjections

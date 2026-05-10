@@ -380,6 +380,7 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
     if user_input:
         from datetime import datetime
         from ..engine.task_description import compose_task_description_with_interjections
+        from ..engine.state_machine import _effective_task_description_base
 
         step_type_value = (
             current_step.step_type.value
@@ -395,20 +396,17 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
         flow.state.context.setdefault("user_interjections", []).append(entry)
 
         # Mutate the current step's inputs in-place so the immediate re-run
-        # sees the new instruction without waiting for _build_step_inputs to
-        # re-compose. We rebuild from the original (pre-interjection) base by
-        # composing against the FULL interjections list — this stays correct
-        # if ``_handle_step_interrupt`` is invoked twice in a row.
-        original_base = current_step.inputs.get("_task_description_base")
-        if original_base is None:
-            # First interjection on this step instance: snapshot the current
-            # value as the base. (state_machine never writes the magic key,
-            # so its absence reliably marks the pre-interjection state.)
-            original_base = current_step.inputs.get("task_description", "")
-            current_step.inputs["_task_description_base"] = original_base
+        # sees the new instruction. Compose from the *un-decorated* base
+        # (refined_description if discovery ran, else flow.task_description)
+        # against the FULL interjections list — never against the step's
+        # already-composed task_description. Snapshotting the latter would
+        # double the ``## Additional Instructions`` section when the user
+        # interrupts a step that was built AFTER an earlier interjection
+        # (its inputs.task_description already carries the section, and
+        # composing on top of it would emit a second one).
         current_step.inputs["task_description"] = (
             compose_task_description_with_interjections(
-                base=original_base,
+                base=_effective_task_description_base(flow),
                 interjections=flow.state.context["user_interjections"],
             )
         )
