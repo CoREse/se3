@@ -1191,8 +1191,20 @@ def _merge_leaf_branch(
         # best-effort to restore the stashed working tree before the
         # exception propagates. Otherwise the user is left with a
         # dangling stash@{0} and an empty-looking working tree.
+        #
+        # The cleanup itself is wrapped: if ``stash pop`` also raises
+        # (e.g., subprocess.TimeoutExpired in a degraded environment),
+        # the inner exception must NOT shadow the original cause that
+        # the caller / user needs to see.
         if stashed:
-            _run_git(project_root, "stash", "pop", check=False)
+            try:
+                _run_git(project_root, "stash", "pop", check=False)
+            except Exception:
+                logger.warning(
+                    "stash pop during exception cleanup also failed; "
+                    "dangling stash@{0} may remain — original exception "
+                    "preserved",
+                )
         raise
 
     if not merge_ok:
