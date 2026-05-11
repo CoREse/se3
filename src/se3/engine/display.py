@@ -10,7 +10,6 @@ import re
 from typing import Any, Dict, Optional
 
 from rich.console import Console
-from rich.panel import Panel
 from rich.text import Text
 from rich.markdown import Markdown
 from rich.syntax import Syntax
@@ -37,22 +36,19 @@ def set_console(console: Console) -> None:
 
 
 def render_full(content: str, title: Optional[str] = None) -> None:
-    """Render full content without truncation using Rich panels.
+    """Render full content without truncation, left-aligned with a markdown-style title.
 
     Args:
         content: The text content to display
-        title: Optional title for the panel
+        title: Optional bold blue ``## Title`` heading printed above the content
     """
     console = get_console()
 
-    # Create panel with full content - no truncation
-    panel = Panel(
-        content,
-        title=title,
-        border_style="blue",
-        expand=True,
-    )
-    console.print(panel)
+    if title:
+        console.print(f"[bold blue]## {title}[/bold blue]")
+        console.print("")
+    console.print(content)
+    console.print("")
 
 
 def render_proposal(proposal: Dict[str, Any]) -> None:
@@ -299,48 +295,43 @@ def render_spec_content(spec: Dict[str, Any]) -> None:
 
 
 def render_text(content: str, title: Optional[str] = None, style: Optional[str] = None) -> None:
-    """Render plain text content with optional styling.
+    """Render plain text content left-aligned with optional styling.
 
     Args:
         content: The text content to display
-        title: Optional title for the panel
-        style: Optional Rich style string for the content
+        title: Optional bold blue ``## Title`` heading printed above the content
+        style: Optional Rich style string applied to the content
     """
     console = get_console()
 
-    if style:
-        text = Text(content, style=style)
-    else:
-        text = content
+    if title:
+        console.print(f"[bold blue]## {title}[/bold blue]")
+        console.print("")
 
-    panel = Panel(
-        text,
-        title=title,
-        border_style="blue",
-        expand=True,
-    )
-    console.print(panel)
+    if style:
+        console.print(Text(content, style=style))
+    else:
+        console.print(content)
+    console.print("")
 
 
 def render_code(content: str, language: str = "python", title: Optional[str] = None) -> None:
-    """Render code content with syntax highlighting.
+    """Render code content with syntax highlighting, left-aligned.
 
     Args:
         content: The code content to display
         language: Programming language for syntax highlighting
-        title: Optional title for the panel
+        title: Optional bold green ``## Title`` heading printed above the code
     """
     console = get_console()
 
-    syntax = Syntax(content, language, theme="monokai", line_numbers=True)
+    if title:
+        console.print(f"[bold green]## {title}[/bold green]")
+        console.print("")
 
-    panel = Panel(
-        syntax,
-        title=title,
-        border_style="green",
-        expand=True,
-    )
-    console.print(panel)
+    syntax = Syntax(content, language, theme="monokai", line_numbers=True)
+    console.print(syntax)
+    console.print("")
 
 
 def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> None:
@@ -348,7 +339,7 @@ def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> N
 
     Args:
         diff_lines: Lines from difflib.unified_diff output
-        file_path: File path for the panel title
+        file_path: File path used in the heading
         max_lines: Max displayable lines before truncation
     """
     console = get_console()
@@ -362,7 +353,7 @@ def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> N
     lno_width = 4
 
     for line in diff_lines:
-        # Skip the --- / +++ header lines (redundant with panel title)
+        # Skip the --- / +++ header lines (redundant with the heading)
         if line.startswith("--- ") or line.startswith("+++ "):
             continue
 
@@ -399,30 +390,25 @@ def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> N
         displayed += 1
 
     if displayed > 0:
-        panel = Panel(
-            text,
-            title=file_path,
-            border_style="yellow",
-            expand=True,
-        )
-        console.print(panel)
+        console.print(f"[bold yellow]## Diff: {file_path}[/bold yellow]")
+        console.print("")
+        console.print(text)
+        console.print("")
 
 
 def render_markdown(content: str, title: Optional[str] = None) -> None:
-    """Render markdown content.
+    """Render markdown content left-aligned.
 
     Args:
         content: The markdown content to display
-        title: Optional title for the panel
+        title: Optional bold magenta ``## Title`` heading printed above the content
     """
     console = get_console()
 
-    markdown = Markdown(content)
+    if title:
+        console.print(f"[bold magenta]## {title}[/bold magenta]")
+        console.print("")
 
-    panel = Panel(
-        markdown,
-        title=title,
-        border_style="magenta",
-        expand=True,
-    )
-    console.print(panel)
+    markdown = Markdown(content)
+    console.print(markdown)
+    console.print("")

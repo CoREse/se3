@@ -1,0 +1,24 @@
+id: 094
+title: merge guardrail violation on branch 'discoverbug' (2 issue(s))
+description: 'Robust merge of ''discoverbug'' completed; HEAD holds the merge commit
+  (081ebbef6fad140481b1a584a7639b8e1e219c85).
+
+
+  Guardrail violations detected on the merged result:
+
+
+  - [DELETE] se3/specs/flow-engine/spec.md: Quantifier deleted: ''all'' line removed
+
+  - [DELETE] se3/specs/flow-engine/spec.md: Scenarios deleted: 4 WHEN clause(s) removed
+
+
+  This is a TRACKED BUG, not a merge failure. Resolve the violation on the source
+  branch and re-merge, or open a follow-up PR to repair the post-merge state.'
+status: open
+priority: high
+scope: in_scope
+type: bug
+tags:
+- guardrail-violation
+created_at: '2026-05-11T21:31:42.869146'
+updated_at: '2026-05-11T21:31:42.869146'

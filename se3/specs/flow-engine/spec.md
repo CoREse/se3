@@ -705,11 +705,11 @@ Returns the injection prompt fragment, or an empty string when the step is not i
 - **THEN** `StreamJSONTracker` 在 `tool_use` 事件时缓存 Edit/Write 工具的输入参数到 `_tool_use_id_to_input` 映射
 - **AND** 对于 Write 工具，在 `tool_use` 事件时额外读取目标文件的当前内容并缓存到 `_tool_use_id_to_old_content` 映射（文件不存在或读取失败时缓存 `None`）
 - **AND** 在 `tool_result` 事件时取出缓存的输入参数和原文件内容，调用 `format_tool_diff(tool_name, input_data, result_data, old_content=old_content)`
-- **AND** Edit 工具：从 `old_string` / `new_string` 通过 `generate_edit_diff()` 生成 unified diff，调用 `display.render_diff()` 渲染红（删除）/绿（新增）/青（hunk 标记）/灰（上下文）着色的 diff 面板
+- **AND** Edit 工具：从 `old_string` / `new_string` 通过 `generate_edit_diff()` 生成 unified diff，调用 `display.render_diff()` 渲染红（删除）/绿（新增）/青（hunk 标记）/灰（上下文）着色的 diff 输出
 - **AND** Write 工具（新建文件，`old_content` 为 `None`）：显示 `Created {file_path} ({n} lines)` 绿色标识，不展示行级 diff
 - **AND** Write 工具（覆写已有文件，`old_content` 非 `None`）：通过 `generate_edit_diff(old_content, content, file_path)` 生成 unified diff 并渲染红/绿着色输出（文件 I/O 仅在 tracker 的 tool_use 阶段发生一次，formatter 层不访问文件系统）
 - **AND** diff 超过 `max_lines`（默认 50 行）时截断并显示剩余行数摘要
-- **AND** `display.render_diff()` 使用 Rich Panel + Text 对象逐行着色，面板标题为文件路径；每行添加 dim 样式的行号前缀（从 `@@ -a,b +c,d @@` hunk header 解析起始行号，删除行显示旧文件行号，新增行和上下文行显示新文件行号）；`total` 行数统计排除 `---`/`+++` 头部行
+- **AND** `display.render_diff()` 使用 Rich `Text` 对象逐行着色（无 Panel 边框），输出前打印粗体黄色 markdown 风格标题 `## Diff: {file_path}` 并空一行；每行添加 dim 样式的行号前缀（列宽固定 4，从 `@@ -a,b +c,d @@` hunk header 解析起始行号，删除行显示旧文件行号，新增行和上下文行显示新文件行号）；`total` 行数统计排除 `---`/`+++` 头部行；达到 `max_lines`（默认 50）时追加 dim 样式的 `... (N more lines)` 摘要后中止；当 `displayed == 0` 时不输出标题与空行
 - **AND** 仅对 `TOOL_FORMATTERS` 注册表中包含 `diff` 键的工具执行 diff 渲染，其他工具为 no-op
 
 #### Scenario: StreamJSONTracker 缓存管理

@@ -1,0 +1,16 @@
+id: 093
+title: 'merge fallback: take-theirs on spec file(s)'
+description: "Branch: discoverbug\nReason: llm-flagged-for-review\n\nRobust merge\
+  \ strategy fell back to `git checkout --theirs` for the conflict files below (i.e.,\
+  \ accepted the incoming branch's version verbatim).\n\nConflict files (now holding\
+  \ incoming branch's version):\n  - pyproject.toml\n  - se3/specs/flow-engine/spec.md"
+status: open
+priority: high
+scope: in_scope
+type: bug
+tags:
+- merge-fallback
+- llm-flagged-for-review
+- spec-take-theirs
+created_at: '2026-05-11T21:31:42.589697'
+updated_at: '2026-05-11T21:31:42.589697'
