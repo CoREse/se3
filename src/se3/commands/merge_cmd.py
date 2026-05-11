@@ -532,9 +532,11 @@ def _robust_stash_dirty(
         )
         return None
     if "No local changes" in (stash.stdout or ""):
-        # git printed this when there were tracked changes but they were
-        # all already in the index — extremely unusual after the porcelain
-        # check above, but treat as a no-op to be safe.
+        # ``git stash push`` returns rc=0 even when there's nothing to
+        # stash. Catch that case here so the caller doesn't try to pop
+        # a stash entry that never got created. Reachable when this
+        # helper is called standalone (production callers gate on
+        # ``_has_user_uncommitted_changes`` first, but tests may not).
         return None
 
     audit_messages.append(

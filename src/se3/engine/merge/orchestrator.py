@@ -3845,11 +3845,24 @@ class MergeOrchestrator:
         )
         if merge_result.returncode == 0:
             # The merge succeeded on retry without conflicts — apply_resolution's
-            # abort plus our retry effectively produced a clean merge. Done.
+            # abort plus our retry effectively produced a clean merge. Run the
+            # same post-merge guards as the clean-merge path so a silent merge
+            # loss or runtime-sync collision still surfaces.
             self._log(
                 "[robust] merge retry succeeded without conflicts after "
                 f"_apply_resolution outcome={prior_failure}"
             )
+            pc_result = self._verify_post_merge_conditions(
+                branch,
+                already_ancestor=False,
+                report=report,
+                allow_fixup_parent=False,
+            )
+            if pc_result is not None:
+                return pc_result
+            sync_result = self._sync_runtime(branch, report)
+            if sync_result:
+                return sync_result
             return "merged"
         conflict_files = get_conflicting_files(self.project_root)
         if not conflict_files:
@@ -3925,6 +3938,22 @@ class MergeOrchestrator:
         self._record_robust_take_theirs_event(
             branch, conflict_files, reason, report,
         )
+        # B1 post-condition + runtime sync — same guards the clean-merge
+        # path runs. Take-theirs lands a real merge commit (two parents),
+        # so ``assert_head_is_merge_commit`` must pass with no fixup
+        # tolerance; ``_sync_runtime`` ensures any se3/ collisions get
+        # the lenient/strict treatment.
+        pc_result = self._verify_post_merge_conditions(
+            branch,
+            already_ancestor=False,
+            report=report,
+            allow_fixup_parent=False,
+        )
+        if pc_result is not None:
+            return pc_result
+        sync_result = self._sync_runtime(branch, report)
+        if sync_result:
+            return sync_result
         return "merged"
 
     def _record_robust_take_theirs_event(
