@@ -3305,6 +3305,14 @@ class MergeOrchestrator:
             resolver input — distinct from a real conflict-resolution
             rejection), or "conflict" (if rejected/aborted).
         """
+        # --- ROBUST: never write a human call file. Try LLM as best effort;
+        # on any non-success outcome, fall back to deterministic take-theirs
+        # (accept the incoming branch's version for each conflict file) and
+        # file an audit issue. The merge always commits — guardrails on the
+        # result are handled by the strategy-aware guardrail path below.
+        if self.strategy == MergeStrategy.ROBUST:
+            return self._handle_conflict_robust(branch, pre_merge_sha, report)
+
         # Build conflict context (must be called while mid-merge).
         # Narrowed from ``except Exception`` to a typed error set so
         # programming bugs (TypeError/AttributeError) crash loudly
@@ -3675,6 +3683,298 @@ class MergeOrchestrator:
                 report.failure_reason = FailureReason.RESOLUTION_REJECTED.legacy_string
             return "fast_abort"
         return "conflict"
+
+    def _handle_conflict_robust(
+        self,
+        branch: str,
+        pre_merge_sha: str,
+        report: MergeReport,
+    ) -> str:
+        """Robust-strategy conflict path: LLM if possible, else take-theirs.
+
+        Guarantees:
+            * Never writes a human call file (``report.human_call_file``
+              is not touched by this path).
+            * Returns "merged" on success, or "non_conflict_failure" only
+              when the deterministic take-theirs commit itself failed
+              (i.e. git is broken — not recoverable by another fallback).
+
+        Decision tree:
+            1. Try ``build_conflict_context`` — on failure, take-theirs
+               over ``get_conflicting_files()`` (no context needed) and
+               file audit issue with reason ``context-build-failed``.
+            2. Try LLM resolver — on exception, take-theirs over
+               ``context.files`` and file audit ``llm-resolution-failed``.
+            3. ``self._decider.decide`` (which delegates to default and
+               may return ACCEPT/REJECT/HUMAN_CALL):
+               * ACCEPT → ``_apply_resolution``. If that succeeds we are
+                 done. If it fails (validation / write / commit), fall
+                 back to take-theirs for all conflict files.
+               * REJECT or HUMAN_CALL → take-theirs for all conflict
+                 files. The decider's HUMAN_CALL signal is repurposed by
+                 the robust strategy as a take-theirs trigger so no
+                 human-in-the-loop is required.
+        """
+        # ``build_conflict_context`` and ``DecisionAction`` are already
+        # imported at module level.
+
+        # --- 1. Context build (may fail) ---
+        try:
+            ours_branch = getattr(self, "_current_branch", "HEAD")
+            context = build_conflict_context(
+                self.project_root, ours_branch, branch,
+            )
+        except (
+            subprocess.SubprocessError,
+            OSError,
+            ValueError,
+            RuntimeError,
+        ) as exc:
+            self._log(
+                f"[robust] build_conflict_context failed: {exc} — "
+                f"taking 'theirs' for all conflict files"
+            )
+            conflict_files = get_conflicting_files(self.project_root)
+            return self._robust_take_theirs_commit(
+                branch, conflict_files, "context-build-failed", report,
+            )
+
+        # --- 2. LLM resolution (may fail) ---
+        from ..llm_caller import LLMCallError
+
+        try:
+            resolution = self._resolver.resolve(
+                context, strategy=self.strategy,
+            )
+        except (
+            LLMCallError,
+            json.JSONDecodeError,
+            ValueError,
+            subprocess.TimeoutExpired,
+        ) as exc:
+            self._log(
+                f"[robust] LLM resolution failed: {exc} — taking 'theirs'"
+            )
+            conflict_files = [cf.path for cf in context.files]
+            return self._robust_take_theirs_commit(
+                branch, conflict_files, "llm-resolution-failed", report,
+            )
+
+        # --- 3. Decision dispatch ---
+        decision = self._decider.decide(
+            resolution,
+            has_spec_files=context.has_spec_files,
+            strategy=self.strategy,
+        )
+        self._log(
+            f"[robust] decision: {decision.action.value} — {decision.reason}"
+        )
+
+        if decision.action == DecisionAction.ACCEPT:
+            # Path-set sanity check (mirrors default strategy):
+            # if the LLM's resolution misses files or adds extras, do
+            # NOT call _apply_resolution (which would write the wrong
+            # set). Take-theirs for everything in the conflict context.
+            context_paths = {cf.path for cf in context.files}
+            resolution_paths = {fr.path for fr in resolution.files}
+            if (context_paths - resolution_paths) or (
+                resolution_paths - context_paths
+            ):
+                self._log(
+                    "[robust] LLM resolution missed/added files — taking "
+                    "'theirs' for the full conflict set"
+                )
+                return self._robust_take_theirs_commit(
+                    branch, sorted(context_paths), "llm-incomplete", report,
+                )
+
+            outcome = self._apply_resolution(
+                branch, resolution, pre_merge_sha, context, report,
+            )
+            if outcome == "merged":
+                return "merged"
+            # Apply-resolution failed. Roll back what it wrote, then
+            # try take-theirs. ``_apply_resolution`` already aborted
+            # the in-progress merge on its failure paths, so we have
+            # to RE-run the merge so the conflict files exist again.
+            self._log(
+                f"[robust] _apply_resolution returned {outcome} — "
+                f"retrying with take-theirs"
+            )
+            return self._robust_retry_take_theirs(
+                branch, pre_merge_sha, report, outcome,
+            )
+
+        # REJECT or HUMAN_CALL → take-theirs.
+        reason = (
+            "llm-rejected"
+            if decision.action == DecisionAction.REJECT
+            else "llm-flagged-for-review"
+        )
+        conflict_files = [cf.path for cf in context.files]
+        return self._robust_take_theirs_commit(
+            branch, conflict_files, reason, report,
+        )
+
+    def _robust_retry_take_theirs(
+        self,
+        branch: str,
+        pre_merge_sha: str,
+        report: MergeReport,
+        prior_failure: str,
+    ) -> str:
+        """Re-attempt the merge after ``_apply_resolution`` aborted it,
+        then take-theirs over the resulting conflict files.
+
+        ``_apply_resolution`` aborts the merge on its failure paths to
+        leave a clean working tree. To take-theirs we need the conflict
+        state to exist again, so we replay the ``git merge`` (it must
+        conflict the same way deterministically) and then resolve via
+        the take-theirs commit helper.
+        """
+        merge_result = _run_git(
+            self.project_root, "merge", branch,
+            "--no-ff", "--no-edit",
+            "-m", f"Merge branch '{branch}'",
+            check=False,
+        )
+        if merge_result.returncode == 0:
+            # The merge succeeded on retry without conflicts — apply_resolution's
+            # abort plus our retry effectively produced a clean merge. Done.
+            self._log(
+                "[robust] merge retry succeeded without conflicts after "
+                f"_apply_resolution outcome={prior_failure}"
+            )
+            return "merged"
+        conflict_files = get_conflicting_files(self.project_root)
+        if not conflict_files:
+            # Merge failed but no conflict files — git itself is unhappy.
+            self._abort_merge()
+            report.failure_reason = (
+                f"robust retry after {prior_failure}: merge failed without "
+                f"conflicts (git output redacted)"
+            )
+            return "non_conflict_failure"
+        return self._robust_take_theirs_commit(
+            branch, conflict_files,
+            f"apply-resolution-failed:{prior_failure}", report,
+        )
+
+    def _robust_take_theirs_commit(
+        self,
+        branch: str,
+        conflict_files: list[str],
+        reason: str,
+        report: MergeReport,
+    ) -> str:
+        """Take-theirs deterministic fallback used by the robust strategy.
+
+        For each path in ``conflict_files``:
+            ``git checkout --theirs -- <path>`` + ``git add <path>``
+
+        Then ``git commit --no-edit`` to land the merge. If the commit
+        fails (e.g. git crashed mid-operation), return
+        ``"non_conflict_failure"`` and record the failure. Otherwise
+        file an audit issue and return ``"merged"``.
+
+        ``reason`` becomes a tag on the audit issue so the operator can
+        filter by why the fallback fired (``llm-resolution-failed``,
+        ``llm-rejected``, ``llm-flagged-for-review``, ``llm-incomplete``,
+        ``context-build-failed``, ``apply-resolution-failed:*``).
+        """
+        if not conflict_files:
+            # Pathological: caller said take-theirs but no files. Abort
+            # the merge to leave a clean tree and surface a real failure.
+            self._abort_merge()
+            report.failure_reason = (
+                f"robust take-theirs invoked with no conflict files "
+                f"(reason={reason})"
+            )
+            return "non_conflict_failure"
+
+        for filepath in conflict_files:
+            _run_git(
+                self.project_root, "checkout", "--theirs", "--", filepath,
+                check=False,
+            )
+            _run_git(
+                self.project_root, "add", filepath,
+                check=False,
+            )
+
+        commit = _run_git(
+            self.project_root, "commit", "--no-edit",
+            check=False,
+        )
+        if commit.returncode != 0:
+            self._log(
+                f"[robust] take-theirs commit failed (rc={commit.returncode}): "
+                f"{(commit.stderr or commit.stdout or '').strip()}"
+            )
+            self._abort_merge()
+            report.failure_reason = (
+                f"robust take-theirs commit failed after {reason}"
+            )
+            return "non_conflict_failure"
+
+        self._record_robust_take_theirs_event(
+            branch, conflict_files, reason, report,
+        )
+        return "merged"
+
+    def _record_robust_take_theirs_event(
+        self,
+        branch: str,
+        conflict_files: list[str],
+        reason: str,
+        report: MergeReport,
+    ) -> None:
+        """File an audit issue describing a take-theirs fallback event.
+
+        Audit-only: failures here are logged but do NOT propagate — a
+        merge that lands but loses one audit row is preferable to
+        rejecting the merge over a tracker glitch. Spec-file conflicts
+        get a dedicated tag (``spec-take-theirs``) so reviewers can
+        filter for them.
+        """
+        try:
+            from ..issue_manager import IssueManager
+        except ImportError:
+            return
+        is_spec = any(
+            f.startswith("se3/specs/") or f.startswith(".claude/")
+            for f in conflict_files
+        )
+        title_prefix = (
+            "merge fallback: take-theirs on spec file(s)"
+            if is_spec
+            else f"merge fallback: take-theirs on {branch}"
+        )
+        tags = ["merge-fallback", reason]
+        if is_spec:
+            tags.append("spec-take-theirs")
+        try:
+            issue = IssueManager(self.project_root).create(
+                title=title_prefix,
+                description=(
+                    f"Branch: {branch}\n"
+                    f"Reason: {reason}\n\n"
+                    "Robust merge strategy fell back to "
+                    "`git checkout --theirs` for the conflict files below "
+                    "(i.e., accepted the incoming branch's version "
+                    "verbatim).\n\n"
+                    "Conflict files (now holding incoming branch's version):\n"
+                    "  - " + "\n  - ".join(conflict_files)
+                ),
+                priority="high",
+                type="bug",
+                tags=tags,
+            )
+            report.robust_audit_issues.append(getattr(issue, "id", "<unknown-id>"))
+        except Exception as exc:
+            self._log(
+                f"[robust] failed to file take-theirs audit issue: {exc}"
+            )
 
     def _apply_resolution(
         self,

@@ -446,7 +446,11 @@ class TestRunMergeSuccess:
             lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock llm fail")),
         )
 
-        exit_code = run_merge(["feature"], project_root=tmp_path)
+        # Pin to ``default`` strategy: the robust default would take-theirs
+        # and commit successfully instead of escalating to human call.
+        exit_code = run_merge(
+            ["feature"], strategy="default", project_root=tmp_path,
+        )
         # pending_human returns 130 (interrupted by user)
         assert exit_code == 130
 

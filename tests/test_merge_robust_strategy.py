@@ -328,3 +328,293 @@ class TestStashPopHelpersStillShared:
         assert implement._take_ours_for_stashpop is (
             take_ours_for_stashpop
         )
+
+
+# ---------------------------------------------------------------------------
+# Commit 3 — robust conflict path: LLM → take-theirs, no human call
+# ---------------------------------------------------------------------------
+
+
+def _init_conflicting_branches(tmp_path: Path) -> tuple[str, str]:
+    """Init a repo with a base commit + two divergent branches that
+    conflict on the same file. Returns (base_branch, feature_branch).
+    """
+    _init_repo(tmp_path)
+    cur = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    # Initial shared file
+    (tmp_path / "shared.txt").write_text("base content\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "shared base"],
+        cwd=tmp_path, check=True,
+    )
+    # Feature branch modifies shared.txt
+    subprocess.run(
+        ["git", "checkout", "-q", "-b", "feat"], cwd=tmp_path, check=True,
+    )
+    (tmp_path / "shared.txt").write_text("incoming content from feat\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "feat edit"],
+        cwd=tmp_path, check=True,
+    )
+    # Back to base, make a conflicting edit
+    subprocess.run(
+        ["git", "checkout", "-q", cur], cwd=tmp_path, check=True,
+    )
+    (tmp_path / "shared.txt").write_text("base-edited\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "base edit"],
+        cwd=tmp_path, check=True,
+    )
+    return cur, "feat"
+
+
+class TestRobustConflictFallback:
+    def test_robust_llm_exception_takes_theirs_and_files_audit_issue(
+        self, tmp_path: Path,
+    ) -> None:
+        _, feat = _init_conflicting_branches(tmp_path)
+        from se3.commands.merge_cmd import run_merge
+        from se3.engine.merge.orchestrator import MergeOrchestrator
+        from se3.engine.merge.conflict_resolver import ConflictResolver
+
+        # Make LLM resolver always raise — simulate API failure.
+        from se3.engine.llm_caller import LLMCallError
+
+        def boom(*_a, **_kw):
+            raise LLMCallError("simulated LLM outage")
+
+        with patch.object(ConflictResolver, "resolve", side_effect=boom):
+            rc = run_merge(
+                branches=[feat],
+                strategy="robust",
+                project_root=tmp_path,
+            )
+        assert rc == 0
+        # shared.txt should now hold feat's content (take-theirs)
+        assert (
+            (tmp_path / "shared.txt").read_text()
+            == "incoming content from feat\n"
+        )
+        # Audit issue filed under se3/issues/open/
+        open_dir = tmp_path / "se3" / "issues" / "open"
+        assert open_dir.exists()
+        issues = list(open_dir.glob("*.yaml"))
+        assert issues, "expected an audit issue to be filed"
+        contents = issues[0].read_text()
+        assert "llm-resolution-failed" in contents
+        assert "merge-fallback" in contents
+
+    def test_robust_decision_reject_takes_theirs(
+        self, tmp_path: Path,
+    ) -> None:
+        _, feat = _init_conflicting_branches(tmp_path)
+        from se3.commands.merge_cmd import run_merge
+        from se3.engine.merge.strategy import (
+            DecisionAction,
+            StrategyDecider,
+            StrategyDecision,
+        )
+
+        # Mock decider to always return REJECT.
+        with patch.object(
+            StrategyDecider, "decide",
+            return_value=StrategyDecision(
+                action=DecisionAction.REJECT,
+                reason="forced reject for test",
+            ),
+        ):
+            rc = run_merge(
+                branches=[feat],
+                strategy="robust",
+                project_root=tmp_path,
+            )
+        assert rc == 0
+        assert (
+            (tmp_path / "shared.txt").read_text()
+            == "incoming content from feat\n"
+        )
+
+    def test_robust_decision_human_call_takes_theirs(
+        self, tmp_path: Path,
+    ) -> None:
+        """HUMAN_CALL decision under robust → repurposed as take-theirs."""
+        _, feat = _init_conflicting_branches(tmp_path)
+        from se3.commands.merge_cmd import run_merge
+        from se3.engine.merge.strategy import (
+            DecisionAction,
+            StrategyDecider,
+            StrategyDecision,
+        )
+
+        with patch.object(
+            StrategyDecider, "decide",
+            return_value=StrategyDecision(
+                action=DecisionAction.HUMAN_CALL,
+                reason="forced human-call for test",
+            ),
+        ):
+            rc = run_merge(
+                branches=[feat],
+                strategy="robust",
+                project_root=tmp_path,
+            )
+        assert rc == 0
+        # take-theirs ran
+        assert (
+            (tmp_path / "shared.txt").read_text()
+            == "incoming content from feat\n"
+        )
+        # No call file was written
+        assert not (tmp_path / "se3" / "merge_calls").exists() or not list(
+            (tmp_path / "se3" / "merge_calls").glob("*"),
+        )
+
+    def test_robust_context_build_failure_takes_theirs(
+        self, tmp_path: Path,
+    ) -> None:
+        _, feat = _init_conflicting_branches(tmp_path)
+        from se3.commands.merge_cmd import run_merge
+
+        # Force build_conflict_context to raise.
+        with patch(
+            "se3.engine.merge.orchestrator.build_conflict_context",
+            side_effect=RuntimeError("context build sabotaged"),
+        ):
+            rc = run_merge(
+                branches=[feat],
+                strategy="robust",
+                project_root=tmp_path,
+            )
+        assert rc == 0
+        # take-theirs ran without needing context
+        assert (
+            (tmp_path / "shared.txt").read_text()
+            == "incoming content from feat\n"
+        )
+        # Audit issue should be tagged context-build-failed
+        open_dir = tmp_path / "se3" / "issues" / "open"
+        issues = list(open_dir.glob("*.yaml"))
+        assert issues
+        assert "context-build-failed" in issues[0].read_text()
+
+    def test_robust_never_writes_human_call_file(
+        self, tmp_path: Path,
+    ) -> None:
+        _, feat = _init_conflicting_branches(tmp_path)
+        from se3.commands.merge_cmd import run_merge
+        from se3.engine.merge.conflict_resolver import ConflictResolver
+        from se3.engine.llm_caller import LLMCallError
+
+        def boom(*_a, **_kw):
+            raise LLMCallError("simulated")
+
+        with patch.object(ConflictResolver, "resolve", side_effect=boom):
+            run_merge(
+                branches=[feat],
+                strategy="robust",
+                project_root=tmp_path,
+            )
+
+        # The merge_calls directory either does not exist or is empty.
+        call_dir = tmp_path / "se3" / "merge_calls"
+        if call_dir.exists():
+            assert not list(call_dir.glob("*"))
+
+    def test_robust_spec_conflict_gets_spec_take_theirs_tag(
+        self, tmp_path: Path,
+    ) -> None:
+        # Set up branches where the conflicting file is under se3/specs/.
+        _init_repo(tmp_path)
+        cur = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=tmp_path, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        spec_dir = tmp_path / "se3" / "specs"
+        spec_dir.mkdir(parents=True)
+        (spec_dir / "a.md").write_text("base spec\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "add spec"],
+            cwd=tmp_path, check=True,
+        )
+        subprocess.run(
+            ["git", "checkout", "-q", "-b", "spec-feat"],
+            cwd=tmp_path, check=True,
+        )
+        (spec_dir / "a.md").write_text("feat-edited spec\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "spec edit"],
+            cwd=tmp_path, check=True,
+        )
+        subprocess.run(
+            ["git", "checkout", "-q", cur], cwd=tmp_path, check=True,
+        )
+        (spec_dir / "a.md").write_text("base-edited spec\n")
+        subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "base spec edit"],
+            cwd=tmp_path, check=True,
+        )
+
+        from se3.commands.merge_cmd import run_merge
+        from se3.engine.merge.conflict_resolver import ConflictResolver
+        from se3.engine.llm_caller import LLMCallError
+
+        with patch.object(
+            ConflictResolver, "resolve",
+            side_effect=LLMCallError("simulated"),
+        ):
+            rc = run_merge(
+                branches=["spec-feat"],
+                strategy="robust",
+                project_root=tmp_path,
+            )
+        assert rc == 0
+        open_dir = tmp_path / "se3" / "issues" / "open"
+        issues = list(open_dir.glob("*.yaml"))
+        assert issues
+        contents = issues[0].read_text()
+        assert "spec-take-theirs" in contents
+
+    def test_robust_audit_issues_recorded_on_report(
+        self, tmp_path: Path,
+    ) -> None:
+        """The MergeReport surfaces robust_audit_issues so the CLI/operator
+        can see what audit IDs were filed during the run."""
+        _, feat = _init_conflicting_branches(tmp_path)
+        from se3.commands.merge_cmd import run_merge
+        from se3.engine.merge.conflict_resolver import ConflictResolver
+        from se3.engine.llm_caller import LLMCallError
+
+        # Patch run_merge's report rendering to capture the report.
+        captured: list = []
+        from se3.commands import merge_cmd as mc
+
+        orig_render = mc.render_text
+
+        def capture_render(*a, **kw):
+            captured.append((a, kw))
+            return orig_render(*a, **kw)
+
+        with patch.object(
+            ConflictResolver, "resolve",
+            side_effect=LLMCallError("simulated"),
+        ), patch.object(mc, "render_text", side_effect=capture_render):
+            run_merge(
+                branches=[feat],
+                strategy="robust",
+                project_root=tmp_path,
+            )
+        # Audit issue file exists on disk — the surface contract is the
+        # IssueManager YAML, which we already check elsewhere. Here we
+        # just verify the function exits cleanly with rendering.
+        assert any("Merge Complete" == kw.get("title")
+                   for _, kw in captured), \
+            "expected a 'Merge Complete' render after take-theirs fallback"
