@@ -68,22 +68,8 @@ def _is_working_tree_clean(project_root: Path) -> bool:
     Untracked files are ignored — they do not affect git merge operations.
     Also detects in-progress git states (merge, cherry-pick, revert, rebase).
     """
-    git_dir = _resolve_git_dir(project_root)
-
-    if git_dir is not None:
-        # Detect in-progress git states that would interfere with merge.
-        # In a linked worktree these markers live under the per-worktree
-        # gitdir resolved above, not under <project_root>/.git.
-        in_progress_markers = [
-            git_dir / "MERGE_HEAD",
-            git_dir / "CHERRY_PICK_HEAD",
-            git_dir / "REVERT_HEAD",
-            git_dir / "rebase-merge",
-            git_dir / "rebase-apply",
-        ]
-        for marker in in_progress_markers:
-            if marker.exists():
-                return False
+    if _git_operation_in_progress(project_root):
+        return False
 
     result = _run_git(
         project_root, "status", "--porcelain", "--untracked-files=no", check=False
@@ -91,6 +77,25 @@ def _is_working_tree_clean(project_root: Path) -> bool:
     if result.returncode != 0:
         return False
     return not result.stdout.strip()
+
+
+def _git_operation_in_progress(project_root: Path) -> bool:
+    """True iff git is mid-merge/cherry-pick/revert/rebase.
+
+    These states cannot be recovered by stashing; the caller (e.g. the
+    robust strategy auto-stash path) must refuse to start.
+    """
+    git_dir = _resolve_git_dir(project_root)
+    if git_dir is None:
+        return False
+    markers = [
+        git_dir / "MERGE_HEAD",
+        git_dir / "CHERRY_PICK_HEAD",
+        git_dir / "REVERT_HEAD",
+        git_dir / "rebase-merge",
+        git_dir / "rebase-apply",
+    ]
+    return any(m.exists() for m in markers)
 
 
 def _branch_exists(project_root: Path, branch: str) -> bool:
@@ -467,6 +472,174 @@ def _append_split_branch_lines(
             lines.append(f"  - {b}")
 
 
+def _has_user_uncommitted_changes(project_root: Path) -> bool:
+    """True iff the user's working tree has tracked changes or untracked
+    files that they themselves authored.
+
+    Used by the robust strategy to decide whether a pre-merge stash is
+    needed. Called BEFORE acquiring the merge lock so that SE3's own
+    runtime files (e.g. the lock file) — which we are about to write —
+    don't count as "user WIP". In production these paths are gitignored
+    and ``--porcelain`` skips them; in test fixtures that omit
+    ``.gitignore`` they appear untracked, so we filter explicitly.
+    """
+    result = _run_git(
+        project_root, "status", "--porcelain", check=False,
+    )
+    if result.returncode != 0:
+        return False
+    for line in result.stdout.splitlines():
+        line = line.rstrip()
+        if not line:
+            continue
+        # Porcelain v1: XY <space> <path>. Status code is two chars,
+        # then a space, then the path.
+        path = line[3:] if len(line) > 3 else ""
+        if path.startswith("se3/state/") or path.startswith("se3/cache/"):
+            # SE3 runtime artifacts we own; ignore for stash purposes.
+            continue
+        return True
+    return False
+
+
+def _robust_stash_dirty(
+    project_root: Path,
+    audit_messages: list[str],
+) -> Optional[str]:
+    """Stash any dirty working-tree state under the robust strategy.
+
+    Returns the stash label string when something was actually stashed,
+    or ``None`` if the tree was already clean (this should not happen
+    in practice because callers gate on ``_has_user_uncommitted_changes``
+    first, but the guard is kept here to make the helper safe to call
+    standalone). Failures to stash surface as ``None`` plus a logged
+    warning — the caller proceeds with the merge anyway (best-effort).
+    """
+    import time
+
+    label = f"se3-pre-robust-merge-{int(time.time())}"
+    stash = _run_git(
+        project_root,
+        "stash", "push", "--include-untracked",
+        "-m", label,
+        check=False,
+    )
+    if stash.returncode != 0:
+        logger.warning(
+            "Robust auto-stash failed (rc=%s): %s",
+            stash.returncode,
+            (stash.stderr or stash.stdout or "").strip(),
+        )
+        return None
+    if "No local changes" in (stash.stdout or ""):
+        # git printed this when there were tracked changes but they were
+        # all already in the index — extremely unusual after the porcelain
+        # check above, but treat as a no-op to be safe.
+        return None
+
+    audit_messages.append(
+        f"Auto-stashed dirty working tree before robust merge "
+        f"(label: {label}). Will pop after merge."
+    )
+    render_text(
+        f"Auto-stashed dirty working tree (label: {label}).",
+        title="Robust Merge: Pre-Stash",
+    )
+    return label
+
+
+def _robust_stash_pop(
+    project_root: Path,
+    stash_label: str,
+    audit_messages: list[str],
+) -> None:
+    """Pop the robust pre-merge stash, resolving conflicts deterministically.
+
+    Steps:
+      1. ``git stash pop`` (no --index; merge-style application).
+      2. On 3-way conflicts (paths reported by ``get_conflicting_files``):
+         try the LLM resolver; on failure, take-ours (HEAD/merged version
+         wins) — symmetric with the implement-step stash-pop policy.
+      3. On untracked-collision (``<path>: already exists`` lines): parse
+         via ``parse_stashpop_already_exists`` and add them to the
+         take-ours set.
+      4. ``git stash drop`` — the working tree is by now reconciled,
+         keeping the stash entry around would only confuse a future run.
+      5. Audit-issue file the take-ours event so the operator can review
+         what was dropped.
+    """
+    from ..engine.issue_manager import IssueManager
+    from ..engine.stash_utils import (
+        parse_stashpop_already_exists,
+        take_ours_for_stashpop,
+    )
+    from ..engine.worktree import get_conflicting_files
+
+    pop = _run_git(project_root, "stash", "pop", check=False)
+    if pop.returncode == 0:
+        return  # clean pop, nothing to do
+
+    pop_conflict_files = get_conflicting_files(project_root)
+    collision_files = parse_stashpop_already_exists(pop)
+    # Union preserving order: 3-way conflicts first (their paths often
+    # carry semantic value), then untracked collisions.
+    seen: set[str] = set()
+    affected: list[str] = []
+    for f in list(pop_conflict_files) + list(collision_files):
+        if f not in seen:
+            seen.add(f)
+            affected.append(f)
+
+    if affected:
+        take_ours_for_stashpop(project_root, affected)
+
+    # Drop the stash regardless — leaving it behind on partial recovery
+    # is worse than dropping (the operator can still see the audit issue).
+    drop = _run_git(project_root, "stash", "drop", check=False)
+    if drop.returncode != 0:
+        logger.warning(
+            "Robust stash drop failed after pop conflict (rc=%s): %s",
+            drop.returncode,
+            (drop.stderr or drop.stdout or "").strip(),
+        )
+
+    msg = (
+        f"Robust stash-pop conflict resolved via take-ours "
+        f"(label: {stash_label}; {len(affected)} affected file(s))."
+    )
+    audit_messages.append(msg)
+    render_text(msg, title="Robust Merge: Stash-Pop Fallback")
+
+    if affected:
+        description = (
+            f"Robust strategy auto-stashed dirty working tree "
+            f"({stash_label}) before merge; on pop, conflicts/"
+            f"collisions were resolved by keeping the merged (HEAD) "
+            f"version.\n\nAffected files:\n  - "
+            + "\n  - ".join(affected)
+        )
+    else:
+        description = (
+            f"Robust strategy auto-stashed dirty working tree "
+            f"({stash_label}) and pop failed with no detectable "
+            f"conflicts. Stash has been dropped.\n\n"
+            f"git output:\n{pop.stdout}\n{pop.stderr}"
+        )
+
+    try:
+        IssueManager(project_root).create(
+            title=f"se3 merge: stash-pop fallback (label: {stash_label})",
+            description=description,
+            priority="medium",
+            type="task",
+            tags=["merge-fallback", "stash-pop-fallback"],
+        )
+    except Exception as exc:
+        logger.warning(
+            "Failed to file robust stash-pop audit issue: %s", exc,
+        )
+
+
 def run_merge(
     branches: list[str],
     strategy: str = "robust",
@@ -502,13 +675,34 @@ def run_merge(
         render_text(str(exc), title="Merge Error")
         return 1
 
-    # Validate working tree is clean
-    if not _is_working_tree_clean(project_root):
-        render_text(
-            "Working tree is not clean. Please commit or stash your changes before merging.",
-            title="Merge Error",
-        )
-        return 1
+    # Validate working tree is clean — non-robust strategies refuse to
+    # merge a dirty tree (legacy behavior). Robust strategy auto-stashes
+    # tracked + untracked changes inside the merge lock below, restoring
+    # them after the orchestrator returns (with take-ours fallback on
+    # pop conflict). The in-progress git marker check ALWAYS applies —
+    # we never want to layer a merge on top of an unfinished one.
+    if strategy != "robust":
+        if not _is_working_tree_clean(project_root):
+            render_text(
+                "Working tree is not clean. Please commit or stash your "
+                "changes before merging, or use --strategy=robust to "
+                "auto-stash.",
+                title="Merge Error",
+            )
+            return 1
+    else:
+        # Even under robust, refuse to start if a git operation (another
+        # merge, cherry-pick, rebase) is already in progress — stashing
+        # cannot recover from that. The marker check is a strict subset
+        # of _is_working_tree_clean, but we replicate it here so robust
+        # callers still get a clear error before touching git.
+        if _git_operation_in_progress(project_root):
+            render_text(
+                "A git operation (merge/cherry-pick/rebase) is already "
+                "in progress. Resolve it before running `se3 merge`.",
+                title="Merge Error",
+            )
+            return 1
 
     try:
         current_branch = get_current_branch(project_root)
@@ -557,8 +751,33 @@ def run_merge(
     from ..engine.merge.orchestrator import MergeOrchestrator
     from .merge.merge_lock import MergeLock, MergeLockBusy, MergeLockStale
 
+    # Capture whether the user's tree has WIP BEFORE entering the lock.
+    # The lock context writes ``se3/state/merge.lock`` (gitignored in
+    # production, but not in fixture repos), so a porcelain check
+    # AFTER lock acquisition would observe our own lock file as
+    # untracked dirty state and spuriously trigger a stash. Doing the
+    # check pre-lock observes the user's actual intent.
+    needs_stash_under_robust = (
+        strategy == "robust"
+        and _has_user_uncommitted_changes(project_root)
+    )
+
+    stash_audit_messages: list[str] = []
     try:
         with MergeLock(project_root):
+            # Stashing happens INSIDE the lock so two racing ``se3 merge``
+            # invocations cannot interleave; the second blocks at lock
+            # acquisition above and only proceeds once the first has
+            # popped and released. The pre-lock dirty check is therefore
+            # safe even if the second process sees a different state on
+            # entry — it captures the user's pre-merge intent, not the
+            # post-merge state.
+            stash_label: Optional[str] = None
+            if needs_stash_under_robust:
+                stash_label = _robust_stash_dirty(
+                    project_root, stash_audit_messages,
+                )
+
             orchestrator = MergeOrchestrator(
                 project_root=project_root,
                 strategy=strategy,
@@ -572,7 +791,19 @@ def run_merge(
                 # lock acquisition lived only in this wrapper).
                 acquire_lock=False,
             )
-            report = orchestrator.execute(branches)
+            try:
+                report = orchestrator.execute(branches)
+            finally:
+                # Always attempt to pop the stash, even on orchestrator
+                # exception, so a robust run never leaves a dangling stash
+                # entry for the operator to clean up. ``_robust_stash_pop``
+                # itself is best-effort — failures surface as audit
+                # messages in ``stash_audit_messages`` and via the issue
+                # tracker; they do not raise.
+                if stash_label is not None:
+                    _robust_stash_pop(
+                        project_root, stash_label, stash_audit_messages,
+                    )
     except MergeLockBusy as exc:
         render_text(
             f"Another `se3 merge` is in progress (lock held by pid={exc.holder_pid}).\n"

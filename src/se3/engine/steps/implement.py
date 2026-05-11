@@ -39,6 +39,10 @@ from ..worktree import (
     has_new_commits,
     resolve_merge_conflicts_with_context,
 )
+from ..stash_utils import (
+    parse_stashpop_already_exists as _parse_stashpop_already_exists,
+    take_ours_for_stashpop as _take_ours_for_stashpop,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -1389,52 +1393,9 @@ def _is_branch_reachable_from(
     return result.returncode == 0
 
 
-def _parse_stashpop_already_exists(
-    pop_result: subprocess.CompletedProcess,
-) -> list[str]:
-    """Extract paths from ``git stash pop``'s "already exists" output.
-
-    When ``--include-untracked`` is stashed and a subsequent merge
-    repopulates one of those paths, ``git stash pop`` emits a line like
-    ``<path>: already exists, no checkout`` per affected file. Git does
-    NOT mark these paths as unmerged (they aren't 3-way conflicts), so
-    ``get_conflicting_files`` returns an empty list — we have to parse
-    the message to know what was dropped.
-    """
-    files: list[str] = []
-    combined = (pop_result.stdout or "") + "\n" + (pop_result.stderr or "")
-    for line in combined.splitlines():
-        marker = "already exists"
-        if marker in line and "no checkout" in line:
-            # Format (git stash pop): ``<path> already exists, no checkout``
-            # Path may contain spaces, so trim everything up to the marker.
-            path = line[: line.index(marker)].rstrip(": ").strip()
-            if path:
-                files.append(path)
-    return files
-
-
-def _take_ours_for_stashpop(
-    project_root: Path,
-    conflict_files: list[str],
-) -> None:
-    """Resolve stash-pop conflicts by keeping the merged (HEAD) version.
-
-    In stash-pop terminology after a conflicted apply: ``--ours`` refers
-    to HEAD (our post-merge state), ``--theirs`` to the stashed content.
-    We keep ours because the merge result is the canonical state we just
-    landed; the stash held pre-DAG artefacts (typically discovery /
-    analyze / plan untracked files) whose conflict-on-the-same-path
-    means the merge has authoritatively overwritten them anyway.
-
-    Best-effort: paths where ``--ours`` fails (e.g. stash pop refused
-    due to an untracked-file collision, leaving no unmerged state) are
-    skipped silently; the subsequent ``git stash drop`` finalizes the
-    cleanup.
-    """
-    for filepath in conflict_files:
-        _run_git(project_root, "checkout", "--ours", "--", filepath, check=False)
-        _run_git(project_root, "add", filepath, check=False)
+# Module-scoped re-exports of the shared stash-pop helpers. Both
+# implement step and ``se3 merge`` robust strategy share the same
+# behavior (see src/se3/engine/stash_utils.py).
 
 
 def _record_take_theirs_event(

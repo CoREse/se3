@@ -185,3 +185,146 @@ class TestCLIRobustAccepted:
         # Error message lists robust as a valid option
         out = result.stdout + (result.stderr or "")
         assert "robust" in out
+
+
+# ---------------------------------------------------------------------------
+# Commit 2 — robust auto-stash + dirty WT
+# ---------------------------------------------------------------------------
+
+
+def _init_repo_with_branch(tmp_path: Path) -> str:
+    """Init a repo with a master commit + a feature branch one commit ahead.
+
+    Returns the feature branch name.
+    """
+    _init_repo(tmp_path)
+    # Determine current branch (master vs main depending on git default)
+    cur = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+    subprocess.run(
+        ["git", "checkout", "-q", "-b", "feat"], cwd=tmp_path, check=True,
+    )
+    (tmp_path / "feature.py").write_text("print('feat')\n")
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "add feat"],
+        cwd=tmp_path, check=True,
+    )
+    subprocess.run(
+        ["git", "checkout", "-q", cur], cwd=tmp_path, check=True,
+    )
+    return "feat"
+
+
+class TestRobustAutoStash:
+    def test_robust_stash_dirty_tracked_file_round_trip(
+        self, tmp_path: Path,
+    ) -> None:
+        _init_repo_with_branch(tmp_path)
+        # Modify the existing README so the tree has a dirty tracked file.
+        readme = tmp_path / "README.md"
+        readme.write_text("init\n\nlocal scratch\n")
+        assert "local scratch" in readme.read_text()
+
+        from se3.commands.merge_cmd import run_merge
+
+        rc = run_merge(
+            branches=["feat"],
+            strategy="robust",
+            project_root=tmp_path,
+        )
+        assert rc == 0
+        # After successful merge, stash should have been popped → tracked
+        # change is back in the working tree.
+        assert "local scratch" in readme.read_text()
+
+    def test_robust_stash_untracked_file_round_trip(
+        self, tmp_path: Path,
+    ) -> None:
+        _init_repo_with_branch(tmp_path)
+        (tmp_path / "scratch.txt").write_text("u\n")
+
+        from se3.commands.merge_cmd import run_merge
+
+        rc = run_merge(
+            branches=["feat"],
+            strategy="robust",
+            project_root=tmp_path,
+        )
+        assert rc == 0
+        assert (tmp_path / "scratch.txt").exists()
+        assert (tmp_path / "scratch.txt").read_text() == "u\n"
+
+    def test_robust_clean_tree_makes_no_stash(self, tmp_path: Path) -> None:
+        _init_repo_with_branch(tmp_path)
+        from se3.commands.merge_cmd import _robust_stash_dirty
+
+        audit: list[str] = []
+        label = _robust_stash_dirty(tmp_path, audit)
+        assert label is None
+        assert audit == []
+        # No stash entries should exist.
+        result = subprocess.run(
+            ["git", "stash", "list"],
+            cwd=tmp_path, check=True, capture_output=True, text=True,
+        )
+        assert result.stdout.strip() == ""
+
+    def test_non_robust_still_rejects_dirty_tree(
+        self, tmp_path: Path,
+    ) -> None:
+        _init_repo_with_branch(tmp_path)
+        (tmp_path / "README.md").write_text("dirty\n")
+
+        from se3.commands.merge_cmd import run_merge
+
+        rc = run_merge(
+            branches=["feat"],
+            strategy="default",
+            project_root=tmp_path,
+        )
+        assert rc == 1
+
+    def test_robust_rejects_in_progress_git_operation(
+        self, tmp_path: Path,
+    ) -> None:
+        _init_repo_with_branch(tmp_path)
+        # Forge a MERGE_HEAD marker — simulates an unfinished merge.
+        git_dir_result = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=tmp_path, check=True, capture_output=True, text=True,
+        )
+        git_dir = Path(git_dir_result.stdout.strip())
+        if not git_dir.is_absolute():
+            git_dir = (tmp_path / git_dir).resolve()
+        (git_dir / "MERGE_HEAD").write_text("deadbeef\n")
+
+        from se3.commands.merge_cmd import run_merge
+
+        rc = run_merge(
+            branches=["feat"],
+            strategy="robust",
+            project_root=tmp_path,
+        )
+        assert rc == 1
+
+
+class TestStashPopHelpersStillShared:
+    """Regression: implement-step still has working stash-pop helpers
+    after the extraction to engine.stash_utils."""
+
+    def test_implement_helpers_resolve_to_shared_module(self) -> None:
+        from se3.engine.stash_utils import (
+            parse_stashpop_already_exists,
+            take_ours_for_stashpop,
+        )
+        from se3.engine.steps import implement
+
+        assert implement._parse_stashpop_already_exists is (
+            parse_stashpop_already_exists
+        )
+        assert implement._take_ours_for_stashpop is (
+            take_ours_for_stashpop
+        )
