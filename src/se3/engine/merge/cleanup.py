@@ -31,9 +31,13 @@ Defects fixed in this module:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
+import shutil
 import subprocess
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
@@ -166,6 +170,20 @@ class CleanupReport:
     skipped_protected: list[str] = field(default_factory=list)
     skipped_not_merged: list[tuple[str, str]] = field(default_factory=list)
     skipped_unknown_state: list[tuple[str, str]] = field(default_factory=list)
+    # Archive metadata: for each branch successfully archived before
+    # deletion, the path of the resulting archive directory under
+    # ``<project_root>/.se3/archive/``. The archive happens BEFORE the
+    # destructive worktree-remove / branch-delete steps so a failure
+    # there preserves the branch + worktree (see ``skipped_archive_failed``).
+    archived: list[tuple[str, Path]] = field(default_factory=list)
+    # When the archive step itself failed (e.g. disk full, permission
+    # denied, ``shutil.copytree`` raised), the worktree-remove and
+    # branch-delete steps are skipped to preserve operator data, and
+    # the reason is recorded here. Operators can re-run after fixing
+    # the underlying issue.
+    skipped_archive_failed: list[tuple[str, str]] = field(
+        default_factory=list,
+    )
 
 
 @dataclass
@@ -329,6 +347,99 @@ def _get_worktree_path_for_branch(
         if record.branch == branch and record.path:
             return Path(record.path)
     return None
+
+
+def _archive_worktree(
+    project_root: Path,
+    branch: str,
+    wt_path: Path,
+) -> Path:
+    """Copy a worktree directory to ``.se3/archive/<slug>-<ts>/`` before
+    it is removed by ``delete_merged_branches``.
+
+    ``.git`` is intentionally excluded: in linked worktrees it is a
+    file containing a gitdir pointer that would not be useful in the
+    archive, and the branch ref in the parent repo remains valid until
+    the destructive deletion step runs (which happens only AFTER this
+    function returns successfully). Untracked and gitignored files
+    ARE included so any operator WIP is preserved.
+
+    Args:
+        project_root: The merge command's project root (parent of
+            ``.se3/archive/``).
+        branch: The branch whose worktree is being archived (used for
+            the slug + recorded in ``.se3-archive-meta.json``).
+        wt_path: Absolute path to the worktree directory on disk.
+
+    Returns:
+        Path to the resulting archive directory.
+
+    Raises:
+        OSError / shutil.Error: Filesystem operation failed; the caller
+            MUST treat this as a hard archive failure and refuse to
+            run the destructive worktree-remove / branch-delete step.
+    """
+    archive_root = project_root / ".se3" / "archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+
+    slug = re.sub(r"[^A-Za-z0-9._-]", "_", branch)
+    ts = int(time.time())
+    base = f"{slug}-{ts}"
+    dest = archive_root / base
+    seq = 0
+    while dest.exists():
+        seq += 1
+        dest = archive_root / f"{base}-{seq}"
+
+    shutil.copytree(
+        wt_path,
+        dest,
+        ignore=shutil.ignore_patterns(".git"),
+        dirs_exist_ok=False,
+        symlinks=True,
+    )
+
+    # Capture HEAD SHA from the worktree itself so the archive metadata
+    # has a self-contained recovery pointer (the branch ref in the
+    # parent repo is the authoritative recovery target but is deleted
+    # by the next step). ``rev-parse HEAD`` from within the worktree
+    # gives the tip commit even after we have copied the files out.
+    head_sha = ""
+    try:
+        rev = subprocess.run(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"],
+            check=False, capture_output=True, text=True, timeout=15,
+        )
+        if rev.returncode == 0:
+            head_sha = rev.stdout.strip()
+    except (subprocess.TimeoutExpired, OSError):
+        # Non-fatal — record what we have.
+        head_sha = ""
+
+    meta = {
+        "branch": branch,
+        "worktree_path": str(wt_path),
+        "head_sha": head_sha,
+        "ts": ts,
+    }
+    try:
+        (dest / ".se3-archive-meta.json").write_text(
+            json.dumps(meta, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        # Meta is best-effort; the directory contents are the
+        # authoritative archive. Log and continue.
+        logger.warning(
+            "Failed to write archive metadata for %s at %s: %s",
+            branch, dest, exc,
+        )
+
+    logger.info(
+        "Archived worktree for branch '%s' to %s before delete",
+        branch, dest,
+    )
+    return dest
 
 
 def _is_worktree_clean(wt_path: Path) -> bool:
@@ -555,6 +666,31 @@ class CleanupManager:
                         )
                         report.skipped_dirty.append((branch, reason))
                         continue
+
+            # Archive the worktree BEFORE the destructive ops. A failure
+            # here preserves the worktree + branch (the destructive ops
+            # are skipped), so an operator can fix the underlying issue
+            # (e.g. disk full) and re-run cleanup. The archive lives at
+            # ``<project_root>/.se3/archive/<slug>-<ts>/`` and includes
+            # tracked + untracked + ignored files (but not ``.git`` —
+            # see ``_archive_worktree``).
+            if has_wt and wt_path is not None and wt_path.exists():
+                try:
+                    archive_path = _archive_worktree(
+                        self.project_root, branch, wt_path,
+                    )
+                    report.archived.append((branch, archive_path))
+                except (OSError, shutil.Error) as exc:
+                    reason = (
+                        f"archive to .se3/archive/ failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    )
+                    logger.warning(
+                        "Skipping branch '%s' (preserving worktree + "
+                        "branch): %s", branch, reason,
+                    )
+                    report.skipped_archive_failed.append((branch, reason))
+                    continue
 
             # Try deleting branch first (safe with lowercase -d).
             # If the branch is checked out in a worktree, git will refuse;

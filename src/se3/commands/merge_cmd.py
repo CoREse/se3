@@ -861,11 +861,21 @@ def run_merge(
         if report.cleanup_report:
             cr = report.cleanup_report
             lines.append("")
+            if cr.archived:
+                lines.append("Archived worktrees (before delete):")
+                for b, archive_path in cr.archived:
+                    lines.append(f"  - {b} -> {archive_path}")
             if cr.deleted:
                 lines.append(f"Deleted branches: {', '.join(cr.deleted)}")
             if cr.skipped_dirty:
                 lines.append("Skipped (dirty worktree):")
                 for b, reason in cr.skipped_dirty:
+                    lines.append(f"  - {b}: {reason}")
+            if cr.skipped_archive_failed:
+                lines.append(
+                    "Skipped (archive failed — preserving worktree + branch):"
+                )
+                for b, reason in cr.skipped_archive_failed:
                     lines.append(f"  - {b}: {reason}")
             if cr.skipped_protected:
                 lines.append(f"Skipped (protected): {', '.join(cr.skipped_protected)}")
