@@ -3004,6 +3004,11 @@ class MergeOrchestrator:
             One of: "merged", "conflict", "pending_human",
             "guardrail_violation", "non_conflict_failure".
         """
+        # Track the report on ``self`` so helper methods that don't take it
+        # as a parameter (currently: ``_run_guardrails_robust``) can append
+        # audit-issue IDs to the report's lists.
+        self._current_merge_report = report
+
         # Remember pre-merge HEAD for guardrails check and rollback
         try:
             pre_merge_head = _run_git(
@@ -4506,6 +4511,13 @@ class MergeOrchestrator:
             RuntimeError: If the rollback (git reset --hard) fails. The
             caller must escalate because the tree is in an inconsistent state.
         """
+        # --- ROBUST: keep the merge commit, file an audit issue, never
+        # roll back or write a call file. Guardrail violations are
+        # tracked bugs under robust, not merge failures.
+        if strategy == MergeStrategy.ROBUST:
+            self._run_guardrails_robust(pre_sha, post_sha, branch)
+            return None
+
         if not pre_sha or not post_sha:
             logger.warning(
                 "Guardrails check skipped for '%s': missing pre/post SHA "
@@ -5388,6 +5400,130 @@ class MergeOrchestrator:
                     f"successfully): {print_exc}"
                 )
             return call_file
+
+    def _run_guardrails_robust(
+        self,
+        pre_sha: str,
+        post_sha: str,
+        branch: str,
+    ) -> None:
+        """Robust-strategy guardrail policy: keep the merge commit, file
+        an audit issue. Never rolls back, never repairs, never writes a
+        call file.
+
+        Args:
+            pre_sha: SHA of HEAD before the merge. May be empty when the
+                pre-merge capture failed.
+            post_sha: SHA of the merge commit. May be empty when the
+                refresh failed.
+            branch: The branch being merged (used in audit description).
+
+        Behavior:
+            * Missing SHA(s) → file ``missing-sha`` audit issue, return.
+            * Guardrail check crashes → file ``guardrail-check-crashed``
+              audit issue, return.
+            * Guardrail check returns violations → file a single
+              ``guardrail-violation`` audit issue listing all violations,
+              return.
+            * Guardrail check passes → return silently.
+
+        IssueManager failures are swallowed (audit-only — never block a
+        merge over a tracker glitch).
+        """
+        report_obj = getattr(self, "_current_merge_report", None)
+
+        def _file_issue(
+            title: str, description: str, extra_tags: list[str],
+        ) -> None:
+            try:
+                from ..issue_manager import IssueManager
+            except ImportError:
+                return
+            try:
+                issue = IssueManager(self.project_root).create(
+                    title=title,
+                    description=description,
+                    priority="high",
+                    type="bug",
+                    tags=["guardrail-violation", *extra_tags],
+                )
+                if report_obj is not None:
+                    report_obj.guardrail_audit_issues.append(
+                        getattr(issue, "id", "<unknown-id>")
+                    )
+            except Exception as exc:
+                self._log(
+                    f"[robust] failed to file guardrail audit issue: {exc}"
+                )
+
+        if not pre_sha or not post_sha:
+            _file_issue(
+                title=(
+                    f"merge guardrail audit: missing SHA for branch '{branch}'"
+                ),
+                description=(
+                    f"Robust merge of '{branch}' completed but guardrails "
+                    f"could not run because pre_sha or post_sha was "
+                    f"unavailable.\n\n"
+                    f"pre_sha={pre_sha!r}\npost_sha={post_sha!r}\n\n"
+                    "The merge commit is in HEAD. Re-run guardrails "
+                    "manually if the post-merge state needs validation."
+                ),
+                extra_tags=["missing-sha"],
+            )
+            return
+
+        try:
+            gr_report = self._guardrails.check_merge_result(
+                pre_sha, post_sha,
+            )
+        except Exception as exc:
+            _file_issue(
+                title=(
+                    f"merge guardrail audit: check crashed for "
+                    f"branch '{branch}'"
+                ),
+                description=(
+                    f"Robust merge of '{branch}' completed but the "
+                    f"guardrails check itself raised an exception. The "
+                    f"merge commit is in HEAD.\n\n"
+                    f"pre_sha={pre_sha}\npost_sha={post_sha}\n\n"
+                    f"Exception:\n{type(exc).__name__}: {exc}"
+                ),
+                extra_tags=["guardrail-check-crashed"],
+            )
+            return
+
+        if gr_report.passed and not gr_report.violations:
+            return
+
+        # Format violations into a description block.
+        viol_lines: list[str] = []
+        for v in gr_report.violations:
+            viol_lines.append(
+                f"- [{v.violation_type}] {v.file_path}: {v.message}"
+            )
+        if gr_report.incomplete:
+            viol_lines.append(
+                "- [CHECK_INCOMPLETE] guardrails check did not complete"
+            )
+        body = (
+            f"Robust merge of '{branch}' completed; HEAD holds the merge "
+            f"commit ({post_sha}).\n\n"
+            f"Guardrail violations detected on the merged result:\n\n"
+            + ("\n".join(viol_lines) if viol_lines else "<no detail>")
+            + "\n\nThis is a TRACKED BUG, not a merge failure. Resolve "
+            "the violation on the source branch and re-merge, or open a "
+            "follow-up PR to repair the post-merge state."
+        )
+        _file_issue(
+            title=(
+                f"merge guardrail violation on branch '{branch}' "
+                f"({len(gr_report.violations)} issue(s))"
+            ),
+            description=body,
+            extra_tags=[],
+        )
 
     def _abort_merge(self) -> bool:
         """Abort the current merge to restore working tree.

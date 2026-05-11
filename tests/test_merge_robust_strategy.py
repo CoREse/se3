@@ -618,3 +618,198 @@ class TestRobustConflictFallback:
         assert any("Merge Complete" == kw.get("title")
                    for _, kw in captured), \
             "expected a 'Merge Complete' render after take-theirs fallback"
+
+
+# ---------------------------------------------------------------------------
+# Commit 4 — guardrail violations become issues, not merge failures
+# ---------------------------------------------------------------------------
+
+
+class TestRobustGuardrailPolicy:
+    def test_robust_guardrail_violation_keeps_commit_and_files_issue(
+        self, tmp_path: Path,
+    ) -> None:
+        """Force a guardrail violation; assert HEAD is still the merge
+        commit, the merge succeeds (exit 0), and an audit issue exists.
+        """
+        feat = _init_repo_with_branch(tmp_path)
+        from se3.commands.merge_cmd import run_merge
+        from se3.engine.merge.guardrails import (
+            GuardrailReport,
+            GuardrailViolation,
+            MergeGuardrailsCheck,
+        )
+
+        bad_report = GuardrailReport(
+            passed=False,
+            violations=[
+                GuardrailViolation(
+                    file_path="se3/specs/example.md",
+                    violation_type="MISSING_REQUIRED_SECTION",
+                    message="spec lacks the 'Acceptance' section",
+                ),
+            ],
+            incomplete=False,
+        )
+        with patch.object(
+            MergeGuardrailsCheck, "check_merge_result",
+            return_value=bad_report,
+        ):
+            rc = run_merge(
+                branches=[feat],
+                strategy="robust",
+                project_root=tmp_path,
+            )
+        assert rc == 0
+        # HEAD must be the merge commit.
+        log = subprocess.run(
+            ["git", "log", "--oneline", "-1"],
+            cwd=tmp_path, check=True, capture_output=True, text=True,
+        ).stdout
+        assert "Merge branch" in log or feat in log
+
+        # Audit issue filed.
+        open_dir = tmp_path / "se3" / "issues" / "open"
+        assert open_dir.exists()
+        issues = list(open_dir.glob("*.yaml"))
+        assert issues
+        contents = issues[0].read_text()
+        assert "guardrail-violation" in contents
+        assert "MISSING_REQUIRED_SECTION" in contents
+
+    def test_robust_guardrail_check_crash_keeps_commit_and_files_issue(
+        self, tmp_path: Path,
+    ) -> None:
+        feat = _init_repo_with_branch(tmp_path)
+        from se3.commands.merge_cmd import run_merge
+        from se3.engine.merge.guardrails import MergeGuardrailsCheck
+
+        with patch.object(
+            MergeGuardrailsCheck, "check_merge_result",
+            side_effect=RuntimeError("simulated check crash"),
+        ):
+            rc = run_merge(
+                branches=[feat],
+                strategy="robust",
+                project_root=tmp_path,
+            )
+        assert rc == 0
+        open_dir = tmp_path / "se3" / "issues" / "open"
+        issues = list(open_dir.glob("*.yaml"))
+        assert issues
+        assert "guardrail-check-crashed" in issues[0].read_text()
+
+    def test_robust_guardrail_pass_files_no_issue(
+        self, tmp_path: Path,
+    ) -> None:
+        """When the guardrails check passes, no audit issue is filed."""
+        feat = _init_repo_with_branch(tmp_path)
+        from se3.commands.merge_cmd import run_merge
+
+        rc = run_merge(
+            branches=[feat],
+            strategy="robust",
+            project_root=tmp_path,
+        )
+        assert rc == 0
+        open_dir = tmp_path / "se3" / "issues" / "open"
+        if open_dir.exists():
+            # Only allow audit issues from completely unrelated subsystems
+            # (none in this isolated test). Robust guardrails must not
+            # file an issue when there is nothing to flag.
+            for f in open_dir.glob("*.yaml"):
+                assert "guardrail-violation" not in f.read_text()
+
+    def test_robust_guardrail_never_writes_call_file(
+        self, tmp_path: Path,
+    ) -> None:
+        feat = _init_repo_with_branch(tmp_path)
+        from se3.commands.merge_cmd import run_merge
+        from se3.engine.merge.guardrails import (
+            GuardrailReport,
+            GuardrailViolation,
+            MergeGuardrailsCheck,
+        )
+
+        bad = GuardrailReport(
+            passed=False,
+            violations=[
+                GuardrailViolation(
+                    file_path="se3/specs/x.md",
+                    violation_type="X",
+                    message="m",
+                ),
+            ],
+        )
+        with patch.object(
+            MergeGuardrailsCheck, "check_merge_result", return_value=bad,
+        ):
+            run_merge(
+                branches=[feat],
+                strategy="robust",
+                project_root=tmp_path,
+            )
+        call_dir = tmp_path / "se3" / "merge_calls"
+        if call_dir.exists():
+            assert not list(call_dir.glob("*"))
+
+
+class TestNonRobustGuardrailUnchanged:
+    """Regression: fast strategy still invokes the GuardrailRepairer path
+    when violations are detected; robust short-circuit does NOT bleed
+    into non-robust strategies."""
+
+    def test_fast_strategy_still_invokes_repair_on_violation(
+        self, tmp_path: Path,
+    ) -> None:
+        feat = _init_repo_with_branch(tmp_path)
+        from se3.commands.merge_cmd import run_merge
+        from se3.engine.merge.guardrails import (
+            GuardrailReport,
+            GuardrailViolation,
+            MergeGuardrailsCheck,
+        )
+
+        repair_called: dict = {"count": 0}
+
+        bad = GuardrailReport(
+            passed=False,
+            violations=[
+                GuardrailViolation(
+                    file_path="se3/specs/x.md",
+                    violation_type="X",
+                    message="m",
+                ),
+            ],
+        )
+
+        # When fast invokes its GuardrailRepairer (instantiated inside
+        # _run_guardrails), spy on the repair call. We use the actual
+        # class path so the patch survives the lazy import.
+        try:
+            from se3.engine.merge.guardrail_repair import GuardrailRepairer
+        except ImportError:
+            pytest.skip("GuardrailRepairer not importable")
+
+        original_init = GuardrailRepairer.__init__
+
+        def spy_init(self, *args, **kwargs):
+            repair_called["count"] += 1
+            return original_init(self, *args, **kwargs)
+
+        with patch.object(
+            MergeGuardrailsCheck, "check_merge_result", return_value=bad,
+        ), patch.object(GuardrailRepairer, "__init__", spy_init):
+            # We don't care about the final rc here — just that the fast
+            # path tried to instantiate GuardrailRepairer (proving the
+            # repair loop is still wired up for non-robust strategies).
+            run_merge(
+                branches=[feat],
+                strategy="fast",
+                project_root=tmp_path,
+            )
+
+        assert repair_called["count"] >= 1, (
+            "fast strategy must still invoke GuardrailRepairer on "
+            "guardrail violations; got zero invocations (regression?)"
+        )
