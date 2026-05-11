@@ -1138,36 +1138,121 @@ def _merge_leaf_branch(
     flow_id: str | None = None,
     merge_step_id: str | None = None,
 ) -> bool:
-    """Merge a leaf branch back to original_branch with enhanced conflict resolution.
+    """Merge a leaf branch back to original_branch with robust recovery.
 
-    Unlike the old approach that fell back to ``--theirs`` on conflict, this
-    function uses :func:`resolve_merge_conflicts_with_context` which provides the LLM
-    with full task context.  If the LLM cannot resolve after 3 retries the merge
-    is aborted and ``False`` is returned — no silent data loss.
+    Layered protections (each must hold; the next layer covers the previous'
+    edge cases):
 
-    Args:
-        project_root: Project root directory
-        branch: Branch to merge
-        original_branch: Target branch
-        task_description: Overall task description for LLM context
-        group_summaries: List of ``{group_id, summary, files_changed}`` dicts
-        spec_content: Spec summary for LLM context
-
-    Returns:
-        True on successful merge, False on failure
+    1. Pre-merge ``git stash push --include-untracked`` — untracked files in
+       the main repo (e.g. discovery-step artefacts) no longer block the
+       merge with ``"untracked working tree files would be overwritten"``.
+    2. ``resolve_merge_conflicts_with_context`` LLM resolution on real
+       content conflicts (existing behavior; 3 retries).
+    3. ``_take_theirs_fallback`` deterministic fallback after the LLM
+       exhausts retries: ``git checkout --theirs`` for every conflict file,
+       commit, audit via ``IssueManager``. Always preserves the leaf
+       branch's commits (which encapsulate the DAG implement output);
+       only discards the master-pre-merge version of conflicting paths.
+    4. Post-merge ``git stash pop``; pop conflicts (a stashed untracked
+       file collides with a file the merge brought in) resolved by
+       ``_take_ours_for_stashpop`` — keep the merged HEAD version, drop
+       the stashed version, audit via ``IssueManager``. Stash is always
+       dropped at the end so no dangling ``stash@{0}`` remains.
     """
     current = get_current_branch(project_root)
     if current != original_branch:
         _run_git(project_root, "checkout", original_branch)
 
+    # Layer 1: pre-merge stash (include untracked so discovery/analyze/plan
+    # artefacts in the main repo don't block FF/3-way merge).
+    stash_result = _run_git(
+        project_root, "stash", "push", "--include-untracked",
+        "-m", f"se3-pre-leaf-merge-{branch}",
+        check=False,
+    )
+    stashed = (
+        stash_result.returncode == 0
+        and "No local changes" not in stash_result.stdout
+    )
+
+    merge_ok = _attempt_merge_with_resolution(
+        project_root,
+        branch=branch,
+        task_description=task_description,
+        group_summaries=group_summaries,
+        spec_content=spec_content,
+        flow_id=flow_id,
+        merge_step_id=merge_step_id,
+    )
+
+    if not merge_ok:
+        # Merge irrecoverably failed (non-conflict failure or take-theirs
+        # commit itself failed). Restore stash and bail; cleanup will
+        # protect the branch via the reachability check.
+        if stashed:
+            _run_git(project_root, "stash", "pop", check=False)
+        return False
+
+    # Merge succeeded (whether via LLM or take-theirs); restore stashed
+    # state.
+    if stashed:
+        pop_result = _run_git(project_root, "stash", "pop", check=False)
+        if pop_result.returncode != 0:
+            # Two distinct stash-pop failure modes, both end with the same
+            # cleanup (drop the dangling stash, leave working tree at the
+            # merged HEAD state, record audit):
+            #
+            #   (a) Real 3-way conflict on a tracked file — surfaces via
+            #       ``get_conflicting_files``. Resolve by taking ours
+            #       (HEAD content); the stashed pre-merge version of the
+            #       conflicting path is the part being dropped.
+            #
+            #   (b) Untracked-file collision — a stash entry from
+            #       ``--include-untracked`` cannot be restored because the
+            #       merge has populated the same path. Git's ``stash pop``
+            #       prints ``"<path>: already exists, no checkout"`` to
+            #       stderr, leaves working tree at the merged content,
+            #       and does NOT mark the path as unmerged. Detect by
+            #       parsing the message; record the same audit signal.
+            pop_conflict_files = get_conflicting_files(project_root)
+            if pop_conflict_files:
+                _take_ours_for_stashpop(project_root, pop_conflict_files)
+
+            collision_files = _parse_stashpop_already_exists(pop_result)
+            affected = pop_conflict_files or collision_files
+            if affected:
+                _record_stashpop_takeours_event(
+                    project_root, branch, affected, flow_id,
+                )
+            _run_git(project_root, "stash", "drop", check=False)
+
+    logger.info("Leaf merge succeeded: %s -> %s", branch, original_branch)
+    return True
+
+
+def _attempt_merge_with_resolution(
+    project_root: Path,
+    branch: str,
+    task_description: str,
+    group_summaries: list[dict],
+    spec_content: str,
+    flow_id: str | None,
+    merge_step_id: str | None,
+) -> bool:
+    """Run ``git merge`` and recover from conflicts.
+
+    Order: 3-way merge → LLM resolution → take-theirs deterministic
+    fallback → abort.  Returns True if a merge commit landed on HEAD,
+    False if even the take-theirs fallback could not commit (extremely
+    rare — disk full, git lock contention, etc.) or if the merge failed
+    for a non-conflict reason that ``--abort`` reverted.
+    """
     result = _run_git(
         project_root, "merge", branch, "--no-edit",
         "-m", f"Merge leaf branch {branch}",
         check=False,
     )
-
     if result.returncode == 0:
-        logger.info("Leaf merge succeeded: %s -> %s", branch, original_branch)
         return True
 
     is_conflict = "CONFLICT" in (result.stdout + result.stderr)
@@ -1185,19 +1270,187 @@ def _merge_leaf_branch(
         _run_git(project_root, "merge", "--abort", check=False)
         return False
 
-    resolved = resolve_merge_conflicts_with_context(
-        project_root, conflict_files, task_description, group_summaries, spec_content,
+    if resolve_merge_conflicts_with_context(
+        project_root, conflict_files, task_description,
+        group_summaries, spec_content,
         flow_id=flow_id, step_id=merge_step_id,
+    ):
+        logger.info("Leaf merge conflicts resolved via LLM: %s", branch)
+        return True
+
+    logger.warning(
+        "Leaf merge LLM resolution exhausted; falling back to take-theirs: %s",
+        branch,
     )
-    if resolved:
-        logger.info("Leaf merge conflicts resolved: %s -> %s", branch, original_branch)
+    if _take_theirs_fallback(
+        project_root, branch, conflict_files, flow_id, merge_step_id,
+    ):
         return True
 
     logger.error(
-        "Leaf merge conflict resolution failed after retries: %s", branch,
+        "Leaf merge: take-theirs fallback also failed; aborting merge: %s",
+        branch,
     )
     _run_git(project_root, "merge", "--abort", check=False)
     return False
+
+
+def _take_theirs_fallback(
+    project_root: Path,
+    branch: str,
+    conflict_files: list[str],
+    flow_id: str | None,
+    step_id: str | None,
+) -> bool:
+    """Deterministic fallback when LLM conflict resolution is exhausted.
+
+    For every conflict file, ``git checkout --theirs`` (the leaf branch's
+    version) and stage it, then complete the merge commit. Records an
+    audit issue via ``IssueManager`` so the operator can see which files
+    were resolved deterministically.
+
+    Rationale for "theirs": the leaf branch encapsulates the DAG implement
+    output — the commits we MUST preserve. ``ours`` is the master pre-
+    merge state, which for the typical use case is upstream content the
+    user is willing to let the implementation override (otherwise they
+    wouldn't have run implement). Preserving leaf is the safer default
+    for SE3's authoring workflow.
+
+    Returns True only if the commit succeeded; False signals the caller
+    to abort.
+    """
+    for filepath in conflict_files:
+        _run_git(project_root, "checkout", "--theirs", "--", filepath, check=False)
+        _run_git(project_root, "add", filepath, check=False)
+    commit_result = _run_git(project_root, "commit", "--no-edit", check=False)
+    if commit_result.returncode != 0:
+        logger.error(
+            "take-theirs fallback commit failed for %s: %s",
+            branch, commit_result.stderr.strip(),
+        )
+        return False
+    _record_take_theirs_event(project_root, branch, conflict_files, flow_id)
+    return True
+
+
+def _parse_stashpop_already_exists(
+    pop_result: subprocess.CompletedProcess,
+) -> list[str]:
+    """Extract paths from ``git stash pop``'s "already exists" output.
+
+    When ``--include-untracked`` is stashed and a subsequent merge
+    repopulates one of those paths, ``git stash pop`` emits a line like
+    ``<path>: already exists, no checkout`` per affected file. Git does
+    NOT mark these paths as unmerged (they aren't 3-way conflicts), so
+    ``get_conflicting_files`` returns an empty list — we have to parse
+    the message to know what was dropped.
+    """
+    files: list[str] = []
+    combined = (pop_result.stdout or "") + "\n" + (pop_result.stderr or "")
+    for line in combined.splitlines():
+        marker = "already exists"
+        if marker in line and "no checkout" in line:
+            # Format (git stash pop): ``<path> already exists, no checkout``
+            # Path may contain spaces, so trim everything up to the marker.
+            path = line[: line.index(marker)].rstrip(": ").strip()
+            if path:
+                files.append(path)
+    return files
+
+
+def _take_ours_for_stashpop(
+    project_root: Path,
+    conflict_files: list[str],
+) -> None:
+    """Resolve stash-pop conflicts by keeping the merged (HEAD) version.
+
+    In stash-pop terminology after a conflicted apply: ``--ours`` refers
+    to HEAD (our post-merge state), ``--theirs`` to the stashed content.
+    We keep ours because the merge result is the canonical state we just
+    landed; the stash held pre-DAG artefacts (typically discovery /
+    analyze / plan untracked files) whose conflict-on-the-same-path
+    means the merge has authoritatively overwritten them anyway.
+
+    Best-effort: paths where ``--ours`` fails (e.g. stash pop refused
+    due to an untracked-file collision, leaving no unmerged state) are
+    skipped silently; the subsequent ``git stash drop`` finalizes the
+    cleanup.
+    """
+    for filepath in conflict_files:
+        _run_git(project_root, "checkout", "--ours", "--", filepath, check=False)
+        _run_git(project_root, "add", filepath, check=False)
+
+
+def _record_take_theirs_event(
+    project_root: Path,
+    branch: str,
+    conflict_files: list[str],
+    flow_id: str | None,
+) -> None:
+    """File an audit issue when the take-theirs fallback fires.
+
+    Audit-only — failures here are logged but never block the merge,
+    because losing one audit row is acceptable; losing commits is not.
+    """
+    try:
+        from ..issue_manager import IssueManager
+    except ImportError:
+        return
+    try:
+        IssueManager(project_root).create(
+            title=f"DAG leaf merge fallback: take-theirs on {branch}",
+            description=(
+                f"Flow: {flow_id or '<unknown>'}\n"
+                f"Branch: {branch}\n\n"
+                "LLM conflict resolution exhausted retries; fell back to "
+                "`git checkout --theirs` for all conflict files (i.e., "
+                "accepted the leaf branch's version verbatim).\n\n"
+                "Conflict files (now holding leaf branch's version):\n  - "
+                + "\n  - ".join(conflict_files)
+            ),
+            priority="medium",
+            type="task",
+            tags=["merge-fallback", "audit"],
+        )
+    except Exception as e:
+        logger.warning("Failed to record take-theirs audit issue: %s", e)
+
+
+def _record_stashpop_takeours_event(
+    project_root: Path,
+    branch: str,
+    conflict_files: list[str],
+    flow_id: str | None,
+) -> None:
+    """File an audit issue when stash-pop conflict was resolved by take-ours."""
+    try:
+        from ..issue_manager import IssueManager
+    except ImportError:
+        return
+    try:
+        IssueManager(project_root).create(
+            title=(
+                f"DAG leaf merge: stash pop conflict resolved (take-ours) "
+                f"on {branch}"
+            ),
+            description=(
+                f"Flow: {flow_id or '<unknown>'}\n"
+                f"Branch: {branch}\n\n"
+                "After successful leaf merge, restoring the pre-merge stash "
+                "(--include-untracked) conflicted on some paths. Resolved by "
+                "keeping the merged HEAD version; the stashed pre-merge "
+                "version was discarded for these paths.\n\n"
+                "Conflict files (kept the merged HEAD version):\n  - "
+                + "\n  - ".join(conflict_files)
+            ),
+            priority="medium",
+            type="task",
+            tags=["merge-fallback", "audit", "stash-pop"],
+        )
+    except Exception as e:
+        logger.warning(
+            "Failed to record stash-pop take-ours audit issue: %s", e,
+        )
 
 
 def _salvage_results_history(results: list, project_root: Path) -> None:

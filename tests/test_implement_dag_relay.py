@@ -219,9 +219,12 @@ class TestMergeLeafBranch:
     @patch("se3.engine.steps.implement._run_git")
     @patch("se3.engine.steps.implement.get_current_branch")
     def test_clean_merge(self, mock_branch, mock_git, mock_resolve, mock_conflict):
-        """Clean merge returns True without conflict resolution."""
+        """Clean merge (no stashable changes, no conflict) returns True."""
         mock_branch.return_value = "main"
-        mock_git.return_value = MagicMock(returncode=0, stdout="", stderr="")
+        # Stash returns "No local changes" so stashed=False; merge succeeds; no pop.
+        mock_git.return_value = MagicMock(
+            returncode=0, stdout="No local changes to save", stderr="",
+        )
 
         result = _merge_leaf_branch(
             Path("/repo"), "impl/flow/G3", "main",
@@ -236,12 +239,11 @@ class TestMergeLeafBranch:
     @patch("se3.engine.steps.implement._run_git")
     @patch("se3.engine.steps.implement.get_current_branch")
     def test_conflict_resolved_by_llm(self, mock_branch, mock_git, mock_resolve, mock_conflict):
-        """Conflict resolved by LLM returns True."""
+        """Conflict resolved by LLM returns True; take-theirs fallback not invoked."""
         mock_branch.return_value = "main"
-        # First call: merge fails with conflict
+        no_stash = MagicMock(returncode=0, stdout="No local changes", stderr="")
         merge_result = MagicMock(returncode=1, stdout="CONFLICT", stderr="")
-        # Second+: various git operations
-        mock_git.side_effect = [merge_result]  # only the merge call
+        mock_git.side_effect = [no_stash, merge_result]
         mock_conflict.return_value = ["file.py"]
         mock_resolve.return_value = True
 
@@ -253,16 +255,59 @@ class TestMergeLeafBranch:
         assert result is True
         mock_resolve.assert_called_once()
 
+    @patch("se3.engine.steps.implement._record_take_theirs_event")
     @patch("se3.engine.steps.implement.get_conflicting_files")
     @patch("se3.engine.steps.implement.resolve_merge_conflicts_with_context")
     @patch("se3.engine.steps.implement._run_git")
     @patch("se3.engine.steps.implement.get_current_branch")
-    def test_conflict_unresolved_aborts(self, mock_branch, mock_git, mock_resolve, mock_conflict):
-        """Unresolved conflict aborts merge and returns False."""
+    def test_llm_exhausted_falls_back_to_take_theirs(
+        self, mock_branch, mock_git, mock_resolve, mock_conflict, mock_audit,
+    ):
+        """When LLM cannot resolve, take-theirs fallback completes the merge.
+
+        Sequence: stash (no-op), merge (conflict), checkout --theirs <file>,
+        add <file>, commit. Audit issue recorded.
+        """
         mock_branch.return_value = "main"
+        no_stash = MagicMock(returncode=0, stdout="No local changes", stderr="")
         merge_result = MagicMock(returncode=1, stdout="CONFLICT", stderr="")
-        abort_result = MagicMock(returncode=0, stdout="", stderr="")
-        mock_git.side_effect = [merge_result, abort_result]
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        mock_git.side_effect = [no_stash, merge_result, ok, ok, ok]
+        mock_conflict.return_value = ["file.py"]
+        mock_resolve.return_value = False  # LLM exhausted
+
+        result = _merge_leaf_branch(
+            Path("/repo"), "impl/flow/G3", "main",
+            "task desc", [], "spec",
+        )
+
+        assert result is True
+        # Verify take-theirs sequence: checkout --theirs, add, commit
+        args_list = [tuple(call.args) for call in mock_git.call_args_list]
+        checkout_call = [a for a in args_list if "checkout" in a and "--theirs" in a]
+        assert checkout_call, f"expected --theirs checkout, got {args_list}"
+        commit_call = [a for a in args_list if "commit" in a]
+        assert commit_call, f"expected commit, got {args_list}"
+        mock_audit.assert_called_once()
+
+    @patch("se3.engine.steps.implement._record_take_theirs_event")
+    @patch("se3.engine.steps.implement.get_conflicting_files")
+    @patch("se3.engine.steps.implement.resolve_merge_conflicts_with_context")
+    @patch("se3.engine.steps.implement._run_git")
+    @patch("se3.engine.steps.implement.get_current_branch")
+    def test_take_theirs_commit_failure_aborts(
+        self, mock_branch, mock_git, mock_resolve, mock_conflict, mock_audit,
+    ):
+        """If take-theirs commit itself fails (extremely rare), abort + False."""
+        mock_branch.return_value = "main"
+        no_stash = MagicMock(returncode=0, stdout="No local changes", stderr="")
+        merge_result = MagicMock(returncode=1, stdout="CONFLICT", stderr="")
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        commit_fail = MagicMock(returncode=1, stdout="", stderr="commit blocked")
+        abort_ok = MagicMock(returncode=0, stdout="", stderr="")
+        mock_git.side_effect = [
+            no_stash, merge_result, ok, ok, commit_fail, abort_ok,
+        ]
         mock_conflict.return_value = ["file.py"]
         mock_resolve.return_value = False
 
@@ -272,6 +317,8 @@ class TestMergeLeafBranch:
         )
 
         assert result is False
+        # Audit issue NOT recorded when commit fails
+        mock_audit.assert_not_called()
 
     @patch("se3.engine.steps.implement.get_conflicting_files")
     @patch("se3.engine.steps.implement._run_git")
@@ -279,9 +326,12 @@ class TestMergeLeafBranch:
     def test_non_conflict_failure(self, mock_branch, mock_git, mock_conflict):
         """Non-conflict merge failure aborts and returns False."""
         mock_branch.return_value = "main"
-        merge_result = MagicMock(returncode=1, stdout="fatal: error", stderr="not a conflict")
+        no_stash = MagicMock(returncode=0, stdout="No local changes", stderr="")
+        merge_fail = MagicMock(
+            returncode=1, stdout="fatal: error", stderr="not a conflict",
+        )
         abort_result = MagicMock(returncode=0, stdout="", stderr="")
-        mock_git.side_effect = [merge_result, abort_result]
+        mock_git.side_effect = [no_stash, merge_fail, abort_result]
 
         result = _merge_leaf_branch(
             Path("/repo"), "impl/flow/G3", "main",
@@ -294,11 +344,16 @@ class TestMergeLeafBranch:
     @patch("se3.engine.steps.implement._run_git")
     @patch("se3.engine.steps.implement.get_current_branch")
     def test_checkout_to_original_branch(self, mock_branch, mock_git):
-        """Checks out original_branch if not already there."""
+        """Checks out original_branch if not already there.
+
+        Sequence: checkout main, stash push (no-op), merge (success). No pop
+        because stash was no-op.
+        """
         mock_branch.return_value = "impl/flow/G3"  # Not on original branch
         checkout_result = MagicMock(returncode=0, stdout="", stderr="")
+        no_stash = MagicMock(returncode=0, stdout="No local changes", stderr="")
         merge_result = MagicMock(returncode=0, stdout="", stderr="")
-        mock_git.side_effect = [checkout_result, merge_result]
+        mock_git.side_effect = [checkout_result, no_stash, merge_result]
 
         result = _merge_leaf_branch(
             Path("/repo"), "impl/flow/G3", "main",

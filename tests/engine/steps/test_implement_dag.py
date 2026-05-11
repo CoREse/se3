@@ -806,13 +806,15 @@ class TestConflictResolution:
         mock_sched.get_fallback_leaves.return_value = []
         mock_sched_cls.return_value = mock_sched
 
-        # Simulate: first git call is get_current_branch (already mocked),
-        # merge call returns conflict, then abort on fallback
+        # Sequence: stash push (no local changes), merge → conflict. LLM
+        # resolves; no take-theirs needed; no pop (no stash).
+        no_stash = MagicMock(
+            returncode=0, stdout="No local changes to save", stderr="",
+        )
         conflict_merge = MagicMock(
             returncode=1, stdout="CONFLICT in file.py", stderr="",
         )
-        success_result = MagicMock(returncode=0, stdout="", stderr="")
-        mock_git.side_effect = [conflict_merge, success_result]
+        mock_git.side_effect = [no_stash, conflict_merge]
 
         mock_conflict_files.return_value = ["file.py"]
         mock_resolve.return_value = True  # LLM resolves it
@@ -834,6 +836,7 @@ class TestConflictResolution:
         assert call_args[0][0] == Path("/repo")  # project_root
         assert "file.py" in call_args[0][1]  # conflict_files
 
+    @patch(f"{_IMP}._record_take_theirs_event")
     @patch(f"{_IMP}.delete_branch")
     @patch(f"{_IMP}.get_current_branch", return_value="main")
     @patch(f"{_IMP}.force_cleanup_worktree")
@@ -844,12 +847,20 @@ class TestConflictResolution:
     @patch(f"{_IMP}.resolve_merge_conflicts_with_context")
     @patch(f"{_IMP}.get_conflicting_files")
     @patch(f"{_IMP}._run_git")
-    def test_conflict_unresolved_returns_failed(
+    def test_conflict_unresolved_falls_back_to_take_theirs(
         self, mock_git, mock_conflict_files, mock_resolve,
         mock_reduce, mock_classify, mock_sched_cls,
         mock_salvage, mock_cleanup, mock_branch, mock_del,
+        mock_audit,
     ):
-        """Unresolved merge conflict → merge aborted, no --theirs."""
+        """LLM exhausted → take-theirs fallback completes the merge.
+
+        With the merge-robustness changes, an LLM that cannot resolve no
+        longer surfaces as a merge_failure. Instead, ``_take_theirs_fallback``
+        deterministically accepts the leaf branch's version for every
+        conflict file and commits, surfacing an audit issue. Merge succeeds
+        end-to-end; merge_failures stays empty.
+        """
         groups = _make_groups([
             ("G1", 1, [], 200),
         ])
@@ -870,12 +881,16 @@ class TestConflictResolution:
         mock_sched.get_fallback_leaves.return_value = []
         mock_sched_cls.return_value = mock_sched
 
-        # Merge fails with conflict
+        # Sequence: stash push (no-op), merge (conflict), take-theirs
+        # (checkout --theirs, add, commit).
+        no_stash = MagicMock(
+            returncode=0, stdout="No local changes", stderr="",
+        )
         conflict_merge = MagicMock(
             returncode=1, stdout="CONFLICT in file.py", stderr="",
         )
-        abort_result = MagicMock(returncode=0, stdout="", stderr="")
-        mock_git.side_effect = [conflict_merge, abort_result]
+        ok = MagicMock(returncode=0, stdout="", stderr="")
+        mock_git.side_effect = [no_stash, conflict_merge, ok, ok, ok]
 
         mock_conflict_files.return_value = ["file.py"]
         mock_resolve.return_value = False  # LLM cannot resolve
@@ -889,28 +904,33 @@ class TestConflictResolution:
             spec_summary="", injection=None, retry_count=0,
         )
 
-        # Merge failed → overall status reflects failure
-        assert "G1" in step.outputs.get("merge_failures", [])
+        # take-theirs fallback succeeded → no merge_failures
+        assert step.outputs.get("merge_failures", []) == []
+        mock_audit.assert_called_once()
 
-    @patch(f"{_IMP}.delete_branch")
-    @patch(f"{_IMP}._merge_leaf_branch", return_value=True)
-    @patch(f"{_IMP}.get_current_branch", return_value="main")
-    @patch(f"{_IMP}.force_cleanup_worktree")
-    @patch(f"{_IMP}._salvage_history_from_worktree")
-    @patch(f"{_IMP}.DAGScheduler")
-    @patch(f"{_IMP}.classify_chains")
-    @patch(f"{_IMP}.transitive_reduce")
-    def test_no_theirs_fallback_in_codebase(
-        self, mock_reduce, mock_classify, mock_sched_cls,
-        mock_salvage, mock_cleanup, mock_branch, mock_merge, mock_del,
-    ):
-        """Verify _force_resolve_conflicts_theirs is not present or called."""
-        import inspect
+    def test_take_theirs_fallback_helpers_present(self):
+        """The merge-robustness fallback helpers ARE present.
+
+        Replaces the old contract that asserted no --theirs path existed.
+        Since 4.11.0, `_take_theirs_fallback` is the deterministic safety
+        net invoked when LLM conflict resolution exhausts retries; it
+        preserves the leaf branch's commits by accepting their version
+        of every conflicting file. The legacy `_force_resolve_conflicts_theirs`
+        (an indiscriminate --theirs that ran instead of LLM resolution) is
+        still gone.
+        """
         import se3.engine.steps.implement as impl_module
 
-        # The function should not exist in the module
+        assert hasattr(impl_module, "_take_theirs_fallback"), (
+            "_take_theirs_fallback must exist as the merge-robustness "
+            "deterministic fallback"
+        )
+        assert hasattr(impl_module, "_take_ours_for_stashpop"), (
+            "_take_ours_for_stashpop must exist for stash-pop conflict cleanup"
+        )
+        # Legacy unguarded --theirs path stays removed
         assert not hasattr(impl_module, "_force_resolve_conflicts_theirs"), (
-            "_force_resolve_conflicts_theirs should be removed from implement.py"
+            "_force_resolve_conflicts_theirs should not return"
         )
 
 
