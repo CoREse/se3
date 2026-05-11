@@ -287,6 +287,45 @@ class TestRobustAutoStash:
         )
         assert rc == 1
 
+    def test_robust_stash_pop_conflict_take_ours_with_audit(
+        self, tmp_path: Path,
+    ) -> None:
+        """When pop introduces a 3-way conflict on the same path the merge
+        modified, robust takes-ours (keeps merged version) and files an
+        audit issue tagged stash-pop-fallback."""
+        feat = _init_repo_with_branch(tmp_path)
+        # The feature branch touches feature.py. Make a local-only edit
+        # to the same file so the pop after merge conflicts with the
+        # merged content.
+        (tmp_path / "feature.py").write_text("local pre-merge edit\n")
+
+        from se3.commands.merge_cmd import run_merge
+
+        rc = run_merge(
+            branches=[feat],
+            strategy="robust",
+            project_root=tmp_path,
+        )
+        assert rc == 0
+        # After take-ours: file holds the merged (feat) content, NOT
+        # the user's local edit.
+        assert (
+            (tmp_path / "feature.py").read_text() == "print('feat')\n"
+        )
+        # Audit issue filed for the pop fallback.
+        open_dir = tmp_path / "se3" / "issues" / "open"
+        assert open_dir.exists()
+        contents = "\n".join(
+            f.read_text() for f in open_dir.glob("*.yaml")
+        )
+        assert "stash-pop-fallback" in contents
+        # Stash list is empty (drop succeeded).
+        list_result = subprocess.run(
+            ["git", "stash", "list"],
+            cwd=tmp_path, check=True, capture_output=True, text=True,
+        )
+        assert list_result.stdout.strip() == ""
+
     def test_robust_rejects_in_progress_git_operation(
         self, tmp_path: Path,
     ) -> None:

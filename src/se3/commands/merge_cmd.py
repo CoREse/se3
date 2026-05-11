@@ -558,8 +558,12 @@ def _robust_stash_pop(
     Steps:
       1. ``git stash pop`` (no --index; merge-style application).
       2. On 3-way conflicts (paths reported by ``get_conflicting_files``):
-         try the LLM resolver; on failure, take-ours (HEAD/merged version
-         wins) — symmetric with the implement-step stash-pop policy.
+         take-ours (HEAD/merged version wins) — symmetric with the
+         implement-step stash-pop policy. LLM is intentionally NOT
+         consulted: the merged HEAD is the canonical post-merge state,
+         while the stashed content was authored against an older tree
+         that didn't know about the incoming branch — letting an LLM
+         try to combine them risks generating incoherent output.
       3. On untracked-collision (``<path>: already exists`` lines): parse
          via ``parse_stashpop_already_exists`` and add them to the
          take-ours set.
@@ -857,6 +861,22 @@ def run_merge(
         if report.version_aggregation_error:
             lines.append("")
             lines.append(f"WARNING: Version aggregation failed: {report.version_aggregation_error}")
+        if getattr(report, "robust_audit_issues", None):
+            lines.append("")
+            lines.append(
+                f"WARNING: {len(report.robust_audit_issues)} take-theirs "
+                f"fallback issue(s) filed in se3/issues/open/:"
+            )
+            for iid in report.robust_audit_issues:
+                lines.append(f"  - {iid}")
+        if getattr(report, "guardrail_audit_issues", None):
+            lines.append("")
+            lines.append(
+                f"WARNING: {len(report.guardrail_audit_issues)} guardrail "
+                f"violation issue(s) filed in se3/issues/open/:"
+            )
+            for iid in report.guardrail_audit_issues:
+                lines.append(f"  - {iid}")
         _append_runtime_sync_lines(lines, report)
         if report.cleanup_report:
             cr = report.cleanup_report
