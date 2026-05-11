@@ -2381,7 +2381,7 @@ def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
 class MergeConfig:
     """Merge command configuration loaded from se3.yaml merge: section."""
 
-    strategy: str = "default"
+    strategy: str = "robust"
     delete_merged_default: bool = False
     strict_runtime_sync: bool = False
 
@@ -2390,12 +2390,12 @@ class MergeConfig:
         """Create MergeConfig from dictionary."""
         if not data:
             return cls()
-        strategy = data.get("strategy", "default")
-        if strategy not in ("default", "strict", "fast"):
+        strategy = data.get("strategy", "robust")
+        if strategy not in ("default", "strict", "fast", "robust"):
             logger.warning(
-                "Invalid merge.strategy %r; using default 'default'", strategy,
+                "Invalid merge.strategy %r; using default 'robust'", strategy,
             )
-            strategy = "default"
+            strategy = "robust"
         return cls(
             strategy=strategy,
             delete_merged_default=_coerce_bool(

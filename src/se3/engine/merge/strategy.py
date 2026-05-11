@@ -67,6 +67,8 @@ class StrategyDecider:
             return self._decide_strict(resolution, has_spec_files)
         elif strategy == MergeStrategy.FAST:
             return self._decide_fast(resolution)
+        elif strategy == MergeStrategy.ROBUST:
+            return self._decide_robust(resolution, has_spec_files)
         else:
             logger.warning("Unknown strategy %s, falling back to default", strategy)
             return self._decide_default(resolution, has_spec_files)
@@ -271,3 +273,18 @@ class StrategyDecider:
             action=DecisionAction.ACCEPT,
             reason=reason,
         )
+
+    def _decide_robust(
+        self,
+        resolution: LLMResolution,
+        has_spec_files: bool,
+    ) -> StrategyDecision:
+        """Robust strategy: same decision logic as default; the orchestrator
+        interprets HUMAN_CALL as a signal to drop into the deterministic
+        take-theirs fallback rather than write a human call file.
+
+        Implemented as a delegate so commit 1 introduces zero behavior
+        change. Commit 3 wires the orchestrator-side branch that treats
+        a HUMAN_CALL decision under ROBUST as a take-theirs trigger.
+        """
+        return self._decide_default(resolution, has_spec_files)

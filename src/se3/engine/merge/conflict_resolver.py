@@ -143,6 +143,7 @@ class MergeStrategy(str, Enum):
     DEFAULT = "default"
     STRICT = "strict"
     FAST = "fast"
+    ROBUST = "robust"
 
 
 @dataclass

@@ -481,7 +481,7 @@ def sync_respond_cmd(
 @app.command(name="merge")
 def merge_cmd(
     branches: list[str] = typer.Argument(None, help="Branches to merge into current branch (in order)"),
-    strategy: str = typer.Option(None, "--strategy", "-s", help="Conflict resolution strategy: default, strict, or fast"),
+    strategy: str = typer.Option(None, "--strategy", "-s", help="Conflict resolution strategy: robust (default), default, strict, or fast"),
     delete_merged: bool = typer.Option(None, "--delete-merged", "-d", help="Delete merged branches and their worktrees after successful merge"),
     no_delete_merged: bool = typer.Option(False, "--no-delete-merged", help="Do not delete merged branches (overrides config)"),
 ):
@@ -532,9 +532,9 @@ def merge_cmd(
     else:
         effective_delete = delete_merged if delete_merged is not None else merge_cfg.delete_merged_default
 
-    if effective_strategy not in ("default", "strict", "fast"):
+    if effective_strategy not in ("default", "strict", "fast", "robust"):
         render_text(
-            f"Invalid strategy '{effective_strategy}'. Must be one of: default, strict, fast",
+            f"Invalid strategy '{effective_strategy}'. Must be one of: robust, default, strict, fast",
             title="Error",
         )
         raise typer.Exit(1)

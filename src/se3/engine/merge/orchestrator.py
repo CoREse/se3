@@ -611,10 +611,10 @@ class MergeOrchestrator:
         acquire_lock: bool = True,
     ) -> None:
         self.project_root = project_root
-        if strategy not in ("default", "strict", "fast"):
+        if strategy not in ("default", "strict", "fast", "robust"):
             raise ValueError(
                 f"Unknown merge strategy: {strategy!r}. "
-                f"Must be one of: default, strict, fast"
+                f"Must be one of: default, strict, fast, robust"
             )
         self.strategy = MergeStrategy(strategy)
         self.delete_merged = delete_merged

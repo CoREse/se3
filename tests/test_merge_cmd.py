@@ -211,14 +211,14 @@ class TestMergeConfig:
         from se3.config import MergeConfig
 
         config = MergeConfig.load(tmp_path)
-        assert config.strategy == "default"
+        assert config.strategy == "robust"
 
     def test_merge_config_defaults_when_missing(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
         from se3.config import MergeConfig
 
         config = MergeConfig.load(tmp_path)
-        assert config.strategy == "default"
+        assert config.strategy == "robust"
         assert config.delete_merged_default is False
         assert config.strict_runtime_sync is False
 

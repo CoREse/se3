@@ -469,7 +469,7 @@ def _append_split_branch_lines(
 
 def run_merge(
     branches: list[str],
-    strategy: str = "default",
+    strategy: str = "robust",
     delete_merged: bool = False,
     strict_runtime_sync: bool = False,
     project_root: Optional[Path] = None,
