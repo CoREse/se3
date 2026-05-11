@@ -765,8 +765,9 @@ class TestMidChainFailure:
 
 
 class TestConflictResolution:
-    """Leaf merge uses LLM conflict resolution, never --theirs."""
+    """Leaf merge uses LLM conflict resolution + take-theirs fallback."""
 
+    @patch(f"{_IMP}._is_branch_reachable_from", return_value=True)
     @patch(f"{_IMP}.delete_branch")
     @patch(f"{_IMP}.get_current_branch", return_value="main")
     @patch(f"{_IMP}.force_cleanup_worktree")
@@ -781,6 +782,7 @@ class TestConflictResolution:
         self, mock_git, mock_conflict_files, mock_resolve,
         mock_reduce, mock_classify, mock_sched_cls,
         mock_salvage, mock_cleanup, mock_branch, mock_del,
+        mock_reachable,
     ):
         """Merge conflict resolved by LLM returns COMPLETED."""
         groups = _make_groups([
@@ -836,6 +838,7 @@ class TestConflictResolution:
         assert call_args[0][0] == Path("/repo")  # project_root
         assert "file.py" in call_args[0][1]  # conflict_files
 
+    @patch(f"{_IMP}._is_branch_reachable_from", return_value=True)
     @patch(f"{_IMP}._record_take_theirs_event")
     @patch(f"{_IMP}.delete_branch")
     @patch(f"{_IMP}.get_current_branch", return_value="main")
@@ -851,7 +854,7 @@ class TestConflictResolution:
         self, mock_git, mock_conflict_files, mock_resolve,
         mock_reduce, mock_classify, mock_sched_cls,
         mock_salvage, mock_cleanup, mock_branch, mock_del,
-        mock_audit,
+        mock_audit, mock_reachable,
     ):
         """LLM exhausted → take-theirs fallback completes the merge.
 
@@ -1291,6 +1294,7 @@ class TestWorktreeCleanup:
 class TestBranchDeletion:
     """Verify all impl branches are deleted after DAG execution."""
 
+    @patch(f"{_IMP}._is_branch_reachable_from", return_value=True)
     @patch(f"{_IMP}._merge_leaf_branch", return_value=True)
     @patch(f"{_IMP}.get_current_branch", return_value="main")
     @patch(f"{_IMP}.force_cleanup_worktree")
@@ -1302,6 +1306,7 @@ class TestBranchDeletion:
     def test_all_impl_branches_deleted(
         self, mock_del, mock_reduce, mock_classify, mock_sched_cls,
         mock_salvage, mock_cleanup, mock_branch, mock_merge,
+        mock_reachable,
     ):
         groups = _make_groups([
             ("G1", 1, [], 200),

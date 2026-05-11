@@ -1333,6 +1333,33 @@ def _take_theirs_fallback(
     return True
 
 
+def _is_branch_reachable_from(
+    project_root: Path,
+    branch: str,
+    target_branch: str,
+) -> bool:
+    """True iff every commit on *branch* is also reachable from *target_branch*.
+
+    Equivalent to ``git merge-base --is-ancestor branch target_branch``.
+    Used by the DAG cleanup loop as the gate for branch deletion: only
+    branches whose commits have safely landed on the target (i.e. the
+    merge succeeded) are eligible for ``git branch -D``. A return of
+    False protects the branch — preserving its commits even if the
+    surrounding merge bookkeeping went wrong.
+
+    Returns False on git error (branch missing, indeterminate ancestry)
+    so deletion fails closed.
+    """
+    result = _run_git(
+        project_root, "merge-base", "--is-ancestor", branch, target_branch,
+        check=False,
+    )
+    # rc=0: branch is ancestor (every commit reachable from target).
+    # rc=1: branch is not ancestor.
+    # rc=128 or other: error (e.g. branch ref missing). Fail closed.
+    return result.returncode == 0
+
+
 def _parse_stashpop_already_exists(
     pop_result: subprocess.CompletedProcess,
 ) -> list[str]:
@@ -1663,19 +1690,37 @@ def _run_dag_parallel(
             logger.error("DAG: leaf merge failed for %s (branch %s)", gid, branch)
             merge_failures.append(gid)
 
-    # Delete impl branches — collect actual branch names from results + recovered
-    branches_to_delete: set[str] = set()
+    # Delete impl branches — but ONLY if their commits are now reachable
+    # from original_branch (i.e. successfully merged). Branches whose merge
+    # failed for any reason must survive so the operator can recover their
+    # commits manually (e.g. ``git checkout <branch>``). Force-deleting an
+    # un-merged branch with ``git branch -D`` was the proximate cause of
+    # the 20260507-200706 data loss incident.
+    candidate_branches: set[str] = set()
     for r in results:
         if r.branch_name:
-            branches_to_delete.add(r.branch_name)
+            candidate_branches.add(r.branch_name)
     for gid in recovered_groups:
         if gid not in already_deleted_gids:
-            branches_to_delete.add(f"impl/{flow.flow_id}/{gid}")
-    for branch in branches_to_delete:
+            candidate_branches.add(f"impl/{flow.flow_id}/{gid}")
+
+    preserved_branches: list[str] = []
+    for branch in candidate_branches:
+        if not _is_branch_reachable_from(project_root, branch, original_branch):
+            preserved_branches.append(branch)
+            logger.warning(
+                "DAG cleanup: preserving branch %s (not an ancestor of %s — "
+                "merge failed or branch missing; commits protectively kept)",
+                branch, original_branch,
+            )
+            continue
         try:
             delete_branch(project_root, branch)
         except Exception:
             logger.debug("DAG: failed to delete branch %s", branch)
+
+    if preserved_branches:
+        step.outputs["preserved_branches"] = sorted(preserved_branches)
 
     # Apply restricted edits on original_branch
     all_restricted_applied: list[dict] = []
@@ -1741,10 +1786,18 @@ def _run_dag_parallel(
         step.outputs["restricted_edits_failed"] = all_restricted_failed
 
     # Compute overall completion status.
-    # When fallback leaves were successfully merged, some work is preserved
-    # even though downstream groups failed — report "partial" not "failed".
-    if "failed" in all_completion_statuses:
-        if fallback_leaf_ids and not merge_failures:
+    # ``merge_failures`` is an INDEPENDENT failure source: even when every
+    # group reports ``completed``, a leaf merge that did not land = data
+    # never reached ``original_branch`` = step did not actually complete.
+    # Defense-in-depth on top of the merge-robustness changes — if the
+    # multi-layer fallback in ``_merge_leaf_branch`` ever did fail (e.g.
+    # disk full during the take-theirs commit), the step status must
+    # reflect it so the flow does NOT proceed into test → self_check on
+    # an inconsistent main repo state.
+    if merge_failures:
+        overall_status = "failed"
+    elif "failed" in all_completion_statuses:
+        if fallback_leaf_ids:
             overall_status = "partial"
         else:
             overall_status = "failed"

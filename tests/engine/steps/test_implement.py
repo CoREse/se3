@@ -756,6 +756,10 @@ class TestStaleBranchHandling:
             f"delete_branch was called {mock_del_branch.call_count} times"
         )
 
+    @patch(
+        "se3.engine.steps.implement._is_branch_reachable_from",
+        return_value=True,
+    )
     @patch("se3.engine.steps.implement._merge_leaf_branch", return_value=True)
     @patch("se3.engine.steps.implement.delete_branch")
     @patch("se3.engine.steps.implement.force_cleanup_worktree")
@@ -766,8 +770,15 @@ class TestStaleBranchHandling:
     def test_finally_cleans_up_branches_on_normal_completion(
         self, mock_config, mock_make_fn, mock_scheduler_cls,
         mock_get_branch, mock_force_cleanup, mock_del_branch, mock_merge,
+        mock_reachable,
     ):
-        """Branches are cleaned up even on successful completion (idempotent cleanup)."""
+        """Branches are cleaned up even on successful completion (idempotent cleanup).
+
+        Mocks ``_is_branch_reachable_from`` because the 4.11.0 cleanup gate
+        skips deletion for branches that aren't ancestors of the target —
+        with ``_merge_leaf_branch`` mocked to return True we semantically
+        mean "merge succeeded → branch IS reachable".
+        """
         from se3.engine.steps.implement import _run_dag_parallel
         from se3.engine.dag_scheduler import GroupResult
 
