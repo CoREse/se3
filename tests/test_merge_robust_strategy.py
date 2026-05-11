@@ -793,6 +793,58 @@ class TestRobustGuardrailPolicy:
             assert not list(call_dir.glob("*"))
 
 
+class TestRobustTakeTheirsRunsGuardrails:
+    """Take-theirs literally lands the incoming branch's version. If that
+    version has a spec violation, the robust guardrail policy MUST file an
+    audit issue — same as clean-merge and LLM-resolution paths."""
+
+    def test_take_theirs_guardrail_violation_files_audit_issue(
+        self, tmp_path: Path,
+    ) -> None:
+        _, feat = _init_conflicting_branches(tmp_path)
+        from se3.commands.merge_cmd import run_merge
+        from se3.engine.merge.conflict_resolver import ConflictResolver
+        from se3.engine.merge.guardrails import (
+            GuardrailReport,
+            GuardrailViolation,
+            MergeGuardrailsCheck,
+        )
+        from se3.engine.llm_caller import LLMCallError
+
+        # Force LLM to fail so we hit take-theirs.
+        # Force guardrails to flag a violation on the post-merge state.
+        bad = GuardrailReport(
+            passed=False,
+            violations=[
+                GuardrailViolation(
+                    file_path="se3/specs/x.md",
+                    violation_type="BAD_SECTION",
+                    message="bad",
+                ),
+            ],
+        )
+        with patch.object(
+            ConflictResolver, "resolve",
+            side_effect=LLMCallError("simulated"),
+        ), patch.object(
+            MergeGuardrailsCheck, "check_merge_result", return_value=bad,
+        ):
+            rc = run_merge(
+                branches=[feat],
+                strategy="robust",
+                project_root=tmp_path,
+            )
+        assert rc == 0
+        # Audit issues filed: at least one for take-theirs, one for guardrail
+        open_dir = tmp_path / "se3" / "issues" / "open"
+        contents = "\n".join(
+            f.read_text() for f in open_dir.glob("*.yaml")
+        )
+        assert "llm-resolution-failed" in contents
+        assert "guardrail-violation" in contents
+        assert "BAD_SECTION" in contents
+
+
 class TestNonRobustGuardrailUnchanged:
     """Regression: fast strategy still invokes the GuardrailRepairer path
     when violations are detected; robust short-circuit does NOT bleed

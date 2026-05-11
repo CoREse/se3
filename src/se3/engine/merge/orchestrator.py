@@ -3742,6 +3742,7 @@ class MergeOrchestrator:
             conflict_files = get_conflicting_files(self.project_root)
             return self._robust_take_theirs_commit(
                 branch, conflict_files, "context-build-failed", report,
+                pre_merge_sha=pre_merge_sha,
             )
 
         # --- 2. LLM resolution (may fail) ---
@@ -3763,6 +3764,7 @@ class MergeOrchestrator:
             conflict_files = [cf.path for cf in context.files]
             return self._robust_take_theirs_commit(
                 branch, conflict_files, "llm-resolution-failed", report,
+                pre_merge_sha=pre_merge_sha,
             )
 
         # --- 3. Decision dispatch ---
@@ -3791,6 +3793,7 @@ class MergeOrchestrator:
                 )
                 return self._robust_take_theirs_commit(
                     branch, sorted(context_paths), "llm-incomplete", report,
+                    pre_merge_sha=pre_merge_sha,
                 )
 
             outcome = self._apply_resolution(
@@ -3819,6 +3822,7 @@ class MergeOrchestrator:
         conflict_files = [cf.path for cf in context.files]
         return self._robust_take_theirs_commit(
             branch, conflict_files, reason, report,
+            pre_merge_sha=pre_merge_sha,
         )
 
     def _robust_retry_take_theirs(
@@ -3847,10 +3851,24 @@ class MergeOrchestrator:
             # The merge succeeded on retry without conflicts — apply_resolution's
             # abort plus our retry effectively produced a clean merge. Run the
             # same post-merge guards as the clean-merge path so a silent merge
-            # loss or runtime-sync collision still surfaces.
+            # loss or runtime-sync collision still surfaces, plus the robust
+            # guardrail policy in case the merged spec content violates rules.
             self._log(
                 "[robust] merge retry succeeded without conflicts after "
                 f"_apply_resolution outcome={prior_failure}"
+            )
+            post_merge_sha = ""
+            try:
+                rev = _run_git(
+                    self.project_root, "rev-parse", "HEAD",
+                    check=False, timeout=15,
+                )
+                if rev.returncode == 0:
+                    post_merge_sha = rev.stdout.strip()
+            except subprocess.TimeoutExpired:
+                post_merge_sha = ""
+            self._run_guardrails_robust(
+                pre_merge_sha, post_merge_sha, branch,
             )
             pc_result = self._verify_post_merge_conditions(
                 branch,
@@ -3876,6 +3894,7 @@ class MergeOrchestrator:
         return self._robust_take_theirs_commit(
             branch, conflict_files,
             f"apply-resolution-failed:{prior_failure}", report,
+            pre_merge_sha=pre_merge_sha,
         )
 
     def _robust_take_theirs_commit(
@@ -3884,6 +3903,7 @@ class MergeOrchestrator:
         conflict_files: list[str],
         reason: str,
         report: MergeReport,
+        pre_merge_sha: str = "",
     ) -> str:
         """Take-theirs deterministic fallback used by the robust strategy.
 
@@ -3899,6 +3919,11 @@ class MergeOrchestrator:
         filter by why the fallback fired (``llm-resolution-failed``,
         ``llm-rejected``, ``llm-flagged-for-review``, ``llm-incomplete``,
         ``context-build-failed``, ``apply-resolution-failed:*``).
+
+        ``pre_merge_sha`` is the HEAD SHA before the merge started — used
+        to run the robust guardrail policy after the take-theirs commit
+        lands. When empty (caller could not capture it), the guardrail
+        audit will record a missing-sha audit issue instead of skipping.
         """
         if not conflict_files:
             # Pathological: caller said take-theirs but no files. Abort
@@ -3938,6 +3963,26 @@ class MergeOrchestrator:
         self._record_robust_take_theirs_event(
             branch, conflict_files, reason, report,
         )
+
+        # Capture post-commit SHA for guardrails.
+        post_merge_sha = ""
+        try:
+            rev = _run_git(
+                self.project_root, "rev-parse", "HEAD",
+                check=False, timeout=15,
+            )
+            if rev.returncode == 0:
+                post_merge_sha = rev.stdout.strip()
+        except subprocess.TimeoutExpired:
+            post_merge_sha = ""
+
+        # Robust guardrail policy: file audit issue on violation, keep
+        # commit. Symmetric with the clean-merge and LLM-resolution
+        # paths — take-theirs literally lands the incoming branch's
+        # version, so guardrail violations on theirs MUST surface as
+        # tracked issues rather than disappear silently.
+        self._run_guardrails_robust(pre_merge_sha, post_merge_sha, branch)
+
         # B1 post-condition + runtime sync — same guards the clean-merge
         # path runs. Take-theirs lands a real merge commit (two parents),
         # so ``assert_head_is_merge_commit`` must pass with no fixup
