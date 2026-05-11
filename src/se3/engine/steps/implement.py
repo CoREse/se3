@@ -1175,15 +1175,25 @@ def _merge_leaf_branch(
         and "No local changes" not in stash_result.stdout
     )
 
-    merge_ok = _attempt_merge_with_resolution(
-        project_root,
-        branch=branch,
-        task_description=task_description,
-        group_summaries=group_summaries,
-        spec_content=spec_content,
-        flow_id=flow_id,
-        merge_step_id=merge_step_id,
-    )
+    try:
+        merge_ok = _attempt_merge_with_resolution(
+            project_root,
+            branch=branch,
+            task_description=task_description,
+            group_summaries=group_summaries,
+            spec_content=spec_content,
+            flow_id=flow_id,
+            merge_step_id=merge_step_id,
+        )
+    except BaseException:
+        # Defensive: if the merge attempt raises (subprocess crash,
+        # KeyboardInterrupt during a long LLM call, etc.), make a
+        # best-effort to restore the stashed working tree before the
+        # exception propagates. Otherwise the user is left with a
+        # dangling stash@{0} and an empty-looking working tree.
+        if stashed:
+            _run_git(project_root, "stash", "pop", check=False)
+        raise
 
     if not merge_ok:
         # Merge irrecoverably failed (non-conflict failure or take-theirs
@@ -1219,7 +1229,15 @@ def _merge_leaf_branch(
                 _take_ours_for_stashpop(project_root, pop_conflict_files)
 
             collision_files = _parse_stashpop_already_exists(pop_result)
-            affected = pop_conflict_files or collision_files
+            # Union (preserving order, dedupe). Mixed scenarios — some stashed
+            # paths in 3-way conflict, others colliding as untracked — must
+            # surface both kinds in the audit trail.
+            seen: set[str] = set()
+            affected: list[str] = []
+            for path in list(pop_conflict_files) + list(collision_files):
+                if path not in seen:
+                    seen.add(path)
+                    affected.append(path)
             if affected:
                 _record_stashpop_takeours_event(
                     project_root, branch, affected, flow_id,
@@ -1283,7 +1301,7 @@ def _attempt_merge_with_resolution(
         branch,
     )
     if _take_theirs_fallback(
-        project_root, branch, conflict_files, flow_id, merge_step_id,
+        project_root, branch, conflict_files, flow_id,
     ):
         return True
 
@@ -1300,7 +1318,6 @@ def _take_theirs_fallback(
     branch: str,
     conflict_files: list[str],
     flow_id: str | None,
-    step_id: str | None,
 ) -> bool:
     """Deterministic fallback when LLM conflict resolution is exhausted.
 

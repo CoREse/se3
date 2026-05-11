@@ -1,4 +1,4 @@
-"""Integration tests for DAG implement merge robustness (v4.11.0).
+"""Integration + unit tests for DAG implement merge robustness (v4.11.0).
 
 These tests exercise ``_merge_leaf_branch`` against real git repositories
 in temporary directories rather than mocking ``_run_git`` call-by-call.
@@ -23,7 +23,10 @@ from unittest.mock import patch
 
 import pytest
 
-from se3.engine.steps.implement import _merge_leaf_branch
+from se3.engine.steps.implement import (
+    _merge_leaf_branch,
+    _parse_stashpop_already_exists,
+)
 
 
 def _git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
@@ -350,3 +353,85 @@ class TestAuditIssueIntegration:
         # Audit failed but merge still succeeded
         assert result is True
         assert (repo / "shared.py").read_text() == "B\n"
+
+
+# ---------------------------------------------------------------------------
+# 6. Unit: _parse_stashpop_already_exists
+# ---------------------------------------------------------------------------
+
+
+class TestExceptionDuringMerge:
+    """If the merge attempt raises, the stash must be popped before re-raise.
+
+    Defends against subprocess crashes, KeyboardInterrupt mid-LLM-call, etc.
+    Without the try/except, an exception leaves the user with stash@{0} and
+    an empty-looking working tree — the original untracked file is invisible
+    until they manually ``git stash pop``.
+    """
+
+    def test_raise_during_merge_still_pops_stash(self, repo: Path):
+        _make_leaf_branch(repo, "impl/f/G1", {"new.py": "n\n"})
+        (repo / "scratch.py").write_text("user-local\n", encoding="utf-8")
+
+        with patch(
+            "se3.engine.steps.implement._attempt_merge_with_resolution",
+            side_effect=RuntimeError("simulated merge crash"),
+        ):
+            with pytest.raises(RuntimeError, match="simulated merge crash"):
+                _merge_leaf_branch(
+                    repo, "impl/f/G1", "main",
+                    task_description="t", group_summaries=[], spec_content="s",
+                )
+
+        # Stash was popped (untracked file restored)
+        assert (repo / "scratch.py").read_text() == "user-local\n"
+        # No dangling stash entry
+        assert _git(repo, "stash", "list").stdout.strip() == ""
+
+
+class TestParseStashpopAlreadyExists:
+    """Parser correctly extracts paths from `<path> already exists, no checkout`."""
+
+    def test_single_file(self):
+        result = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="app.py already exists, no checkout\n",
+        )
+        assert _parse_stashpop_already_exists(result) == ["app.py"]
+
+    def test_multiple_files(self):
+        result = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="",
+            stderr=(
+                "src/a.py already exists, no checkout\n"
+                "src/b.py already exists, no checkout\n"
+            ),
+        )
+        assert _parse_stashpop_already_exists(result) == ["src/a.py", "src/b.py"]
+
+    def test_mixed_with_unrelated_output(self):
+        """Unrelated lines (e.g. "Already up to date") are not falsely matched."""
+        result = subprocess.CompletedProcess(
+            args=[], returncode=1,
+            stdout="Already up to date.\n",
+            stderr=(
+                "foo.py already exists, no checkout\n"
+                "error: could not restore untracked files from stash\n"
+            ),
+        )
+        # "Already up to date" lacks "no checkout" so must not match
+        assert _parse_stashpop_already_exists(result) == ["foo.py"]
+
+    def test_empty_output(self):
+        result = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="", stderr="",
+        )
+        assert _parse_stashpop_already_exists(result) == []
+
+    def test_path_with_subdirs(self):
+        result = subprocess.CompletedProcess(
+            args=[], returncode=1, stdout="",
+            stderr="src/a/b/c.py already exists, no checkout\n",
+        )
+        assert _parse_stashpop_already_exists(result) == ["src/a/b/c.py"]
+
+
