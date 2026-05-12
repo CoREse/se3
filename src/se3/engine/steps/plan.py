@@ -282,6 +282,27 @@ REVISION_SECTION = """
 Revise the plan above to address the feedback. Keep what was good, fix what was flagged.
 """
 
+VERSION_FILE_GUARDRAIL = """
+## Guardrail: Do Not Bump Version Files
+The project version number is owned exclusively by the engine's `version_analyze`
+and `commit` steps. Do NOT create tasks or task groups whose purpose is to bump
+the version recorded in any project version file, including but not limited to:
+
+- `pyproject.toml` (Python projects, including the `[project].version` /
+  `[tool.poetry].version` fields)
+- `package.json` (Node.js projects, the `version` field)
+- `VERSIONS.md` (changelog / version history)
+- Equivalent project version files in other languages (e.g. `Cargo.toml`,
+  `go.mod` major-version suffixes, `__version__` constants).
+
+These files MUST NOT appear as the target of an `implement` group, task, or fix
+iteration. The engine itself will compute the new version from the actual
+changes and write the version file during the `commit` step. If the user's
+request is *literally only* "bump the version", produce zero file changes in
+the plan and explain in the proposal summary that the version bump will be
+handled automatically by the engine.
+"""
+
 
 def _get_prompt_depth(task_type: str) -> str:
     """Determine prompt depth based on task_type.
@@ -322,15 +343,18 @@ def _build_prompt(
         parts.append(PROPOSAL_SECTION)
         parts.append(DESIGN_SECTION)
         parts.append(TASKS_SECTION.format(part_label="Part 3"))
+        parts.append(VERSION_FILE_GUARDRAIL)
         parts.append(SPEC_CHANGES_SECTION)
         parts.append(FULL_JSON_SCHEMA)
     elif depth == "medium":
         parts.append(PROPOSAL_SECTION)
         parts.append(DESIGN_SECTION_BUGFIX)
         parts.append(TASKS_SECTION.format(part_label="Part 3"))
+        parts.append(VERSION_FILE_GUARDRAIL)
         parts.append(MEDIUM_JSON_SCHEMA)
     else:  # shallow
         parts.append(TASKS_SECTION.format(part_label="Instructions"))
+        parts.append(VERSION_FILE_GUARDRAIL)
         parts.append(SHALLOW_JSON_SCHEMA)
 
     return "\n".join(parts)

@@ -27,6 +27,22 @@ from ..transitive_reduction import transitive_reduce
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
 from ..utils.json_parser import parse_json_response
+from .plan import VERSION_FILE_GUARDRAIL as _PLAN_VERSION_FILE_GUARDRAIL
+
+# Re-export for tests / clarity at the implement.py module level.
+VERSION_FILE_GUARDRAIL = _PLAN_VERSION_FILE_GUARDRAIL
+
+# Additional clause appended to FIX_PROMPT: fix iterations must also not bump
+# the version file. The version bump is always handled by the engine's
+# version_analyze + commit steps, not by the LLM during a fix iteration.
+FIX_VERSION_FILE_GUARDRAIL = """
+Fix iterations are also covered by this guardrail: do NOT include a version
+bump (modifying `pyproject.toml`, `package.json`, `VERSIONS.md`, or any other
+project version file) as part of a fix. If a test failure or verification
+issue appears to be "wrong version number", the underlying cause is in the
+engine's version-handling steps, not in the implementation — flag it in your
+fix summary and leave the version file untouched.
+"""
 from ..worktree import (
     _run_git,
     create_worktree,
@@ -272,6 +288,13 @@ When you are done, output a JSON summary of what you did:
 ### Timeout guidance:
 If the fix context indicates that tests previously timed out (timeout_reason is present), first investigate whether the timeout reflects a real hang or infinite loop in the code you changed — the test runner caps computed timeouts at its configured maximum, so simply increasing the estimate cannot rescue a runaway test. If the prior timeout looks like a genuine under-estimate (the suite really does take that long), provide a meaningfully higher `estimated_test_duration` (roughly 1.5–2× the previous value is usually enough; don't blindly multiply without bound). If the fix context indicates `Timeout at cap: true`, raising `estimated_test_duration` will NOT produce a larger timeout — the prior run was already at the cap, so focus on splitting the suite or fixing the slow/hung test instead.
 """
+
+# Append the version-file guardrail to all three implementation prompt
+# templates. The guardrail text contains no `{...}` placeholders, so it's safe
+# to concatenate after the `.format(...)`-style prompt body.
+IMPLEMENT_PROMPT = IMPLEMENT_PROMPT + "\n" + VERSION_FILE_GUARDRAIL
+IMPLEMENT_GROUP_PROMPT = IMPLEMENT_GROUP_PROMPT + "\n" + VERSION_FILE_GUARDRAIL
+FIX_PROMPT = FIX_PROMPT + "\n" + VERSION_FILE_GUARDRAIL + FIX_VERSION_FILE_GUARDRAIL
 
 
 def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:

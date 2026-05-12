@@ -1429,3 +1429,42 @@ class TestStreamPrefixConstruction:
         mock_run.assert_called_once()
         call_kwargs = mock_run.call_args
         assert "stream_prefix" not in call_kwargs.kwargs
+
+
+class TestImplementVersionFileGuardrail:
+    """G1: version-file guardrail must appear in implement / fix prompts."""
+
+    def test_implement_prompt_includes_guardrail(self):
+        from se3.engine.steps.implement import (
+            IMPLEMENT_PROMPT,
+            VERSION_FILE_GUARDRAIL,
+        )
+        assert 'Do Not Bump Version Files' in IMPLEMENT_PROMPT
+        assert 'pyproject.toml' in IMPLEMENT_PROMPT
+        assert 'package.json' in IMPLEMENT_PROMPT
+        assert 'VERSIONS.md' in IMPLEMENT_PROMPT
+        # Constant should match the actual appended text
+        assert VERSION_FILE_GUARDRAIL.strip() in IMPLEMENT_PROMPT
+
+    def test_implement_group_prompt_includes_guardrail(self):
+        from se3.engine.steps.implement import (
+            IMPLEMENT_GROUP_PROMPT,
+            VERSION_FILE_GUARDRAIL,
+        )
+        assert 'Do Not Bump Version Files' in IMPLEMENT_GROUP_PROMPT
+        assert 'pyproject.toml' in IMPLEMENT_GROUP_PROMPT
+        assert VERSION_FILE_GUARDRAIL.strip() in IMPLEMENT_GROUP_PROMPT
+
+    def test_fix_prompt_includes_guardrail_and_fix_clause(self):
+        from se3.engine.steps.implement import (
+            FIX_PROMPT,
+            VERSION_FILE_GUARDRAIL,
+            FIX_VERSION_FILE_GUARDRAIL,
+        )
+        assert 'Do Not Bump Version Files' in FIX_PROMPT
+        assert 'pyproject.toml' in FIX_PROMPT
+        assert VERSION_FILE_GUARDRAIL.strip() in FIX_PROMPT
+        # Fix-iteration-specific clause: forbid bumping version as a fix
+        assert FIX_VERSION_FILE_GUARDRAIL.strip() in FIX_PROMPT
+        assert 'Fix iterations are also covered' in FIX_PROMPT
+

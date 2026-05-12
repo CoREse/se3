@@ -13,6 +13,7 @@ from se3.engine.steps.plan import (
     FULL_JSON_SCHEMA,
     MEDIUM_JSON_SCHEMA,
     SHALLOW_JSON_SCHEMA,
+    VERSION_FILE_GUARDRAIL,
     _build_prompt,
     _get_prompt_depth,
     plan_handler,
@@ -192,6 +193,59 @@ class TestPlanHandlerSpecChanges:
 
         assert result == StepStatus.COMPLETED
         mock_display.assert_called_once()
+
+
+class TestVersionFileGuardrail:
+    """G1: prompt-layer guardrail forbidding version-file bumps as plan tasks."""
+
+    def test_guardrail_constant_exists_and_lists_examples(self):
+        assert isinstance(VERSION_FILE_GUARDRAIL, str)
+        assert "pyproject.toml" in VERSION_FILE_GUARDRAIL
+        assert "package.json" in VERSION_FILE_GUARDRAIL
+        assert "VERSIONS.md" in VERSION_FILE_GUARDRAIL
+        # Must reference the engine steps that own version bumping
+        assert "version_analyze" in VERSION_FILE_GUARDRAIL
+        assert "commit" in VERSION_FILE_GUARDRAIL
+
+    def test_full_depth_includes_guardrail(self):
+        prompt = _build_prompt(
+            task_description="Add feature X",
+            task_type="feature",
+            scope="m",
+            spec_content="s",
+            project_summary="p",
+            revision_section="",
+            depth="full",
+        )
+        assert "Do Not Bump Version Files" in prompt
+        assert "pyproject.toml" in prompt
+        assert "VERSIONS.md" in prompt
+
+    def test_medium_depth_includes_guardrail(self):
+        prompt = _build_prompt(
+            task_description="Fix bug Y",
+            task_type="bugfix",
+            scope="m",
+            spec_content="s",
+            project_summary="p",
+            revision_section="",
+            depth="medium",
+        )
+        assert "Do Not Bump Version Files" in prompt
+        assert "pyproject.toml" in prompt
+
+    def test_shallow_depth_includes_guardrail(self):
+        prompt = _build_prompt(
+            task_description="Directive Z",
+            task_type="directive",
+            scope="m",
+            spec_content="s",
+            project_summary="p",
+            revision_section="",
+            depth="shallow",
+        )
+        assert "Do Not Bump Version Files" in prompt
+        assert "pyproject.toml" in prompt
 
 
 class TestStepPoolSpecChanges:
