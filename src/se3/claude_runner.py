@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .agent_runner import AgentRunner, InfraErrorType
-from .config import load_claude_commands
+from .config import load_claude_commands, load_claude_subprocess_config
 
 # Platform-specific imports for process resource monitoring
 try:
@@ -100,6 +100,7 @@ class ClaudeCodeRunner(AgentRunner):
         project_root: Optional[Path] = None,
         commands: Optional[List[Dict[str, Any]]] = None,
         command: Optional[Dict[str, Any]] = None,
+        setting_sources: Optional[List[str]] = None,
     ):
         """Initialize with a single command.
 
@@ -108,6 +109,15 @@ class ClaudeCodeRunner(AgentRunner):
             commands: Legacy parameter — list of command dicts.  If provided
                 and ``command`` is None, the first entry is used.
             command: Single command dict ``{cmd, priority}``.  Preferred.
+            setting_sources: Optional explicit list of Claude CLI setting
+                sources (subset of ``{"user", "project", "local"}``). When
+                ``None``, the value is loaded from ``project_root``'s
+                ``claude_subprocess.setting_sources`` config, falling back
+                to ``["user"]`` if no project root is provided. The chosen
+                list is injected into every spawned Claude subprocess via
+                ``--setting-sources`` so SE3 workers are not locked by a
+                downstream project's ``.claude/settings.json``
+                ``permissions.deny`` rules.
         """
         if command is not None:
             self.command = command
@@ -122,6 +132,16 @@ class ClaudeCodeRunner(AgentRunner):
             self.commands = commands
         else:
             self.commands = [self.command]
+
+        if setting_sources is not None:
+            self.setting_sources = list(setting_sources)
+        elif project_root is not None:
+            self.setting_sources = list(
+                load_claude_subprocess_config(project_root).setting_sources
+            )
+        else:
+            self.setting_sources = ["user"]
+        self._setting_sources_arg = ",".join(self.setting_sources)
 
     @staticmethod
     def _resolve_args(
@@ -215,7 +235,12 @@ class ClaudeCodeRunner(AgentRunner):
         cmd_name = self.command["cmd"]
 
         resolved_args, stdin_prompt = self._resolve_args(args, cwd)
-        full_cmd = [cmd_name, "--dangerously-skip-permissions"] + resolved_args
+        full_cmd = [
+            cmd_name,
+            "--dangerously-skip-permissions",
+            "--setting-sources",
+            self._setting_sources_arg,
+        ] + resolved_args
 
         run_env = env
         if run_env is None:
@@ -274,7 +299,12 @@ class ClaudeCodeRunner(AgentRunner):
         cmd_entry = self.commands[cmd_index]
         resolved_args, stdin_prompt = self._resolve_args(args, cwd)
 
-        full_cmd = [cmd_entry["cmd"], "--dangerously-skip-permissions"] + resolved_args
+        full_cmd = [
+            cmd_entry["cmd"],
+            "--dangerously-skip-permissions",
+            "--setting-sources",
+            self._setting_sources_arg,
+        ] + resolved_args
 
         # If we need to feed a prompt via stdin, force stdin=PIPE regardless
         # of what the caller passed in kwargs, and write the prompt in a
@@ -463,7 +493,12 @@ class ClaudeCodeRunner(AgentRunner):
 
         try:
             resolved_args, stdin_prompt = self._resolve_args(args, cwd)
-            full_cmd = [cmd_name, "--dangerously-skip-permissions"] + resolved_args
+            full_cmd = [
+                cmd_name,
+                "--dangerously-skip-permissions",
+                "--setting-sources",
+                self._setting_sources_arg,
+            ] + resolved_args
 
             print(
                 f"[claude-runner] Running command: '{cmd_name}'",
