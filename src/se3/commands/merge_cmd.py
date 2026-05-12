@@ -83,7 +83,7 @@ def _git_operation_in_progress(project_root: Path) -> bool:
     """True iff git is mid-merge/cherry-pick/revert/rebase.
 
     These states cannot be recovered by stashing; the caller (e.g. the
-    robust strategy auto-stash path) must refuse to start.
+    fast strategy auto-stash path) must refuse to start.
     """
     git_dir = _resolve_git_dir(project_root)
     if git_dir is None:
@@ -476,7 +476,7 @@ def _has_user_uncommitted_changes(project_root: Path) -> bool:
     """True iff the user's working tree has tracked changes or untracked
     files that they themselves authored.
 
-    Used by the robust strategy to decide whether a pre-merge stash is
+    Used by the fast strategy to decide whether a pre-merge stash is
     needed. Called BEFORE acquiring the merge lock so that SE3's own
     runtime files (e.g. the lock file) — which we are about to write —
     don't count as "user WIP". In production these paths are gitignored
@@ -502,11 +502,11 @@ def _has_user_uncommitted_changes(project_root: Path) -> bool:
     return False
 
 
-def _robust_stash_dirty(
+def _fast_stash_dirty(
     project_root: Path,
     audit_messages: list[str],
 ) -> Optional[str]:
-    """Stash any dirty working-tree state under the robust strategy.
+    """Stash any dirty working-tree state under the fast strategy.
 
     Returns the stash label string when something was actually stashed,
     or ``None`` if the tree was already clean (this should not happen
@@ -517,7 +517,7 @@ def _robust_stash_dirty(
     """
     import time
 
-    label = f"se3-pre-robust-merge-{int(time.time())}"
+    label = f"se3-pre-fast-merge-{int(time.time())}"
     stash = _run_git(
         project_root,
         "stash", "push", "--include-untracked",
@@ -526,7 +526,7 @@ def _robust_stash_dirty(
     )
     if stash.returncode != 0:
         logger.warning(
-            "Robust auto-stash failed (rc=%s): %s",
+            "Fast auto-stash failed (rc=%s): %s",
             stash.returncode,
             (stash.stderr or stash.stdout or "").strip(),
         )
@@ -540,22 +540,22 @@ def _robust_stash_dirty(
         return None
 
     audit_messages.append(
-        f"Auto-stashed dirty working tree before robust merge "
+        f"Auto-stashed dirty working tree before fast merge "
         f"(label: {label}). Will pop after merge."
     )
     render_text(
         f"Auto-stashed dirty working tree (label: {label}).",
-        title="Robust Merge: Pre-Stash",
+        title="Fast Merge: Pre-Stash",
     )
     return label
 
 
-def _robust_stash_pop(
+def _fast_stash_pop(
     project_root: Path,
     stash_label: str,
     audit_messages: list[str],
 ) -> None:
-    """Pop the robust pre-merge stash, resolving conflicts deterministically.
+    """Pop the fast pre-merge stash, resolving conflicts deterministically.
 
     Steps:
       1. ``git stash pop`` (no --index; merge-style application).
@@ -604,21 +604,21 @@ def _robust_stash_pop(
     drop = _run_git(project_root, "stash", "drop", check=False)
     if drop.returncode != 0:
         logger.warning(
-            "Robust stash drop failed after pop conflict (rc=%s): %s",
+            "Fast stash drop failed after pop conflict (rc=%s): %s",
             drop.returncode,
             (drop.stderr or drop.stdout or "").strip(),
         )
 
     msg = (
-        f"Robust stash-pop conflict resolved via take-ours "
+        f"Fast stash-pop conflict resolved via take-ours "
         f"(label: {stash_label}; {len(affected)} affected file(s))."
     )
     audit_messages.append(msg)
-    render_text(msg, title="Robust Merge: Stash-Pop Fallback")
+    render_text(msg, title="Fast Merge: Stash-Pop Fallback")
 
     if affected:
         description = (
-            f"Robust strategy auto-stashed dirty working tree "
+            f"Fast strategy auto-stashed dirty working tree "
             f"({stash_label}) before merge; on pop, conflicts/"
             f"collisions were resolved by keeping the merged (HEAD) "
             f"version.\n\nAffected files:\n  - "
@@ -626,7 +626,7 @@ def _robust_stash_pop(
         )
     else:
         description = (
-            f"Robust strategy auto-stashed dirty working tree "
+            f"Fast strategy auto-stashed dirty working tree "
             f"({stash_label}) and pop failed with no detectable "
             f"conflicts. Stash has been dropped.\n\n"
             f"git output:\n{pop.stdout}\n{pop.stderr}"
@@ -642,7 +642,7 @@ def _robust_stash_pop(
         )
     except Exception as exc:
         logger.warning(
-            "Failed to file robust stash-pop audit issue: %s", exc,
+            "Failed to file fast stash-pop audit issue: %s", exc,
         )
 
 
@@ -682,11 +682,11 @@ def run_merge(
         return 1
 
     # Validate working tree is clean — non-fast strategies refuse to
-    # merge a dirty tree. The fast strategy (which inherits the legacy
-    # robust stash behavior) auto-stashes tracked + untracked changes
-    # inside the merge lock below, restoring them after the orchestrator
-    # returns. The in-progress git marker check ALWAYS applies — we
-    # never want to layer a merge on top of an unfinished one.
+    # merge a dirty tree. The fast strategy auto-stashes tracked +
+    # untracked changes inside the merge lock below, restoring them
+    # after the orchestrator returns. The in-progress git marker check
+    # ALWAYS applies — we never want to layer a merge on top of an
+    # unfinished one.
     if strategy != "fast":
         if not _is_working_tree_clean(project_root):
             render_text(
@@ -780,7 +780,7 @@ def run_merge(
             # post-merge state.
             stash_label: Optional[str] = None
             if needs_stash_under_fast:
-                stash_label = _robust_stash_dirty(
+                stash_label = _fast_stash_dirty(
                     project_root, stash_audit_messages,
                 )
 
@@ -801,13 +801,13 @@ def run_merge(
                 report = orchestrator.execute(branches)
             finally:
                 # Always attempt to pop the stash, even on orchestrator
-                # exception, so a robust run never leaves a dangling stash
-                # entry for the operator to clean up. ``_robust_stash_pop``
+                # exception, so a fast run never leaves a dangling stash
+                # entry for the operator to clean up. ``_fast_stash_pop``
                 # itself is best-effort — failures surface as audit
                 # messages in ``stash_audit_messages`` and via the issue
                 # tracker; they do not raise.
                 if stash_label is not None:
-                    _robust_stash_pop(
+                    _fast_stash_pop(
                         project_root, stash_label, stash_audit_messages,
                     )
     except MergeLockBusy as exc:
@@ -863,22 +863,6 @@ def run_merge(
         if report.version_aggregation_error:
             lines.append("")
             lines.append(f"WARNING: Version aggregation failed: {report.version_aggregation_error}")
-        if getattr(report, "robust_audit_issues", None):
-            lines.append("")
-            lines.append(
-                f"WARNING: {len(report.robust_audit_issues)} take-theirs "
-                f"fallback issue(s) filed in se3/issues/open/:"
-            )
-            for iid in report.robust_audit_issues:
-                lines.append(f"  - {iid}")
-        if getattr(report, "guardrail_audit_issues", None):
-            lines.append("")
-            lines.append(
-                f"WARNING: {len(report.guardrail_audit_issues)} guardrail "
-                f"violation issue(s) filed in se3/issues/open/:"
-            )
-            for iid in report.guardrail_audit_issues:
-                lines.append(f"  - {iid}")
         _append_runtime_sync_lines(lines, report)
         if report.cleanup_report:
             cr = report.cleanup_report
