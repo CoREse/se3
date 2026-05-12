@@ -734,7 +734,6 @@ def _display_discovery_message(
     """
     from rich.console import Group
     from rich.markdown import Markdown
-    from rich.panel import Panel
     from rich.text import Text
     from ..display import get_console
 
@@ -788,12 +787,9 @@ def _display_discovery_message(
         renderables.append(Text(""))
 
     console = get_console()
-    panel = Panel(
-        Group(*renderables),
-        title="Discovery",
-        border_style="blue",
-        expand=True,
-    )
-    console.print(panel)
+    console.print("[bold blue]## Discovery[/bold blue]")
+    console.print("")
+    console.print(Group(*renderables))
+    console.print("")
 
 

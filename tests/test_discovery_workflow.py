@@ -1284,9 +1284,11 @@ class TestDisplayDiscoveryMessageWithNarrative:
         raw = "Additional narrative text.\n\n```json\n{\"mode\": \"question\"}\n```"
         _display_discovery_message("content", None, questions=None, raw_result_text=raw)
 
-        mock_console.return_value.print.assert_called_once()
-        panel = mock_console.return_value.print.call_args[0][0]
-        group = panel.renderable
+        # Heading + blank + Group + blank = 4 prints
+        assert mock_console.return_value.print.call_count == 4
+        heading = mock_console.return_value.print.call_args_list[0][0][0]
+        assert "## Discovery" in heading
+        group = mock_console.return_value.print.call_args_list[2][0][0]
         assert isinstance(group, Group)
         # First renderable should be the narrative Markdown
         assert isinstance(group.renderables[0], Markdown)
@@ -1300,9 +1302,8 @@ class TestDisplayDiscoveryMessageWithNarrative:
 
         _display_discovery_message("Hello", None, questions=None, raw_result_text=None)
 
-        mock_console.return_value.print.assert_called_once()
-        panel = mock_console.return_value.print.call_args[0][0]
-        group = panel.renderable
+        assert mock_console.return_value.print.call_count == 4
+        group = mock_console.return_value.print.call_args_list[2][0][0]
         assert isinstance(group, Group)
         # First renderable should be Markdown("Hello"), no extra narrative
         assert isinstance(group.renderables[0], Markdown)
@@ -1317,9 +1318,8 @@ class TestDisplayDiscoveryMessageWithNarrative:
         raw = '{"mode": "question", "content": "Hello"}'
         _display_discovery_message("Hello", None, questions=None, raw_result_text=raw)
 
-        mock_console.return_value.print.assert_called_once()
-        panel = mock_console.return_value.print.call_args[0][0]
-        group = panel.renderable
+        assert mock_console.return_value.print.call_count == 4
+        group = mock_console.return_value.print.call_args_list[2][0][0]
         assert isinstance(group, Group)
         # First renderable should be Markdown("Hello"), no narrative prefix
         assert isinstance(group.renderables[0], Markdown)
