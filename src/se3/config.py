@@ -2382,7 +2382,10 @@ class MergeConfig:
     """Merge command configuration loaded from se3.yaml merge: section."""
 
     strategy: str = "robust"
-    delete_merged_default: bool = False
+    # Default flipped to True in 4.12.x: `se3 merge` now deletes merged
+    # branches (and archives their worktrees) by default. Pass
+    # `--no-delete-merged` on the command line to opt out.
+    delete_merged_default: bool = True
     strict_runtime_sync: bool = False
 
     @classmethod
@@ -2399,7 +2402,7 @@ class MergeConfig:
         return cls(
             strategy=strategy,
             delete_merged_default=_coerce_bool(
-                data.get("delete_merged_default", False), default=False,
+                data.get("delete_merged_default", True), default=True,
             ),
             strict_runtime_sync=_coerce_bool(
                 data.get("strict_runtime_sync", False), default=False,

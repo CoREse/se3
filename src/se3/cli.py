@@ -482,8 +482,8 @@ def sync_respond_cmd(
 def merge_cmd(
     branches: list[str] = typer.Argument(None, help="Branches to merge into current branch (in order)"),
     strategy: str = typer.Option(None, "--strategy", "-s", help="Conflict resolution strategy: robust (default), default, strict, or fast"),
-    delete_merged: bool = typer.Option(None, "--delete-merged", "-d", help="Delete merged branches and their worktrees after successful merge"),
-    no_delete_merged: bool = typer.Option(False, "--no-delete-merged", help="Do not delete merged branches (overrides config)"),
+    delete_merged: bool = typer.Option(None, "--delete-merged", "-d", help="Delete merged branches and archive their worktrees (default: enabled; use --no-delete-merged to disable)"),
+    no_delete_merged: bool = typer.Option(False, "--no-delete-merged", help="Do not delete merged branches (overrides config and the new default-on behaviour)"),
 ):
     """Merge one or more branches sequentially into the current branch.
 

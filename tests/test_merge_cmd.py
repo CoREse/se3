@@ -219,7 +219,8 @@ class TestMergeConfig:
 
         config = MergeConfig.load(tmp_path)
         assert config.strategy == "robust"
-        assert config.delete_merged_default is False
+        # Default flipped in 4.12.x: delete-merged is on by default.
+        assert config.delete_merged_default is True
         assert config.strict_runtime_sync is False
 
     def test_merge_config_strict_runtime_sync_true(self, tmp_path: Path) -> None:
@@ -524,6 +525,27 @@ class TestMergeDeleteMergedTristate:
         captured = self._run_cli_tristate(tmp_path, monkeypatch, ["--delete-merged"])
         assert captured["exit_code"] == 0
         assert captured["delete_merged"] is True
+
+    def test_no_config_no_flag_defaults_to_true(self, tmp_path: Path, monkeypatch) -> None:
+        """Regression for the default flip: absent se3.yaml and absent CLI
+        flag, ``se3 merge`` MUST delete merged branches by default.
+        """
+        # Intentionally write no se3.yaml — MergeConfig.load() falls back
+        # to the dataclass default.
+        captured = self._run_cli_tristate(tmp_path, monkeypatch, [])
+        assert captured["exit_code"] == 0, captured.get("output")
+        assert captured["delete_merged"] is True
+
+    def test_no_config_no_delete_flag_overrides_default(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Regression: --no-delete-merged still wins even after the
+        default flip (no se3.yaml present)."""
+        captured = self._run_cli_tristate(
+            tmp_path, monkeypatch, ["--no-delete-merged"],
+        )
+        assert captured["exit_code"] == 0
+        assert captured["delete_merged"] is False
 
 
 class TestMergeVersionAggregationWarning:

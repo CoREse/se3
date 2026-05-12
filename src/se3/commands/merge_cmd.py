@@ -649,7 +649,7 @@ def _robust_stash_pop(
 def run_merge(
     branches: list[str],
     strategy: str = "robust",
-    delete_merged: bool = False,
+    delete_merged: bool = True,
     strict_runtime_sync: bool = False,
     project_root: Optional[Path] = None,
 ) -> int:
