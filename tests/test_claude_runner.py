@@ -20,7 +20,7 @@ import pytest
 import sys
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from se3.config import load_claude_commands
+from se3.config import load_claude_commands, load_claude_subprocess_config
 from se3.claude_runner import (
     ClaudeCodeRunner,
     ClaudeRunner,
@@ -28,6 +28,18 @@ from se3.claude_runner import (
     _MAX_ARG_BYTES,
 )
 from se3.agent_runner import AgentRunner, InfraErrorType
+
+
+def _argv_after_skip_perms(argv):
+    """Return the slice of argv immediately following ``--dangerously-skip-permissions``.
+
+    Used by tests to assert the presence and position of ``--setting-sources``
+    without hard-coding numeric indexes — the runner is free to insert other
+    flags before/after this pair so long as the pair stays adjacent.
+    """
+    assert "--dangerously-skip-permissions" in argv, argv
+    idx = argv.index("--dangerously-skip-permissions")
+    return argv[idx + 1:]
 
 
 # =============================================================================
@@ -533,3 +545,154 @@ class TestStdinLifecycle:
         with patch("subprocess.Popen", side_effect=mock_popen_ctor):
             runner.popen(["-p", "small"], cwd=tmp_path, stdin=subprocess.DEVNULL)
         assert captured_kwargs.get("stdin") == subprocess.DEVNULL
+
+
+# =============================================================================
+# Setting Sources Isolation (--setting-sources)
+# =============================================================================
+
+class TestClaudeSubprocessSettingSources:
+    """SE3-spawned Claude subprocesses MUST always pass ``--setting-sources``
+    so a downstream project's ``.claude/settings.json`` ``permissions.deny``
+    cannot lock the SE3 worker out of its own tools.
+
+    Default is ``user``; explicit configuration via
+    ``claude_subprocess.setting_sources`` in ``se3.yaml`` can opt back into
+    project/local sources.  These tests cover the three argv-emission sites
+    (``run``, ``popen``, ``run_with_monitor``) plus configuration loading.
+    """
+
+    def test_run_default_argv_contains_setting_sources_user(self):
+        runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            runner.run(["-p", "hi"])
+        argv = mock_run.call_args[0][0]
+        tail = _argv_after_skip_perms(argv)
+        assert tail[0] == "--setting-sources"
+        assert tail[1] == "user"
+
+    def test_popen_default_argv_contains_setting_sources_user(self):
+        runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            runner.popen(["-p", "hi"])
+        argv = mock_popen.call_args[0][0]
+        tail = _argv_after_skip_perms(argv)
+        assert tail[0] == "--setting-sources"
+        assert tail[1] == "user"
+
+    def test_run_with_monitor_default_argv_contains_setting_sources_user(self, tmp_path):
+        """``run_with_monitor`` builds argv before delegating to the internal
+        monitor loop.  Patch ``_run_single_with_monitor`` so we can capture
+        the constructed ``full_cmd`` without spinning up a real subprocess."""
+        from se3.claude_runner import _SingleRunResult
+
+        runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
+        captured = {}
+
+        def fake_monitor(self, *, full_cmd, **_kwargs):
+            captured["full_cmd"] = list(full_cmd)
+            return _SingleRunResult(
+                returncode=0, output="", success=True, should_retry=False,
+            )
+
+        with patch.object(
+            ClaudeCodeRunner, "_run_single_with_monitor", autospec=True,
+            side_effect=fake_monitor,
+        ):
+            runner.run_with_monitor(["-p", "hi"], cwd=tmp_path)
+
+        argv = captured["full_cmd"]
+        assert argv[0] == "claude-a"
+        tail = _argv_after_skip_perms(argv)
+        assert tail[0] == "--setting-sources"
+        assert tail[1] == "user"
+
+    def test_explicit_setting_sources_user_project(self):
+        runner = ClaudeCodeRunner(
+            command={"cmd": "claude-a", "priority": 10},
+            setting_sources=["user", "project"],
+        )
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            runner.run(["-p", "hi"])
+        argv = mock_run.call_args[0][0]
+        tail = _argv_after_skip_perms(argv)
+        assert tail[0] == "--setting-sources"
+        assert tail[1] == "user,project"
+
+    def test_project_settings_json_does_not_leak_into_argv(self, tmp_path):
+        """A target project's ``.claude/settings.json`` (with deny rules) must
+        NOT influence the SE3 subprocess argv: the runner pulls its sources
+        from ``se3.yaml``'s ``claude_subprocess.setting_sources``, not from
+        the target project's Claude settings file.
+        """
+        # Simulate a downstream project that denies core tools for its own
+        # verifier sub-LLMs.  SE3 must not honour these for its own children.
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        (claude_dir / "settings.json").write_text(
+            '{"permissions": {"deny": ["Read", "Write", "Edit", "Bash"]}}',
+            encoding="utf-8",
+        )
+        # No se3.yaml present → defaults apply.
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            runner = ClaudeCodeRunner(
+                project_root=tmp_path,
+                command={"cmd": "claude-a", "priority": 10},
+            )
+        assert runner.setting_sources == ["user"]
+
+        mock_result = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="", stderr=""
+        )
+        with patch("subprocess.run", return_value=mock_result) as mock_run:
+            runner.run(["-p", "hi"], cwd=tmp_path)
+
+        argv = mock_run.call_args[0][0]
+        tail = _argv_after_skip_perms(argv)
+        assert tail[0] == "--setting-sources"
+        assert tail[1] == "user"
+        # The target project's settings file must not appear anywhere in
+        # the argv — SE3 never references it.
+        assert not any("settings.json" in a for a in argv)
+
+    def test_yaml_setting_sources_loaded_into_runner(self, tmp_path):
+        """``claude_subprocess.setting_sources: [user, project]`` in
+        ``se3.yaml`` is loaded by the Runner constructor when
+        ``setting_sources`` isn't passed explicitly."""
+        (tmp_path / "se3.yaml").write_text(
+            "claude_subprocess:\n  setting_sources: [user, project]\n",
+            encoding="utf-8",
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            runner = ClaudeCodeRunner(
+                project_root=tmp_path,
+                command={"cmd": "claude-a", "priority": 10},
+            )
+        assert runner.setting_sources == ["user", "project"]
+
+        mock_proc = MagicMock(spec=subprocess.Popen)
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+            runner.popen(["-p", "hi"])
+        argv = mock_popen.call_args[0][0]
+        tail = _argv_after_skip_perms(argv)
+        assert tail[0] == "--setting-sources"
+        assert tail[1] == "user,project"
+
+    def test_empty_list_setting_sources_fails_fast(self, tmp_path):
+        """``claude_subprocess.setting_sources: []`` is a config error —
+        the loader raises rather than silently producing argv with an
+        empty ``--setting-sources`` value."""
+        (tmp_path / "se3.yaml").write_text(
+            "claude_subprocess:\n  setting_sources: []\n",
+            encoding="utf-8",
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            with pytest.raises(ValueError, match="setting_sources"):
+                load_claude_subprocess_config(tmp_path)
