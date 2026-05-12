@@ -306,6 +306,17 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
     # Used after all paths to get ground-truth files_changed via git diff.
     baseline_hash = _get_head_hash(project_root)
 
+    # Record the project version before implement runs. version_analyze
+    # uses this as the authoritative current_version so that any version
+    # bumps that slipped into implement commits (worktree path) are
+    # discounted. See se3-versioning version_analyze requirements.
+    pre_session_version = _read_pre_session_version(project_root)
+    step.outputs["pre_session_version"] = pre_session_version
+    # Default empty; only the DAG-parallel path that merges commits back
+    # to the main branch populates this. Other paths leave changes in the
+    # working tree, so there are no in-session commits to discount.
+    step.outputs["session_commits"] = []
+
     # Format design section (shared across paths)
     design_section = ""
     if design_doc:
@@ -543,6 +554,9 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
                             "implemented_groups": list(completed_groups_dag),
                         },
                     )
+                    step.outputs["session_commits"] = _collect_session_commits(
+                        project_root, baseline_hash,
+                    )
                     _resolve_files_changed(step, project_root, baseline_hash)
                     return result
                 prior_outputs = {
@@ -568,6 +582,9 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
             injection=injection,
             retry_count=retry_count,
             prior_outputs=prior_outputs,
+        )
+        step.outputs["session_commits"] = _collect_session_commits(
+            project_root, baseline_hash,
         )
         _resolve_files_changed(step, project_root, baseline_hash)
         return result
@@ -2161,6 +2178,108 @@ def _get_head_hash(project_root: Path) -> str | None:
     if result.returncode == 0:
         return result.stdout.strip()
     return None
+
+
+def _read_pre_session_version(project_root: Path) -> str | None:
+    """Read the project version before implement runs.
+
+    Detects the project's version file via VersionBumper and reads the
+    current version. Returns None on any failure (missing file, parse
+    error, etc.) so that implement is never blocked by version detection
+    issues — the value is purely informational for version_analyze.
+    """
+    try:
+        from ...config import load_version_config
+        from ..version_bumper import VersionBumper
+
+        config = load_version_config(project_root)
+        if not getattr(config, "enabled", True):
+            return None
+        bumper = VersionBumper(config)
+        version_file = bumper.detect_version_file(project_root)
+        if version_file is None:
+            return None
+        return bumper.read_version(version_file)
+    except Exception:
+        logger.debug("Could not read pre_session_version", exc_info=True)
+        return None
+
+
+def _collect_session_commits(
+    project_root: Path, baseline_hash: str | None,
+) -> list[dict]:
+    """Collect commits introduced on HEAD since ``baseline_hash``.
+
+    Excludes the baseline commit itself and merge commits (which are noise
+    when assessing what implement actually changed). Each returned entry is
+    a dict with keys ``sha``, ``subject``, and ``files`` (list of str).
+
+    Returns an empty list when:
+    - ``baseline_hash`` is None (empty repo or unknown baseline)
+    - no new commits exist between baseline and HEAD
+    - any git command fails (logged at debug level)
+    """
+    if not baseline_hash:
+        return []
+
+    try:
+        log_result = _run_git(
+            project_root,
+            "log",
+            "--no-merges",
+            f"{baseline_hash}..HEAD",
+            "--pretty=format:%H%x00%s",
+            check=False,
+        )
+    except Exception:
+        logger.debug("git log for session commits failed", exc_info=True)
+        return []
+
+    if log_result.returncode != 0:
+        logger.debug(
+            "git log baseline..HEAD returned %d: %s",
+            log_result.returncode, log_result.stderr.strip(),
+        )
+        return []
+
+    raw = log_result.stdout.strip()
+    if not raw:
+        return []
+
+    commits: list[dict] = []
+    for line in raw.splitlines():
+        if "\x00" not in line:
+            continue
+        sha, subject = line.split("\x00", 1)
+        sha = sha.strip()
+        if not sha:
+            continue
+        files: list[str] = []
+        try:
+            files_result = _run_git(
+                project_root,
+                "diff-tree",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                sha,
+                check=False,
+            )
+            if files_result.returncode == 0 and files_result.stdout.strip():
+                files = [
+                    f for f in files_result.stdout.strip().splitlines() if f
+                ]
+        except Exception:
+            logger.debug(
+                "git diff-tree failed for %s", sha, exc_info=True,
+            )
+            files = []
+        commits.append({
+            "sha": sha,
+            "subject": subject,
+            "files": files,
+        })
+    return commits
 
 
 def _resolve_files_changed(step: Step, project_root: Path, baseline_hash: str | None) -> None:
