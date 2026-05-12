@@ -211,11 +211,11 @@ se3 run --discover "我想做一个用户管理功能"
 
 #### Discovery Message Display Rendering
 
-The `_display_discovery_message()` function SHALL render LLM-generated content fields (`content` and `refined_description`) as markdown using `rich.markdown.Markdown`, while structural UI elements (section titles, numbered question lists, confirmation prompts) use Rich `Text` with appropriate styling. Multiple renderables are combined via `rich.console.Group` and displayed inside a Rich `Panel` titled "Discovery".
+The `_display_discovery_message()` function SHALL render LLM-generated content fields (`content` and `refined_description`) as markdown using `rich.markdown.Markdown`, while structural UI elements (section titles, numbered question lists, confirmation prompts) use Rich `Text` with appropriate styling. Multiple renderables are combined via `rich.console.Group` and printed under a left-aligned bold blue markdown-style heading `## Discovery` (rendered via `[bold blue]## Discovery[/bold blue]`), followed by a trailing blank line. This replaces the previous outer `Panel(title="Discovery", border_style="blue")` framing — no border/box is drawn to the terminal's left and right edges, while the original blue accent color and "Discovery" label are preserved as the heading.
 
 **Narrative prefix from raw LLM output:**
 
-When `raw_result_text` is provided (the raw LLM output from which JSON was extracted), `_display_discovery_message()` SHALL strip both (a) fenced JSON code blocks and (b) any trailing bare JSON object that follows the last narrative line. JSON detection for both paths SHALL use the same lenient parse semantics as `parse_json_response` (full repair chain: `json.loads` → `_repair_json` → `_repair_unescaped_quotes` → combined), exposed via the shared helpers `looks_like_json` (fenced blocks; any JSON value type, including arrays and scalars) and `looks_like_json_object` (trailing bare JSON; dict-only, matching `parse_json_response`'s dict-only return contract). Strict `json.loads` MUST NOT be used for this detection: LLM responses commonly contain unescaped ASCII double quotes inside JSON string values (or analogous quirks) that the repair chain handles but strict parsing rejects — without this alignment, the same fenced block can be successfully extracted as `content` while simultaneously leaking back into the narrative prefix, causing the same data to render twice in the Panel (once formatted, once as a raw fenced block). If the remaining narrative text is non-empty after stripping whitespace, it SHALL be rendered as `rich.markdown.Markdown` and placed before all other renderables in the Panel, separated by a blank line. If the remaining text is empty (e.g., Phase 2 pure-JSON output), the Panel renders exactly as before, with no additional prefix. This rule applies uniformly across all five rendering modes.
+When `raw_result_text` is provided (the raw LLM output from which JSON was extracted), `_display_discovery_message()` SHALL strip both (a) fenced JSON code blocks and (b) any trailing bare JSON object that follows the last narrative line. JSON detection for both paths SHALL use the same lenient parse semantics as `parse_json_response` (full repair chain: `json.loads` → `_repair_json` → `_repair_unescaped_quotes` → combined), exposed via the shared helpers `looks_like_json` (fenced blocks; any JSON value type, including arrays and scalars) and `looks_like_json_object` (trailing bare JSON; dict-only, matching `parse_json_response`'s dict-only return contract). Strict `json.loads` MUST NOT be used for this detection: LLM responses commonly contain unescaped ASCII double quotes inside JSON string values (or analogous quirks) that the repair chain handles but strict parsing rejects — without this alignment, the same fenced block can be successfully extracted as `content` while simultaneously leaking back into the narrative prefix, causing the same data to render twice under the Discovery heading (once formatted, once as a raw fenced block). If the remaining narrative text is non-empty after stripping whitespace, it SHALL be rendered as `rich.markdown.Markdown` and placed before all other renderables in the Group printed under the heading, separated by a blank line. If the remaining text is empty (e.g., Phase 2 pure-JSON output), the rendering is identical to the no-narrative case, with no additional prefix. This rule applies uniformly across all five rendering modes.
 
 **Rendering rules by mode:**
 
@@ -229,41 +229,41 @@ When `raw_result_text` is provided (the raw LLM output from which JSON was extra
 
 **Confirmation phase content display:**
 
-When the discovery step enters the confirmation phase (`is_confirmation=True`), `_display_discovery_message()` SHALL display the full LLM analysis content (`content` field) followed by the `refined_description`, both rendered as markdown. This ensures users see the complete LLM analysis (reasoning, summaries, context) alongside the final proposed description before making their confirmation decision. The confirmation Panel SHALL include a styled prompt hint at the bottom, outside the markdown content area, rendered as Rich `Text` (not markdown). This hint is the only mechanism by which the user learns the `1` affordance — without it, the rendering spec is silent on input expectations. **Non-normative:** The exact hint wording is non-normative; only the `1` affordance is normative. Implementations MAY localize or reword the hint freely (e.g., `输入 1 确认并继续，输入其它内容继续探索；直接回车重新显示本提示`), provided the `1` confirmation key is communicated to the user and the empty-input no-op behavior is preserved.
+When the discovery step enters the confirmation phase (`is_confirmation=True`), `_display_discovery_message()` SHALL display the full LLM analysis content (`content` field) followed by the `refined_description`, both rendered as markdown. This ensures users see the complete LLM analysis (reasoning, summaries, context) alongside the final proposed description before making their confirmation decision. The confirmation rendering SHALL include a styled prompt hint at the bottom of the Group printed under the `## Discovery` heading, outside the markdown content area, rendered as Rich `Text` (not markdown). This hint is the only mechanism by which the user learns the `1` affordance — without it, the rendering spec is silent on input expectations. **Non-normative:** The exact hint wording is non-normative; only the `1` affordance is normative. Implementations MAY localize or reword the hint freely (e.g., `输入 1 确认并继续，输入其它内容继续探索；直接回车重新显示本提示`), provided the `1` confirmation key is communicated to the user and the empty-input no-op behavior is preserved.
 
 ##### Scenario: Discovery message renders LLM content as markdown
 - **GIVEN** the discovery step receives LLM response with `content` and `refined_description` fields containing markdown syntax (headings, lists, bold, etc.)
 - **WHEN** `_display_discovery_message()` renders the message
 - **THEN** `content` and `refined_description` are rendered via `rich.markdown.Markdown`
 - **AND** structural elements (titles, numbered questions, confirmation prompts) use Rich `Text` with styling
-- **AND** all renderables are combined via `rich.console.Group` into a single `Panel`
+- **AND** all renderables are combined via `rich.console.Group` and printed under a bold blue markdown-style heading `## Discovery`, with no outer `Panel` border
 
 ##### Scenario: Confirmation phase shows full LLM analysis content
 - **GIVEN** LLM enters confirmation mode with both `content` (analysis text) and `refined_description`
 - **WHEN** the confirmation display is rendered
 - **THEN** the full `content` from the LLM response is displayed as markdown
 - **AND** the `refined_description` is displayed as markdown below it
-- **AND** a styled prompt hint is rendered at the bottom of the Panel as Rich `Text` (not markdown), communicating the `1` confirmation affordance
+- **AND** a styled prompt hint is rendered at the bottom of the Group (under the `## Discovery` heading) as Rich `Text` (not markdown), communicating the `1` confirmation affordance
 - **AND** the user can review the complete analysis before choosing to confirm or continue exploration
 
-##### Scenario: Narrative text from raw LLM output prefixed to Panel
+##### Scenario: Narrative text from raw LLM output prefixed to Discovery rendering
 - **GIVEN** `last_raw_result` contains narrative text outside any JSON code block (e.g., Phase 1 LLM output with analysis followed by a fenced JSON object)
 - **WHEN** `_display_discovery_message()` renders the message with `raw_result_text` provided
-- **THEN** the narrative text (after stripping all JSON code blocks) is rendered as `Markdown` and appears as the first renderable in the Panel
+- **THEN** the narrative text (after stripping all JSON code blocks) is rendered as `Markdown` and appears as the first renderable in the Group printed under the `## Discovery` heading
 - **AND** a blank line separates the narrative prefix from the existing renderables (`content`, `refined_description`, structural elements)
 - **AND** all subsequent renderables follow their existing mode-specific rules unchanged
 
 ##### Scenario: Pure JSON raw output renders unchanged
 - **GIVEN** `last_raw_result` is pure JSON (e.g., Phase 2 output) or empty, so stripping JSON code blocks leaves no remaining text
 - **WHEN** `_display_discovery_message()` renders the message with `raw_result_text` provided
-- **THEN** the Panel renders identically to the behavior before this change, with no additional prefix renderable
+- **THEN** the rendering under the `## Discovery` heading is identical to the behavior before this change, with no additional prefix renderable
 - **AND** the `content` and other fields follow their existing mode-specific rules
 
 ##### Scenario: Fenced JSON with unescaped quotes is stripped (no duplicate display)
 - **GIVEN** `last_raw_result` contains a fenced JSON block whose string values include unescaped ASCII double quotes (e.g., `content` referencing a phrase like `"是否重写..."`) — text that strict `json.loads` rejects but the `parse_json_response` repair chain successfully recovers as a dict
 - **WHEN** `_display_discovery_message()` renders the message with `raw_result_text` provided
 - **THEN** narrative extraction recognizes the fenced block as JSON via the same lenient parse helpers (`looks_like_json` / `looks_like_json_object`) used upstream, and strips it from the narrative prefix
-- **AND** the Panel shows only the formatted `content` once — the raw fenced block does NOT appear alongside it
+- **AND** the rendering under `## Discovery` shows only the formatted `content` once — the raw fenced block does NOT appear alongside it
 - **AND** the same alignment applies to a trailing bare JSON object after the last narrative line
 
 ### Requirement: 状态机驱动流程
@@ -752,7 +752,7 @@ Returns the injection prompt fragment, or an empty string when the step is not i
 #### Scenario: 结构化详细渲染（非 verbose）
 - **WHEN** `render_session_detailed(session, verbose=False)` 被调用
 - **THEN** 返回 Rich renderables 列表
-- **AND** 用户 prompt 按 `segment_prompt()` 分段，每段使用带标题的 Rich Panel 展示
+- **AND** 用户 prompt 按 `segment_prompt()` 分段后整体在一个 `bold blue` 的 markdown heading `## Prompt`（attempt 重试时为 `## Prompt ({attempt_label})`）下展示，段内每个 segment 标题与内容左对齐渲染，不再绘制 Rich `Panel` 边框；assistant response 同样使用 `bold green` heading `## Response`（重试时附加 attempt 标签）+ 内容主体（最终文本 `Markdown` 或 verbose 模式下的 `Text(_render_ndjson_for_human(...))`）+ 末尾空行展示。颜色沿用先前 `border_style` 的语义（prompt → blue，response → green）。
 - **AND** assistant response 仅展示最终 text block（通过 `_extract_final_text()` 提取最后一个 `type: "assistant"` 消息中最后一个 `type: "text"` 内容块）
 - **AND** 若无 text 内容但有 tool 活动，fallback 到 `_render_ndjson_for_human()` 展示 tool 活动摘要
 - **AND** 按 attempt 分组，多次 attempt 分开展示并标注序号
@@ -1600,11 +1600,15 @@ The `implement` step SHALL use a custom renderer that presents structured, human
 
 ### Requirement: Implement Step Task Plan Display
 
-The `implement` step SHALL display a structured task plan panel at the start of execution, before any LLM calls are made, across all execution paths (single-call, LOC-merged single-call, DAG parallel, sequential).
+The `implement` step SHALL display a structured task plan view at the start of execution, before any LLM calls are made, across all execution paths (single-call, LOC-merged single-call, DAG parallel, sequential).
 
-**Panel Contents:**
+**Rendering style:**
 
-The plan is rendered as a Rich `Panel` titled "Implementation Plan" containing up to four sections:
+The plan is rendered under a left-aligned bold-blue markdown-style heading `## Implementation Plan` (built via `Text.from_markup("[bold blue]## Implementation Plan[/bold blue]")`), followed by a blank spacer, the body (a `rich.console.Group` of the sections below), and a trailing blank line. No outer `Panel` border is drawn to the terminal edges. The `task_formatter` module exposes internal helpers `_md_heading(title, color)` and `_heading_group(title, color, *body)` that all other formatter return values (Task Plan, Task Summary, Dependencies, task detail, etc.) share so they remain Group-returning functions — callers continue to `console.print(...)` the returned renderable without changing their contract. Color mapping from the previous `border_style` is preserved per call site (blue/green/cyan as appropriate).
+
+**Body Contents:**
+
+The body (rendered as a `rich.console.Group` under the heading) contains up to four sections:
 
 1. **Strategy Line** — shows the selected execution strategy with a visual icon:
    - `⚡ Single group → single LLM call` — when there is only one task group (with total LOC)
@@ -1636,21 +1640,21 @@ The plan is rendered as a Rich `Panel` titled "Implementation Plan" containing u
 #### Scenario: Task plan displayed before single-group execution
 - **GIVEN** `plan` produced exactly one task group
 - **WHEN** the implement step begins execution
-- **THEN** the task plan panel is displayed with "Single group → single LLM call (N LOC)" strategy
-- **AND** the panel shows the task group and LOC summary before the LLM call starts
+- **THEN** the task plan view is displayed under the `## Implementation Plan` heading with "Single group → single LLM call (N LOC)" strategy
+- **AND** the view shows the task group and LOC summary before the LLM call starts
 
 #### Scenario: Task plan displayed before LOC-merged single-call execution
 - **GIVEN** `plan` produced multiple groups with total LOC ≤ threshold
 - **WHEN** the implement step begins execution
-- **THEN** the task plan panel is displayed with "Single LLM call (N LOC ≤ T threshold)" strategy
-- **AND** the panel shows all task groups and LOC summary before the LLM call starts
+- **THEN** the task plan view is displayed under the `## Implementation Plan` heading with "Single LLM call (N LOC ≤ T threshold)" strategy
+- **AND** the view shows all task groups and LOC summary before the LLM call starts
 
 #### Scenario: Task plan displayed before DAG parallel execution
 - **GIVEN** `plan` produced groups with total LOC > threshold and DAG topology
 - **WHEN** the implement step begins execution
-- **THEN** the task plan panel is displayed with "DAG parallel" strategy
-- **AND** the panel shows group dependencies and per-group LOC estimates
-- **AND** the panel includes an Execution Topology section showing waves, LLM call numbering, and relay/fork/merge annotations
+- **THEN** the task plan view is displayed under the `## Implementation Plan` heading with "DAG parallel" strategy
+- **AND** the view shows group dependencies and per-group LOC estimates
+- **AND** the view includes an Execution Topology section showing waves, LLM call numbering, and relay/fork/merge annotations
 
 #### Scenario: Task plan display failure does not block execution
 - **GIVEN** the task plan rendering raises an exception

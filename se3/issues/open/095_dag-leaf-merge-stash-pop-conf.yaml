@@ -1,0 +1,18 @@
+id: 095
+title: 'DAG leaf merge: stash pop conflict resolved (take-ours) on impl/20260512-020508_d575cd20/G7'
+description: "Flow: 20260512-020508_d575cd20\nBranch: impl/20260512-020508_d575cd20/G7\n\
+  \nAfter successful leaf merge, restoring the pre-merge stash (--include-untracked)\
+  \ conflicted on some paths. Resolved by keeping the merged HEAD version; the stashed\
+  \ pre-merge version was discarded for these paths.\n\nConflict files (kept the merged\
+  \ HEAD version):\n  - tests/engine/formatters/test_task_formatter.py\n  - tests/test_chat_history.py\n\
+  \  - tests/test_discovery_workflow.py"
+status: open
+priority: medium
+scope: in_scope
+type: task
+tags:
+- merge-fallback
+- audit
+- stash-pop
+created_at: '2026-05-12T09:54:25.055276'
+updated_at: '2026-05-12T09:54:25.055276'
