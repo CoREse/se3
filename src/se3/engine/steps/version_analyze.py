@@ -72,9 +72,17 @@ Given a version number MAJOR.MINOR.PATCH, increment the:
 
 {current_version}
 
+**Pre-Session Version (baseline for version analysis):** {pre_session_version}
+
+## Session-Introduced Commits
+
+{session_commits}
+
 ## Instructions
 
-`suggested_version` is the AUTHORITATIVE field — the commit step writes exactly this value to the project version file. `bump_type` is auxiliary, used only for display and commit-message decoration; it does NOT recompute the version. Derive `suggested_version` directly from the current version and the rules above.
+implement 阶段可能已在主分支上提交了若干变更（见 Session-Introduced Commits），其中可能包含对版本文件的修改。请将这些 commit 视为未发生，以 Pre-Session Version 为 current_version 基线计算 suggested_version。
+
+`suggested_version` is the AUTHORITATIVE field — the commit step writes exactly this value to the project version file. `bump_type` is auxiliary, used only for display and commit-message decoration; it does NOT recompute the version. Derive `suggested_version` directly from the Pre-Session Version baseline and the rules above.
 
 When the project-specific rules section above conflicts with the default SemVer 2.0.0 description, the project-specific rules take priority.
 
@@ -169,10 +177,26 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     rules_text = _read_version_rules_file(project_root)
     custom_rules_block = rules_text if rules_text else _NO_CUSTOM_RULES_PLACEHOLDER
 
+    # Pre-session version + session-introduced commits (G3 forwards these
+    # into step.inputs from the implement step). pre_session_version falls
+    # back to the disk-read current_version when absent.
+    pre_session_version = step.inputs.get("pre_session_version")
+    if pre_session_version is None or (
+        isinstance(pre_session_version, str) and not pre_session_version.strip()
+    ):
+        logger.warning(
+            "version_analyze: pre_session_version missing from step.inputs; "
+            "falling back to disk-read current_version=%s",
+            current_version,
+        )
+        pre_session_version = current_version
+    session_commits = step.inputs.get("session_commits") or []
+
     # Format inputs for prompt
     changes_text = _format_changes(changes_made)
     spec_changes_text = _format_spec_changes(spec_changes)
     verification_text = _format_verification(verification_result)
+    session_commits_text = _format_session_commits(session_commits)
 
     prompt = VERSION_ANALYZE_PROMPT.format(
         task_type=task_type,
@@ -181,6 +205,8 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         spec_changes=spec_changes_text,
         verification_result=verification_text,
         current_version=current_version,
+        pre_session_version=pre_session_version,
+        session_commits=session_commits_text,
         custom_rules=custom_rules_block,
     )
 
@@ -446,6 +472,61 @@ def _format_spec_changes(spec_changes: dict[str, Any]) -> str:
         lines.append("")
     
     return "\n".join(lines) if lines else "Spec was checked but no API changes were recorded."
+
+
+_SESSION_COMMITS_RENDER_LIMIT = 50
+_SESSION_COMMITS_FILES_FOLD = 10
+
+
+def _format_session_commits(commits: list[dict[str, Any]] | None) -> str:
+    """Format implement-stage commits introduced into the main branch.
+
+    Renders as a markdown list. Empty list produces an explanatory line so
+    the prompt is unambiguous. Caps rendering at ``_SESSION_COMMITS_RENDER_LIMIT``
+    entries (trailing note explains how many were omitted). Each commit's
+    files list is folded when it exceeds ``_SESSION_COMMITS_FILES_FOLD``.
+
+    Args:
+        commits: List of commit dicts with keys ``sha``, ``subject``, ``files``.
+
+    Returns:
+        Markdown text safe for direct prompt embedding.
+    """
+    if not commits:
+        return "implement 阶段未在主分支留下任何 commit。"
+
+    total = len(commits)
+    limit = _SESSION_COMMITS_RENDER_LIMIT
+    rendered = commits[:limit]
+    omitted = total - len(rendered)
+
+    lines: list[str] = []
+    for commit in rendered:
+        if not isinstance(commit, dict):
+            lines.append(f"- {commit}")
+            continue
+        sha = str(commit.get("sha", "") or "")
+        sha_short = sha[:8] if sha else "(no-sha)"
+        subject = str(commit.get("subject", "") or "").strip() or "(no subject)"
+        lines.append(f"- {sha_short} {subject}")
+
+        files = commit.get("files") or []
+        if not isinstance(files, list):
+            files = []
+        if files:
+            fold = _SESSION_COMMITS_FILES_FOLD
+            if len(files) > fold:
+                shown = files[:fold]
+                more = len(files) - fold
+                files_line = ", ".join(str(f) for f in shown) + f", ... 还有 {more} 个文件未展示"
+            else:
+                files_line = ", ".join(str(f) for f in files)
+            lines.append(f"  files: {files_line}")
+
+    if omitted > 0:
+        lines.append(f"- ... 还有 {omitted} 个未展示")
+
+    return "\n".join(lines)
 
 
 def _format_verification(verification_result: dict[str, Any]) -> str:
