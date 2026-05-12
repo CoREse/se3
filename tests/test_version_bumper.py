@@ -194,3 +194,129 @@ class TestInitializeVersionSystemEdgeCases:
         bumper = VersionBumper(version_config)
         with pytest.raises(FileExistsError):
             bumper.initialize_version_system(temp_dir)
+
+
+# === VersionBumper.set_version() ===
+
+
+class TestSetVersionToml:
+    """set_version writes a fully-formed version verbatim to a TOML version file."""
+
+    def test_set_version_writes_explicit_version_to_pyproject(
+        self, temp_dir: Path, version_config: VersionConfig
+    ):
+        """set_version('2.5.7') on pyproject.toml writes exactly '2.5.7'."""
+        path = temp_dir / "pyproject.toml"
+        path.write_text('[project]\nname = "demo"\nversion = "1.0.0"\n')
+
+        bumper = VersionBumper(version_config)
+        result = bumper.set_version("2.5.7", path=path)
+
+        assert result == "2.5.7"
+        # Reading the file back yields the exact version (no bump computation)
+        assert bumper.read_version(path) == "2.5.7"
+
+    def test_set_version_supports_prerelease_and_build(
+        self, temp_dir: Path, version_config: VersionConfig
+    ):
+        """set_version preserves valid prerelease + build metadata strings."""
+        path = temp_dir / "pyproject.toml"
+        path.write_text('[project]\nname = "demo"\nversion = "1.0.0"\n')
+
+        bumper = VersionBumper(version_config)
+        result = bumper.set_version("1.2.3-alpha.1+build.42", path=path)
+
+        assert result == "1.2.3-alpha.1+build.42"
+        assert bumper.read_version(path) == "1.2.3-alpha.1+build.42"
+
+
+class TestSetVersionJson:
+    """set_version writes a fully-formed version verbatim to a JSON version file."""
+
+    def test_set_version_writes_explicit_version_to_package_json(
+        self, temp_dir: Path, version_config: VersionConfig
+    ):
+        """set_version('3.0.0') on package.json writes exactly '3.0.0'."""
+        path = temp_dir / "package.json"
+        path.write_text('{"name": "demo", "version": "1.2.3"}\n')
+
+        bumper = VersionBumper(version_config)
+        result = bumper.set_version("3.0.0", path=path)
+
+        assert result == "3.0.0"
+        assert bumper.read_version(path) == "3.0.0"
+
+
+class TestSetVersionValidation:
+    """set_version rejects invalid SemVer strings before writing."""
+
+    def test_set_version_rejects_invalid_semver(
+        self, temp_dir: Path, version_config: VersionConfig
+    ):
+        """A non-SemVer string raises ValueError without touching the file."""
+        path = temp_dir / "pyproject.toml"
+        original = '[project]\nname = "demo"\nversion = "1.0.0"\n'
+        path.write_text(original)
+
+        bumper = VersionBumper(version_config)
+        with pytest.raises(ValueError, match="Invalid SemVer"):
+            bumper.set_version("not-a-version", path=path)
+
+        # File on disk is untouched
+        assert path.read_text() == original
+
+    def test_set_version_rejects_empty_string(
+        self, temp_dir: Path, version_config: VersionConfig
+    ):
+        """Empty string raises ValueError."""
+        path = temp_dir / "pyproject.toml"
+        path.write_text('[project]\nname = "demo"\nversion = "1.0.0"\n')
+
+        bumper = VersionBumper(version_config)
+        with pytest.raises(ValueError):
+            bumper.set_version("", path=path)
+
+    def test_set_version_disabled_raises_runtime_error(
+        self, temp_dir: Path
+    ):
+        """When config.enabled is False, set_version raises RuntimeError."""
+        path = temp_dir / "pyproject.toml"
+        path.write_text('[project]\nname = "demo"\nversion = "1.0.0"\n')
+
+        cfg = VersionConfig(enabled=False)
+        cfg.auto_generate_script = False
+        bumper = VersionBumper(cfg)
+        with pytest.raises(RuntimeError, match="disabled"):
+            bumper.set_version("2.0.0", path=path)
+
+
+class TestSetVersionRollback:
+    """set_version captures a backup of the previous version for rollback."""
+
+    def test_set_version_rollback_restores_previous_version(
+        self, temp_dir: Path, version_config: VersionConfig
+    ):
+        """After set_version, calling rollback restores the original value."""
+        path = temp_dir / "pyproject.toml"
+        path.write_text('[project]\nname = "demo"\nversion = "1.0.0"\n')
+
+        bumper = VersionBumper(version_config)
+        bumper.set_version("2.0.0", path=path)
+        assert bumper.read_version(path) == "2.0.0"
+
+        bumper.rollback()
+        assert bumper.read_version(path) == "1.0.0"
+
+    def test_set_version_rollback_works_for_json(
+        self, temp_dir: Path, version_config: VersionConfig
+    ):
+        """Rollback after set_version on a JSON handler restores the original."""
+        path = temp_dir / "package.json"
+        path.write_text('{"name": "demo", "version": "0.9.0"}\n')
+
+        bumper = VersionBumper(version_config)
+        bumper.set_version("1.0.0", path=path)
+        assert bumper.read_version(path) == "1.0.0"
+
+        bumper.rollback()
+        assert bumper.read_version(path) == "0.9.0"
