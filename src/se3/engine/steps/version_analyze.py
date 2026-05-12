@@ -7,10 +7,9 @@ version changes based on actual implementation, not just task type.
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
@@ -18,9 +17,13 @@ from ..models import FlowInstance, Step, StepStatus
 logger = logging.getLogger(__name__)
 
 
-VERSION_ANALYZE_PROMPT = """You are an expert in Semantic Versioning 2.0.0. Analyze the following changes and determine the appropriate version bump type.
+VERSION_RULES_FILE_RELPATH = "se3/version-rules.md"
+VERSION_RULES_MAX_BYTES = 64 * 1024
 
-## Semantic Versioning 2.0.0 Rules
+
+VERSION_ANALYZE_PROMPT = """You are an expert in Semantic Versioning 2.0.0. Analyze the following changes and decide the new version number for this project.
+
+## Default Rules: Semantic Versioning 2.0.0
 
 Given a version number MAJOR.MINOR.PATCH, increment the:
 
@@ -43,6 +46,10 @@ Given a version number MAJOR.MINOR.PATCH, increment the:
    - Internal refactoring with no API changes
    - Documentation fixes
    - Test additions/improvements
+
+## Project-Specific Version Rules
+
+{custom_rules}
 
 ## Task Information
 
@@ -67,22 +74,21 @@ Given a version number MAJOR.MINOR.PATCH, increment the:
 
 ## Instructions
 
-Analyze the changes above and determine:
+`suggested_version` is the AUTHORITATIVE field — the commit step writes exactly this value to the project version file. `bump_type` is auxiliary, used only for display and commit-message decoration; it does NOT recompute the version. Derive `suggested_version` directly from the current version and the rules above.
 
-1. **bump_type**: Which version component should be incremented? ("major", "minor", "patch", or "none")
-   - Focus on API contract changes (spec_changes) as the primary indicator
-   - "major": Breaking API changes, removed parameters/functions, incompatible behavior
-   - "minor": New APIs, new features, backward-compatible additions
-   - "patch": Bug fixes, internal changes, documentation, tests
-   - "none": Truly trivial changes (formatting, comments only)
+When the project-specific rules section above conflicts with the default SemVer 2.0.0 description, the project-specific rules take priority.
 
-2. **reasoning**: Explain your reasoning based on SemVer rules. Reference specific files, API changes, or issues.
+Analyze the changes above and produce:
 
-3. **confidence**: How confident are you? ("high", "medium", or "low")
+1. **suggested_version** (AUTHORITATIVE): The exact new version string (e.g., "1.3.0"). Must be a concrete version number derived from current version + rules. Required.
 
-4. **suggested_version**: What should the new version be? (e.g., "1.3.0")
+2. **bump_type** (auxiliary, for display only): One of "major", "minor", "patch", or "none". Describes the nature of the change; does not have to be a strict mathematical match against `suggested_version` if the project rules allow non-standard transitions.
 
-5. **commit_message**: Write a concise git commit message summary (first line only, max 72 characters).
+3. **reasoning**: Explain your decision, referencing the active rules (default SemVer or project rules) and specific files / API changes / issues.
+
+4. **confidence**: How confident are you? ("high", "medium", or "low")
+
+5. **commit_message**: A concise git commit summary (first line only, max 72 characters).
    - Use imperative mood (e.g., "Add feature" not "Added feature")
    - Start with a verb describing the action
    - Be specific but brief — describe what was done, not what was planned
@@ -92,41 +98,47 @@ Respond in valid JSON format:
 
 ```json
 {{
-  "bump_type": "major|minor|patch|none",
-  "reasoning": "Detailed explanation referencing specific changes and SemVer rules",
-  "confidence": "high|medium|low",
   "suggested_version": "X.Y.Z",
+  "bump_type": "major|minor|patch|none",
+  "reasoning": "Detailed explanation referencing the active rules and specific changes",
+  "confidence": "high|medium|low",
   "commit_message": "Concise imperative commit summary (max 72 chars)"
 }}
 ```
 
 IMPORTANT:
-- API contract changes (spec_changes) are the strongest indicator of major/minor
-- If spec_changes shows "added function" → likely minor; "removed parameter" → likely major
-- If unsure between minor and patch, be conservative and choose patch
-- Use "none" only for truly trivial changes
+- `suggested_version` MUST be present and MUST be a concrete version string — the commit step uses it verbatim.
+- API contract changes (spec_changes) are the strongest indicator under default SemVer rules.
+- Project-specific rules (when given) override the default rules on conflict.
+- If unsure between minor and patch under default rules, be conservative and choose patch.
 """
+
+
+_NO_CUSTOM_RULES_PLACEHOLDER = (
+    "_No project-specific rules file found at `se3/version-rules.md`. "
+    "Use the default Semantic Versioning 2.0.0 rules above._"
+)
 
 
 def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the version analyze step.
-    
-    Uses LLM to analyze the actual changes and determine the appropriate
-    SemVer bump type based on the content of changes, not just task type.
-    
-    Prioritizes spec_changes (API contract changes) as the primary indicator
-    for breaking vs non-breaking changes.
-    
+
+    Uses LLM to decide the new version number based on the actual changes,
+    project-specific version rules (optional), and Semantic Versioning 2.0.0
+    as the default. The LLM-returned ``suggested_version`` is authoritative
+    and the commit step writes it verbatim into the project version file.
+
     Args:
         step: The current step being executed
         flow: The flow instance containing context
-        
+
     Returns:
-        StepStatus.COMPLETED on success, StepStatus.FAILED on error
+        StepStatus.COMPLETED on success, StepStatus.FAILED when the LLM call
+        fails or the response does not include a valid ``suggested_version``.
     """
     task_type = flow.task_type or "feature"
     task_description = step.inputs.get("task_description", flow.task_description) or ""
-    
+
     # Get changes - implement step uses different output names
     changes_made = step.inputs.get("changes_made") or {}
     if not changes_made:
@@ -137,9 +149,9 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
             "files_changed": files_changed,
             "implemented_groups": implemented_groups,
         }
-    
+
     verification_result = step.inputs.get("verification_result", {})
-    
+
     # Get spec changes - handle both dict (legacy) and list (current) formats
     spec_changes_raw = step.inputs.get("updated_specs", {})  # From update_spec step
     if isinstance(spec_changes_raw, list):
@@ -147,16 +159,21 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         spec_changes = {"updated_specs": spec_changes_raw}
     else:
         spec_changes = spec_changes_raw
-    
+
     # Get current version if available
     current_version = _get_current_version(flow)
-    
+
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+
+    # Read optional project-specific version rules
+    rules_text = _read_version_rules_file(project_root)
+    custom_rules_block = rules_text if rules_text else _NO_CUSTOM_RULES_PLACEHOLDER
+
     # Format inputs for prompt
     changes_text = _format_changes(changes_made)
     spec_changes_text = _format_spec_changes(spec_changes)
     verification_text = _format_verification(verification_result)
-    
-    # Build prompt
+
     prompt = VERSION_ANALYZE_PROMPT.format(
         task_type=task_type,
         task_description=task_description,
@@ -164,66 +181,123 @@ def version_analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         spec_changes=spec_changes_text,
         verification_result=verification_text,
         current_version=current_version,
+        custom_rules=custom_rules_block,
     )
-    
+
     # Append issue discovery injection if applicable
     from ..context_builder import get_issue_discovery_injection
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     injection = get_issue_discovery_injection("version_analyze", project_root)
     if injection:
         prompt += injection
 
-    logger.info("Analyzing changes to determine version bump type...")
+    logger.info("Analyzing changes to determine new project version...")
+
+    retry_count = step.inputs.get("retry_count", 0)
+    caller = LLMCaller(
+        project_root,
+        flow_id=flow.flow_id,
+        step_id=step.step_id,
+        step_type=step.step_type.value,
+        external_attempt=retry_count,
+        fix_iteration=step.inputs.get("fix_iteration", 0),
+    )
 
     try:
-        # Call LLM for version analysis using EXTRACT mode
-        # This mode requests JSON but uses LLM extraction on parse failure (no retry)
-        retry_count = step.inputs.get("retry_count", 0)
-        caller = LLMCaller(
-            project_root,
-            flow_id=flow.flow_id,
-            step_id=step.step_id,
-            step_type=step.step_type.value,
-            external_attempt=retry_count,
-            fix_iteration=step.inputs.get("fix_iteration", 0),
-        )
         response = caller.call(
             prompt=prompt,
             json_mode="two_phase",
         )
-        
-        # Parse the response
         result = _parse_response(response)
-        
-        # Store outputs
-        step.outputs["bump_type"] = result["bump_type"]
-        step.outputs["reasoning"] = result["reasoning"]
-        step.outputs["confidence"] = result["confidence"]
-        step.outputs["suggested_version"] = result["suggested_version"]
-        step.outputs["current_version"] = current_version
-        step.outputs["commit_message"] = result.get("commit_message") or _fallback_commit_message(task_type, task_description)
-
-        # Log the decision
-        logger.info(
-            f"Version analysis complete: bump_type={result['bump_type']}, "
-            f"confidence={result['confidence']}, "
-            f"version={current_version} -> {result['suggested_version']}"
-        )
-
-        return StepStatus.COMPLETED
-        
     except Exception as e:
         logger.exception("Version analysis failed")
-        # Use fallback based on task type
-        fallback_bump = _get_fallback_bump_type(task_type)
-        step.outputs["bump_type"] = fallback_bump
-        step.outputs["reasoning"] = f"LLM analysis failed ({e}), using fallback based on task type"
-        step.outputs["confidence"] = "low"
-        step.outputs["suggested_version"] = "auto"  # Will be calculated by commit step
-        step.outputs["commit_message"] = _fallback_commit_message(task_type, task_description)
+        step.error_message = (
+            f"version_analyze failed: {e}. "
+            f"Current version is '{current_version}'. "
+            "suggested_version could not be determined; the commit step will "
+            "halt until a version is supplied via human intervention."
+        )
+        step.outputs["current_version"] = current_version
+        return StepStatus.FAILED
 
-        logger.warning(f"Using fallback bump type: {fallback_bump}")
-        return StepStatus.COMPLETED
+    step.outputs["bump_type"] = result["bump_type"]
+    step.outputs["reasoning"] = result["reasoning"]
+    step.outputs["confidence"] = result["confidence"]
+    step.outputs["suggested_version"] = result["suggested_version"]
+    step.outputs["current_version"] = current_version
+    step.outputs["commit_message"] = (
+        result.get("commit_message")
+        or _fallback_commit_message(task_type, task_description)
+    )
+
+    logger.info(
+        "Version analysis complete: suggested_version=%s (current=%s), "
+        "bump_type=%s, confidence=%s",
+        result["suggested_version"],
+        current_version,
+        result["bump_type"],
+        result["confidence"],
+    )
+
+    return StepStatus.COMPLETED
+
+
+def _read_version_rules_file(project_root: Path) -> Optional[str]:
+    """Read project-specific version rules from ``se3/version-rules.md``.
+
+    The file is a free-form Markdown / natural-language document. It is
+    injected verbatim into the version_analyze prompt so the LLM can use
+    it as decision criteria, overriding the default SemVer 2.0.0 rules
+    on conflict.
+
+    Args:
+        project_root: The project root directory.
+
+    Returns:
+        The file contents (possibly truncated to ``VERSION_RULES_MAX_BYTES``
+        bytes when oversized) or ``None`` when the file is absent or
+        unreadable. Read errors never propagate.
+    """
+    try:
+        rules_path = project_root / VERSION_RULES_FILE_RELPATH
+    except Exception:
+        return None
+
+    try:
+        if not rules_path.is_file():
+            return None
+    except OSError as e:
+        logger.warning("Could not stat version rules file %s: %s", rules_path, e)
+        return None
+
+    try:
+        data = rules_path.read_bytes()
+    except (OSError, PermissionError) as e:
+        logger.warning("Could not read version rules file %s: %s", rules_path, e)
+        return None
+
+    truncated = False
+    if len(data) > VERSION_RULES_MAX_BYTES:
+        data = data[:VERSION_RULES_MAX_BYTES]
+        truncated = True
+
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        logger.warning("Version rules file %s is not valid UTF-8: %s", rules_path, e)
+        return None
+
+    if truncated:
+        logger.warning(
+            "Version rules file %s exceeds %d bytes; truncated for prompt injection.",
+            rules_path,
+            VERSION_RULES_MAX_BYTES,
+        )
+        text += (
+            "\n\n_[Truncated by SE3: original file exceeds "
+            f"{VERSION_RULES_MAX_BYTES} bytes.]_\n"
+        )
+
+    return text
 
 
 def _get_current_version(flow: FlowInstance) -> str:
@@ -425,70 +499,55 @@ def _parse_response(response: str) -> dict[str, Any]:
     # two_phase mode should provide valid JSON via extraction
     # Use the shared json_parser for consistency
     from ..utils.json_parser import parse_json_response
-    
-    result = parse_json_response(response, required_keys=["bump_type"])
-    
+
+    result = parse_json_response(response, required_keys=["suggested_version"])
+
     if result is None:
         preview = response[:200].replace('\n', ' ')
-        raise ValueError(f"Could not parse JSON response. Preview: {preview}...")
-    
+        raise ValueError(
+            "LLM response did not contain a parsable JSON object with "
+            f"suggested_version. Preview: {preview}..."
+        )
+
     return _validate_result(result)
 
 
 def _validate_result(result: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize the parsed result.
-    
+
+    ``suggested_version`` is the authoritative output field and is required.
+    Raises ``ValueError`` if it is missing or empty. ``bump_type`` is
+    auxiliary and defaulted to ``"patch"`` when invalid or absent — it does
+    not gate success.
+
     Args:
         result: Parsed result dictionary
-        
+
     Returns:
         Validated and normalized result
     """
-    # Ensure required fields exist
-    bump_type = result.get("bump_type", "patch").lower()
-    
-    # Normalize bump_type
-    valid_bumps = ["major", "minor", "patch", "none"]
-    if bump_type not in valid_bumps:
-        bump_type = "patch"  # Default to patch if invalid
-    
-    # Normalize confidence
-    confidence = result.get("confidence", "medium").lower()
-    valid_confidences = ["high", "medium", "low"]
-    if confidence not in valid_confidences:
+    suggested_version = result.get("suggested_version")
+    if not isinstance(suggested_version, str) or not suggested_version.strip():
+        raise ValueError(
+            "LLM response is missing the required 'suggested_version' field."
+        )
+    suggested_version = suggested_version.strip()
+
+    bump_type = str(result.get("bump_type", "patch")).lower()
+    if bump_type not in ("major", "minor", "patch", "none"):
+        bump_type = "patch"
+
+    confidence = str(result.get("confidence", "medium")).lower()
+    if confidence not in ("high", "medium", "low"):
         confidence = "medium"
-    
+
     return {
         "bump_type": bump_type,
         "reasoning": result.get("reasoning", "No reasoning provided"),
         "confidence": confidence,
-        "suggested_version": result.get("suggested_version", "auto"),
+        "suggested_version": suggested_version,
         "commit_message": result.get("commit_message", ""),
     }
-
-
-def _get_fallback_bump_type(task_type: str) -> str:
-    """Get fallback bump type based on task type.
-    
-    Args:
-        task_type: The type of task
-        
-    Returns:
-        Fallback bump type string
-    """
-    fallback_map = {
-        "feature": "minor",
-        "feat": "minor",
-        "bugfix": "patch",
-        "fix": "patch",
-        "small": "patch",
-        "refactor": "patch",
-        "docs": "patch",
-        "test": "patch",
-        "chore": "patch",
-        "breaking": "major",
-    }
-    return fallback_map.get(task_type, "patch")
 
 
 def _fallback_commit_message(task_type: str, task_description: str) -> str:

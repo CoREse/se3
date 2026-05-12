@@ -10,7 +10,9 @@ import pytest
 
 from se3.engine.models import FlowInstance, Step, StepStatus, StepType
 from se3.engine.steps.version_analyze import (
+    VERSION_RULES_MAX_BYTES,
     _fallback_commit_message,
+    _read_version_rules_file,
     _validate_result,
     version_analyze_handler,
 )
@@ -117,14 +119,14 @@ class TestCommitMessageInOutput:
         assert step.outputs["commit_message"] == "Fix login timeout bug"
 
 
-class TestCommitMessageOnLLMFailure:
-    """When the entire LLM call fails, commit_message fallback is produced."""
+class TestLLMFailureFailsStep:
+    """When the LLM call fails or omits suggested_version, the step FAILS."""
 
     @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
     @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.0.0")
     @patch("se3.engine.steps.version_analyze.LLMCaller")
-    def test_llm_failure_produces_fallback_commit_message(self, mock_caller_cls, mock_ver, mock_inject):
-        """On LLM exception, commit_message is generated from task description."""
+    def test_llm_exception_marks_step_failed(self, mock_caller_cls, mock_ver, mock_inject):
+        """LLM exception → step FAILED with informative error message."""
         mock_caller = MagicMock()
         mock_caller.call.side_effect = RuntimeError("LLM unavailable")
         mock_caller_cls.return_value = mock_caller
@@ -134,9 +136,166 @@ class TestCommitMessageOnLLMFailure:
 
         result = version_analyze_handler(step, flow)
 
-        assert result == StepStatus.COMPLETED  # Falls back, doesn't fail
-        assert step.outputs["commit_message"] == "Refactor auth module"
-        assert step.outputs["confidence"] == "low"
+        assert result == StepStatus.FAILED
+        assert step.outputs.get("current_version") == "1.0.0"
+        assert "1.0.0" in step.error_message
+        assert "suggested_version" in step.error_message
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.0.0")
+    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    def test_missing_suggested_version_marks_step_failed(self, mock_caller_cls, mock_ver, mock_inject):
+        """LLM returns JSON without suggested_version → step FAILED."""
+        llm_response = json.dumps({
+            "bump_type": "patch",
+            "reasoning": "Bug fix",
+            "confidence": "high",
+            # No suggested_version
+        })
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = llm_response
+        mock_caller_cls.return_value = mock_caller
+
+        flow = _make_flow()
+        step = _make_step({"task_description": "Fix bug"})
+
+        result = version_analyze_handler(step, flow)
+
+        assert result == StepStatus.FAILED
+        assert "suggested_version" in step.error_message
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.0.0")
+    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    def test_empty_suggested_version_marks_step_failed(self, mock_caller_cls, mock_ver, mock_inject):
+        """LLM returns empty suggested_version → step FAILED."""
+        llm_response = json.dumps({
+            "bump_type": "patch",
+            "reasoning": "Bug fix",
+            "confidence": "high",
+            "suggested_version": "   ",
+        })
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = llm_response
+        mock_caller_cls.return_value = mock_caller
+
+        flow = _make_flow()
+        step = _make_step({"task_description": "Fix bug"})
+
+        result = version_analyze_handler(step, flow)
+
+        assert result == StepStatus.FAILED
+
+
+class TestVersionRulesFileInjection:
+    """version_analyze reads se3/version-rules.md and injects it into the prompt."""
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    def test_rules_file_absent_uses_default_placeholder(
+        self, mock_caller_cls, mock_ver, mock_inject, tmp_path
+    ):
+        """No rules file present → prompt contains default-SemVer placeholder."""
+        llm_response = json.dumps({
+            "bump_type": "minor",
+            "suggested_version": "1.3.0",
+            "reasoning": "feature added",
+            "confidence": "high",
+            "commit_message": "Add feature",
+        })
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = llm_response
+        mock_caller_cls.return_value = mock_caller
+
+        flow = _make_flow(change_path=tmp_path / "se3.yaml")
+        step = _make_step({"task_description": "Add feature"})
+
+        result = version_analyze_handler(step, flow)
+        assert result == StepStatus.COMPLETED
+
+        called_prompt = mock_caller.call.call_args.kwargs["prompt"]
+        assert "No project-specific rules file found" in called_prompt
+        assert "Project-Specific Version Rules" in called_prompt
+
+    @patch("se3.engine.context_builder.get_issue_discovery_injection", return_value="")
+    @patch("se3.engine.steps.version_analyze._get_current_version", return_value="1.2.3")
+    @patch("se3.engine.steps.version_analyze.LLMCaller")
+    def test_rules_file_present_is_injected_into_prompt(
+        self, mock_caller_cls, mock_ver, mock_inject, tmp_path
+    ):
+        """When rules file exists, its content is injected into the prompt."""
+        rules_dir = tmp_path / "se3"
+        rules_dir.mkdir()
+        rules_marker = "PROJECT RULE: docs-only commits never bump version."
+        (rules_dir / "version-rules.md").write_text(rules_marker, encoding="utf-8")
+
+        llm_response = json.dumps({
+            "bump_type": "none",
+            "suggested_version": "1.2.3",
+            "reasoning": "docs only",
+            "confidence": "high",
+            "commit_message": "Update docs",
+        })
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = llm_response
+        mock_caller_cls.return_value = mock_caller
+
+        flow = _make_flow(change_path=tmp_path / "se3.yaml")
+        step = _make_step({"task_description": "Update docs"})
+
+        result = version_analyze_handler(step, flow)
+        assert result == StepStatus.COMPLETED
+
+        called_prompt = mock_caller.call.call_args.kwargs["prompt"]
+        assert rules_marker in called_prompt
+        assert "No project-specific rules file found" not in called_prompt
+
+
+class TestReadVersionRulesFile:
+    """Unit tests for _read_version_rules_file."""
+
+    def test_missing_file_returns_none(self, tmp_path):
+        assert _read_version_rules_file(tmp_path) is None
+
+    def test_normal_file_returns_full_content(self, tmp_path):
+        rules_dir = tmp_path / "se3"
+        rules_dir.mkdir()
+        content = "# Custom Rules\n\n- docs → none\n"
+        (rules_dir / "version-rules.md").write_text(content, encoding="utf-8")
+
+        result = _read_version_rules_file(tmp_path)
+        assert result is not None
+        assert content in result
+
+    def test_oversized_file_is_truncated_with_warning(self, tmp_path, caplog):
+        rules_dir = tmp_path / "se3"
+        rules_dir.mkdir()
+        # Build content well over the limit
+        big = "x" * (VERSION_RULES_MAX_BYTES + 1024)
+        (rules_dir / "version-rules.md").write_text(big, encoding="utf-8")
+
+        import logging as _logging
+        with caplog.at_level(_logging.WARNING):
+            result = _read_version_rules_file(tmp_path)
+
+        assert result is not None
+        # The injected text contains the truncation notice
+        assert "Truncated by SE3" in result
+        # And the raw content is bounded by the limit (plus the notice suffix)
+        assert any("exceeds" in rec.message for rec in caplog.records)
+
+    def test_invalid_utf8_returns_none_with_warning(self, tmp_path, caplog):
+        rules_dir = tmp_path / "se3"
+        rules_dir.mkdir()
+        (rules_dir / "version-rules.md").write_bytes(b"\xff\xfe\xfa not utf-8")
+
+        import logging as _logging
+        with caplog.at_level(_logging.WARNING):
+            result = _read_version_rules_file(tmp_path)
+
+        assert result is None
+        assert any("not valid UTF-8" in rec.message for rec in caplog.records)
 
 
 class TestFallbackCommitMessage:
