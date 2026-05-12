@@ -157,7 +157,6 @@ class SyncInteractionHandler:
         """Display pending items using Rich."""
         from rich.console import Console
         from rich.table import Table
-        from rich.panel import Panel
 
         console = Console()
         table = Table(title="Pending Decisions", expand=True, show_lines=True)
@@ -179,19 +178,18 @@ class SyncInteractionHandler:
             )
 
         console.print(table)
+        console.print("[bold blue]## Decision Input[/bold blue]")
+        console.print("")
         console.print(
-            Panel(
-                "[bold]Options:[/bold]\n"
-                "  Enter number and decision:  [cyan]1:1[/cyan] (update_spec)  "
-                "[cyan]1:2[/cyan] (create_issue)\n"
-                "  Batch all:  [cyan]all:1[/cyan] (all update_spec)  "
-                "[cyan]all:2[/cyan] (all create_issue)\n"
-                "  When done:  [cyan]done[/cyan]\n\n"
-                "[dim]Or edit the .response file in se3/calls/ from another terminal.[/dim]",
-                title="Decision Input",
-                border_style="blue",
-            )
+            "[bold]Options:[/bold]\n"
+            "  Enter number and decision:  [cyan]1:1[/cyan] (update_spec)  "
+            "[cyan]1:2[/cyan] (create_issue)\n"
+            "  Batch all:  [cyan]all:1[/cyan] (all update_spec)  "
+            "[cyan]all:2[/cyan] (all create_issue)\n"
+            "  When done:  [cyan]done[/cyan]\n\n"
+            "[dim]Or edit the .response file in se3/calls/ from another terminal.[/dim]"
         )
+        console.print("")
 
     def _read_line_interruptible(self) -> Optional[str]:
         """Read a line from stdin, checking stop/done events periodically.
