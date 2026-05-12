@@ -434,3 +434,47 @@ class TestVersionConfigNewFields:
         config = AppVersionConfig.from_dict({})
         assert config.script_path is None
         assert config.auto_generate_script is True
+
+    def test_from_dict_ignores_deprecated_bump_rules(self, caplog):
+        """Legacy ``version.bump_rules`` is silently dropped with a single
+        deprecation warning; the rest of the section still loads."""
+        import logging
+
+        from se3.config import VersionConfig as AppVersionConfig
+
+        data = {
+            "version": {
+                "enabled": True,
+                "bump_rules": {"feature": "major"},
+                "confidence_threshold": "high",
+            }
+        }
+        with caplog.at_level(logging.WARNING, logger="se3.config"):
+            config = AppVersionConfig.from_dict(data)
+
+        assert not hasattr(config, "bump_rules")
+        assert config.enabled is True
+        assert config.confidence_threshold == "high"
+        assert any("bump_rules" in rec.message for rec in caplog.records)
+
+    def test_from_dict_ignores_deprecated_smart_version_analysis(self, caplog):
+        """Legacy ``version.smart_version_analysis`` is silently dropped with
+        a deprecation warning."""
+        import logging
+
+        from se3.config import VersionConfig as AppVersionConfig
+
+        data = {
+            "version": {
+                "enabled": True,
+                "smart_version_analysis": False,
+            }
+        }
+        with caplog.at_level(logging.WARNING, logger="se3.config"):
+            config = AppVersionConfig.from_dict(data)
+
+        assert not hasattr(config, "smart_version_analysis")
+        assert config.enabled is True
+        assert any(
+            "smart_version_analysis" in rec.message for rec in caplog.records
+        )

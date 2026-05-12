@@ -381,28 +381,7 @@ class VersionConfig:
     
     # Version file location (relative to project root)
     version_file: Optional[str] = None  # Auto-detect if None
-    
-    # Bump rules: map task type to bump type (following SemVer 2.0.0)
-    # Note: These are used as fallback when version_analyze step is not available
-    # or when smart_version_analysis is disabled
-    bump_rules: dict[str, str] = field(default_factory=lambda: {
-        "feature": "minor",   # New functionality
-        "feat": "minor",
-        "bugfix": "patch",    # Bug fixes
-        "fix": "patch",
-        "small": "patch",     # Small changes are also fixes (typo, etc.)
-        "refactor": "patch",  # Refactoring is internal change
-        "docs": "patch",      # Doc fixes are still fixes
-        "test": "patch",      # Test additions/fixes
-        "chore": "patch",     # Maintenance tasks
-        "review": "none",     # No code changes
-        "directive": "minor", # Following instructions may add features
-    })
-    
-    # Smart version analysis configuration
-    # Uses LLM to analyze actual changes and determine bump type
-    smart_version_analysis: bool = True  # Enable version_analyze step
-    
+
     # Auto-confirmation settings
     # If True, version bump is applied automatically without human confirmation
     auto_bump: bool = True
@@ -449,24 +428,29 @@ class VersionConfig:
         """Create VersionConfig from dictionary (typically loaded from se3.yaml)."""
         if not data:
             return cls()
-        
+
         # Extract version section if nested
         version_data = data.get("version", data)
-        
-        # Build bump rules from config or use defaults
-        bump_rules = version_data.get("bump_rules", {})
-        if not bump_rules:
-            bump_rules = cls().bump_rules
-        
+
+        # Deprecation: bump_rules and smart_version_analysis were removed when the
+        # version decision model collapsed to a single authoritative suggested_version
+        # field (see se3-versioning spec). Old configs are accepted but ignored.
+        for deprecated_field in ("bump_rules", "smart_version_analysis"):
+            if deprecated_field in version_data:
+                logger.warning(
+                    "se3.yaml version.%s is deprecated and ignored; remove it from "
+                    "your config (version decisions are now driven by version_analyze's "
+                    "suggested_version, optionally guided by se3/version-rules.md).",
+                    deprecated_field,
+                )
+
         # Build templates from config or use defaults
         templates = cls().templates.copy()
         templates.update(version_data.get("templates", {}))
-        
+
         return cls(
             enabled=version_data.get("enabled", True),
             version_file=version_data.get("version_file"),
-            bump_rules=bump_rules,
-            smart_version_analysis=version_data.get("smart_version_analysis", True),
             auto_bump=version_data.get("auto_bump", True),
             confidence_threshold=version_data.get("confidence_threshold", None),
             prerelease_prefix=version_data.get("prerelease_prefix", ""),
@@ -489,21 +473,6 @@ class VersionConfig:
         if not data:
             return cls()
         return cls.from_dict(data)
-    
-    def get_bump_type(self, task_type: str) -> BumpType:
-        """Get the bump type for a given task type.
-        
-        Args:
-            task_type: The type of task (feature, bugfix, small, etc.)
-            
-        Returns:
-            The corresponding BumpType enum value
-        """
-        bump_rule = self.bump_rules.get(task_type, "none")
-        try:
-            return BumpType(bump_rule)
-        except ValueError:
-            return BumpType.NONE
     
     def get_template(self, name: str) -> str:
         """Get a template by name.

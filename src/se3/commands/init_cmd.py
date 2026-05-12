@@ -22,9 +22,6 @@ project_name: {project_name}
 # Version management settings
 version:
   enabled: true
-  # bump_rules:
-  #   feature: minor
-  #   bugfix: patch
 
 # Confirmation steps (optional)
 # Per-step dict: list a step here to insert a CONFIRM after it.
