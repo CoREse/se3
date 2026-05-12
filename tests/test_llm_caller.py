@@ -132,3 +132,43 @@ class TestCallPassesRequiredKeys:
 
         call_kwargs = mock_two_phase.call_args.kwargs
         assert call_kwargs["required_keys"] == ["issues"]
+
+
+class TestCreateRunnerForwardsProjectRoot:
+    """Regression: _create_runner must forward project_root to ClaudeCodeRunner
+    so that ``claude_subprocess.setting_sources`` from the project's
+    ``se3.yaml`` actually reaches the subprocess. Without forwarding, the
+    Runner falls back to the built-in default ``["user"]`` regardless of
+    user config — silently neutralising the documented escape hatch.
+    """
+
+    def test_project_root_forwarded_so_yaml_setting_sources_takes_effect(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            "claude_subprocess:\n  setting_sources: [user, project]\n",
+            encoding="utf-8",
+        )
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            caller = LLMCaller(
+                project_root=tmp_path,
+                max_retries=1,
+                flow_id="test-flow",
+                step_id="test-step",
+                step_type="implement",
+                agents=[{"name": "test", "type": "claude-code", "cmd": "claude-a"}],
+            )
+        runner = caller._get_current_runner()
+        assert runner.setting_sources == ["user", "project"]
+
+    def test_default_setting_sources_when_no_yaml(self, tmp_path):
+        """When no project YAML is present, runner falls back to ['user']."""
+        with patch("se3.config.Path.home", return_value=tmp_path):
+            caller = LLMCaller(
+                project_root=tmp_path,
+                max_retries=1,
+                flow_id="test-flow",
+                step_id="test-step",
+                step_type="implement",
+                agents=[{"name": "test", "type": "claude-code", "cmd": "claude-a"}],
+            )
+        runner = caller._get_current_runner()
+        assert runner.setting_sources == ["user"]

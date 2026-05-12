@@ -484,6 +484,7 @@ class LLMCaller:
         agent_type = agent_config.get("type", "claude-code")
         if agent_type == "claude-code":
             return ClaudeCodeRunner(
+                project_root=self.project_root,
                 command={"cmd": agent_config["cmd"], "priority": agent_config.get("priority", 0)},
             )
         # Future: add other agent types here
