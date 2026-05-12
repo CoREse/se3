@@ -97,8 +97,8 @@ would silently ignore the developer's main-repo override.
 **Configurable options:**
 - `version.enabled`: Enable automatic version bumping (default: true)
 - `version.file_path`: Path to version file (auto-detect if null)
-- `version.bump_rules`: Map task types to bump types
 - `version.auto_bump`: Auto-apply version bump without confirmation (default: true)
+- `version.script_path`: Custom version script path (default: null = use default `se3/scripts/version.py`)
 - `agents`: Top-level dict registry `{name: {type, cmd, priority?}}` (authoritative identity layer; see Agent Registry requirement)
 - `claude_commands`: Legacy alias for `agents`, auto-migrated at load time (deprecated — use `agents` + `llm_caller.defaults`)
 - `llm_caller.defaults`: Default caller chain as a list of agent names referencing `agents` (default: built-in `[claude]` fallback)
@@ -129,8 +129,8 @@ would silently ignore the developer's main-repo override.
 - **THEN** the framework runs with built-in default values
 
 #### Scenario: Custom version configuration
-- **WHEN** se3.yaml specifies custom bump_rules
-- **THEN** the framework uses those rules for version bumping
+- **WHEN** se3.yaml specifies custom version settings (e.g., `version.file_path` or `version.script_path`)
+- **THEN** the framework uses those settings when bumping the version
 
 #### Scenario: Global configuration
 - **WHEN** `~/.se3/config.yaml` defines top-level `agents` entries
@@ -239,24 +239,23 @@ The system SHALL support version management configuration.
 **Version section options:**
 - `enabled`: Whether automatic version bumping is enabled (default: true)
 - `file_path`: Path to version file (null = auto-detect)
-- `bump_rules`: Map task type to bump type
-  - feature: minor
-  - bugfix: patch
-  - small: patch
-  - review: none
-  - directive: minor
-- `auto_bump`: Apply bump automatically (default: true)
+- `auto_bump`: Apply the LLM-suggested version automatically (default: true)
 - `confidence_threshold`: Require confirmation for low confidence (default: null)
+- `script_path`: Custom version script path (null = use default `se3/scripts/version.py`)
+- `auto_generate_script`: Auto-generate a version script when none is found (default: true)
+
+The new version number is computed by the `version_analyze` step's
+`suggested_version` field (see the `se3-versioning` spec). The
+configuration system does NOT carry any static task-type-to-bump-type
+mapping, and there is no global "smart analysis" on/off switch — the
+`version_analyze` step is the single source for the new version, and
+project-specific policy is expressed via the optional `se3/version-rules.md`
+file (see `se3-versioning` *Custom Version Rules File* requirement).
 
 #### Scenario: Disable version bumping
 - **GIVEN** se3.yaml has `version.enabled: false`
 - **WHEN** commit step executes
 - **THEN** no version bump is performed
-
-#### Scenario: Custom bump rules
-- **GIVEN** se3.yaml defines custom bump_rules
-- **WHEN** version_analyze step runs
-- **THEN** it uses the custom rules to determine bump type
 
 ### Requirement: Confirmation Configuration
 

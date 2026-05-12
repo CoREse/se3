@@ -168,13 +168,13 @@ Note: When a version script is present, it takes priority over file detection.
 - **THEN** returns `package.json` as version file
 - **AND** extracts version `2.1.0`
 
-### Requirement: Smart Version Analysis
+### Requirement: LLM-Based Version Analysis
 
-SE3 SHALL provide intelligent version bumping using LLM analysis of actual changes, rather than relying solely on task type classification.
+SE3 SHALL determine the new version number via LLM analysis of actual changes. The LLM's `suggested_version` is the **single authoritative version field** consumed by the commit step.
 
 **Version Analyze Step:**
-A dedicated `version_analyze` step SHALL run after `update_spec` and before `commit` to determine the appropriate SemVer bump type and generate the commit message, based on:
-- **Spec changes (updated_specs)**: API contract changes - PRIMARY indicator for breaking/non-breaking
+A dedicated `version_analyze` step SHALL run after `update_spec` and before `commit` to compute the new version number, based on:
+- **Spec changes (updated_specs)**: API contract changes — PRIMARY indicator for breaking/non-breaking
 - **Files changed (changes_made)**: Implementation details and scope
 - **Verification results**: Consistency checks against specs
 
@@ -191,55 +191,93 @@ Spec changes are prioritized as they directly reflect API contract modifications
 }
 ```
 
+**Authoritative field:** `suggested_version` is the single authoritative version number consumed downstream. The commit step writes this value verbatim into the project's version file. `bump_type`, `reasoning`, and `confidence` are supplementary fields used only for human-facing display (renderers, commit-message metadata) and are NOT used to mechanically recompute the new version from `current_version`.
+
 The `commit_message` field is generated alongside version analysis. It uses imperative mood, starts with a verb, and does not include task type prefixes. The commit step consumes this field as the primary source for the git commit message subject line.
 
-**Semantic Versioning 2.0.0 Decision Criteria:**
+**Semantic Versioning 2.0.0 Decision Criteria (default rules):**
 - **MAJOR**: Incompatible API changes, removed functionality, breaking behavioral changes
 - **MINOR**: New backward-compatible functionality, new features, new optional parameters
 - **PATCH**: Backward-compatible bug fixes, performance improvements, internal refactoring
 - **NONE**: No version-worthy changes (formatting, comments only)
+
+The LLM applies these defaults to compute `suggested_version` from `current_version` when no project-level custom rules file is present. When a custom rules file exists (see Custom Version Rules File requirement), the LLM applies the custom rules in preference to the defaults.
 
 **Confidence Levels:**
 - `high`: Clear change type (e.g., obvious breaking change or simple bugfix)
 - `medium`: Some ambiguity but reasonable determination possible
 - `low`: Complex changes with unclear impact, borderline cases
 
-#### Scenario: Smart Version Analysis for Breaking Change
+#### Scenario: Version analysis identifies breaking change
 - **GIVEN** a `small` task that removed a public function parameter
 - **WHEN** the `version_analyze` step runs
-- **THEN** LLM identifies this as a breaking change
-- **AND** recommends `bump_type: major` despite task type being `small`
+- **THEN** the LLM identifies this as a breaking change
+- **AND** `suggested_version` reflects a major bump regardless of task type
 
-#### Scenario: Confidence-Based Fallback
-- **GIVEN** LLM analysis returns `confidence: low`
-- **WHEN** auto_bump is enabled (default)
-- **THEN** system applies the suggested bump type anyway
-- **AND** logs a warning about low confidence
+#### Scenario: suggested_version is the authoritative value
+- **GIVEN** `version_analyze` returns `suggested_version: 1.3.0` and `bump_type: minor`
+- **WHEN** the commit step writes the new version to the version file
+- **THEN** it writes `1.3.0` directly (the value from `suggested_version`)
+- **AND** it does NOT recompute the version by applying `bump_type` to `current_version`
+
+### Requirement: Custom Version Rules File
+
+SE3 SHALL support an optional, project-level natural-language version rules file at the conventional path `se3/version-rules.md`.
+
+**Purpose:** Allow each project to declare its own version-numbering policy in plain Markdown / prose. The LLM running the `version_analyze` step reads this file (when present) and uses it as the authoritative rule set when computing `suggested_version`.
+
+**Conventional path and discovery:**
+- Path: `<project_root>/se3/version-rules.md`.
+- No configuration field overrides this path — there is no `se3.yaml` `version.rules_file` key.
+- Discovery is purely path-based: if the file exists and is non-empty, it is read; otherwise the framework falls back to the default SemVer 2.0.0 rules built into the `version_analyze` prompt.
+- The file SHALL be excluded from the default `.gitignore` mask (alongside `se3/specs/`, `se3/issues/`, `se3/scripts/`) so that the rules are committed with the project.
+
+**File format:**
+- Pure natural language / Markdown. No DSL, no schema, no code blocks interpreted as executable rules.
+- No syntax validation, no parsing beyond reading the text. The framework MUST NOT execute, evaluate, or interpret the file beyond passing its contents into the LLM prompt.
+- Practical size cap: when the file exceeds ~64 KB the framework SHALL truncate the content (preserving the head) and log a warning, to keep the LLM prompt within budget.
+
+**Prompt injection:**
+- When the file exists, its content is injected into the `version_analyze` prompt as a dedicated "Project-Specific Version Rules" section. The default SemVer 2.0.0 description remains in the prompt as a baseline; the LLM is instructed to prefer the custom rules whenever they conflict with the defaults.
+- When the file does NOT exist, no custom-rules section is emitted and the LLM uses only the default SemVer 2.0.0 rules to compute `suggested_version`.
+
+**Out of scope (explicit non-goals):**
+- No DSL or structured rule schema.
+- No code execution from the rules file under any circumstances.
+- No syntax validation or auto-fix of malformed content.
+- No CLI override or alternate file path.
+
+#### Scenario: Custom rules file present is injected into prompt
+- **GIVEN** `se3/version-rules.md` exists with project-specific version guidance (e.g., "Bugfix only bumps patch when the user-visible behavior changes; otherwise stay on the same version.")
+- **WHEN** the `version_analyze` step runs
+- **THEN** the file's content is included in the LLM prompt under a "Project-Specific Version Rules" section
+- **AND** the LLM is instructed to prefer the custom rules over the default SemVer 2.0.0 rules where they differ
+- **AND** the resulting `suggested_version` reflects the custom rules
+
+#### Scenario: No custom rules file falls back to default SemVer
+- **GIVEN** `se3/version-rules.md` does NOT exist
+- **WHEN** the `version_analyze` step runs
+- **THEN** the LLM prompt contains only the default SemVer 2.0.0 description
+- **AND** `suggested_version` is computed using SemVer 2.0.0 rules
+
+#### Scenario: Oversized rules file is truncated with warning
+- **GIVEN** `se3/version-rules.md` is larger than ~64 KB
+- **WHEN** the `version_analyze` step reads the file
+- **THEN** the content is truncated to a safe budget (head preserved)
+- **AND** a warning is logged identifying the truncation
 
 ### Requirement: Automatic Version Bumping
 
-SE3 SHALL provide automatic version bumping integrated into the commit workflow.
+SE3 SHALL provide automatic version bumping integrated into the commit workflow, driven exclusively by `suggested_version` from the `version_analyze` step.
 
-**Bump Process with Smart Analysis:**
-1. Detect current version from version file
-2. Run `version_analyze` step to determine bump type via LLM analysis
-3. If smart analysis is disabled or fails, fall back to task type based rules
-4. Calculate new version following SemVer rules
-5. Update version file atomically
-6. Create backup for potential rollback
-7. Stage version file for commit
+**Bump Process:**
+1. Detect current version from the version file (or version script).
+2. Read `suggested_version` from the completed `version_analyze` step.
+3. If `version_analyze` is missing or did not produce a `suggested_version`, the commit step SHALL fail with a descriptive error (see Missing Version Handling requirement).
+4. Write `suggested_version` verbatim into the version file (atomic write + backup for rollback).
+5. Stage the version file for the upcoming commit.
 
-**Fallback Bump Rules (when smart analysis is disabled):**
-| Task Type | Bump Type | Version Change |
-|-----------|-----------|----------------|
-| `feature` | minor | X.Y.Z → X.Y+1.0 |
-| `feat` | minor | X.Y.Z → X.Y+1.0 |
-| `bugfix` | patch | X.Y.Z → X.Y.Z+1 |
-| `fix` | patch | X.Y.Z → X.Y.Z+1 |
-| `breaking` | major | X.Y.Z → X+1.0.0 |
-| `small` | patch | X.Y.Z → X.Y.Z+1 |
-| `docs` | patch | X.Y.Z → X.Y.Z+1 |
-| `refactor` | patch | X.Y.Z → X.Y.Z+1 |
+`bump_type` is NOT used to compute the new version. There is no static task-type-to-bump-type lookup table — that mechanism has been removed. `bump_type` survives only as a display hint and a commit-message metadata field.
 
 **Configuration (se3.yaml):**
 ```yaml
@@ -247,43 +285,55 @@ version:
   enabled: true                       # Enable automatic version bumping
   file_path: null                     # Explicit version file path (null = auto-detect)
   include_in_commit_message: true     # Include version in commit message
-  
-  # Smart Version Analysis
-  smart_version_analysis: true        # Enable LLM-based version analysis
-  auto_bump: true                     # Auto-apply bump without confirmation
-  confidence_threshold: null          # Threshold for human confirmation (null=never)
-  
-  # Fallback bump rules (used when smart analysis is disabled)
-  bump_rules:
-    feature: minor
-    bugfix: patch
-    breaking: major
-    small: patch
+  auto_bump: true                     # Auto-apply suggested_version without confirmation
+  confidence_threshold: null          # Threshold for human confirmation (null = never)
+  script_path: null                   # Custom version script path (null = default)
+  auto_generate_script: true          # Auto-generate version script if absent
 ```
 
-#### Scenario: Feature Task Version Bump with Smart Analysis
-- **GIVEN** current version is `1.2.3`
-- **AND** `smart_version_analysis: true`
-- **WHEN** `version_analyze` step executes for a `feature` task
-- **THEN** LLM analyzes the actual changes
-- **AND** version bumps according to analysis result (typically `1.3.0`)
+Legacy `version` keys that previously controlled a static bump-rules table or a smart-analysis toggle are no longer recognized. When present in a legacy `se3.yaml`, they are silently ignored at load time (a deprecation note may be logged once). They have no effect on the new flow.
 
-#### Scenario: Bugfix Task Version Bump
+#### Scenario: Feature task applies suggested_version
 - **GIVEN** current version is `1.2.3`
-- **WHEN** commit step executes for a `bugfix` task
-- **THEN** version bumps to `1.2.4`
-- **AND** commit message includes new version
+- **AND** `version_analyze` returns `suggested_version: 1.3.0`
+- **WHEN** the commit step runs
+- **THEN** the version file is updated to `1.3.0` (the value from `suggested_version`)
+- **AND** the commit includes the version-file change
 
-#### Scenario: Disabled Smart Analysis
-- **GIVEN** `smart_version_analysis: false` in se3.yaml
-- **WHEN** commit step executes
-- **THEN** system uses task type based bump rules from configuration
+#### Scenario: Bugfix task applies suggested_version
+- **GIVEN** current version is `1.2.3`
+- **AND** `version_analyze` returns `suggested_version: 1.2.4`
+- **WHEN** the commit step runs
+- **THEN** the version file is updated to `1.2.4`
+- **AND** the commit message includes the new version
 
 #### Scenario: Disabled Version Bumping
 - **GIVEN** `version.enabled: false` in se3.yaml
 - **WHEN** commit step executes
 - **THEN** no version bumping occurs
 - **AND** existing version is preserved
+
+### Requirement: Missing Version Handling
+
+When the `version_analyze` step fails or completes without a usable `suggested_version`, the `commit` step SHALL halt the flow rather than silently fall back to a default bump.
+
+**Behavior:**
+- The commit step raises a runtime error describing: (a) the current version on disk, (b) the reason `suggested_version` is unavailable (e.g., `version_analyze` failed, missing field, empty string), and (c) guidance on human intervention — re-run `version_analyze`, edit `se3/version-rules.md` to clarify the policy, or apply an explicit override through existing manual mechanisms.
+- The flow is left in a state where the user can resume after intervention; no partial version-file write is committed.
+- Silent fallback to a default patch bump (the previous behavior) is explicitly REMOVED.
+
+#### Scenario: Commit step halts when suggested_version missing
+- **GIVEN** the `version_analyze` step completed but `suggested_version` is absent from its outputs
+- **WHEN** the commit step runs
+- **THEN** the commit step raises an error identifying the current version and the missing-version reason
+- **AND** the flow is halted for human intervention
+- **AND** no version-file write is committed
+
+#### Scenario: Commit step halts when version_analyze failed
+- **GIVEN** the `version_analyze` step has status FAILED
+- **WHEN** the commit step is reached
+- **THEN** the commit step raises an error with current version and intervention guidance
+- **AND** the flow is halted
 
 #### Scenario: Aggregated SemVer bump after `se3 merge`
 - **GIVEN** the current branch is at version `4.4.0`
@@ -428,8 +478,8 @@ SE3 SHALL provide CLI commands for manual version management.
 │         ▼          ▼               ▼              ▼              │
 │  ┌───────────┐ ┌────────────┐ ┌────────────┐ ┌────────────────┐ │
 │  │ se3.yaml  │ │  Script    │ │  Built-in  │ │  README.md     │ │
-│  │bump_rules │ │  Interface │ │  Handlers  │ │  VERSIONS.md   │ │
-│  │script_path│ │(subprocess)│ │ (fallback) │ │                │ │
+│  │script_path│ │  Interface │ │  Handlers  │ │  VERSIONS.md   │ │
+│  │auto_bump  │ │(subprocess)│ │ (fallback) │ │                │ │
 │  └───────────┘ └─────┬──────┘ └────────────┘ └────────────────┘ │
 │                      │                                           │
 │                      ▼                                           │

@@ -319,7 +319,7 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 | `self_check` | LLM 代码审查：逻辑完整性、代码健壮性、功能遗漏、测试未覆盖区域（不检查 spec 合规性） | 是 | TWO_PHASE | **是** | test_results, changes_made, spec_content, task_groups, fix_iteration, self_check_pass_index, self_check_passes_required, self_check_convergence_enabled, prev_self_check_issues (conditional) | issues (structured list with description, severity, location), status, self_check_pass_index, self_check_passes_required |
 | `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, fix_needed, fix_instructions, fix_context |
 | `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | 否 | changes_made, verification_result, spec_changes, design_doc, selected_items | updated_specs, new_capabilities, spec_decisions, notes |
-| `version_analyze` | 分析变更确定版本类型 + 生成 commit message | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result | bump_type, confidence, reasoning, commit_message |
+| `version_analyze` | 分析变更确定 suggested_version（权威）+ 生成 commit message | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result, current_version, custom_rules (se3/version-rules.md if present) | **suggested_version**（权威）, bump_type, confidence, reasoning, commit_message |
 | `commit` | 提交变更 | 否（程序执行） | - | 否 | changes_made, bump_type | commit_hash |
 | `summarize` | 生成总结和 handoff | 是 | 文本 | **是** | all_previous_outputs | summary (Markdown 文本) |
 | ~~`project_summary`~~ | ~~生成项目上下文摘要~~ (deprecated — merged into analyze) | 是 | 文本 | **是** | 项目状态 | 摘要字符串 |
@@ -1019,6 +1019,10 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 }
 ```
 
+**权威字段：** `suggested_version` 是 commit step 写入版本文件时直接使用的权威值。`bump_type`、`reasoning`、`confidence` 仅作为展示/commit message 辅助字段，不再用于按 `current_version + bump_type` 反推新版本号。当 `version_analyze` 失败或未输出 `suggested_version` 时，commit step 报错中断流程（见 Commit 步骤版本管理 requirement）。
+
+**自定义规则文件注入：** 当 `<project_root>/se3/version-rules.md` 存在时，其内容作为「项目自定义规则」段注入 LLM prompt，由 LLM 据此推导 `suggested_version`；不存在时回落默认 SemVer 2.0.0 规则。详见 `se3-versioning` 的 *Custom Version Rules File* requirement。
+
 **commit_message 生成规则：**
 - 使用祈使语气（如 "Add feature" 而非 "Added feature"）
 - 以动词开头，描述实际完成的工作
@@ -1054,8 +1058,8 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - **GIVEN** `version_analyze` 返回 `confidence: low`
 - **AND** `auto_bump: true` (默认)
 - **WHEN** 进入 commit 步骤
-- **THEN** 系统仍应用建议的 bump 类型
-- **AND** 记录警告日志
+- **THEN** 系统仍直接采用 `suggested_version` 写入版本文件
+- **AND** 记录低置信度警告日志
 
 ### Requirement: Commit 步骤版本管理
 
@@ -1078,13 +1082,13 @@ The commit step prepends the `task_type` prefix (e.g., `feature:`, `bugfix:`) to
 
 **版本更新流程：**
 1. 检测项目类型（Python/Node.js）并定位版本文件（pyproject.toml/package.json）
-2. 从 `version_analyze` 步骤获取 `bump_type` 和 `confidence`
-3. 如果智能分析不可用或禁用，回退到基于任务类型的规则
-4. 根据配置决定是否应用自动 bump（`auto_bump` 和 `confidence_threshold`）
-5. 使用语义化版本规范（SemVer 2.0.0）计算新版本
-6. 更新版本文件中的版本号
-7. 自动更新 README.md 和 VERSIONS.md（如配置了模板）
-8. 将版本文件和文档变更一起提交
+2. 从 `version_analyze` 步骤读取 **`suggested_version`**（权威字段）
+3. 若 `version_analyze` 失败或未输出 `suggested_version`，commit step 报错并中断流程（携带 current_version 与人工介入提示），不再进行默认 bump 兜底
+4. 将 `suggested_version` 原样写入版本文件（原子写入 + 备份用于回滚）
+5. 自动更新 README.md 和 VERSIONS.md（如配置了模板）
+6. 将版本文件和文档变更一起提交
+
+`bump_type` 不再参与新版本号的计算，仅作为 commit message / 渲染层的辅助字段。
 
 **版本回滚机制：**
 - 如果提交失败，自动回滚版本文件到原始版本
@@ -1096,37 +1100,32 @@ version:
   enabled: true                    # 启用自动版本更新
   file_path: null                  # 版本文件路径（null=自动检测）
   include_in_commit_message: true  # 在提交消息中包含版本号
-  
-  # 智能版本分析
-  smart_version_analysis: true     # 启用 LLM 分析
-  auto_bump: true                  # 自动应用 bump（无需确认）
+  auto_bump: true                  # 自动应用 suggested_version（无需确认）
   confidence_threshold: null       # 置信度阈值（null=总是自动）
-  
-  # 回退规则（智能分析禁用时使用）
-  bump_rules:
-    feature: minor
-    bugfix: patch
-    breaking: major
-  
+  script_path: null                # 自定义版本脚本路径
+  auto_generate_script: true       # 缺失时自动生成版本脚本
+
   # 文档更新模板
   templates:
     readme_badge: "![Version](https://img.shields.io/badge/version-{version}-blue)"
     versions_entry: "## {version} - {date}\n\n{changes}\n"
 ```
 
+旧版 `version` 段中按 task_type 静态映射 bump_type 的配置项与智能分析总开关字段已废弃；在 `se3.yaml` 中保留也会被加载器静默忽略，不再影响版本流程。版本规则的项目级定制改由可选的 `se3/version-rules.md` 自然语言文件承载（见 `se3-versioning` *Custom Version Rules File* requirement）。
+
 #### Scenario: Feature 任务自动更新版本
 - **GIVEN** 当前版本为 1.2.3
-- **AND** `smart_version_analysis: true`
-- **WHEN** `version_analyze` 分析变更后建议 `minor` bump
-- **THEN** 版本自动 bump 为 1.3.0
+- **AND** `version_analyze` 返回 `suggested_version: 1.3.0`
+- **WHEN** commit 步骤执行
+- **THEN** 版本文件被写入 `1.3.0`（直接采用 `suggested_version`）
 - **AND** README.md 和 VERSIONS.md 自动更新
 - **AND** 所有变更一起提交
 
 #### Scenario: Bugfix 任务自动更新版本
 - **GIVEN** 当前版本为 1.2.3
-- **WHEN** 执行 bugfix 类型的任务
-- **AND** `version_analyze` 返回 `bump_type: patch`
-- **THEN** 版本自动 bump 为 1.2.4
+- **AND** `version_analyze` 返回 `suggested_version: 1.2.4`
+- **WHEN** 执行 bugfix 类型的任务的 commit 步骤
+- **THEN** 版本文件被写入 `1.2.4`
 - **AND** 提交消息包含新版本号
 
 #### Scenario: 版本更新失败回滚
@@ -1134,6 +1133,14 @@ version:
 - **WHEN** commit 步骤检测到提交错误
 - **THEN** 自动将版本文件回滚到原始版本
 - **AND** 报告错误信息
+
+#### Scenario: suggested_version 缺失时 commit 报错中断
+- **GIVEN** `version_analyze` 步骤已完成但输出中没有 `suggested_version`
+  （或步骤状态为 FAILED）
+- **WHEN** commit 步骤被触发
+- **THEN** commit 步骤抛出 runtime error，错误信息包含当前版本与人工介入指引
+- **AND** 不进行任何 patch bump 静默兜底
+- **AND** 流程中断，等待用户重新运行 `version_analyze`、修订 `se3/version-rules.md` 或通过已有的人工介入机制提供版本号
 
 ### Requirement: 错误处理和重试
 
