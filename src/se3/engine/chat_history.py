@@ -1259,7 +1259,6 @@ def render_session_detailed(
                  _render_ndjson_for_human(). If False, show only the final
                  assistant text block.
     """
-    from rich.panel import Panel
     from rich.rule import Rule
     from rich.text import Text
     from rich.markdown import Markdown
@@ -1295,12 +1294,12 @@ def render_session_detailed(
                 title = "Prompt"
                 if attempt_label:
                     title = f"Prompt ({attempt_label})"
-                renderables.append(Panel(
+                renderables.extend([
+                    Text(f"## {title}", style="bold blue"),
+                    Text(""),
                     Group(*prompt_parts),
-                    title=title,
-                    border_style="blue",
-                    expand=True,
-                ))
+                    Text(""),
+                ])
 
             elif msg.role == "assistant":
                 # ── Response display ──
@@ -1313,12 +1312,13 @@ def render_session_detailed(
                     # Use Text() instead of Markdown() to avoid rendering artifacts
                     # (bracket sequences like [Edit: src/handler.py] get misinterpreted as links)
                     rendered_text = _render_ndjson_for_human(msg.raw_json)
-                    renderables.append(Panel(
-                        Text(rendered_text) if rendered_text else Text("(empty response)", style="dim"),
-                        title=title,
-                        border_style="green",
-                        expand=True,
-                    ))
+                    body = Text(rendered_text) if rendered_text else Text("(empty response)", style="dim")
+                    renderables.extend([
+                        Text(f"## {title}", style="bold green"),
+                        Text(""),
+                        body,
+                        Text(""),
+                    ])
                 else:
                     # Default: show only the final assistant text
                     if msg.raw_json:
@@ -1330,19 +1330,19 @@ def render_session_detailed(
                     else:
                         text = msg.content
                     if text:
-                        renderables.append(Panel(
+                        renderables.extend([
+                            Text(f"## {title}", style="bold green"),
+                            Text(""),
                             Markdown(text),
-                            title=title,
-                            border_style="green",
-                            expand=True,
-                        ))
+                            Text(""),
+                        ])
                     else:
-                        renderables.append(Panel(
+                        renderables.extend([
+                            Text(f"## {title}", style="bold green"),
+                            Text(""),
                             Text("(empty response)", style="dim"),
-                            title=title,
-                            border_style="green",
-                            expand=True,
-                        ))
+                            Text(""),
+                        ])
 
     return renderables
 

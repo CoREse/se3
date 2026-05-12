@@ -721,12 +721,13 @@ class TestRenderSessionDetailed:
     def test_returns_renderables(self):
         session = self._make_session()
         renderables = render_session_detailed(session, verbose=False)
-        assert len(renderables) == 2  # prompt panel + response panel
+        # Each message now produces 4 renderables (heading, blank, body, blank)
+        assert len(renderables) == 8  # prompt (4) + response (4)
 
     def test_verbose_returns_renderables(self):
         session = self._make_session()
         renderables = render_session_detailed(session, verbose=True)
-        assert len(renderables) == 2
+        assert len(renderables) == 8
 
     def test_non_verbose_shows_final_text(self):
         """Non-verbose mode should extract only the final text block."""
@@ -759,14 +760,16 @@ class TestRenderSessionDetailed:
         assert "Read:" in output
 
     def test_prompt_segmentation_in_panel(self):
-        """Prompt panel should contain segment titles."""
+        """Prompt rendering should contain segment titles."""
         from rich.console import Console
         from io import StringIO
         session = self._make_session()
         renderables = render_session_detailed(session, verbose=False)
         buf = StringIO()
         c = Console(file=buf, force_terminal=False, width=200)
-        c.print(renderables[0])  # Prompt panel
+        # Print the prompt renderables (first 4 entries: heading, blank, body, blank)
+        for r in renderables[:4]:
+            c.print(r)
         output = buf.getvalue()
         assert "Task Description" in output
         assert "Read-Only Constraint" in output
@@ -811,8 +814,8 @@ class TestRenderSessionDetailed:
         ]
         session = self._make_session(messages=messages)
         renderables = render_session_detailed(session, verbose=False)
-        # Should have 4 panels: prompt+response for each attempt
-        assert len(renderables) == 4
+        # Each message produces 4 renderables; 2 attempts × 2 messages × 4 = 16
+        assert len(renderables) == 16
         buf = StringIO()
         c = Console(file=buf, force_terminal=False, width=200)
         for r in renderables:
@@ -841,7 +844,7 @@ class TestRenderSessionDetailed:
         ]
         session = self._make_session(messages=messages)
         renderables = render_session_detailed(session, verbose=False)
-        assert len(renderables) == 2
+        assert len(renderables) == 8
         buf = StringIO()
         c = Console(file=buf, force_terminal=False, width=200)
         for r in renderables:
