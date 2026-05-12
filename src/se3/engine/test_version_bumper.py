@@ -15,7 +15,6 @@ from .version_bumper import (
     JsonVersionHandler,
     PythonVersionHandler,
     SetupPyHandler,
-    TaskType,
     TomlVersionHandler,
     VersionBumper,
     VersionConfig,
@@ -542,24 +541,6 @@ class TestVersionBumper:
             detected = bumper.detect_version_file(root)
             assert detected == version_file
 
-    def test_bump_version_with_task_type(self):
-        """Test bumping based on task type."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-
-            # Create package.json
-            package_json = root / "package.json"
-            package_json.write_text('{"name": "test", "version": "1.2.3"}')
-
-            config = VersionConfig()
-            bumper = VersionBumper(config)
-
-            # Feature should bump minor
-            new_version = bumper.bump_version(
-                path=package_json, task_type=TaskType.FEATURE
-            )
-            assert new_version == "1.3.0"
-
     def test_bump_version_with_bump_type(self):
         """Test bumping with explicit bump type."""
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -644,43 +625,8 @@ class TestVersionBumper:
         with pytest.raises(RuntimeError, match="Version bumping is disabled"):
             bumper.bump_version(bump_type=BumpType.PATCH)
 
-    def test_bump_version_no_type(self):
-        """Test error when neither bump_type nor task_type provided."""
-        config = VersionConfig()
-        bumper = VersionBumper(config)
-
-        with pytest.raises(ValueError, match="Either bump_type or task_type"):
-            bumper.bump_version()
-
-
 class TestVersionConfig:
     """Tests for VersionConfig."""
-
-    def test_default_bump_rules(self):
-        """Test default bump rules are set."""
-        config = VersionConfig()
-        assert config.bump_rules[TaskType.FEATURE] == BumpType.MINOR
-        assert config.bump_rules[TaskType.BUGFIX] == BumpType.PATCH
-        assert config.bump_rules[TaskType.BREAKING] == BumpType.MAJOR
-
-    def test_custom_bump_rules(self):
-        """Test custom bump rules can be set."""
-        rules = {
-            TaskType.FEATURE: BumpType.PATCH,
-            TaskType.BUGFIX: BumpType.PATCH,
-            TaskType.BREAKING: BumpType.MINOR,
-        }
-        config = VersionConfig(bump_rules=rules)
-        assert config.bump_rules[TaskType.FEATURE] == BumpType.PATCH
-        assert config.bump_rules[TaskType.BREAKING] == BumpType.MINOR
-
-    def test_validate_missing_rule(self):
-        """Test validation catches missing rules."""
-        rules = {TaskType.FEATURE: BumpType.MINOR}
-        config = VersionConfig(bump_rules=rules)
-        errors = config.validate()
-        assert len(errors) > 0
-        assert any("Missing bump rule" in e for e in errors)
 
     def test_validate_nonexistent_file(self):
         """Test validation catches nonexistent file."""

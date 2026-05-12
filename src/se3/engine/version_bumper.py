@@ -36,14 +36,6 @@ class BumpType(Enum):
     PATCH = "patch"
 
 
-class TaskType(Enum):
-    """Task types that determine bump rules."""
-
-    FEATURE = "feature"
-    BUGFIX = "bugfix"
-    BREAKING = "breaking"
-
-
 @dataclass(frozen=True)
 class Version:
     """Semantic Version data class following SemVer 2.0.0 spec.
@@ -970,22 +962,12 @@ class VersionConfig:
     Attributes:
         enabled: Whether automatic version bumping is enabled
         file_path: Optional explicit path to version file (None = auto-detect)
-        bump_rules: Mapping of task types to bump types
         include_in_commit_message: Whether to include version in commit message
     """
 
     enabled: bool = True
     file_path: Optional[str] = None
-    bump_rules: Dict[TaskType, BumpType] = None  # type: ignore
     include_in_commit_message: bool = True
-
-    def __post_init__(self):
-        if self.bump_rules is None:
-            self.bump_rules = {
-                TaskType.FEATURE: BumpType.MINOR,
-                TaskType.BUGFIX: BumpType.PATCH,
-                TaskType.BREAKING: BumpType.MAJOR,
-            }
 
     def validate(self) -> List[str]:
         """Validate the configuration.
@@ -1001,10 +983,6 @@ class VersionConfig:
                 path = Path.cwd() / path
             if not path.exists():
                 errors.append(f"Version file not found: {self.file_path}")
-
-        for task_type in TaskType:
-            if task_type not in self.bump_rules:
-                errors.append(f"Missing bump rule for task type: {task_type.value}")
 
         return errors
 

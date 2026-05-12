@@ -1,0 +1,26 @@
+id: '101'
+title: 'README.md (lines 226-228) and README.zh.md (lines 226-228) still document
+  `smart_version_analysis: true` and `bump_rules:` as configuration options. The task
+  description''s item 5 only explicitly scopes ''spec 与文档同步'' to specs and init templates,
+  so README cleanup is arguably out of scope, but they will confuse new users following
+  the README''s example config.'
+description: 'README.md (lines 226-228) and README.zh.md (lines 226-228) still document
+  `smart_version_analysis: true` and `bump_rules:` as configuration options. The task
+  description''s item 5 only explicitly scopes ''spec 与文档同步'' to specs and init templates,
+  so README cleanup is arguably out of scope, but they will confuse new users following
+  the README''s example config.
+
+
+  Suggestion: Update README.md and README.zh.md version configuration examples to
+  drop the deprecated fields and mention the optional `se3/version-rules.md` natural-language
+  rules file.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-12T17:59:21.783031'
+updated_at: '2026-05-12T17:59:21.783031'

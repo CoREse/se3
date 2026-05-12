@@ -58,7 +58,6 @@ def _default_version_config(**overrides) -> VersionConfig:
     """Create a VersionConfig with sensible defaults."""
     cfg = MagicMock(spec=VersionConfig)
     cfg.enabled = True
-    cfg.bump_rules = {"bugfix": "patch", "feature": "minor"}
     cfg.include_in_commit_message = True
     for k, v in overrides.items():
         setattr(cfg, k, v)

@@ -221,14 +221,12 @@ confirmation:
     max_iterations: 3
 
 # 自动版本管理
+# version_analyze 步骤（LLM）直接决定新版本号，默认采用 SemVer 2.0.0。
+# 如需自定义规则，在项目中创建 se3/version-rules.md（自然语言 Markdown），
+# 其内容会注入 version_analyze 的 prompt。
 version:
   enabled: true
-  smart_version_analysis: true    # LLM 分析变更确定语义版本号递增
   auto_bump: true
-  bump_rules:                     # 智能分析关闭时的兜底规则
-    feature: minor
-    bugfix: patch
-    small: patch
 
 # 语言设置
 language:

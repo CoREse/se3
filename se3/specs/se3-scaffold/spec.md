@@ -217,15 +217,16 @@ The base specification template SHALL include the following sections:
 
 **版本格式:** `MAJOR.MINOR.PATCH`
 - MAJOR: 不兼容的 API 修改
-- MINOR: 向下兼容的功能添加  
+- MINOR: 向下兼容的功能添加
 - PATCH: 向下兼容的问题修复
 
-**版本更新规则:**
-- `feature` 任务 → bump minor 版本
-- `bugfix` 任务 → bump patch 版本
+**版本决策模型:**
+- `version_analyze` 步骤的 `suggested_version` 字段是新版本号的唯一权威来源
+- 可选自定义规则: `se3/version-rules.md`（自然语言/Markdown），存在时由 `version_analyze` 注入 LLM prompt 作为决策依据；不存在时回落到默认 SemVer 2.0.0 规则
+- `commit` 步骤直接采用 `suggested_version` 写入版本文件；若该字段缺失或 `version_analyze` 失败，流程报错中断等待人工介入
 
 #### Scenario: 版本自动更新
 - **GIVEN** 当前版本为 1.2.3
-- **WHEN** 完成 feature 任务并执行 commit 步骤
-- **THEN** 版本自动更新为 1.3.0
+- **WHEN** 完成功能任务并执行 commit 步骤，`version_analyze` 输出 `suggested_version: 1.3.0`
+- **THEN** 版本文件直接写入 `1.3.0`
 ```

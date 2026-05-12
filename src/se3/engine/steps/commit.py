@@ -298,18 +298,6 @@ def _resolve_target_version(step: Step, flow: FlowInstance) -> str:
     return suggested.strip()
 
 
-def _get_task_type(flow: FlowInstance) -> str:
-    """Determine task type from flow context.
-
-    Args:
-        flow: The flow instance
-
-    Returns:
-        Task type string (feature, bugfix, small, etc.)
-    """
-    return flow.task_type or "feature"
-
-
 def _stage_file(project_root: Path, file_path: Path) -> None:
     """Stage a specific file for commit.
 

@@ -221,14 +221,12 @@ confirmation:
     max_iterations: 3
 
 # Automatic version bumping
+# version_analyze (LLM) decides the new version directly; default rules are
+# SemVer 2.0.0. To customize, create se3/version-rules.md (natural-language
+# Markdown) — its contents are injected into the version_analyze prompt.
 version:
   enabled: true
-  smart_version_analysis: true    # LLM analyzes changes for SemVer bump
   auto_bump: true
-  bump_rules:                     # Fallback rules when smart analysis is off
-    feature: minor
-    bugfix: patch
-    small: patch
 
 # Language settings
 language:

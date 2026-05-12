@@ -333,7 +333,6 @@ class TestVersionBumperScriptMode:
         return VersionConfig(
             enabled=True,
             file_path=None,
-            bump_rules={},
             include_in_commit_message=True,
         )
 

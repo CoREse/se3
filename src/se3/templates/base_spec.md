@@ -37,10 +37,13 @@
 - MINOR: 向下兼容的功能添加
 - PATCH: 向下兼容的问题修复
 
-**版本更新规则:**
-- `feature` 任务 → bump minor 版本 (X.Y+1.0)
-- `bugfix` 任务 → bump patch 版本 (X.Y.Z+1)
-- `breaking` 变更 → bump major 版本 (X+1.0.0)
+**版本决策模型:**
+- `version_analyze` 步骤的 `suggested_version` 字段是新版本号的唯一权威来源
+  （由 LLM 基于实际变更内容、SemVer 2.0.0 默认规则以及可选的项目级规则文件推导）
+- 可选自定义规则: 在 `se3/version-rules.md` 写入自然语言规则，
+  `version_analyze` 会将其注入 LLM prompt 作为决策依据；文件不存在时回落到默认 SemVer 2.0.0 规则
+- `commit` 步骤直接采用 `suggested_version` 写入版本文件；若该字段缺失或步骤失败，
+  流程报错中断并提示人工介入（不再有静默 patch bump 兜底）
 
 **文档更新:**
 - README.md: 显示当前版本徽章/头部
@@ -52,10 +55,6 @@ version:
   enabled: true
   file_path: null  # 自动检测
   include_in_commit_message: true
-  bump_rules:
-    feature: minor
-    bugfix: patch
-    breaking: major
 ```
 
 #### Scenario: 版本自动更新
