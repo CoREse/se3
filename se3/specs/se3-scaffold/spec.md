@@ -23,11 +23,21 @@ project/
 │   │   │   └── spec.md    # Required: project conventions
 │   │   └── <capability>/  # Capability specs
 │   │       └── spec.md
+│   ├── version-rules.md   # Optional project-level natural-language
+│   │                      # version rules consumed by version_analyze
 │   ├── state/             # Flow engine state persistence
 │   └── cache/             # Cache files
 ├── src/                   # Source code (conventional)
 └── tests/                 # Test files (conventional)
 ```
+
+**Optional file — `se3/version-rules.md`:** When this file exists, its
+plain-Markdown contents are injected into the `version_analyze` LLM
+prompt as the authoritative version policy (see the `se3-versioning`
+*Custom Version Rules File* requirement). When absent, the default
+SemVer 2.0.0 rules apply. The file is included alongside `se3/specs/`,
+`se3/issues/`, and `se3/scripts/` in the default `.gitignore` whitelist
+so it is committed with the project.
 
 **Required Files:**
 - `se3/specs/base/spec.md` — Base project specification (auto-loaded in all flows)
@@ -84,7 +94,7 @@ authoritative semantics.
 
 **Configuration options:**
 - `version.enabled`: Enable automatic version bumping (default: true)
-- `version.bump_rules`: Map task types to bump types (feature→minor, bugfix→patch, etc.)
+- `version.auto_bump`: Auto-apply the LLM-suggested version without confirmation (default: true)
 - `agents`: Top-level dict registry `{name: {type, cmd, priority?}}` — see the `se3-config` Agent Registry requirement
 - `llm_caller.defaults`: Default caller chain as a list of agent names referencing `agents` (optional)
 - `llm_caller.steps.<step_name>`: Per-step hard override as a list of agent names (optional)
