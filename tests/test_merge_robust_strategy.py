@@ -1,9 +1,12 @@
-"""Tests for the robust merge strategy.
+"""Tests for the (now-removed) robust merge strategy.
 
-Commit 1 (this file's initial scope): verifies that ``robust`` is accepted by
-the type system, CLI plumbing, and MergeConfig default. Behavior is still
-delegated to default-equivalent semantics; commits 2-4 add the behavioral
-differentiation (auto-stash, take-theirs fallback, guardrail-as-issue).
+The ``robust`` strategy was merged into the new ``fast`` tier as part of the
+LLM-as-editor conflict-resolver refactor.  These tests covered the legacy
+take-theirs fallback and audit-issue plumbing that the refactor permanently
+removes.  They are skipped at module level so the file remains in the tree
+for archaeological reference until the deeper take-theirs cleanup deletes
+``_handle_conflict_robust`` and friends; at that point this file should be
+removed entirely.
 """
 
 from __future__ import annotations
@@ -13,6 +16,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+
+pytestmark = pytest.mark.skip(
+    reason=(
+        "robust strategy removed; superseded by 'fast' with LLM-as-editor "
+        "and no take-theirs fallback (see merge strategy refactor)"
+    ),
+)
 
 from se3.engine.merge.conflict_resolver import (
     Confidence,

@@ -352,7 +352,7 @@ class TestDefaultStrategyUnchanged:
             hunk_confidence=Confidence.HIGH,
         )
         decision = decider.decide(
-            resolution, has_spec_files=False, strategy=MergeStrategy.DEFAULT,
+            resolution, has_spec_files=False, strategy=MergeStrategy.SAFE,
         )
         assert decision.action == DecisionAction.ACCEPT
 
@@ -360,7 +360,7 @@ class TestDefaultStrategyUnchanged:
         decider = StrategyDecider()
         resolution = _make_resolution(overall_confidence=Confidence.LOW)
         decision = decider.decide(
-            resolution, has_spec_files=False, strategy=MergeStrategy.DEFAULT,
+            resolution, has_spec_files=False, strategy=MergeStrategy.SAFE,
         )
         assert decision.action == DecisionAction.HUMAN_CALL
 
@@ -371,7 +371,7 @@ class TestDefaultStrategyUnchanged:
             spec_guardrail_concern=True,
         )
         decision = decider.decide(
-            resolution, has_spec_files=True, strategy=MergeStrategy.DEFAULT,
+            resolution, has_spec_files=True, strategy=MergeStrategy.SAFE,
         )
         assert decision.action == DecisionAction.HUMAN_CALL
 
@@ -382,6 +382,6 @@ class TestDefaultStrategyUnchanged:
             requires_human_review=True,
         )
         decision = decider.decide(
-            resolution, has_spec_files=False, strategy=MergeStrategy.DEFAULT,
+            resolution, has_spec_files=False, strategy=MergeStrategy.SAFE,
         )
         assert decision.action == DecisionAction.HUMAN_CALL

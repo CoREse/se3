@@ -138,12 +138,59 @@ class Confidence(str, Enum):
 
 
 class MergeStrategy(str, Enum):
-    """Conflict resolution strategy."""
+    """Conflict resolution strategy.
 
-    DEFAULT = "default"
-    STRICT = "strict"
+    Three tiers (the previous ``default`` / ``robust`` names have been
+    removed without silent aliasing — see :meth:`from_str` for the
+    migration error message):
+
+    - ``fast`` (the new default): LLM resolves conflicts; on failure the
+      merge exits without ever invoking a human, and never falls back to
+      take-theirs.  Inherits the original robust strategy's
+      dirty-worktree stash behavior.
+    - ``safe``: LLM resolves conflicts; if the LLM cannot converge it
+      falls back to a human MCP call.  Sets the same expectation of
+      clean working tree as the legacy ``default`` strategy.
+    - ``strict``: every conflict goes straight to a human call without
+      invoking the LLM at all.
+    """
+
     FAST = "fast"
-    ROBUST = "robust"
+    SAFE = "safe"
+    STRICT = "strict"
+
+    @classmethod
+    def from_str(cls, value: str) -> "MergeStrategy":
+        """Resolve a string to a :class:`MergeStrategy`, failing fast on
+        the removed ``default`` / ``robust`` names.
+
+        Unlike Python's default ``MergeStrategy(value)`` constructor,
+        this method produces a migration-friendly error message pointing
+        users at the replacement strategy.  Unknown values raise a
+        ``ValueError`` listing the allowed names.
+        """
+        if not isinstance(value, str):
+            raise ValueError(
+                f"Merge strategy must be a string, got {type(value).__name__}={value!r}"
+            )
+        norm = value.strip().lower()
+        if norm == "default":
+            raise ValueError(
+                "Merge strategy 'default' has been removed; use 'safe' instead "
+                "(LLM-resolves conflicts, falls back to human MCP call on failure)."
+            )
+        if norm == "robust":
+            raise ValueError(
+                "Merge strategy 'robust' has been removed; use 'fast' instead "
+                "(LLM-resolves conflicts, never falls back to take-theirs or human)."
+            )
+        try:
+            return cls(norm)
+        except ValueError as exc:
+            allowed = ", ".join(m.value for m in cls)
+            raise ValueError(
+                f"Unknown merge strategy {value!r}; must be one of: {allowed}"
+            ) from exc
 
 
 @dataclass
@@ -307,7 +354,7 @@ class ConflictResolver:
     def resolve(
         self,
         context: ConflictContext,
-        strategy: MergeStrategy = MergeStrategy.DEFAULT,
+        strategy: MergeStrategy = MergeStrategy.SAFE,
     ) -> LLMResolution:
         """Resolve conflicts in the given context.
 
@@ -428,10 +475,11 @@ class ConflictResolver:
 
         # Strategy indicator
         lines.append(f"## Strategy: {strategy.value}")
-        if strategy == MergeStrategy.DEFAULT:
+        if strategy == MergeStrategy.SAFE:
             lines.append(
-                "Default mode: resolve carefully. For spec files, be extra cautious. "
-                "For regular files, resolve based on semantic correctness."
+                "Safe mode: resolve carefully. For spec files, be extra cautious. "
+                "For regular files, resolve based on semantic correctness. "
+                "On unresolved cases the merge falls back to a human MCP call."
             )
         elif strategy == MergeStrategy.STRICT:
             lines.append(
@@ -441,7 +489,8 @@ class ConflictResolver:
         elif strategy == MergeStrategy.FAST:
             lines.append(
                 "Fast mode: resolve aggressively for regular files, but NEVER weaken spec requirements. "
-                "Spec files still require the same caution as default mode."
+                "Spec files still require the same caution. There is no human fallback — "
+                "if you cannot resolve a conflict, the merge will exit with a failure."
             )
         lines.append("")
 

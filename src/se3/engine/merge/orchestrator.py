@@ -605,18 +605,16 @@ class MergeOrchestrator:
     def __init__(
         self,
         project_root: Path,
-        strategy: str = "default",
+        strategy: str = "fast",
         delete_merged: bool = False,
         strict_runtime_sync: bool = False,
         acquire_lock: bool = True,
     ) -> None:
         self.project_root = project_root
-        if strategy not in ("default", "strict", "fast", "robust"):
-            raise ValueError(
-                f"Unknown merge strategy: {strategy!r}. "
-                f"Must be one of: default, strict, fast, robust"
-            )
-        self.strategy = MergeStrategy(strategy)
+        # Validate via MergeStrategy.from_str so the removed
+        # ``default`` / ``robust`` names produce the migration-friendly
+        # error message rather than a generic "unknown value".
+        self.strategy = MergeStrategy.from_str(strategy)
         self.delete_merged = delete_merged
         self.strict_runtime_sync = strict_runtime_sync
         # When True (default), ``execute()`` wraps its body in a
@@ -3310,13 +3308,13 @@ class MergeOrchestrator:
             resolver input — distinct from a real conflict-resolution
             rejection), or "conflict" (if rejected/aborted).
         """
-        # --- ROBUST: never write a human call file. Try LLM as best effort;
-        # on any non-success outcome, fall back to deterministic take-theirs
-        # (accept the incoming branch's version for each conflict file) and
-        # file an audit issue. The merge always commits — guardrails on the
-        # result are handled by the strategy-aware guardrail path below.
-        if self.strategy == MergeStrategy.ROBUST:
-            return self._handle_conflict_robust(branch, pre_merge_sha, report)
+        # NOTE (G2 transition): the legacy ROBUST tier — which dispatched
+        # to ``_handle_conflict_robust`` for the take-theirs fallback — has
+        # been removed.  FAST now continues into the LLM resolution path
+        # below and uses ``_decide_fast`` (ACCEPT or REJECT only, no human
+        # call, no take-theirs).  The ``_handle_conflict_robust`` helper
+        # itself is scheduled for full removal in a later group together
+        # with the rest of the take-theirs plumbing.
 
         # Build conflict context (must be called while mid-merge).
         # Narrowed from ``except Exception`` to a typed error set so
@@ -4554,7 +4552,7 @@ class MergeOrchestrator:
         pre_sha: str,
         post_sha: str,
         branch: str,
-        strategy: MergeStrategy = MergeStrategy.DEFAULT,
+        strategy: MergeStrategy = MergeStrategy.SAFE,
     ) -> Optional[Path]:
         """Run guardrails check on spec files changed in the merge.
 
@@ -4585,12 +4583,12 @@ class MergeOrchestrator:
             RuntimeError: If the rollback (git reset --hard) fails. The
             caller must escalate because the tree is in an inconsistent state.
         """
-        # --- ROBUST: keep the merge commit, file an audit issue, never
-        # roll back or write a call file. Guardrail violations are
-        # tracked bugs under robust, not merge failures.
-        if strategy == MergeStrategy.ROBUST:
-            self._run_guardrails_robust(pre_sha, post_sha, branch)
-            return None
+        # NOTE (G2 transition): the legacy ROBUST guardrails-audit branch
+        # has been removed along with the ROBUST strategy.  FAST continues
+        # into its existing repair-loop path below; the dedicated
+        # ``_run_guardrails_robust`` helper is scheduled for full removal
+        # in a later group together with the rest of the take-theirs
+        # plumbing.
 
         if not pre_sha or not post_sha:
             logger.warning(
@@ -4708,9 +4706,9 @@ class MergeOrchestrator:
                     f"never enumerated.",
                     level=logging.WARNING,
                 )
-                # Re-classify under the default-strategy escalation so the
+                # Re-classify under the safe-strategy escalation so the
                 # rollback + human call path below executes.
-                strategy = MergeStrategy.DEFAULT
+                strategy = MergeStrategy.SAFE
 
             # H1/H2: topology violations (CHECK_FAILURE with file_path="N/A")
             # cannot be repaired by editing spec files — the LLM has no
@@ -4729,7 +4727,7 @@ class MergeOrchestrator:
                     f"LLM repair.",
                     level=logging.WARNING,
                 )
-                strategy = MergeStrategy.DEFAULT
+                strategy = MergeStrategy.SAFE
 
             self._log(
                 f"Guardrails detected {len(gr_report.violations)} violation(s) "

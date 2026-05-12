@@ -2381,21 +2381,49 @@ def get_max_fix_iterations(project_root: Optional[Path] = None) -> int:
 class MergeConfig:
     """Merge command configuration loaded from se3.yaml merge: section."""
 
-    strategy: str = "robust"
+    strategy: str = "fast"
     delete_merged_default: bool = False
     strict_runtime_sync: bool = False
+    max_conflict_resolve_iterations: int = 10
 
     @classmethod
     def from_dict(cls, data: dict) -> "MergeConfig":
-        """Create MergeConfig from dictionary."""
+        """Create MergeConfig from dictionary.
+
+        Strategy strings are validated via ``MergeStrategy.from_str``;
+        the removed ``default`` / ``robust`` names raise immediately so
+        a stale config cannot silently change merge semantics.
+        """
         if not data:
             return cls()
-        strategy = data.get("strategy", "robust")
-        if strategy not in ("default", "strict", "fast", "robust"):
+        from .engine.merge.conflict_resolver import MergeStrategy
+
+        strategy_raw = data.get("strategy", "fast")
+        # MergeStrategy.from_str raises ValueError with a migration hint
+        # for the removed legacy names and for unknown values.  We
+        # propagate it as a ConfigError so callers see the same
+        # fail-fast surface used elsewhere in this module.
+        try:
+            strategy = MergeStrategy.from_str(strategy_raw).value
+        except ValueError as exc:
+            raise ConfigError(f"merge.strategy: {exc}") from exc
+
+        max_iter_raw = data.get("max_conflict_resolve_iterations", 10)
+        try:
+            max_iter = int(max_iter_raw)
+        except (TypeError, ValueError):
             logger.warning(
-                "Invalid merge.strategy %r; using default 'robust'", strategy,
+                "Invalid merge.max_conflict_resolve_iterations %r; "
+                "falling back to default 10",
+                max_iter_raw,
             )
-            strategy = "robust"
+            max_iter = 10
+        if max_iter < 1:
+            raise ConfigError(
+                "merge.max_conflict_resolve_iterations must be >= 1, "
+                f"got {max_iter}"
+            )
+
         return cls(
             strategy=strategy,
             delete_merged_default=_coerce_bool(
@@ -2404,6 +2432,7 @@ class MergeConfig:
             strict_runtime_sync=_coerce_bool(
                 data.get("strict_runtime_sync", False), default=False,
             ),
+            max_conflict_resolve_iterations=max_iter,
         )
 
     @classmethod

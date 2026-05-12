@@ -201,26 +201,77 @@ class TestMergeConfig:
         assert config.strategy == "fast"
         assert config.delete_merged_default is True
 
-    def test_merge_config_invalid_strategy_fallback(self, tmp_path: Path) -> None:
+    def test_merge_config_invalid_strategy_raises(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
         se3_yaml = tmp_path / "se3.yaml"
         se3_yaml.write_text(
             "merge:\n"
             "  strategy: invalid_strategy\n"
         )
-        from se3.config import MergeConfig
+        from se3.config import ConfigError, MergeConfig
 
-        config = MergeConfig.load(tmp_path)
-        assert config.strategy == "robust"
+        with pytest.raises(ConfigError):
+            MergeConfig.load(tmp_path)
+
+    def test_merge_config_legacy_robust_raises(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml.write_text(
+            "merge:\n"
+            "  strategy: robust\n"
+        )
+        from se3.config import ConfigError, MergeConfig
+
+        with pytest.raises(ConfigError) as excinfo:
+            MergeConfig.load(tmp_path)
+        assert "fast" in str(excinfo.value)
+
+    def test_merge_config_legacy_default_raises(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml.write_text(
+            "merge:\n"
+            "  strategy: default\n"
+        )
+        from se3.config import ConfigError, MergeConfig
+
+        with pytest.raises(ConfigError) as excinfo:
+            MergeConfig.load(tmp_path)
+        assert "safe" in str(excinfo.value)
 
     def test_merge_config_defaults_when_missing(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
         from se3.config import MergeConfig
 
         config = MergeConfig.load(tmp_path)
-        assert config.strategy == "robust"
+        assert config.strategy == "fast"
         assert config.delete_merged_default is False
         assert config.strict_runtime_sync is False
+        assert config.max_conflict_resolve_iterations == 10
+
+    def test_merge_config_max_conflict_resolve_iterations(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml.write_text(
+            "merge:\n"
+            "  max_conflict_resolve_iterations: 25\n"
+        )
+        from se3.config import MergeConfig
+
+        config = MergeConfig.load(tmp_path)
+        assert config.max_conflict_resolve_iterations == 25
+
+    def test_merge_config_max_conflict_resolve_iterations_zero_raises(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        se3_yaml = tmp_path / "se3.yaml"
+        se3_yaml.write_text(
+            "merge:\n"
+            "  max_conflict_resolve_iterations: 0\n"
+        )
+        from se3.config import ConfigError, MergeConfig
+
+        with pytest.raises(ConfigError):
+            MergeConfig.load(tmp_path)
 
     def test_merge_config_strict_runtime_sync_true(self, tmp_path: Path) -> None:
         _init_repo(tmp_path)
@@ -446,15 +497,15 @@ class TestRunMergeSuccess:
             lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock llm fail")),
         )
 
-        # Pin to ``default`` strategy: the robust default would take-theirs
-        # and commit successfully instead of escalating to human call.
+        # Pin to ``safe`` strategy: the fast default would take a different
+        # path. Safe escalates to human call when the LLM cannot resolve.
         exit_code = run_merge(
-            ["feature"], strategy="default", project_root=tmp_path,
+            ["feature"], strategy="safe", project_root=tmp_path,
         )
         # pending_human returns 130 (interrupted by user)
         assert exit_code == 130
 
-        # Working tree should have conflict markers (default strategy leaves them for human)
+        # Working tree should have conflict markers (safe strategy leaves them for human)
         content = (tmp_path / "shared.txt").read_text()
         assert "<<<<<<<" in content
         assert "=======" in content

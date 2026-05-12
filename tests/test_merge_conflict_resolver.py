@@ -128,7 +128,7 @@ class TestConflictResolverPrompt:
         _setup_conflict(tmp_path)
         resolver = ConflictResolver(tmp_path)
         ctx = build(tmp_path, "HEAD", "theirs-branch")
-        prompt = resolver._build_prompt(ctx, MergeStrategy.DEFAULT)
+        prompt = resolver._build_prompt(ctx, MergeStrategy.SAFE)
 
         assert ctx.ours_branch in prompt
         assert ctx.theirs_branch in prompt
@@ -148,7 +148,7 @@ class TestConflictResolverPrompt:
         _setup_conflict(tmp_path)
         resolver = ConflictResolver(tmp_path)
         ctx = build(tmp_path, "HEAD", "theirs-branch")
-        prompt = resolver._build_prompt(ctx, MergeStrategy.DEFAULT)
+        prompt = resolver._build_prompt(ctx, MergeStrategy.SAFE)
 
         assert "Base version" in prompt
         assert "Ours version" in prompt
@@ -160,7 +160,7 @@ class TestConflictResolverPrompt:
         _setup_conflict(tmp_path)
         resolver = ConflictResolver(tmp_path)
         ctx = build(tmp_path, "HEAD", "theirs-branch")
-        prompt = resolver._build_prompt(ctx, MergeStrategy.DEFAULT)
+        prompt = resolver._build_prompt(ctx, MergeStrategy.SAFE)
 
         assert "resolved_content" in prompt
         assert "overall_confidence" in prompt
@@ -171,7 +171,7 @@ class TestConflictResolverPrompt:
         _setup_conflict(tmp_path, rel_path="se3/specs/test/spec.md")
         resolver = ConflictResolver(tmp_path)
         ctx = build(tmp_path, "HEAD", "theirs-branch")
-        prompt = resolver._build_prompt(ctx, MergeStrategy.DEFAULT)
+        prompt = resolver._build_prompt(ctx, MergeStrategy.SAFE)
 
         assert "SPEC FILES DETECTED" in prompt
         assert "guardrails" in prompt.lower() or "SHALL" in prompt
@@ -344,13 +344,13 @@ class TestStrategyDeciderDefault:
             overall_confidence=Confidence.HIGH,
             hunk_confidence=Confidence.HIGH,
         )
-        decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.DEFAULT)
+        decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.SAFE)
         assert decision.action == DecisionAction.ACCEPT
 
     def test_default_low_overall_confidence_human_call(self) -> None:
         decider = StrategyDecider()
         resolution = _make_resolution(overall_confidence=Confidence.LOW)
-        decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.DEFAULT)
+        decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.SAFE)
         assert decision.action == DecisionAction.HUMAN_CALL
         assert "overall confidence" in decision.reason
 
@@ -360,7 +360,7 @@ class TestStrategyDeciderDefault:
             overall_confidence=Confidence.HIGH,
             requires_human_review=True,
         )
-        decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.DEFAULT)
+        decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.SAFE)
         assert decision.action == DecisionAction.HUMAN_CALL
         assert "requires_human_review" in decision.reason
 
@@ -370,7 +370,7 @@ class TestStrategyDeciderDefault:
             overall_confidence=Confidence.HIGH,
             spec_guardrail_concern=True,
         )
-        decision = decider.decide(resolution, has_spec_files=True, strategy=MergeStrategy.DEFAULT)
+        decision = decider.decide(resolution, has_spec_files=True, strategy=MergeStrategy.SAFE)
         assert decision.action == DecisionAction.HUMAN_CALL
         assert "spec_guardrail_concern" in decision.reason
 
@@ -382,7 +382,7 @@ class TestStrategyDeciderDefault:
         )
         # Add per-file flag
         resolution.files[0].flags["requires_human_review"] = True
-        decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.DEFAULT)
+        decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.SAFE)
         assert decision.action == DecisionAction.HUMAN_CALL
 
     def test_default_medium_hunk_high_overall_accept(self) -> None:
@@ -392,7 +392,7 @@ class TestStrategyDeciderDefault:
             overall_confidence=Confidence.HIGH,
             hunk_confidence=Confidence.MEDIUM,
         )
-        decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.DEFAULT)
+        decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.SAFE)
         assert decision.action == DecisionAction.ACCEPT
 
     def test_default_low_file_overall_still_human_call(self) -> None:
@@ -403,7 +403,7 @@ class TestStrategyDeciderDefault:
             hunk_confidence=Confidence.HIGH,
         )
         resolution.files[0].overall_confidence = Confidence.LOW
-        decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.DEFAULT)
+        decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.SAFE)
         assert decision.action == DecisionAction.HUMAN_CALL
 
 
@@ -716,7 +716,7 @@ class TestResolverStrategyIntegration:
         decision = decider.decide(
             resolution,
             has_spec_files=ctx.has_spec_files,
-            strategy=MergeStrategy.DEFAULT,
+            strategy=MergeStrategy.SAFE,
         )
         assert decision.action == DecisionAction.ACCEPT
 
@@ -737,6 +737,6 @@ class TestResolverStrategyIntegration:
         decision = decider.decide(
             resolution,
             has_spec_files=ctx.has_spec_files,
-            strategy=MergeStrategy.DEFAULT,
+            strategy=MergeStrategy.SAFE,
         )
         assert decision.action == DecisionAction.HUMAN_CALL

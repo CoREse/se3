@@ -559,7 +559,7 @@ class TestSharedLLMCaller:
             project_root=tmp_path, ours_branch="x", theirs_branch="y",
             files=[ConflictFile(path="f.txt")],
         )
-        result = r.resolve(ctx, MergeStrategy.DEFAULT)
+        result = r.resolve(ctx, MergeStrategy.SAFE)
 
         # The injected caller was used (no fresh LLMCaller instantiated)
         stub.call.assert_called_once()

@@ -981,7 +981,7 @@ class TestOrchestratorVersionAggregation:
             "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Pending human, version aggregation skipped, version unchanged
@@ -992,8 +992,9 @@ class TestOrchestratorVersionAggregation:
         assert _read_pyproject_version(tmp_path) == "4.4.0"
 
     def test_conflict_reject_skips_aggregation(self, tmp_path: Path, monkeypatch):
-        """If a branch has a conflict and LLM resolution fails, default strategy
-        escalates to human call. Aggregation is skipped and version unchanged."""
+        """If a branch has a conflict and LLM resolution fails, the ``safe``
+        strategy escalates to human call. Aggregation is skipped and version
+        unchanged."""
         _init_repo(tmp_path)
         _write_pyproject(tmp_path, "4.4.0")
         _commit(tmp_path, "Add pyproject")
@@ -1009,13 +1010,14 @@ class TestOrchestratorVersionAggregation:
         (tmp_path / "shared.txt").write_text("base new content\n")
         _commit(tmp_path, "Change shared on base")
 
-        # Mock the resolver to raise — default strategy escalates to human call
+        # Mock the resolver to raise — ``safe`` strategy escalates to
+        # human call (the new default ``fast`` does not).
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve",
             lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock")),
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         assert report.success is False

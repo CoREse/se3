@@ -1,6 +1,6 @@
 """StrategyDecider — Three-strategy decision matrix for conflict resolution.
 
-Implements default/strict/fast decision logic based on LLM resolution
+Implements safe/strict/fast decision logic based on LLM resolution
 confidence, spec guardrail flags, and file types.
 """
 
@@ -35,8 +35,8 @@ class StrategyDecider:
     """Decide whether to accept, reject, or escalate to human review.
 
     Three strategies:
-    - default: high confidence + no spec_guardrail_concern → ACCEPT,
-               otherwise HUMAN_CALL
+    - safe:    high confidence + no spec_guardrail_concern → ACCEPT,
+               otherwise HUMAN_CALL (the legacy ``default`` tier).
     - strict:  short-circuited by orchestrator (_handle_conflict skips LLM
                and goes directly to human call). Retained as fallback.
     - fast:    ACCEPT or REJECT only — never HUMAN_CALL.
@@ -49,7 +49,7 @@ class StrategyDecider:
         self,
         resolution: LLMResolution,
         has_spec_files: bool,
-        strategy: MergeStrategy = MergeStrategy.DEFAULT,
+        strategy: MergeStrategy = MergeStrategy.SAFE,
     ) -> StrategyDecision:
         """Evaluate the LLM resolution and return a decision.
 
@@ -61,31 +61,29 @@ class StrategyDecider:
         Returns:
             StrategyDecision with action and reason.
         """
-        if strategy == MergeStrategy.DEFAULT:
-            return self._decide_default(resolution, has_spec_files)
+        if strategy == MergeStrategy.SAFE:
+            return self._decide_safe(resolution, has_spec_files)
         elif strategy == MergeStrategy.STRICT:
             return self._decide_strict(resolution, has_spec_files)
         elif strategy == MergeStrategy.FAST:
             return self._decide_fast(resolution)
-        elif strategy == MergeStrategy.ROBUST:
-            return self._decide_robust(resolution, has_spec_files)
         else:
-            logger.warning("Unknown strategy %s, falling back to default", strategy)
-            return self._decide_default(resolution, has_spec_files)
+            logger.warning("Unknown strategy %s, falling back to safe", strategy)
+            return self._decide_safe(resolution, has_spec_files)
 
-    def _decide_default(
+    def _decide_safe(
         self,
         resolution: LLMResolution,
         has_spec_files: bool,
     ) -> StrategyDecision:
-        """Default strategy: high overall confidence + no spec concerns → ACCEPT.
+        """Safe strategy: high overall confidence + no spec concerns → ACCEPT.
 
-        Unlike strict, default does NOT require every individual hunk to be
+        Unlike strict, safe does NOT require every individual hunk to be
         HIGH — only file-level and global overall confidence.
 
         Note:
             ``has_spec_files`` is kept in the signature for API consistency
-            with ``decide()`` but is intentionally unused; default strategy
+            with ``decide()`` but is intentionally unused; safe strategy
             relies on per-file ``is_spec`` and confidence flags rather than
             a global file-type predicate.
         """
@@ -93,13 +91,13 @@ class StrategyDecider:
         if resolution.flags.get("spec_guardrail_concern", False):
             return StrategyDecision(
                 action=DecisionAction.HUMAN_CALL,
-                reason="spec_guardrail_concern flag set (default strategy)",
+                reason="spec_guardrail_concern flag set (safe strategy)",
             )
 
         if resolution.flags.get("requires_human_review", False):
             return StrategyDecision(
                 action=DecisionAction.HUMAN_CALL,
-                reason="requires_human_review flag set (default strategy)",
+                reason="requires_human_review flag set (safe strategy)",
             )
 
         # Check per-file flags and file-level overall confidence
@@ -107,33 +105,33 @@ class StrategyDecider:
             if f.flags.get("spec_guardrail_concern", False):
                 return StrategyDecision(
                     action=DecisionAction.HUMAN_CALL,
-                    reason=f"spec_guardrail_concern on file {f.path} (default strategy)",
+                    reason=f"spec_guardrail_concern on file {f.path} (safe strategy)",
                 )
             if f.flags.get("requires_human_review", False):
                 return StrategyDecision(
                     action=DecisionAction.HUMAN_CALL,
-                    reason=f"requires_human_review on file {f.path} (default strategy)",
+                    reason=f"requires_human_review on file {f.path} (safe strategy)",
                 )
-            # Default requires file-level overall confidence to be HIGH
+            # Safe requires file-level overall confidence to be HIGH
             if f.overall_confidence != Confidence.HIGH:
                 return StrategyDecision(
                     action=DecisionAction.HUMAN_CALL,
-                    reason=f"overall confidence on {f.path} is {f.overall_confidence.value}, not high (default strategy)",
+                    reason=f"overall confidence on {f.path} is {f.overall_confidence.value}, not high (safe strategy)",
                 )
-            # Note: default does NOT gate on per-hunk confidence — that is
+            # Note: safe does NOT gate on per-hunk confidence — that is
             # the distinguishing factor from strict.
 
         # Require high global overall confidence
         if resolution.overall_confidence != Confidence.HIGH:
             return StrategyDecision(
                 action=DecisionAction.HUMAN_CALL,
-                reason=f"overall confidence is {resolution.overall_confidence.value}, not high (default strategy)",
+                reason=f"overall confidence is {resolution.overall_confidence.value}, not high (safe strategy)",
             )
 
         # All checks passed
         return StrategyDecision(
             action=DecisionAction.ACCEPT,
-            reason="High confidence, no guardrail concerns (default strategy)",
+            reason="High confidence, no guardrail concerns (safe strategy)",
         )
 
     def _decide_strict(
@@ -274,17 +272,3 @@ class StrategyDecider:
             reason=reason,
         )
 
-    def _decide_robust(
-        self,
-        resolution: LLMResolution,
-        has_spec_files: bool,
-    ) -> StrategyDecision:
-        """Robust strategy: same decision logic as default; the orchestrator
-        interprets HUMAN_CALL as a signal to drop into the deterministic
-        take-theirs fallback rather than write a human call file.
-
-        Implemented as a delegate so commit 1 introduces zero behavior
-        change. Commit 3 wires the orchestrator-side branch that treats
-        a HUMAN_CALL decision under ROBUST as a take-theirs trigger.
-        """
-        return self._decide_default(resolution, has_spec_files)

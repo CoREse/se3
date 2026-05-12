@@ -648,7 +648,7 @@ def _robust_stash_pop(
 
 def run_merge(
     branches: list[str],
-    strategy: str = "robust",
+    strategy: str = "fast",
     delete_merged: bool = False,
     strict_runtime_sync: bool = False,
     project_root: Optional[Path] = None,
@@ -681,26 +681,26 @@ def run_merge(
         render_text(str(exc), title="Merge Error")
         return 1
 
-    # Validate working tree is clean — non-robust strategies refuse to
-    # merge a dirty tree (legacy behavior). Robust strategy auto-stashes
-    # tracked + untracked changes inside the merge lock below, restoring
-    # them after the orchestrator returns (with take-ours fallback on
-    # pop conflict). The in-progress git marker check ALWAYS applies —
-    # we never want to layer a merge on top of an unfinished one.
-    if strategy != "robust":
+    # Validate working tree is clean — non-fast strategies refuse to
+    # merge a dirty tree. The fast strategy (which inherits the legacy
+    # robust stash behavior) auto-stashes tracked + untracked changes
+    # inside the merge lock below, restoring them after the orchestrator
+    # returns. The in-progress git marker check ALWAYS applies — we
+    # never want to layer a merge on top of an unfinished one.
+    if strategy != "fast":
         if not _is_working_tree_clean(project_root):
             render_text(
                 "Working tree is not clean. Please commit or stash your "
-                "changes before merging, or use --strategy=robust to "
+                "changes before merging, or use --strategy=fast to "
                 "auto-stash.",
                 title="Merge Error",
             )
             return 1
     else:
-        # Even under robust, refuse to start if a git operation (another
+        # Even under fast, refuse to start if a git operation (another
         # merge, cherry-pick, rebase) is already in progress — stashing
         # cannot recover from that. The marker check is a strict subset
-        # of _is_working_tree_clean, but we replicate it here so robust
+        # of _is_working_tree_clean, but we replicate it here so fast
         # callers still get a clear error before touching git.
         if _git_operation_in_progress(project_root):
             render_text(
@@ -763,8 +763,8 @@ def run_merge(
     # AFTER lock acquisition would observe our own lock file as
     # untracked dirty state and spuriously trigger a stash. Doing the
     # check pre-lock observes the user's actual intent.
-    needs_stash_under_robust = (
-        strategy == "robust"
+    needs_stash_under_fast = (
+        strategy == "fast"
         and _has_user_uncommitted_changes(project_root)
     )
 
@@ -779,7 +779,7 @@ def run_merge(
             # entry — it captures the user's pre-merge intent, not the
             # post-merge state.
             stash_label: Optional[str] = None
-            if needs_stash_under_robust:
+            if needs_stash_under_fast:
                 stash_label = _robust_stash_dirty(
                     project_root, stash_audit_messages,
                 )
