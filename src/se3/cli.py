@@ -1,4 +1,3 @@
-```
 """SE 3.0 CLI - Main entry point for se3 commands."""
 
 import re
@@ -596,4 +595,3 @@ def salvage_cmd(
 
 if __name__ == "__main__":
     app()
-```
