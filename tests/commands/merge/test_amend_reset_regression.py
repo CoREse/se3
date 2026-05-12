@@ -1352,7 +1352,9 @@ class TestEndToEndAmendResetRegression:
             lambda self, pre, post, **kwargs: GuardrailReport(passed=True, violations=[]),
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
+        orch = MergeOrchestrator(
+            project_root=tmp_path, strategy="safe", delete_merged=False,
+        )
         report = orch.execute(["feature"])
 
         assert report.success is True, (

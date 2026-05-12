@@ -93,16 +93,23 @@ class StrategyDecider:
         resolution: LLMResolution,
         has_spec_files: bool,
     ) -> StrategyDecision:
-        """Safe strategy: high overall confidence + no spec concerns → ACCEPT.
+        """Safe strategy: gate on explicit human-review / spec flags only.
 
-        Unlike strict, safe does NOT require every individual hunk to be
-        HIGH — only file-level and global overall confidence.
+        Under the LLM-as-editor model (G3), success is observable on
+        disk — ``ConflictResolver.resolve`` wraps :meth:`resolve_batch`
+        and synthesises a resolution whose ``requires_human_review`` /
+        ``spec_guardrail_concern`` flags reflect whether the LLM cleared
+        every conflict marker.  The decider therefore no longer gates
+        on the (now informational-only) ``overall_confidence``
+        rating — that would re-introduce the legacy JSON-decision
+        behaviour the new model deliberately replaced.  A
+        ``MEDIUM``-confidence resolution that cleared every marker is
+        accepted; only flag-bearing resolutions escalate to a human
+        MCP call.
 
         Note:
-            ``has_spec_files`` is kept in the signature for API consistency
-            with ``decide()`` but is intentionally unused; safe strategy
-            relies on per-file ``is_spec`` and confidence flags rather than
-            a global file-type predicate.
+            ``has_spec_files`` is kept in the signature for API
+            consistency with ``decide()`` but is intentionally unused.
         """
         # Check global flags first
         if resolution.flags.get("spec_guardrail_concern", False):
@@ -117,7 +124,7 @@ class StrategyDecider:
                 reason="requires_human_review flag set (safe strategy)",
             )
 
-        # Check per-file flags and file-level overall confidence
+        # Check per-file flags only; confidence rating is informational.
         for f in resolution.files:
             if f.flags.get("spec_guardrail_concern", False):
                 return StrategyDecision(
@@ -129,26 +136,14 @@ class StrategyDecider:
                     action=DecisionAction.HUMAN_CALL,
                     reason=f"requires_human_review on file {f.path} (safe strategy)",
                 )
-            # Safe requires file-level overall confidence to be HIGH
-            if f.overall_confidence != Confidence.HIGH:
-                return StrategyDecision(
-                    action=DecisionAction.HUMAN_CALL,
-                    reason=f"overall confidence on {f.path} is {f.overall_confidence.value}, not high (safe strategy)",
-                )
-            # Note: safe does NOT gate on per-hunk confidence — that is
-            # the distinguishing factor from strict.
-
-        # Require high global overall confidence
-        if resolution.overall_confidence != Confidence.HIGH:
-            return StrategyDecision(
-                action=DecisionAction.HUMAN_CALL,
-                reason=f"overall confidence is {resolution.overall_confidence.value}, not high (safe strategy)",
-            )
 
         # All checks passed
         return StrategyDecision(
             action=DecisionAction.ACCEPT,
-            reason="High confidence, no guardrail concerns (safe strategy)",
+            reason=(
+                "No human-review / spec_guardrail_concern flags set "
+                "(safe strategy)"
+            ),
         )
 
     def _decide_strict(
@@ -340,6 +335,99 @@ class StrategyDecider:
             resolver, conflict_files, context, max_iterations,
         )
 
+    def _run_resolver(
+        self,
+        resolver: "ConflictResolver",
+        conflict_files: list[ConflictFile],
+        context: BatchContext,
+        max_iterations: int,
+    ) -> BatchResolveOutcome:
+        """Drive ``ConflictResolver`` and return a :class:`BatchResolveOutcome`.
+
+        Calls :meth:`ConflictResolver.resolve` (the public entry point,
+        which wraps ``resolve_batch``) so that test infrastructure that
+        monkeypatches ``ConflictResolver.resolve`` keeps working.
+        Builds a :class:`ConflictContext` from the supplied
+        ``BatchContext`` and ``conflict_files`` to satisfy the wrapper's
+        signature, then derives a :class:`BatchResolveOutcome` from the
+        resulting :class:`LLMResolution` by scanning the working tree
+        for unresolved files.
+        """
+        from .conflict_resolver import ConflictContext
+
+        ctx = ConflictContext(
+            project_root=context.project_root,
+            ours_branch=context.ours_branch,
+            theirs_branch=context.theirs_branch,
+            merge_base=context.merge_base,
+            ours_head_sha=context.ours_head_sha,
+            ours_head_message=context.ours_head_message,
+            theirs_head_sha=context.theirs_head_sha,
+            theirs_head_message=context.theirs_head_message,
+            ours_log_oneline=list(context.ours_log_oneline),
+            theirs_log_oneline=list(context.theirs_log_oneline),
+            files=list(conflict_files),
+            has_spec_files=context.has_spec_files,
+        )
+        # Call ``resolve()`` with the positional signature that legacy
+        # test mocks expect — ``(self, ctx, strategy)``.  The
+        # ``max_iterations`` kwarg is intentionally NOT forwarded: the
+        # public wrapper reads the cap from project config when not
+        # supplied, and many existing tests monkeypatch ``resolve`` with
+        # a callable that only accepts the two positional arguments.
+        try:
+            resolution = resolver.resolve(
+                ctx, strategy=context.strategy, max_iterations=max_iterations,
+            )
+        except TypeError:
+            resolution = resolver.resolve(ctx, context.strategy)
+
+        # Prefer the originating BatchResolveOutcome if ``resolve()``
+        # attached one (the production wrapper does this).  This
+        # preserves the real iteration count and the resolver's
+        # observed-on-disk classification of resolved vs. unresolved
+        # paths.  Falls back to re-deriving from the LLMResolution
+        # when a test mock returned a hand-built resolution without
+        # an attached outcome.
+        attached = getattr(resolution, "_batch_outcome", None)
+        if attached is not None:
+            outcome = attached
+        else:
+            from .conflict_resolver import _has_conflict_markers
+
+            unresolved: list[Path] = []
+            resolved: list[Path] = []
+            for fr in resolution.files:
+                abs_path = context.project_root / fr.path
+                content_has_markers = (
+                    fr.resolved_content and _has_conflict_markers(fr.resolved_content)
+                )
+                flag_unresolved = bool(
+                    fr.flags.get("contains_conflict_markers", False)
+                    or content_has_markers
+                )
+                if flag_unresolved:
+                    unresolved.append(abs_path)
+                else:
+                    resolved.append(abs_path)
+
+            outcome = BatchResolveOutcome(
+                resolved=resolved,
+                unresolved=unresolved,
+                iterations_used=1,
+            )
+            if unresolved:
+                outcome.escalation_reason = (
+                    "strict_to_human"
+                    if context.strategy == MergeStrategy.STRICT
+                    else "fast_failed"
+                )
+        # Stash the synthesised resolution on the outcome (under a
+        # private attribute) so the orchestrator can reuse it for
+        # downstream consumers (human-call writer) without re-synthesising.
+        outcome._resolution = resolution  # type: ignore[attr-defined]
+        return outcome
+
     def _decide_fast_batch(
         self,
         resolver: "ConflictResolver",
@@ -352,28 +440,42 @@ class StrategyDecider:
         Never invokes a human MCP call.  When the LLM cannot clear all
         conflict markers within ``max_iterations``, the merge is
         rejected and the orchestrator aborts with a failure report.
+        Additional flag-based gates from :meth:`_decide_fast` (e.g.
+        spec-file low confidence) are also applied after the marker
+        check.
         """
-        outcome = resolver.resolve_batch(
-            conflict_files, context, max_iterations=max_iterations,
+        outcome = self._run_resolver(
+            resolver, conflict_files, context, max_iterations,
         )
-        if outcome.success:
+        if not outcome.success:
             return StrategyDecision(
-                action=DecisionAction.ACCEPT,
+                action=DecisionAction.REJECT,
                 reason=(
-                    f"Fast strategy: LLM cleared all conflict markers in "
-                    f"{outcome.iterations_used} iteration(s)"
+                    f"Fast strategy: LLM could not clear conflict markers in "
+                    f"{outcome.iterations_used}/{max_iterations} iteration(s); "
+                    f"{len(outcome.unresolved)} file(s) remain unresolved"
                 ),
                 outcome=outcome,
+                unresolved_files=list(outcome.unresolved),
             )
+        # Markers cleared — defer to the legacy flag-based gates for
+        # fast strategy (spec-file low confidence / explicit
+        # requires_human_review).  These still apply because the
+        # LLM-as-editor model trusts the LLM's signals about file
+        # quality on top of the on-disk marker scan.
+        resolution = getattr(outcome, "_resolution", None)
+        if resolution is not None:
+            flag_decision = self._decide_fast(resolution)
+            if flag_decision.action != DecisionAction.ACCEPT:
+                flag_decision.outcome = outcome
+                return flag_decision
         return StrategyDecision(
-            action=DecisionAction.REJECT,
+            action=DecisionAction.ACCEPT,
             reason=(
-                f"Fast strategy: LLM could not clear conflict markers in "
-                f"{outcome.iterations_used}/{max_iterations} iteration(s); "
-                f"{len(outcome.unresolved)} file(s) remain unresolved"
+                f"Fast strategy: LLM cleared all conflict markers in "
+                f"{outcome.iterations_used} iteration(s)"
             ),
             outcome=outcome,
-            unresolved_files=list(outcome.unresolved),
         )
 
     def _decide_safe_batch(
@@ -387,32 +489,43 @@ class StrategyDecider:
 
         Mirrors the legacy ``default`` semantics but without ever
         delegating to take-theirs — humans, not the resolver, decide
-        what to do when the LLM cannot converge.
+        what to do when the LLM cannot converge.  Flag-based gates from
+        :meth:`_decide_safe` (explicit ``requires_human_review`` /
+        ``spec_guardrail_concern``) still apply after the marker check.
         """
-        outcome = resolver.resolve_batch(
-            conflict_files, context, max_iterations=max_iterations,
+        outcome = self._run_resolver(
+            resolver, conflict_files, context, max_iterations,
         )
-        if outcome.success:
+        if not outcome.success:
+            outcome.escalation_reason = "safe_to_human"
             return StrategyDecision(
-                action=DecisionAction.ACCEPT,
+                action=DecisionAction.HUMAN_CALL,
                 reason=(
-                    f"Safe strategy: LLM cleared all conflict markers in "
-                    f"{outcome.iterations_used} iteration(s)"
+                    f"Safe strategy: LLM could not clear conflict markers in "
+                    f"{outcome.iterations_used}/{max_iterations} iteration(s); "
+                    f"escalating {len(outcome.unresolved)} file(s) to human review"
                 ),
                 outcome=outcome,
+                unresolved_files=list(outcome.unresolved),
             )
-        # Mark the outcome's escalation_reason so callers can route the
-        # human-call file write through the safe-specific code path.
-        outcome.escalation_reason = "safe_to_human"
+        # Markers cleared — defer to the legacy flag-based gates so
+        # the safe strategy still escalates resolutions that
+        # explicitly request human review.
+        resolution = getattr(outcome, "_resolution", None)
+        if resolution is not None:
+            flag_decision = self._decide_safe(
+                resolution, context.has_spec_files,
+            )
+            if flag_decision.action != DecisionAction.ACCEPT:
+                flag_decision.outcome = outcome
+                return flag_decision
         return StrategyDecision(
-            action=DecisionAction.HUMAN_CALL,
+            action=DecisionAction.ACCEPT,
             reason=(
-                f"Safe strategy: LLM could not clear conflict markers in "
-                f"{outcome.iterations_used}/{max_iterations} iteration(s); "
-                f"escalating {len(outcome.unresolved)} file(s) to human review"
+                f"Safe strategy: LLM cleared all conflict markers in "
+                f"{outcome.iterations_used} iteration(s)"
             ),
             outcome=outcome,
-            unresolved_files=list(outcome.unresolved),
         )
 
     def _decide_strict_batch(

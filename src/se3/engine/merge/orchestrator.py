@@ -20,7 +20,13 @@ from ..version_bumper import BumpType, Version
 from ..worktree import _run_git, get_conflicting_files, get_current_branch
 from .cleanup import CleanupManager, CleanupReport
 from .conflict_context import build as build_conflict_context
-from .conflict_resolver import ConflictResolver, LLMResolution, MergeStrategy
+from .conflict_resolver import (
+    BatchContext,
+    ConflictResolver,
+    LLMResolution,
+    MergeStrategy,
+    _load_max_conflict_resolve_iterations,
+)
 from ...commands.merge.secret_redact import redact_text
 from .guardrail_repair import GuardrailRepairer, GuardrailRepairInconsistentState
 from .guardrails import (
@@ -606,7 +612,7 @@ class MergeOrchestrator:
         self,
         project_root: Path,
         strategy: str = "fast",
-        delete_merged: bool = False,
+        delete_merged: bool = True,
         strict_runtime_sync: bool = False,
         acquire_lock: bool = True,
     ) -> None:
@@ -3485,13 +3491,38 @@ class MergeOrchestrator:
                 )
             return "pending_human"
 
-        # --- DEFAULT / FAST: call LLM resolver ---
+        # --- SAFE / FAST: call LLM resolver via batch (LLM-as-editor) path ---
         self._log(f"Conflict detected with branch '{branch}', invoking LLM resolution")
+
+        # Build the BatchContext that the new ``resolve_and_decide`` API
+        # expects.  The per-file payload is the existing ``context.files``
+        # list which carries the three-way base/ours/theirs/working
+        # contents already read by ``build_conflict_context``.
+        batch_ctx = BatchContext(
+            project_root=context.project_root,
+            ours_branch=context.ours_branch,
+            theirs_branch=context.theirs_branch,
+            merge_base=context.merge_base,
+            ours_head_sha=context.ours_head_sha,
+            ours_head_message=context.ours_head_message,
+            theirs_head_sha=context.theirs_head_sha,
+            theirs_head_message=context.theirs_head_message,
+            ours_log_oneline=list(context.ours_log_oneline),
+            theirs_log_oneline=list(context.theirs_log_oneline),
+            has_spec_files=context.has_spec_files,
+            strategy=self.strategy,
+        )
+        max_iter = _load_max_conflict_resolve_iterations(self.project_root)
 
         from ..llm_caller import LLMCallError
         try:
-            resolution = self._resolver.resolve(context, strategy=self.strategy)
-        except (LLMCallError, json.JSONDecodeError, ValueError, subprocess.TimeoutExpired) as exc:
+            decision = self._decider.resolve_and_decide(
+                self._resolver,
+                list(context.files),
+                batch_ctx,
+                max_iterations=max_iter,
+            )
+        except (LLMCallError, ValueError, subprocess.TimeoutExpired) as exc:
             self._log(f"LLM resolution failed: {exc}")
             if self.strategy == MergeStrategy.FAST:
                 if not self._abort_merge():
@@ -3499,7 +3530,7 @@ class MergeOrchestrator:
                 else:
                     report.failure_reason = FailureReason.LLM_RESOLUTION_FAILED.legacy_string
                 return "fast_abort"
-            # DEFAULT strategy: escalate to human call (do NOT abort yet)
+            # SAFE strategy: escalate to human call (do NOT abort yet)
             llm_fail_decision = StrategyDecision(
                 action=DecisionAction.HUMAN_CALL,
                 reason=redact_text(f"LLM resolution system failure: {exc}"),
@@ -3537,12 +3568,28 @@ class MergeOrchestrator:
             # Leave working tree with conflict markers for human — do NOT abort
             return "pending_human"
 
-        # Strategy decision
-        decision = self._decider.decide(
-            resolution,
-            has_spec_files=context.has_spec_files,
-            strategy=self.strategy,
-        )
+        # Recover the LLMResolution that the decider stashed on the
+        # outcome (the new ``_run_resolver`` path attaches it under
+        # ``_resolution`` after calling ``ConflictResolver.resolve``).
+        # Fall back to synthesising one from the batch outcome if not
+        # present (e.g. strict_batch which short-circuits).  The on-disk
+        # state is the canonical artefact — this structured view is
+        # only used by downstream consumers (human-call writer,
+        # guardrails report).
+        resolution = None
+        if decision.outcome is not None:
+            resolution = getattr(decision.outcome, "_resolution", None)
+            if resolution is None:
+                resolution = self._resolver._synthesize_resolution_from_outcome(
+                    decision.outcome, context,
+                )
+        if resolution is None:
+            from .conflict_resolver import Confidence, LLMResolution
+            resolution = LLMResolution(
+                files=[],
+                overall_confidence=Confidence.LOW,
+                flags={},
+            )
 
         self._log(f"Strategy decision: {decision.action.value} — {decision.reason}")
 
@@ -3916,7 +3963,25 @@ class MergeOrchestrator:
                         break
                     continue
 
-                # Non-empty resolved content: write and stage
+                # Under the LLM-as-editor model the file on disk is
+                # already the LLM's final output (``resolve_batch``
+                # operates by editing the working tree directly).  The
+                # ``resolved_content`` we hold here is synthesised from
+                # disk by ``_synthesize_resolution_from_outcome`` — so
+                # this write is a no-op on the happy path.  We retain
+                # it as defense-in-depth for two distinct callers that
+                # still produce structured resolved_content directly:
+                # (1) merge-respond, which reconstructs an
+                # ``LLMResolution`` from a human-edited call file, and
+                # (2) test infrastructure that mocks
+                # ``ConflictResolver.resolve`` and returns an
+                # ``LLMResolution`` whose ``resolved_content``
+                # represents what the LLM "would have written" without
+                # actually performing the write.  In both cases the
+                # write here brings disk into alignment with the
+                # structured resolution.  In production this code path
+                # is idempotent because the synthesiser reads back the
+                # very content the LLM just wrote.
                 full_path.parent.mkdir(parents=True, exist_ok=True)
                 # Atomic write: temp file + fsync + rename so a crash or
                 # signal mid-write never leaves a partially-written file.

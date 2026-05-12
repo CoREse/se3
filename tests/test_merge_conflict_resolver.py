@@ -123,215 +123,15 @@ def _make_resolution(
 # --------- ConflictResolver unit tests ---------
 
 
-class TestConflictResolverPrompt:
-    def test_prompt_contains_merge_metadata(self, tmp_path: Path) -> None:
-        _setup_conflict(tmp_path)
-        resolver = ConflictResolver(tmp_path)
-        ctx = build(tmp_path, "HEAD", "theirs-branch")
-        prompt = resolver._build_prompt(ctx, MergeStrategy.SAFE)
-
-        assert ctx.ours_branch in prompt
-        assert ctx.theirs_branch in prompt
-        assert ctx.merge_base in prompt
-        assert "Merge Metadata" in prompt
-
-    def test_prompt_contains_strategy_indicator(self, tmp_path: Path) -> None:
-        _setup_conflict(tmp_path)
-        resolver = ConflictResolver(tmp_path)
-        ctx = build(tmp_path, "HEAD", "theirs-branch")
-        prompt = resolver._build_prompt(ctx, MergeStrategy.STRICT)
-
-        assert "Strategy: strict" in prompt
-        assert "Strict mode" in prompt
-
-    def test_prompt_contains_file_versions(self, tmp_path: Path) -> None:
-        _setup_conflict(tmp_path)
-        resolver = ConflictResolver(tmp_path)
-        ctx = build(tmp_path, "HEAD", "theirs-branch")
-        prompt = resolver._build_prompt(ctx, MergeStrategy.SAFE)
-
-        assert "Base version" in prompt
-        assert "Ours version" in prompt
-        assert "Theirs version" in prompt
-        assert "Working tree" in prompt
-        assert "line1" in prompt  # content from base/ours/theirs
-
-    def test_prompt_contains_json_schema(self, tmp_path: Path) -> None:
-        _setup_conflict(tmp_path)
-        resolver = ConflictResolver(tmp_path)
-        ctx = build(tmp_path, "HEAD", "theirs-branch")
-        prompt = resolver._build_prompt(ctx, MergeStrategy.SAFE)
-
-        assert "resolved_content" in prompt
-        assert "overall_confidence" in prompt
-        assert "requires_human_review" in prompt
-        assert "spec_guardrail_concern" in prompt
-
-    def test_prompt_warns_for_spec_files(self, tmp_path: Path) -> None:
-        _setup_conflict(tmp_path, rel_path="se3/specs/test/spec.md")
-        resolver = ConflictResolver(tmp_path)
-        ctx = build(tmp_path, "HEAD", "theirs-branch")
-        prompt = resolver._build_prompt(ctx, MergeStrategy.SAFE)
-
-        assert "SPEC FILES DETECTED" in prompt
-        assert "guardrails" in prompt.lower() or "SHALL" in prompt
-
-
-class TestConflictResolverParse:
-    def test_parse_valid_json(self, tmp_path: Path) -> None:
-        resolver = ConflictResolver(tmp_path)
-        # Use a multi-line resolved_content so the hunk's end_line=5 is
-        # within bounds; end_line beyond the resolved file's line count
-        # forces human review (a separate bug-fix described in the
-        # high-severity bounds-check issue).
-        raw = json.dumps({
-            "files": [
-                {
-                    "path": "foo.txt",
-                    "resolved_content": "line1\nline2\nline3\nline4\nline5\n",
-                    "hunks": [
-                        {
-                            "start_line": 1,
-                            "end_line": 5,
-                            "confidence": "high",
-                            "reasoning": "merged both",
-                        }
-                    ],
-                    "overall_confidence": "high",
-                    "flags": {
-                        "requires_human_review": False,
-                        "spec_guardrail_concern": False,
-                    },
-                }
-            ],
-            "overall_confidence": "high",
-            "flags": {
-                "requires_human_review": False,
-                "spec_guardrail_concern": False,
-            },
-        })
-
-        # Build a minimal context
-        cf = ConflictFile(path="foo.txt", hunks=[ConflictHunk(1, 5)])
-        ctx = ConflictContext(
-            project_root=tmp_path,
-            ours_branch="main",
-            theirs_branch="feat",
-            files=[cf],
-        )
-
-        result = resolver._parse_response(raw, ctx)
-        assert result.overall_confidence == Confidence.HIGH
-        assert len(result.files) == 1
-        assert result.files[0].path == "foo.txt"
-        assert result.files[0].resolved_content == "line1\nline2\nline3\nline4\nline5\n"
-        assert len(result.files[0].hunks) == 1
-        assert result.files[0].hunks[0].confidence == Confidence.HIGH
-        assert result.files[0].flags["requires_human_review"] is False
-
-    def test_parse_invalid_json_fallback(self, tmp_path: Path, monkeypatch) -> None:
-        resolver = ConflictResolver(tmp_path)
-        cf = ConflictFile(path="foo.txt", hunks=[ConflictHunk(1, 5)], working_content="conflict\n")
-        ctx = ConflictContext(
-            project_root=tmp_path,
-            ours_branch="main",
-            theirs_branch="feat",
-            files=[cf],
-        )
-
-        # Mock extract_json_two_phase to return None (simulating parse failure)
-        monkeypatch.setattr(
-            "se3.engine.merge.conflict_resolver.extract_json_two_phase",
-            lambda *args, **kwargs: None,
-        )
-
-        result = resolver._parse_response("not json at all", ctx)
-        assert result.overall_confidence == Confidence.LOW
-        assert result.flags["requires_human_review"] is True
-        assert result.parse_error is not None
-
-    def test_parse_conflict_markers_flag_human_review(self, tmp_path: Path) -> None:
-        resolver = ConflictResolver(tmp_path)
-        raw = json.dumps({
-            "files": [
-                {
-                    "path": "foo.txt",
-                    "resolved_content": "line\n<<<<<<< HEAD\n ours\n=======\ntheirs\n>>>>>>> branch\nend",
-                    "hunks": [],
-                    "overall_confidence": "high",
-                    "flags": {
-                        "requires_human_review": False,
-                        "spec_guardrail_concern": False,
-                    },
-                }
-            ],
-            "overall_confidence": "high",
-            "flags": {
-                "requires_human_review": False,
-                "spec_guardrail_concern": False,
-            },
-        })
-
-        cf = ConflictFile(path="foo.txt", hunks=[])
-        ctx = ConflictContext(
-            project_root=tmp_path,
-            ours_branch="main",
-            theirs_branch="feat",
-            files=[cf],
-        )
-
-        result = resolver._parse_response(raw, ctx)
-        # Conflict markers in resolved content should trigger human review flag
-        assert result.files[0].flags["requires_human_review"] is True
-
-    def test_parse_conflict_markers_without_flags_field(self, tmp_path: Path) -> None:
-        """When LLM JSON omits 'flags' but content has markers, force_review must still be set."""
-        resolver = ConflictResolver(tmp_path)
-        raw = json.dumps({
-            "files": [
-                {
-                    "path": "foo.txt",
-                    "resolved_content": "line\n<<<<<<< HEAD\n ours\n=======\ntheirs\n>>>>>>> branch\nend",
-                    "hunks": [],
-                    "overall_confidence": "high",
-                    # flags field deliberately omitted
-                }
-            ],
-            "overall_confidence": "high",
-            "flags": {
-                "requires_human_review": False,
-                "spec_guardrail_concern": False,
-            },
-        })
-
-        cf = ConflictFile(path="foo.txt", hunks=[])
-        ctx = ConflictContext(
-            project_root=tmp_path,
-            ours_branch="main",
-            theirs_branch="feat",
-            files=[cf],
-        )
-
-        result = resolver._parse_response(raw, ctx)
-        assert result.files[0].flags["requires_human_review"] is True
-
-    def test_parse_confidence_case_insensitive(self, tmp_path: Path) -> None:
-        resolver = ConflictResolver(tmp_path)
-        raw = json.dumps({
-            "files": [],
-            "overall_confidence": "HIGH",
-            "flags": {},
-        })
-
-        ctx = ConflictContext(
-            project_root=tmp_path,
-            ours_branch="main",
-            theirs_branch="feat",
-            files=[],
-        )
-
-        result = resolver._parse_response(raw, ctx)
-        assert result.overall_confidence == Confidence.HIGH
+# Legacy ``TestConflictResolverPrompt`` and ``TestConflictResolverParse``
+# classes have been removed.  Both exercised the deprecated JSON-decision
+# pipeline (``_build_prompt`` / ``_parse_response`` /
+# ``_build_resolution_from_json`` / ``_fallback_resolution`` /
+# ``_RESOLUTION_SCHEMA``) which is no longer present in the resolver —
+# production conflict resolution now flows through ``resolve_batch``
+# with the LLM editing files directly on disk.  See
+# ``TestMergeOrchestratorBatchResolverIntegration`` in
+# ``test_merge_orchestrator.py`` for the new end-to-end coverage.
 
 
 # --------- StrategyDecider unit tests ---------
@@ -347,12 +147,19 @@ class TestStrategyDeciderDefault:
         decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.SAFE)
         assert decision.action == DecisionAction.ACCEPT
 
-    def test_default_low_overall_confidence_human_call(self) -> None:
+    def test_default_low_overall_confidence_accepted_without_flags(self) -> None:
+        """Under the LLM-as-editor model, confidence is informational.
+
+        Safe strategy only gates on explicit flags
+        (``requires_human_review`` / ``spec_guardrail_concern``).  A
+        resolution with LOW confidence but no flags is accepted because
+        the LLM cleared every conflict marker on disk — which is the
+        only real success signal.
+        """
         decider = StrategyDecider()
         resolution = _make_resolution(overall_confidence=Confidence.LOW)
         decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.SAFE)
-        assert decision.action == DecisionAction.HUMAN_CALL
-        assert "overall confidence" in decision.reason
+        assert decision.action == DecisionAction.ACCEPT
 
     def test_default_requires_human_review_flag_human_call(self) -> None:
         decider = StrategyDecider()
@@ -395,8 +202,13 @@ class TestStrategyDeciderDefault:
         decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.SAFE)
         assert decision.action == DecisionAction.ACCEPT
 
-    def test_default_low_file_overall_still_human_call(self) -> None:
-        """Default strategy still rejects when file-level overall confidence is LOW."""
+    def test_default_low_file_overall_accepted_without_flags(self) -> None:
+        """Safe strategy ignores file-level confidence under the new model.
+
+        Confidence is informational — the on-disk marker scan is the
+        success signal.  A file-level LOW rating without a
+        ``requires_human_review`` flag is still accepted.
+        """
         decider = StrategyDecider()
         resolution = _make_resolution(
             overall_confidence=Confidence.HIGH,
@@ -404,7 +216,7 @@ class TestStrategyDeciderDefault:
         )
         resolution.files[0].overall_confidence = Confidence.LOW
         decision = decider.decide(resolution, has_spec_files=False, strategy=MergeStrategy.SAFE)
-        assert decision.action == DecisionAction.HUMAN_CALL
+        assert decision.action == DecisionAction.ACCEPT
 
 
 class TestStrategyDeciderStrict:
@@ -720,8 +532,15 @@ class TestResolverStrategyIntegration:
         )
         assert decision.action == DecisionAction.ACCEPT
 
-    def test_end_to_end_mock_llm_low_confidence_human_call(self, tmp_path: Path) -> None:
-        """Simulate low-confidence resolution leading to HUMAN_CALL."""
+    def test_end_to_end_mock_llm_review_flag_human_call(self, tmp_path: Path) -> None:
+        """Simulate a review-flagged resolution leading to HUMAN_CALL.
+
+        Under the LLM-as-editor model, the decider gates on explicit
+        flags rather than confidence rating.  A resolution carrying
+        ``requires_human_review=True`` (set by the synthesiser when
+        ``resolve_batch`` could not clear every marker) routes to a
+        human MCP call regardless of confidence.
+        """
         _setup_conflict(tmp_path)
         resolver = ConflictResolver(tmp_path)
         ctx = build(tmp_path, "HEAD", "theirs-branch")
@@ -731,6 +550,7 @@ class TestResolverStrategyIntegration:
             resolved_content="line1\nRESOLVED\nline3\n",
             overall_confidence=Confidence.LOW,
             hunk_confidence=Confidence.LOW,
+            requires_human_review=True,
         )
 
         decider = StrategyDecider()

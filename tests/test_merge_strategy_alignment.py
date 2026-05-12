@@ -356,13 +356,20 @@ class TestDefaultStrategyUnchanged:
         )
         assert decision.action == DecisionAction.ACCEPT
 
-    def test_default_low_overall_human_call(self) -> None:
+    def test_default_low_overall_accepted_without_flags(self) -> None:
+        """Confidence rating is informational under the LLM-as-editor model.
+
+        Safe strategy now only gates on explicit
+        ``requires_human_review`` / ``spec_guardrail_concern`` flags;
+        a LOW-confidence resolution without flags is accepted because
+        the cleared-marker scan is the only success signal.
+        """
         decider = StrategyDecider()
         resolution = _make_resolution(overall_confidence=Confidence.LOW)
         decision = decider.decide(
             resolution, has_spec_files=False, strategy=MergeStrategy.SAFE,
         )
-        assert decision.action == DecisionAction.HUMAN_CALL
+        assert decision.action == DecisionAction.ACCEPT
 
     def test_default_spec_guardrail_human_call(self) -> None:
         decider = StrategyDecider()

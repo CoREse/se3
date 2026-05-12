@@ -395,3 +395,70 @@ def test_replay_resolves_via_llm_without_take_theirs(
     assert outcome.iterations_used == 2
     assert captured_calls == ["r1", "r2"]
     assert "<<<<<<<" not in target.read_text()
+
+
+def test_synthesis_osfailure_does_not_synthesise_deletion(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Regression: a successful LLM resolution whose read-back fails
+    with :class:`OSError` MUST flag the file for human review rather
+    than silently degrading to an empty ``resolved_content`` (which
+    ``_apply_resolution`` treats as a delete request).
+
+    Without this guard a transient EACCES / EIO on a successfully
+    resolved file would cause ``git rm -f`` to erase the file the LLM
+    had just fixed.
+    """
+    from se3.engine.merge.conflict_context import ConflictContext
+    from se3.engine.merge.conflict_resolver import (
+        BatchResolveOutcome,
+        Confidence,
+    )
+
+    target = tmp_path / "resolved.txt"
+    target.write_text("LLM produced this clean content\n")
+
+    resolver = ConflictResolver(tmp_path)
+    cf = _make_conflict_file(
+        "resolved.txt", "(working content with markers)",
+    )
+    ctx = ConflictContext(
+        project_root=tmp_path,
+        ours_branch="ours",
+        theirs_branch="theirs-branch",
+        merge_base="deadbeef",
+        files=[cf],
+    )
+    # LLM cleared the markers — ``resolve_batch`` returns success with
+    # the file listed under ``resolved``.
+    outcome = BatchResolveOutcome(
+        resolved=[target],
+        unresolved=[],
+        iterations_used=1,
+    )
+
+    # Inject an OSError on read_text for the resolved file so the
+    # synthesiser's read-back path fails.
+    original_read_text = Path.read_text
+
+    def failing_read_text(self, *args, **kwargs):
+        if self == target:
+            raise OSError("EIO simulated")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+
+    resolution = resolver._synthesize_resolution_from_outcome(outcome, ctx)
+
+    # The single file must be flagged for human review and the
+    # ``resolved_content`` must NOT be empty (that would be a delete
+    # request).  Carrying the working content with markers preserves
+    # the disputed state for the reviewer.
+    assert len(resolution.files) == 1
+    fr = resolution.files[0]
+    assert fr.flags.get("requires_human_review") is True
+    assert fr.resolved_content != ""
+    assert fr.overall_confidence == Confidence.LOW
+    # The overall resolution must also flag for human review so safe
+    # strategy escalates and fast strategy rejects.
+    assert resolution.flags.get("requires_human_review") is True

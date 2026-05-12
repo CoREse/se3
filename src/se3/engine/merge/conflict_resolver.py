@@ -7,7 +7,6 @@ per-hunk confidence scores, and flags.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import time
@@ -16,7 +15,6 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
-from ..json_extractor import extract_json_two_phase
 from ...commands.merge.secret_redact import redact_text
 from .conflict_context import ConflictContext, ConflictFile, ConflictHunk
 
@@ -149,6 +147,27 @@ def _scan_unresolved(paths: list[Path]) -> list[Path]:
     The order of input paths is preserved in the output.
     """
     return [p for p in paths if _has_any_conflict_marker(p)]
+
+
+def _load_max_conflict_resolve_iterations(project_root: Path) -> int:
+    """Read ``merge.max_conflict_resolve_iterations`` from the project config.
+
+    Falls back to 10 (the documented default) when the config is
+    unavailable, malformed, or sets a non-positive value.  Failures are
+    logged but never raised — the resolver MUST be able to function
+    even when the project YAML cannot be read.
+    """
+    try:
+        from ...config import MergeConfig
+
+        return MergeConfig.load(project_root).max_conflict_resolve_iterations
+    except Exception as exc:  # noqa: BLE001 — config IO is best-effort
+        logger.warning(
+            "Failed to load merge.max_conflict_resolve_iterations "
+            "(falling back to default 10): %s",
+            exc,
+        )
+        return 10
 
 
 _PREVIEW_CHARS = 500
@@ -324,35 +343,6 @@ class LLMResolution:
     parse_error: Optional[str] = None
 
 
-# JSON schema description for the LLM output
-_RESOLUTION_SCHEMA = """{
-  "files": [
-    {
-      "path": "relative/path/to/file",
-      "resolved_content": "full resolved file content with no conflict markers",
-      "hunks": [
-        {
-          "start_line": 1,
-          "end_line": 10,
-          "confidence": "high|medium|low",
-          "reasoning": "brief explanation of the resolution choice"
-        }
-      ],
-      "overall_confidence": "high|medium|low",
-      "flags": {
-        "requires_human_review": false,
-        "spec_guardrail_concern": false
-      }
-    }
-  ],
-  "overall_confidence": "high|medium|low",
-  "flags": {
-    "requires_human_review": false,
-    "spec_guardrail_concern": false
-  }
-}"""
-
-
 @dataclass
 class BatchContext:
     """Merge-level metadata for a single :meth:`ConflictResolver.resolve_batch` call.
@@ -473,35 +463,215 @@ class ConflictResolver:
         self,
         context: ConflictContext,
         strategy: MergeStrategy = MergeStrategy.SAFE,
+        *,
+        max_iterations: Optional[int] = None,
     ) -> LLMResolution:
-        """Resolve conflicts in the given context.
+        """Resolve conflicts via the LLM-as-editor batch loop.
 
-        Constructs a detailed prompt from the context, calls the LLM,
-        and parses the structured JSON response.
+        This is a thin wrapper over :meth:`resolve_batch` that translates
+        the resulting :class:`BatchResolveOutcome` into the
+        :class:`LLMResolution` shape consumed by the orchestrator and the
+        legacy :class:`StrategyDecider` API.  All production conflict
+        resolution flows through ``resolve_batch`` — the LLM edits files
+        on disk directly, success is judged by whether conflict markers
+        remain, and the JSON-decision pipeline has been removed.
 
         Args:
-            context: The three-way merge context.
-            strategy: The conflict resolution strategy.
+            context: The three-way merge context (built from the
+                mid-merge working tree by
+                :func:`build_conflict_context`).
+            strategy: The conflict-resolution strategy that drives
+                downstream decisions.  Strict short-circuits inside
+                ``resolve_batch`` and returns an outcome flagged for
+                human review without calling the LLM.
+            max_iterations: Hard upper bound on LLM-as-editor rounds.
+                When ``None``, the value is read from
+                ``merge.max_conflict_resolve_iterations`` in the active
+                project config (default 10).
 
         Returns:
-            An LLMResolution with resolved content and confidence scores.
-            On parse failure, returns a low-confidence result with
-            requires_human_review=True.
+            An :class:`LLMResolution` synthesised from the on-disk state
+            after ``resolve_batch``.  On success, every file's
+            ``resolved_content`` mirrors the cleaned working-tree
+            contents and ``overall_confidence`` is ``HIGH``.  On failure
+            (markers still present after ``max_iterations``), each
+            unresolved file carries ``requires_human_review=True`` so
+            the :class:`StrategyDecider` routes the merge to either a
+            human MCP call (safe) or a fast-mode reject.
         """
-        prompt = self._build_prompt(context, strategy)
+        if max_iterations is None:
+            max_iterations = _load_max_conflict_resolve_iterations(
+                context.project_root,
+            )
 
-        # Pass the raw prompt text to LLMCaller; the framework's own
-        # _resolve_args() handles auto-filing when the prompt exceeds
-        # the 100KB threshold. This preserves chat-history integrity
-        # (the original text is recorded, not an @file reference) and
-        # avoids redundant temp-file lifecycle management.
-        raw_response = self._call_llm(prompt)
+        batch_ctx = BatchContext(
+            project_root=context.project_root,
+            ours_branch=context.ours_branch,
+            theirs_branch=context.theirs_branch,
+            merge_base=context.merge_base,
+            ours_head_sha=context.ours_head_sha,
+            ours_head_message=context.ours_head_message,
+            theirs_head_sha=context.theirs_head_sha,
+            theirs_head_message=context.theirs_head_message,
+            ours_log_oneline=list(context.ours_log_oneline),
+            theirs_log_oneline=list(context.theirs_log_oneline),
+            has_spec_files=context.has_spec_files,
+            strategy=strategy,
+        )
 
-        if not raw_response:
-            logger.warning("LLM returned empty response for conflict resolution")
-            return self._fallback_resolution(context, "Empty LLM response")
+        outcome = self.resolve_batch(
+            list(context.files), batch_ctx, max_iterations=max_iterations,
+        )
+        return self._synthesize_resolution_from_outcome(outcome, context)
 
-        return self._parse_response(raw_response, context)
+    def _synthesize_resolution_from_outcome(
+        self,
+        outcome: "BatchResolveOutcome",
+        context: ConflictContext,
+    ) -> LLMResolution:
+        """Translate a :class:`BatchResolveOutcome` into an :class:`LLMResolution`.
+
+        For files the LLM cleared of conflict markers, the synthesised
+        ``FileResolution.resolved_content`` is the on-disk content so
+        ``_apply_resolution`` writes it back without surprise (effectively
+        a no-op write since the LLM already produced the canonical
+        state).  Files that the LLM could not clear are flagged with
+        ``requires_human_review=True`` so the
+        :class:`StrategyDecider` routes the merge accordingly.
+        """
+        unresolved_set = {p for p in outcome.unresolved}
+        file_resolutions: list[FileResolution] = []
+        any_unresolved = bool(outcome.unresolved)
+        read_back_failed_paths: list[str] = []
+
+        for cf in context.files:
+            abs_path = context.project_root / cf.path
+            is_unresolved = abs_path in unresolved_set
+            if is_unresolved:
+                # Carry working_content (still has markers) so a human
+                # reviewer can see the disputed state if a call file is
+                # written downstream.
+                resolved_content = cf.working_content
+                confidence = Confidence.LOW
+                flags = {
+                    "requires_human_review": True,
+                    "spec_guardrail_concern": cf.is_spec,
+                }
+            else:
+                # Read the on-disk content the LLM produced (may be
+                # missing if the LLM deleted the file as a valid
+                # resolution).
+                read_failure = False
+                try:
+                    if abs_path.exists():
+                        resolved_content = abs_path.read_text(
+                            encoding="utf-8", errors="replace",
+                        )
+                    else:
+                        resolved_content = ""
+                except OSError as exc:
+                    # CRITICAL: if we cannot read the file the LLM just
+                    # cleared of conflict markers, we MUST NOT silently
+                    # downgrade the resolution to an empty
+                    # ``resolved_content``.  Downstream
+                    # ``_apply_resolution`` treats an empty
+                    # ``resolved_content`` paired with a HIGH-confidence
+                    # resolution as a deletion request and will run
+                    # ``git rm -f`` on the file — destroying the
+                    # successful LLM resolution we cannot read back.
+                    # Instead, flag the file as requiring human review
+                    # and carry the (still-marker-bearing) working
+                    # content as the disputed state so a reviewer can
+                    # see what happened.
+                    logger.warning(
+                        "Failed to read resolved file %s for synthesis: %s "
+                        "— flagging for human review (read-back failure is "
+                        "ambiguous; refusing to synthesise a deletion).",
+                        abs_path, exc,
+                    )
+                    resolved_content = cf.working_content
+                    read_failure = True
+                    read_back_failed_paths.append(cf.path)
+                if read_failure:
+                    confidence = Confidence.LOW
+                    flags = {
+                        "requires_human_review": True,
+                        "spec_guardrail_concern": cf.is_spec,
+                    }
+                    any_unresolved = True
+                else:
+                    confidence = Confidence.HIGH
+                    flags = {
+                        "requires_human_review": False,
+                        "spec_guardrail_concern": False,
+                    }
+
+            # Synthesise a single hunk spanning the resolved file so the
+            # downstream apply path has a placeholder for any consumers
+            # that iterate hunks.
+            if is_unresolved:
+                hunk_reasoning = "LLM-as-editor could not resolve"
+            elif cf.path in read_back_failed_paths:
+                hunk_reasoning = (
+                    "LLM-as-editor cleared markers but the resolved file "
+                    "could not be read back — flagged for human review"
+                )
+            else:
+                hunk_reasoning = "LLM-as-editor resolved file"
+            safe_hunks: list[HunkResolution] = []
+            for h in cf.hunks:
+                try:
+                    safe_hunks.append(
+                        HunkResolution(
+                            start_line=h.start_line,
+                            end_line=h.end_line,
+                            confidence=confidence,
+                            reasoning=hunk_reasoning,
+                        )
+                    )
+                except HunkValidationError:
+                    # Defensive: hunk metadata from git is occasionally
+                    # malformed; we simply drop it rather than crash.
+                    continue
+
+            file_resolutions.append(
+                FileResolution(
+                    path=cf.path,
+                    resolved_content=resolved_content,
+                    hunks=safe_hunks,
+                    overall_confidence=confidence,
+                    flags=flags,
+                    is_spec=cf.is_spec,
+                )
+            )
+
+        overall_conf = (
+            Confidence.LOW if any_unresolved else Confidence.HIGH
+        )
+        overall_flags = {
+            "requires_human_review": any_unresolved,
+            "spec_guardrail_concern": (
+                any_unresolved and any(cf.is_spec for cf in context.files)
+            ),
+        }
+        synthesized = LLMResolution(
+            files=file_resolutions,
+            overall_confidence=overall_conf,
+            flags=overall_flags,
+            raw_response="",
+            parse_error=(
+                f"resolve_batch escalated: {outcome.escalation_reason}"
+                if outcome.escalation_reason
+                else None
+            ),
+        )
+        # Stash the originating BatchResolveOutcome on the resolution so
+        # callers (the StrategyDecider's batch path) can recover the
+        # iteration count and unresolved-paths set without re-deriving
+        # them.  Attached under a private attribute that does not
+        # affect the dataclass surface.
+        synthesized._batch_outcome = outcome  # type: ignore[attr-defined]
+        return synthesized
 
     # ------------------------------------------------------------------
     # LLM-as-editor batch resolution (new model — see G3 in design doc).
@@ -895,452 +1065,3 @@ class ConflictResolver:
                         trace_exc,
                     )
         return result
-
-    def _build_prompt(
-        self,
-        context: ConflictContext,
-        strategy: MergeStrategy,
-    ) -> str:
-        """Build the conflict resolution prompt."""
-        lines: list[str] = []
-
-        lines.append("You are a git merge conflict resolver. Your task is to resolve ALL conflicts in the files below and output a structured JSON response.")
-        lines.append("")
-        lines.append("## Merge Metadata")
-        lines.append(f"- Current branch (ours): {context.ours_branch}")
-        lines.append(f"- Incoming branch (theirs): {context.theirs_branch}")
-        lines.append(f"- Merge base: {context.merge_base}")
-        lines.append(f"- Ours HEAD: {context.ours_head_sha}")
-        lines.append(f"- Theirs HEAD: {context.theirs_head_sha}")
-        lines.append("")
-
-        if context.ours_head_message:
-            lines.append(f"### Ours commit message\n{context.ours_head_message}")
-            lines.append("")
-        if context.theirs_head_message:
-            lines.append(f"### Theirs commit message\n{context.theirs_head_message}")
-            lines.append("")
-
-        if context.ours_log_oneline:
-            lines.append("### Commits on ours since merge base")
-            for line in context.ours_log_oneline:
-                lines.append(f"  {line}")
-            lines.append("")
-
-        if context.theirs_log_oneline:
-            lines.append("### Commits on theirs since merge base")
-            for line in context.theirs_log_oneline:
-                lines.append(f"  {line}")
-            lines.append("")
-
-        # Strategy indicator
-        lines.append(f"## Strategy: {strategy.value}")
-        if strategy == MergeStrategy.SAFE:
-            lines.append(
-                "Safe mode: resolve carefully. For spec files, be extra cautious. "
-                "For regular files, resolve based on semantic correctness. "
-                "On unresolved cases the merge falls back to a human MCP call."
-            )
-        elif strategy == MergeStrategy.STRICT:
-            lines.append(
-                "Strict mode: only accept resolutions you are highly confident about. "
-                "If uncertain about any hunk, flag it for human review."
-            )
-        elif strategy == MergeStrategy.FAST:
-            lines.append(
-                "Fast mode: resolve aggressively for regular files, but NEVER weaken spec requirements. "
-                "Spec files still require the same caution. There is no human fallback — "
-                "if you cannot resolve a conflict, the merge will exit with a failure."
-            )
-        lines.append("")
-
-        # Spec file warning
-        if context.has_spec_files:
-            lines.append(
-                "⚠️  SPEC FILES DETECTED: This merge involves spec files (se3/specs/**/spec.md). "
-                "You MUST NOT delete requirements, weaken language (SHALL→SHOULD, MUST→SHOULD), "
-                "weaken quantifiers (all→some), or delete scenarios. If any such change is needed, "
-                "flag spec_guardrail_concern=true."
-            )
-            lines.append("")
-
-        # Per-file sections
-        lines.append("## Conflicting Files")
-        lines.append("")
-
-        for cf in context.files:
-            lines.append(f"--- File: {cf.path} ---")
-            if cf.is_binary:
-                lines.append("[BINARY FILE — cannot resolve automatically]")
-                lines.append("")
-                continue
-
-            if cf.is_spec:
-                lines.append("[SPEC FILE — guardrails apply]")
-
-            # Show hunk info
-            if cf.hunks:
-                lines.append(f"Conflict hunks: {len(cf.hunks)}")
-                for hunk in cf.hunks:
-                    lines.append(f"  Lines {hunk.start_line}-{hunk.end_line}")
-            lines.append("")
-
-            # Base version
-            lines.append("### Base version (common ancestor)")
-            if cf.base_exists:
-                lines.append("```")
-                lines.append(cf.base_content)
-                lines.append("```")
-            else:
-                lines.append("[file did not exist in base]")
-            lines.append("")
-
-            # Ours version
-            lines.append("### Ours version (current branch)")
-            if cf.ours_exists:
-                lines.append("```")
-                lines.append(cf.ours_content)
-                lines.append("```")
-            else:
-                lines.append("[file did not exist in ours]")
-            lines.append("")
-
-            # Theirs version
-            lines.append("### Theirs version (incoming branch)")
-            if cf.theirs_exists:
-                lines.append("```")
-                lines.append(cf.theirs_content)
-                lines.append("```")
-            else:
-                lines.append("[file did not exist in theirs]")
-            lines.append("")
-
-            # Working tree (with conflict markers)
-            lines.append("### Working tree (current state with conflict markers)")
-            lines.append("```")
-            lines.append(cf.working_content)
-            lines.append("```")
-            lines.append("")
-
-        # Output instructions
-        lines.append("## Output Format")
-        lines.append("")
-        lines.append(
-            "Return ONLY a valid JSON object matching this schema (no markdown fences, no prose):"
-        )
-        lines.append("")
-        lines.append(_RESOLUTION_SCHEMA)
-        lines.append("")
-        lines.append("Rules:")
-        lines.append("1. resolved_content MUST be the COMPLETE file content with NO conflict markers.")
-        lines.append("2. Each hunk must have confidence (high/medium/low) and a brief reasoning.")
-        lines.append("3. overall_confidence should reflect your confidence across ALL files.")
-        lines.append("4. flags.requires_human_review=true if ANY hunk is uncertain or a spec file has questionable changes.")
-        lines.append("5. flags.spec_guardrail_concern=true if any spec file change might violate guardrails.")
-        lines.append("6. For binary files, set resolved_content to empty string and requires_human_review=true.")
-
-        return "\n".join(lines)
-
-    def _parse_response(
-        self,
-        raw_response: str,
-        context: ConflictContext,
-    ) -> LLMResolution:
-        """Parse the LLM's structured JSON response."""
-        schema_hint = (
-            "A JSON object with 'files' array, 'overall_confidence' string, "
-            "and 'flags' dict. Each file has 'path', 'resolved_content', "
-            "'hunks' array with 'start_line', 'end_line', 'confidence', 'reasoning', "
-            "and 'overall_confidence' and 'flags'."
-        )
-
-        parsed = extract_json_two_phase(
-            raw_response,
-            project_root=self.project_root,
-            schema_hint=schema_hint,
-            required_keys=["files"],
-        )
-
-        if parsed is None:
-            logger.warning("Failed to parse LLM conflict resolution JSON")
-            return self._fallback_resolution(context, "JSON parse failure")
-
-        try:
-            return self._build_resolution_from_json(parsed, context, raw_response)
-        except Exception as exc:
-            logger.warning("Failed to build resolution from parsed JSON: %s", exc)
-            return self._fallback_resolution(context, f"Resolution build error: {exc}")
-
-    def _build_resolution_from_json(
-        self,
-        data: dict,
-        context: ConflictContext,
-        raw_response: str = "",
-    ) -> LLMResolution:
-        """Build LLMResolution from parsed JSON dict."""
-        files_data = data.get("files", [])
-        if not isinstance(files_data, list):
-            files_data = []
-
-        file_resolutions: list[FileResolution] = []
-        global_flags = data.get("flags", {})
-        if not isinstance(global_flags, dict):
-            global_flags = {}
-
-        for file_data in files_data:
-            if not isinstance(file_data, dict):
-                continue
-
-            path = file_data.get("path", "")
-            resolved_content = file_data.get("resolved_content", "")
-            if not isinstance(resolved_content, str):
-                # Coerce non-string types (LLMs sometimes hand back lists
-                # or numbers).  Raise instead of silently stringifying:
-                # the merge would otherwise commit garbage.
-                raise HunkValidationError(
-                    f"resolved_content for {path!r} must be a string, "
-                    f"got {type(resolved_content).__name__}"
-                )
-
-            # D2: enforce size cap before any further processing.
-            content_bytes = resolved_content.encode("utf-8", errors="replace")
-            if len(content_bytes) > self.max_resolved_content_bytes:
-                raise ResolvedContentTooLargeError(
-                    f"resolved_content for {path!r} is "
-                    f"{len(content_bytes)} bytes, exceeds cap of "
-                    f"{self.max_resolved_content_bytes} bytes"
-                )
-
-            # Determine if this is a spec file by cross-referencing with context
-            is_spec = False
-            decoding_lossy = False
-            for cf in context.files:
-                if cf.path == path:
-                    is_spec = cf.is_spec
-                    decoding_lossy = bool(getattr(cf, "decoding_lossy", False))
-                    break
-
-            # Validate: no conflict markers in resolved content (D3 —
-            # whitespace-tolerant detection).
-            force_review = False
-            if _has_conflict_markers(resolved_content):
-                logger.warning(
-                    "Resolved content for %s still contains conflict markers",
-                    path,
-                )
-                force_review = True
-            # G3 fix (medium): when conflict_context flagged the file
-            # as decoded with errors='replace' (binary-adjacent or
-            # non-UTF-8 input), the decoded text may have been
-            # corrupted before the LLM ever saw it. Auto-accepting a
-            # high-confidence resolution would commit garbage. Force
-            # human review so the operator inspects the file rather
-            # than letting a confident LLM mask data loss.
-            if decoding_lossy:
-                logger.warning(
-                    "Forcing human review for %s: source content was "
-                    "decoded with errors='replace' (decoding_lossy=True). "
-                    "Auto-acceptance would risk committing corrupted "
-                    "bytes back to disk.",
-                    path,
-                )
-                force_review = True
-
-            # Parse hunks
-            hunks_data = file_data.get("hunks", [])
-            hunks: list[HunkResolution] = []
-            if isinstance(hunks_data, list):
-                resolved_line_count = (
-                    resolved_content.count("\n") + 1 if resolved_content else 0
-                )
-                for hunk_data in hunks_data:
-                    if not isinstance(hunk_data, dict):
-                        continue
-                    try:
-                        hunk = HunkResolution(
-                            start_line=hunk_data.get("start_line", 0),
-                            end_line=hunk_data.get("end_line", 0),
-                            confidence=self._parse_confidence(
-                                hunk_data.get("confidence", "low")
-                            ),
-                            reasoning=str(hunk_data.get("reasoning", "")),
-                        )
-                    except HunkValidationError as exc:
-                        # D1: surface the malformed hunk rather than
-                        # silently coercing nonsense values into the
-                        # resolution.  Tests assert that negatives /
-                        # huge / string values raise; production keeps
-                        # the resolution flagged for human review and
-                        # skips this hunk.
-                        logger.warning(
-                            "Discarding malformed hunk in %s: %s",
-                            path, exc,
-                        )
-                        force_review = True
-                        continue
-                    # When file_lines is known, validate the hunk's
-                    # end_line is within the resolved file's tail.
-                    # If end_line points strictly past the resolved
-                    # line count, the LLM likely produced metadata
-                    # referring to the marker-decorated working tree
-                    # — but the resolved file is what gets committed
-                    # and the human-call file's hunk-localised view
-                    # would point at garbage line numbers, defeating
-                    # the operator's ability to inspect a localised
-                    # hunk.  Force ``requires_human_review`` so the
-                    # auto-accept path is rejected and the human-call
-                    # file is written with a proper warning.
-                    out_of_range = bool(
-                        resolved_line_count
-                        and hunk.end_line > resolved_line_count
-                    )
-                    if out_of_range:
-                        logger.warning(
-                            "Hunk end_line %d exceeds resolved-file line "
-                            "count %d for %s — forcing human review because "
-                            "downstream metadata would be misleading",
-                            hunk.end_line, resolved_line_count, path,
-                        )
-                        force_review = True
-                    hunks.append(hunk)
-
-            file_flags = file_data.get("flags", {})
-            if not isinstance(file_flags, dict):
-                file_flags = {}
-            if force_review:
-                file_flags["requires_human_review"] = True
-
-            file_resolutions.append(
-                FileResolution(
-                    path=path,
-                    resolved_content=resolved_content,
-                    hunks=hunks,
-                    overall_confidence=self._parse_confidence(
-                        file_data.get("overall_confidence", "low")
-                    ),
-                    flags={
-                        "requires_human_review": bool(
-                            file_flags.get("requires_human_review", False)
-                        ),
-                        "spec_guardrail_concern": bool(
-                            file_flags.get("spec_guardrail_concern", False)
-                        ),
-                    },
-                    is_spec=is_spec,
-                )
-            )
-
-        # Build overall resolution
-        overall_conf = self._parse_confidence(data.get("overall_confidence", "low"))
-
-        return LLMResolution(
-            files=file_resolutions,
-            overall_confidence=overall_conf,
-            flags={
-                "requires_human_review": bool(
-                    global_flags.get("requires_human_review", False)
-                ),
-                "spec_guardrail_concern": bool(
-                    global_flags.get("spec_guardrail_concern", False)
-                ),
-            },
-            raw_response=raw_response,
-        )
-
-    def _parse_confidence(self, value: str | None) -> Confidence:
-        """Parse a confidence string to Confidence enum."""
-        if not value:
-            return Confidence.LOW
-        try:
-            return Confidence(value.lower())
-        except ValueError:
-            return Confidence.LOW
-
-    def _fallback_resolution(
-        self,
-        context: ConflictContext,
-        parse_error: str,
-    ) -> LLMResolution:
-        """Create a fallback low-confidence resolution on parse failure.
-
-        Defense-in-depth: when ``cf.working_content`` still contains
-        conflict markers (the LLM produced no usable response, so we
-        fell back to the unresolved working tree), the per-file flag
-        ``contains_conflict_markers`` is set in addition to
-        ``requires_human_review``.  Strategy gates SHOULD treat this
-        as an unrecoverable failure rather than silently committing the
-        working tree with ``<<<<<<<``/``=======``/``>>>>>>>`` markers.
-        """
-        files: list[FileResolution] = []
-        any_markers = False
-        for cf in context.files:
-            has_markers = _has_conflict_markers(cf.working_content)
-            if has_markers:
-                any_markers = True
-                logger.warning(
-                    "Fallback resolution for %s contains unresolved conflict "
-                    "markers — flagging for human review (parse_error=%s)",
-                    cf.path, parse_error,
-                )
-            # Defense-in-depth: a malformed ``git diff --cc`` parse may
-            # produce a ``ConflictHunk`` with non-positive line numbers.
-            # Building a ``HunkResolution`` from those would raise
-            # :class:`HunkValidationError` and escape the outer
-            # ``_parse_response`` ``except``, crashing the resolver.
-            # We swap such hunks for a placeholder ``(1, 1)`` so the
-            # fallback path can always produce a valid LLMResolution
-            # routed to human review.
-            safe_hunks: list[HunkResolution] = []
-            for h in cf.hunks:
-                try:
-                    safe_hunks.append(
-                        HunkResolution(
-                            start_line=h.start_line,
-                            end_line=h.end_line,
-                            confidence=Confidence.LOW,
-                            reasoning="Parse failure — human review required",
-                        )
-                    )
-                except HunkValidationError as h_exc:
-                    logger.warning(
-                        "Fallback resolution: hunk in %s has invalid line "
-                        "numbers (start=%r end=%r): %s — substituting "
-                        "placeholder hunk (1,1).",
-                        cf.path, h.start_line, h.end_line, h_exc,
-                    )
-                    safe_hunks.append(
-                        HunkResolution(
-                            start_line=1,
-                            end_line=1,
-                            confidence=Confidence.LOW,
-                            reasoning=(
-                                "Parse failure — human review required "
-                                "(original hunk had invalid line numbers)"
-                            ),
-                        )
-                    )
-            files.append(
-                FileResolution(
-                    path=cf.path,
-                    resolved_content=cf.working_content,
-                    hunks=safe_hunks,
-                    overall_confidence=Confidence.LOW,
-                    flags={
-                        "requires_human_review": True,
-                        "spec_guardrail_concern": cf.is_spec,
-                        "contains_conflict_markers": has_markers,
-                    },
-                    is_spec=cf.is_spec,
-                )
-            )
-
-        return LLMResolution(
-            files=files,
-            overall_confidence=Confidence.LOW,
-            flags={
-                "requires_human_review": True,
-                "spec_guardrail_concern": context.has_spec_files,
-                "contains_conflict_markers": any_markers,
-            },
-            parse_error=parse_error,
-        )

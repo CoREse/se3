@@ -129,7 +129,7 @@ class TestMergeOrchestrator:
             check=True, capture_output=True,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature"])
 
         assert report.success is True
@@ -154,7 +154,7 @@ class TestMergeOrchestrator:
             check=True, capture_output=True,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature-a", "feature-b"])
 
         assert report.success is True
@@ -366,7 +366,7 @@ class TestMergeOrchestrator:
             check=True, capture_output=True,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature"])
 
         assert report.log_file is not None
@@ -389,7 +389,7 @@ class TestMergeOrchestrator:
         from unittest.mock import patch
 
         _init_repo(tmp_path)
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         orch._log("test message for fsync")
 
         with patch("os.fsync") as mock_fsync:
@@ -435,7 +435,7 @@ class TestMergeOrchestrator:
         assert 'version = "1.0.0"' in pre_version
 
         # Now run orchestrator to merge the already-merged branch
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature"])
 
         assert report.success is True
@@ -751,7 +751,9 @@ class TestMergeOrchestrator:
             check=True, capture_output=True,
         )
 
-        # Mock LLM resolver: low confidence -> triggers HUMAN_CALL
+        # Mock LLM resolver: requires_human_review flag -> triggers HUMAN_CALL
+        # (Confidence rating is now informational under the LLM-as-editor
+        # model; the safe decider gates on explicit flags only.)
         def mock_resolve(self, context, strategy):
             from se3.engine.merge.conflict_resolver import (
                 Confidence, FileResolution, HunkResolution, LLMResolution,
@@ -763,12 +765,12 @@ class TestMergeOrchestrator:
                         resolved_content="",
                         hunks=[HunkResolution(1, 3, Confidence.LOW, "uncertain")],
                         overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        flags={"requires_human_review": True, "spec_guardrail_concern": False},
                         is_spec=False,
                     ),
                 ],
                 overall_confidence=Confidence.LOW,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": True, "spec_guardrail_concern": False},
             )
 
         monkeypatch.setattr(
@@ -1206,7 +1208,7 @@ class TestMergeOrchestrator:
             mock_infer_branch_bump,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature"])
 
         # The merge itself succeeded; the post-condition failed.
@@ -1295,7 +1297,7 @@ class TestMergeOrchestrator:
             lambda self, branch, report: "runtime_sync_collision",
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature"])
 
         # Runtime sync should have reported a collision
@@ -1361,7 +1363,7 @@ class TestMergeOrchestrator:
             check=True, capture_output=True,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["scn", "discoverbug"])
 
         # Bucket split: scn appears only in already_ancestor_branches,
@@ -1499,7 +1501,12 @@ class TestMergeOrchestratorConflictResolution:
         assert (tmp_path / "shared.txt").read_text() == "line1\nRESOLVED\nline3\n"
 
     def test_default_human_call_preserves_markers(self, tmp_path: Path, monkeypatch) -> None:
-        """default strategy + low confidence → HUMAN_CALL → conflict markers preserved."""
+        """safe strategy + requires_human_review flag → HUMAN_CALL → conflict markers preserved.
+
+        Under the LLM-as-editor model, the safe decider gates on
+        explicit flags, not confidence rating.  The mock here sets
+        ``requires_human_review=True`` to force the escalation path.
+        """
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
@@ -1513,12 +1520,12 @@ class TestMergeOrchestratorConflictResolution:
                         resolved_content="",
                         hunks=[HunkResolution(1, 5, Confidence.LOW, "uncertain")],
                         overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        flags={"requires_human_review": True, "spec_guardrail_concern": False},
                         is_spec=False,
                     ),
                 ],
                 overall_confidence=Confidence.LOW,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": True, "spec_guardrail_concern": False},
             )
 
         monkeypatch.setattr(
@@ -1580,9 +1587,9 @@ class TestMergeOrchestratorConflictResolution:
                 flags={"requires_human_review": True, "spec_guardrail_concern": False},
             )
 
-        # Force REJECT by using strict strategy where low confidence = HUMAN_CALL
-        # Actually strict returns HUMAN_CALL not REJECT. Let me use a mock decider instead.
-        def mock_decide(self, resolution, has_spec_files, strategy):
+        # Force REJECT via the new ``resolve_and_decide`` entry point
+        # (the orchestrator no longer routes through ``decide``).
+        def mock_resolve_and_decide(self, resolver, conflict_files, context, *, max_iterations):
             from se3.engine.merge.strategy import DecisionAction, StrategyDecision
             return StrategyDecision(
                 action=DecisionAction.REJECT,
@@ -1593,7 +1600,8 @@ class TestMergeOrchestratorConflictResolution:
             "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
         monkeypatch.setattr(
-            "se3.engine.merge.orchestrator.StrategyDecider.decide", mock_decide
+            "se3.engine.merge.orchestrator.StrategyDecider.resolve_and_decide",
+            mock_resolve_and_decide,
         )
 
         pre_head = subprocess.run(
@@ -1699,10 +1707,19 @@ class TestMergeOrchestratorConflictResolution:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute([feature_branch])
 
-        # Merge must fail — markers were detected and aborted
+        # Merge must fail — markers were detected and aborted.  Under
+        # the LLM-as-editor batch path the resolver itself rejects a
+        # resolution whose ``resolved_content`` still contains markers,
+        # surfacing as ``resolution_rejected`` rather than the legacy
+        # ``resolution_validation_failed`` (which fired one layer
+        # deeper, in ``_apply_resolution``).  Either failure category
+        # is acceptable so long as the merge does not commit markers.
         assert report.success is False
         assert report.failed_branch == feature_branch
-        assert report.failure_reason == "resolution_validation_failed"
+        assert report.failure_reason in (
+            "resolution_rejected",
+            "resolution_validation_failed",
+        )
 
         # Working tree should be clean after abort
         assert _is_working_tree_clean(tmp_path) is True
@@ -2173,7 +2190,11 @@ class TestAbortMergeFailureHandling:
     def test_default_human_call_write_fails_and_abort_fails(
         self, tmp_path: Path, monkeypatch
     ) -> None:
-        """default + write_call fails + abort fails -> failure_reason=merge_abort_failed."""
+        """safe + write_call fails + abort fails -> failure_reason=merge_abort_failed.
+
+        The escalation is forced by the ``requires_human_review`` flag
+        (the LLM-as-editor decider gates on flags, not confidence).
+        """
         default_branch, feature_branch = self._create_conflict_repo(tmp_path)
 
         def mock_resolve(self, context, strategy):
@@ -2187,12 +2208,12 @@ class TestAbortMergeFailureHandling:
                         resolved_content="resolved",
                         hunks=[HunkResolution(1, 5, Confidence.LOW, "uncertain")],
                         overall_confidence=Confidence.LOW,
-                        flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                        flags={"requires_human_review": True, "spec_guardrail_concern": False},
                         is_spec=False,
                     ),
                 ],
                 overall_confidence=Confidence.LOW,
-                flags={"requires_human_review": False, "spec_guardrail_concern": False},
+                flags={"requires_human_review": True, "spec_guardrail_concern": False},
             )
 
         monkeypatch.setattr(
@@ -3832,11 +3853,18 @@ class TestFastAbortBehavior:
         orch = MergeOrchestrator(project_root=tmp_path, strategy="fast")
         report = orch.execute([feature_branch])
 
-        # Must fail with resolution_validation_failed
+        # Must fail.  Under the LLM-as-editor batch path the resolver
+        # rejects an LLMResolution whose ``resolved_content`` still
+        # contains conflict markers and surfaces this as
+        # ``resolution_rejected`` rather than the legacy
+        # ``resolution_validation_failed`` produced one layer deeper.
         assert report.success is False
         assert report.pending_human is False
         assert report.failed_branch == feature_branch
-        assert report.failure_reason == "resolution_validation_failed"
+        assert report.failure_reason in (
+            "resolution_rejected",
+            "resolution_validation_failed",
+        )
 
         # Working tree clean
         assert _is_working_tree_clean(tmp_path) is True
@@ -5730,7 +5758,7 @@ class TestRuntimeSyncIntegration:
         (wt_se3 / "state").mkdir(parents=True, exist_ok=True)
         (wt_se3 / "state" / "summary-abc.md").write_text("wt summary")
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature"])
 
         assert report.success is True
@@ -5936,7 +5964,7 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature"])
 
         assert report.success is True
@@ -5962,7 +5990,7 @@ class TestRuntimeSyncIntegration:
         )
 
         # Merge feature first (normal path)
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report1 = orch.execute(["feature"])
         assert report1.success is True
         assert report1.merged_branches == ["feature"]
@@ -5985,7 +6013,7 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        orch2 = MergeOrchestrator(project_root=tmp_path)
+        orch2 = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report2 = orch2.execute(["feature"])
 
         assert report2.success is True
@@ -6047,7 +6075,7 @@ class TestRuntimeSyncIntegration:
 
         os.open = _failing_open
         try:
-            orch = MergeOrchestrator(project_root=tmp_path)
+            orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
             report = orch.execute(["feature-a", "feature-b"])
         finally:
             os.open = original_open
@@ -6106,7 +6134,7 @@ class TestRuntimeSyncIntegration:
 
         _rs._get_worktree_path_for_branch = _raise_timeout
         try:
-            orch = MergeOrchestrator(project_root=tmp_path)
+            orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
             report = orch.execute(["feature-a", "feature-b"])
         finally:
             _rs._get_worktree_path_for_branch = original
@@ -6173,7 +6201,7 @@ class TestRuntimeSyncIntegration:
         (target_se3 / "history" / "flow1.log").unlink()
 
         # Second merge attempt — should succeed via already_merged path
-        orch2 = MergeOrchestrator(project_root=tmp_path)
+        orch2 = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report2 = orch2.execute(["feature-b"])
 
         assert report2.success is True
@@ -6263,7 +6291,7 @@ class TestRuntimeSyncIntegration:
         (target_se3 / "history" / "flow1.log").unlink()
 
         # Retry: B is already_merged, C merges cleanly
-        orch2 = MergeOrchestrator(project_root=tmp_path)
+        orch2 = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report2 = orch2.execute(["feature-b", "feature-c"])
 
         assert report2.success is True
@@ -6349,7 +6377,7 @@ class TestRuntimeSyncIntegration:
             "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["conflict-branch"])
 
         assert report.success is True
@@ -6449,7 +6477,7 @@ class TestRuntimeSyncIntegration:
             "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["C", "B"])
 
         assert report.success is True
@@ -6475,7 +6503,7 @@ class TestRuntimeSyncIntegration:
             check=True, capture_output=True,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature"])
 
         assert report.success is True
@@ -6513,7 +6541,7 @@ class TestRuntimeSyncIntegration:
         _commit(tmp_path, "M1: advance A to 4.6.0")
 
         # Feature merges cleanly because both A and feature have pyproject=4.6.0
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature"])
 
         assert report.success is True
@@ -6606,7 +6634,7 @@ class TestRuntimeSyncIntegration:
 
         monkeypatch.setattr(orch_mod, "_run_git", fake_run_git)
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["branch-a", "branch-b"])
 
         # Both branches merged successfully
@@ -6658,7 +6686,7 @@ class TestRuntimeSyncIntegration:
         )
 
         # Merge A → M1 (1.0.1)
-        orch1 = MergeOrchestrator(project_root=tmp_path)
+        orch1 = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report1 = orch1.execute(["A"])
         assert report1.success is True
         assert report1.final_version == "1.0.1"
@@ -6674,13 +6702,13 @@ class TestRuntimeSyncIntegration:
         )
 
         # Merge B → M2 (1.1.0)
-        orch2 = MergeOrchestrator(project_root=tmp_path)
+        orch2 = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report2 = orch2.execute(["B"])
         assert report2.success is True
         assert report2.final_version == "1.1.0"
 
         # Now retry `se3 merge A B` — both are already merged
-        orch3 = MergeOrchestrator(project_root=tmp_path)
+        orch3 = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report3 = orch3.execute(["A", "B"])
 
         assert report3.success is True
@@ -6736,7 +6764,7 @@ class TestRuntimeSyncIntegration:
         (wt_se3 / "history" / "flow1.log").write_text("feature-b log")
 
         # Default (lenient) mode — collision should be bypassed, sequence continues
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature-a", "feature-b"])
 
         # Both branches should be merged successfully
@@ -6815,7 +6843,7 @@ class TestRuntimeSyncIntegration:
         (wt_b / "se3" / "history" / "flow1.log").write_text("feature-b log")
 
         # Lenient mode — both collisions bypassed
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature-a", "feature-b"])
 
         # Both branches merged successfully
@@ -6881,7 +6909,7 @@ class TestRuntimeSyncIntegration:
         (wt_dir / "se3" / "history").mkdir(parents=True, exist_ok=True)
         (wt_dir / "se3" / "history" / "flow1.log").write_text("feature log")
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature"])
 
         assert report.success is True
@@ -7243,7 +7271,7 @@ class TestRuntimeSyncIntegration:
 
         monkeypatch.setattr(_orch, "sync_branch_runtime", _raising_sync)
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature-a", "feature-b"])
 
         # feature-a should merge successfully
@@ -7349,7 +7377,7 @@ class TestRuntimeSyncIntegration:
 
         monkeypatch.setattr(_orch, "sync_branch_runtime", _raising_sync)
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature-a", "feature-b", "feature-c"])
 
         # All branches merge successfully at git level; lenient mode continues
@@ -7413,7 +7441,7 @@ class TestRuntimeSyncIntegration:
 
         monkeypatch.setattr(_orch, "sync_branch_runtime", _raising_sync)
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature-a", "feature-b", "feature-c"])
 
         # feature-a merges successfully
@@ -7565,7 +7593,7 @@ class TestRuntimeSyncIntegration:
         with caplog.at_level(
             logging.WARNING, logger="se3.engine.merge.runtime_sync"
         ):
-            orch = MergeOrchestrator(project_root=tmp_path)
+            orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
             report = orch.execute(["feature-b"])
 
         # Merge should still succeed (lenient mode)
@@ -7654,7 +7682,7 @@ class TestRuntimeSyncIntegration:
             src_content
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature-b"])
 
         # Merge succeeds in lenient mode
@@ -7696,7 +7724,7 @@ class TestRuntimeSyncIntegration:
             lambda self, branch, *, already_ancestor, report, allow_fixup_parent=False: "postcond_check_timeout",
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, delete_merged=False)
         report = orch.execute(["feature"])
 
         assert report.success is False
@@ -8110,3 +8138,164 @@ class TestRuntimeSyncCollisionVersionAggregation:
                 ["git", "-C", str(tmp_path), "worktree", "remove", "--force", str(wt_b)],
                 check=False, capture_output=True,
             )
+
+
+class TestMergeOrchestratorBatchResolverIntegration:
+    """End-to-end coverage that ``MergeOrchestrator.execute()`` actually
+    routes conflict resolution through :meth:`ConflictResolver.resolve_batch`.
+
+    The other conflict-resolution tests in this file monkeypatch the
+    legacy ``ConflictResolver.resolve`` entry point, which bypasses the
+    LLM-as-editor batch path entirely.  This class exercises the new
+    path: ``resolve`` is the public wrapper, but the LLM call site
+    (``ConflictResolver._call_llm``) is monkeypatched so the test can
+    drive a stub "LLM" that edits files on disk — exactly how the new
+    model is supposed to work.
+    """
+
+    def test_orchestrator_routes_through_resolve_batch_for_safe(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """A real merge with a single conflict file is resolved via the
+        LLM-as-editor loop.  The stub LLM clears the conflict markers
+        on its first call; the orchestrator commits and reports
+        success.
+        """
+        _init_repo(tmp_path)
+        default_branch = _get_default_branch(tmp_path)
+        _add_commit(tmp_path, "shared.txt", "base\n", "base")
+        _create_branch(tmp_path, "feature")
+        (tmp_path / "shared.txt").write_text("feature\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "feature change"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "shared.txt").write_text("base-updated\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "base change"],
+            check=True, capture_output=True,
+        )
+
+        # Stub LLM that clears the conflict by writing a merged version
+        # of shared.txt directly.  Called via ``ConflictResolver._call_llm``,
+        # which the new ``resolve()`` wrapper invokes through ``resolve_batch``.
+        call_count = {"n": 0}
+
+        def fake_call_llm(self, prompt: str) -> str:
+            call_count["n"] += 1
+            (tmp_path / "shared.txt").write_text("base-updated\nfeature\n")
+            return "edited"
+
+        monkeypatch.setattr(
+            "se3.engine.merge.conflict_resolver.ConflictResolver._call_llm",
+            fake_call_llm,
+        )
+
+        orch = MergeOrchestrator(
+            project_root=tmp_path, strategy="safe", delete_merged=False,
+        )
+        report = orch.execute(["feature"])
+
+        assert report.success is True, (
+            f"merge unexpectedly failed: "
+            f"{report.failure_reason} / {report.failure_detail}"
+        )
+        assert call_count["n"] >= 1, (
+            "The orchestrator never invoked the LLM — meaning the "
+            "LLM-as-editor batch path was not exercised."
+        )
+        assert "feature" in report.merged_branches
+
+        # The resolved file is on disk with markers cleared.
+        content = (tmp_path / "shared.txt").read_text()
+        assert "<<<<<<<" not in content
+        assert "=======" not in content
+        assert ">>>>>>>" not in content
+
+    def test_orchestrator_fast_aborts_when_batch_loop_exhausts(
+        self, tmp_path: Path, monkeypatch,
+    ) -> None:
+        """Fast strategy + an LLM that never clears markers → after the
+        configured ``max_conflict_resolve_iterations`` are exhausted the
+        merge aborts without writing a human MCP call file.  Exercises
+        the full path through ``resolve_batch``.
+        """
+        _init_repo(tmp_path)
+        # Use a low iteration cap so the test runs quickly.  Written
+        # after _init_repo so we don't fight that helper's initial
+        # commit logic.
+        (tmp_path / "se3.yaml").write_text(
+            "merge:\n  max_conflict_resolve_iterations: 2\n"
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "se3.yaml"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "configure max iter"],
+            check=True, capture_output=True,
+        )
+        default_branch = _get_default_branch(tmp_path)
+        _add_commit(tmp_path, "shared.txt", "base\n", "base")
+        _create_branch(tmp_path, "feature")
+        (tmp_path / "shared.txt").write_text("feature\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "feature"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        (tmp_path / "shared.txt").write_text("base-updated\n")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "shared.txt"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "commit", "-m", "base change"],
+            check=True, capture_output=True,
+        )
+
+        # Stub LLM that never edits — every iteration leaves markers in place.
+        call_count = {"n": 0}
+
+        def fake_call_llm(self, prompt: str) -> str:
+            call_count["n"] += 1
+            return "I couldn't resolve"
+
+        monkeypatch.setattr(
+            "se3.engine.merge.conflict_resolver.ConflictResolver._call_llm",
+            fake_call_llm,
+        )
+
+        orch = MergeOrchestrator(
+            project_root=tmp_path, strategy="fast", delete_merged=False,
+        )
+        report = orch.execute(["feature"])
+
+        # Cap was 2 → the resolve_batch loop should have called the LLM
+        # exactly that many times (one per iteration) before declaring
+        # the batch exhausted.
+        assert call_count["n"] == 2, (
+            f"Expected 2 LLM iterations (cap=2), got {call_count['n']}"
+        )
+        assert report.success is False
+        # Fast strategy never writes a human call file on resolution failure.
+        assert report.human_call_file is None

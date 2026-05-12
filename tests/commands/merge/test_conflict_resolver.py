@@ -157,77 +157,14 @@ class TestResolvedContentSizeCap:
         with pytest.raises(ValueError, match=r"must be positive"):
             ConflictResolver(tmp_path, max_resolved_content_bytes=-1)
 
-    def test_resolved_content_under_cap_passes(self, tmp_path: Path) -> None:
-        r = ConflictResolver(tmp_path, max_resolved_content_bytes=1024)
-        ctx = ConflictContext(
-            project_root=tmp_path, ours_branch="x", theirs_branch="y",
-        )
-        raw = json.dumps({
-            "files": [{
-                "path": "f.txt",
-                "resolved_content": "small text",
-                "hunks": [],
-                "overall_confidence": "high",
-                "flags": {},
-            }],
-            "overall_confidence": "high",
-            "flags": {},
-        })
-        result = r._parse_response(raw, ctx)
-        assert len(result.files) == 1
-        assert result.files[0].resolved_content == "small text"
-
-    def test_resolved_content_over_cap_falls_back(
-        self, tmp_path: Path,
-    ) -> None:
-        # The resolver wraps build_resolution_from_json in a try/except
-        # that converts errors into a fallback low-confidence
-        # resolution.  We verify the cap is enforced by checking the
-        # parse_error mentions the cap.
-        r = ConflictResolver(tmp_path, max_resolved_content_bytes=10)
-        ctx = ConflictContext(
-            project_root=tmp_path, ours_branch="x", theirs_branch="y",
-            files=[ConflictFile(path="f.txt")],
-        )
-        big_payload = "A" * 100  # > 10 bytes when utf-8
-        raw = json.dumps({
-            "files": [{
-                "path": "f.txt",
-                "resolved_content": big_payload,
-                "hunks": [],
-                "overall_confidence": "high",
-                "flags": {},
-            }],
-            "overall_confidence": "high",
-            "flags": {},
-        })
-        result = r._parse_response(raw, ctx)
-        assert result.parse_error is not None
-        assert "exceeds cap" in result.parse_error
-        assert result.flags["requires_human_review"] is True
-
-    def test_resolved_content_at_exact_cap_passes(self, tmp_path: Path) -> None:
-        # Exactly equal to cap is allowed.
-        cap = 50
-        r = ConflictResolver(tmp_path, max_resolved_content_bytes=cap)
-        ctx = ConflictContext(
-            project_root=tmp_path, ours_branch="x", theirs_branch="y",
-        )
-        payload = "B" * cap
-        raw = json.dumps({
-            "files": [{
-                "path": "f.txt",
-                "resolved_content": payload,
-                "hunks": [],
-                "overall_confidence": "high",
-                "flags": {},
-            }],
-            "overall_confidence": "high",
-            "flags": {},
-        })
-        result = r._parse_response(raw, ctx)
-        assert len(result.files) == 1
-        assert result.files[0].resolved_content == payload
+    # NOTE: The legacy JSON-decision pipeline tests
+    # (``test_resolved_content_under_cap_passes`` /
+    # ``test_resolved_content_over_cap_falls_back`` /
+    # ``test_resolved_content_at_exact_cap_passes``) have been removed.
+    # They exercised ``_parse_response`` / ``_build_resolution_from_json``
+    # which no longer exist — the resolver now operates in LLM-as-editor
+    # mode and there is no path that materialises a single
+    # ``resolved_content`` string from an LLM JSON response.
 
     def test_size_error_directly_raised(self) -> None:
         # Direct exercise of the exception type.
@@ -540,30 +477,35 @@ class TestSharedLLMCaller:
     """D9: ConflictResolver / GuardrailRepairer accept injected caller."""
 
     def test_resolver_uses_injected_caller(self, tmp_path: Path) -> None:
-        # Build a stub LLMCaller exposing a single .call() method.
+        """Under the LLM-as-editor model the LLM is invoked when a target
+        file actually contains conflict markers — the stub here writes
+        the resolved content as a side effect of being called, so we can
+        verify the injected caller is reached.
+        """
+        target = tmp_path / "f.txt"
+        target.write_text(
+            "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n"
+        )
+
+        def side_effect(*args, **kwargs):
+            target.write_text("resolved\n")
+            return ""
+
         stub = MagicMock()
-        stub.call.return_value = json.dumps({
-            "files": [{
-                "path": "f.txt",
-                "resolved_content": "resolved",
-                "hunks": [],
-                "overall_confidence": "high",
-                "flags": {},
-            }],
-            "overall_confidence": "high",
-            "flags": {},
-        })
+        stub.call.side_effect = side_effect
 
         r = ConflictResolver(tmp_path, llm_caller=stub)
         ctx = ConflictContext(
             project_root=tmp_path, ours_branch="x", theirs_branch="y",
-            files=[ConflictFile(path="f.txt")],
+            files=[ConflictFile(
+                path="f.txt", working_content=target.read_text(),
+            )],
         )
         result = r.resolve(ctx, MergeStrategy.SAFE)
 
         # The injected caller was used (no fresh LLMCaller instantiated)
-        stub.call.assert_called_once()
-        assert result.files[0].resolved_content == "resolved"
+        assert stub.call.call_count >= 1
+        assert result.files[0].resolved_content == "resolved\n"
 
     def test_resolver_lazy_caller_when_none_injected(
         self, tmp_path: Path,
@@ -605,82 +547,8 @@ class TestSharedLLMCaller:
 # -------------------- Integration: parse with bad hunk -----------------------
 
 
-class TestParserHandlesBadHunks:
-    """Parser drops malformed hunks and flags resolution for review."""
-
-    def test_negative_line_in_hunk_drops_hunk(self, tmp_path: Path) -> None:
-        r = ConflictResolver(tmp_path)
-        ctx = ConflictContext(
-            project_root=tmp_path, ours_branch="x", theirs_branch="y",
-            files=[ConflictFile(path="f.txt")],
-        )
-        raw = json.dumps({
-            "files": [{
-                "path": "f.txt",
-                "resolved_content": "hello\n",
-                "hunks": [
-                    {"start_line": -5, "end_line": 10, "confidence": "high"},
-                    {"start_line": 1, "end_line": 1, "confidence": "high"},
-                ],
-                "overall_confidence": "high",
-                "flags": {},
-            }],
-            "overall_confidence": "high",
-            "flags": {},
-        })
-        result = r._parse_response(raw, ctx)
-        # The bad hunk is dropped, the good one remains
-        assert len(result.files) == 1
-        assert len(result.files[0].hunks) == 1
-        # The file was flagged for review since at least one hunk failed
-        assert result.files[0].flags["requires_human_review"] is True
-
-    def test_string_line_in_hunk_drops_hunk(self, tmp_path: Path) -> None:
-        r = ConflictResolver(tmp_path)
-        ctx = ConflictContext(
-            project_root=tmp_path, ours_branch="x", theirs_branch="y",
-            files=[ConflictFile(path="f.txt")],
-        )
-        raw = json.dumps({
-            "files": [{
-                "path": "f.txt",
-                "resolved_content": "x\n",
-                "hunks": [
-                    {"start_line": "garbage", "end_line": 10, "confidence": "low"},
-                ],
-                "overall_confidence": "low",
-                "flags": {},
-            }],
-            "overall_confidence": "low",
-            "flags": {},
-        })
-        result = r._parse_response(raw, ctx)
-        assert len(result.files) == 1
-        assert len(result.files[0].hunks) == 0
-        assert result.files[0].flags["requires_human_review"] is True
-
-    def test_indented_marker_in_resolved_content_flags_review(
-        self, tmp_path: Path,
-    ) -> None:
-        # An LLM hands back a "resolution" that still contains a
-        # 5-space-indented `<<<<<<<` marker.  D3 says this must be
-        # detected and the file flagged.
-        r = ConflictResolver(tmp_path)
-        ctx = ConflictContext(
-            project_root=tmp_path, ours_branch="x", theirs_branch="y",
-            files=[ConflictFile(path="f.md")],
-        )
-        bad_resolved = "intro\n     <<<<<<< HEAD\nfoo\n     >>>>>>> them\nend"
-        raw = json.dumps({
-            "files": [{
-                "path": "f.md",
-                "resolved_content": bad_resolved,
-                "hunks": [],
-                "overall_confidence": "high",
-                "flags": {},
-            }],
-            "overall_confidence": "high",
-            "flags": {},
-        })
-        result = r._parse_response(raw, ctx)
-        assert result.files[0].flags["requires_human_review"] is True
+# Legacy ``TestParserHandlesBadHunks`` removed: those tests exercised
+# the deprecated JSON-decision pipeline (``_parse_response`` /
+# ``_build_resolution_from_json``).  The LLM-as-editor model judges
+# success on the on-disk marker scan rather than parsed JSON metadata,
+# so per-hunk parsing is no longer a part of the resolver.
