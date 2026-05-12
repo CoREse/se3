@@ -1,4 +1,3 @@
-```
 """Tests for discovery workflow functionality."""
 
 import json
@@ -1362,4 +1361,3 @@ class TestRestoreDiscoveryDisplayWithRawText:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
-```
