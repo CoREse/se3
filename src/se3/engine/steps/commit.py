@@ -2,7 +2,9 @@
 
 Commits the changes using git.
 Integrates with VersionBumper for automatic version bumping.
-Uses version analysis and commit message from the version_analyze step when available.
+Consumes the authoritative ``suggested_version`` from the version_analyze
+step and writes it verbatim to the project version file. ``bump_type`` is
+read only for commit-message decoration and template summary display.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 from ..models import FlowInstance, Step, StepStatus, StepType
-from ..version_bumper import BumpType, TaskType, VersionBumper, VersionConfig
+from ..version_bumper import VersionBumper, VersionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -21,11 +23,9 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
     """Execute the commit step.
 
     Commits changes using git commands. If version bumping is enabled,
-    bumps the version before committing and includes the new version
-    in the commit message.
-
-    Uses the bump_type from version_analyze step if available, otherwise
-    falls back to task type based bump rules.
+    writes the authoritative ``suggested_version`` produced by the
+    preceding version_analyze step to the project version file before
+    committing.
 
     Args:
         step: The current step being executed
@@ -60,10 +60,12 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
             version_bumper = VersionBumper(version_config)
             version_file = version_bumper.detect_version_file(project_root)
 
-            if version_file:
-                # Get bump type from version_analyze step or fallback to task type
-                bump_type = _get_bump_type(step, flow, version_config)
+            # Resolve target version up front — this is the authoritative
+            # value from version_analyze. Raises RuntimeError if missing or
+            # if version_analyze failed, halting the commit.
+            target_version = _resolve_target_version(step, flow)
 
+            if version_file:
                 try:
                     # Save original version for potential rollback
                     original_version = version_bumper.read_version(version_file)
@@ -88,13 +90,13 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
                     # Retry — let any exception propagate normally
                     original_version = version_bumper.read_version(version_file)
 
-                # Bump the version
-                new_version = version_bumper.bump_version(
+                # Write the authoritative target version directly
+                new_version = version_bumper.set_version(
+                    version=target_version,
                     path=version_file,
-                    bump_type=bump_type
                 )
                 version_bumped = True
-                logger.info(f"Bumped version: {original_version} -> {new_version}")
+                logger.info(f"Set version: {original_version} -> {new_version}")
 
                 # Stage the version file
                 _stage_file(project_root, version_file)
@@ -107,9 +109,6 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
                         initial_version="0.1.0"
                     )
                     logger.info(f"Created version file: {version_file}")
-
-                    # Now get the bump type and bump the version
-                    bump_type = _get_bump_type(step, flow, version_config)
 
                     # Save original version for potential rollback
                     try:
@@ -132,13 +131,13 @@ def commit_handler(step: Step, flow: FlowInstance) -> StepStatus:
                         # Retry — let any exception propagate normally
                         original_version = version_bumper.read_version(version_file)
 
-                    # Bump the version
-                    new_version = version_bumper.bump_version(
+                    # Write the authoritative target version directly
+                    new_version = version_bumper.set_version(
+                        version=target_version,
                         path=version_file,
-                        bump_type=bump_type
                     )
                     version_bumped = True
-                    logger.info(f"Bumped version: {original_version} -> {new_version}")
+                    logger.info(f"Set version: {original_version} -> {new_version}")
 
                     # Stage the new version file
                     _stage_file(project_root, version_file)
@@ -234,40 +233,69 @@ def _load_version_config(project_root: Path) -> VersionConfig:
     return load_cfg(project_root)
 
 
-def _get_bump_type(step: Step, flow: FlowInstance, version_config: VersionConfig) -> BumpType:
-    """Determine bump type from version_analyze step or fallback to task type.
+def _resolve_target_version(step: Step, flow: FlowInstance) -> str:
+    """Resolve the authoritative target version from the version_analyze step.
 
-    First checks if version_analyze step provided a bump_type, then falls back
-    to the task type based bump rules from configuration.
+    The version_analyze step's ``suggested_version`` is the sole authority on
+    the new version number — this function reads it from ``step.inputs``
+    (forwarded by the state machine) with a fallback to the most recent
+    version_analyze step's outputs. If the version_analyze step is FAILED, or
+    no ``suggested_version`` is available, a ``RuntimeError`` is raised so
+    the commit step halts instead of inventing a version.
 
     Args:
-        step: The current step (may have bump_type in inputs)
-        flow: The flow instance
-        version_config: Version configuration with bump rules
+        step: The commit step (its ``inputs`` carry forwarded version_analyze
+            outputs)
+        flow: The flow instance — used to locate the version_analyze step for
+            status and current_version
 
     Returns:
-        BumpType enum value - always returns a valid BumpType, never None
+        The authoritative version string to write.
+
+    Raises:
+        RuntimeError: When the version_analyze step failed or did not produce
+            a ``suggested_version``. The message names the current version
+            (when known) and directs the user toward human intervention.
     """
-    # First, try to get bump_type from version_analyze step input
-    bump_type_str = step.inputs.get("bump_type")
-    confidence = step.inputs.get("confidence", "low")
+    # Locate the most recent version_analyze step (if any) for status and
+    # current_version context.
+    va_step: Step | None = None
+    for step_id in reversed(flow.state.step_history):
+        s = flow.state.steps.get(step_id)
+        if s and s.step_type == StepType.VERSION_ANALYZE:
+            va_step = s
+            break
 
-    if bump_type_str:
-        logger.info(f"Using version_analyze result: bump_type={bump_type_str}, confidence={confidence}")
-        try:
-            return BumpType(bump_type_str) if bump_type_str != "none" else BumpType.PATCH
-        except ValueError:
-            logger.warning(f"Invalid bump_type from version_analyze: {bump_type_str}, falling back")
+    suggested = step.inputs.get("suggested_version")
+    if not suggested and va_step is not None:
+        suggested = va_step.outputs.get("suggested_version")
 
-    # Fallback to task type based bump rules
-    task_type = flow.task_type or "feature"
-    bump_type_str = version_config.bump_rules.get(task_type, "patch")
+    current_version = (
+        (va_step.outputs.get("current_version") if va_step else None)
+        or step.inputs.get("current_version")
+        or "<unknown>"
+    )
 
-    # Always return a valid BumpType - never None or skip
-    try:
-        return BumpType(bump_type_str)
-    except ValueError:
-        return BumpType.PATCH
+    if va_step is not None and va_step.status == StepStatus.FAILED:
+        raise RuntimeError(
+            f"version_analyze step failed; cannot determine target version "
+            f"(current_version='{current_version}'). "
+            "Provide a version via human intervention: rerun the version_analyze "
+            "step, or create a human call under se3/calls/ to supply the version "
+            "manually."
+        )
+
+    if not isinstance(suggested, str) or not suggested.strip():
+        raise RuntimeError(
+            "version_analyze did not produce a suggested_version "
+            f"(current_version='{current_version}'). "
+            "The commit step requires an explicit target version. "
+            "Provide one via human intervention: rerun the version_analyze "
+            "step, or create a human call under se3/calls/ to supply the "
+            "version manually."
+        )
+
+    return suggested.strip()
 
 
 def _get_task_type(flow: FlowInstance) -> str:
@@ -433,6 +461,15 @@ def _generate_commit_message(
             # Priority 4: template fallback from task description
             desc = task_description[:60] if len(task_description) > 60 else task_description
             message = f"{task_type}: {desc}"
+
+    # Decorate the subject line with the version_analyze bump_type when
+    # available. bump_type is auxiliary — it never determines the new version
+    # number, but it provides useful context in the commit message.
+    bump_type = step.inputs.get("bump_type")
+    if isinstance(bump_type, str):
+        bump_type = bump_type.strip().lower()
+        if bump_type and bump_type != "none":
+            message += f" ({bump_type} bump)"
 
     # Add context about the change
     files_changed = changes_made.get("files_changed", [])

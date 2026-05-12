@@ -34,10 +34,20 @@ def _make_flow(temp_dir: Path, task_type: str = "feature") -> FlowInstance:
     return flow
 
 
-def _make_step() -> Step:
-    """Create a minimal commit Step."""
+def _make_step(suggested_version: str = "0.2.0") -> Step:
+    """Create a minimal commit Step.
+
+    Pre-populates ``suggested_version`` (and a placeholder ``bump_type``) on
+    the step's inputs so that the commit handler's ``_resolve_target_version``
+    check passes. Tests that want to exercise the missing/failed branches
+    should override.
+    """
     step = Step(step_type=StepType.COMMIT)
-    step.inputs = {"task_description": "test task"}
+    step.inputs = {
+        "task_description": "test task",
+        "suggested_version": suggested_version,
+        "bump_type": "patch",
+    }
     return step
 
 
