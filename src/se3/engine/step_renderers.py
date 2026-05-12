@@ -153,16 +153,37 @@ def _render_remaining(step: Step, title: str, skip_keys: set[str]) -> None:
 @register_renderer(StepType.VERSION_ANALYZE)
 def _render_version_analyze(step: Step) -> None:
     outputs = step.outputs or {}
-    va_lines = [
-        f"[bold]Current Version:[/bold] {outputs.get('current_version', 'N/A')}",
-        f"[bold]Suggested Version:[/bold] {outputs.get('suggested_version', 'N/A')}",
-        f"[bold]Bump Type:[/bold] {outputs.get('bump_type', 'N/A')}",
-        f"[bold]Confidence:[/bold] {outputs.get('confidence', 'N/A')}",
-        "",
-        "[bold]Reasoning:[/bold]",
-        outputs.get("reasoning", ""),
-    ]
-    render_full("\n".join(va_lines), title="Version Analysis")
+
+    current_version = outputs.get("current_version", "N/A")
+    suggested_version = outputs.get("suggested_version", "N/A")
+    bump_type = outputs.get("bump_type", "N/A")
+    confidence = outputs.get("confidence", "N/A")
+    reasoning = outputs.get("reasoning", "")
+
+    lines: list[str] = []
+
+    # ── Top line: current → suggested (authoritative) ─────────────
+    lines.append(
+        f"[bold]{current_version}[/bold] → [bold cyan]{suggested_version}[/bold cyan]"
+    )
+
+    # ── Sub-line: bump_type + confidence (auxiliary) ──────────────
+    lines.append(f"[dim]{bump_type} bump  │  confidence: {confidence}[/dim]")
+
+    # ── Reasoning ──────────────────────────────────────────────────
+    if reasoning:
+        lines.append("")
+        lines.append("[dim]" + "─" * 50 + "[/dim]")
+        lines.append("")
+        lines.append("[bold cyan]Reasoning[/bold cyan]")
+        lines.append(f"  {reasoning}")
+
+    # ── Error ──────────────────────────────────────────────────────
+    if step.error_message:
+        lines.append("")
+        lines.append(f"[bold red]Error:[/bold red] {step.error_message}")
+
+    render_full("\n".join(lines), title="Version Analysis")
 
 
 @register_renderer(StepType.SUMMARIZE)

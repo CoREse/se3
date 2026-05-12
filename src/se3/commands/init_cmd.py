@@ -86,6 +86,7 @@ env/
 !/se3/specs/
 !/se3/issues/
 !/se3/scripts/
+!/se3/version-rules.md
 
 # SE3: local-only config overrides (never committed)
 se3.local.yaml
