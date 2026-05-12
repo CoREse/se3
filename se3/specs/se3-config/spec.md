@@ -1037,3 +1037,131 @@ spec_loading:
 - **WHEN** the `update_spec` step builds its inputs
 - **THEN** `spec_content` contains the full text of all involved specs
 - **AND** the LLM can see all existing spec names to avoid naming collisions when creating a new spec
+
+### Requirement: Claude Subprocess Setting Sources Isolation
+
+When SE3 spawns Claude CLI subprocesses (for any step that drives an
+LLM via `claude` — `plan`, `implement`, `verify_spec`, `update_spec`,
+etc.), it sets the subprocess `cwd` to the target project root so that
+the LLM can read and edit project files. The Claude CLI, by default,
+also loads the project-level settings file `<cwd>/.claude/settings.json`
+during that invocation. When a downstream project uses its project-root
+`.claude/settings.json` to deny tools as a guardrail for its own
+sub-LLMs (for example, denying `Read`, `Write`, `Edit`, `Bash`, `Glob`,
+`Grep` for verifier-style sub-agents), those `permissions.deny` entries
+also apply to SE3's own worker subprocess and prevent the implement
+step from reading or writing files — surfacing as runtime errors like
+`Read exists but is not enabled in this context`. The
+`--dangerously-skip-permissions` flag does NOT override `permissions.deny`;
+it only suppresses interactive permission prompts.
+
+To structurally insulate SE3 worker subprocesses from this hazard, the
+framework SHALL by default restrict Claude's settings-source loading
+to user-level settings only.
+
+**Default behavior:**
+
+- Every Claude CLI subprocess spawned by SE3 SHALL be invoked with
+  `--setting-sources user` immediately following
+  `--dangerously-skip-permissions` in its argv.
+- The `--setting-sources` argument value is a comma-separated list of
+  source identifiers (`user`/`project`/`local`); when the configured
+  list contains a single element the value is just that element with no
+  trailing comma.
+- The default list is `["user"]`, so the default argv injects
+  `--setting-sources user`. SE3 worker subprocesses therefore consult
+  `~/.claude/settings.json` only and are immune to any `permissions.deny`
+  entries in the target project's `.claude/settings.json` or
+  `.claude/settings.local.json`.
+
+**Configuration:**
+
+- The behavior is controlled by `claude_subprocess.setting_sources`
+  in `se3.yaml` (or `se3.local.yaml`).
+- Schema: `list[str]`. Allowed element values are `"user"`, `"project"`,
+  and `"local"` — corresponding to the three settings tiers recognised
+  by Claude CLI. The default value when the key is absent is
+  `["user"]`.
+- Validation (startup fail-fast — see Configuration File Format):
+  - The value MUST be a list. A non-list value (string, dict, number,
+    etc.) SHALL raise a configuration error at load time.
+  - The list MUST be non-empty. An empty list SHALL raise a
+    configuration error at load time.
+  - Each element MUST be a string in the allowed set
+    `{"user", "project", "local"}`. Any other value SHALL raise a
+    configuration error at load time, and the error message SHALL list
+    the allowed values.
+- When the user explicitly opts back into project/local sources (for
+  example `setting_sources: [user, project]`), the framework SHALL
+  pass `--setting-sources user,project` to the Claude CLI subprocess.
+  In this mode the operator accepts that downstream project settings
+  may again constrain SE3 worker tools.
+
+**Guidance for downstream project authors:**
+
+Downstream projects that need to constrain sub-LLM tool access — for
+example verifier-style sub-agents inside an arapa-like workflow —
+SHALL NOT do so by adding broad `permissions.deny` entries to the
+project-root `.claude/settings.json`, because that file is also read by
+any other Claude CLI invocation rooted in the same project, including
+SE3's worker subprocesses, and will silently break implement-step
+file access. Recommended alternatives:
+
+- Pass `--disallowed-tools <names>` directly to the sub-LLM
+  invocation so the constraint scopes to that one subprocess.
+- Place sub-LLM-specific guardrails in a dedicated settings file and
+  pass it via `--settings <path>` (or via the sub-LLM's own
+  `--setting-sources` flag) so that other Claude CLI invocations in
+  the same `cwd` are unaffected.
+
+#### Scenario: Default argv loads only user-level settings
+- **GIVEN** the project has no `claude_subprocess.setting_sources`
+  configured in `se3.yaml`
+- **WHEN** SE3 spawns any Claude CLI subprocess (e.g. during the
+  `implement` step)
+- **THEN** the subprocess argv contains
+  `--dangerously-skip-permissions --setting-sources user`
+- **AND** the target project's `.claude/settings.json` is not loaded
+  by that subprocess, so its `permissions.deny` entries do not apply
+
+#### Scenario: Explicit configuration opts back into project settings
+- **GIVEN** `se3.yaml` declares
+  ```yaml
+  claude_subprocess:
+    setting_sources: [user, project]
+  ```
+- **WHEN** SE3 spawns any Claude CLI subprocess
+- **THEN** the subprocess argv contains
+  `--dangerously-skip-permissions --setting-sources user,project`
+- **AND** the operator has explicitly accepted that the target
+  project's `.claude/settings.json` may again constrain SE3 worker tools
+
+#### Scenario: Target project .claude/settings.json does not affect default argv
+- **GIVEN** the target project root contains a
+  `.claude/settings.json` that denies `Read`, `Write`, `Edit`, `Bash`,
+  `Glob`, and `Grep`
+- **AND** no `claude_subprocess.setting_sources` is configured in
+  `se3.yaml`
+- **WHEN** SE3 spawns a Claude CLI subprocess with `cwd` set to that
+  project root
+- **THEN** the subprocess argv still contains
+  `--setting-sources user`
+- **AND** the subprocess is not affected by the project's
+  `permissions.deny` entries
+
+#### Scenario: Empty setting_sources list fails fast at startup
+- **GIVEN** `se3.yaml` declares `claude_subprocess.setting_sources: []`
+- **WHEN** SE3 loads project configuration
+- **THEN** the framework raises a configuration error before any
+  Claude CLI subprocess is spawned
+- **AND** the error identifies `claude_subprocess.setting_sources`
+  and states that the list must be non-empty
+
+#### Scenario: Invalid element in setting_sources fails fast
+- **GIVEN** `se3.yaml` declares
+  `claude_subprocess.setting_sources: [user, system]`
+- **WHEN** SE3 loads project configuration
+- **THEN** the framework raises a configuration error before any
+  Claude CLI subprocess is spawned
+- **AND** the error message lists the allowed values
+  (`user`, `project`, `local`)
