@@ -49,6 +49,33 @@ logger = logging.getLogger(__name__)
 
 IMPLEMENT_PROMPT = """You are an expert software engineer. Implement the following tasks by writing code.
 
+## Agent Safety: Process Cleanup
+
+This entire prompt — including this section — is passed to your runtime via
+argv and is therefore visible in `/proc/<pid>/cmdline` for your own process
+and any sibling agents launched the same way. Pattern-based process matchers
+read that file, so a command like `pkill -f <pattern>` will match its own
+invoker whenever the pattern occurs anywhere in this prompt. Running such a
+command can kill yourself, your parent shell, or peer agents mid-flight.
+
+Hard bans — never issue these to clean up processes:
+- `pkill -f <pattern>` (matches against full argv, including this prompt).
+- `pgrep -f <pattern> | xargs kill` (same self-match hazard plus PID reuse).
+- `killall <name>` where `<name>` is a shared interpreter or shell such as
+  `python`, `node`, `claude`, or `bash` (kills unrelated processes).
+
+Preferred alternatives, in order:
+1. If you spawned the process yourself, capture its PID at spawn time
+   (e.g. `mycmd & echo $!`, or read `$!` after backgrounding) and later
+   `kill <pid>` that exact PID — no pattern matching needed.
+2. If you did not spawn it but know its short command name (`comm`, max 15
+   chars), use `pkill -x <comm>` for an exact-name match — `-x` does not
+   read argv, so the self-match hazard is gone.
+3. If `-f` is genuinely unavoidable, first run `pgrep -af <pattern>` and
+   inspect the list. Exclude `$$`, `$PPID`, and every ancestor PID up the
+   process tree before passing survivors to `kill`. Never pipe `pgrep -f`
+   directly into `kill` or `xargs`.
+
 ## Task Description
 {task_description}
 
@@ -93,6 +120,33 @@ When you are done, output a JSON summary of what you did:
 """
 
 IMPLEMENT_GROUP_PROMPT = """You are an expert software engineer. Implement the tasks for this specific group by writing code.
+
+## Agent Safety: Process Cleanup
+
+This entire prompt — including this section — is passed to your runtime via
+argv and is therefore visible in `/proc/<pid>/cmdline` for your own process
+and any sibling agents launched the same way. Pattern-based process matchers
+read that file, so a command like `pkill -f <pattern>` will match its own
+invoker whenever the pattern occurs anywhere in this prompt. Running such a
+command can kill yourself, your parent shell, or peer agents mid-flight.
+
+Hard bans — never issue these to clean up processes:
+- `pkill -f <pattern>` (matches against full argv, including this prompt).
+- `pgrep -f <pattern> | xargs kill` (same self-match hazard plus PID reuse).
+- `killall <name>` where `<name>` is a shared interpreter or shell such as
+  `python`, `node`, `claude`, or `bash` (kills unrelated processes).
+
+Preferred alternatives, in order:
+1. If you spawned the process yourself, capture its PID at spawn time
+   (e.g. `mycmd & echo $!`, or read `$!` after backgrounding) and later
+   `kill <pid>` that exact PID — no pattern matching needed.
+2. If you did not spawn it but know its short command name (`comm`, max 15
+   chars), use `pkill -x <comm>` for an exact-name match — `-x` does not
+   read argv, so the self-match hazard is gone.
+3. If `-f` is genuinely unavoidable, first run `pgrep -af <pattern>` and
+   inspect the list. Exclude `$$`, `$PPID`, and every ancestor PID up the
+   process tree before passing survivors to `kill`. Never pipe `pgrep -f`
+   directly into `kill` or `xargs`.
 
 ## Task Description
 {task_description}
@@ -141,6 +195,33 @@ When you are done, output a JSON summary of what you did:
 """
 
 FIX_PROMPT = """You are an expert software engineer. Fix the issues found in the previous implementation.
+
+## Agent Safety: Process Cleanup
+
+This entire prompt — including this section — is passed to your runtime via
+argv and is therefore visible in `/proc/<pid>/cmdline` for your own process
+and any sibling agents launched the same way. Pattern-based process matchers
+read that file, so a command like `pkill -f <pattern>` will match its own
+invoker whenever the pattern occurs anywhere in this prompt. Running such a
+command can kill yourself, your parent shell, or peer agents mid-flight.
+
+Hard bans — never issue these to clean up processes:
+- `pkill -f <pattern>` (matches against full argv, including this prompt).
+- `pgrep -f <pattern> | xargs kill` (same self-match hazard plus PID reuse).
+- `killall <name>` where `<name>` is a shared interpreter or shell such as
+  `python`, `node`, `claude`, or `bash` (kills unrelated processes).
+
+Preferred alternatives, in order:
+1. If you spawned the process yourself, capture its PID at spawn time
+   (e.g. `mycmd & echo $!`, or read `$!` after backgrounding) and later
+   `kill <pid>` that exact PID — no pattern matching needed.
+2. If you did not spawn it but know its short command name (`comm`, max 15
+   chars), use `pkill -x <comm>` for an exact-name match — `-x` does not
+   read argv, so the self-match hazard is gone.
+3. If `-f` is genuinely unavoidable, first run `pgrep -af <pattern>` and
+   inspect the list. Exclude `$$`, `$PPID`, and every ancestor PID up the
+   process tree before passing survivors to `kill`. Never pipe `pgrep -f`
+   directly into `kill` or `xargs`.
 
 ## Task Description
 {task_description}
