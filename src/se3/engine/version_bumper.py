@@ -1029,13 +1029,6 @@ class VersionBumper:
         "src/version.py",
     ]
 
-    # Task type to bump type mapping
-    DEFAULT_BUMP_RULES: Dict[TaskType, BumpType] = {
-        TaskType.FEATURE: BumpType.MINOR,
-        TaskType.BUGFIX: BumpType.PATCH,
-        TaskType.BREAKING: BumpType.MAJOR,
-    }
-
     def __init__(self, config: VersionConfig):
         """Initialize the version bumper with configuration.
 
@@ -1346,25 +1339,9 @@ class VersionBumper:
         new_v = v.bump(bump_type)
         return str(new_v)
 
-    @staticmethod
-    def get_bump_type_from_task(task_type: TaskType, rules: Optional[Dict[TaskType, BumpType]] = None) -> BumpType:
-        """Get the bump type for a given task type.
-
-        Args:
-            task_type: The type of task being performed
-            rules: Optional custom mapping rules (uses DEFAULT_BUMP_RULES if not provided)
-
-        Returns:
-            The bump type to apply
-        """
-        if rules is None:
-            rules = VersionBumper.DEFAULT_BUMP_RULES
-        return rules.get(task_type, BumpType.PATCH)
-
     def bump_version(
         self,
-        bump_type: Optional[BumpType] = None,
-        task_type: Optional[TaskType] = None,
+        bump_type: BumpType,
         path: Optional[Path] = None,
     ) -> str:
         """Bump the version in the specified file or via script.
@@ -1372,8 +1349,7 @@ class VersionBumper:
         Creates a backup before bumping to allow rollback on failure.
 
         Args:
-            bump_type: Type of bump to apply (overrides task_type)
-            task_type: Task type to determine bump type from config
+            bump_type: Type of bump to apply
             path: Path to version file (None = auto-detect)
 
         Returns:
@@ -1386,12 +1362,6 @@ class VersionBumper:
         """
         if not self.config.enabled:
             raise RuntimeError("Version bumping is disabled")
-
-        # Determine bump type
-        if bump_type is None:
-            if task_type is None:
-                raise ValueError("Either bump_type or task_type must be provided")
-            bump_type = self.config.bump_rules.get(task_type, BumpType.PATCH)
 
         # Script mode: delegate to VersionScriptRunner
         if self._use_script_mode and self._script_runner is not None:
@@ -1422,6 +1392,67 @@ class VersionBumper:
 
         logger.info(f"Bumped version: {current_version_str} -> {new_version_str}")
         return new_version_str
+
+    def set_version(
+        self,
+        version: str,
+        path: Optional[Path] = None,
+    ) -> str:
+        """Write an explicit version string to the version file or via script.
+
+        Unlike bump_version, this skips bump computation and writes the
+        provided version directly. The version string is validated against
+        SemVer 2.0.0 before being written. A backup of the previous version
+        is captured for rollback.
+
+        Args:
+            version: New version string (must be valid SemVer 2.0.0)
+            path: Path to version file (None = auto-detect)
+
+        Returns:
+            The version string that was written
+
+        Raises:
+            ValueError: If version is not a valid SemVer string
+            FileNotFoundError: If version file not found
+            RuntimeError: If version bumping is disabled
+        """
+        if not self.config.enabled:
+            raise RuntimeError("Version bumping is disabled")
+
+        if not Version.validate(version):
+            raise ValueError(
+                f"Invalid SemVer version: '{version}'. "
+                "Expected format: MAJOR.MINOR.PATCH[-prerelease][+build]"
+            )
+
+        # Script mode: delegate to VersionScriptRunner
+        if self._use_script_mode and self._script_runner is not None:
+            current_version = self._script_runner.get_version()
+            self._backup_version = str(current_version)
+            self._backup_path = self._script_runner.script_path
+
+            new_version = self._script_runner.set_version(version)
+            logger.info(f"Set version (script): {current_version} -> {new_version}")
+            return str(new_version)
+
+        # Find version file
+        if path is None:
+            path = self.detect_version_file()
+            if path is None:
+                raise FileNotFoundError("No version file found")
+
+        # Read current version and create backup
+        handler = self._get_handler(path)
+        current_version_str = handler.read_version(path)
+        self._backup_version = current_version_str
+        self._backup_path = path
+
+        # Write the explicit version directly
+        handler.write_version(path, version)
+
+        logger.info(f"Set version: {current_version_str} -> {version}")
+        return version
 
     def save_original_version(self, path: Optional[Path] = None) -> str:
         """Save the current version for potential rollback.
@@ -1491,8 +1522,7 @@ class VersionBumper:
     @contextmanager
     def atomic_bump(
         self,
-        bump_type: Optional[BumpType] = None,
-        task_type: Optional[TaskType] = None,
+        bump_type: BumpType,
         path: Optional[Path] = None,
     ) -> Generator[str, None, None]:
         """Context manager for atomic version bumping with automatic rollback.
@@ -1501,15 +1531,14 @@ class VersionBumper:
         On exception, the version is rolled back to the original.
 
         Args:
-            bump_type: Type of bump to apply (overrides task_type)
-            task_type: Task type to determine bump type from config
+            bump_type: Type of bump to apply
             path: Path to version file (None = auto-detect)
 
         Yields:
             New version string
 
         Example:
-            with bumper.atomic_bump(task_type=TaskType.FEATURE) as new_version:
+            with bumper.atomic_bump(BumpType.MINOR) as new_version:
                 # Do something with the new version
                 git_commit(f"Release {new_version}")
             # If exception raised, version is rolled back automatically
@@ -1517,12 +1546,6 @@ class VersionBumper:
         """
         if not self.config.enabled:
             raise RuntimeError("Version bumping is disabled")
-
-        # Determine bump type
-        if bump_type is None:
-            if task_type is None:
-                raise ValueError("Either bump_type or task_type must be provided")
-            bump_type = self.get_bump_type_from_task(task_type, self.config.bump_rules)
 
         # Find version file
         if path is None:
