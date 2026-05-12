@@ -2431,3 +2431,112 @@ def load_merge_config(project_root: Optional[Path] = None) -> MergeConfig:
     if project_root is None:
         project_root = Path.cwd()
     return MergeConfig.load(project_root)
+
+
+# Allowed values for ``claude_subprocess.setting_sources``.  Mirrors the
+# Claude CLI ``--setting-sources`` flag accepted tokens.
+_ALLOWED_SETTING_SOURCES = ("user", "project", "local")
+_DEFAULT_SETTING_SOURCES = ("user",)
+
+
+@dataclass
+class ClaudeSubprocessConfig:
+    """Configuration for SE3-spawned Claude CLI subprocesses.
+
+    ``setting_sources`` controls which settings files Claude CLI loads
+    when SE3 spawns it as a worker.  The default ``["user"]`` isolates
+    SE3 workers from the target project's ``.claude/settings.json`` so
+    that ``permissions.deny`` rules intended for the *downstream*
+    project's sub-LLMs do not lock out SE3's own plan/implement/review
+    children.  Set explicitly (e.g. ``["user", "project"]``) to opt back
+    into project-level settings.
+    """
+
+    setting_sources: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_SETTING_SOURCES)
+    )
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ClaudeSubprocessConfig":
+        """Build a config from the ``claude_subprocess`` YAML section.
+
+        Validates ``setting_sources``:
+        - non-list / non-string-element → ``ValueError``
+        - empty list → ``ValueError``
+        - element outside ``{user, project, local}`` → ``ValueError``
+        Missing key returns the built-in default ``["user"]``.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(
+                "claude_subprocess: expected a mapping, got "
+                f"{type(data).__name__}"
+            )
+
+        if "setting_sources" not in data:
+            return cls()
+
+        raw = data["setting_sources"]
+        if not isinstance(raw, list):
+            raise ValueError(
+                "claude_subprocess.setting_sources must be a list of "
+                f"strings, got {type(raw).__name__}. Allowed values: "
+                f"{list(_ALLOWED_SETTING_SOURCES)}"
+            )
+        if len(raw) == 0:
+            raise ValueError(
+                "claude_subprocess.setting_sources must not be empty. "
+                f"Allowed values: {list(_ALLOWED_SETTING_SOURCES)}"
+            )
+
+        normalized: list[str] = []
+        for item in raw:
+            if not isinstance(item, str):
+                raise ValueError(
+                    "claude_subprocess.setting_sources entries must be "
+                    f"strings, got {type(item).__name__} ({item!r}). "
+                    f"Allowed values: {list(_ALLOWED_SETTING_SOURCES)}"
+                )
+            if item not in _ALLOWED_SETTING_SOURCES:
+                raise ValueError(
+                    "claude_subprocess.setting_sources contains invalid "
+                    f"value {item!r}. Allowed values: "
+                    f"{list(_ALLOWED_SETTING_SOURCES)}"
+                )
+            normalized.append(item)
+
+        return cls(setting_sources=normalized)
+
+    @classmethod
+    def load(cls, project_root: Optional[Path] = None) -> "ClaudeSubprocessConfig":
+        """Load from the active project YAML, falling back to defaults."""
+        if project_root is None:
+            return cls()
+        data, _src = load_project_yaml(project_root)
+        if not data:
+            return cls()
+        section = data.get("claude_subprocess")
+        if section is None:
+            return cls()
+        if not isinstance(section, dict):
+            raise ValueError(
+                "claude_subprocess: expected a mapping, got "
+                f"{type(section).__name__}"
+            )
+        return cls.from_dict(section)
+
+
+def load_claude_subprocess_config(
+    project_root: Optional[Path] = None,
+) -> ClaudeSubprocessConfig:
+    """Load Claude subprocess configuration.
+
+    Args:
+        project_root: Project root directory.  ``None`` returns the
+            built-in default (``setting_sources=["user"]``).
+
+    Raises:
+        ValueError: If ``claude_subprocess.setting_sources`` is set but
+            invalid (empty list, non-list, or contains values outside
+            ``{user, project, local}``).
+    """
+    return ClaudeSubprocessConfig.load(project_root)
