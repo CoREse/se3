@@ -121,6 +121,48 @@ def _has_conflict_markers(text: str) -> bool:
     )
 
 
+def _has_any_conflict_marker(path: Path) -> bool:
+    """Return True when the file at ``path`` still contains a conflict marker.
+
+    Missing files (e.g. delete/modify conflicts where the LLM resolved
+    the conflict by removing the file) are treated as "no markers" — a
+    deleted file cannot harbour ``<<<<<<<``.  Read errors short-circuit
+    to ``True`` so the caller treats the file as unresolved and re-tries
+    rather than silently passing.
+    """
+    try:
+        if not path.exists():
+            return False
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        logger.warning(
+            "Failed to read %s when scanning for conflict markers: %s",
+            path, exc,
+        )
+        return True
+    return _has_conflict_markers(text)
+
+
+def _scan_unresolved(paths: list[Path]) -> list[Path]:
+    """Return the subset of ``paths`` whose files still contain conflict markers.
+
+    The order of input paths is preserved in the output.
+    """
+    return [p for p in paths if _has_any_conflict_marker(p)]
+
+
+_PREVIEW_CHARS = 500
+
+
+def _preview(text: str) -> str:
+    """Trim ``text`` to a short prefix suitable for storing on the outcome."""
+    if not text:
+        return ""
+    if len(text) <= _PREVIEW_CHARS:
+        return text
+    return text[:_PREVIEW_CHARS] + f"… [+{len(text) - _PREVIEW_CHARS} chars]"
+
+
 class HunkValidationError(ValueError):
     """Raised when a HunkResolution payload is malformed."""
 
@@ -311,6 +353,82 @@ _RESOLUTION_SCHEMA = """{
 }"""
 
 
+@dataclass
+class BatchContext:
+    """Merge-level metadata for a single :meth:`ConflictResolver.resolve_batch` call.
+
+    The fields mirror :class:`ConflictContext` but the per-file
+    ``files`` list is decoupled — ``resolve_batch`` receives conflict
+    files as a separate argument so the same context object can be
+    re-used across iterations that operate on shrinking unresolved
+    subsets.
+    """
+
+    project_root: Path
+    ours_branch: str
+    theirs_branch: str
+    merge_base: str = ""
+    ours_head_sha: str = ""
+    ours_head_message: str = ""
+    theirs_head_sha: str = ""
+    theirs_head_message: str = ""
+    ours_log_oneline: list[str] = field(default_factory=list)
+    theirs_log_oneline: list[str] = field(default_factory=list)
+    has_spec_files: bool = False
+    strategy: MergeStrategy = MergeStrategy.FAST
+
+
+@dataclass
+class IterationFailure:
+    """One iteration's failure state, fed back into the next iteration's prompt.
+
+    Captures any of the five failure modes that the legacy JSON-decision
+    pipeline used to escalate to take-theirs:
+
+    * ``context_build_failed`` — building the conflict-context bundle raised.
+    * ``llm_exception`` — the LLM subprocess raised or timed out.
+    * ``parse_failed`` — pre-LLM-as-editor schema parsing failed.
+    * ``apply_failed`` — writing the LLM's output failed.
+    * ``markers_remaining`` — files still contain ``<<<<<<<``/``=======``/``>>>>>>>``.
+    """
+
+    iteration: int
+    kind: str
+    detail: str
+    files: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BatchResolveOutcome:
+    """Result of :meth:`ConflictResolver.resolve_batch`.
+
+    ``escalation_reason`` is ``None`` on success, otherwise one of:
+
+    * ``"fast_failed"`` — fast strategy reached ``max_iterations`` with
+      files still containing conflict markers; the caller MUST fail the
+      merge without any human escalation.
+    * ``"safe_to_human"`` — safe strategy reached ``max_iterations``;
+      the caller MUST fall back to a human MCP call.
+    * ``"strict_to_human"`` — strict strategy never invoked the LLM and
+      routes every conflict file straight to a human MCP call.
+    """
+
+    resolved: list[Path] = field(default_factory=list)
+    unresolved: list[Path] = field(default_factory=list)
+    iterations_used: int = 0
+    escalation_reason: Optional[str] = None
+    history: list[IterationFailure] = field(default_factory=list)
+    duration_sec: float = 0.0
+    prompts_preview: list[str] = field(default_factory=list)
+    responses_preview: list[str] = field(default_factory=list)
+
+    @property
+    def success(self) -> bool:
+        """True when no files remain with conflict markers and no
+        escalation was triggered."""
+        return self.escalation_reason is None and not self.unresolved
+
+
 class ConflictResolver:
     """Resolve merge conflicts using LLM with structured JSON output."""
 
@@ -384,6 +502,348 @@ class ConflictResolver:
             return self._fallback_resolution(context, "Empty LLM response")
 
         return self._parse_response(raw_response, context)
+
+    # ------------------------------------------------------------------
+    # LLM-as-editor batch resolution (new model — see G3 in design doc).
+    # The legacy ``resolve`` / ``_parse_response`` / ``_apply_resolution``
+    # path is retained for the current orchestrator wiring and will be
+    # removed by G4 once orchestrator.py adopts ``resolve_batch``.
+    # ------------------------------------------------------------------
+
+    def resolve_batch(
+        self,
+        conflict_files: list[ConflictFile],
+        context: "BatchContext",
+        *,
+        max_iterations: int,
+    ) -> "BatchResolveOutcome":
+        """Resolve every conflicting file by asking the LLM to edit them in place.
+
+        Each iteration:
+
+        1. Builds an editor-style prompt listing every *currently
+           unresolved* file with its base/ours/theirs/working content
+           and tells the LLM to use its file-editing tools to remove
+           every ``<<<<<<<`` / ``=======`` / ``>>>>>>>`` marker.
+        2. Sends the prompt to the LLM (single call, all files
+           bundled).
+        3. Scans the on-disk versions of the targeted files; any file
+           that still contains a conflict marker is retained for the
+           next iteration's prompt, accompanied by the failure history
+           of the previous iteration.
+
+        The five legacy failure paths that used to fall back to
+        take-theirs (context-build exception, LLM exception, parse
+        failure, write/apply failure, leftover markers) are now all
+        recorded as :class:`IterationFailure` entries and fed back into
+        the next iteration's prompt — *never* into a take-theirs
+        commit.
+
+        Args:
+            conflict_files: All conflicting files (post-``git merge``).
+                Each :class:`ConflictFile` carries its working-tree
+                relative path (interpreted relative to
+                ``context.project_root``) plus the base/ours/theirs
+                content captured before the LLM was invoked.
+            context: Merge-level metadata shared across all files.
+            max_iterations: Hard upper bound on the number of LLM
+                calls.  When exhausted with files still unresolved, the
+                outcome's ``escalation_reason`` is set to
+                ``"fast_failed"`` and the caller decides what to do
+                next (the strategy layer maps this to fail-fast for
+                ``fast`` and to a human MCP call for ``safe``).
+
+        Returns:
+            A :class:`BatchResolveOutcome` describing which files were
+            cleared, which remain, how many iterations were spent, and
+            (when applicable) the per-iteration failure history that
+            led to escalation.
+        """
+        if max_iterations < 1:
+            raise ValueError(
+                f"max_iterations must be >= 1, got {max_iterations}"
+            )
+
+        all_paths = [context.project_root / cf.path for cf in conflict_files]
+        path_to_file = {
+            context.project_root / cf.path: cf for cf in conflict_files
+        }
+
+        # Strict strategy never invokes the LLM — every conflicting
+        # file routes straight to a human MCP call.  We still flag
+        # every file as unresolved so the caller can build the call
+        # file from the same outcome surface that fast/safe use.
+        if context.strategy == MergeStrategy.STRICT:
+            unresolved_now = _scan_unresolved(all_paths)
+            return BatchResolveOutcome(
+                resolved=[p for p in all_paths if p not in unresolved_now],
+                unresolved=unresolved_now,
+                iterations_used=0,
+                escalation_reason="strict_to_human",
+                history=[],
+                duration_sec=0.0,
+            )
+
+        outcome = BatchResolveOutcome()
+        history: list[IterationFailure] = []
+        unresolved = _scan_unresolved(all_paths)
+
+        # Edge case: caller passed in files that already happen to have
+        # no markers (e.g. a previous run already cleared them).
+        # Return success without burning an LLM call.
+        if not unresolved:
+            outcome.resolved = list(all_paths)
+            outcome.unresolved = []
+            outcome.iterations_used = 0
+            return outcome
+
+        t0 = time.monotonic()
+        for iteration in range(1, max_iterations + 1):
+            outcome.iterations_used = iteration
+
+            iter_files = [path_to_file[p] for p in unresolved]
+            prompt = self._build_editor_prompt(
+                iter_files, context, history, iteration, max_iterations,
+            )
+            outcome.prompts_preview.append(_preview(prompt))
+
+            try:
+                response = self._call_llm(prompt)
+            except Exception as exc:
+                outcome.responses_preview.append("")
+                history.append(IterationFailure(
+                    iteration=iteration,
+                    kind="llm_exception",
+                    detail=redact_text(f"{type(exc).__name__}: {exc}"),
+                    files=[str(p) for p in unresolved],
+                ))
+                logger.warning(
+                    "resolve_batch iteration %d/%d: LLM call failed: %s",
+                    iteration, max_iterations, exc,
+                )
+                # Re-scan in case the LLM partially wrote before failing.
+                unresolved = _scan_unresolved(unresolved)
+                if not unresolved:
+                    break
+                continue
+
+            outcome.responses_preview.append(_preview(response))
+
+            # The LLM was instructed to use file-editing tools, so the
+            # primary success signal is "files no longer contain
+            # markers" — independent of any text it printed.
+            try:
+                new_unresolved = _scan_unresolved(unresolved)
+            except Exception as exc:
+                history.append(IterationFailure(
+                    iteration=iteration,
+                    kind="apply_failed",
+                    detail=redact_text(f"scan after write failed: {exc}"),
+                    files=[str(p) for p in unresolved],
+                ))
+                logger.warning(
+                    "resolve_batch iteration %d/%d: post-edit scan failed: %s",
+                    iteration, max_iterations, exc,
+                )
+                # Be conservative: assume all targeted files are still
+                # unresolved so the next iteration retries them.
+                new_unresolved = list(unresolved)
+
+            if not new_unresolved:
+                unresolved = []
+                break
+
+            history.append(IterationFailure(
+                iteration=iteration,
+                kind="markers_remaining",
+                detail=(
+                    f"{len(new_unresolved)}/{len(unresolved)} files still "
+                    f"contain conflict markers after iteration {iteration}"
+                ),
+                files=[str(p) for p in new_unresolved],
+            ))
+            unresolved = new_unresolved
+
+        outcome.duration_sec = time.monotonic() - t0
+        outcome.history = history
+        outcome.unresolved = unresolved
+        outcome.resolved = [p for p in all_paths if p not in unresolved]
+
+        if unresolved:
+            # Strategy layer maps "fast_failed" → fail merge, and (on
+            # the safe path) overrides this to "safe_to_human" before
+            # acting.  The resolver itself does not know which surface
+            # the caller wants.
+            outcome.escalation_reason = "fast_failed"
+
+        return outcome
+
+    def _build_editor_prompt(
+        self,
+        conflict_files: list[ConflictFile],
+        context: "BatchContext",
+        history: list[IterationFailure],
+        iteration: int,
+        max_iterations: int,
+    ) -> str:
+        """Construct the LLM-as-editor prompt for one iteration.
+
+        The prompt asks the LLM to use its file-editing tools directly
+        — there is no JSON schema, no per-hunk confidence reporting.
+        Success is judged on a single observable: whether the working
+        tree files still contain conflict markers after the call
+        returns.
+        """
+        lines: list[str] = []
+
+        lines.append(
+            "You are resolving an in-progress `git merge` by directly editing the "
+            "working-tree files listed below."
+        )
+        lines.append("")
+        lines.append(
+            "## Goal"
+        )
+        lines.append(
+            "Edit each file so that **no** `<<<<<<<`, `=======`, or `>>>>>>>` "
+            "conflict marker remains on disk. Use your file-editing tools "
+            "(Edit / Write) directly — do NOT return JSON or print resolved "
+            "content into your reply. The on-disk state is what counts."
+        )
+        lines.append("")
+        lines.append(f"Iteration {iteration} of {max_iterations}.")
+        lines.append("")
+
+        # Merge metadata
+        lines.append("## Merge Metadata")
+        lines.append(f"- Project root: {context.project_root}")
+        lines.append(f"- Current branch (ours): {context.ours_branch}")
+        lines.append(f"- Incoming branch (theirs): {context.theirs_branch}")
+        lines.append(f"- Merge base: {context.merge_base}")
+        lines.append(f"- Ours HEAD: {context.ours_head_sha}")
+        lines.append(f"- Theirs HEAD: {context.theirs_head_sha}")
+        lines.append(f"- Strategy: {context.strategy.value}")
+        lines.append("")
+        if context.ours_head_message:
+            lines.append(f"### Ours commit message\n{context.ours_head_message}")
+            lines.append("")
+        if context.theirs_head_message:
+            lines.append(f"### Theirs commit message\n{context.theirs_head_message}")
+            lines.append("")
+        if context.ours_log_oneline:
+            lines.append("### Commits on ours since merge base")
+            for line in context.ours_log_oneline:
+                lines.append(f"  {line}")
+            lines.append("")
+        if context.theirs_log_oneline:
+            lines.append("### Commits on theirs since merge base")
+            for line in context.theirs_log_oneline:
+                lines.append(f"  {line}")
+            lines.append("")
+
+        if context.has_spec_files:
+            lines.append(
+                "⚠️  SPEC FILES PRESENT: do NOT delete requirements, weaken "
+                "SHALL→SHOULD or MUST→SHOULD, weaken quantifiers (all→some), "
+                "or delete scenarios. Merge both sides' content faithfully."
+            )
+            lines.append("")
+
+        if history:
+            lines.append("## Previous Iteration Outcomes")
+            lines.append(
+                "The previous iteration(s) did NOT clear all conflict markers. "
+                "Each entry below describes what went wrong; consider whether "
+                "you need a different approach this time."
+            )
+            for h in history[-3:]:  # only the last 3 entries to keep prompt size bounded
+                lines.append(
+                    f"- iteration {h.iteration}: {h.kind} — {h.detail}"
+                )
+                if h.files:
+                    lines.append(
+                        f"  files affected: {', '.join(h.files[:10])}"
+                        + (" …" if len(h.files) > 10 else "")
+                    )
+            lines.append("")
+
+        # Per-file blocks
+        lines.append("## Files to resolve")
+        lines.append("")
+        for cf in conflict_files:
+            abs_path = context.project_root / cf.path
+            lines.append(f"### `{cf.path}`")
+            lines.append(f"Absolute path: `{abs_path}`")
+            if cf.is_spec:
+                lines.append("[SPEC FILE — spec-guardrail rules apply]")
+            if cf.is_binary:
+                lines.append(
+                    "[BINARY FILE — cannot be auto-edited. Choose a side "
+                    "deliberately via `git checkout --ours`/`--theirs` "
+                    "or leave it unresolved for human review.]"
+                )
+                lines.append("")
+                continue
+            if cf.hunks:
+                lines.append(f"Conflict hunks: {len(cf.hunks)}")
+                for hunk in cf.hunks:
+                    lines.append(f"  Lines {hunk.start_line}-{hunk.end_line}")
+            lines.append("")
+            lines.append("#### Base version (common ancestor)")
+            if cf.base_exists:
+                lines.append("```")
+                lines.append(cf.base_content)
+                lines.append("```")
+            else:
+                lines.append("[file did not exist in base]")
+            lines.append("")
+            lines.append("#### Ours version (current branch)")
+            if cf.ours_exists:
+                lines.append("```")
+                lines.append(cf.ours_content)
+                lines.append("```")
+            else:
+                lines.append("[file did not exist in ours]")
+            lines.append("")
+            lines.append("#### Theirs version (incoming branch)")
+            if cf.theirs_exists:
+                lines.append("```")
+                lines.append(cf.theirs_content)
+                lines.append("```")
+            else:
+                lines.append("[file did not exist in theirs]")
+            lines.append("")
+            lines.append("#### Working tree (current state with conflict markers)")
+            lines.append("```")
+            lines.append(cf.working_content)
+            lines.append("```")
+            lines.append("")
+
+        lines.append("## Rules")
+        lines.append(
+            "1. Combine both sides' intent faithfully; do NOT silently "
+            "discard either side just to make conflicts go away."
+        )
+        lines.append(
+            "2. For version-number conflicts (e.g. `pyproject.toml`), pick "
+            "the higher SemVer value rather than concatenating; if both "
+            "sides bumped, take whichever bump-type is larger."
+        )
+        lines.append(
+            "3. Do not output JSON. Do not paste full resolved file content "
+            "into your reply. Use your file-editing tools to write the "
+            "resolved version directly to disk."
+        )
+        lines.append(
+            "4. When you are done, the file SHALL contain no `<<<<<<<`, "
+            "`=======`, or `>>>>>>>` marker lines."
+        )
+        lines.append(
+            "5. Do not stage, commit, or `git add` anything — the caller "
+            "handles staging and committing once all markers are gone."
+        )
+
+        return "\n".join(lines)
 
     def _call_llm(self, prompt: str) -> str:
         """Call LLM with the given prompt.

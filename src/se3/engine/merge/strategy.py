@@ -7,10 +7,22 @@ confidence, spec guardrail flags, and file types.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
+from typing import TYPE_CHECKING, Optional
 
-from .conflict_resolver import Confidence, LLMResolution, MergeStrategy
+from .conflict_resolver import (
+    BatchContext,
+    BatchResolveOutcome,
+    Confidence,
+    ConflictFile,
+    LLMResolution,
+    MergeStrategy,
+)
+
+if TYPE_CHECKING:
+    from .conflict_resolver import ConflictResolver
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +41,11 @@ class StrategyDecision:
 
     action: DecisionAction
     reason: str = ""
+    # Populated by the new ``resolve_and_decide`` path so the orchestrator
+    # can build a human-call file (safe / strict) or a precise failure
+    # report (fast) without re-running the resolver.
+    outcome: Optional[BatchResolveOutcome] = None
+    unresolved_files: list[Path] = field(default_factory=list)
 
 
 class StrategyDecider:
@@ -270,5 +287,158 @@ class StrategyDecider:
         return StrategyDecision(
             action=DecisionAction.ACCEPT,
             reason=reason,
+        )
+
+    # ------------------------------------------------------------------
+    # New batch / LLM-as-editor decision path (G3).
+    # ------------------------------------------------------------------
+
+    def resolve_and_decide(
+        self,
+        resolver: "ConflictResolver",
+        conflict_files: list[ConflictFile],
+        context: BatchContext,
+        *,
+        max_iterations: int,
+    ) -> StrategyDecision:
+        """Run :meth:`ConflictResolver.resolve_batch` and translate the
+        outcome into a :class:`StrategyDecision` per the active merge
+        strategy.
+
+        Branching:
+
+        * ``MergeStrategy.STRICT`` — short-circuits inside ``resolve_batch``
+          (no LLM call); every conflict file routes straight to a human
+          MCP call.
+        * ``MergeStrategy.FAST`` — success → ACCEPT; hitting
+          ``max_iterations`` with files still unresolved → REJECT, never
+          HUMAN_CALL.
+        * ``MergeStrategy.SAFE`` — success → ACCEPT; hitting
+          ``max_iterations`` → HUMAN_CALL (the human MCP fallback).
+
+        ``take-theirs`` is no longer a possible outcome on any branch.
+        """
+        strategy = context.strategy
+
+        if strategy == MergeStrategy.STRICT:
+            return self._decide_strict_batch(
+                resolver, conflict_files, context, max_iterations,
+            )
+        if strategy == MergeStrategy.FAST:
+            return self._decide_fast_batch(
+                resolver, conflict_files, context, max_iterations,
+            )
+        if strategy == MergeStrategy.SAFE:
+            return self._decide_safe_batch(
+                resolver, conflict_files, context, max_iterations,
+            )
+        logger.warning(
+            "Unknown strategy %s in resolve_and_decide; falling back to safe",
+            strategy,
+        )
+        return self._decide_safe_batch(
+            resolver, conflict_files, context, max_iterations,
+        )
+
+    def _decide_fast_batch(
+        self,
+        resolver: "ConflictResolver",
+        conflict_files: list[ConflictFile],
+        context: BatchContext,
+        max_iterations: int,
+    ) -> StrategyDecision:
+        """Fast strategy: ACCEPT on success, REJECT on exhaustion.
+
+        Never invokes a human MCP call.  When the LLM cannot clear all
+        conflict markers within ``max_iterations``, the merge is
+        rejected and the orchestrator aborts with a failure report.
+        """
+        outcome = resolver.resolve_batch(
+            conflict_files, context, max_iterations=max_iterations,
+        )
+        if outcome.success:
+            return StrategyDecision(
+                action=DecisionAction.ACCEPT,
+                reason=(
+                    f"Fast strategy: LLM cleared all conflict markers in "
+                    f"{outcome.iterations_used} iteration(s)"
+                ),
+                outcome=outcome,
+            )
+        return StrategyDecision(
+            action=DecisionAction.REJECT,
+            reason=(
+                f"Fast strategy: LLM could not clear conflict markers in "
+                f"{outcome.iterations_used}/{max_iterations} iteration(s); "
+                f"{len(outcome.unresolved)} file(s) remain unresolved"
+            ),
+            outcome=outcome,
+            unresolved_files=list(outcome.unresolved),
+        )
+
+    def _decide_safe_batch(
+        self,
+        resolver: "ConflictResolver",
+        conflict_files: list[ConflictFile],
+        context: BatchContext,
+        max_iterations: int,
+    ) -> StrategyDecision:
+        """Safe strategy: ACCEPT on success, HUMAN_CALL on exhaustion.
+
+        Mirrors the legacy ``default`` semantics but without ever
+        delegating to take-theirs — humans, not the resolver, decide
+        what to do when the LLM cannot converge.
+        """
+        outcome = resolver.resolve_batch(
+            conflict_files, context, max_iterations=max_iterations,
+        )
+        if outcome.success:
+            return StrategyDecision(
+                action=DecisionAction.ACCEPT,
+                reason=(
+                    f"Safe strategy: LLM cleared all conflict markers in "
+                    f"{outcome.iterations_used} iteration(s)"
+                ),
+                outcome=outcome,
+            )
+        # Mark the outcome's escalation_reason so callers can route the
+        # human-call file write through the safe-specific code path.
+        outcome.escalation_reason = "safe_to_human"
+        return StrategyDecision(
+            action=DecisionAction.HUMAN_CALL,
+            reason=(
+                f"Safe strategy: LLM could not clear conflict markers in "
+                f"{outcome.iterations_used}/{max_iterations} iteration(s); "
+                f"escalating {len(outcome.unresolved)} file(s) to human review"
+            ),
+            outcome=outcome,
+            unresolved_files=list(outcome.unresolved),
+        )
+
+    def _decide_strict_batch(
+        self,
+        resolver: "ConflictResolver",
+        conflict_files: list[ConflictFile],
+        context: BatchContext,
+        max_iterations: int,
+    ) -> StrategyDecision:
+        """Strict strategy: every conflict file routes directly to a human.
+
+        :meth:`ConflictResolver.resolve_batch` short-circuits for
+        ``MergeStrategy.STRICT`` and returns immediately with
+        ``escalation_reason='strict_to_human'`` — the LLM is never
+        invoked.
+        """
+        outcome = resolver.resolve_batch(
+            conflict_files, context, max_iterations=max_iterations,
+        )
+        return StrategyDecision(
+            action=DecisionAction.HUMAN_CALL,
+            reason=(
+                f"Strict strategy: routing {len(conflict_files)} conflict "
+                "file(s) directly to human review (LLM not invoked)"
+            ),
+            outcome=outcome,
+            unresolved_files=list(outcome.unresolved),
         )
 
