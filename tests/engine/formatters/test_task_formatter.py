@@ -182,16 +182,17 @@ class TestTaskFormatter:
 
     def test_format_tasks_tree_mode(self, formatter, sample_task_groups, console):
         """Test tree mode formatting."""
-        panel = formatter.format_tasks(sample_task_groups, mode="tree")
+        renderable = formatter.format_tasks(sample_task_groups, mode="tree")
 
-        assert panel is not None
-        assert "Task Plan" in str(panel.title)
+        assert renderable is not None
 
-        # Check that panel can be rendered
+        # Check that the renderable can be rendered
         with console.capture() as capture:
-            console.print(panel)
+            console.print(renderable)
         output = capture.get()
 
+        # Title now appears in the rendered output as a markdown heading
+        assert "Task Plan" in output
         # Verify tree structure is present
         assert "G1" in output
         assert "G2" in output
@@ -200,27 +201,33 @@ class TestTaskFormatter:
 
     def test_format_tasks_table_mode(self, formatter, sample_task_groups, console):
         """Test table mode formatting."""
-        panel = formatter.format_tasks(sample_task_groups, mode="table")
+        renderable = formatter.format_tasks(sample_task_groups, mode="table")
 
-        assert panel is not None
-        assert "Task Plan" in str(panel.title)
+        assert renderable is not None
 
-        # Check that panel can be rendered
+        # Check that the renderable can be rendered
         with console.capture() as capture:
-            console.print(panel)
+            console.print(renderable)
         output = capture.get()
 
+        # Title now appears in the rendered output as a markdown heading
+        assert "Task Plan" in output
         # Verify table columns are present
         assert "ID" in output or "Task" in output
         assert "Description" in output or "description" in output.lower()
         assert "Complexity" in output or "complexity" in output.lower()
 
-    def test_format_tasks_empty(self, formatter):
+    def test_format_tasks_empty(self, formatter, console):
         """Test formatting empty task groups."""
-        panel = formatter.format_tasks([], mode="tree")
+        renderable = formatter.format_tasks([], mode="tree")
 
-        assert panel is not None
-        assert "No tasks" in str(panel.renderable) or "No tasks" in str(panel)
+        assert renderable is not None
+
+        with console.capture() as capture:
+            console.print(renderable)
+        output = capture.get()
+
+        assert "No tasks" in output
 
     def test_format_task_detail(self, formatter, console):
         """Test formatting single task detail."""
@@ -249,15 +256,16 @@ class TestTaskFormatter:
 
     def test_format_summary(self, formatter, sample_task_groups, console):
         """Test formatting summary statistics."""
-        panel = formatter.format_summary(sample_task_groups)
+        renderable = formatter.format_summary(sample_task_groups)
 
-        assert panel is not None
-        assert "Summary" in str(panel.title)
+        assert renderable is not None
 
         with console.capture() as capture:
-            console.print(panel)
+            console.print(renderable)
         output = capture.get()
 
+        # Title now appears in the rendered output as a markdown heading
+        assert "Summary" in output
         # Verify summary stats are present
         assert "2" in output  # 2 groups
         assert "3" in output  # 3 tasks total
@@ -265,15 +273,16 @@ class TestTaskFormatter:
 
     def test_format_dependencies(self, formatter, sample_task_groups, console):
         """Test formatting dependency map."""
-        panel = formatter.format_dependencies(sample_task_groups)
+        renderable = formatter.format_dependencies(sample_task_groups)
 
-        assert panel is not None
-        assert "Dependencies" in str(panel.title)
+        assert renderable is not None
 
         with console.capture() as capture:
-            console.print(panel)
+            console.print(renderable)
         output = capture.get()
 
+        # Title now appears in the rendered output as a markdown heading
+        assert "Dependencies" in output
         # Verify dependency info is present
         assert "G1" in output or "G2" in output or "ID" in output
 
