@@ -230,6 +230,8 @@ A single `se3 run` session SHALL produce exactly one effective version bump in t
 - The `implement` step (including any LLM groups, fix-iteration, or worktree merges back to the main branch) SHALL NOT be the legitimate site of a version-file write. Version-file changes belong exclusively to the `commit` step.
 - LLM prompts for `plan`, `implement` (group), and `fix-iteration` SHALL include an explicit guardrail forbidding "bump version" as a task group, an `implement` change, or a fix-iteration change. If the user's task description is purely a version bump, the LLM is instructed to produce zero file changes in `implement` and explain in the summary why the bump was deferred to the `commit` step.
 - The `implement` step SHALL record `pre_session_version` (entry-time disk version) and, on worktree paths, a `session_commits` list of commits introduced to the main branch during this session. Both fields are forwarded into `version_analyze.inputs` (see flow-engine spec).
+- `pre_session_version` SHALL be captured exactly once per `implement` step — at the **first** entry of the handler — and preserved on every subsequent re-entry (fix-iteration, DAG resume, retry). Re-entries MUST NOT overwrite `pre_session_version` with the current on-disk value, because an earlier worktree group may have already bumped the version file; overwriting would let `version_analyze` compute the bump relative to the post-bump version and produce a second, spurious bump.
+- `session_commits` SHALL be computed against the **flow-wide** baseline recorded at flow init (`flow.baseline_commit` from `state_machine.init_flow`), NOT against the per-entry HEAD. This guarantees that commits merged onto the main branch by earlier `implement` entries remain visible to `version_analyze` after a re-entry, and that the list spans the entire implement phase even when the handler executes in multiple passes.
 - The `version_analyze` LLM prompt SHALL render `pre_session_version` as the baseline `Current Version`, surface the `session_commits` list, and instruct the LLM to treat any version-file modifications inside those commits as if they had not happened. The resulting `suggested_version` is therefore computed once, relative to `pre_session_version`.
 - The `commit` step SHALL unconditionally write `suggested_version` into the version files. When the on-disk version already equals `suggested_version` (because an upstream group merged a matching bump commit), `set_version` is required to be idempotent — the same write is performed and no error is raised; the final on-disk version equals exactly `suggested_version`.
 
@@ -245,6 +247,15 @@ A single `se3 run` session SHALL produce exactly one effective version bump in t
 - **WHEN** the `commit` step runs
 - **THEN** it writes `5.2.0` into `pyproject.toml` / `VERSIONS.md` idempotently (no second 5.2.1 bump)
 - **AND** the final on-disk version equals `5.2.0`
+
+#### Scenario: Re-entry preserves the originally captured pre_session_version
+- **GIVEN** the project version on disk is `5.1.0` at the start of `se3 run`
+- **AND** the `implement` step's first entry captures `pre_session_version=5.1.0` into `step.outputs`
+- **AND** a worktree-DAG group then merges a `bump version to 5.2.0` commit onto the main branch (disk now reads `5.2.0`)
+- **WHEN** `implement_handler` is re-entered (as a fix iteration, DAG resume, or retry)
+- **THEN** `step.outputs["pre_session_version"]` remains `5.1.0` (NOT overwritten to the post-bump disk value `5.2.0`)
+- **AND** `step.outputs["session_commits"]` is recomputed against `flow.baseline_commit` and still includes the `bump version to 5.2.0` commit merged between entries
+- **AND** the resulting `version_analyze` baseline remains `5.1.0`, so `suggested_version` is a single MINOR bump (`5.2.0`) rather than a second bump on top of `5.2.0`
 
 #### Scenario: Non-worktree session behavior is unchanged
 - **GIVEN** the project's version on disk is `1.2.3`

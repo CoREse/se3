@@ -325,20 +325,31 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
 
-    # Record baseline commit hash before any implementation.
-    # Used after all paths to get ground-truth files_changed via git diff.
-    baseline_hash = _get_head_hash(project_root)
+    # Baseline for session-commit collection: prefer the flow-wide baseline
+    # captured at flow init (state_machine._record_baseline_commit), which is
+    # stable across resumes/fix iterations. Falls back to current HEAD only
+    # if the flow has no baseline yet (e.g. early-failure edge cases).
+    # Using the flow-wide baseline ensures _collect_session_commits spans
+    # the entire implement phase even when this handler is re-entered after
+    # a partial run that already merged some group branches back to main.
+    baseline_hash = getattr(flow, "baseline_commit", None) or _get_head_hash(
+        project_root,
+    )
 
-    # Record the project version before implement runs. version_analyze
-    # uses this as the authoritative current_version so that any version
-    # bumps that slipped into implement commits (worktree path) are
-    # discounted. See se3-versioning version_analyze requirements.
-    pre_session_version = _read_pre_session_version(project_root)
-    step.outputs["pre_session_version"] = pre_session_version
-    # Default empty; only the DAG-parallel path that merges commits back
-    # to the main branch populates this. Other paths leave changes in the
-    # working tree, so there are no in-session commits to discount.
-    step.outputs["session_commits"] = []
+    # Capture pre_session_version exactly once per Step. On re-entry (fix
+    # iteration, DAG resume) the disk version may have been bumped by a
+    # previously-merged worktree group; overwriting here would clobber the
+    # true pre-implement baseline and let version_analyze double-bump.
+    if "pre_session_version" not in step.outputs:
+        step.outputs["pre_session_version"] = _read_pre_session_version(
+            project_root,
+        )
+    # session_commits is recomputed below from `baseline_hash` so the list
+    # always reflects everything implement has merged onto main since the
+    # flow started. Seed with [] only on first entry to keep prior-run data
+    # visible if a downstream path fails before we recompute.
+    if "session_commits" not in step.outputs:
+        step.outputs["session_commits"] = []
 
     # Format design section (shared across paths)
     design_section = ""
@@ -384,6 +395,15 @@ def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:
 
         result = _run_single_llm_call(
             prompt, step, flow, project_root, task_groups, retry_count,
+        )
+        # Recompute session_commits against the flow-wide baseline so any
+        # commits a prior worktree-DAG entry merged onto main remain visible
+        # to version_analyze. The fix-iteration LLM call itself does not
+        # commit anything, so this is purely about preserving prior-entry
+        # data; we still recompute (rather than keep the cached value) so a
+        # subsequent merge that happened between entries is picked up.
+        step.outputs["session_commits"] = _collect_session_commits(
+            project_root, baseline_hash,
         )
         _resolve_files_changed(step, project_root, baseline_hash)
         return result

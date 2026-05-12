@@ -1013,6 +1013,14 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - **AND** `step.outputs["pre_session_version"]` 仍记录 implement 入口时的版本号
 - **AND** state_machine 透传到 version_analyze.inputs 的 `session_commits` 为空列表
 
+#### Scenario: implement 重入时保留首入版本基线
+- **GIVEN** 同一 `implement` Step 第一次进入时把磁盘版本号 `5.1.0` 写入 `step.outputs["pre_session_version"]`
+- **AND** worktree-DAG 中某个 group 随后把 `bump version to 5.2.0` 合并回主分支（磁盘版本变为 `5.2.0`）
+- **WHEN** 同一 Step 因 fix-iteration / DAG resume / 重试 而再次调用 `implement_handler`
+- **THEN** `step.outputs["pre_session_version"]` 保持为 `5.1.0`（首入值），不被覆盖为当前磁盘上的 `5.2.0`
+- **AND** `step.outputs["session_commits"]` 以 `flow.baseline_commit`（`state_machine.init_flow` 时记录的 flow 全局基线）为对比基线重新计算，仍包含上一次入口合入的 `bump version to 5.2.0` commit
+- **AND** version_analyze 拿到的基线仍是 `5.1.0`，不会因为已经发生过一次 bump 而再次触发增量计算
+
 ### Requirement: Version Analyze 步骤
 
 `version_analyze` 步骤 SHALL 使用 LLM 智能分析实际变更内容，依据 Semantic Versioning 2.0.0 规则确定版本变更类型。
