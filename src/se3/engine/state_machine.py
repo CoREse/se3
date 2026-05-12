@@ -1061,6 +1061,14 @@ class StateMachine:
                     # Forward restricted edits results for downstream visibility
                     inputs["restricted_edits_applied"] = step.outputs.get("restricted_edits_applied", [])
                     inputs["restricted_edits_failed"] = step.outputs.get("restricted_edits_failed", [])
+                    # Forward pre-session version + session-introduced commits so
+                    # version_analyze can discount any version-file edits already
+                    # merged onto main during the implement (worktree) phase.
+                    # Older persisted flows without these fields safely degrade
+                    # to None / [] (version_analyze treats both as "no prior
+                    # session bumps in play").
+                    inputs["pre_session_version"] = step.outputs.get("pre_session_version")
+                    inputs["session_commits"] = step.outputs.get("session_commits", [])
                 elif step.step_type == StepType.TEST:
                     inputs["test_results"] = step.outputs.get("test_results")
                 elif step.step_type == StepType.SELF_CHECK:
