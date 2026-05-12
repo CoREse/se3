@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Optional
 
 import typer
-from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
@@ -34,7 +33,7 @@ class SyncMode(str, Enum):
 
 
 def _render_sync_results(result) -> None:
-    """Render sync results using Rich Table and Panel."""
+    """Render sync results using Rich Table and markdown-style headings."""
     from ..engine.sync_engine import SyncResult
 
     console = get_console()
@@ -76,13 +75,19 @@ def _render_sync_results(result) -> None:
             if desc:
                 label += f": {desc}"
             changes_tree.add(label)
-        console.print(Panel(changes_tree, title="Detailed Changes", border_style="cyan"))
+        console.print("[bold cyan]## Detailed Changes[/bold cyan]")
+        console.print("")
+        console.print(changes_tree)
+        console.print("")
 
     if result.specs_created:
         specs_tree = Tree("[bold]New Specs Created[/bold]")
         for name in result.specs_created:
             specs_tree.add(f"[green]{name}[/green]")
-        console.print(Panel(specs_tree, title="New Specs", border_style="green"))
+        console.print("[bold green]## New Specs[/bold green]")
+        console.print("")
+        console.print(specs_tree)
+        console.print("")
 
     if result.gap_resolutions:
         gap_tree = Tree("[bold]Gap Resolutions[/bold]")
@@ -97,7 +102,10 @@ def _render_sync_results(result) -> None:
             if desc:
                 label += f": {desc}"
             gap_tree.add(label)
-        console.print(Panel(gap_tree, title="Gap Decisions", border_style="yellow"))
+        console.print("[bold yellow]## Gap Decisions[/bold yellow]")
+        console.print("")
+        console.print(gap_tree)
+        console.print("")
 
     if hasattr(result, "conflict_resolutions") and result.conflict_resolutions:
         conflict_tree = Tree("[bold]Conflict Resolutions[/bold]")
@@ -112,7 +120,10 @@ def _render_sync_results(result) -> None:
             if desc:
                 label += f": {desc}"
             conflict_tree.add(label)
-        console.print(Panel(conflict_tree, title="Conflict Decisions", border_style="magenta"))
+        console.print("[bold magenta]## Conflict Decisions[/bold magenta]")
+        console.print("")
+        console.print(conflict_tree)
+        console.print("")
 
     if hasattr(result, "issues_created") and result.issues_created > 0:
         issues_from_gaps = [
@@ -124,7 +135,10 @@ def _render_sync_results(result) -> None:
                 issue_tree.add(
                     f"[sync] {r.get('spec_name', '?')}: {r.get('description', '')}"
                 )
-            console.print(Panel(issue_tree, title="Issues", border_style="red"))
+            console.print("[bold red]## Issues[/bold red]")
+            console.print("")
+            console.print(issue_tree)
+            console.print("")
 
     summary_parts = []
     summary_parts.append(f"Issues created: {result.issues_created}")
@@ -137,13 +151,13 @@ def _render_sync_results(result) -> None:
         summary_parts.append("[yellow]Warning: spec discovery failed, results may be incomplete[/yellow]")
 
     if result.all_in_sync and not result.conflicts:
-        border_style = "green"
+        heading_color = "green"
         title = "Sync Complete — All In Sync"
     elif result.conflicts:
-        border_style = "yellow"
+        heading_color = "yellow"
         title = "Sync Complete — Action Required"
     else:
-        border_style = "blue"
+        heading_color = "blue"
         title = "Sync Complete"
 
     summary_text = "\n".join(summary_parts)
@@ -154,7 +168,10 @@ def _render_sync_results(result) -> None:
             f"\nRespond via: se3 sync-respond '{result.call_file}'"
         )
 
-    console.print(Panel(summary_text, title=title, border_style=border_style))
+    console.print(f"[bold {heading_color}]## {title}[/bold {heading_color}]")
+    console.print("")
+    console.print(summary_text)
+    console.print("")
 
 
 def sync_command(
@@ -174,13 +191,10 @@ def sync_command(
         project_root = get_project_root()
 
     console = get_console()
-    console.print(
-        Panel(
-            f"Mode: [bold]{mode.value}[/bold]\nProject: {project_root}",
-            title="SE3 Sync",
-            border_style="blue",
-        )
-    )
+    console.print("[bold blue]## SE3 Sync[/bold blue]")
+    console.print("")
+    console.print(f"Mode: [bold]{mode.value}[/bold]\nProject: {project_root}")
+    console.print("")
 
     logger.info("se3 sync called with mode=%s, project_root=%s", mode.value, project_root)
 
