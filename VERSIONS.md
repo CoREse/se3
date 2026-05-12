@@ -2,12 +2,13 @@
 
 ## Current Version
 
-**3.22.0** — feat: Restore `se3 init` command and align specs with 3.0 CLI. Simplified init creates se3.yaml and base/spec.md. Updated all se3-* specs to reflect current CLI (run/init/guardrails only). Removed obsolete specs for deleted functionality.
+**5.2.0** — fix: Isolate claude subprocess from target project `.claude/settings.json` via `--setting-sources` (default `user`). New `claude_subprocess.setting_sources` config as escape hatch.
 
 ## Version History
 
 | Version | Date | Changes |
 |---------|------|---------|
+| 5.2.0 | 2026-05-12 | fix: Isolate claude subprocess from target project .claude/settings.json via --setting-sources (default user). New claude_subprocess.setting_sources config as escape hatch. |
 | 3.22.0 | 2026-03-06 | feat: Restore se3 init command. Align all specs with 3.0 CLI reality. |
 | 3.21.0 | 2026-03-06 | BREAKING: Remove deprecated commands for 3.0. Only `se3 run` remains as unified entry point. |
 | 3.20.1 | 2026-03-06 | fix: Fix loop now creates new implement steps per iteration. Fixed REVISION_NEEDED transition handling. |
