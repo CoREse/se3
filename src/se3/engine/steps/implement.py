@@ -1418,6 +1418,15 @@ def _take_theirs_fallback(
 ) -> bool:
     """Deterministic fallback when LLM conflict resolution is exhausted.
 
+    NOTE: This is the DAG leaf-merge path — NOT the ``se3 merge`` command
+    path. The ``se3 merge`` command has had every take-theirs route
+    removed (see merge strategy refactor: ``fast`` / ``safe`` / ``strict``
+    all resolve via LLM-as-editor or escalate to human, never via
+    take-theirs). The leaf-merge fallback here is preserved because it
+    sits inside the DAG implement loop and has its own success/failure
+    contract independent of ``se3 merge``; reworking that loop is out
+    of scope for the merge refactor.
+
     For every conflict file, ``git checkout --theirs`` (the leaf branch's
     version) and stage it, then complete the merge commit. Records an
     audit issue via ``IssueManager`` so the operator can see which files
@@ -1475,7 +1484,7 @@ def _is_branch_reachable_from(
 
 
 # Module-scoped re-exports of the shared stash-pop helpers. Both
-# implement step and ``se3 merge`` robust strategy share the same
+# implement step and ``se3 merge`` (fast strategy) share the same
 # behavior (see src/se3/engine/stash_utils.py).
 
 

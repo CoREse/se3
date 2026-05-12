@@ -107,7 +107,10 @@ would silently ignore the developer's main-repo override.
 - `language.language`: Language for human-facing steps (default: null)
 - `language.spec_language`: Language for spec writing (default: null)
 - `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: ["summarize"])
-- `conflict_resolver.strategy`: Merge conflict resolution strategy — `"human"` or `"llm"` (default: `"human"`)
+- `conflict_resolver.strategy`: In-loop branch-merge conflict resolution strategy used by `se3 run --loop --merge` — `"human"` or `"llm"` (default: `"human"`)
+- `merge.strategy`: Default conflict-resolution tier for the standalone `se3 merge` command — `"fast"` (new default), `"safe"`, or `"strict"`. The previous `"default"` / `"robust"` values have been removed and trigger fail-fast at config load (see Merge Configuration requirement).
+- `merge.delete_merged_default`: Whether `se3 merge` defaults to deleting merged branches and archiving their worktrees under `.se3/archive/` (default: `true`).
+- `merge.max_conflict_resolve_iterations`: Maximum batched LLM-as-editor rounds the merge conflict resolver performs per `git merge` before the active strategy's cap-exhaustion policy kicks in (default: `10`, must be `>= 1`).
 - `implement.group_loc_threshold`: LOC threshold for collapsing task groups into a single LLM call (default: 300)
 - `implement.use_worktree`: Whether the implement step may use per-group worktrees and `impl/*` branches on the DAG parallel path (default: true). Set to `false` to force fully sequential execution on the original branch regardless of DAG topology.
 - `workflow.max_fix_iterations`: Max fix loop iterations before FAILED (default: 100). A value of `0` (or `null`) is the sentinel for "unlimited" — the fix loop will never exit due to the iteration upper bound.
@@ -459,8 +462,9 @@ The system SHALL support configuring merge conflict resolution strategy for loop
 The system SHALL support configuration of the `se3 merge` command via a top-level `merge` section in `se3.yaml`.
 
 **Merge section options:**
-- `merge.strategy`: Default conflict-resolution tier for `se3 merge` (default: `"default"`). Allowed values: `"default"`, `"strict"`, `"fast"`. The CLI flag `--strategy` overrides this value for a single invocation.
-- `merge.delete_merged_default`: Whether `se3 merge` defaults to deleting merged branches and their bound worktrees (default: `false`). The CLI flags `--delete-merged` / `--no-delete-merged` override this value for a single invocation.
+- `merge.strategy`: Default conflict-resolution tier for `se3 merge` (default: `"fast"`). Allowed values: `"fast"`, `"safe"`, `"strict"`. The CLI flag `--strategy` overrides this value for a single invocation. The previous values `"default"` and `"robust"` have been removed without silent aliasing: providing them at config load SHALL raise a `ConfigError` whose message points at the replacement (`safe` replaces `default`; `fast` replaces `robust`).
+- `merge.delete_merged_default`: Whether `se3 merge` defaults to deleting merged branches and archiving their bound worktrees under `.se3/archive/` (default: `true`). The CLI flags `--delete-merged` / `--no-delete-merged` override this value for a single invocation.
+- `merge.max_conflict_resolve_iterations`: Maximum number of batched LLM-as-editor rounds the conflict resolver performs per `git merge` invocation before applying the active strategy's cap-exhaustion policy (default: `10`). MUST be a positive integer (`>= 1`); non-positive values trigger a fail-fast `ConfigError` at config load. Non-integer / non-numeric values trigger a WARNING and fall back to the default `10`. The strategy decides what happens on cap exhaustion: `fast` exits with a failure, `safe` escalates to a human MCP call, `strict` never enters the loop in the first place. There is no separate `merge.conflict_resolver` subtree — conflict-resolution behavior is fully determined by `merge.strategy` and this iteration cap.
 - `merge.strict_runtime_sync`: Whether `se3 merge` treats a tier A runtime sync collision as a fatal error that halts the merge sequence (default: `false`). When `true`, the old strict behavior is preserved: a collision raises `runtime_sync_collision` and stops the sequence. When `false` (default), collisions are bypassed by writing the source version to a sidecar file (`<dest>.from-<branch>`) and the sequence continues. Accepts boolean values and common string forms (`"true"`, `"false"`, `"1"`, `"0"`, `"yes"`, `"no"`); unrecognized strings fall back to the default `false`.
 
 **Orthogonality with `conflict_resolver.strategy`:**
@@ -470,30 +474,48 @@ The system SHALL support configuration of the `se3 merge` command via a top-leve
 **Example configuration:**
 ```yaml
 merge:
-  strategy: default            # default | strict | fast
-  delete_merged_default: false # require --delete-merged on the command line
-  strict_runtime_sync: false   # true = halt on collision, false = bypass via sidecar
+  strategy: fast                       # fast (default) | safe | strict
+  delete_merged_default: true          # default; pass --no-delete-merged to keep
+  max_conflict_resolve_iterations: 10  # cap on batched LLM-as-editor rounds
+  strict_runtime_sync: false           # true = halt on collision, false = bypass via sidecar
 ```
 
 #### Scenario: Default merge configuration
 - **WHEN** no `merge` section exists in se3.yaml
-- **THEN** `se3 merge` uses `strategy: default`, `delete_merged_default: false`, and `strict_runtime_sync: false`
+- **THEN** `se3 merge` uses `strategy: fast`, `delete_merged_default: true`, `max_conflict_resolve_iterations: 10`, and `strict_runtime_sync: false`
 
 #### Scenario: Strategy override via CLI flag
-- **GIVEN** `merge.strategy: default` in se3.yaml
+- **GIVEN** `merge.strategy: fast` in se3.yaml
 - **WHEN** the user runs `se3 merge feat/x --strategy strict`
 - **THEN** the invocation uses the `strict` tier
 - **AND** the configured default is unchanged for future invocations
 
+#### Scenario: Removed strategy names rejected fail-fast
+- **GIVEN** `merge.strategy: default` or `merge.strategy: robust` in se3.yaml
+- **WHEN** the framework loads `MergeConfig`
+- **THEN** a `ConfigError` is raised before any `se3 merge` invocation runs
+- **AND** the error message points the user at the replacement strategy (`safe` for `default`, `fast` for `robust`)
+
 #### Scenario: delete_merged_default honored when no CLI flag is given
-- **GIVEN** `merge.delete_merged_default: true` in se3.yaml
+- **GIVEN** `merge.delete_merged_default: true` in se3.yaml (which is also the default)
 - **WHEN** the user runs `se3 merge feat/x` without `--no-delete-merged`
-- **THEN** merged branches (and their clean bound worktrees) are deleted
+- **THEN** merged branches (and their clean bound worktrees) are deleted and archived to `.se3/archive/`
+
+#### Scenario: max_conflict_resolve_iterations cap honored
+- **GIVEN** `merge.max_conflict_resolve_iterations: 3` in se3.yaml
+- **WHEN** `se3 merge feat/x` runs the LLM-as-editor loop on a conflicted merge
+- **THEN** the orchestrator performs at most 3 batched LLM rounds before applying the active strategy's cap-exhaustion policy
+
+#### Scenario: max_conflict_resolve_iterations non-positive value fail-fast
+- **GIVEN** `merge.max_conflict_resolve_iterations: 0` (or any value `< 1`) in se3.yaml
+- **WHEN** the framework loads `MergeConfig`
+- **THEN** a `ConfigError` is raised before any `se3 merge` invocation runs
+- **AND** the error message identifies the offending key and value
 
 #### Scenario: Independence from conflict_resolver.strategy
 - **GIVEN** `conflict_resolver.strategy: "llm"` and no `merge` section
 - **WHEN** the user runs `se3 merge feat/x`
-- **THEN** the standalone merge command uses `merge.strategy = default`, NOT the `conflict_resolver` value
+- **THEN** the standalone merge command uses `merge.strategy = fast`, NOT the `conflict_resolver` value
 - **AND** `se3 run --loop --merge` continues to honor `conflict_resolver.strategy: "llm"`
 
 #### Scenario: Strict runtime sync halts on collision

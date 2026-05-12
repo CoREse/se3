@@ -316,8 +316,10 @@ The `se3 merge` command SHALL sequentially merge one or more named branches into
 
 **Interface:**
 ```bash
-se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-merged | --no-delete-merged]
+se3 merge <branch> [<branch> ...] [--strategy fast|safe|strict] [--delete-merged | --no-delete-merged]
 ```
+
+When `--strategy` is omitted, the default tier is **`fast`**. The legacy strategy names `default` and `robust` have been removed; passing them to `--strategy` (or setting them in `se3.yaml`'s `merge.strategy`) SHALL be rejected fail-fast with a migration hint pointing at the new name (`safe` replaces `default`; `fast` replaces `robust`). No deprecation-silent alias is provided.
 
 **Behavior contract:**
 
@@ -327,18 +329,18 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
    - Merge metadata: ours/theirs branch names, merge-base commit, both HEAD commit hashes and messages.
    - For every conflicting file: the full base/ours/theirs three-way contents (`git show :1:`/`:2:`/`:3:`) plus the working-tree file with `<<<<<<<` / `=======` / `>>>>>>>` markers.
    - The path and hunk line ranges of each conflict.
-   - The selected strategy tier (default/strict/fast).
+   - The selected strategy tier (`fast` / `safe` / `strict`).
 
    The call SHOULD additionally receive `git log <merge-base>..<theirs>` and `git log <merge-base>..<ours>` (oneline), a flag identifying spec files (subject to spec-guardrails), and a project-conventions summary.
 
-3. **Structured LLM output.** The LLM SHALL return structured JSON. For each file: `resolved_content` (full file text), per-hunk `confidence` and `reasoning`, and an `overall_confidence`. Top-level `flags` MAY include `requires_human_review` and `spec_guardrail_concern`. The strategy tier consumes this structured output to decide accept / human / reject.
+3. **LLM-as-editor output.** The LLM SHALL directly edit the working-tree conflict files (e.g., via an `Edit` tool) to remove every `<<<<<<<` / `=======` / `>>>>>>>` marker; it MUST NOT return a JSON `decision` field or a `resolved_content` blob for the orchestrator to splice in. The single batched call is the unit of work — all conflict files of one `git merge` invocation are passed in one call (see the flow-engine spec's `se3 merge` Conflict Resolution Mechanism Requirement). After each round, the orchestrator scans every target file for residual markers; files that still contain a marker form the next round's batch. The cap is `merge.max_conflict_resolve_iterations` (default 10). The merge SHALL NEVER fall back to take-theirs / take-ours under any failure mode (context-build error, LLM exception, parse failure, write failure, iteration-cap exhaustion).
 
-4. **Three strategy tiers (aligned with `se3 sync`):**
+4. **Three strategy tiers (`fast` is the default):**
    | Tier | Behavior |
    |------|----------|
-   | `default` | LLM auto-resolves conflicts. Low confidence, `requires_human_review`, or `spec_guardrail_concern` → MCP human call. LLM resolution failure also → human call. Post-merge guardrails violation → rollback + human call. |
-   | `strict` | LLM is NOT invoked; every conflict or post-merge guardrails violation escalates directly to human call. |
-   | `fast` | LLM auto-resolves all conflicts (including spec files). If LLM resolution fails or post-merge guardrails violation cannot be repaired by LLM → abort with failure (no human call). Exception: when the LLM repair loop *stalls* (consecutive repair iterations produce the same violation set, indicating no progress) the merge is escalated to a human call instead of aborting (see "Fast-Mode Guardrail Repair Stall Escalation"). |
+   | `fast` (default) | LLM-as-editor resolves conflicts in batched rounds up to `merge.max_conflict_resolve_iterations`. On cap exhaustion the merge exits with a failure — no human call and no take-theirs. Inherits the original `robust`-strategy dirty-worktree behavior: stashes a dirty working tree before the merge and pops the stash back on failure rollback. Post-merge guardrails violation still feeds back into the LLM repair loop (see "Fast-Mode Guardrail Repair Stall Escalation"). |
+   | `safe` | LLM-as-editor resolves conflicts in batched rounds up to `merge.max_conflict_resolve_iterations`. On cap exhaustion the merge escalates to a human MCP call (`reviewer: human`): the user edits the residual files until every conflict marker is gone, and the merge then resumes. Requires a clean working tree before starting (no built-in stash path). Never falls back to take-theirs. Post-merge guardrails violation → rollback + human call. |
+   | `strict` | LLM is NOT invoked for conflicts at all. Every conflict (and every post-merge guardrails violation) escalates directly to a human MCP call from the first iteration. Never falls back to take-theirs. |
 
    <!-- Preserved original table row for guardrails compatibility:
    | `strict` | Accept only when every hunk is high-confidence AND guardrails pass; otherwise raise a human call. |
@@ -350,9 +352,9 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
 
 7. **SemVer aggregation after merge.** After all branches are processed, the per-branch SemVer bump types (patch/minor/major) are reduced via SemVer's max rule and a single `pyproject.toml` update is amended onto the last merge commit. Each per-branch bump type is computed as an **end-to-end diff** from the version at that branch's merge-base (the commit where the branch diverged from the current branch) to the version at the branch tip; intra-branch intermediate bumps are NOT accumulated (symmetric with the cross-branch max rule, and robust to noisy intermediate version commits). The **application base** for the chosen aggregated bump is the current branch's pre-merge version (which may be ahead of any branch's merge-base version). Example: pre-merge `4.6.0`, branch `B` whose merge-base version is `4.4.0` and tip `4.4.1` (PATCH end-to-end), branch `C` whose merge-base version is `4.4.0` and tip `4.6.0` (MINOR end-to-end, even if its history walked through `4.5.0` → `4.5.1` → `4.6.0`) → `max(PATCH, MINOR) = MINOR`, applied to `4.6.0` yields `4.7.0`. Per-branch historical commits are NOT rewritten — SemVer uniqueness is guaranteed by tags.
 
-8. **Branch and worktree cleanup.** Default behavior is to keep merged branches. With `--delete-merged`:
+8. **Branch and worktree cleanup.** Default behavior is to delete merged branches and archive their worktrees to `.se3/archive/`. Pass `--no-delete-merged` to keep them. When deletion runs (either because the default applies or because `--delete-merged` is explicitly given):
    - Each merged branch is removed via `git branch -d` (lowercase) so that branches not reachable from HEAD are not silently destroyed.
-   - If a branch has a bound git worktree, `git worktree remove` is called when the worktree is clean (`git status --porcelain` empty); when dirty the cleanup is refused with an error and `--force` is NEVER used.
+   - If a branch has a bound git worktree, the worktree is first archived to `<project_root>/.se3/archive/<slug>-<ts>/` along with an `.se3-archive-meta.json` capturing the HEAD SHA, then `git worktree remove` is called when the worktree is clean (`git status --porcelain` empty); when dirty the cleanup is refused with an error and `--force` is NEVER used.
    - The current branch and `main`/`master` are NEVER deleted.
 
 9. **Infrastructure reuse.** Execution logs go to `se3/logs/`. Human-decision artifacts go to `se3/calls/` as MCP call files (e.g., `se3/calls/merge_<timestamp>_<branch>.json`), consistent with `se3 sync` and the existing `merge_loop_branch` flow.
@@ -365,26 +367,29 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
 - **THEN** each branch is merged in order, producing one merge commit per branch
 - **AND** the aggregated SemVer bump (max of each branch's bump type) is applied as a single `pyproject.toml` update amended onto the last merge commit
 
-#### Scenario: Conflict resolved automatically in default strategy
+#### Scenario: Conflict resolved automatically in safe strategy
 - **GIVEN** merging `feat/x` produces text conflicts in non-spec files
-- **AND** the LLM returns high `overall_confidence` with no `spec_guardrail_concern`
-- **WHEN** strategy is `default`
-- **THEN** the resolved contents are written back, staged, and committed
+- **AND** the LLM-as-editor loop removes every `<<<<<<<` / `=======` / `>>>>>>>` marker within `merge.max_conflict_resolve_iterations` rounds
+- **WHEN** strategy is `safe`
+- **THEN** the cleaned working-tree files are staged and committed
 - **AND** the merge proceeds to the next branch
+- **AND** the orchestrator does NOT invoke any take-theirs / take-ours fallback at any point
 
-#### Scenario: Low-confidence conflict escalates to human call
-- **GIVEN** the LLM resolution for a merge has low `overall_confidence` or sets `requires_human_review`
-- **WHEN** strategy is `default`
-- **THEN** `git merge --abort` restores the working tree
-- **AND** an MCP call file is created at `se3/calls/merge_<timestamp>_<branch>.json` containing the conflict context, LLM proposal, and confidence data
-- **AND** subsequent branches in the argument list are NOT attempted
+#### Scenario: Iteration cap escalates safe to human call
+- **GIVEN** the LLM-as-editor loop reaches `merge.max_conflict_resolve_iterations` with at least one file still containing a conflict marker
+- **WHEN** strategy is `safe`
+- **THEN** an MCP call file is created at `se3/calls/merge_<timestamp>_<branch>.json` containing the residual conflict files, the merge context, and the iteration history
+- **AND** the user is expected to edit the residual files until no conflict marker remains, at which point the merge resumes
+- **AND** subsequent branches in the argument list are NOT attempted while the human call is pending
+- **AND** the orchestrator does NOT invoke any take-theirs / take-ours fallback
 
 #### Scenario: Strict strategy skips LLM and escalates directly to human
 - **GIVEN** a merge produces conflicts in any file
 - **WHEN** strategy is `strict`
 - **THEN** the LLM is NOT invoked for conflict resolution
-- **AND** a human call is created directly at `se3/calls/`
+- **AND** a human call is created directly at `se3/calls/` from the first iteration
 - **AND** previously successfully merged branches in the same invocation are preserved
+- **AND** the orchestrator does NOT invoke any take-theirs / take-ours fallback
 
 #### Scenario: Fast strategy still enforces guardrails on spec files
 - **GIVEN** a merge produces a change to `se3/specs/foo/spec.md` that weakens a SHALL to SHOULD
@@ -396,12 +401,46 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
 - **AND** if the LLM repair *stalls* (no-progress detection fires), the merge is escalated to a human call instead of aborting
 - **AND** fast does NOT bypass spec guardrails detection
 
-#### Scenario: Fast strategy aborts when LLM cannot resolve a conflict
-- **GIVEN** merging `feat/z` produces text conflicts in a spec file
-- **AND** the LLM returns low confidence or sets `requires_human_review`
+#### Scenario: Fast strategy exits without human fallback when cap is reached
+- **GIVEN** merging `feat/z` produces text conflicts and `merge.max_conflict_resolve_iterations` rounds of LLM-as-editor leave at least one residual conflict marker
 - **WHEN** strategy is `fast`
-- **THEN** the merge is aborted without creating a human call
-- **AND** a failure message indicates the fast strategy could not resolve the conflict
+- **THEN** the merge exits with a failure
+- **AND** no human MCP call is created
+- **AND** the orchestrator does NOT invoke any take-theirs / take-ours fallback
+
+#### Scenario: Default strategy when --strategy is omitted is `fast`
+- **GIVEN** the user runs `se3 merge feat/x` with no `--strategy` argument and no `merge.strategy` override in `se3.yaml`
+- **WHEN** the CLI resolves the active strategy
+- **THEN** the effective strategy is `fast`
+
+#### Scenario: Removed `default` strategy name rejected fail-fast
+- **GIVEN** the user runs `se3 merge feat/x --strategy default` (or sets `merge.strategy: default` in `se3.yaml`)
+- **WHEN** strategy is `default`
+- **THEN** the command exits immediately with a configuration error pointing the user at the replacement strategy `safe`
+- **AND** no `git merge` is attempted
+
+#### Scenario: Removed `default` strategy in se3.yaml rejected at load time
+- **GIVEN** `merge.strategy: default` is present in se3.yaml
+- **WHEN** strategy is `default`
+- **THEN** the framework raises `ConfigError` before any `se3 merge` invocation runs
+
+#### Scenario: Removed `robust` strategy name rejected fail-fast
+- **WHEN** the user runs `se3 merge feat/x --strategy robust` (or sets `merge.strategy: robust` in `se3.yaml`)
+- **THEN** the command exits immediately with a configuration error pointing the user at the replacement strategy `fast`
+- **AND** no `git merge` is attempted
+
+#### Scenario: Branch cleanup default is delete-and-archive
+- **GIVEN** `feat/x` was merged successfully and has a bound worktree with a clean working tree
+- **WHEN** the user runs `se3 merge feat/x` with no `--delete-merged` / `--no-delete-merged` flag and no `merge.delete_merged_default` override
+- **THEN** the worktree is archived to `<project_root>/.se3/archive/<slug>-<ts>/` with `.se3-archive-meta.json` capturing the HEAD SHA
+- **AND** `git branch -d feat/x` removes the branch
+- **AND** `main`/`master` and the current branch are never touched
+
+#### Scenario: --no-delete-merged keeps branch and worktree
+- **GIVEN** `feat/y` was merged successfully and has a bound worktree
+- **WHEN** the user passes `--no-delete-merged`
+- **THEN** the branch is NOT deleted
+- **AND** the worktree is NOT archived or removed
 
 #### Scenario: Branch cleanup with --delete-merged
 - **GIVEN** `feat/x` was merged successfully and has no bound worktree
@@ -420,13 +459,13 @@ se3 merge <branch> [<branch> ...] [--strategy default|strict|fast] [--delete-mer
 - **THEN** the message clearly identifies the failure category, distinguishing at minimum:
   - `git merge conflict (could not be resolved)` — text conflicts the resolver could not handle
   - `post-merge guardrails violation` — spec guardrails rejected the merge result
-  - `failed to build conflict context` — the resolver could not even prepare conflict input (strategy-neutral phrasing applies to default, strict, and fast)
+  - `failed to build conflict context` — the resolver could not even prepare conflict input (strategy-neutral phrasing applies to `fast`, `safe`, and `strict`)
   - `runtime_sync_collision` — post-merge runtime data synchronization (see "`se3 merge` Runtime Data Synchronization") detected a tier A relative-path collision in strict mode and halted the sequence
   - fast-mode aborts (`fast strategy could not resolve conflict`, `fast strategy could not auto-repair guardrails violation`, `fast strategy LLM resolution failed`)
 - **AND** the same category labels are used in the CLI summary and the corresponding log entry, so that users do not confuse a guardrails-driven failure with an unresolved git conflict
 
 #### Scenario: Human call required but call file cannot be written
-- **GIVEN** the merge needs to escalate to a human call (low-confidence LLM resolution, post-merge guardrails violation in default/strict, etc.)
+- **GIVEN** the merge needs to escalate to a human call (iteration-cap exhaustion in `safe`, first-iteration escalation in `strict`, post-merge guardrails violation in `safe`/`strict`, etc.)
 - **AND** writing the MCP call file fails (filesystem error, permission issue, etc.)
 - **WHEN** the merge command finalizes the report
 - **THEN** the report is treated as an outright failure rather than a pending-human state
@@ -508,7 +547,7 @@ The fast-strategy post-merge guardrail repair loop SHALL detect when the LLM is 
 
 1. After each guardrail repair iteration, the orchestrator SHALL compute a deterministic hash of the current violation set, derived from `(file, violation_type, normalized_message)` triples sorted to be order-insensitive.
 2. When two consecutive repair iterations produce the *same* violation-set hash (the LLM's repair did not change the violation set), the orchestrator SHALL stop further repair attempts and treat the situation as a *stall*.
-3. On stall, the merge SHALL NOT be aborted. Instead, the orchestrator SHALL write a human MCP call file under `se3/calls/` with a distinct call type (e.g., `guardrail_repair_stalled`) and route the merge to a `pending_human` state, consistent with how default/strict tiers escalate guardrail violations.
+3. On stall, the merge SHALL NOT be aborted. Instead, the orchestrator SHALL write a human MCP call file under `se3/calls/` with a distinct call type (e.g., `guardrail_repair_stalled`) and route the merge to a `pending_human` state, consistent with how the `safe` and `strict` tiers escalate guardrail violations.
 4. The stalled-repair call file SHALL embed the structured detector evidence from each violation (paired strong/weak lines, line numbers, branch identification) so the human reviewer can act without re-running the detector.
 5. If repair iterations are still changing the violation set but the maximum iteration cap is exhausted, fast mode SHALL fall back to the original abort-without-human-call behavior — only the *stall* condition triggers escalation.
 6. The repair loop's per-iteration semantics (one LLM call per iteration) live in the orchestrator/strategy layer, not inside the single-call repair primitive.

@@ -696,7 +696,12 @@ class TestRunMergeEndToEndAcceptance:
 
         from se3.commands.merge_cmd import run_merge
 
-        exit_code = run_merge(["feat-e2e"], project_root=tmp_path)
+        # delete_merged=False: this test references feat-e2e after merge to
+        # verify ancestry; with the new default-on cleanup, the branch would
+        # be gone by then.
+        exit_code = run_merge(
+            ["feat-e2e"], project_root=tmp_path, delete_merged=False,
+        )
         assert exit_code == 0, f"run_merge exited {exit_code}, expected 0"
 
         # (a) HEAD has parent_count >= 2 — a real merge commit was created.

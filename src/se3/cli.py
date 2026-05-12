@@ -1,3 +1,4 @@
+```
 """SE 3.0 CLI - Main entry point for se3 commands."""
 
 import re
@@ -481,9 +482,9 @@ def sync_respond_cmd(
 @app.command(name="merge")
 def merge_cmd(
     branches: list[str] = typer.Argument(None, help="Branches to merge into current branch (in order)"),
-    strategy: str = typer.Option(None, "--strategy", "-s", help="Conflict resolution strategy: robust (default), default, strict, or fast"),
-    delete_merged: bool = typer.Option(None, "--delete-merged", "-d", help="Delete merged branches and their worktrees after successful merge"),
-    no_delete_merged: bool = typer.Option(False, "--no-delete-merged", help="Do not delete merged branches (overrides config)"),
+    strategy: str = typer.Option(None, "--strategy", "-s", help="Conflict resolution strategy: fast (default), safe, or strict"),
+    delete_merged: bool = typer.Option(None, "--delete-merged", "-d", help="Delete merged branches and archive their worktrees (default: enabled; use --no-delete-merged to disable)"),
+    no_delete_merged: bool = typer.Option(False, "--no-delete-merged", help="Do not delete merged branches (overrides config and the new default-on behaviour)"),
 ):
     """Merge one or more branches sequentially into the current branch.
 
@@ -532,12 +533,16 @@ def merge_cmd(
     else:
         effective_delete = delete_merged if delete_merged is not None else merge_cfg.delete_merged_default
 
-    if effective_strategy not in ("default", "strict", "fast", "robust"):
-        render_text(
-            f"Invalid strategy '{effective_strategy}'. Must be one of: robust, default, strict, fast",
-            title="Error",
-        )
-        raise typer.Exit(1)
+    from .engine.merge.conflict_resolver import MergeStrategy
+
+    try:
+        effective_strategy = MergeStrategy.from_str(effective_strategy).value
+    except ValueError as exc:
+        # ``MergeStrategy.from_str`` already carries a migration-friendly
+        # message for ``default`` / ``robust``; surface it through
+        # ``BadParameter`` so the user sees the same Click-style error
+        # rendering as other CLI argument failures.
+        raise typer.BadParameter(str(exc), param_hint="--strategy") from exc
 
     exit_code = run_merge(
         branches=branches,
@@ -591,3 +596,4 @@ def salvage_cmd(
 
 if __name__ == "__main__":
     app()
+```

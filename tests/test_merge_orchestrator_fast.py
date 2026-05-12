@@ -910,10 +910,10 @@ class TestRunGuardrailsFastRepairLoop:
             mock_check,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         result = orch._run_guardrails(
             pre_head, post_head, "feature-incomplete",
-            strategy=MergeStrategy.DEFAULT,
+            strategy=MergeStrategy.SAFE,
         )
 
         # The LLM repairer must NOT have been invoked because incomplete

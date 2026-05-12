@@ -255,18 +255,6 @@ class MergeReport:
     # --- Rollback state ---
     rollback_failed: bool = False
 
-    # --- Robust-strategy audit trail ---
-    # Issue IDs filed by the robust strategy when its deterministic
-    # take-theirs fallback fired (e.g. LLM resolution failed, decision
-    # was REJECT/HUMAN_CALL, _apply_resolution failed). Populated only
-    # under ``--strategy=robust``; empty for default/strict/fast runs.
-    robust_audit_issues: list[str] = field(default_factory=list)
-    # Issue IDs filed when guardrails detected violations under robust
-    # — under robust the merge commit is kept and the violation is
-    # surfaced as a tracked issue rather than a merge failure. Populated
-    # only under ``--strategy=robust``.
-    guardrail_audit_issues: list[str] = field(default_factory=list)
-
     # --- Bump inference diagnostics ---
     # Branches whose SemVer bump could not be inferred (transient git
     # timeout, parse error, etc.).  Populated by

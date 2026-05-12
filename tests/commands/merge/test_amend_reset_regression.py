@@ -900,7 +900,7 @@ class TestTimeoutFailClosed:
             mock_postcond,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Must fail closed, not silently succeed
@@ -1352,7 +1352,7 @@ class TestEndToEndAmendResetRegression:
             lambda self, pre, post, **kwargs: GuardrailReport(passed=True, violations=[]),
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         assert report.success is True, (
@@ -1401,7 +1401,7 @@ class TestEndToEndAmendResetRegression:
             lambda self, pre, post, **kwargs: GuardrailReport(passed=True, violations=[]),
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         assert report.success is True
@@ -1452,7 +1452,7 @@ class TestEndToEndAmendResetRegression:
             check=True, capture_output=True,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         assert report.success is False

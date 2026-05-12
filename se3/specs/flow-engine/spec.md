@@ -1491,6 +1491,65 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - **WHEN** history salvage runs after all groups complete
 - **THEN** the shared worktree is only salvaged once (deduplication by worktree_path)
 
+### Requirement: `se3 merge` Conflict Resolution Mechanism
+
+The standalone `se3 merge` orchestrator SHALL resolve every git-level merge conflict through an LLM-as-editor loop. This Requirement is the central contract for the conflict-resolution layer used by every merge strategy tier; per-tier escalation policies are defined separately under the `se3-commands` spec.
+
+**Core rules:**
+
+1. **Never take-theirs.** The orchestrator SHALL NOT, under any code path, fall back to `git checkout --theirs <file>`, `git merge -X theirs`, or any equivalent silent acceptance of the incoming side. This applies to every failure mode (context-build failures, LLM exceptions, parse failures, apply failures, human-call write failures, repair stalls). Every conflict — including conflicts in pyproject.toml or other deterministic-version files — is resolved either by the LLM editor loop or by escalation to a human MCP call (when the active strategy permits it); silent acceptance of either side is prohibited.
+
+2. **LLM edits all conflict files in a single batched call.** When `git merge` produces conflicts, the orchestrator SHALL build a single LLM prompt that lists every conflicting file in that one merge invocation, together with merge metadata (ours/theirs branch names, merge-base, both HEAD hashes and oneline logs since merge-base) and the three-way base/ours/theirs contents plus the working-tree file containing `<<<<<<<` / `=======` / `>>>>>>>` markers for each. The LLM SHALL directly edit those working-tree files (e.g., via an `Edit` tool) to remove every conflict marker and produce a semantically reasonable merge — it MUST NOT emit a JSON `decision` field or a `resolved_content` blob for the orchestrator to splice in. Per-file LLM invocations are NOT used; a single batched edit call is the unit of work.
+
+3. **Unresolved files trigger a whole-batch retry up to a configured upper bound.** After each edit round, the orchestrator SHALL scan every target file for any remaining `<<<<<<<` / `=======` / `>>>>>>>` marker. Files still containing a marker — together with their current residual content and the previous round's prompt context — are gathered into a new batch and re-submitted to the LLM as the next round. The iteration cap is `merge.max_conflict_resolve_iterations` (default 10; see se3-config). The orchestrator SHALL NOT abandon the batch early because of a single file's apparent failure: the loop continues, with the same not-take-theirs guarantee, until either every file is clean (no markers anywhere) or the iteration cap is reached.
+
+4. **The active strategy decides what happens on cap exhaustion — LLM-only vs human fallback.** When the iteration cap is reached with at least one file still containing a conflict marker, the orchestrator SHALL hand control to the strategy layer:
+   - `fast` mode SHALL fail the merge invocation outright, never invoking a human reviewer and never taking either side.
+   - `safe` mode SHALL escalate to a human MCP call (`reviewer: human`, same mechanism as the `confirmation` step's human reviewer): the user edits the still-conflicting files until no marker remains, and the merge then resumes.
+   - `strict` mode SHALL NOT enter the LLM editor loop at all — every conflict is routed directly to a human MCP call from the first iteration, without any LLM attempt.
+
+   The choice is made entirely by the merge strategy (see se3-commands `se3 merge` Command); the conflict-resolver layer does not consult `conflict_resolver.strategy` or any other ad-hoc config — there is no `merge.conflict_resolver` configuration knob.
+
+#### Scenario: Take-theirs is never invoked
+- **GIVEN** any `se3 merge` invocation in any strategy
+- **WHEN** the LLM throws, the prompt context cannot be built, a round of edits leaves files still containing conflict markers, the iteration cap is reached, or a human-call write fails
+- **THEN** the orchestrator SHALL NOT silently checkout either side of the conflict
+- **AND** no `git checkout --theirs`, `git checkout --ours`, or `--strategy-option theirs` invocation appears anywhere in the merge code path
+
+#### Scenario: Single batched LLM call edits every conflicting file
+- **GIVEN** a `git merge` produces conflicts in files `a.py`, `b.py`, and `se3/specs/x/spec.md`
+- **WHEN** the conflict resolver builds the first round's prompt
+- **THEN** all three files appear in one LLM call with their three-way contents and working-tree markers
+- **AND** the LLM directly edits the working-tree files to remove every `<<<<<<<` / `=======` / `>>>>>>>` marker
+- **AND** the orchestrator does NOT splice content from a JSON `decision` / `resolved_content` field — file state on disk is the sole source of truth
+
+#### Scenario: Unresolved files re-enter the batch for another round
+- **GIVEN** a first round of LLM edits leaves `a.py` clean but `b.py` and `c.py` still containing markers
+- **WHEN** the orchestrator scans the working tree after the round
+- **THEN** `b.py` and `c.py` (and only those) form the next round's batch
+- **AND** the new round's prompt includes both the previous round's prompt context and the current residual state of those two files
+
+#### Scenario: Fast mode exits without human fallback when the cap is hit
+- **GIVEN** `merge.max_conflict_resolve_iterations` is 10 and `merge.strategy` is `fast`
+- **WHEN** ten rounds of LLM edits still leave at least one conflict marker in some file
+- **THEN** the merge invocation exits with a failure
+- **AND** no human MCP call is created
+- **AND** no take-theirs fallback is attempted
+
+#### Scenario: Safe mode escalates to a human call when the cap is hit
+- **GIVEN** the same setup with `merge.strategy: safe`
+- **WHEN** the iteration cap is reached and conflict markers persist
+- **THEN** a human MCP call is created (same mechanism as `confirmation.steps.<step>.reviewer: human`)
+- **AND** the flow waits until the user has edited the residual files to remove every conflict marker
+- **AND** no take-theirs fallback is attempted
+
+#### Scenario: Strict mode never enters the LLM editor loop
+- **GIVEN** `merge.strategy: strict` and a `git merge` reports conflicts in any file
+- **WHEN** the orchestrator handles the conflict
+- **THEN** no LLM call is issued
+- **AND** a human MCP call is created from the very first iteration
+- **AND** no take-theirs fallback is attempted
+
 ### Requirement: Worktree Cleanup Resilience
 
 The worktree cleanup subsystem SHALL be resilient to cascading failures. `force_cleanup_worktree` executes a multi-step cleanup pipeline where each step is independently fault-tolerant — a single step timing out or raising an exception MUST NOT prevent subsequent steps from executing.

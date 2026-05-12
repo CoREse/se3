@@ -198,14 +198,17 @@ class TestMergeOrchestrator:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        # Mock LLM resolver to fail — default strategy should escalate to human call
+        # Mock LLM resolver to fail — ``safe`` strategy escalates to human call.
+        # (The new default is ``fast``, which does not write a human-call
+        # file; this test pins ``safe`` explicitly to exercise the
+        # escalation path.)
         from se3.engine.llm_caller import LLMCallError
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve",
             lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock llm fail")),
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         assert report.success is False
@@ -326,13 +329,15 @@ class TestMergeOrchestrator:
         )
 
         # Mock LLM resolver to fail, triggering abort path on feature-b
+        # under the ``safe`` strategy (the new default is ``fast`` which
+        # does NOT escalate to human call on failure).
         from se3.engine.llm_caller import LLMCallError
         monkeypatch.setattr(
             "se3.engine.merge.orchestrator.ConflictResolver.resolve",
             lambda self, ctx, strategy: (_ for _ in ()).throw(LLMCallError("mock llm fail")),
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature-a", "feature-b"])
 
         assert report.success is False
@@ -492,7 +497,9 @@ class TestMergeOrchestrator:
             "se3.engine.merge.orchestrator._run_git", patch_run_git
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        # Pin to ``safe`` so the fail-closed path writes a human-call file
+        # (the new default ``fast`` aborts without one).
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # The merge itself succeeds (git merge feature works), but because
@@ -588,7 +595,9 @@ class TestMergeOrchestrator:
             "se3.engine.merge.orchestrator._run_git", patch_run_git,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path)
+        # Pin to ``safe`` so the fail-closed path writes a human-call file
+        # (the new default ``fast`` aborts without one).
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # The merge succeeds but post-merge rev-parse times out, so
@@ -650,7 +659,7 @@ class TestMergeOrchestrator:
             mock_rollback,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         assert report.success is False
@@ -697,7 +706,7 @@ class TestMergeOrchestrator:
             mock_print_instructions,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         assert report.success is False
@@ -780,7 +789,7 @@ class TestMergeOrchestrator:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         assert report.success is False
@@ -841,7 +850,7 @@ class TestMergeOrchestrator:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # The true failure mode is "rollback succeeded, call file write failed"
@@ -891,7 +900,7 @@ class TestMergeOrchestrator:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         assert report.success is False
@@ -990,7 +999,7 @@ class TestMergeOrchestrator:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         assert report.success is False
@@ -1468,7 +1477,7 @@ class TestMergeOrchestratorConflictResolution:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute([feature_branch])
 
         # Should succeed with one LLM call
@@ -1521,7 +1530,7 @@ class TestMergeOrchestratorConflictResolution:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute([feature_branch])
 
         assert report.success is False
@@ -1592,7 +1601,7 @@ class TestMergeOrchestratorConflictResolution:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute([feature_branch])
 
         assert report.success is False
@@ -1753,7 +1762,7 @@ class TestMergeOrchestratorConflictResolution:
             "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute([feature_branch])
 
         assert call_count == 1, f"Expected exactly 1 LLM call, got {call_count}"
@@ -1837,7 +1846,7 @@ class TestMergeOrchestratorConflictResolution:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Should succeed — file was legitimately deleted
@@ -1921,7 +1930,7 @@ class TestMergeOrchestratorConflictResolution:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Should fail with pending_human due to incomplete resolution
@@ -2021,7 +2030,7 @@ class TestMergeOrchestratorConflictResolution:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Should fail — binary files cannot be auto-resolved
@@ -2108,7 +2117,7 @@ class TestMergeOrchestratorConflictResolution:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         assert report.success is False
@@ -2200,7 +2209,7 @@ class TestAbortMergeFailureHandling:
             lambda self: False,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute([feature_branch])
 
         assert report.success is False
@@ -2244,7 +2253,7 @@ class TestAbortMergeFailureHandling:
             lambda self: False,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute([feature_branch])
 
         assert report.success is False
@@ -2298,7 +2307,7 @@ class TestMergeOrchestratorCleanupInteraction:
 
         orch = MergeOrchestrator(
             project_root=tmp_path,
-            strategy="default",
+            strategy="safe",
             delete_merged=True,
         )
         report = orch.execute(["feature"])
@@ -2381,7 +2390,7 @@ class TestMergeOrchestratorCleanupInteraction:
 
         orch = MergeOrchestrator(
             project_root=tmp_path,
-            strategy="default",
+            strategy="safe",
         )
         report = orch.execute(["feature"])
 
@@ -2429,7 +2438,7 @@ class TestMergeOrchestratorCleanupInteraction:
             lambda self, pre, post: (_ for _ in ()).throw(RuntimeError("mock diff parser blowup")),
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Should be treated as guardrail violation (fail closed)
@@ -2577,7 +2586,7 @@ class TestMergeOrchestratorCleanupInteraction:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Should fail — binary files cannot be auto-resolved
@@ -2708,7 +2717,7 @@ class TestMergeOrchestratorCleanupInteraction:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Should fail — git rm -f failed
@@ -2817,7 +2826,7 @@ class TestMergeOrchestratorCleanupInteraction:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Should succeed — git rm -f --ignore-unmatch handled the absent path
@@ -2907,7 +2916,7 @@ class TestMergeOrchestratorCleanupInteraction:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Must abort, not return pending_human without a call file
@@ -2998,7 +3007,7 @@ class TestMergeOrchestratorCleanupInteraction:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Should fail — low-confidence deletion of a file with content rejected
@@ -3404,7 +3413,7 @@ class TestStrictShortCircuit:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute([feature_branch])
 
         assert report.success is False
@@ -3999,7 +4008,7 @@ class TestFastAbortBehavior:
             "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # default mode should still create human call
@@ -4408,7 +4417,7 @@ class TestGuardrailsStrategyAware:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Should fail with guardrail_violation and human call
@@ -5037,7 +5046,7 @@ class TestGuardrailsStrategyAware:
             mock_write_guardrail_call,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Should surface the call-file failure, not rollback failure.
@@ -5343,7 +5352,7 @@ class TestGuardrailsStrategyAware:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Must abort, not return pending_human without a call file
@@ -5436,7 +5445,7 @@ class TestGuardrailsStrategyAware:
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # Must abort, not return pending_human without a call file
@@ -5530,7 +5539,7 @@ class TestGuardrailsStrategyAware:
             lambda self: False,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # abort_merge failed overrides human_call_write_failed
@@ -5599,7 +5608,7 @@ class TestGuardrailsStrategyAware:
             lambda self: False,
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature"])
 
         # abort_merge failed overrides human_call_write_failed

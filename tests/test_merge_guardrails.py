@@ -1459,7 +1459,7 @@ class TestOrchestratorGuardrailsIntegration:
         _git(tmp_path, "checkout", default_branch)
         pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature-weaken"])
 
         # Should fail with guardrail_violation
@@ -1542,7 +1542,7 @@ class TestOrchestratorGuardrailsIntegration:
             "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature-conflict"])
 
         # Should fail with guardrail_violation
@@ -1785,7 +1785,7 @@ class TestOrchestratorGuardrailsIntegration:
         _git(tmp_path, "checkout", default_branch)
         pre_head = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature-mixed"])
 
         # Spec weakening should cause rollback even though regular file is fine
@@ -1826,7 +1826,7 @@ class TestOrchestratorGuardrailsIntegration:
         # After feature-a merges, HEAD moves; pre-head for feature-b is post-feature-a
         pre_all = _git(tmp_path, "rev-parse", "HEAD").stdout.strip()
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature-a", "feature-b"])
 
         assert report.success is False
@@ -1856,7 +1856,7 @@ class TestOrchestratorGuardrailsIntegration:
 
         _git(tmp_path, "checkout", default_branch)
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature-clean"])
 
         assert report.success is True
@@ -1929,7 +1929,7 @@ class TestOrchestratorGuardrailsIntegration:
             "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature-delete-when"])
 
         # Should fail with guardrail_violation
@@ -2018,7 +2018,7 @@ class TestOrchestratorGuardrailsIntegration:
             "se3.engine.merge.orchestrator.ConflictResolver.resolve", mock_resolve
         )
 
-        orch = MergeOrchestrator(project_root=tmp_path, strategy="default")
+        orch = MergeOrchestrator(project_root=tmp_path, strategy="safe")
         report = orch.execute(["feature-weaken-shall"])
 
         assert report.success is False
