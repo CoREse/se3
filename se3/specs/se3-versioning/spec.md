@@ -177,8 +177,10 @@ A dedicated `version_analyze` step SHALL run after `update_spec` and before `com
 - **Spec changes (updated_specs)**: API contract changes — PRIMARY indicator for breaking/non-breaking
 - **Files changed (changes_made)**: Implementation details and scope
 - **Verification results**: Consistency checks against specs
+- **Pre-session version (pre_session_version)**: The project version recorded at the entry of the `implement` step, BEFORE any worktree-merged commits could have touched the version file. The LLM SHALL treat this value — not the on-disk `current_version` — as the baseline when computing `suggested_version`.
+- **Session-introduced commits (session_commits)**: A list (possibly empty) of commits that the `implement` step merged into the main branch in this session, each entry containing `{sha, subject, files}`. The prompt instructs the LLM to treat any version-file modifications inside these commits AS IF THEY HAD NOT HAPPENED, ensuring the bump is computed once relative to `pre_session_version`.
 
-Spec changes are prioritized as they directly reflect API contract modifications.
+Spec changes are prioritized as they directly reflect API contract modifications. `pre_session_version` and `session_commits` are emitted by the `implement` step (see flow-engine "步骤间输入传递" requirement) and are unconditionally forwarded — when no commits were introduced (e.g. `implement.use_worktree=false` or a single LLM-call execution), `session_commits` is an empty list and `pre_session_version` still records the entry-time version for audit.
 
 **LLM Analysis Output:**
 ```json
@@ -219,6 +221,38 @@ The LLM applies these defaults to compute `suggested_version` from `current_vers
 - **WHEN** the commit step writes the new version to the version file
 - **THEN** it writes `1.3.0` directly (the value from `suggested_version`)
 - **AND** it does NOT recompute the version by applying `bump_type` to `current_version`
+
+### Requirement: Single-Session Single-Bump Guarantee
+
+A single `se3 run` session SHALL produce exactly one effective version bump in the project's version files (`pyproject.toml`, `VERSIONS.md`, or the configured equivalents), regardless of whether the `implement` step used a worktree-based DAG-parallel strategy that may have already merged a "bump version" commit into the main branch.
+
+**Rules:**
+- The `implement` step (including any LLM groups, fix-iteration, or worktree merges back to the main branch) SHALL NOT be the legitimate site of a version-file write. Version-file changes belong exclusively to the `commit` step.
+- LLM prompts for `plan`, `implement` (group), and `fix-iteration` SHALL include an explicit guardrail forbidding "bump version" as a task group, an `implement` change, or a fix-iteration change. If the user's task description is purely a version bump, the LLM is instructed to produce zero file changes in `implement` and explain in the summary why the bump was deferred to the `commit` step.
+- The `implement` step SHALL record `pre_session_version` (entry-time disk version) and, on worktree paths, a `session_commits` list of commits introduced to the main branch during this session. Both fields are forwarded into `version_analyze.inputs` (see flow-engine spec).
+- The `version_analyze` LLM prompt SHALL render `pre_session_version` as the baseline `Current Version`, surface the `session_commits` list, and instruct the LLM to treat any version-file modifications inside those commits as if they had not happened. The resulting `suggested_version` is therefore computed once, relative to `pre_session_version`.
+- The `commit` step SHALL unconditionally write `suggested_version` into the version files. When the on-disk version already equals `suggested_version` (because an upstream group merged a matching bump commit), `set_version` is required to be idempotent — the same write is performed and no error is raised; the final on-disk version equals exactly `suggested_version`.
+
+**Out of scope:** Adjusting the `task_type` prefix or the rendered `bump_type` annotation in the commit message body — these remain governed by their existing requirements.
+
+#### Scenario: Worktree session containing a stray bump commit produces only one effective bump
+- **GIVEN** the project's version on disk is `5.1.0` at the start of `se3 run`
+- **AND** the `implement` step uses worktree-based DAG parallel and one of its groups merges a commit titled "bump version to 5.2.0" back to the main branch
+- **AND** a subsequent fix-iteration commit modifies unrelated source files
+- **WHEN** `version_analyze` runs
+- **THEN** the LLM receives `pre_session_version=5.1.0` and a `session_commits` list including the bump commit and the fix-iteration commit
+- **AND** the LLM, instructed to treat the bump commit as if it had not happened, returns `suggested_version=5.2.0` (a single MINOR bump relative to `5.1.0`)
+- **WHEN** the `commit` step runs
+- **THEN** it writes `5.2.0` into `pyproject.toml` / `VERSIONS.md` idempotently (no second 5.2.1 bump)
+- **AND** the final on-disk version equals `5.2.0`
+
+#### Scenario: Non-worktree session behavior is unchanged
+- **GIVEN** the project's version on disk is `1.2.3`
+- **AND** the `implement` step runs on the original branch (no worktree, no merges into main)
+- **WHEN** `version_analyze` runs
+- **THEN** `session_commits` is an empty list
+- **AND** `pre_session_version` equals `current_version` (`1.2.3`)
+- **AND** the LLM computes `suggested_version` exactly as it did before this requirement was introduced
 
 ### Requirement: Custom Version Rules File
 

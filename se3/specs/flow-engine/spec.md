@@ -966,10 +966,11 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - 所有步骤接收 `task_description` 和 `flow_id`
 - `analyze` 输出 `task_type`、`scope`、`complexity`、`reasoning`、`project_summary`、`relevant_specs`、`spec_content`、`selected_specs`、`selected_items`；其中 `project_summary` 由 `ProjectContextCollector.collect()` 程序化生成（非 LLM），`spec_content` 由后处理程序化加载（base spec 自动附加 + LLM 选择的 spec items），`selected_items` 为 LLM 选中的 `[{spec, requirement_name, tags}]` 列表
 - `plan` 接收 `spec_content`（从 analyze）、`task_type`、`scope`、`project_summary`（从 analyze），输出 `plan`（含 proposal + design）、`task_groups` 和 `spec_changes`（仅 full depth）
-- `implement` 接收 `design_doc`（从 plan.design 映射）、`task_groups`、`spec_content`（从 analyze）、`project_summary`（从 analyze）
+- `implement` 接收 `design_doc`（从 plan.design 映射）、`task_groups`、`spec_content`（从 analyze）、`project_summary`（从 analyze）；输出新增 `pre_session_version`（implement 入口时项目版本号，用于版本基线审计）与 `session_commits`（DAG/worktree 路径下 implement 阶段在主分支上引入的 commit 清单，列表元素为 `{sha, subject, files}`；非 worktree 路径或未产生 commit 时为空列表）
 - `self_check` 接收 `test_results`（从 test）、`changes_made`（从 implement）、`spec_content`（从 analyze）、`task_groups`（从 plan，用作「功能遗漏」维度的 scope 参考）、`fix_iteration`（当前 fix loop 迭代次数）、`self_check_pass_index`（本轮 fix-loop 内的 1..N 序号）、`self_check_passes_required`（来自 `workflow.self_check_passes_required`）、`self_check_convergence_enabled`（来自 `workflow.self_check_convergence_enabled`，默认 false）、`prev_self_check_issues`（仅在 `convergence_enabled=true` 且 `pass_index=1` 时注入，承载上一轮 fix-loop 末尾 self_check 的 issues 作为收敛对比基线）
 - `verify_spec` 接收 `changes_made`、`spec_content`（从 analyze）、`test_results`、`fix_iteration`、`spec_changes`（从 plan 步骤传递，用于区分有意变更与回归）和 `relevant_specs`（从 analyze）
 - `update_spec` 接收 `changes_made`、`verification_result`、`spec_changes`（从 plan 步骤传递，作为变更指引清单）、`design_doc`（从 plan.design 映射，提供架构上下文）、`selected_items`（从 analyze，用于定位相关 spec）；默认以 `full_spec` 模式加载所有 spec 全文，支持命名查重和跨 spec 一致性检查
+- `version_analyze` 接收 `updated_specs`、`changes_made`、`verification_result`、`task_type`、`task_description`、`current_version`（磁盘版本号）、`pre_session_version`（从 implement 透传，作为 LLM 计算 `suggested_version` 的真实基线；缺失时回退到 `current_version`）、`session_commits`（从 implement 透传，列出本 session 在主分支上已经引入的 commit；可能包含被 implement 阶段误写入的版本文件改动，prompt 中要求 LLM 将其视为未发生）
 - `commit` 接收 `changes_made`、`commit_message`（from version_analyze）、`bump_type`（from version_analyze）
 - `summarize` 接收所有前序输出（when included in step sequence）
 
@@ -996,6 +997,22 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - **AND** 判据结果指向 new_spec 时，在 `se3/specs/` 下创建新的 spec 目录和 `spec.md`
 - **AND** 新 spec 文件被创建在 `se3/specs/issue-discovery/spec.md`
 
+#### Scenario: worktree 合回后 version_analyze 收到 commit 清单
+- **GIVEN** implement 步骤启用 worktree 并通过 DAG 并行策略执行
+- **AND** 某个 group 在主分支上引入了 `bump version to 5.2.0` 的 commit，另一个 fix-iteration commit 修改了源码
+- **WHEN** implement 步骤完成并写出 `step.outputs`
+- **THEN** `step.outputs["pre_session_version"]` 等于 implement 入口时磁盘上的版本号（如 `5.1.0`）
+- **AND** `step.outputs["session_commits"]` 为非空列表，列出上述两条 commit 的 `{sha, subject, files}`
+- **AND** state_machine 在为 version_analyze 构建 inputs 时将 `pre_session_version` 与 `session_commits` 透传过去
+- **AND** version_analyze 的 LLM prompt 中包含这两条 commit 清单与 `pre_session_version`
+
+#### Scenario: implement 未启用 worktree 时 session_commits 为空
+- **GIVEN** `implement.use_worktree=false`（或 DAG 退化为线性链 / 单 LLM 调用）
+- **WHEN** implement 步骤完成
+- **THEN** `step.outputs["session_commits"]` 为空列表
+- **AND** `step.outputs["pre_session_version"]` 仍记录 implement 入口时的版本号
+- **AND** state_machine 透传到 version_analyze.inputs 的 `session_commits` 为空列表
+
 ### Requirement: Version Analyze 步骤
 
 `version_analyze` 步骤 SHALL 使用 LLM 智能分析实际变更内容，依据 Semantic Versioning 2.0.0 规则确定版本变更类型。
@@ -1006,7 +1023,9 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - `verification_result`: 与 spec 的一致性检查结果
 - `task_type`: 任务类型（作为参考，不作为决定因素）
 - `task_description`: 原始任务描述
-- `current_version`: 当前版本号
+- `current_version`: 磁盘上当前版本号（供 LLM 对照）
+- `pre_session_version`: implement 步骤入口时的版本号；作为 LLM 计算 `suggested_version` 的真实基线。缺失时回退为 `current_version`
+- `session_commits`: implement 阶段在主分支上引入的 commit 列表（`[{sha, subject, files}]`，可能为空）。prompt 中指示 LLM 将这些 commit 中对版本文件的修改视为未发生，以 `pre_session_version` 为基线推导 `suggested_version`
 
 **分析输出：**
 ```json
