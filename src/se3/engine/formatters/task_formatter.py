@@ -12,13 +12,24 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set
 if TYPE_CHECKING:
     from ..dag_scheduler import RelayPlan
 
-from rich.panel import Panel
+from rich.console import Group, RenderableType
 from rich.table import Table
+from rich.text import Text
 from rich.tree import Tree
 
 from ..display import get_console
 
 logger = logging.getLogger(__name__)
+
+
+def _md_heading(title: str, color: str) -> Text:
+    """Build a ``[bold <color>]## Title[/bold <color>]`` heading line."""
+    return Text.from_markup(f"[bold {color}]## {title}[/bold {color}]")
+
+
+def _heading_group(title: str, color: str, *body: RenderableType) -> Group:
+    """Wrap ``body`` with a markdown-style heading and trailing blank."""
+    return Group(_md_heading(title, color), Text(""), *body, Text(""))
 
 
 class TaskValidationError(Exception):
@@ -212,7 +223,7 @@ class TaskFormatter:
         self.console = console or get_console()
         self.validator = TaskDataValidator()
 
-    def format_tasks(self, task_groups: List[Dict[str, Any]], mode: str = "tree") -> Panel:
+    def format_tasks(self, task_groups: List[Dict[str, Any]], mode: str = "tree") -> RenderableType:
         """Format task groups into rich output.
 
         Args:
@@ -220,26 +231,31 @@ class TaskFormatter:
             mode: Display mode - "tree" for hierarchical view or "table" for flat table
 
         Returns:
-            Rich Panel containing formatted output
+            Rich renderable (Group) containing the formatted output with a
+            markdown-style ``## Task Plan`` heading.
         """
         if not task_groups:
-            return Panel("[dim]No tasks to display[/dim]", title="Task Plan", border_style="blue")
+            return _heading_group(
+                "Task Plan", "blue", Text.from_markup("[dim]No tasks to display[/dim]"),
+            )
 
         if mode == "tree":
             return self._format_tree_view(task_groups)
         elif mode == "table":
             return self._format_table_view(task_groups)
         else:
-            return Panel(f"[red]Unknown mode: {mode}[/red]", title="Task Plan", border_style="red")
+            return _heading_group(
+                "Task Plan", "red", Text.from_markup(f"[red]Unknown mode: {mode}[/red]"),
+            )
 
-    def _format_tree_view(self, task_groups: List[Dict[str, Any]]) -> Panel:
+    def _format_tree_view(self, task_groups: List[Dict[str, Any]]) -> RenderableType:
         """Format task groups as a hierarchical tree.
 
         Args:
             task_groups: List of task group dictionaries
 
         Returns:
-            Rich Panel containing tree view
+            Rich renderable containing the tree view under a ``## Task Plan`` heading.
         """
         total_tasks = 0
         total_complexity = {"small": 0, "medium": 0, "large": 0}
@@ -320,17 +336,16 @@ class TaskFormatter:
         summary = "".join(summary_parts)
         tree.add(f"\n[dim]{summary}[/dim]")
 
-        # Wrap tree in a panel
-        return Panel(tree, title="[bold]Task Plan[/bold]", border_style="blue")
+        return _heading_group("Task Plan", "blue", tree)
 
-    def _format_table_view(self, task_groups: List[Dict[str, Any]]) -> Panel:
+    def _format_table_view(self, task_groups: List[Dict[str, Any]]) -> RenderableType:
         """Format task groups as a flat table.
 
         Args:
             task_groups: List of task group dictionaries
 
         Returns:
-            Rich Panel containing table view
+            Rich renderable containing the table view under a ``## Task Plan`` heading.
         """
         table = Table(title="Task Plan", show_header=True, header_style="bold cyan")
 
@@ -373,17 +388,17 @@ class TaskFormatter:
                     str(len(criteria)) if criteria else "-",
                 )
 
-        # Create panel with table
-        return Panel(table, title=f"[bold]Task Plan[/bold] ({total_tasks} tasks)", border_style="blue")
+        return _heading_group(f"Task Plan ({total_tasks} tasks)", "blue", table)
 
-    def format_task_detail(self, task: Dict[str, Any]) -> Panel:
+    def format_task_detail(self, task: Dict[str, Any]) -> RenderableType:
         """Format detailed view of a single task.
 
         Args:
             task: Task dictionary
 
         Returns:
-            Rich Panel containing task details
+            Rich renderable containing the task detail under a
+            ``## Task <id>`` heading.
         """
         table = Table(show_header=False, header_style="bold")
         table.add_column("Field", style="bold cyan", width=20)
@@ -416,21 +431,23 @@ class TaskFormatter:
             criteria_str = "\n".join(f"{i+1}. {c}" for i, c in enumerate(criteria))
             table.add_row("Verification Criteria", criteria_str)
 
-        # Build title
+        # Build heading: blue ## title with the complexity icon kept in its own color
         task_id = task.get("id", "Unknown")
         complexity_icon = self.COMPLEXITY_ICONS.get(complexity, "•")
-        title = f"[bold]Task {task_id}[/bold] [{color}]{complexity_icon}[/{color}]"
+        heading = Text.from_markup(
+            f"[bold blue]## Task {task_id}[/bold blue] [{color}]{complexity_icon}[/{color}]"
+        )
+        return Group(heading, Text(""), table, Text(""))
 
-        return Panel(table, title=title, border_style="blue")
-
-    def format_summary(self, task_groups: List[Dict[str, Any]]) -> Panel:
+    def format_summary(self, task_groups: List[Dict[str, Any]]) -> RenderableType:
         """Format summary statistics for task groups.
 
         Args:
             task_groups: List of task group dictionaries
 
         Returns:
-            Rich Panel containing summary statistics
+            Rich renderable containing the summary statistics under a
+            ``## Task Summary`` heading.
         """
         total_groups = len(task_groups)
         total_tasks = 0
@@ -484,7 +501,7 @@ class TaskFormatter:
         effort_estimate = self._estimate_effort(total_tasks, avg_complexity)
         table.add_row("Est. Effort", effort_estimate)
 
-        return Panel(table, title="[bold]Task Summary[/bold]", border_style="green")
+        return _heading_group("Task Summary", "green", table)
 
     def _calculate_avg_complexity(self, total: int, counts: Dict[str, int]) -> float:
         """Calculate average complexity score.
@@ -538,7 +555,7 @@ class TaskFormatter:
         loc_threshold: int,
         relay_plan: Optional[RelayPlan] = None,
         sequential_reason: Optional[str] = None,
-    ) -> Panel:
+    ) -> RenderableType:
         """Format implement step task plan with execution strategy summary.
 
         Args:
@@ -553,12 +570,13 @@ class TaskFormatter:
                 ``"use_worktree=False"`` or ``"linear chain"``.
 
         Returns:
-            Rich Panel containing task tree with strategy summary
+            Rich renderable (Group) containing the implementation plan under
+            a ``## Implementation Plan`` heading.
         """
-        from rich.console import Group as RichGroup
-        from rich.text import Text
-
-        renderables = []
+        renderables: list[RenderableType] = [
+            _md_heading("Implementation Plan", "blue"),
+            Text(""),
+        ]
 
         # Strategy summary line
         strategy_line = self._format_strategy_line(
@@ -573,7 +591,7 @@ class TaskFormatter:
             tree = self._build_implement_tree(task_groups)
             renderables.append(tree)
         else:
-            renderables.append(Text("[dim]No tasks to display[/dim]"))
+            renderables.append(Text.from_markup("[dim]No tasks to display[/dim]"))
 
         # DAG topology diagram (only for dag_parallel with relay_plan)
         if (
@@ -593,12 +611,9 @@ class TaskFormatter:
         loc_summary = self._format_loc_summary(task_groups, total_loc)
         renderables.append(Text(""))  # blank separator
         renderables.append(loc_summary)
+        renderables.append(Text(""))  # trailing blank
 
-        return Panel(
-            RichGroup(*renderables),
-            title="[bold]Implementation Plan[/bold]",
-            border_style="blue",
-        )
+        return Group(*renderables)
 
     def _format_strategy_line(
         self,
@@ -846,14 +861,15 @@ class TaskFormatter:
             text.append(")", style="dim")
         return text
 
-    def format_dependencies(self, task_groups: List[Dict[str, Any]]) -> Panel:
+    def format_dependencies(self, task_groups: List[Dict[str, Any]]) -> RenderableType:
         """Format dependency map for task groups.
 
         Args:
             task_groups: List of task group dictionaries
 
         Returns:
-            Rich Panel containing dependency map
+            Rich renderable containing the dependency map under a
+            ``## Dependencies`` heading.
         """
         # Build dependency graph
         all_tasks = {}
@@ -868,7 +884,10 @@ class TaskFormatter:
                     }
 
         if not all_tasks:
-            return Panel("[dim]No tasks with dependencies[/dim]", title="Dependencies", border_style="blue")
+            return _heading_group(
+                "Dependencies", "blue",
+                Text.from_markup("[dim]No tasks with dependencies[/dim]"),
+            )
 
         # Build dependency table
         table = Table(show_header=True, header_style="bold cyan")
@@ -902,8 +921,8 @@ class TaskFormatter:
         tasks_with_deps = sum(1 for t in all_tasks.values() if t["deps"])
         total_deps = sum(len(t["deps"]) for t in all_tasks.values())
 
-        title = f"[bold]Dependencies[/bold] ({tasks_with_deps} tasks, {total_deps} deps)"
-        return Panel(table, title=title, border_style="cyan")
+        title = f"Dependencies ({tasks_with_deps} tasks, {total_deps} deps)"
+        return _heading_group(title, "cyan", table)
 
 
 def format_task_groups(
@@ -911,44 +930,39 @@ def format_task_groups(
     mode: str = "tree",
     show_summary: bool = True,
     show_dependencies: bool = False,
-) -> Panel:
+) -> RenderableType:
     """Convenience function to format task groups with optional summary.
 
     Args:
         task_groups: List of task group dictionaries
         mode: Display mode - "tree" or "table"
-        show_summary: Whether to include summary panel
-        show_dependencies: Whether to include dependencies panel
+        show_summary: Whether to include summary section
+        show_dependencies: Whether to include dependencies section
 
     Returns:
-        Rich Panel containing formatted output
+        Rich renderable containing the formatted output. When multiple
+        sections are requested they are combined under a
+        ``## Task Plan Complete View`` heading.
     """
-    from rich.console import Group
-
     formatter = TaskFormatter()
 
-    panels = []
+    sections: list[RenderableType] = []
 
     # Main task display
     if mode == "tree":
-        panels.append(formatter.format_tasks(task_groups, mode="tree"))
+        sections.append(formatter.format_tasks(task_groups, mode="tree"))
     else:
-        panels.append(formatter.format_tasks(task_groups, mode="table"))
+        sections.append(formatter.format_tasks(task_groups, mode="table"))
 
-    # Summary panel
+    # Summary section
     if show_summary:
-        panels.append(formatter.format_summary(task_groups))
+        sections.append(formatter.format_summary(task_groups))
 
-    # Dependencies panel
+    # Dependencies section
     if show_dependencies:
-        panels.append(formatter.format_dependencies(task_groups))
+        sections.append(formatter.format_dependencies(task_groups))
 
-    # Combine into a single panel with sub-panels
-    if len(panels) == 1:
-        return panels[0]
+    if len(sections) == 1:
+        return sections[0]
 
-    return Panel(
-        Group(*panels),
-        title="[bold]Task Plan Complete View[/bold]",
-        border_style="green",
-    )
+    return _heading_group("Task Plan Complete View", "green", *sections)
