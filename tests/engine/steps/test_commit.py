@@ -10,7 +10,9 @@ import pytest
 from se3.engine.models import FlowInstance, State, Step, StepStatus, StepType
 from se3.engine.steps.commit import (
     commit_handler,
+    _generate_commit_message,
     _generate_template_summary,
+    _resolve_target_version,
     _collect_changes_from_flow,
     _collect_test_results_from_flow,
 )
@@ -41,7 +43,13 @@ def _make_flow(**kwargs) -> FlowInstance:
 
 def _make_step(inputs: dict | None = None) -> Step:
     step = MagicMock(spec=Step)
-    step.inputs = inputs or {}
+    # Default to a sane suggested_version so the commit step's
+    # _resolve_target_version() check passes. Individual tests that
+    # exercise the missing/failed paths set inputs explicitly.
+    base_inputs = {"suggested_version": "0.1.1", "bump_type": "patch"}
+    if inputs:
+        base_inputs.update(inputs)
+    step.inputs = base_inputs
     step.outputs = {}
     return step
 
@@ -80,7 +88,7 @@ class TestRuntimeErrorScriptModeAutoRepair:
 
         # First call raises RuntimeError, second call (retry) succeeds
         mock_bumper.read_version.side_effect = [RuntimeError("script error"), "0.1.0"]
-        mock_bumper.bump_version.return_value = "0.1.1"
+        mock_bumper.set_version.return_value = "0.1.1"
 
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
@@ -160,7 +168,7 @@ class TestRuntimeErrorFileModeAutoRepair:
 
         # First call raises RuntimeError, second call (retry) succeeds
         mock_bumper.read_version.side_effect = [RuntimeError("file parse error"), "0.1.0"]
-        mock_bumper.bump_version.return_value = "0.1.1"
+        mock_bumper.set_version.return_value = "0.1.1"
         mock_bumper.initialize_version_system.return_value = repaired_file
 
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -237,7 +245,7 @@ class TestRuntimeErrorNoVersionFileAutoRepair:
 
         # First read_version raises RuntimeError, retry succeeds
         mock_bumper.read_version.side_effect = [RuntimeError("bad script"), "0.1.0"]
-        mock_bumper.bump_version.return_value = "0.1.1"
+        mock_bumper.set_version.return_value = "0.1.1"
 
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
@@ -276,7 +284,7 @@ class TestRuntimeErrorNoVersionFileAutoRepair:
         mock_bumper.initialize_version_system.return_value = created_file
 
         mock_bumper.read_version.side_effect = [RuntimeError("bad file"), "0.1.0"]
-        mock_bumper.bump_version.return_value = "0.1.1"
+        mock_bumper.set_version.return_value = "0.1.1"
 
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
@@ -313,7 +321,7 @@ class TestValueErrorKeyErrorRegression:
         mock_bumper._script_runner = None
 
         mock_bumper.read_version.side_effect = [ValueError("bad version format"), "0.1.0"]
-        mock_bumper.bump_version.return_value = "0.1.1"
+        mock_bumper.set_version.return_value = "0.1.1"
         mock_bumper.initialize_version_system.return_value = version_file
 
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
@@ -346,7 +354,7 @@ class TestValueErrorKeyErrorRegression:
         mock_bumper._script_runner = MagicMock()
 
         mock_bumper.read_version.side_effect = [KeyError("missing key"), "0.1.0"]
-        mock_bumper.bump_version.return_value = "0.1.1"
+        mock_bumper.set_version.return_value = "0.1.1"
 
         mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
@@ -661,3 +669,169 @@ class TestCollectTestResultsFromFlow:
     def test_returns_empty_dict_when_no_test_step(self):
         flow = _make_flow_with_state(step_history=[], steps={})
         assert _collect_test_results_from_flow(flow) == {}
+
+
+class TestResolveTargetVersion:
+    """Tests for _resolve_target_version — authoritative version pickup."""
+
+    def _va_step(self, status: StepStatus, outputs: dict | None = None) -> Step:
+        s = MagicMock(spec=Step)
+        s.step_type = StepType.VERSION_ANALYZE
+        s.status = status
+        s.outputs = outputs or {}
+        return s
+
+    def test_returns_suggested_version_from_inputs(self):
+        flow = _make_flow_with_state(
+            step_history=["va-1"],
+            steps={
+                "va-1": self._va_step(
+                    StepStatus.COMPLETED,
+                    {"suggested_version": "1.3.0", "current_version": "1.2.3"},
+                )
+            },
+        )
+        step = MagicMock(spec=Step)
+        step.inputs = {"suggested_version": "1.3.0", "current_version": "1.2.3"}
+
+        assert _resolve_target_version(step, flow) == "1.3.0"
+
+    def test_falls_back_to_va_step_outputs(self):
+        """When step.inputs lacks suggested_version, look at the VA step's outputs."""
+        flow = _make_flow_with_state(
+            step_history=["va-1"],
+            steps={
+                "va-1": self._va_step(
+                    StepStatus.COMPLETED,
+                    {"suggested_version": "2.0.0", "current_version": "1.9.0"},
+                )
+            },
+        )
+        step = MagicMock(spec=Step)
+        step.inputs = {}
+
+        assert _resolve_target_version(step, flow) == "2.0.0"
+
+    def test_strips_whitespace(self):
+        flow = _make_flow_with_state(step_history=[], steps={})
+        step = MagicMock(spec=Step)
+        step.inputs = {"suggested_version": "  1.4.0  "}
+
+        assert _resolve_target_version(step, flow) == "1.4.0"
+
+    def test_missing_suggested_version_raises_with_current_version(self):
+        flow = _make_flow_with_state(
+            step_history=["va-1"],
+            steps={
+                "va-1": self._va_step(
+                    StepStatus.COMPLETED,
+                    {"current_version": "1.2.3"},
+                )
+            },
+        )
+        step = MagicMock(spec=Step)
+        step.inputs = {}
+
+        with pytest.raises(RuntimeError) as exc_info:
+            _resolve_target_version(step, flow)
+
+        msg = str(exc_info.value)
+        assert "suggested_version" in msg
+        assert "1.2.3" in msg
+        # Human-intervention guidance
+        assert "human" in msg.lower() or "call" in msg.lower()
+
+    def test_va_step_failed_raises_with_intervention_hint(self):
+        flow = _make_flow_with_state(
+            step_history=["va-1"],
+            steps={
+                "va-1": self._va_step(
+                    StepStatus.FAILED,
+                    {"current_version": "1.2.3"},
+                )
+            },
+        )
+        # Even if step.inputs somehow carries a stale suggested_version,
+        # a FAILED version_analyze step takes precedence and we halt.
+        step = MagicMock(spec=Step)
+        step.inputs = {"suggested_version": "1.3.0"}
+
+        with pytest.raises(RuntimeError) as exc_info:
+            _resolve_target_version(step, flow)
+
+        msg = str(exc_info.value)
+        assert "version_analyze" in msg
+        assert "failed" in msg.lower()
+        assert "1.2.3" in msg
+        # Human intervention guidance
+        assert "human" in msg.lower() or "rerun" in msg.lower()
+
+    def test_empty_string_suggested_version_raises(self):
+        flow = _make_flow_with_state(step_history=[], steps={})
+        step = MagicMock(spec=Step)
+        step.inputs = {"suggested_version": "   "}
+
+        with pytest.raises(RuntimeError):
+            _resolve_target_version(step, flow)
+
+    def test_no_va_step_at_all_uses_unknown_current_version(self):
+        """When no version_analyze step ever ran, current_version is reported as unknown."""
+        flow = _make_flow_with_state(step_history=[], steps={})
+        step = MagicMock(spec=Step)
+        step.inputs = {}
+
+        with pytest.raises(RuntimeError) as exc_info:
+            _resolve_target_version(step, flow)
+
+        assert "<unknown>" in str(exc_info.value)
+
+
+class TestCommitMessageBumpTypeDecoration:
+    """Tests for bump_type display decoration in commit message generation."""
+
+    def test_bump_type_appended_to_message(self):
+        flow = _make_flow(task_type="feature")
+        step = _make_step(inputs={
+            "commit_message": "Add new auth endpoint",
+            "bump_type": "minor",
+        })
+
+        msg = _generate_commit_message(flow, step)
+        # Subject line is the first line
+        subject = msg.split("\n", 1)[0]
+        assert subject == "feature: Add new auth endpoint (minor bump)"
+
+    def test_bump_type_missing_omits_suffix(self):
+        flow = _make_flow(task_type="bugfix")
+        step = _make_step(inputs={
+            "commit_message": "Fix login crash",
+        })
+        # Clear the default bump_type from _make_step's defaults
+        step.inputs.pop("bump_type", None)
+
+        msg = _generate_commit_message(flow, step)
+        subject = msg.split("\n", 1)[0]
+        assert subject == "bugfix: Fix login crash"
+        assert "bump)" not in subject
+
+    def test_bump_type_none_omits_suffix(self):
+        flow = _make_flow(task_type="small")
+        step = _make_step(inputs={
+            "commit_message": "Tidy comments",
+            "bump_type": "none",
+        })
+
+        msg = _generate_commit_message(flow, step)
+        subject = msg.split("\n", 1)[0]
+        assert "bump)" not in subject
+
+    def test_bump_type_empty_string_omits_suffix(self):
+        flow = _make_flow(task_type="feature")
+        step = _make_step(inputs={
+            "commit_message": "Add X",
+            "bump_type": "",
+        })
+
+        msg = _generate_commit_message(flow, step)
+        subject = msg.split("\n", 1)[0]
+        assert "bump)" not in subject

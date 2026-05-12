@@ -165,11 +165,11 @@ class TestGetProjectConfigPath:
 class TestLoadersReadLocal:
     def test_version_config_loads_from_local(self, tmp_path):
         (tmp_path / "se3.local.yaml").write_text(
-            "version:\n  enabled: false\n  bump_rules:\n    feature: major\n"
+            "version:\n  enabled: false\n  confidence_threshold: high\n"
         )
         cfg = VersionConfig.load(tmp_path)
         assert cfg.enabled is False
-        assert cfg.bump_rules["feature"] == "major"
+        assert cfg.confidence_threshold == "high"
 
     def test_language_config_loads_from_local(self, tmp_path):
         (tmp_path / "se3.local.yaml").write_text(
@@ -216,28 +216,24 @@ class TestLocalReplacesSe3Yaml:
     ``se3.yaml`` that are absent from local MUST NOT leak through.
     """
 
-    def test_version_bump_rules_not_merged(self, tmp_path):
-        # se3.yaml sets a distinctive rule that local does not redeclare.
-        # Since VersionConfig.from_dict falls back to its defaults when
-        # bump_rules is empty, we make local declare a non-default rule
-        # that is distinct from se3.yaml's to verify the two files are
-        # not merged.
+    def test_version_config_not_merged(self, tmp_path):
+        # se3.yaml sets distinctive values that local does not redeclare;
+        # local sets its own distinctive values. The two files MUST NOT
+        # be deep-merged — local wholesale replaces se3.yaml.
         (tmp_path / "se3.yaml").write_text(
             "version:\n"
             "  enabled: true\n"
-            "  bump_rules:\n"
-            "    feature: major\n"
+            "  confidence_threshold: medium\n"
         )
         (tmp_path / "se3.local.yaml").write_text(
             "version:\n"
             "  enabled: false\n"
-            "  bump_rules:\n"
-            "    feature: patch\n"
+            "  confidence_threshold: high\n"
         )
         cfg = VersionConfig.load(tmp_path)
         # Values from local win, not merged with se3.yaml.
         assert cfg.enabled is False
-        assert cfg.bump_rules["feature"] == "patch"
+        assert cfg.confidence_threshold == "high"
 
     def test_language_yaml_shadowed_completely(self, tmp_path):
         (tmp_path / "se3.yaml").write_text(
@@ -283,11 +279,11 @@ class TestLocalReplacesSe3Yaml:
 class TestOnlySe3YamlRegression:
     def test_version_config_from_se3_yaml(self, tmp_path):
         (tmp_path / "se3.yaml").write_text(
-            "version:\n  enabled: false\n  bump_rules:\n    feature: patch\n"
+            "version:\n  enabled: false\n  confidence_threshold: medium\n"
         )
         cfg = VersionConfig.load(tmp_path)
         assert cfg.enabled is False
-        assert cfg.bump_rules["feature"] == "patch"
+        assert cfg.confidence_threshold == "medium"
 
     def test_test_config_from_se3_yaml(self, tmp_path):
         (tmp_path / "se3.yaml").write_text(
@@ -1385,12 +1381,12 @@ class TestWorktreeFallbackPaths:
         main_root, worktree_root = make_worktree
         (worktree_root / "se3.yaml").write_text("version:\n  enabled: false\n")
         (main_root / "se3.local.yaml").write_text(
-            "version:\n  enabled: true\n  bump_rules:\n    feature: patch\n"
+            "version:\n  enabled: true\n  confidence_threshold: medium\n"
         )
 
         cfg = VersionConfig.load(worktree_root)
         assert cfg.enabled is True
-        assert cfg.bump_rules["feature"] == "patch"
+        assert cfg.confidence_threshold == "medium"
 
     def test_agent_registry_loader_uses_worktree_lookup(
         self, make_worktree, isolated_global_home,
