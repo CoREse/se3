@@ -18,7 +18,6 @@ from typing import Optional
 
 import typer
 from rich.console import Console
-from rich.panel import Panel
 from rich.table import Table
 
 from ..engine.issue_manager import KNOWN_TYPES, IssueManager, IssueStatus
@@ -164,8 +163,10 @@ def show_cmd(
         f"\n[bold]Description:[/bold]\n{issue.description}"
     )
 
-    panel = Panel(content, title=f"Issue {issue.id}", border_style="cyan")
-    console.print(panel)
+    console.print(f"[bold cyan]## Issue {issue.id}[/bold cyan]")
+    console.print()
+    console.print(content)
+    console.print()
 
 
 @app.command(name="create")
