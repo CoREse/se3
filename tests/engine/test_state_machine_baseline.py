@@ -174,6 +174,70 @@ class TestVersionAnalyzeForwarding:
         assert inputs["suggested_version"] is None
 
 
+class TestImplementSessionCommitsForwarding:
+    """IMPLEMENT step's pre_session_version + session_commits outputs must be
+    forwarded into the inputs of every downstream step (notably VERSION_ANALYZE)
+    so the engine can discount any version-file edits introduced during the
+    implement phase (e.g. when worktrees merged a bump commit onto main).
+    """
+
+    def test_session_commits_forwarded_to_version_analyze(self, tmp_path):
+        sm = StateMachine(tmp_path)
+        flow = FlowInstance(task_description="bump-test")
+        flow.state.selected_steps = [StepType.IMPLEMENT, StepType.VERSION_ANALYZE]
+
+        session_commits = [
+            {
+                "sha": "abc123",
+                "subject": "bump version to 5.2.0",
+                "files": ["pyproject.toml", "VERSIONS.md"],
+            },
+            {
+                "sha": "def456",
+                "subject": "fix off-by-one",
+                "files": ["src/se3/engine/loop.py"],
+            },
+        ]
+        impl_step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={
+                "files_changed": ["pyproject.toml", "VERSIONS.md", "src/se3/engine/loop.py"],
+                "pre_session_version": "5.1.0",
+                "session_commits": session_commits,
+            },
+        )
+        flow.state.add_step(impl_step)
+
+        inputs = sm._build_step_inputs(flow, StepType.VERSION_ANALYZE)
+
+        assert inputs["pre_session_version"] == "5.1.0"
+        assert inputs["session_commits"] == session_commits
+
+    def test_session_commits_default_empty_list_when_missing(self, tmp_path):
+        """Backward compat: an older IMPLEMENT step without these outputs
+        must still build valid downstream inputs (pre_session_version=None,
+        session_commits=[]) instead of raising or omitting the keys."""
+        sm = StateMachine(tmp_path)
+        flow = FlowInstance(task_description="legacy")
+        flow.state.selected_steps = [StepType.IMPLEMENT, StepType.VERSION_ANALYZE]
+
+        impl_step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.COMPLETED,
+            outputs={
+                "files_changed": ["a.py"],
+                # No pre_session_version, no session_commits.
+            },
+        )
+        flow.state.add_step(impl_step)
+
+        inputs = sm._build_step_inputs(flow, StepType.VERSION_ANALYZE)
+
+        assert inputs["pre_session_version"] is None
+        assert inputs["session_commits"] == []
+
+
 class TestUserInterjectionsInTaskDescription:
     """Test cases for ``flow.state.context["user_interjections"]`` being
     composed onto every step's effective ``inputs["task_description"]``

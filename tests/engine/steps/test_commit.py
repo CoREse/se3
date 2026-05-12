@@ -834,3 +834,66 @@ class TestCommitMessageBumpTypeDecoration:
         msg = _generate_commit_message(flow, step)
         subject = msg.split("\n", 1)[0]
         assert "bump)" not in subject
+
+
+class TestCommitIdempotentVersionWrite:
+    """Regression test: suggested_version equal to the on-disk version is a
+    valid, idempotent write — the commit step must not refuse it or treat
+    it as an error.
+
+    Background (G5 of the double-bump bugfix): commit step is now
+    "authoritative overwrite" — it always writes suggested_version
+    verbatim, even when it matches what's already on disk. Replays the
+    20260512-225655 scenario tail: implement already merged a 5.1.0 → 5.2.0
+    bump into main, so disk is 5.2.0; version_analyze (using
+    pre_session_version=5.1.0 as the baseline) still suggests 5.2.0, and
+    the commit step must accept that as a happy-path idempotent write.
+    """
+
+    @patch("se3.engine.steps.commit._get_commit_hash", return_value="abc12345")
+    @patch("se3.engine.steps.commit.subprocess")
+    @patch("se3.engine.steps.commit._has_changes", return_value=True)
+    @patch("se3.engine.steps.commit._load_version_config")
+    @patch("se3.engine.steps.commit._generate_commit_message", return_value="bugfix: fix x")
+    def test_commit_idempotent_when_suggested_equals_disk(
+        self, mock_commit_msg, mock_load_cfg, mock_has_changes, mock_subprocess, mock_hash
+    ):
+        """Disk at 5.2.0, suggested_version 5.2.0 → set_version('5.2.0') runs
+        once, step completes successfully, no rollback."""
+        mock_load_cfg.return_value = _default_version_config()
+
+        version_file = Path("/tmp/project/pyproject.toml")
+
+        mock_bumper = MagicMock(spec=VersionBumper)
+        mock_bumper.detect_version_file.return_value = version_file
+        mock_bumper._use_script_mode = False
+        mock_bumper._script_runner = None
+        mock_bumper.read_version.return_value = "5.2.0"
+        mock_bumper.set_version.return_value = "5.2.0"
+
+        mock_subprocess.run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        flow = _make_flow()
+        step = _make_step({
+            "suggested_version": "5.2.0",
+            "bump_type": "patch",
+            "task_description": "Fix x",
+        })
+
+        with patch("se3.engine.steps.commit.VersionBumper", return_value=mock_bumper):
+            result = commit_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        # set_version called exactly once with the suggested_version, even
+        # though it matches the current on-disk value.
+        mock_bumper.set_version.assert_called_once_with(
+            version="5.2.0",
+            path=version_file,
+        )
+        # No rollback path: clear_backup is the success signal.
+        mock_bumper.clear_backup.assert_called_once()
+        # Step outputs reflect a successful version-bump cycle (the write
+        # happened even if the value is unchanged).
+        assert step.outputs.get("version") == "5.2.0"
+        assert step.outputs.get("version_bumped") is True
+        assert step.outputs.get("committed") is True
