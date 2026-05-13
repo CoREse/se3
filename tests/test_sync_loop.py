@@ -514,6 +514,48 @@ class TestSyncLoopInteractiveFlag:
 
         assert seen["interactive"] is True
 
+    def test_unresolved_drift_does_not_count_as_converged(
+        self, tmp_path, patched_loop_deps
+    ):
+        """If ``specs_updated == 0`` but the analyzer still flagged drift
+        (e.g. the LLM rewrite was rejected by the 50%-length guard), the
+        loop MUST NOT declare convergence — that would be a lie. The
+        loop should continue until either max_rounds is exhausted or the
+        drift actually disappears."""
+        unresolved_round = RoundResult(round_index=1)
+        unresolved_round.specs_updated = 0
+        unresolved_round.spec_hashes_after = {"auth": "X"}
+        unresolved_round.analyses.append(
+            SpecAnalysis(
+                spec_name="auth",
+                diffs=[SpecDiff(DiffType.GAP, "auth", "Unresolved drift")],
+            )
+        )
+
+        second_round = RoundResult(round_index=2)
+        second_round.specs_updated = 0
+        second_round.spec_hashes_after = {"auth": "X"}
+        second_round.analyses.append(
+            SpecAnalysis(
+                spec_name="auth",
+                diffs=[SpecDiff(DiffType.GAP, "auth", "Unresolved drift")],
+            )
+        )
+
+        scripted = [unresolved_round, second_round]
+
+        def _engine_factory(project_root, interactive=False):
+            eng = _ScriptedEngine(project_root, interactive=interactive)
+            eng.script = scripted
+            patched_loop_deps["engine"] = eng
+            return eng
+
+        with patch("se3.engine.sync_loop.SyncEngine", _engine_factory):
+            loop_result = SyncLoop(tmp_path, max_rounds=2).run()
+
+        assert loop_result.converged is False
+        assert len(loop_result.rounds) == 2
+
     def test_persistent_skip_does_not_cause_infinite_loop(
         self, tmp_path, patched_loop_deps
     ):

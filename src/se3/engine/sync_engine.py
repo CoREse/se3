@@ -162,6 +162,30 @@ class RoundResult:
     high_impact_deletions: List[Dict[str, Any]] = field(default_factory=list)
     discovery_failed: bool = False
 
+    @property
+    def is_stable(self) -> bool:
+        """Round is stable when nothing was changed AND no drift remains.
+
+        A round is considered stable (i.e. eligible to count toward
+        convergence) only when both:
+          * ``specs_updated == 0`` — no spec content was written in this
+            round, and
+          * every analysis is in sync — the analyzer detected no drift.
+
+        The second clause is essential: when the LLM proposes a fix that
+        is rejected by a safety guard (e.g. the 50%-length floor) or that
+        raises during application, ``specs_updated`` stays at 0 even
+        though real drift was detected. Convergence in that case would be
+        a lie — the next ``se3 sync`` invocation will rediscover the same
+        drift. Requiring ``all(a.is_in_sync ...)`` keeps convergence
+        honest. When ``analyses`` is empty (scripted RoundResults in
+        tests, or pre-engine fixture data), ``all([]) is True`` falls
+        back to the legacy ``specs_updated == 0`` semantics.
+        """
+        if self.specs_updated != 0:
+            return False
+        return all(a.is_in_sync for a in self.analyses)
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "round_index": self.round_index,
@@ -674,14 +698,33 @@ class SyncEngine:
     # ------------------------------------------------------------------
 
     def _is_high_impact_deletion(self, diff: SpecDiff) -> bool:
-        """Heuristic: a GAP whose description references a whole Requirement.
+        """Heuristic: a GAP whose description indicates a whole-Requirement removal.
 
-        The check is intentionally conservative — only gap-type drift
-        qualifies, and only when the gap description mentions
-        ``Requirement: <name>`` or quotes a heading-style phrase that maps to
-        an existing top-level requirement of the spec. Other drift types are
-        not classified as high-impact (extensions never delete, conflicts
-        rewrite scoped sections).
+        A bare substring match between a Requirement heading and the gap
+        description is far too lax — a description like "the project
+        identity section's listed language is outdated" mentions an
+        existing Requirement name but only proposes a small in-place
+        edit, not a deletion of the entire ``### Requirement: ...``
+        block. Treating that as high-impact would block every round on
+        a needless approval call file.
+
+        The stricter contract this method enforces:
+
+        * Only ``GAP`` drift is ever high-impact (extensions never
+          delete; conflicts rewrite scoped sections).
+        * The description MUST mention at least one existing Requirement
+          name (case-insensitive substring).
+        * AND one of the following must hold:
+
+            1. The description contains the heading-style phrase
+               ``Requirement: <something>`` (with the colon), which the
+               LLM uses when it intends to reference / drop a whole
+               Requirement block. OR
+            2. The description contains the word ``requirement`` AND a
+               clear "whole-absence" indicator
+               (``not implemented``, ``lacks``, ``missing``,
+               ``removed``, ``no longer``, ``never implemented``,
+               ``does not exist``, ``no code``, ...).
         """
         if diff.diff_type != DiffType.GAP:
             return False
@@ -692,11 +735,39 @@ class SyncEngine:
         if not existing_reqs:
             return False
         desc = diff.description or ""
+        if not desc:
+            return False
         desc_lower = desc.lower()
-        for name in existing_reqs:
-            if name.lower() and name.lower() in desc_lower:
-                return True
-        return False
+
+        matched_names = [
+            name for name in existing_reqs
+            if name and name.lower() in desc_lower
+        ]
+        if not matched_names:
+            return False
+
+        if re.search(r"\brequirement\s*:\s*\S", desc_lower):
+            return True
+
+        if not re.search(r"\brequirements?\b", desc_lower):
+            return False
+
+        absence_pattern = re.compile(
+            r"\b("
+            r"not\s+implemented|"
+            r"not\s+present|"
+            r"un[-\s]?implemented|"
+            r"lacks?|lacking|"
+            r"missing|absent|"
+            r"removed?|deleted?|dropped?|"
+            r"no\s+longer|"
+            r"never\s+implemented|"
+            r"does\s+not\s+(exist|implement)|"
+            r"doesn['’]?t\s+(exist|implement)|"
+            r"no\s+(code|implementation)"
+            r")\b"
+        )
+        return bool(absence_pattern.search(desc_lower))
 
     def _build_high_impact_entry(
         self, diff: SpecDiff, spec_info: Dict[str, Any]
@@ -738,18 +809,18 @@ class SyncEngine:
         try:
             decisions = handler.collect_decisions()
         except KeyboardInterrupt:
-            logger.info("High-impact deletion approval interrupted")
+            logger.info("High-impact deletion approval interrupted — aborting sync")
             for p in pending_items:
                 result.high_impact_deletions.append(
                     {
                         "spec_name": p["spec_name"],
                         "kind": "deletion",
-                        "decision": "skip",
+                        "decision": "interrupted",
                         "description": p["diff"].description,
                         "requirement_name": p["requirement_name"],
                     }
                 )
-            return
+            raise
 
         item_map = {p["item_id"]: p for p in pending_items}
         for item_id, decision in decisions.items():

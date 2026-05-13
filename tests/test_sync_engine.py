@@ -294,6 +294,61 @@ class TestIsHighImpactDeletion:
         diff = SpecDiff(DiffType.GAP, "auth", "Unrelated minor gap text")
         assert engine._is_high_impact_deletion(diff) is False
 
+    def test_gap_mentioning_requirement_name_without_deletion_intent_is_low_impact(
+        self, tmp_path
+    ):
+        """Regression: a GAP whose description merely mentions an existing
+        Requirement heading by name — but proposes only a narrow in-place
+        tweak — must NOT be classified as high-impact."""
+        spec = (
+            "# Spec\n## Purpose\nx\n\n"
+            "### Requirement: Project Identity\n\n- primary language: Python 3.8+\n"
+        )
+        _create_spec(tmp_path, "base", spec)
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        diff = SpecDiff(
+            DiffType.GAP,
+            "base",
+            "The project identity section's listed primary language is outdated.",
+        )
+        assert engine._is_high_impact_deletion(diff) is False
+
+    def test_gap_with_explicit_removal_verb_and_requirement_word_is_high_impact(
+        self, tmp_path
+    ):
+        spec = (
+            "# Spec\n## Purpose\nx\n\n"
+            "### Requirement: Legacy Auth\n\n- step 1\n"
+        )
+        _create_spec(tmp_path, "auth", spec)
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        diff = SpecDiff(
+            DiffType.GAP,
+            "auth",
+            "The Legacy Auth requirement was removed from the code entirely.",
+        )
+        assert engine._is_high_impact_deletion(diff) is True
+
+    def test_gap_with_heading_style_reference_is_high_impact(self, tmp_path):
+        spec = (
+            "# Spec\n## Purpose\nx\n\n"
+            "### Requirement: Legacy Auth\n\n- step 1\n"
+        )
+        _create_spec(tmp_path, "auth", spec)
+        engine = SyncEngine(tmp_path)
+        engine._load_specs()
+
+        diff = SpecDiff(
+            DiffType.GAP,
+            "auth",
+            "Requirement: Legacy Auth has no corresponding implementation.",
+        )
+        assert engine._is_high_impact_deletion(diff) is True
+
 
 # ---------------------------------------------------------------------------
 # run_once integration
@@ -484,6 +539,76 @@ class TestInteractiveHighImpact:
         assert any(
             e["decision"] == "auto" for e in result.high_impact_deletions
         )
+
+    def test_keyboard_interrupt_during_approval_propagates(self, tmp_path):
+        """Ctrl+C in interactive approval must abort the sync, not silently
+        downgrade every pending deletion to ``skip`` and return normally."""
+        spec_content = (
+            "# Spec\n## Purpose\np that is long enough to clear length guard. "
+            * 4
+            + "\n\n### Requirement: Foo\n\n- a body content long enough.\n"
+        )
+        _create_spec(tmp_path, "auth", spec_content)
+
+        engine = SyncEngine(tmp_path, interactive=True)
+        flow_ctx = _make_flow_ctx(tmp_path)
+        llm = MagicMock()
+
+        with patch(
+            "se3.engine.sync_interaction.SyncInteractionHandler.collect_decisions",
+            side_effect=KeyboardInterrupt,
+        ), patch(
+            "se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec"
+        ) as mock_an:
+            mock_an.return_value = SpecAnalysis(
+                spec_name="auth",
+                diffs=[
+                    SpecDiff(
+                        DiffType.GAP, "auth",
+                        "Foo requirement not implemented in code",
+                    ),
+                ],
+            )
+
+            with pytest.raises(KeyboardInterrupt):
+                engine.run_once(
+                    round_index=1,
+                    flow_ctx=flow_ctx,
+                    llm_caller=llm,
+                    project_context="{}",
+                )
+
+
+# ---------------------------------------------------------------------------
+# Round-stability semantics (convergence honesty)
+# ---------------------------------------------------------------------------
+
+
+class TestRoundIsStable:
+    def test_empty_round_is_stable(self):
+        rr = RoundResult(round_index=1)
+        assert rr.is_stable is True
+
+    def test_round_with_updates_is_not_stable(self):
+        rr = RoundResult(round_index=1)
+        rr.specs_updated = 2
+        assert rr.is_stable is False
+
+    def test_round_with_unresolved_drift_is_not_stable(self):
+        rr = RoundResult(round_index=1)
+        rr.specs_updated = 0
+        rr.analyses.append(
+            SpecAnalysis(
+                spec_name="auth",
+                diffs=[SpecDiff(DiffType.GAP, "auth", "Unresolved drift")],
+            )
+        )
+        assert rr.is_stable is False
+
+    def test_round_with_clean_analyses_and_no_updates_is_stable(self):
+        rr = RoundResult(round_index=1)
+        rr.analyses.append(SpecAnalysis(spec_name="auth", diffs=[]))
+        assert rr.is_stable is True
 
 
 # ---------------------------------------------------------------------------

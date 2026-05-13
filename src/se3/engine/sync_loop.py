@@ -222,7 +222,7 @@ class SyncLoop:
                 logger.warning("Oscillation detected: %s", report.summary())
                 break
 
-            if round_result.specs_updated == 0:
+            if round_result.is_stable:
                 stable_count += 1
                 if stable_count >= self.stable_rounds:
                     loop_result.converged = True
