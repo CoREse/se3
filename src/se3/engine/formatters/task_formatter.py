@@ -17,19 +17,26 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
-from ..display import get_console
+from ..display import _reverse_footer, _reverse_title, get_console
 
 logger = logging.getLogger(__name__)
 
 
 def _md_heading(title: str, color: str) -> Text:
-    """Build a ``[bold <color>]## Title[/bold <color>]`` heading line."""
-    return Text.from_markup(f"[bold {color}]## {title}[/bold {color}]")
+    """Build a reverse-color block heading (``[reverse] ## Title [/reverse]``)."""
+    return _reverse_title(title, color)
 
 
 def _heading_group(title: str, color: str, *body: RenderableType) -> Group:
-    """Wrap ``body`` with a markdown-style heading and trailing blank."""
-    return Group(_md_heading(title, color), Text(""), *body, Text(""))
+    """Wrap ``body`` with a reverse-color heading and matching footer."""
+    return Group(
+        _reverse_title(title, color),
+        Text(""),
+        *body,
+        Text(""),
+        _reverse_footer(color),
+        Text(""),
+    )
 
 
 class TaskValidationError(Exception):
@@ -431,13 +438,21 @@ class TaskFormatter:
             criteria_str = "\n".join(f"{i+1}. {c}" for i, c in enumerate(criteria))
             table.add_row("Verification Criteria", criteria_str)
 
-        # Build heading: blue ## title with the complexity icon kept in its own color
+        # Build heading: reverse-color block + standalone complexity icon
         task_id = task.get("id", "Unknown")
         complexity_icon = self.COMPLEXITY_ICONS.get(complexity, "•")
-        heading = Text.from_markup(
-            f"[bold blue]## Task {task_id}[/bold blue] [{color}]{complexity_icon}[/{color}]"
+        heading_line = Text.assemble(
+            _reverse_title(f"Task {task_id}", "blue"),
+            Text(f" {complexity_icon}", style=color),
         )
-        return Group(heading, Text(""), table, Text(""))
+        return Group(
+            heading_line,
+            Text(""),
+            table,
+            Text(""),
+            _reverse_footer("blue"),
+            Text(""),
+        )
 
     def format_summary(self, task_groups: List[Dict[str, Any]]) -> RenderableType:
         """Format summary statistics for task groups.
@@ -611,6 +626,8 @@ class TaskFormatter:
         loc_summary = self._format_loc_summary(task_groups, total_loc)
         renderables.append(Text(""))  # blank separator
         renderables.append(loc_summary)
+        renderables.append(Text(""))  # blank separator before footer
+        renderables.append(_reverse_footer("blue"))
         renderables.append(Text(""))  # trailing blank
 
         return Group(*renderables)

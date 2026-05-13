@@ -19,7 +19,12 @@ from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
-from ..engine.display import get_console, render_text
+from ..engine.display import (
+    get_console,
+    render_block_footer,
+    render_block_header,
+    render_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,19 +80,19 @@ def _render_sync_results(result) -> None:
             if desc:
                 label += f": {desc}"
             changes_tree.add(label)
-        console.print("[bold cyan]## Detailed Changes[/bold cyan]")
-        console.print("")
+        render_block_header("Detailed Changes", "cyan")
         console.print(changes_tree)
         console.print("")
+        render_block_footer("cyan")
 
     if result.specs_created:
         specs_tree = Tree("[bold]New Specs Created[/bold]")
         for name in result.specs_created:
             specs_tree.add(f"[green]{name}[/green]")
-        console.print("[bold green]## New Specs[/bold green]")
-        console.print("")
+        render_block_header("New Specs", "green")
         console.print(specs_tree)
         console.print("")
+        render_block_footer("green")
 
     if result.gap_resolutions:
         gap_tree = Tree("[bold]Gap Resolutions[/bold]")
@@ -102,10 +107,10 @@ def _render_sync_results(result) -> None:
             if desc:
                 label += f": {desc}"
             gap_tree.add(label)
-        console.print("[bold yellow]## Gap Decisions[/bold yellow]")
-        console.print("")
+        render_block_header("Gap Decisions", "yellow")
         console.print(gap_tree)
         console.print("")
+        render_block_footer("yellow")
 
     if hasattr(result, "conflict_resolutions") and result.conflict_resolutions:
         conflict_tree = Tree("[bold]Conflict Resolutions[/bold]")
@@ -120,10 +125,10 @@ def _render_sync_results(result) -> None:
             if desc:
                 label += f": {desc}"
             conflict_tree.add(label)
-        console.print("[bold magenta]## Conflict Decisions[/bold magenta]")
-        console.print("")
+        render_block_header("Conflict Decisions", "magenta")
         console.print(conflict_tree)
         console.print("")
+        render_block_footer("magenta")
 
     if hasattr(result, "issues_created") and result.issues_created > 0:
         issues_from_gaps = [
@@ -135,10 +140,10 @@ def _render_sync_results(result) -> None:
                 issue_tree.add(
                     f"[sync] {r.get('spec_name', '?')}: {r.get('description', '')}"
                 )
-            console.print("[bold red]## Issues[/bold red]")
-            console.print("")
+            render_block_header("Issues", "red")
             console.print(issue_tree)
             console.print("")
+            render_block_footer("red")
 
     summary_parts = []
     summary_parts.append(f"Issues created: {result.issues_created}")
@@ -168,10 +173,10 @@ def _render_sync_results(result) -> None:
             f"\nRespond via: se3 sync-respond '{result.call_file}'"
         )
 
-    console.print(f"[bold {heading_color}]## {title}[/bold {heading_color}]")
-    console.print("")
+    render_block_header(title, heading_color)
     console.print(summary_text)
     console.print("")
+    render_block_footer(heading_color)
 
 
 def sync_command(
@@ -191,10 +196,10 @@ def sync_command(
         project_root = get_project_root()
 
     console = get_console()
-    console.print("[bold blue]## SE3 Sync[/bold blue]")
-    console.print("")
+    render_block_header("SE3 Sync", "blue")
     console.print(f"Mode: [bold]{mode.value}[/bold]\nProject: {project_root}")
     console.print("")
+    render_block_footer("blue")
 
     logger.info("se3 sync called with mode=%s, project_root=%s", mode.value, project_root)
 

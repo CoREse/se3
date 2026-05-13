@@ -721,14 +721,14 @@ class TestRenderSessionDetailed:
     def test_returns_renderables(self):
         session = self._make_session()
         renderables = render_session_detailed(session, verbose=False)
-        # 4 items per message section (heading + blank + body + trailing blank)
-        # × 2 messages (prompt + response) = 8
-        assert len(renderables) == 8
+        # 6 items per message section (heading + blank + body + blank + footer + blank)
+        # × 2 messages (prompt + response) = 12
+        assert len(renderables) == 12
 
     def test_verbose_returns_renderables(self):
         session = self._make_session()
         renderables = render_session_detailed(session, verbose=True)
-        assert len(renderables) == 8
+        assert len(renderables) == 12
 
     def test_non_verbose_shows_final_text(self):
         """Non-verbose mode should extract only the final text block."""
@@ -815,9 +815,9 @@ class TestRenderSessionDetailed:
         ]
         session = self._make_session(messages=messages)
         renderables = render_session_detailed(session, verbose=False)
-        # 4 items per message section × 4 messages (prompt+response for each
-        # of 2 attempts) = 16
-        assert len(renderables) == 16
+        # 6 items per message section × 4 messages (prompt+response for each
+        # of 2 attempts) = 24
+        assert len(renderables) == 24
         buf = StringIO()
         c = Console(file=buf, force_terminal=False, width=200)
         for r in renderables:
@@ -846,7 +846,7 @@ class TestRenderSessionDetailed:
         ]
         session = self._make_session(messages=messages)
         renderables = render_session_detailed(session, verbose=False)
-        assert len(renderables) == 8
+        assert len(renderables) == 12
         buf = StringIO()
         c = Console(file=buf, force_terminal=False, width=200)
         for r in renderables:
@@ -886,51 +886,64 @@ class TestRenderSessionDetailed:
         assert "(empty response)" not in output
 
     def test_markdown_heading_style(self):
-        """Renderables should use markdown-style ## headings with bold blue/green colors.
+        """Renderables should use reverse-color block headings with matching footers.
 
-        Regression guard: ensures the Panel-to-heading refactor preserves
-        the '## Prompt' / '## Response' heading text, the bold blue/green
-        color mapping (from the original Panel border_style), and the
-        trailing blank Text spacer that closes each section.
+        Regression guard: ensures each section is wrapped as
+        ``(reverse_title, blank, body, blank, reverse_footer, blank)`` with
+        the original color mapping (blue for prompt, green for response).
+        Title text retains the ``## Title`` form (with leading/trailing
+        padding spaces) on a colored background instead of bold-on-default.
         """
         from rich.text import Text as RichText
         session = self._make_session()
         renderables = render_session_detailed(session, verbose=False)
 
-        # Section layout is (heading, blank, body, trailing_blank) repeated.
-        assert len(renderables) == 8
+        # Section layout is (heading, blank, body, blank, footer, blank) repeated.
+        assert len(renderables) == 12
 
         prompt_heading = renderables[0]
         assert isinstance(prompt_heading, RichText)
-        assert prompt_heading.plain == "## Prompt"
-        assert prompt_heading.style == "bold blue"
+        assert prompt_heading.plain == " ## Prompt "
+        assert prompt_heading.style.bgcolor.name == "blue"
 
-        # Trailing spacer after prompt section
+        # Trailing spacer after prompt body
         assert isinstance(renderables[3], RichText)
         assert renderables[3].plain == ""
 
-        response_heading = renderables[4]
+        # Prompt footer (reverse block, fixed-width spaces)
+        prompt_footer = renderables[4]
+        assert isinstance(prompt_footer, RichText)
+        assert set(prompt_footer.plain) == {" "}
+        assert prompt_footer.style.bgcolor.name == "blue"
+
+        response_heading = renderables[6]
         assert isinstance(response_heading, RichText)
-        assert response_heading.plain == "## Response"
-        assert response_heading.style == "bold green"
+        assert response_heading.plain == " ## Response "
+        assert response_heading.style.bgcolor.name == "green"
+
+        # Response footer
+        response_footer = renderables[10]
+        assert isinstance(response_footer, RichText)
+        assert set(response_footer.plain) == {" "}
+        assert response_footer.style.bgcolor.name == "green"
 
         # Trailing spacer after response section
-        assert isinstance(renderables[7], RichText)
-        assert renderables[7].plain == ""
+        assert isinstance(renderables[11], RichText)
+        assert renderables[11].plain == ""
 
     def test_markdown_heading_style_verbose(self):
-        """Verbose mode should also emit the '## Prompt' / '## Response' headings."""
+        """Verbose mode should also emit the reverse-block headings/footers."""
         from rich.text import Text as RichText
         session = self._make_session()
         renderables = render_session_detailed(session, verbose=True)
 
-        assert len(renderables) == 8
+        assert len(renderables) == 12
         assert isinstance(renderables[0], RichText)
-        assert renderables[0].plain == "## Prompt"
-        assert renderables[0].style == "bold blue"
-        assert isinstance(renderables[4], RichText)
-        assert renderables[4].plain == "## Response"
-        assert renderables[4].style == "bold green"
+        assert renderables[0].plain == " ## Prompt "
+        assert renderables[0].style.bgcolor.name == "blue"
+        assert isinstance(renderables[6], RichText)
+        assert renderables[6].plain == " ## Response "
+        assert renderables[6].style.bgcolor.name == "green"
 
     def test_markdown_heading_attempt_label(self):
         """Heading text should include the attempt label when sessions have multiple attempts."""
@@ -962,21 +975,22 @@ class TestRenderSessionDetailed:
         session = self._make_session(messages=messages)
         renderables = render_session_detailed(session, verbose=False)
 
+        # Each attempt produces 12 elements (prompt + response, each 6).
         # First attempt headings
         assert isinstance(renderables[0], RichText)
-        assert renderables[0].plain == "## Prompt (Attempt 1)"
-        assert renderables[0].style == "bold blue"
-        assert isinstance(renderables[4], RichText)
-        assert renderables[4].plain == "## Response (Attempt 1)"
-        assert renderables[4].style == "bold green"
+        assert renderables[0].plain == " ## Prompt (Attempt 1) "
+        assert renderables[0].style.bgcolor.name == "blue"
+        assert isinstance(renderables[6], RichText)
+        assert renderables[6].plain == " ## Response (Attempt 1) "
+        assert renderables[6].style.bgcolor.name == "green"
 
-        # Second attempt headings (offset by 8)
-        assert isinstance(renderables[8], RichText)
-        assert renderables[8].plain == "## Prompt (Attempt 2)"
-        assert renderables[8].style == "bold blue"
+        # Second attempt headings (offset by 12)
         assert isinstance(renderables[12], RichText)
-        assert renderables[12].plain == "## Response (Attempt 2)"
-        assert renderables[12].style == "bold green"
+        assert renderables[12].plain == " ## Prompt (Attempt 2) "
+        assert renderables[12].style.bgcolor.name == "blue"
+        assert isinstance(renderables[18], RichText)
+        assert renderables[18].plain == " ## Response (Attempt 2) "
+        assert renderables[18].style.bgcolor.name == "green"
 
 
 # --- Detailed JSON output ---

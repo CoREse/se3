@@ -211,7 +211,7 @@ se3 run --discover "我想做一个用户管理功能"
 
 #### Discovery Message Display Rendering
 
-The `_display_discovery_message()` function SHALL render LLM-generated content fields (`content` and `refined_description`) as markdown using `rich.markdown.Markdown`, while structural UI elements (section titles, numbered question lists, confirmation prompts) use Rich `Text` with appropriate styling. Multiple renderables are combined via `rich.console.Group` and printed under a left-aligned bold blue markdown-style heading `## Discovery` (rendered via `[bold blue]## Discovery[/bold blue]`), followed by a trailing blank line. This replaces the previous outer `Panel(title="Discovery", border_style="blue")` framing — no border/box is drawn to the terminal's left and right edges, while the original blue accent color and "Discovery" label are preserved as the heading.
+The `_display_discovery_message()` function SHALL render LLM-generated content fields (`content` and `refined_description`) as markdown using `rich.markdown.Markdown`, while structural UI elements (section titles, numbered question lists, confirmation prompts) use Rich `Text` with appropriate styling. Multiple renderables are combined via `rich.console.Group` and printed inside a reverse-color block titled `## Discovery` (white text on blue background) — produced via the shared helpers described in the **Block Rendering Visual Style** Requirement — followed by a blank line, the renderables, another blank line, and a matching short reverse-color blue footer block. This replaces the previous outer `Panel(title="Discovery", border_style="blue")` framing — no border/box is drawn to the terminal's left and right edges, while the original blue accent color and "Discovery" label are preserved as the reverse-color block title and footer.
 
 **Narrative prefix from raw LLM output:**
 
@@ -236,7 +236,7 @@ When the discovery step enters the confirmation phase (`is_confirmation=True`), 
 - **WHEN** `_display_discovery_message()` renders the message
 - **THEN** `content` and `refined_description` are rendered via `rich.markdown.Markdown`
 - **AND** structural elements (titles, numbered questions, confirmation prompts) use Rich `Text` with styling
-- **AND** all renderables are combined via `rich.console.Group` and printed under a bold blue markdown-style heading `## Discovery`, with no outer `Panel` border
+- **AND** all renderables are combined via `rich.console.Group` and printed inside a reverse-color block titled `## Discovery` (white on blue) with a matching short reverse-color blue footer block closing the section; no outer `Panel` border, `Rule`, or horizontal-line element is drawn (see **Block Rendering Visual Style** Requirement)
 
 ##### Scenario: Confirmation phase shows full LLM analysis content
 - **GIVEN** LLM enters confirmation mode with both `content` (analysis text) and `refined_description`
@@ -738,7 +738,7 @@ Returns the injection prompt fragment, or an empty string when the step is not i
 - **AND** Write 工具（新建文件，`old_content` 为 `None`）：显示 `Created {file_path} ({n} lines)` 绿色标识，不展示行级 diff
 - **AND** Write 工具（覆写已有文件，`old_content` 非 `None`）：通过 `generate_edit_diff(old_content, content, file_path)` 生成 unified diff 并渲染红/绿着色输出（文件 I/O 仅在 tracker 的 tool_use 阶段发生一次，formatter 层不访问文件系统）
 - **AND** diff 超过 `max_lines`（默认 50 行）时截断并显示剩余行数摘要
-- **AND** `display.render_diff()` 使用 Rich `Text` 对象逐行着色（无 Panel 边框），输出前打印粗体黄色 markdown 风格标题 `## Diff: {file_path}` 并空一行；每行添加 dim 样式的行号前缀（列宽固定 4，从 `@@ -a,b +c,d @@` hunk header 解析起始行号，删除行显示旧文件行号，新增行和上下文行显示新文件行号）；`total` 行数统计排除 `---`/`+++` 头部行；达到 `max_lines`（默认 50）时追加 dim 样式的 `... (N more lines)` 摘要后中止；当 `displayed == 0` 时不输出标题与空行
+- **AND** `display.render_diff()` 使用 Rich `Text` 对象逐行着色（无 Panel 边框、无 Rule、无横线），按 **Block Rendering Visual Style** 输出反色色块标题 `## Diff: {file_path}`（白字黄底）并空一行；每行添加 dim 样式的行号前缀（列宽固定 4，从 `@@ -a,b +c,d @@` hunk header 解析起始行号，删除行显示旧文件行号，新增行和上下文行显示新文件行号）；`total` 行数统计排除 `---`/`+++` 头部行；达到 `max_lines`（默认 50）时追加 dim 样式的 `... (N more lines)` 摘要后中止；diff 内容下方再空一行并打印固定宽度（4 字符）的反色黄色色块作为下边界；当 `displayed == 0` 时不输出标题、内容、空行与下边界色块
 - **AND** 仅对 `TOOL_FORMATTERS` 注册表中包含 `diff` 键的工具执行 diff 渲染，其他工具为 no-op
 
 #### Scenario: StreamJSONTracker 缓存管理
@@ -781,7 +781,7 @@ Returns the injection prompt fragment, or an empty string when the step is not i
 #### Scenario: 结构化详细渲染（非 verbose）
 - **WHEN** `render_session_detailed(session, verbose=False)` 被调用
 - **THEN** 返回 Rich renderables 列表
-- **AND** 用户 prompt 按 `segment_prompt()` 分段后整体在一个 `bold blue` 的 markdown heading `## Prompt`（attempt 重试时为 `## Prompt ({attempt_label})`）下展示，段内每个 segment 标题与内容左对齐渲染，不再绘制 Rich `Panel` 边框；assistant response 同样使用 `bold green` heading `## Response`（重试时附加 attempt 标签）+ 内容主体（最终文本 `Markdown` 或 verbose 模式下的 `Text(_render_ndjson_for_human(...))`）+ 末尾空行展示。颜色沿用先前 `border_style` 的语义（prompt → blue，response → green）。
+- **AND** 用户 prompt 按 `segment_prompt()` 分段后整体被包裹在反色色块标题 `## Prompt`（白字蓝底；attempt 重试时为 `## Prompt ({attempt_label})`）与匹配的固定宽度反色蓝色色块下边界之间，段内每个 segment 标题与内容左对齐渲染，不再绘制 Rich `Panel` 边框、Rule 或横线；assistant response 同样使用反色色块标题 `## Response`（白字绿底，重试时附加 attempt 标签）+ 内容主体（最终文本 `Markdown` 或 verbose 模式下的 `Text(_render_ndjson_for_human(...))`）+ 反色绿色色块下边界 + 末尾空行展示。颜色沿用先前 `border_style` 的语义（prompt → blue，response → green）；视觉规范统一由 **Block Rendering Visual Style** 要求提供。
 - **AND** assistant response 仅展示最终 text block（通过 `_extract_final_text()` 提取最后一个 `type: "assistant"` 消息中最后一个 `type: "text"` 内容块）
 - **AND** 若无 text 内容但有 tool 活动，fallback 到 `_render_ndjson_for_human()` 展示 tool 活动摘要
 - **AND** 按 attempt 分组，多次 attempt 分开展示并标注序号
@@ -1691,6 +1691,65 @@ implement 步骤 SHALL 在输出中声明 `tests_added`、`test_mapping` 和 `es
 - **THEN** implement 在新的 JSON 输出中提供一个更大的 `estimated_test_duration`
 - **AND** 下次 test 执行基于更新后的预估计算 timeout，避免反复超时的死循环
 
+### Requirement: Block Rendering Visual Style
+
+All SE3 user-facing rendered output blocks SHALL use a uniform reverse-color block visual: a reverse-color title at the top, the content body in the middle, and a fixed-width reverse-color footer at the bottom — no `Panel` border, no `Rule`, no horizontal lines, no left-side color bar, no terminal-width-adaptive visual elements.
+
+**Visual primitives:**
+
+- **Title block** — rendered as a Rich `Text` instance styled with `Style(color="white", bgcolor=<role_color>, bold=True)`. The text uses the markdown form `## Title` padded with a single space on each side (e.g. ` ## Discovery `) so the colored background visually frames the title. Using a `Text` object (not markup string interpolation) avoids markup-escape pitfalls in titles that contain user data.
+- **Footer block** — a fixed-width reverse-color block of `_BLOCK_FOOTER_WIDTH = 4` spaces, rendered with `Style(bgcolor=<role_color>)` matching the title's role color. The footer width is constant (4 columns) regardless of terminal size; it SHALL NOT scale with the console width.
+- **Layout order:** `title_block`, blank line, `content`, blank line, `footer_block`, blank line. The blank line between content and footer is mandatory — it prevents the footer from being copied when the user selects content.
+- **Copy safety:** boundary markers are drawn purely via `bgcolor` over space characters, not via visible characters (no `─`, `═`, `┃`, `▔`, etc.). A user selecting and copying the content body never picks up boundary noise; selecting the footer copies only insignificant whitespace.
+
+**Helper functions (single source of truth in `se3/engine/display.py`):**
+
+- `_reverse_title(title: str, color: str) -> Text` — module-private helper that returns the title `Text` object.
+- `_reverse_footer(color: str, width: int = _BLOCK_FOOTER_WIDTH) -> Text` — module-private helper that returns the fixed-width footer `Text` object.
+- `render_block_header(title: str, color: str)` and `render_block_footer(color: str)` — thin public wrappers that print the header/footer (with appropriate blank-line spacing) directly to the console. These are the entry points used by modules outside `display.py` so external call sites do not construct `[reverse <color>] ## ... [/reverse <color>]` markup inline.
+
+**Consumers:**
+
+- All 8 render functions in `display.py` (`render_full`, `render_proposal`, `render_design`, `render_spec_content`, `render_text`, `render_code`, `render_diff`, `render_markdown`) use `_reverse_title` and `_reverse_footer` for their boundaries. The three delegating renderers (`render_proposal`, `render_design`, `render_spec_content`) inherit the visual transparently via `render_full`.
+- `task_formatter._md_heading` and `_heading_group` are thin re-wraps of the display helpers. `_heading_group` SHALL append `_reverse_footer` (plus a trailing blank line) inside the returned `Group`, so all 8 task_formatter callers automatically gain the bottom boundary without per-callsite changes; callers continue to `console.print(...)` the returned renderable without changing their contract.
+- External display call sites in `chat_history`, `sync`, `issue_cmd`, `worktree.py` (Merge Conflict prompt, red), `sync_interaction.py` (Decision Input panel, blue), and `discovery.py` (Discovery message, blue) SHALL invoke `display.render_block_header(title, color)` before the body and `display.render_block_footer(color)` after, rather than constructing markup strings directly.
+
+**Color → role mapping (preserved from the prior `border_style` semantics):**
+
+| Color | Role |
+|-------|------|
+| `blue` | general / prompt / discovery / decision input |
+| `green` | code / response |
+| `yellow` | diff |
+| `magenta` | markdown |
+| `red` | error / merge conflict |
+| `cyan` | summary (task_formatter local use) |
+
+#### Scenario: Footer width is constant across terminal widths
+- **GIVEN** any rendered block produced by a `display.render_*` function or via `render_block_footer`
+- **WHEN** the terminal is resized to any width (narrow or wide)
+- **THEN** the footer block remains exactly `_BLOCK_FOOTER_WIDTH` (4) columns wide
+- **AND** no part of the title/footer scales with terminal width
+- **AND** no `Rule`, `Panel` outline, or horizontal-line element appears around the body
+
+#### Scenario: Content selection excludes boundary characters
+- **GIVEN** a rendered block consisting of reverse-color title, blank line, content, blank line, reverse-color footer
+- **WHEN** the user selects and copies the content body
+- **THEN** the copied text contains only the content body — no boundary characters leak in, because the title and footer are drawn entirely via background-colored spaces, not via visible glyphs
+- **AND** the title and content are separated by a blank line, and the content and footer are separated by a blank line, so the footer is never adjacent to the last content line
+
+#### Scenario: External modules use public block wrappers
+- **WHEN** code outside `display.py` needs to render a titled block (e.g. `worktree.py` Merge Conflict prompt, `sync_interaction.py` Decision Input, `discovery.py` Discovery message, `chat_history`/`sync`/`issue_cmd` panels)
+- **THEN** the call site invokes `display.render_block_header(title, color)` before the body and `display.render_block_footer(color)` after
+- **AND** the call site does NOT hand-roll `[reverse <color>] ## Title [/reverse <color>]` markup strings inline
+- **AND** no `Panel`, `Rule`, or other border element is added around the body
+
+#### Scenario: task_formatter heading group auto-appends footer
+- **GIVEN** a `task_formatter` helper that returns a `rich.console.Group` built via `_heading_group(title, color, *body)`
+- **WHEN** the caller prints that Group to the console
+- **THEN** the Group already contains the reverse-color title at the top and a matching reverse-color footer at the bottom (with the required blank-line spacing)
+- **AND** the caller does not need to print a footer separately
+
 ### Requirement: Implement Step Output Rendering
 
 The `implement` step SHALL use a custom renderer that presents structured, human-readable output instead of raw JSON key-value listing.
@@ -1727,7 +1786,7 @@ The `implement` step SHALL display a structured task plan view at the start of e
 
 **Rendering style:**
 
-The plan is rendered under a left-aligned bold-blue markdown-style heading `## Implementation Plan` (built via `Text.from_markup("[bold blue]## Implementation Plan[/bold blue]")`), followed by a blank spacer, the body (a `rich.console.Group` of the sections below), and a trailing blank line. No outer `Panel` border is drawn to the terminal edges. The `task_formatter` module exposes internal helpers `_md_heading(title, color)` and `_heading_group(title, color, *body)` that all other formatter return values (Task Plan, Task Summary, Dependencies, task detail, etc.) share so they remain Group-returning functions — callers continue to `console.print(...)` the returned renderable without changing their contract. Color mapping from the previous `border_style` is preserved per call site (blue/green/cyan as appropriate).
+The plan is rendered inside a reverse-color block titled `## Implementation Plan` (white text on blue background), followed by a blank spacer, the body (a `rich.console.Group` of the sections below), a blank line, and a trailing fixed-width reverse-color blue footer block — produced via the shared helpers described in the **Block Rendering Visual Style** Requirement. No outer `Panel` border, `Rule`, or horizontal-line element is drawn. The `task_formatter` module exposes internal helpers `_md_heading(title, color)` and `_heading_group(title, color, *body)` that thin-wrap the shared display helpers; `_heading_group` SHALL append the matching reverse-color footer (plus trailing blank line) inside the returned `Group`, so all other formatter return values (Task Plan, Task Summary, Dependencies, task detail, etc.) automatically gain symmetric upper/lower boundaries. The helpers remain Group-returning functions — callers continue to `console.print(...)` the returned renderable without changing their contract. Color mapping from the previous `border_style` is preserved per call site (blue/green/cyan as appropriate).
 
 **Body Contents:**
 

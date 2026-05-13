@@ -1284,10 +1284,11 @@ class TestDisplayDiscoveryMessageWithNarrative:
         raw = "Additional narrative text.\n\n```json\n{\"mode\": \"question\"}\n```"
         _display_discovery_message("content", None, questions=None, raw_result_text=raw)
 
-        # Heading + blank + Group + blank = 4 prints
-        assert mock_console.return_value.print.call_count == 4
+        # Heading block (header + blank) + Group + blank + Footer block
+        # (footer + blank) = 6 prints
+        assert mock_console.return_value.print.call_count == 6
         heading = mock_console.return_value.print.call_args_list[0][0][0]
-        assert "## Discovery" in heading
+        assert "## Discovery" in heading.plain
         group = mock_console.return_value.print.call_args_list[2][0][0]
         assert isinstance(group, Group)
         # First renderable should be the narrative Markdown
@@ -1302,7 +1303,7 @@ class TestDisplayDiscoveryMessageWithNarrative:
 
         _display_discovery_message("Hello", None, questions=None, raw_result_text=None)
 
-        assert mock_console.return_value.print.call_count == 4
+        assert mock_console.return_value.print.call_count == 6
         group = mock_console.return_value.print.call_args_list[2][0][0]
         assert isinstance(group, Group)
         # First renderable should be Markdown("Hello"), no extra narrative
@@ -1318,7 +1319,7 @@ class TestDisplayDiscoveryMessageWithNarrative:
         raw = '{"mode": "question", "content": "Hello"}'
         _display_discovery_message("Hello", None, questions=None, raw_result_text=raw)
 
-        assert mock_console.return_value.print.call_count == 4
+        assert mock_console.return_value.print.call_count == 6
         group = mock_console.return_value.print.call_args_list[2][0][0]
         assert isinstance(group, Group)
         # First renderable should be Markdown("Hello"), no narrative prefix

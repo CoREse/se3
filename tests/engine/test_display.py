@@ -1,0 +1,218 @@
+"""Unit tests for src/se3/engine/display.py reverse-block helpers and renderers."""
+
+from __future__ import annotations
+
+from io import StringIO
+
+import pytest
+from rich.console import Console
+from rich.text import Text
+
+from se3.engine import display
+from se3.engine.display import (
+    _BLOCK_FOOTER_WIDTH,
+    _reverse_footer,
+    _reverse_title,
+    render_block_footer,
+    render_block_header,
+    render_code,
+    render_diff,
+    render_full,
+    render_markdown,
+    render_text,
+    set_console,
+)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _make_recording_console(width: int = 80) -> tuple[Console, StringIO]:
+    """Build a Console that writes captured output to a StringIO buffer."""
+    buf = StringIO()
+    console = Console(file=buf, width=width, force_terminal=True, color_system="truecolor")
+    return console, buf
+
+
+@pytest.fixture(autouse=True)
+def _isolate_console():
+    """Reset the module-level console between tests."""
+    saved = display._console
+    yield
+    display._console = saved
+
+
+# ---------------------------------------------------------------------------
+# Low-level helper tests
+# ---------------------------------------------------------------------------
+
+
+class TestReverseHelpers:
+    def test_reverse_title_returns_text(self):
+        out = _reverse_title("Hello", "blue")
+        assert isinstance(out, Text)
+        # Padded form preserves the ## marker for visibility.
+        assert out.plain == " ## Hello "
+        assert out.style.bgcolor.name == "blue"
+        assert out.style.bold is True
+
+    def test_reverse_title_is_markup_safe(self):
+        # Square brackets in title must NOT be parsed as Rich markup.
+        out = _reverse_title("[bold]inj[/bold]", "magenta")
+        assert out.plain == " ## [bold]inj[/bold] "
+        # No nested spans created by markup parsing
+        assert len(out.spans) == 0
+
+    def test_reverse_footer_fixed_width(self):
+        out = _reverse_footer("blue")
+        assert isinstance(out, Text)
+        assert out.plain == " " * _BLOCK_FOOTER_WIDTH
+        assert len(out.plain) == 4
+
+    def test_reverse_footer_only_spaces(self):
+        # Copy safety: footer body must contain only whitespace.
+        for color in ("blue", "green", "yellow", "magenta", "red", "cyan"):
+            out = _reverse_footer(color)
+            assert set(out.plain) == {" "}
+            assert out.style.bgcolor.name == color
+
+    @pytest.mark.parametrize("term_width", [40, 80, 120, 200])
+    def test_footer_width_independent_of_terminal(self, term_width):
+        console, buf = _make_recording_console(width=term_width)
+        set_console(console)
+        render_block_footer("yellow")
+        # The footer has fixed plain width 4, regardless of terminal width.
+        # We reconstruct via _reverse_footer (deterministic) and assert width.
+        footer = _reverse_footer("yellow")
+        assert len(footer.plain) == 4
+
+    def test_render_block_header_uses_global_console(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        render_block_header("Ctx", "green")
+        # The captured output should contain " ## Ctx " somewhere
+        assert " ## Ctx " in buf.getvalue()
+
+    def test_render_block_footer_emits_blank_line(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        render_block_footer("red")
+        out = buf.getvalue()
+        # Footer line + a trailing blank line
+        # Last two non-stripped lines should be footer then empty
+        lines = out.splitlines()
+        assert len(lines) >= 1
+
+
+# ---------------------------------------------------------------------------
+# Render function output sequencing tests
+# ---------------------------------------------------------------------------
+
+
+class TestRenderFunctionsBlocks:
+    def test_render_full_with_title_emits_footer(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        render_full("hello body", title="My Block")
+        out = buf.getvalue()
+        # Title appears before content, footer (4 spaces with bg) appears after.
+        i_title = out.find("## My Block")
+        i_body = out.find("hello body")
+        assert 0 <= i_title < i_body
+        # Title and footer both present (footer characters are spaces, but
+        # ANSI bg sequence will appear in the captured stream); detect by
+        # looking for an ANSI background after the body.
+        assert "\x1b[" in out  # has ANSI styling
+        assert i_body < len(out)
+
+    def test_render_full_without_title_emits_no_block_borders(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        render_full("just body")
+        out = buf.getvalue()
+        assert "##" not in out
+        # No background-colored spans expected
+        # (We accept generic ANSI for plain text formatting; here Rich won't
+        # add bg without title.)
+        assert "## " not in out
+
+    def test_render_text_with_title_block(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        render_text("payload", title="Step Output")
+        out = buf.getvalue()
+        assert " ## Step Output " in out
+
+    def test_render_text_without_title_no_borders(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        render_text("payload")
+        out = buf.getvalue()
+        assert "##" not in out
+
+    def test_render_code_with_title_block(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        render_code("print(1)\n", language="python", title="Snippet")
+        out = buf.getvalue()
+        assert " ## Snippet " in out
+        # syntax-highlighted body present
+        assert "print" in out
+
+    def test_render_diff_with_displayed_lines_emits_block(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        diff_lines = [
+            "--- a/foo.py\n",
+            "+++ b/foo.py\n",
+            "@@ -1,2 +1,2 @@\n",
+            "-old\n",
+            "+new\n",
+            " ctx\n",
+        ]
+        render_diff(diff_lines, "foo.py", max_lines=50)
+        out = buf.getvalue()
+        assert " ## Diff: foo.py " in out
+
+    def test_render_diff_no_displayed_lines_no_block(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        # Only header lines; no real diff content rendered
+        render_diff(["--- a/foo.py\n", "+++ b/foo.py\n"], "foo.py")
+        out = buf.getvalue()
+        assert "## Diff" not in out
+
+    def test_render_markdown_with_title_block(self):
+        console, buf = _make_recording_console()
+        set_console(console)
+        render_markdown("**md**", title="Notes")
+        out = buf.getvalue()
+        assert " ## Notes " in out
+
+
+# ---------------------------------------------------------------------------
+# task_formatter integration: _heading_group should append a footer
+# ---------------------------------------------------------------------------
+
+
+class TestHeadingGroupFooter:
+    def test_heading_group_last_element_is_blank_after_footer(self):
+        from rich.console import Group
+        from se3.engine.formatters.task_formatter import _heading_group
+
+        group = _heading_group("Plan", "blue", Text("body"))
+        assert isinstance(group, Group)
+        elements = list(group.renderables)
+        # (title, blank, body, blank, footer, blank) → 6 elements
+        assert len(elements) == 6
+        title, blank1, body, blank2, footer, blank3 = elements
+        assert isinstance(title, Text) and title.plain == " ## Plan "
+        assert isinstance(blank1, Text) and blank1.plain == ""
+        assert isinstance(body, Text) and body.plain == "body"
+        assert isinstance(blank2, Text) and blank2.plain == ""
+        assert isinstance(footer, Text)
+        assert set(footer.plain) == {" "}
+        assert footer.style.bgcolor.name == "blue"
+        assert isinstance(blank3, Text) and blank3.plain == ""

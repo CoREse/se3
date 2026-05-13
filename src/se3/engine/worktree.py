@@ -588,10 +588,9 @@ def _create_merge_conflict_call(
 def _display_merge_conflict(loop_branch: str, target_branch: str, conflict_files: list[str]) -> None:
     """Display merge conflict information with Rich formatting."""
     try:
-        from rich.console import Console
         from rich.text import Text
 
-        console = Console()
+        from . import display
 
         lines = Text()
         lines.append(f"Cannot merge ", style="bold red")
@@ -612,10 +611,11 @@ def _display_merge_conflict(loop_branch: str, target_branch: str, conflict_files
         lines.append(f"  # resolve conflicts\n", style="dim")
         lines.append(f"  git add . && git commit\n", style="dim")
 
-        console.print("[bold red]## Merge Conflict[/bold red]")
-        console.print("")
+        console = display.get_console()
+        display.render_block_header("Merge Conflict", "red")
         console.print(lines)
         console.print("")
+        display.render_block_footer("red")
     except ImportError:
         # Fallback without Rich
         print(f"\n--- Merge Conflict ---")

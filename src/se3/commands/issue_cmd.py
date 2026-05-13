@@ -20,6 +20,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from ..engine.display import render_block_footer, render_block_header
 from ..engine.issue_manager import KNOWN_TYPES, IssueManager, IssueStatus
 
 app = typer.Typer(help="Manage SE3 issues")
@@ -163,10 +164,10 @@ def show_cmd(
         f"\n[bold]Description:[/bold]\n{issue.description}"
     )
 
-    console.print(f"[bold cyan]## Issue {issue.id}[/bold cyan]")
-    console.print()
+    render_block_header(f"Issue {issue.id}", "cyan")
     console.print(content)
     console.print()
+    render_block_footer("cyan")
 
 
 @app.command(name="create")

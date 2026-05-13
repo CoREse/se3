@@ -10,11 +10,18 @@ import re
 from typing import Any, Dict, Optional
 
 from rich.console import Console
+from rich.style import Style
 from rich.text import Text
 from rich.markdown import Markdown
 from rich.syntax import Syntax
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+# Fixed width (in characters) of the reverse-color block footer used as the
+# bottom boundary of a rendered block. Kept small and constant so it never
+# stretches with terminal width and never adds visible characters when copied.
+_BLOCK_FOOTER_WIDTH = 4
 
 
 # Global console instance for consistent output
@@ -35,6 +42,48 @@ def set_console(console: Console) -> None:
     _console = console
 
 
+def _reverse_title(title: str, color: str) -> Text:
+    """Build a reverse-color block heading: ` ## Title ` on a colored background.
+
+    Uses an explicit ``Style`` so the title text is not parsed as Rich markup
+    (square brackets in the title are safe). Returns a ``Text`` object.
+    """
+    style = Style(color="white", bgcolor=color, bold=True)
+    return Text(f" ## {title} ", style=style)
+
+
+def _reverse_footer(color: str, width: int = _BLOCK_FOOTER_WIDTH) -> Text:
+    """Build a fixed-width reverse-color block as the bottom boundary marker.
+
+    The body is `width` spaces — when copied from the terminal, the user gets
+    only whitespace (no visible boundary characters).
+    """
+    style = Style(bgcolor=color)
+    return Text(" " * width, style=style)
+
+
+def render_block_header(title: str, color: str) -> None:
+    """Print a reverse-color block heading followed by a blank line.
+
+    Public thin wrapper for modules outside ``display.py`` so they don't need
+    to assemble Rich markup strings themselves.
+    """
+    console = get_console()
+    console.print(_reverse_title(title, color))
+    console.print("")
+
+
+def render_block_footer(color: str) -> None:
+    """Print the fixed-width reverse-color block footer followed by a blank line.
+
+    Caller is responsible for any preceding blank line separating content from
+    the footer.
+    """
+    console = get_console()
+    console.print(_reverse_footer(color))
+    console.print("")
+
+
 def render_full(content: str, title: Optional[str] = None) -> None:
     """Render full content without truncation, left-aligned with a markdown-style title.
 
@@ -45,10 +94,13 @@ def render_full(content: str, title: Optional[str] = None) -> None:
     console = get_console()
 
     if title:
-        console.print(f"[bold blue]## {title}[/bold blue]")
+        console.print(_reverse_title(title, "blue"))
         console.print("")
     console.print(content)
     console.print("")
+    if title:
+        console.print(_reverse_footer("blue"))
+        console.print("")
 
 
 def render_proposal(proposal: Dict[str, Any]) -> None:
@@ -305,7 +357,7 @@ def render_text(content: str, title: Optional[str] = None, style: Optional[str] 
     console = get_console()
 
     if title:
-        console.print(f"[bold blue]## {title}[/bold blue]")
+        console.print(_reverse_title(title, "blue"))
         console.print("")
 
     if style:
@@ -313,6 +365,9 @@ def render_text(content: str, title: Optional[str] = None, style: Optional[str] 
     else:
         console.print(content)
     console.print("")
+    if title:
+        console.print(_reverse_footer("blue"))
+        console.print("")
 
 
 def render_code(content: str, language: str = "python", title: Optional[str] = None) -> None:
@@ -326,12 +381,15 @@ def render_code(content: str, language: str = "python", title: Optional[str] = N
     console = get_console()
 
     if title:
-        console.print(f"[bold green]## {title}[/bold green]")
+        console.print(_reverse_title(title, "green"))
         console.print("")
 
     syntax = Syntax(content, language, theme="monokai", line_numbers=True)
     console.print(syntax)
     console.print("")
+    if title:
+        console.print(_reverse_footer("green"))
+        console.print("")
 
 
 def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> None:
@@ -390,9 +448,11 @@ def render_diff(diff_lines: list[str], file_path: str, max_lines: int = 50) -> N
         displayed += 1
 
     if displayed > 0:
-        console.print(f"[bold yellow]## Diff: {file_path}[/bold yellow]")
+        console.print(_reverse_title(f"Diff: {file_path}", "yellow"))
         console.print("")
         console.print(text)
+        console.print("")
+        console.print(_reverse_footer("yellow"))
         console.print("")
 
 
@@ -406,9 +466,12 @@ def render_markdown(content: str, title: Optional[str] = None) -> None:
     console = get_console()
 
     if title:
-        console.print(f"[bold magenta]## {title}[/bold magenta]")
+        console.print(_reverse_title(title, "magenta"))
         console.print("")
 
     markdown = Markdown(content)
     console.print(markdown)
     console.print("")
+    if title:
+        console.print(_reverse_footer("magenta"))
+        console.print("")

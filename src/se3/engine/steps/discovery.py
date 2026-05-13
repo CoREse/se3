@@ -735,6 +735,7 @@ def _display_discovery_message(
     from rich.console import Group
     from rich.markdown import Markdown
     from rich.text import Text
+    from .. import display
     from ..display import get_console
 
     renderables = []
@@ -787,9 +788,9 @@ def _display_discovery_message(
         renderables.append(Text(""))
 
     console = get_console()
-    console.print("[bold blue]## Discovery[/bold blue]")
-    console.print("")
+    display.render_block_header("Discovery", "blue")
     console.print(Group(*renderables))
     console.print("")
+    display.render_block_footer("blue")
 
 

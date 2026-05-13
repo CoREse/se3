@@ -1259,10 +1259,11 @@ def render_session_detailed(
                  _render_ndjson_for_human(). If False, show only the final
                  assistant text block.
     """
-    from rich.rule import Rule
     from rich.text import Text
     from rich.markdown import Markdown
     from rich.console import Group
+
+    from .display import _reverse_footer, _reverse_title
 
     renderables = []
 
@@ -1295,9 +1296,11 @@ def render_session_detailed(
                 if attempt_label:
                     title = f"Prompt ({attempt_label})"
                 renderables.extend([
-                    Text(f"## {title}", style="bold blue"),
+                    _reverse_title(title, "blue"),
                     Text(""),
                     Group(*prompt_parts),
+                    Text(""),
+                    _reverse_footer("blue"),
                     Text(""),
                 ])
 
@@ -1314,9 +1317,11 @@ def render_session_detailed(
                     rendered_text = _render_ndjson_for_human(msg.raw_json)
                     body = Text(rendered_text) if rendered_text else Text("(empty response)", style="dim")
                     renderables.extend([
-                        Text(f"## {title}", style="bold green"),
+                        _reverse_title(title, "green"),
                         Text(""),
                         body,
+                        Text(""),
+                        _reverse_footer("green"),
                         Text(""),
                     ])
                 else:
@@ -1331,16 +1336,20 @@ def render_session_detailed(
                         text = msg.content
                     if text:
                         renderables.extend([
-                            Text(f"## {title}", style="bold green"),
+                            _reverse_title(title, "green"),
                             Text(""),
                             Markdown(text),
+                            Text(""),
+                            _reverse_footer("green"),
                             Text(""),
                         ])
                     else:
                         renderables.extend([
-                            Text(f"## {title}", style="bold green"),
+                            _reverse_title(title, "green"),
                             Text(""),
                             Text("(empty response)", style="dim"),
+                            Text(""),
+                            _reverse_footer("green"),
                             Text(""),
                         ])
 
