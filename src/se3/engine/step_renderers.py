@@ -478,19 +478,21 @@ def _render_analyze(step: Step) -> None:
         lines.append("[bold cyan]Reasoning[/bold cyan]")
         lines.append(f"  {reasoning}")
 
-    # ── Relevant Specs ─────────────────────────────────────────────
-    relevant_specs = outputs.get("relevant_specs", [])
-    if relevant_specs:
+    # ── Relevant Spec Items ────────────────────────────────────────
+    selected_items = outputs.get("selected_items", [])
+    if selected_items:
         lines.append("")
         lines.append("[dim]" + "─" * 50 + "[/dim]")
         lines.append("")
-        lines.append("[bold yellow]Relevant Specs[/bold yellow]")
-        for spec in relevant_specs:
-            if isinstance(spec, dict):
-                name = spec.get("name", spec.get("spec_name", str(spec)))
+        lines.append("[bold yellow]Relevant Spec Items[/bold yellow]")
+        for item in selected_items:
+            if isinstance(item, dict):
+                spec = item.get("spec", "")
+                name = item.get("requirement_name", "")
+                label = f"{spec}:{name}" if spec and name else (spec or name or str(item))
             else:
-                name = str(spec)
-            lines.append(f"  • {name}")
+                label = str(item)
+            lines.append(f"  • {label}")
 
     # ── Error ──────────────────────────────────────────────────────
     if step.error_message:

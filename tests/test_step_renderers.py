@@ -38,7 +38,10 @@ class TestRenderAnalyze:
             "complexity": "medium",
             "scope": "src/se3/engine/step_renderers.py",
             "reasoning": "This task modifies rendering logic.",
-            "relevant_specs": ["flow-engine", "base"],
+            "selected_items": [
+                {"spec": "flow-engine", "requirement_name": "FE-3"},
+                {"spec": "base", "requirement_name": "Project Identity"},
+            ],
             "spec_content": "long spec content...",
             "project_summary": "long project summary...",
         })
@@ -57,9 +60,10 @@ class TestRenderAnalyze:
         # Reasoning displayed
         assert "This task modifies rendering logic." in content
 
-        # Relevant specs listed
-        assert "flow-engine" in content
-        assert "base" in content
+        # Relevant Spec Items listed as spec:requirement_name
+        assert "Relevant Spec Items" in content
+        assert "flow-engine:FE-3" in content
+        assert "base:Project Identity" in content
 
         # Internal fields NOT displayed
         assert "long spec content..." not in content
@@ -89,12 +93,12 @@ class TestRenderAnalyze:
         assert "N/A" in content  # all defaults
 
     @patch("se3.engine.step_renderers.render_full")
-    def test_relevant_specs_as_dicts(self, mock_render_full):
+    def test_selected_items_rendering(self, mock_render_full):
         step = _make_step(StepType.ANALYZE, {
             "task_type": "feature",
-            "relevant_specs": [
-                {"name": "flow-engine", "relevance": "high"},
-                {"spec_name": "base"},
+            "selected_items": [
+                {"spec": "flow-engine", "requirement_name": "FE-3"},
+                {"spec": "base", "requirement_name": "Project Identity"},
             ],
         })
 
@@ -102,8 +106,47 @@ class TestRenderAnalyze:
         _render_analyze(step)
 
         content = mock_render_full.call_args[0][0]
-        assert "flow-engine" in content
-        assert "base" in content
+        assert "Relevant Spec Items" in content
+        assert "flow-engine:FE-3" in content
+        assert "base:Project Identity" in content
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_analyze_renderer_shows_spec_items(self, mock_render_full):
+        """G4 acceptance test: analyze renderer displays 'Relevant Spec Items'
+        and renders each item as ``spec:requirement_name`` (e.g., flow-engine:FE-3).
+        Guards against regressions where the renderer reverts to showing
+        relevant_specs / spec names only.
+        """
+        step = _make_step(StepType.ANALYZE, {
+            "task_type": "feature",
+            "selected_items": [
+                {"spec": "flow-engine", "requirement_name": "FE-3"},
+            ],
+            "spec_content": "ignored payload",
+            "project_summary": "ignored payload",
+        })
+
+        from se3.engine.step_renderers import _render_analyze
+        _render_analyze(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "Relevant Spec Items" in content
+        assert "flow-engine:FE-3" in content
+
+    @patch("se3.engine.step_renderers.render_full")
+    def test_no_selected_items_no_section(self, mock_render_full):
+        step = _make_step(StepType.ANALYZE, {
+            "task_type": "feature",
+            "complexity": "simple",
+            "scope": "tiny",
+            "selected_items": [],
+        })
+
+        from se3.engine.step_renderers import _render_analyze
+        _render_analyze(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "Relevant Spec Items" not in content
 
 
 # ---------------------------------------------------------------------------

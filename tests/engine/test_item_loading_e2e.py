@@ -299,6 +299,9 @@ class TestAnalyzeHandlerItemLevel:
         assert len(selected_items) > 0
         assert selected_items[0]["spec"] == "flow-engine"
         assert selected_items[0]["requirement_name"] == "状态机驱动流程"
+        # Output-side cleanup: selected_specs must not leak into outputs even
+        # when the LLM returns it alongside selected_items.
+        assert "selected_specs" not in step.outputs
 
     def test_analyze_handler_spec_content_smaller_than_full(self):
         """The assembled spec_content should be smaller than full flow-engine text."""
