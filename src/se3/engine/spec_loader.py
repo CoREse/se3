@@ -226,22 +226,19 @@ def _assemble_full_text(
 
     Returns (text, relevant_specs, loaded_item_ids derived from all items in involved specs).
     """
+    if not selected_items:
+        raise ValueError(
+            "full_spec mode requires non-empty selected_items; got [] — "
+            "this usually means the analyze step failed to select any spec "
+            "items relevant to the task. Check ANALYZE outputs."
+        )
+
     # Determine involved specs from selected items + base
     involved_specs: Set[str] = {"base"}
-    if selected_items:
-        for item in selected_items:
-            spec = item.get("spec", "").strip()
-            if spec:
-                involved_specs.add(spec)
-    else:
-        # No selected items — fall back to base spec only for consistency
-        # with ContextBuilder.load_specs_for_step. Loading all specs is
-        # expensive for large projects and unnecessary when analyze found
-        # nothing relevant.
-        logger.warning(
-            "full_spec mode with empty selected_items: loading base spec only "
-            "(no relevant specs selected by analyze)",
-        )
+    for item in selected_items:
+        spec = item.get("spec", "").strip()
+        if spec:
+            involved_specs.add(spec)
 
     parts: List[str] = []
     relevant_specs: List[str] = []
