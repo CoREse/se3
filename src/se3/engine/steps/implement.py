@@ -47,12 +47,15 @@ from ..worktree import (
     _run_git,
     create_worktree,
     delete_branch,
+    detect_unmerged_paths,
     force_cleanup_worktree,
     fork_worktree,
     get_conflicting_files,
     get_current_branch,
     has_commits,
     has_new_commits,
+    merge_in_progress,
+    recover_stale_unmerged_paths,
     resolve_merge_conflicts_with_context,
 )
 from ..stash_utils import (
@@ -1273,6 +1276,43 @@ def _resolve_convergence_conflicts(
     return True
 
 
+def _clean_index_after_failed_merge(project_root: Path, branch: str) -> None:
+    """Guarantee the index is free of unmerged entries on every failure exit.
+
+    ``git merge --abort`` silently no-ops when no ``MERGE_HEAD`` exists
+    (e.g. the merge was rejected pre-flight because the index already had
+    stage>0 entries from an earlier crashed run). Without this helper, the
+    leaf-merge failure paths can return with the same garbage in the index
+    that caused the failure — making the next leaf merge fail identically
+    and locking the DAG in a wedged state across retries.
+
+    Strategy: if a merge is in progress, abort it first; afterwards run
+    ``recover_stale_unmerged_paths`` so any residual stage>0 entries whose
+    working-tree blob already matches HEAD get ``git add``-ed away. This
+    mirrors what the DAG entry preflight does, applied locally so a single
+    bad leaf doesn't poison subsequent leaves within the same run.
+    """
+    if merge_in_progress(project_root):
+        _run_git(project_root, "merge", "--abort", check=False)
+    leftover = detect_unmerged_paths(project_root)
+    if not leftover:
+        return
+    recovered, unresolved = recover_stale_unmerged_paths(project_root)
+    if recovered:
+        logger.warning(
+            "Leaf merge cleanup for %s: cleared %d stale unmerged path(s) "
+            "post-failure: %s",
+            branch, len(recovered), recovered,
+        )
+    if unresolved:
+        logger.error(
+            "Leaf merge cleanup for %s: %d unmerged path(s) could not be "
+            "auto-resolved and remain in the index — next leaf merge may "
+            "fail until manual resolution: %s",
+            branch, len(unresolved), unresolved,
+        )
+
+
 def _merge_leaf_branch(
     project_root: Path,
     branch: str,
@@ -1333,14 +1373,26 @@ def _merge_leaf_branch(
     except BaseException:
         # Defensive: if the merge attempt raises (subprocess crash,
         # KeyboardInterrupt during a long LLM call, etc.), make a
-        # best-effort to restore the stashed working tree before the
-        # exception propagates. Otherwise the user is left with a
-        # dangling stash@{0} and an empty-looking working tree.
+        # best-effort to:
+        #   1. abort any in-progress merge and clear stale unmerged-index
+        #      entries (otherwise the next DAG run inherits a wedged index
+        #      and ``git stash`` cannot package stage>0 entries, so every
+        #      future leaf merge fails with "Merging is not possible
+        #      because you have unmerged files");
+        #   2. restore the stashed working tree so the user isn't left with
+        #      a dangling stash@{0} and an empty-looking working tree.
         #
-        # The cleanup itself is wrapped: if ``stash pop`` also raises
-        # (e.g., subprocess.TimeoutExpired in a degraded environment),
-        # the inner exception must NOT shadow the original cause that
-        # the caller / user needs to see.
+        # Each cleanup step is wrapped: if a step also raises (e.g.,
+        # subprocess.TimeoutExpired in a degraded environment), the inner
+        # exception must NOT shadow the original cause that the caller /
+        # user needs to see.
+        try:
+            _clean_index_after_failed_merge(project_root, branch)
+        except Exception:
+            logger.warning(
+                "index cleanup during exception path also failed; "
+                "unmerged entries may persist — original exception preserved",
+            )
         if stashed:
             try:
                 _run_git(project_root, "stash", "pop", check=False)
@@ -1354,8 +1406,10 @@ def _merge_leaf_branch(
 
     if not merge_ok:
         # Merge irrecoverably failed (non-conflict failure or take-theirs
-        # commit itself failed). Restore stash and bail; cleanup will
-        # protect the branch via the reachability check.
+        # commit itself failed). The failure paths inside
+        # ``_attempt_merge_with_resolution`` already called
+        # ``_clean_index_after_failed_merge``; restore stash and bail.
+        # Branch cleanup is protected by the reachability check upstream.
         if stashed:
             _run_git(project_root, "stash", "pop", check=False)
         return False
@@ -1436,13 +1490,13 @@ def _attempt_merge_with_resolution(
             "Leaf merge failed (non-conflict): %s: %s",
             branch, result.stderr.strip(),
         )
-        _run_git(project_root, "merge", "--abort", check=False)
+        _clean_index_after_failed_merge(project_root, branch)
         return False
 
     logger.warning("Leaf merge conflict: %s, attempting LLM resolution", branch)
     conflict_files = get_conflicting_files(project_root)
     if not conflict_files:
-        _run_git(project_root, "merge", "--abort", check=False)
+        _clean_index_after_failed_merge(project_root, branch)
         return False
 
     if resolve_merge_conflicts_with_context(
@@ -1466,7 +1520,7 @@ def _attempt_merge_with_resolution(
         "Leaf merge: take-theirs fallback also failed; aborting merge: %s",
         branch,
     )
-    _run_git(project_root, "merge", "--abort", check=False)
+    _clean_index_after_failed_merge(project_root, branch)
     return False
 
 
@@ -1663,6 +1717,39 @@ def _run_dag_parallel(
             These are merged into the final aggregated outputs.
     """
     original_branch = get_current_branch(project_root)
+
+    # Pre-flight: refuse to start if the repo is in an unrecoverable git state,
+    # and auto-heal stale leftover unmerged-index entries (modify/delete
+    # conflicts abandoned without ``git merge --abort`` in a prior run leave
+    # the index dirty, and ``git stash`` cannot package stage>0 entries — so
+    # every subsequent leaf merge would fail with "Merging is not possible
+    # because you have unmerged files" until someone manually ``git add``s).
+    if merge_in_progress(project_root):
+        msg = (
+            "DAG implement aborted: an in-progress git merge/cherry-pick/"
+            "rebase/revert was detected in the project root. Finish or "
+            "abort it before retrying (git merge --continue / --abort, etc.)."
+        )
+        logger.error(msg)
+        step.error_message = msg
+        return StepStatus.FAILED
+
+    recovered, unresolved = recover_stale_unmerged_paths(project_root)
+    if recovered:
+        logger.warning(
+            "DAG implement: auto-recovered %d stale unmerged path(s) "
+            "(working tree already matched HEAD): %s",
+            len(recovered), recovered,
+        )
+    if unresolved:
+        msg = (
+            "DAG implement aborted: unmerged index entries diverge from HEAD "
+            "and require manual resolution before retrying:\n  "
+            + "\n  ".join(unresolved)
+        )
+        logger.error(msg)
+        step.error_message = msg
+        return StepStatus.FAILED
 
     # Disaster recovery: merge surviving branches from prior_outputs
     # before running new groups (so new groups see recovered code)

@@ -746,6 +746,121 @@ def get_conflicting_files(project_root: Path) -> list[str]:
     return [f.strip() for f in result.stdout.strip().splitlines() if f.strip()]
 
 
+def detect_unmerged_paths(project_root: Path) -> list[str]:
+    """Return paths currently in unmerged-index state, deduped.
+
+    Unlike ``get_conflicting_files`` which reads worktree-vs-index diff and
+    can miss modify/delete combinations, this reads the index directly via
+    ``git ls-files --unmerged`` and surfaces every stage>0 path regardless
+    of working-tree state.
+    """
+    result = _run_git(project_root, "ls-files", "--unmerged", check=False)
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    paths: set[str] = set()
+    for line in result.stdout.splitlines():
+        if "\t" in line:
+            paths.add(line.split("\t", 1)[1])
+    return sorted(paths)
+
+
+def merge_in_progress(project_root: Path) -> bool:
+    """True iff a real git merge/cherry-pick/rebase/revert is mid-flight.
+
+    Distinguishes "user has an active git operation they need to finish"
+    from "the index is dirty but no operation is active" (stale leftover).
+    Works for both regular clones and linked worktrees by resolving the
+    real ``.git`` directory via ``git rev-parse --git-dir``.
+    """
+    result = _run_git(project_root, "rev-parse", "--git-dir", check=False)
+    if result.returncode != 0:
+        return False
+    git_dir_str = result.stdout.strip()
+    if not git_dir_str:
+        return False
+    git_dir = Path(git_dir_str)
+    if not git_dir.is_absolute():
+        git_dir = (project_root / git_dir).resolve()
+    return any(
+        (git_dir / m).exists()
+        for m in ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
+                  "rebase-merge", "rebase-apply")
+    )
+
+
+def recover_stale_unmerged_paths(
+    project_root: Path,
+) -> tuple[list[str], list[str]]:
+    """Auto-resolve stale unmerged-index entries left over from a prior failure.
+
+    A path is safe to auto-resolve when no active merge marker exists (see
+    ``merge_in_progress``) AND the working-tree content already matches
+    what HEAD has for that path — i.e. resolving as "keep HEAD" is a no-op
+    on actual file content, only the stale stage entries get cleared.
+
+    The two safe shapes:
+
+    * working-tree file present, blob == HEAD blob → ``git add`` to mark
+      resolved (the case produced by a modify/delete merge that was
+      abandoned without ``--abort``).
+    * working-tree path absent AND HEAD has no entry for it → ``git rm``
+      (path was never on either resolved side; entries are pure index
+      garbage).
+
+    Returns ``(resolved, unresolved)``. ``resolved`` lists paths cleared by
+    this call; ``unresolved`` lists paths whose working-tree content
+    diverges from HEAD and therefore needs human attention. Callers should
+    fail-fast when ``unresolved`` is non-empty.
+
+    Does NOT touch the index when ``merge_in_progress`` is true — caller
+    must check that separately. The split mirrors the data-vs-policy
+    boundary: this function only handles the stale-leftover case; an
+    in-progress merge is the user's call to continue or abort.
+    """
+    paths = detect_unmerged_paths(project_root)
+    if not paths:
+        return ([], [])
+
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    for path in paths:
+        head_obj = _run_git(
+            project_root, "ls-tree", "HEAD", "--", path, check=False,
+        )
+        head_blob: str | None = None
+        if head_obj.returncode == 0 and head_obj.stdout.strip():
+            parts = head_obj.stdout.strip().split()
+            if len(parts) >= 3 and parts[1] == "blob":
+                head_blob = parts[2]
+
+        wt_path = project_root / path
+        wt_blob: str | None = None
+        if wt_path.is_file():
+            wt_obj = _run_git(
+                project_root, "hash-object", "--", str(wt_path), check=False,
+            )
+            if wt_obj.returncode == 0:
+                wt_blob = wt_obj.stdout.strip() or None
+
+        if wt_blob is not None and wt_blob == head_blob:
+            add_res = _run_git(project_root, "add", "--", path, check=False)
+            if add_res.returncode == 0:
+                resolved.append(path)
+            else:
+                unresolved.append(path)
+        elif wt_blob is None and head_blob is None:
+            rm_res = _run_git(
+                project_root, "rm", "--cached", "--", path, check=False,
+            )
+            if rm_res.returncode == 0:
+                resolved.append(path)
+            else:
+                unresolved.append(path)
+        else:
+            unresolved.append(path)
+    return (resolved, unresolved)
+
+
 def list_loop_branches(project_root: Path) -> list[dict[str, any]]:
     """List existing unmerged loop branches with commit counts.
 

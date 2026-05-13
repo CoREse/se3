@@ -17,6 +17,7 @@ from se3.engine.worktree import (
     create_loop_branch,
     create_worktree,
     delete_branch,
+    detect_unmerged_paths,
     exists_for_branch,
     force_cleanup_worktree,
     get_current_branch,
@@ -24,7 +25,9 @@ from se3.engine.worktree import (
     has_commits,
     has_new_commits,
     list_loop_branches,
+    merge_in_progress,
     merge_loop_branch,
+    recover_stale_unmerged_paths,
     remove_worktree,
 )
 
@@ -1048,3 +1051,221 @@ class TestDeleteBranchWorktreeVerification:
             capture_output=True, text=True,
         )
         assert branch_name not in result.stdout
+
+
+def _make_modify_delete_unmerged(tmp_path: Path, filename: str = "foo.yaml") -> str:
+    """Construct a modify/delete UD index state, then clear MERGE_HEAD.
+
+    Simulates the exact crash signature the DAG hit: a prior failed merge
+    that was abandoned without ``git merge --abort``. The ``MERGE_HEAD``
+    file is removed manually so the resulting state looks like "stale
+    leftover" (no active merge) rather than "in-progress merge".
+    Returns the branch name with the file still present (``ours``).
+    """
+    _init_repo(tmp_path)
+    (tmp_path / filename).write_text("v1\n")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", filename],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-m", "add file"],
+        check=True, capture_output=True,
+    )
+    ours = get_current_branch(tmp_path)
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "checkout", "-b", "theirs"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "rm", filename],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-m", "delete file"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "checkout", ours],
+        check=True, capture_output=True,
+    )
+    (tmp_path / filename).write_text("v2\n")
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "add", filename],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "commit", "-m", "modify file"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(tmp_path), "merge", "theirs"],
+        capture_output=True,
+    )
+    # Resolve as "keep ours" in the working tree (so wt blob == HEAD blob)
+    # but leave the index unmerged. Then delete MERGE_HEAD to simulate
+    # process crash before any add/abort happened.
+    (tmp_path / filename).write_text("v2\n")
+    git_dir = (tmp_path / ".git").resolve()
+    merge_head = git_dir / "MERGE_HEAD"
+    if merge_head.exists():
+        merge_head.unlink()
+    return ours
+
+
+class TestDetectUnmergedPaths:
+    def test_clean_repo_returns_empty(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        assert detect_unmerged_paths(tmp_path) == []
+
+    def test_returns_unmerged_path_deduped(self, tmp_path: Path) -> None:
+        _make_modify_delete_unmerged(tmp_path, "foo.yaml")
+        assert detect_unmerged_paths(tmp_path) == ["foo.yaml"]
+
+
+class TestMergeInProgress:
+    def test_clean_repo_returns_false(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        assert merge_in_progress(tmp_path) is False
+
+    def test_after_failed_merge_returns_true(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        (tmp_path / "a.txt").write_text("ours\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "a.txt"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "ours"], check=True, capture_output=True)
+        ours = get_current_branch(tmp_path)
+        subprocess.run(["git", "-C", str(tmp_path), "checkout", "-b", "feature", "HEAD~0"], check=True, capture_output=True)
+        # Create divergent commits on both sides
+        subprocess.run(["git", "-C", str(tmp_path), "checkout", ours], check=True, capture_output=True)
+        (tmp_path / "a.txt").write_text("ours v2\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "a.txt"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "ours v2"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "checkout", "feature"], check=True, capture_output=True)
+        (tmp_path / "a.txt").write_text("theirs v2\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "a.txt"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "theirs v2"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "checkout", ours], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "merge", "feature"], capture_output=True)
+        assert merge_in_progress(tmp_path) is True
+        subprocess.run(["git", "-C", str(tmp_path), "merge", "--abort"], check=True, capture_output=True)
+        assert merge_in_progress(tmp_path) is False
+
+    def test_stale_unmerged_without_merge_head_returns_false(self, tmp_path: Path) -> None:
+        _make_modify_delete_unmerged(tmp_path)
+        assert merge_in_progress(tmp_path) is False
+
+
+class TestRecoverStaleUnmergedPaths:
+    def test_clean_repo_no_op(self, tmp_path: Path) -> None:
+        _init_repo(tmp_path)
+        assert recover_stale_unmerged_paths(tmp_path) == ([], [])
+
+    def test_resolves_when_worktree_matches_head(self, tmp_path: Path) -> None:
+        # The exact crash signature: modify/delete UD, working tree was
+        # left at HEAD content (v2), MERGE_HEAD wiped by a crashed run.
+        _make_modify_delete_unmerged(tmp_path, "foo.yaml")
+        resolved, unresolved = recover_stale_unmerged_paths(tmp_path)
+        assert resolved == ["foo.yaml"]
+        assert unresolved == []
+        # Index now clean
+        assert detect_unmerged_paths(tmp_path) == []
+
+    def test_unresolved_when_worktree_diverges_from_head(self, tmp_path: Path) -> None:
+        _make_modify_delete_unmerged(tmp_path, "foo.yaml")
+        # Make working tree differ from HEAD — user has unsaved manual edits
+        (tmp_path / "foo.yaml").write_text("manual edit not in HEAD\n")
+        resolved, unresolved = recover_stale_unmerged_paths(tmp_path)
+        assert resolved == []
+        assert unresolved == ["foo.yaml"]
+        # Index untouched so manual resolution can still happen
+        assert detect_unmerged_paths(tmp_path) == ["foo.yaml"]
+
+
+class TestImplementEntryPreflight:
+    """``_run_dag_parallel`` must auto-heal stale unmerged state and refuse
+    to start when a real merge is in progress. Wired via the worktree
+    helpers above so we exercise the integration boundary, not just the
+    helpers in isolation.
+    """
+
+    def test_dag_entry_auto_recovers_stale_unmerged(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        from se3.engine.models import StepStatus
+        from se3.engine.steps import implement as impl_mod
+
+        _make_modify_delete_unmerged(tmp_path, "foo.yaml")
+        assert detect_unmerged_paths(tmp_path) == ["foo.yaml"]
+
+        step = MagicMock()
+        step.step_id = "implement"
+        step.outputs = {}
+        step.error_message = None
+        flow = MagicMock()
+        flow.flow_id = "test-flow"
+
+        # No groups → after preflight, _run_dag_parallel aggregates outputs
+        # and returns COMPLETED. Confirms the preflight didn't fail-fast.
+        status = impl_mod._run_dag_parallel(
+            groups=[],
+            step=step,
+            flow=flow,
+            project_root=tmp_path,
+            task_description="t",
+            task_type="feature",
+            design_section="",
+            spec_summary="",
+            injection=None,
+            retry_count=0,
+            prior_outputs=None,
+        )
+        assert status == StepStatus.COMPLETED
+        assert detect_unmerged_paths(tmp_path) == []
+
+    def test_dag_entry_fails_fast_when_merge_in_progress(self, tmp_path: Path) -> None:
+        from unittest.mock import MagicMock
+
+        from se3.engine.models import StepStatus
+        from se3.engine.steps import implement as impl_mod
+
+        # Same setup but leave MERGE_HEAD in place
+        _init_repo(tmp_path)
+        (tmp_path / "a.txt").write_text("ours\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "a.txt"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "c1"], check=True, capture_output=True)
+        ours = get_current_branch(tmp_path)
+        subprocess.run(["git", "-C", str(tmp_path), "checkout", "-b", "feat"], check=True, capture_output=True)
+        (tmp_path / "a.txt").write_text("theirs\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "a.txt"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "c2"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "checkout", ours], check=True, capture_output=True)
+        (tmp_path / "a.txt").write_text("ours v2\n")
+        subprocess.run(["git", "-C", str(tmp_path), "add", "a.txt"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "commit", "-m", "c3"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(tmp_path), "merge", "feat"], capture_output=True)
+        assert merge_in_progress(tmp_path) is True
+
+        step = MagicMock()
+        step.step_id = "implement"
+        step.outputs = {}
+        step.error_message = None
+        flow = MagicMock()
+        flow.flow_id = "test-flow"
+
+        status = impl_mod._run_dag_parallel(
+            groups=[],
+            step=step,
+            flow=flow,
+            project_root=tmp_path,
+            task_description="t",
+            task_type="feature",
+            design_section="",
+            spec_summary="",
+            injection=None,
+            retry_count=0,
+            prior_outputs=None,
+        )
+        assert status == StepStatus.FAILED
+        assert "in-progress git" in step.error_message
+        # Did not touch the merge state
+        assert merge_in_progress(tmp_path) is True
