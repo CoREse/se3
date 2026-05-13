@@ -25,7 +25,6 @@ STEP_DISPLAY_TITLES: Dict[StepType, str] = {
     StepType.DISCOVERY: "Discovery",
     StepType.ANALYZE: "Analysis",
     StepType.PROJECT_SUMMARY: "Project Summary",
-    StepType.READ_SPEC: "Spec Reading",
     StepType.PROPOSE: "Proposal",
     StepType.DESIGN: "Design",
     StepType.PLAN: "Planning",

@@ -2,8 +2,8 @@
 
 Verifies:
 1. _build_step_inputs ANALYZE mapping includes spec_content, relevant_specs, project_summary
-2. Step sequences no longer contain PROJECT_SUMMARY or READ_SPEC
-3. STEP_POOL ANALYZE outputs updated; PROJECT_SUMMARY and READ_SPEC marked deprecated
+2. Step sequences no longer contain PROJECT_SUMMARY (READ_SPEC fully removed)
+3. STEP_POOL ANALYZE outputs updated; PROJECT_SUMMARY marked deprecated
 4. Stub handlers exist and forward correctly
 5. Downstream steps (plan, implement, verify_spec) get spec_content from analyze outputs
 """
@@ -27,7 +27,6 @@ from se3.engine.state_machine import StateMachine
 from se3.engine.steps import (
     STEP_HANDLERS,
     project_summary_stub_handler,
-    read_spec_stub_handler,
 )
 
 
@@ -113,7 +112,7 @@ class TestBuildStepInputsAnalyzeMapping:
 
 
 class TestBuildStepInputsDeprecatedBackwardCompat:
-    """Verify deprecated PROJECT_SUMMARY and READ_SPEC branches still work for old flows."""
+    """Verify deprecated PROJECT_SUMMARY branch still works for old flows."""
 
     @pytest.fixture
     def sm(self, tmp_path):
@@ -129,23 +128,16 @@ class TestBuildStepInputsDeprecatedBackwardCompat:
         inputs = sm._build_step_inputs(flow, StepType.PLAN)
         assert inputs["project_summary"] == "Old-style project summary"
 
-    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_old_read_spec_step_still_forwards(self, _cfg, sm, tmp_path):
-        """Old persisted flow with READ_SPEC step should still forward spec data."""
-        flow = _make_flow(tmp_path)
-        _add_completed_step(flow, StepType.READ_SPEC, {
-            "relevant_specs": ["base"],
-            "spec_content": {"base": "# Base"},
-        })
-        inputs = sm._build_step_inputs(flow, StepType.PLAN)
-        assert inputs["relevant_specs"] == ["base"]
-        assert inputs["spec_content"]["base"] == "# Base"
+    def test_old_read_spec_step_type_no_longer_parseable(self):
+        """READ_SPEC has been fully removed from StepType enum."""
+        with pytest.raises(ValueError):
+            StepType("read_spec")
 
 
 # --- Task 5: Step sequence updates ---
 
 class TestStepSequenceNoProjectSummaryOrReadSpec:
-    """Verify PROJECT_SUMMARY and READ_SPEC removed from all task type sequences."""
+    """Verify PROJECT_SUMMARY removed from all task type sequences (READ_SPEC fully removed)."""
 
     ALL_TASK_TYPES = ["feature", "bugfix", "review", "small", "directive", "discovery"]
 
@@ -154,13 +146,6 @@ class TestStepSequenceNoProjectSummaryOrReadSpec:
         sequence = get_default_step_sequence(task_type)
         assert StepType.PROJECT_SUMMARY not in sequence, (
             f"{task_type} sequence still contains PROJECT_SUMMARY"
-        )
-
-    @pytest.mark.parametrize("task_type", ALL_TASK_TYPES)
-    def test_no_read_spec_in_sequence(self, task_type):
-        sequence = get_default_step_sequence(task_type)
-        assert StepType.READ_SPEC not in sequence, (
-            f"{task_type} sequence still contains READ_SPEC"
         )
 
     def test_feature_sequence_starts_analyze_then_plan(self):
@@ -173,7 +158,7 @@ class TestStepSequenceNoProjectSummaryOrReadSpec:
         assert seq == [StepType.ANALYZE, StepType.VERIFY_SPEC]
 
     def test_small_sequence_unchanged(self):
-        """Small sequence never had PROJECT_SUMMARY or READ_SPEC."""
+        """Small sequence never had PROJECT_SUMMARY."""
         seq = get_default_step_sequence("small")
         assert seq == [
             StepType.ANALYZE,
@@ -211,17 +196,14 @@ class TestStepPoolUpdates:
         assert info.get("deprecated") is True
         assert "deprecated" in info["description"].lower()
 
-    def test_read_spec_marked_deprecated(self):
-        info = STEP_POOL[StepType.READ_SPEC]
-        assert info.get("deprecated") is True
-        assert "deprecated" in info["description"].lower()
-
     def test_project_summary_still_has_read_only(self):
         """Deprecated steps retain read_only for backward compat."""
         assert STEP_POOL[StepType.PROJECT_SUMMARY]["read_only"] is True
 
-    def test_read_spec_still_has_read_only(self):
-        assert STEP_POOL[StepType.READ_SPEC]["read_only"] is True
+    def test_read_spec_step_type_removed(self):
+        """READ_SPEC fully removed from StepType enum."""
+        with pytest.raises(ValueError):
+            StepType("read_spec")
 
 
 # --- Task 7: Stub handlers ---
@@ -231,9 +213,6 @@ class TestStubHandlers:
 
     def test_step_handlers_uses_project_summary_stub(self):
         assert STEP_HANDLERS[StepType.PROJECT_SUMMARY] is project_summary_stub_handler
-
-    def test_step_handlers_uses_read_spec_stub(self):
-        assert STEP_HANDLERS[StepType.READ_SPEC] is read_spec_stub_handler
 
     @patch("se3.engine.steps.project_summary_handler")
     def test_project_summary_stub_forwards(self, mock_handler):
@@ -246,19 +225,6 @@ class TestStubHandlers:
 
         mock_handler.assert_called_once_with(step, flow)
         assert result == StepStatus.COMPLETED
-
-    @patch("se3.engine.steps.read_spec_handler")
-    def test_read_spec_stub_forwards(self, mock_handler):
-        """read_spec_stub_handler should forward to read_spec_handler."""
-        mock_handler.return_value = StepStatus.COMPLETED
-        step = Step(step_type=StepType.READ_SPEC)
-        flow = FlowInstance(flow_id="test-stub-rs", task_description="test")
-
-        result = read_spec_stub_handler(step, flow)
-
-        mock_handler.assert_called_once_with(step, flow)
-        assert result == StepStatus.COMPLETED
-
 
 # --- Integration: downstream steps get spec_content from analyze ---
 

@@ -15,7 +15,6 @@ from .implement import implement_handler
 from .plan import plan_handler
 from .plan_tasks import plan_tasks_handler
 from .project_summary import project_summary_handler
-from .read_spec import read_spec_handler
 from .self_check import self_check_handler
 from .summarize import summarize_handler
 from .test import test_handler
@@ -64,26 +63,11 @@ def project_summary_stub_handler(step, flow):
     return project_summary_handler(step, flow)
 
 
-def read_spec_stub_handler(step, flow):
-    """Stub handler for deprecated READ_SPEC step type.
-
-    READ_SPEC has been merged into ANALYZE. This stub forwards to
-    read_spec_handler so old persisted flows can resume without crashing.
-    """
-    logger.warning(
-        "Step type READ_SPEC is deprecated (merged into ANALYZE). "
-        "Forwarding to read_spec_handler. Flow %s, step %s",
-        flow.flow_id, step.step_id,
-    )
-    return read_spec_handler(step, flow)
-
-
 # Registry of all step handlers for the state machine
 STEP_HANDLERS = {
     StepType.DISCOVERY: discovery_handler,
     StepType.ANALYZE: analyze_handler,
     StepType.PROJECT_SUMMARY: project_summary_stub_handler,  # Deprecated: merged into ANALYZE
-    StepType.READ_SPEC: read_spec_stub_handler,  # Deprecated: merged into ANALYZE
     StepType.PLAN: plan_handler,
     StepType.PROPOSE: propose_stub_handler,  # Backward compat for persisted flows
     StepType.DESIGN: design_stub_handler,  # Backward compat for persisted flows
@@ -104,8 +88,6 @@ __all__ = [
     "analyze_handler",
     "project_summary_handler",
     "project_summary_stub_handler",
-    "read_spec_handler",
-    "read_spec_stub_handler",
     "plan_handler",
     "propose_stub_handler",
     "design_stub_handler",

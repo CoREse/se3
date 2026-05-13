@@ -542,7 +542,7 @@ class TestBuildStepInputs:
     def test_review_flow_verify_spec_gets_spec_content_without_read_spec(self, tmp_path):
         """In review flow (ANALYZE → VERIFY_SPEC), verify_spec gets spec_content directly from ANALYZE."""
         sm = self._make_state_machine(tmp_path)
-        # Simulate review flow: only ANALYZE completed, no READ_SPEC step
+        # Simulate review flow: only ANALYZE completed (READ_SPEC removed)
         flow = self._make_flow_with_analyze(
             task_desc="Review auth module",
             analyze_outputs={
@@ -556,7 +556,7 @@ class TestBuildStepInputs:
 
         inputs = sm._build_step_inputs(flow, StepType.VERIFY_SPEC)
 
-        # verify_spec must get spec_content even though there's no READ_SPEC step
+        # verify_spec must get spec_content from ANALYZE (READ_SPEC removed)
         assert inputs["spec_content"] == {"base": "# base", "auth-spec": "# auth spec"}
         assert inputs["relevant_specs"] == ["base", "auth-spec"]
 
@@ -576,25 +576,10 @@ class TestBuildStepInputs:
 
         assert inputs["project_summary"] == "Old-style project summary"
 
-    def test_deprecated_read_spec_step_backward_compat(self, tmp_path):
-        """Persisted flows with old READ_SPEC step still provide spec_content."""
-        sm = self._make_state_machine(tmp_path)
-        flow = FlowInstance(task_description="Old flow")
-
-        # Simulate old flow with separate READ_SPEC step
-        rs_step = Step(step_type=StepType.READ_SPEC)
-        rs_step.status = StepStatus.COMPLETED
-        rs_step.outputs = {
-            "relevant_specs": ["base"],
-            "spec_content": {"base": "# old base content"},
-        }
-        flow.state.steps[rs_step.step_id] = rs_step
-        flow.state.step_history.append(rs_step.step_id)
-
-        inputs = sm._build_step_inputs(flow, StepType.PLAN)
-
-        assert inputs["relevant_specs"] == ["base"]
-        assert inputs["spec_content"] == {"base": "# old base content"}
+    def test_old_persisted_read_spec_step_type_raises(self):
+        """Persisted flows with old READ_SPEC step type cannot be deserialized."""
+        with pytest.raises(ValueError):
+            StepType("read_spec")
 
 
 class TestStepSequences:
@@ -607,15 +592,6 @@ class TestStepSequences:
             seq = get_default_step_sequence(task_type)
             assert StepType.PROJECT_SUMMARY not in seq, (
                 f"{task_type} sequence still contains PROJECT_SUMMARY"
-            )
-
-    def test_all_task_types_exclude_read_spec(self):
-        """All 6 task type sequences must not contain READ_SPEC."""
-        from .models import get_default_step_sequence
-        for task_type in ["feature", "bugfix", "review", "small", "directive", "discovery"]:
-            seq = get_default_step_sequence(task_type)
-            assert StepType.READ_SPEC not in seq, (
-                f"{task_type} sequence still contains READ_SPEC"
             )
 
     def test_small_sequence_unchanged(self):
@@ -639,7 +615,7 @@ class TestStepSequences:
         assert seq[0] == StepType.ANALYZE
 
     def test_review_sequence_has_verify_spec(self):
-        """Review sequence: ANALYZE → VERIFY_SPEC → SUMMARIZE (no READ_SPEC between)."""
+        """Review sequence: ANALYZE → VERIFY_SPEC → SUMMARIZE."""
         from .models import get_default_step_sequence
         seq = get_default_step_sequence("review")
         assert seq == [
@@ -649,13 +625,12 @@ class TestStepSequences:
         ]
 
     def test_discovery_sequence_starts_with_discovery_then_analyze(self):
-        """Discovery sequence starts with DISCOVERY → ANALYZE (no PROJECT_SUMMARY/READ_SPEC)."""
+        """Discovery sequence starts with DISCOVERY → ANALYZE (no PROJECT_SUMMARY)."""
         from .models import get_default_step_sequence
         seq = get_default_step_sequence("discovery")
         assert seq[0] == StepType.DISCOVERY
         assert seq[1] == StepType.ANALYZE
         assert StepType.PROJECT_SUMMARY not in seq
-        assert StepType.READ_SPEC not in seq
 
 
 if __name__ == "__main__":

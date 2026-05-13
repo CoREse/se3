@@ -29,7 +29,6 @@ class TestStepPoolReadOnly:
             StepType.DISCOVERY,
             StepType.ANALYZE,
             StepType.PROJECT_SUMMARY,
-            StepType.READ_SPEC,
             StepType.PLAN,
             StepType.VERIFY_SPEC,
             StepType.VERSION_ANALYZE,
@@ -70,7 +69,7 @@ class TestGetReadOnlyInjection:
     """Verify the injection function returns correct results."""
 
     @pytest.mark.parametrize("step_name", [
-        "discovery", "analyze", "project_summary", "read_spec", "plan",
+        "discovery", "analyze", "project_summary", "plan",
         "verify_spec", "version_analyze", "summarize", "self_check",
     ])
     def test_read_only_steps_return_constraint(self, step_name):
