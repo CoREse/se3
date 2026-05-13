@@ -190,18 +190,23 @@ class TestInfraErrorRotation:
         assert caller._current_agent_index == 1
 
 
-class TestTaskFailureNoRotation:
-    """Test that task failures do NOT trigger agent rotation."""
+class TestOtherErrorRotation:
+    """Test that OTHER (unclassified) errors also trigger agent rotation."""
 
     @patch("se3.engine.llm_caller.ClaudeCodeRunner")
-    def test_task_failure_stays_on_same_agent(self, MockRunner):
-        """Non-infra failure should retry same agent, not rotate."""
-        mock_runner = MagicMock()
-        fail_result = _make_fail_result(returncode=1, output="file not found")
-        success_result = _make_success_result()
-        mock_runner.run_with_monitor.side_effect = [fail_result, success_result]
-        mock_runner.detect_infra_error.return_value = InfraErrorType.NONE
-        MockRunner.return_value = mock_runner
+    def test_other_error_rotates_to_next_agent(self, MockRunner):
+        """Unclassified failure (detect_infra_error=NONE) should rotate."""
+        mock_runner_a = MagicMock()
+        mock_runner_a.run_with_monitor.return_value = _make_fail_result(
+            returncode=1, output="file not found"
+        )
+        mock_runner_a.detect_infra_error.return_value = InfraErrorType.NONE
+
+        mock_runner_b = MagicMock()
+        mock_runner_b.run_with_monitor.return_value = _make_success_result()
+        mock_runner_b.detect_infra_error.return_value = InfraErrorType.NONE
+
+        MockRunner.side_effect = [mock_runner_a, mock_runner_b]
 
         caller = LLMCaller(
             project_root=Path("/tmp"),
@@ -212,8 +217,38 @@ class TestTaskFailureNoRotation:
 
         result = caller.call(prompt="test", on_output=lambda x: None)
         assert result == "ok"
-        # Should NOT have rotated
-        assert caller._current_agent_index == 0
+        assert caller._current_agent_index == 1
+
+    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    def test_unknown_certificate_error_triggers_rotation(self, MockRunner):
+        """UNKNOWN_CERTIFICATE_VERIFICATION_ERROR (classified as NONE) should rotate."""
+        cert_output = (
+            "API Error: Unable to connect to API "
+            "(UNKNOWN_CERTIFICATE_VERIFICATION_ERROR)"
+        )
+        mock_runner_a = MagicMock()
+        mock_runner_a.run_with_monitor.return_value = _make_fail_result(
+            returncode=1, output=cert_output
+        )
+        mock_runner_a.detect_infra_error.return_value = InfraErrorType.NONE
+
+        mock_runner_b = MagicMock()
+        mock_runner_b.run_with_monitor.return_value = _make_success_result()
+        mock_runner_b.detect_infra_error.return_value = InfraErrorType.NONE
+
+        MockRunner.side_effect = [mock_runner_a, mock_runner_b]
+
+        caller = LLMCaller(
+            project_root=Path("/tmp"),
+            agents=TWO_AGENTS,
+            max_retries=3,
+            retry_delay=0.01,
+        )
+
+        result = caller.call(prompt="test", on_output=lambda x: None)
+        assert result == "ok"
+        # After the first failure, we should have rotated to the second agent.
+        assert caller._current_agent_index == 1
 
 
 class TestAllAgentsExhausted:
@@ -294,4 +329,26 @@ class TestSingleAgentScenario:
 
         result = caller.call(prompt="test", on_output=lambda x: None)
         assert result == "ok"
+        assert caller._current_agent_index == 0
+
+    @patch("se3.engine.llm_caller.ClaudeCodeRunner")
+    def test_single_agent_other_error_falls_through(self, MockRunner):
+        """With single agent, OTHER error cannot rotate — falls through to same-agent retry."""
+        mock_runner = MagicMock()
+        fail_result = _make_fail_result(returncode=1, output="file not found")
+        success_result = _make_success_result()
+        mock_runner.run_with_monitor.side_effect = [fail_result, success_result]
+        mock_runner.detect_infra_error.return_value = InfraErrorType.NONE
+        MockRunner.return_value = mock_runner
+
+        caller = LLMCaller(
+            project_root=Path("/tmp"),
+            agents=[TWO_AGENTS[0]],
+            max_retries=3,
+            retry_delay=0.01,
+        )
+
+        result = caller.call(prompt="test", on_output=lambda x: None)
+        assert result == "ok"
+        # Single agent can't rotate; fallthrough retries on same agent.
         assert caller._current_agent_index == 0

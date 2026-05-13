@@ -899,9 +899,19 @@ field provides the ordering for any internal chain that needs it).
   **only** that list as its chain. The `defaults` chain is NOT
   appended as a fallback — users who want a default tail MUST list
   those agents explicitly in the step's override.
-- Agent rotation on infrastructure errors happens strictly within the
-  step's override list. When exhausted, the call fails rather than
-  silently falling back to `defaults`.
+- Agent rotation on any LLM call failure (usage-limit, timeout, or
+  any other error such as network / certificate / unknown failures)
+  happens strictly within the step's override list. When exhausted,
+  the call fails rather than silently falling back to `defaults`.
+  Each rotation consumes one of the `max_retries` attempt slots; the
+  total number of attempts per call remains bounded by `max_retries`
+  regardless of chain length. When the chain is exhausted before
+  `max_retries` is reached, any remaining attempts run on the last
+  agent in the chain (tail-on-last-agent fallback).
+- Error classification (usage-limit / timeout / other) is retained
+  for diagnostic logging only — it labels the failure in log output
+  and does NOT gate whether rotation happens. All three categories
+  trigger rotation identically.
 - When `agents` is explicitly passed to the `LLMCaller` constructor
   (e.g. by internal helpers such as the JSON extractor), that argument
   takes the highest priority and bypasses both the per-step override
@@ -953,8 +963,33 @@ llm_caller:
 
 #### Scenario: Exhaustion does not fall back to default chain
 - **GIVEN** `llm_caller.steps.analyze: [A, B]`
-- **WHEN** both A and B fail with infrastructure errors
+- **WHEN** both A and B fail with any error (infrastructure or otherwise)
 - **THEN** the LLM call fails rather than rotating to `defaults`
+
+#### Scenario: Rotation triggers on any error category
+- **GIVEN** an LLMCaller with chain `[A, B]` and `max_retries >= 2`
+- **WHEN** agent A fails with an unknown / non-classified error
+  (e.g., `UNKNOWN_CERTIFICATE_VERIFICATION_ERROR` or any network
+  error that is neither usage-limit nor timeout)
+- **THEN** `_rotate_agent` is invoked and the next attempt runs on
+  agent B — the caller does NOT retry on agent A
+- **AND** the log records the failure with an `other` category label
+  (alongside the existing `usage_limit` / `timeout` labels)
+
+#### Scenario: max_retries bounds total attempts across rotations
+- **GIVEN** an LLMCaller with chain `[A, B, C, D, E]` and
+  `max_retries = 3`
+- **WHEN** every invocation fails
+- **THEN** the call performs exactly 3 attempts in total (one per
+  agent in chain order, stopping when `max_retries` is reached)
+- **AND** agents D and E are NOT tried in this call
+
+#### Scenario: Tail-on-last-agent when chain shorter than max_retries
+- **GIVEN** an LLMCaller with chain `[A, B]` and `max_retries = 3`
+- **WHEN** every invocation fails
+- **THEN** the call performs 3 attempts total: agent A, agent B,
+  then agent B again for the final attempt (rotation exhaustion
+  falls through and the remaining attempt runs on the last agent)
 
 #### Scenario: Explicit agents argument wins over per-step override
 - **GIVEN** `llm_caller.steps.analyze` declares an override list

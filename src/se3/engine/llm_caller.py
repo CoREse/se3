@@ -1077,20 +1077,26 @@ class LLMCaller:
                     logger.debug(f"LLM call succeeded in {int(duration_s * 1000)}ms")
                     return result.output
 
-                # --- Failure path: check for infrastructure error → rotate agent ---
+                # --- Failure path: always attempt agent rotation ---
+                # detect_infra_error is retained for diagnostic labeling only;
+                # USAGE_LIMIT / TIMEOUT / OTHER all trigger rotation identically.
                 infra_error = current_runner.detect_infra_error(
                     result.returncode, result.output or "", ""
                 )
-                if infra_error != InfraErrorType.NONE:
-                    logger.warning(
-                        f"Infrastructure error ({infra_error.value}) on agent '{current_agent_name}', "
-                        f"attempting agent rotation..."
-                    )
-                    if self._rotate_agent():
-                        # Rotation succeeded — retry immediately with the new agent
-                        # (don't count this as a regular internal_attempt)
-                        time.sleep(self.retry_delay)
-                        continue
+                error_label = (
+                    "other" if infra_error == InfraErrorType.NONE else infra_error.value
+                )
+                logger.warning(
+                    f"LLM call failed ({error_label}) on agent '{current_agent_name}', "
+                    f"attempting agent rotation..."
+                )
+                if self._rotate_agent():
+                    # Rotation succeeded — next iteration uses the new agent.
+                    # This consumes one of the max_retries attempt slots.
+                    time.sleep(self.retry_delay)
+                    continue
+                # Rotation exhausted — fall through; remaining attempts run on
+                # the last agent (existing tail-on-last-agent behavior).
 
                 last_error = f"Command '{result.cmd_used}' failed with exit code {result.returncode}"
                 logger.warning(f"LLM call failed: {last_error}, internal attempt {internal_attempt + 1}/{self.max_retries}")
