@@ -1,10 +1,17 @@
-"""SyncInteractionHandler — Concurrent dual-path human decision collection.
+"""SyncInteractionHandler — Concurrent dual-path approval for high-impact deletions.
 
-Provides two equivalent paths for humans to resolve pending sync decisions:
+In the one-directional sync model, the only spec change that ever requires a
+human gate is a **high-impact deletion** — i.e. ``se3 sync`` is about to
+remove an entire ``### Requirement:`` section because the code no longer
+implements it. Everything else (description tweaks, new sections,
+in-place rewrites) is auto-applied and trivially reversible by the next
+sync round.
+
+This handler offers two equivalent input paths:
   Path A: Terminal interactive UI (Rich-rendered list, stdin input)
-  Path B: File polling (MCP call file in se3/calls/, 1-second polling)
+  Path B: File polling (MCP call file in ``se3/calls/``, 1-second polling)
 
-Either path completing first satisfies the request; the other is stopped.
+Whichever path completes first satisfies the request; the other is stopped.
 """
 
 from __future__ import annotations
@@ -19,6 +26,7 @@ import tempfile
 import threading
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -28,23 +36,47 @@ logger = logging.getLogger(__name__)
 
 _THREAD_JOIN_TIMEOUT = 5
 
+_VALID_DECISIONS = {"approve", "skip"}
+
+
+@dataclass
+class HighImpactDeletion:
+    """A pending whole-requirement removal awaiting human approval."""
+
+    item_id: str
+    spec_name: str
+    requirement_name: str = ""
+    requirement_excerpt: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "item_id": self.item_id,
+            "spec_name": self.spec_name,
+            "requirement_name": self.requirement_name,
+            "requirement_excerpt": self.requirement_excerpt,
+        }
+
+
 class SyncInteractionHandler:
-    """Collect human decisions for pending sync items via dual concurrent paths.
+    """Collect approve/skip decisions for pending high-impact deletions.
 
     Args:
-        project_root: Project root directory (for se3/calls/ path).
-        pending_items: List of PendingDecision dicts/objects to resolve.
+        project_root: Project root directory (for ``se3/calls/`` path).
+        pending_items: List of ``HighImpactDeletion`` to resolve.
+        use_terminal: Force terminal path on/off. Defaults to ``stdin.isatty()``.
     """
 
     def __init__(
         self,
         project_root: Path,
-        pending_items: Optional[List[Any]] = None,
+        pending_items: Optional[List[HighImpactDeletion]] = None,
         use_terminal: Optional[bool] = None,
     ):
         self.project_root = project_root
-        self._pending_items: List[Any] = pending_items or []
-        self._use_terminal = use_terminal if use_terminal is not None else sys.stdin.isatty()
+        self._pending_items: List[HighImpactDeletion] = list(pending_items or [])
+        self._use_terminal = (
+            use_terminal if use_terminal is not None else sys.stdin.isatty()
+        )
 
         self._decisions: Dict[str, str] = {}
         self._done_event = threading.Event()
@@ -53,23 +85,20 @@ class SyncInteractionHandler:
         self._call_file_path: Optional[Path] = None
 
     def collect_decisions(
-        self, pending_items: Optional[List[Any]] = None
+        self, pending_items: Optional[List[HighImpactDeletion]] = None
     ) -> Dict[str, str]:
-        """Collect decisions for all pending items via dual concurrent paths.
+        """Collect approve/skip decisions for all pending items.
 
-        When stdin is a TTY, starts both terminal interaction and file polling
-        threads.  When stdin is not a TTY (e.g. piped or in a CI environment),
-        only the file-polling path is started — the process blocks until the
-        response file is written.
-
-        Args:
-            pending_items: Override the pending items list.
+        When stdin is a TTY, starts both terminal interaction and file-polling
+        threads. When stdin is not a TTY (e.g. CI), only the file-polling
+        path is started — the process blocks until the response file is
+        written.
 
         Returns:
-            Dict mapping item_id -> decision ('update_spec' or 'create_issue').
+            Dict mapping ``item_id -> 'approve'|'skip'``.
         """
         if pending_items is not None:
-            self._pending_items = pending_items
+            self._pending_items = list(pending_items)
 
         if not self._pending_items:
             return {}
@@ -137,7 +166,7 @@ class SyncInteractionHandler:
     # ------------------------------------------------------------------
 
     def _terminal_path(self) -> None:
-        """Path A: Render pending items and collect decisions via stdin."""
+        """Path A: render pending items and collect approve/skip from stdin."""
         try:
             self._render_pending_items()
             decisions = self._collect_terminal_input()
@@ -154,53 +183,41 @@ class SyncInteractionHandler:
                 logger.debug("Terminal path error", exc_info=True)
 
     def _render_pending_items(self) -> None:
-        """Display pending items using Rich."""
         from rich.table import Table
 
         from . import display
 
         console = display.get_console()
-        table = Table(title="Pending Decisions", expand=True, show_lines=True)
+        table = Table(title="High-Impact Deletions", expand=True, show_lines=True)
         table.add_column("#", style="bold cyan", width=4)
-        table.add_column("Type", width=10)
         table.add_column("Spec", style="bold")
-        table.add_column("Description")
+        table.add_column("Requirement")
+        table.add_column("Excerpt")
 
         for idx, item in enumerate(self._pending_items, 1):
-            item_type = self._get_field(item, "type", "?")
-            spec_name = self._get_field(item, "spec_name", "?")
-            description = self._get_field(item, "description", "")
-            type_style = "red" if item_type == "conflict" else "yellow"
             table.add_row(
                 str(idx),
-                f"[{type_style}]{item_type}[/{type_style}]",
-                spec_name,
-                description,
+                item.spec_name,
+                item.requirement_name or "(unspecified)",
+                (item.requirement_excerpt or "")[:120],
             )
 
         console.print(table)
-        display.render_block_header("Decision Input", "blue")
+        display.render_block_header("Approve Deletion?", "red")
         console.print(
             "[bold]Options:[/bold]\n"
-            "  Enter number and decision:  [cyan]1:1[/cyan] (update_spec)  "
-            "[cyan]1:2[/cyan] (create_issue)\n"
-            "  Batch all:  [cyan]all:1[/cyan] (all update_spec)  "
-            "[cyan]all:2[/cyan] (all create_issue)\n"
+            "  Enter number and decision:  [cyan]1:1[/cyan] (approve)  "
+            "[cyan]1:2[/cyan] (skip)\n"
+            "  Batch all:  [cyan]all:1[/cyan] (approve all)  "
+            "[cyan]all:2[/cyan] (skip all)\n"
             "  When done:  [cyan]done[/cyan]\n\n"
             "[dim]Or edit the .response file in se3/calls/ from another terminal.[/dim]"
         )
         console.print("")
-        display.render_block_footer("blue")
+        display.render_block_footer("red")
 
     def _read_line_interruptible(self) -> Optional[str]:
-        """Read a line from stdin, checking stop/done events periodically.
-
-        Uses select() on real ttys so the thread can be interrupted when the
-        file-watch path wins.  Falls back to blocking input() when stdin is
-        redirected or mocked (e.g. in tests).
-
-        Returns None if interrupted by stop/done events or EOF.
-        """
+        """Read a line from stdin, checking stop/done events periodically."""
         try:
             fileno = sys.stdin.fileno()
         except (AttributeError, ValueError, OSError):
@@ -221,10 +238,9 @@ class SyncInteractionHandler:
         return None
 
     def _collect_terminal_input(self) -> Optional[Dict[str, str]]:
-        """Read decisions from stdin. Returns None if stopped."""
         decisions: Dict[str, str] = {}
         total = len(self._pending_items)
-        decision_map = {"1": "update_spec", "2": "create_issue"}
+        decision_map = {"1": "approve", "2": "skip"}
 
         while not self._stop_event.is_set():
             if self._done_event.is_set():
@@ -247,22 +263,20 @@ class SyncInteractionHandler:
             if line.lower() == "done":
                 remaining = total - len(decisions)
                 if remaining > 0:
-                    print(f"  {remaining} item(s) still unresolved. Defaulting to create_issue.")
+                    print(f"  {remaining} item(s) still unresolved. Defaulting to skip.")
                     for idx, item in enumerate(self._pending_items):
-                        item_id = self._get_field(item, "item_id", str(idx))
-                        if item_id not in decisions:
-                            decisions[item_id] = "create_issue"
+                        if item.item_id not in decisions:
+                            decisions[item.item_id] = "skip"
                 return decisions
 
             if line.lower().startswith("all:"):
                 val = line.split(":", 1)[1].strip()
                 if val not in decision_map:
-                    print(f"  Invalid decision '{val}'. Use 1 (update_spec) or 2 (create_issue).")
+                    print(f"  Invalid decision '{val}'. Use 1 (approve) or 2 (skip).")
                     continue
                 decision = decision_map[val]
-                for idx, item in enumerate(self._pending_items):
-                    item_id = self._get_field(item, "item_id", str(idx))
-                    decisions[item_id] = decision
+                for item in self._pending_items:
+                    decisions[item.item_id] = decision
                 print(f"  All {total} items set to {decision}.")
                 return decisions
 
@@ -271,12 +285,12 @@ class SyncInteractionHandler:
                 try:
                     num = int(parts[0].strip())
                 except ValueError:
-                    print(f"  Invalid format. Use '<number>:<1|2>' or 'all:<1|2>'.")
+                    print("  Invalid format. Use '<number>:<1|2>' or 'all:<1|2>'.")
                     continue
 
                 val = parts[1].strip()
                 if val not in decision_map:
-                    print(f"  Invalid decision '{val}'. Use 1 (update_spec) or 2 (create_issue).")
+                    print(f"  Invalid decision '{val}'. Use 1 (approve) or 2 (skip).")
                     continue
 
                 if num < 1 or num > total:
@@ -284,8 +298,7 @@ class SyncInteractionHandler:
                     continue
 
                 item = self._pending_items[num - 1]
-                item_id = self._get_field(item, "item_id", str(num - 1))
-                decisions[item_id] = decision_map[val]
+                decisions[item.item_id] = decision_map[val]
                 print(f"  #{num} -> {decision_map[val]}")
 
                 if len(decisions) == total:
@@ -302,7 +315,6 @@ class SyncInteractionHandler:
     def _file_watch_path(
         self, call_file: Path, *, initial_hash: Optional[str] = None,
     ) -> None:
-        """Path B: Poll for .response file creation/modification."""
         response_path = Path(str(call_file) + ".response")
         last_content_hash = initial_hash
 
@@ -316,7 +328,9 @@ class SyncInteractionHandler:
                     content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
                     if content_hash != last_content_hash:
                         last_content_hash = content_hash
-                        decisions = self._parse_response_file(response_path, content=content)
+                        decisions = self._parse_response_file(
+                            response_path, content=content
+                        )
                         if decisions is not None:
                             with self._lock:
                                 if not self._done_event.is_set():
@@ -329,30 +343,28 @@ class SyncInteractionHandler:
             self._stop_event.wait(timeout=1.0)
 
     def generate_pending_call_file(self) -> Path:
-        """Generate an MCP call file for all pending decisions."""
+        """Generate a ``sync_high_impact_deletion`` MCP call file."""
         calls_dir = self.project_root / "se3" / "calls"
         calls_dir.mkdir(parents=True, exist_ok=True)
 
         timestamp = int(datetime.now().timestamp())
         unique_id = uuid.uuid4().hex[:8]
-        call_file = calls_dir / f"sync_pending_{timestamp}_{unique_id}.json"
+        call_file = calls_dir / f"sync_deletion_{timestamp}_{unique_id}.json"
 
         items = []
         for idx, item in enumerate(self._pending_items, 1):
             items.append({
                 "id": idx,
-                "item_id": self._get_field(item, "item_id", ""),
-                "type": self._get_field(item, "type", "gap"),
-                "spec_name": self._get_field(item, "spec_name", ""),
-                "description": self._get_field(item, "description", ""),
-                "diff": self._get_field(item, "diff", ""),
-                "confidence": self._get_field(item, "confidence", ""),
-                "options": ["update_spec", "create_issue"],
+                "item_id": item.item_id,
+                "spec_name": item.spec_name,
+                "requirement_name": item.requirement_name,
+                "excerpt": item.requirement_excerpt,
+                "options": ["approve", "skip"],
                 "decision": "pending",
             })
 
         call_data = {
-            "type": "sync_pending_decisions",
+            "type": "sync_high_impact_deletion",
             "timestamp": timestamp,
             "items": items,
         }
@@ -362,32 +374,32 @@ class SyncInteractionHandler:
             encoding="utf-8",
         )
 
-        logger.info("Generated pending decisions call file: %s", call_file)
+        logger.info("Generated high-impact deletion call file: %s", call_file)
         return call_file
 
     def _parse_response_file(
         self, response_path: Path, *, content: Optional[str] = None,
     ) -> Optional[Dict[str, str]]:
-        """Parse a .response file into a decisions dict.
+        """Parse a ``.response`` file into a ``{item_id: 'approve'|'skip'}`` dict.
 
         Expected format::
 
             {
               "items": [
-                {"id": 1, "item_id": "gap_auth_abc12345", "decision": "update_spec"},
+                {"id": 1, "item_id": "del_auth_abc12345", "decision": "approve"},
                 ...
               ]
             }
 
-        Args:
-            response_path: Path to the response file.
-            content: Pre-read file content. If provided, the file is not re-read.
-
-        Returns None if parsing fails or file is incomplete.
-        Unresolved items default to create_issue (matching terminal path behavior).
+        Returns ``None`` if parsing fails or the file holds no usable items.
+        Items missing a decision default to ``"skip"`` (safe default — no
+        deletion is applied).
         """
         try:
-            raw = content if content is not None else response_path.read_text(encoding="utf-8")
+            raw = (
+                content if content is not None
+                else response_path.read_text(encoding="utf-8")
+            )
             data = json.loads(raw)
         except (json.JSONDecodeError, OSError):
             return None
@@ -397,16 +409,15 @@ class SyncInteractionHandler:
             return None
 
         decisions: Dict[str, str] = {}
-        id_to_item_id = {}
+        id_to_item_id: Dict[int, str] = {}
         expected_item_ids: set[str] = set()
         for idx, item in enumerate(self._pending_items, 1):
-            item_id = self._get_field(item, "item_id", str(idx - 1))
-            id_to_item_id[idx] = item_id
-            expected_item_ids.add(item_id)
+            id_to_item_id[idx] = item.item_id
+            expected_item_ids.add(item.item_id)
 
         for resp in resp_items:
-            decision = resp.get("decision", "")
-            if decision not in ("update_spec", "create_issue"):
+            decision = (resp.get("decision") or "").lower()
+            if decision not in _VALID_DECISIONS:
                 continue
 
             item_id = resp.get("item_id", "")
@@ -423,20 +434,16 @@ class SyncInteractionHandler:
         missing = expected_item_ids - decisions.keys()
         if missing:
             logger.debug(
-                "Response file missing item_ids (defaulting to create_issue): %s",
+                "Response file missing item_ids (defaulting to skip): %s",
                 missing,
             )
             for item_id in missing:
-                decisions[item_id] = "create_issue"
+                decisions[item_id] = "skip"
 
         return decisions
 
     def _write_response_file(self, decisions: Dict[str, str]) -> None:
-        """Write decisions back to the .response file atomically.
-
-        Uses write-to-temp-then-rename to prevent the file poll thread
-        from reading a partially written file.
-        """
+        """Write decisions back to the ``.response`` file atomically."""
         if self._call_file_path is None:
             return
 
@@ -444,11 +451,10 @@ class SyncInteractionHandler:
 
         items = []
         for idx, item in enumerate(self._pending_items, 1):
-            item_id = self._get_field(item, "item_id", str(idx - 1))
             items.append({
                 "id": idx,
-                "item_id": item_id,
-                "decision": decisions.get(item_id, "create_issue"),
+                "item_id": item.item_id,
+                "decision": decisions.get(item.item_id, "skip"),
             })
 
         response_data = {"items": items}
@@ -470,14 +476,3 @@ class SyncInteractionHandler:
                 raise
         except OSError as e:
             logger.warning("Failed to write response file: %s", e)
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _get_field(item: Any, field: str, default: str = "") -> str:
-        """Get a field from a PendingDecision (dataclass or dict)."""
-        if isinstance(item, dict):
-            return str(item.get(field, default))
-        return str(getattr(item, field, default))

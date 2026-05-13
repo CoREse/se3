@@ -62,6 +62,19 @@ class TestBuildAnalysisPrompt:
         assert '"high"' in prompt
         assert '"low"' in prompt
 
+    def test_declares_one_directional_sync_semantics(self, tmp_path):
+        """The prompt MUST tell the LLM that this analysis drives a
+        one-directional spec update (code → spec only) so that
+        not-yet-built features in the spec are not flagged as gaps —
+        they get removed instead. See sync philosophy: spec is a
+        snapshot of code, not a forward-looking commitment."""
+        prompt = self._build(tmp_path)
+        lowered = prompt.lower()
+        assert "one-directional" in lowered
+        assert "one-directional spec update" in lowered
+        # And the prompt must explicitly redirect future intent to issues.
+        assert "issue" in lowered
+
     def test_special_characters_in_spec_content(self, tmp_path):
         prompt = self._build(tmp_path, spec_content='Code uses {braces} and "quotes"')
         assert '{braces}' in prompt

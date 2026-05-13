@@ -433,45 +433,69 @@ app.add_typer(issue_app, name="issue", help="Manage SE3 issues")
 
 @app.command(name="sync")
 def sync_cmd(
-    mode: str = typer.Option("default", "--mode", "-m", help="Conflict handling mode: default, strict, or fast"),
+    once: bool = typer.Option(False, "--once", help="Run a single sync round (no convergence loop)"),
+    max_rounds: int = typer.Option(10, "--max-rounds", help="Hard upper bound on rounds before aborting"),
+    stable_rounds: int = typer.Option(1, "--stable-rounds", help="Consecutive zero-change rounds required to declare convergence"),
+    interactive: bool = typer.Option(False, "--interactive", "-i", help="Pause for approval on high-impact requirement deletions"),
+    show_diff: bool = typer.Option(False, "--show-diff", help="Print full per-round change list"),
 ):
-    """Check and synchronize se3/specs/ with project code.
+    """Run code → spec sync until convergence.
 
-    Compares spec files against actual code and handles differences:
-    - Spec ahead of code: creates issues for unimplemented items
-    - Code extends spec: updates spec to reflect code
-    - Conflicts: handled per --mode setting
+    Spec is the documented snapshot of code (spec-assistant); this command
+    rewrites specs to match the current code in repeated rounds until no
+    further drift is found (convergence) or ``--max-rounds`` is reached.
 
     Examples:
-        se3 sync
-        se3 sync --mode=strict
-        se3 sync --mode=fast
+        se3 sync                              # loop until converged
+        se3 sync --once                       # one round only
+        se3 sync --max-rounds 5 --stable-rounds 2
+        se3 sync --interactive                # approve high-impact deletions
+        se3 sync --show-diff                  # also dump per-round changes
     """
-    from .commands.sync import SyncMode, sync_command
+    from .commands.sync import sync_command
 
-    try:
-        sync_mode = SyncMode(mode)
-    except ValueError:
+    if once:
+        # --once collapses to a single-round invocation. We deliberately ignore
+        # user-supplied max_rounds / stable_rounds in this case so the semantics
+        # stay obvious: "exactly one round, no convergence check."
+        max_rounds = 1
+        stable_rounds = 1
+
+    if max_rounds < 1:
+        render_text("--max-rounds must be >= 1.", title="Error")
+        raise typer.Exit(1)
+    if stable_rounds < 1:
+        render_text("--stable-rounds must be >= 1.", title="Error")
+        raise typer.Exit(1)
+    if stable_rounds > max_rounds:
         render_text(
-            f"Invalid mode '{mode}'. Must be one of: default, strict, fast",
+            f"--stable-rounds ({stable_rounds}) cannot exceed --max-rounds ({max_rounds}).",
             title="Error",
         )
         raise typer.Exit(1)
 
-    sync_command(mode=sync_mode)
+    sync_command(
+        max_rounds=max_rounds,
+        stable_rounds=stable_rounds,
+        interactive=interactive,
+        show_diff=show_diff,
+        once=once,
+    )
 
 
 @app.command(name="sync-respond")
 def sync_respond_cmd(
     call_file: Path = typer.Argument(..., help="Path to the sync call file"),
 ):
-    """Process an MCP call response file for sync conflicts.
+    """Process an MCP call response file for sync high-impact deletions.
 
-    After editing the .response file for a sync call, run this command
-    to execute the conflict decisions (update spec or create issue).
+    The single-directional sync flow only emits one kind of call file:
+    ``sync_high_impact_deletion``. After editing the ``.response`` file
+    (filling each item's ``decision`` with ``approve`` or ``skip``), run
+    this command to apply the approved deletions.
 
     Example:
-        se3 sync-respond se3/calls/sync_conflicts_12345.json
+        se3 sync-respond se3/calls/sync_high_impact_deletion_12345.json
     """
     from .commands.sync import process_call_response
 

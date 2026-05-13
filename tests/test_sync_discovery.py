@@ -418,8 +418,19 @@ class TestGenerateSpecForSubsystem:
 # ---------------------------------------------------------------------------
 
 class TestSyncEngineIntegration:
+    """Discovery integration with the post-G2 single-round SyncEngine.
+
+    These tests drive ``SyncEngine.run_once(do_discovery=True)`` directly so
+    that discovery's contribution to ``RoundResult.specs_created`` is
+    verified without going through ``SyncLoop`` (which is covered separately
+    in ``test_sync_loop.py``).
+    """
+
+    def _make_flow_ctx(self, tmp_path):
+        from se3.engine.sync_history import SyncFlowContext
+        return SyncFlowContext(tmp_path)
+
     def test_new_specs_added_to_sync_flow(self, tmp_path):
-        """New specs from discovery should be included in the specs dict for sync."""
         from se3.engine.sync_engine import SyncEngine, SpecAnalysis
 
         _create_spec(tmp_path, "base")
@@ -429,11 +440,7 @@ class TestSyncEngineIntegration:
         ]
         spec_content = "# new-feature Specification\n\n## Purpose\n\nNew feature.\n\n## Requirements\n\n### Requirement: Feature\nDetails."
 
-        with patch("se3.engine.sync_engine.SyncEngine._load_existing_issues", return_value=[]), \
-             patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None), \
-             patch("se3.engine.project_context.ProjectContextCollector.collect",
-                   return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
-             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
+        with patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
              patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs") as mock_discover, \
              patch("se3.engine.sync_discovery.SpecDiscovery.generate_spec_for_subsystem") as mock_gen:
 
@@ -445,12 +452,17 @@ class TestSyncEngineIntegration:
             mock_analyze.return_value = SpecAnalysis(spec_name="base")
 
             engine = SyncEngine(tmp_path)
-            result = engine.run()
+            result = engine.run_once(
+                round_index=1,
+                flow_ctx=self._make_flow_ctx(tmp_path),
+                llm_caller=MagicMock(),
+                project_context="{}",
+                do_discovery=True,
+            )
 
         assert "new-feature" in result.specs_created
 
     def test_specs_created_recorded_in_result(self, tmp_path):
-        """SyncResult.specs_created should list newly discovered specs."""
         from se3.engine.sync_engine import SyncEngine, SpecAnalysis
 
         _create_spec(tmp_path, "base")
@@ -463,11 +475,7 @@ class TestSyncEngineIntegration:
         spec_a_content = "# sub-a Specification\n\n## Purpose\n\nSub A.\n\n## Requirements\n\n### Requirement: A\nDetails."
         spec_b_content = "# sub-b Specification\n\n## Purpose\n\nSub B.\n\n## Requirements\n\n### Requirement: B\nDetails."
 
-        with patch("se3.engine.sync_engine.SyncEngine._load_existing_issues", return_value=[]), \
-             patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None), \
-             patch("se3.engine.project_context.ProjectContextCollector.collect",
-                   return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
-             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
+        with patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
              patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs") as mock_discover, \
              patch("se3.engine.sync_discovery.SpecDiscovery.generate_spec_for_subsystem") as mock_gen:
 
@@ -485,30 +493,38 @@ class TestSyncEngineIntegration:
             mock_analyze.return_value = SpecAnalysis(spec_name="x")
 
             engine = SyncEngine(tmp_path)
-            result = engine.run()
+            result = engine.run_once(
+                round_index=1,
+                flow_ctx=self._make_flow_ctx(tmp_path),
+                llm_caller=MagicMock(),
+                project_context="{}",
+                do_discovery=True,
+            )
 
         assert "sub-a" in result.specs_created
         assert "sub-b" in result.specs_created
 
     def test_progress_callback_reports_discovering_phase(self, tmp_path):
-        """progress_callback should be called with phase='discovering'."""
         from se3.engine.sync_engine import SyncEngine, SpecAnalysis
 
         _create_spec(tmp_path, "base")
 
         callback = MagicMock()
 
-        with patch("se3.engine.sync_engine.SyncEngine._load_existing_issues", return_value=[]), \
-             patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None), \
-             patch("se3.engine.project_context.ProjectContextCollector.collect",
-                   return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
-             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
+        with patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
              patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs", return_value=[]):
 
             mock_analyze.return_value = SpecAnalysis(spec_name="base")
 
             engine = SyncEngine(tmp_path)
-            engine.run(progress_callback=callback)
+            engine.run_once(
+                round_index=1,
+                flow_ctx=self._make_flow_ctx(tmp_path),
+                llm_caller=MagicMock(),
+                project_context="{}",
+                do_discovery=True,
+                progress_callback=callback,
+            )
 
         discovering_calls = [
             c for c in callback.call_args_list
@@ -517,17 +533,12 @@ class TestSyncEngineIntegration:
         assert len(discovering_calls) >= 1
 
     def test_discovery_runs_before_analysis(self, tmp_path):
-        """SpecDiscovery should execute before per-spec analysis."""
         from se3.engine.sync_engine import SyncEngine, SpecAnalysis
 
         _create_spec(tmp_path, "base")
         call_order = []
 
-        with patch("se3.engine.sync_engine.SyncEngine._load_existing_issues", return_value=[]), \
-             patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None), \
-             patch("se3.engine.project_context.ProjectContextCollector.collect",
-                   return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
-             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
+        with patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
              patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs") as mock_discover:
 
             def discover_side(*a, **kw):
@@ -541,28 +552,36 @@ class TestSyncEngineIntegration:
             mock_analyze.side_effect = analyze_side
 
             engine = SyncEngine(tmp_path)
-            engine.run()
+            engine.run_once(
+                round_index=1,
+                flow_ctx=self._make_flow_ctx(tmp_path),
+                llm_caller=MagicMock(),
+                project_context="{}",
+                do_discovery=True,
+            )
 
         assert call_order.index("discover") < call_order.index("analyze")
 
     def test_discovery_failure_does_not_block_sync(self, tmp_path):
-        """If discovery fails, sync should continue with existing specs."""
         from se3.engine.sync_engine import SyncEngine, SpecAnalysis
 
         _create_spec(tmp_path, "base")
 
-        with patch("se3.engine.sync_engine.SyncEngine._load_existing_issues", return_value=[]), \
-             patch("se3.engine.llm_caller.LLMCaller.__init__", return_value=None), \
-             patch("se3.engine.project_context.ProjectContextCollector.collect",
-                   return_value={"git": {}, "flow_engine": None, "backlog": [], "specs": []}), \
-             patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
+        with patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_analyze, \
              patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs") as mock_discover:
 
             mock_discover.side_effect = RuntimeError("LLM down")
             mock_analyze.return_value = SpecAnalysis(spec_name="base")
 
             engine = SyncEngine(tmp_path)
-            result = engine.run()
+            result = engine.run_once(
+                round_index=1,
+                flow_ctx=self._make_flow_ctx(tmp_path),
+                llm_caller=MagicMock(),
+                project_context="{}",
+                do_discovery=True,
+            )
 
         assert result.specs_created == []
         assert len(result.analyses) >= 1
+        assert result.discovery_failed is True
