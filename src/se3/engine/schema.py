@@ -32,7 +32,6 @@ class StepTypeValue(str, Enum):
     """Valid step type values."""
 
     ANALYZE = "analyze"
-    READ_SPEC = "read_spec"
     PLAN = "plan"
     PROPOSE = "propose"  # deprecated: use PLAN
     DESIGN = "design"  # deprecated: use PLAN
@@ -105,7 +104,7 @@ class StateSchema(TypedDict, total=False):
             "step_history": ["a1b2c3d4", "e5f6g7h8"],
             "steps": {"a1b2c3d4": {...}, "e5f6g7h8": {...}},
             "context": {"task_description": "...", "task_type": "feature"},
-            "selected_steps": ["analyze", "read_spec", "propose", ...],
+            "selected_steps": ["analyze", "plan", "propose", ...],
             "current_step_index": 2
         }
     """
@@ -230,12 +229,12 @@ class ContextSchema(TypedDict, total=False):
             },
             "steps": [
                 {"step_type": "analyze", "status": "completed", ...},
-                {"step_type": "read_spec", "status": "completed", ...},
+                {"step_type": "plan", "status": "completed", ...},
                 ...
             ],
             "key_outputs": {
                 "analyze": {"task_type": "feature", "scope": "backend"},
-                "read_spec": {"relevant_specs": ["api-design"]}
+                "plan": {"task_groups": [...]}
             },
             "project_context": {
                 "root": "/home/user/project",
@@ -377,7 +376,6 @@ def _summarize_outputs(outputs: Dict[str, Any], step_type: str) -> Dict[str, Any
     # Define key fields per step type
     key_fields = {
         "analyze": ["task_type", "scope", "required_steps"],
-        "read_spec": ["relevant_specs"],
         "plan": ["plan", "task_groups", "total_complexity"],
         "propose": ["proposal_summary"],
         "design": ["design_summary", "decisions"],
@@ -408,7 +406,6 @@ def _extract_key_outputs(outputs: Dict[str, Any], step_type: str) -> Dict[str, A
     """Extract the most important outputs for each step type."""
     key_map = {
         "analyze": ["task_type", "scope", "complexity"],
-        "read_spec": ["relevant_specs", "spec_summary"],
         "plan": ["plan", "task_groups", "total_complexity", "estimated_effort"],
         "propose": ["proposal", "acceptance_criteria"],
         "design": ["design_doc", "decisions", "architecture"],

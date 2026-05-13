@@ -44,7 +44,6 @@ class StepType(Enum):
     DISCOVERY = "discovery"  # Discovery mode: explore requirements with user
     ANALYZE = "analyze"  # Analyze input, determine task type and scope
     PROJECT_SUMMARY = "project_summary"  # Generate project context summary
-    READ_SPEC = "read_spec"  # Read relevant OpenSpec specs (LLM-driven)
     PLAN = "plan"  # Unified planning: proposal + design + task breakdown
     PROPOSE = "propose"  # Generate change proposal (deprecated: use PLAN)
     DESIGN = "design"  # Design solution and architecture decisions (deprecated: use PLAN)
@@ -504,16 +503,6 @@ STEP_POOL: Dict[StepType, Dict[str, Any]] = {
         "deprecated": True,
         "inputs": ["task_description"],
         "outputs": ["project_summary"],
-    },
-    # Deprecated: READ_SPEC merged into ANALYZE (kept for backward compat with persisted flows)
-    StepType.READ_SPEC: {
-        "name": "read_spec",
-        "description": "Read relevant OpenSpec specs (deprecated: merged into analyze)",
-        "uses_llm": True,
-        "read_only": True,
-        "deprecated": True,
-        "inputs": ["task_type", "scope", "project_summary"],
-        "outputs": ["relevant_specs", "spec_content"],
     },
     StepType.PLAN: {
         "name": "plan",
