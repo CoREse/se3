@@ -384,10 +384,10 @@ class TestGitHelpers:
 
 
 class TestReadSpecBaseLoading:
-    """Tests for base spec auto-loading in read_spec step."""
+    """Tests for base spec auto-loading via ContextBuilder."""
 
     def test_base_spec_loaded_when_exists(self, tmp_path):
-        """read_spec auto-loads base spec when it exists."""
+        """ContextBuilder._load_spec_content auto-loads base spec when it exists."""
         from se3.engine.context_builder import ContextBuilder
 
         # Create base spec

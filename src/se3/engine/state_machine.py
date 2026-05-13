@@ -1025,12 +1025,9 @@ class StateMachine:
                     inputs["relevant_specs"] = step.outputs.get("relevant_specs")
                     inputs["spec_content"] = step.outputs.get("spec_content")
                     inputs["selected_items"] = step.outputs.get("selected_items", [])
-                # Deprecated: PROJECT_SUMMARY and READ_SPEC merged into ANALYZE (backward compat for persisted flows)
+                # Deprecated: PROJECT_SUMMARY merged into ANALYZE (backward compat for persisted flows)
                 elif step.step_type == StepType.PROJECT_SUMMARY:
                     inputs["project_summary"] = step.outputs.get("project_summary")
-                elif step.step_type == StepType.READ_SPEC:
-                    inputs["relevant_specs"] = step.outputs.get("relevant_specs")
-                    inputs["spec_content"] = step.outputs.get("spec_content")
                 elif step.step_type == StepType.PLAN:
                     plan = step.outputs.get("plan", {})
                     inputs["proposal"] = plan.get("proposal", {})
