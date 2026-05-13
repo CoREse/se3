@@ -132,6 +132,52 @@ class TestCreateFromFixLoopExhaustion:
         assert issue is not None
         assert "Fix the auth token validation" in issue.description
 
+    def test_description_includes_flow_id(self, discovery, basic_flow):
+        trigger = Step(step_type=StepType.VERIFY_SPEC, status=StepStatus.COMPLETED)
+        trigger.outputs = {"fix_context": {}}
+
+        issue = discovery.create_from_fix_loop_exhaustion(basic_flow, trigger)
+
+        assert issue is not None
+        assert f"**Flow ID:** {basic_flow.flow_id}" in issue.description
+
+    def test_description_includes_history_path(self, discovery, basic_flow):
+        trigger = Step(step_type=StepType.VERIFY_SPEC, status=StepStatus.COMPLETED)
+        trigger.outputs = {"fix_context": {}}
+
+        issue = discovery.create_from_fix_loop_exhaustion(basic_flow, trigger)
+
+        assert issue is not None
+        assert f"**History path:** se3/history/{basic_flow.flow_id}" in issue.description
+
+    def test_description_includes_refined_description(self, discovery, basic_flow):
+        # Add a completed DISCOVERY step with a refined_description
+        discovery_step = Step(step_type=StepType.DISCOVERY, status=StepStatus.COMPLETED)
+        discovery_step.outputs = {
+            "refined_description": "Implement user authentication with OAuth2 and 2FA support",
+        }
+        basic_flow.state.add_step(discovery_step)
+        basic_flow.state.step_history.append(discovery_step.step_id)
+
+        trigger = Step(step_type=StepType.VERIFY_SPEC, status=StepStatus.COMPLETED)
+        trigger.outputs = {"fix_context": {}}
+
+        issue = discovery.create_from_fix_loop_exhaustion(basic_flow, trigger)
+
+        assert issue is not None
+        assert "**Refined description:**" in issue.description
+        assert "OAuth2 and 2FA support" in issue.description
+
+    def test_description_omits_refined_when_same_as_original(self, discovery, basic_flow):
+        # No discovery step present in basic_flow → refined equals original
+        trigger = Step(step_type=StepType.VERIFY_SPEC, status=StepStatus.COMPLETED)
+        trigger.outputs = {"fix_context": {}}
+
+        issue = discovery.create_from_fix_loop_exhaustion(basic_flow, trigger)
+
+        assert issue is not None
+        assert "**Refined description:**" not in issue.description
+
     def test_deduplicates(self, discovery, basic_flow):
         trigger = Step(step_type=StepType.VERIFY_SPEC, status=StepStatus.COMPLETED)
         trigger.outputs = {"fix_context": {}}

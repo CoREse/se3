@@ -18,6 +18,7 @@ The system SHALL support two classes of issue discovery:
 - **WHEN** the test→verify_spec→implement fix loop reaches `max_fix_iterations` (default 100)
 - **THEN** `IssueDiscovery.create_from_fix_loop_exhaustion()` creates a `high` priority issue
 - **AND** the issue includes fix history (last 5 entries), last test output (tail 1000 chars), and fix instructions (first 1500 chars)
+- **AND** the issue description also includes the flow's `flow_id`, the history path (`se3/history/{flow_id}`), and — when a completed DISCOVERY step produced a `refined_description` that differs from the original `task_description` — a `**Refined description:**` section containing the refined text (truncated to 1500 chars)
 - **AND** the flow is set to FAILED status and execution stops (the flow does NOT continue to the next step)
 - **NOTE** when `max_fix_iterations == 0` (the user-configured `0`/`null` sentinel for "unlimited"), this A-class trigger never fires because the state machine skips the exhaustion check entirely. Negative values are rejected at config load, so they cannot reach this code path.
 

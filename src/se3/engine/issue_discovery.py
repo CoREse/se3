@@ -98,9 +98,23 @@ class IssueDiscovery:
         desc_parts = [
             f"The fix loop reached maximum iterations while working on: {flow.task_description}",
             "",
+            f"**Flow ID:** {flow.flow_id}",
+            f"**History path:** se3/history/{flow.flow_id}",
+        ]
+
+        # Include refined_description if it differs from the original task_description.
+        # Lazy import avoids module-level circular dependency: state_machine already
+        # imports issue_discovery for A-class triggers.
+        from .state_machine import _effective_task_description_base
+        refined = _effective_task_description_base(flow)
+        if refined and refined != flow.task_description:
+            desc_parts.extend(["", "**Refined description:**", refined[:1500]])
+
+        desc_parts.extend([
+            "",
             f"**Trigger step:** {trigger_step.step_type.value}",
             f"**Fix iterations:** {flow.state.get_fix_iteration()}",
-        ]
+        ])
 
         # Include last test results if available
         fix_context = trigger_step.outputs.get("fix_context", {})
