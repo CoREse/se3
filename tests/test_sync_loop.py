@@ -281,6 +281,36 @@ class TestSyncLoopConvergence:
         assert loop_result.converged is True
         assert len(loop_result.rounds) == 4
 
+    def test_once_mode_stops_after_first_round_even_with_drift(
+        self, tmp_path, patched_loop_deps
+    ):
+        """``--once`` is implemented as ``max_rounds=1``: the loop must
+        execute exactly one round and stop, even if that round produced
+        drift (i.e. ``specs_updated > 0``). Convergence is reported as
+        False because the loop did not reach a stable state."""
+        scripted = [
+            _round(1, updated=3, hashes={"a": "X1", "b": "Y1"}),
+            # If the loop incorrectly enters round 2, ScriptedEngine will
+            # raise via run_once() — providing a defensive failure signal.
+        ]
+
+        def _engine_factory(project_root, interactive=False):
+            eng = _ScriptedEngine(project_root, interactive=interactive)
+            eng.script = scripted
+            patched_loop_deps["engine"] = eng
+            return eng
+
+        with patch("se3.engine.sync_loop.SyncEngine", _engine_factory):
+            loop_result = SyncLoop(tmp_path, max_rounds=1).run()
+
+        assert len(loop_result.rounds) == 1
+        assert loop_result.final_round_index == 1
+        assert loop_result.converged is False
+        assert loop_result.oscillation_detected is False
+        assert loop_result.total_specs_updated == 3
+        # Engine must only have been invoked once.
+        assert len(patched_loop_deps["engine"].calls) == 1
+
     def test_max_rounds_exhausted(self, tmp_path, patched_loop_deps):
         scripted = [
             _round(1, updated=1, hashes={"a": "X1"}),
