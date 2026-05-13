@@ -18,7 +18,7 @@ project/
 ├── se3.local.yaml         # Optional developer-local override (gitignored)
 ├── README.md              # Project documentation
 ├── se3/                   # SE3 runtime directory
-│   ├── specs/             # Source of truth for requirements
+│   ├── specs/             # Documented snapshot of code (spec-assistant)
 │   │   ├── base/          # Base project specification
 │   │   │   └── spec.md    # Required: project conventions
 │   │   └── <capability>/  # Capability specs
@@ -44,7 +44,7 @@ so it is committed with the project.
 - `se3.yaml` — Project configuration (optional but recommended)
 
 **Key Directories:**
-- `se3/specs/` — Spec files (the source of truth for requirements)
+- `se3/specs/` — Spec files (documented snapshot of code; spec-assistant maintained by `se3 sync`)
 - `se3/state/` — Flow engine state persistence
 - `se3/cache/` — Cache files
 
@@ -56,13 +56,13 @@ so it is committed with the project.
 
 The system SHALL require a base specification at `se3/specs/base/spec.md` in every SE3 project.
 
-**Base spec purpose:**
-- Define project identity (name, description, languages)
-- Define directory structure conventions
-- Define coding conventions
-- Define key constraints
-- Define workflow conventions
-- Define version management rules
+**Base spec purpose:** The base spec is a documented snapshot of the project's current code reality — its identity, structure, conventions, and constraints — not a forward-looking design contract. It exists so humans and LLMs share a fast, accurate read of *what the project is today*. Future intent and unimplemented commitments belong in issues, not in the base spec. Concretely, the base spec captures:
+- Project identity (name, description, languages) — as currently configured
+- Directory structure conventions — as currently laid out on disk
+- Coding conventions — as currently practiced
+- Key constraints — as currently enforced
+- Workflow conventions — as currently used
+- Version management rules — as currently applied
 
 **Base spec auto-loading:**
 - The base spec SHALL be automatically loaded in all `se3 run` flows
@@ -166,6 +166,8 @@ se3/specs/
 - Markdown format
 - Required sections: Purpose, Requirements
 - Scenario format: WHEN/THEN
+
+**Spec role:** Specs are the documented snapshot of code (a spec-assistant view), maintained by `se3 sync`. They have no routine manual-edit entry; future intent belongs in issues.
 
 #### Scenario: Spec discovery
 - **WHEN** flow engine reads specs

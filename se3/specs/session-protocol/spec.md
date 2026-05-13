@@ -15,7 +15,7 @@ The system SHALL adhere to the following core principles that govern all SE3 ope
 
 **2. Progressive Loading**: Start with minimal context. Load deeper only when the task needs it.
 
-**3. Specs as Truth**: SE3 specs (`se3/specs/`) are the single source of truth for requirements. Agents MUST NOT weaken or delete existing requirements without explicit human approval.
+**3. Specs as Snapshot of Code (spec-assistant)**: SE3 specs (`se3/specs/`) are the documented snapshot of project code, generated and maintained by the sync workflow. They protect against drift during implementation and help humans/LLMs understand current state. Future intent enters through issues, not specs. Specs have no routine manual-edit entry; therefore spec leading code is not a legitimate state. Agents MUST NOT weaken or delete existing requirements of a spec they are currently implementing against without explicit human approval — the spec is the implementation contract for the duration of that flow.
 
 **4. Verify Before Done**: Never mark a feature complete without running tests. Spec scenarios are acceptance criteria, not documentation.
 

@@ -207,108 +207,127 @@ Results are de-duplicated by `flow_id` and sorted by `updated_at` descending.
 
 ### Requirement: `se3 sync` Command
 
-The `se3 sync` command SHALL check and synchronize `se3/specs/` with project code, identifying gaps, extensions, and conflicts between specifications and the actual codebase.
+The `se3 sync` command SHALL refresh `se3/specs/` so that each spec file reflects the **current state of project code**. Sync is one-directional (code → spec): when a spec drifts from the code, the spec is updated. The command iterates rounds until a fixed point is reached (no spec changes), or a hard cap is hit, or oscillation is detected.
+
+**Philosophy:** Specs are the documented snapshot of code (a spec-assistant view). Future intent enters through issues, not through specs. Sync therefore never modifies project source code, never creates issues from spec/code drift, and never propagates spec content back to code.
 
 **Interface:**
 ```bash
-se3 sync                    # Sync with default mode
-se3 sync --mode=default     # Same as above (explicit)
-se3 sync --mode=strict      # All conflicts require human decision
-se3 sync --mode=fast        # LLM handles all conflicts automatically
+se3 sync                              # Default: loop until convergence
+se3 sync --once                       # Run a single round (legacy / CI-friendly)
+se3 sync --max-rounds 10              # Hard cap on number of rounds (default 10)
+se3 sync --stable-rounds 1            # Consecutive zero-change rounds required to declare convergence (default 1)
+se3 sync --interactive                # Pause for human approval on high-impact deletions
+se3 sync --show-diff                  # Print the full spec diff at end of run
 ```
 
-**Mode Parameter:**
-| Mode | Behavior |
-|------|----------|
-| `default` | LLM auto-resolves high-confidence conflicts; low-confidence conflicts are batched into an MCP call file for human decision |
-| `strict` | All conflicts are batched into a single MCP call file for human decision |
-| `fast` | LLM fully auto-resolves all conflicts; no human intervention |
+**Option summary:**
+| Option | Default | Behavior |
+|--------|---------|----------|
+| `--once` | off | Run exactly one round and exit, regardless of whether drift remains. Useful for CI gates and single-step inspection. |
+| `--max-rounds N` | 10 | Maximum number of rounds before aborting as non-converged. |
+| `--stable-rounds N` | 1 | Number of consecutive zero-change rounds required to declare convergence. Raise to 2+ for higher confidence. |
+| `--interactive` | off | When set, sync pauses and writes a `sync_high_impact_deletion` call file before deleting an entire `### Requirement:` block. Other updates are still applied automatically. |
+| `--show-diff` | off | Print the full aggregated spec diff after the final round. |
+
+**Drift classification (used for log readability only):** Each round's analyzer still classifies drift as *gap* (spec describes something not in code → delete that spec section), *extension* (code does something the spec omits → add a section), or *conflict* (spec describes the behavior differently from the code → modify the section). All three classes resolve to the same kind of action: update the spec. The classification is preserved in round reports so humans can scan what changed.
+
+**Per-round honesty:** Each round's LLM call is stateless — it sees only the current spec content plus a fresh project-code snapshot. The sync driver process retains cross-round history for convergence detection, oscillation detection, and final reporting; it does NOT feed this history back into the LLM prompts.
 
 #### Scenario: Sync with existing base spec
 - **GIVEN** the project has a base spec at `se3/specs/base/`
 - **WHEN** user runs `se3 sync`
 - **THEN** the engine loads all specs starting from base
-- **AND** performs LLM-driven comparison of each spec against project code
-- **AND** classifies each difference as gap, extension, or conflict
+- **AND** performs an LLM-driven comparison of each spec against project code
+- **AND** the analyzer's classification (gap / extension / conflict) is recorded for logging
+- **AND** every drift, regardless of classification, is resolved by updating the spec to reflect the code
 
 #### Scenario: Sync without base spec (SE3 bootstrapping)
 - **GIVEN** the project has no `se3/specs/base/` directory
 - **WHEN** user runs `se3 sync`
-- **THEN** the engine first explores the project codebase and generates a base spec
-- **AND** then proceeds with the iterative sync flow
+- **THEN** the engine first explores the project codebase and generates a base spec in the first round
+- **AND** subsequent rounds only update existing specs (no new discovery)
 
-#### Scenario: Gap detected (spec leads code)
-- **WHEN** a spec describes a requirement that is NOT implemented in the code
-- **THEN** the engine creates an issue tagged `["auto-discovered", "source:sync"]`
-- **AND** the issue title follows the format `[sync] {spec_name}: {description}`
-- **AND** idempotency uses normalized matching: titles are normalized by extracting the description portion, lowercasing, removing articles (a/an/the), stripping punctuation, and collapsing whitespace before comparison
-- **AND** if a normalized-matching open issue already exists, it is NOT created (idempotency)
-
-#### Scenario: Extension detected (code extends spec)
-- **WHEN** the code contains functionality that the spec does NOT describe, with no contradiction
-- **THEN** the engine uses LLM to update the spec file to reflect the code's actual behavior
-- **AND** the update preserves all existing requirements (add-only)
+#### Scenario: Spec drift detected — unified update
+- **WHEN** any drift is found between a spec and the code, of any classification (gap / extension / conflict)
+- **THEN** the engine uses an LLM to update the spec file to match the code's actual behavior
+- **AND** for *gap* drift the corresponding spec section is removed (the code no longer implements that requirement)
+- **AND** for *extension* drift a new section is added
+- **AND** for *conflict* drift the existing section is rewritten
 - **AND** a content length safety guard rejects suspiciously short LLM outputs (< 50% of original)
 - **AND** markdown code fences wrapping the LLM response are stripped before writing to spec files
+- **AND** sync NEVER creates issues, edits source code, or touches files outside `se3/specs/`
 
-#### Scenario: Conflict detected in default mode
-- **WHEN** the code implements something differently from what the spec describes
-- **AND** mode is `default`
-- **THEN** high-confidence conflicts are auto-resolved by LLM (update spec or create issue)
-- **AND** low-confidence conflicts are collected for human decision
+#### Scenario: Convergence reached
+- **GIVEN** `--stable-rounds` defaults to 1
+- **WHEN** a round completes with zero spec changes
+- **THEN** the loop terminates as converged
+- **AND** the final report states: `Converged after N rounds. Total M specs updated. Final round: 0 changes.`
+- **AND** the report includes an explicit honesty disclaimer: *"Convergence means the LLM detected no drift in the final round; it does not guarantee absolute spec/code consistency."*
 
-#### Scenario: Conflict detected in strict mode
-- **WHEN** a conflict is detected and mode is `strict`
-- **THEN** all conflicts are batched into a single MCP call file in `se3/calls/`
-- **AND** flow pauses, awaiting human input
+#### Scenario: Convergence with --stable-rounds 2
+- **GIVEN** the user runs `se3 sync --stable-rounds 2`
+- **WHEN** a round produces zero changes but the prior round produced changes
+- **THEN** the loop continues for one more round
+- **AND** the loop only terminates after two consecutive zero-change rounds
 
-#### Scenario: Conflict detected in fast mode
-- **WHEN** a conflict is detected and mode is `fast`
-- **THEN** LLM auto-resolves every conflict (deciding update_spec or create_issue)
-- **AND** no human intervention is triggered
+#### Scenario: Max-rounds reached without convergence
+- **GIVEN** `--max-rounds N` (default 10)
+- **WHEN** the loop has executed N rounds and the last round still produced spec changes
+- **THEN** the loop terminates and the command exits with a non-zero status
+- **AND** the report clearly states: `sync did not converge within N rounds` and lists which specs were still being modified
 
-#### Scenario: Conflict spec update safety guards
-- **WHEN** a conflict is resolved by updating the spec (via LLM)
-- **THEN** a content length safety guard rejects LLM outputs shorter than 50% of the original spec content
-- **AND** markdown code fences wrapping the LLM response are stripped before writing to spec files
+#### Scenario: Oscillation detected
+- **WHEN** the sync driver observes that the SHA-256 of a spec's content has cycled (e.g. A → B → A → B over the last K rounds, K=4 by default)
+- **THEN** the loop aborts immediately
+- **AND** the report names the oscillating spec(s), prints the cycle, and asks the user to inspect manually
+- **AND** the command exits with a non-zero status
 
-#### Scenario: Issue lifecycle — auto-close resolved gaps
-- **WHEN** sync detects that a previously reported gap is no longer present
-- **THEN** the corresponding sync-tagged issue is automatically closed using a three-layer matching strategy:
-  1. **Normalized match**: the issue title is normalized and compared against current gap titles
-  2. **Prefix fallback**: if normalized match fails but the issue's spec still has gaps, the issue is conservatively kept open
-  3. **Close**: only when neither condition holds is the issue closed
-- **AND** the close reason indicates the gap was resolved
-- **AND** only gap issues are processed (conflict issues have their own lifecycle)
+#### Scenario: --once mode
+- **WHEN** the user runs `se3 sync --once`
+- **THEN** the engine performs exactly one round and exits
+- **AND** the report distinguishes the single-round case explicitly (it does NOT claim "converged")
+- **AND** any remaining drift is reported with the suggestion to re-run without `--once`
 
-#### Scenario: MCP call file generation for human intervention
-- **WHEN** conflicts require human decision (default or strict mode)
-- **THEN** all pending conflicts are written to a single JSON file in `se3/calls/`
-- **AND** the file includes conflict ID, spec name, description, code location, spec content (truncated to 2000 chars), and decision options
-- **AND** the CLI displays the call file path and the `se3 sync-respond` command to process it
+#### Scenario: --interactive mode and high-impact deletion
+- **GIVEN** the user runs `se3 sync --interactive`
+- **WHEN** within a round the LLM concludes that an entire `### Requirement:` block (with its scenarios) should be deleted from a spec
+- **THEN** the engine writes a single MCP call file in `se3/calls/` of type `sync_high_impact_deletion`
+- **AND** the call file lists each pending deletion with spec name, requirement name, and the spec content that would be removed (truncated to 2000 chars per item)
+- **AND** the available decision values are `approve` and `skip`
+- **AND** non-deletion updates inside the same round are still applied automatically
+- **AND** the round pauses until the user runs `se3 sync-respond` with their decisions
+
+#### Scenario: Non-interactive default does not pause
+- **GIVEN** the user runs `se3 sync` without `--interactive`
+- **WHEN** any drift is found, including deletions of entire requirement blocks
+- **THEN** the engine applies all updates automatically without writing any call file
+- **AND** the loop relies on oscillation detection and `--max-rounds` to bound risk
 
 ### Requirement: `se3 sync-respond` Command
 
-The `se3 sync-respond` command SHALL process an MCP call response file for sync conflicts.
+The `se3 sync-respond` command SHALL process an MCP call response file produced by `se3 sync --interactive` for high-impact deletions.
 
 **Interface:**
 ```bash
 se3 sync-respond <call-file-path>
 ```
 
-#### Scenario: Process call response
-- **GIVEN** an MCP call file has been created by `se3 sync`
-- **AND** the user has filled in the `.response` file with decisions for each conflict
-- **WHEN** user runs `se3 sync-respond <call-file-path>`
-- **THEN** the engine reads each conflict decision from the response file
-- **AND** for `update_spec` decisions: uses LLM to update the spec to match the code
-- **AND** for `create_issue` decisions: creates an issue recording the discrepancy
-- **AND** responses with invalid decision values (not `update_spec` or `create_issue`) are skipped
-- **AND** responses referencing unknown conflict IDs (not present in the original call file) are skipped
+The call file SHALL have `type: sync_high_impact_deletion`. The only valid decision values are `approve` and `skip`.
+
+#### Scenario: Process high-impact deletion response
+- **GIVEN** an MCP call file of type `sync_high_impact_deletion` has been created by `se3 sync --interactive`
+- **AND** the user has filled in the `.response` file with `approve` or `skip` per pending deletion
+- **WHEN** the user runs `se3 sync-respond <call-file-path>`
+- **THEN** for each `approve` decision the engine deletes the named `### Requirement:` block (and its scenarios) from the spec
+- **AND** for each `skip` decision the deletion is recorded as deferred and the spec block is left intact for this round
+- **AND** responses with invalid decision values (not `approve` or `skip`) are skipped
+- **AND** responses referencing unknown deletion IDs (not present in the original call file) are skipped
+- **AND** after responses are applied, the user is expected to re-run `se3 sync` to continue the loop (the response itself does not auto-resume the loop)
 
 ### Requirement: Sync Operation Permission Limits
 
-`se3 sync` SHALL only directly modify spec files (`se3/specs/`) and issue files (`se3/issues/`). All situations requiring code changes SHALL be recorded as issues, never applied directly to project source code.
+`se3 sync` SHALL only directly modify spec files (`se3/specs/`). It SHALL NOT modify project source code, SHALL NOT create or modify issues, and SHALL NOT touch any other runtime files. If the code itself looks wrong, the wrongness will be honestly reflected in the updated spec where a human reviewer can spot it — sync does not act as a guardian of code correctness.
 
 ### Requirement: `se3 merge` Command
 
