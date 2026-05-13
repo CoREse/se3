@@ -1848,25 +1848,25 @@ The `analyze`, `self_check`, `verify_spec`, `update_spec`, and `commit` steps SH
 
 #### Analyze Renderer
 
-The `analyze` step renderer SHALL display a top-line status bar followed by reasoning and relevant specs.
+The `analyze` step renderer SHALL display a top-line status bar followed by reasoning and relevant spec items.
 
 **Status Bar:**
 - A single line showing `task_type`, `complexity`, and `scope` separated by `│` delimiters (e.g. `feature  │  medium  │  src/engine`).
 
 **Sections (displayed in order when data is present):**
 1. **Reasoning** — the analysis reasoning as a body paragraph.
-2. **Relevant Specs** — a bullet list showing only spec names (extracted from `name` or `spec_name` fields of spec objects).
+2. **Relevant Spec Items** — a bullet list of selected spec item identifiers rendered from `selected_items`, with each entry formatted as `<spec>:<requirement_name>` (e.g., `flow-engine:FE-3`) so cross-spec same-named requirements remain distinguishable.
 
 **Hidden fields:** `spec_content` and `project_summary` are intentionally omitted from display — they are downstream data payloads, not user-facing information.
 
 **Output keys consumed by the renderer:**
-- `task_type`, `complexity`, `scope`, `reasoning`, `relevant_specs`
+- `task_type`, `complexity`, `scope`, `reasoning`, `selected_items`
 
 ##### Scenario: Analyze rendering with all fields
-- **WHEN** the analyze step completes with `task_type`, `complexity`, `scope`, `reasoning`, and `relevant_specs`
+- **WHEN** the analyze step completes with `task_type`, `complexity`, `scope`, `reasoning`, and `selected_items`
 - **THEN** the renderer displays a status bar with task_type, complexity, and scope
 - **AND** reasoning is shown as a labeled body paragraph
-- **AND** relevant specs are listed by name only
+- **AND** relevant spec items are listed in `<spec>:<requirement_name>` form
 
 ##### Scenario: Analyze rendering hides internal data
 - **WHEN** the analyze step outputs include `spec_content` or `project_summary`

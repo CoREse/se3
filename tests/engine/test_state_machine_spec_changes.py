@@ -66,6 +66,15 @@ class TestSpecChangesForwarding:
     def flow_with_plan(self, tmp_path):
         """Flow with a completed PLAN step that has spec_changes."""
         flow = _make_flow(tmp_path)
+        _add_completed_step(flow, StepType.ANALYZE, {
+            "task_type": "feature",
+            "scope": "src/",
+            "selected_items": [
+                {"spec": "base", "requirement_name": "Project Identity"}
+            ],
+            "spec_content": "items-mode content",
+            "relevant_specs": ["base"],
+        })
         _add_completed_step(flow, StepType.PLAN, {
             "plan": {
                 "proposal": {"summary": "s"},
@@ -127,6 +136,15 @@ class TestNoSpecChanges:
     def flow_without_spec_changes(self, tmp_path):
         """Flow with PLAN that has no spec_changes key in outputs."""
         flow = _make_flow(tmp_path)
+        _add_completed_step(flow, StepType.ANALYZE, {
+            "task_type": "bugfix",
+            "scope": "src/",
+            "selected_items": [
+                {"spec": "base", "requirement_name": "Project Identity"}
+            ],
+            "spec_content": "items-mode content",
+            "relevant_specs": ["base"],
+        })
         _add_completed_step(flow, StepType.PLAN, {
             "plan": {
                 "proposal": {"summary": "bugfix"},
@@ -170,6 +188,15 @@ class TestEmptyDesignDoc:
     @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_empty_design_forwarded_as_empty_dict(self, _cfg, sm, tmp_path):
         flow = _make_flow(tmp_path)
+        _add_completed_step(flow, StepType.ANALYZE, {
+            "task_type": "small",
+            "scope": "src/",
+            "selected_items": [
+                {"spec": "base", "requirement_name": "Project Identity"}
+            ],
+            "spec_content": "items-mode content",
+            "relevant_specs": ["base"],
+        })
         _add_completed_step(flow, StepType.PLAN, {
             "plan": {
                 "proposal": {"summary": "quick fix"},

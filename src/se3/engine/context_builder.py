@@ -368,8 +368,8 @@ def _detect_main_repo_root(worktree_path: Path) -> Path | None:
 class ContextBuilder:
     """Provides spec directory resolution and spec content loading.
 
-    Used by read_spec and discovery handlers to locate and load
-    specification files from the project's specs directory.
+    Used by the analyze and discovery handlers (via ContextBuilder.load_specs_for_step)
+    to locate and load specification files from the project's specs directory.
     """
 
     def __init__(self, project_root: Path):

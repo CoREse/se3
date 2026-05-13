@@ -75,10 +75,10 @@ The system SHALL classify user input in the analyze step to determine the approp
 | Task Type | Description | Steps Used |
 |-----------|-------------|------------|
 | `feature` | New functionality or significant enhancement | Full 10-step workflow |
-| `bugfix` | Fixing a bug or issue | analyze → read_spec → plan → implement → test → verify_spec → update_spec → commit → summarize |
-| `review` | Code review, audit, or analysis | analyze → read_spec → verify_spec → summarize |
+| `bugfix` | Fixing a bug or issue | analyze → plan → implement → test → verify_spec → update_spec → commit → summarize |
+| `review` | Code review, audit, or analysis | analyze → verify_spec → summarize |
 | `small` | Minor fix, typo, or simple change | analyze → implement → test → commit → summarize |
-| `directive` | Following specific instructions | analyze → read_spec → plan → implement → commit → summarize |
+| `directive` | Following specific instructions | analyze → plan → implement → commit → summarize |
 
 **Classification Indicators:**
 - Bugfix: "error", "bug", "broken", "fail", "crash", "exception", "not working"

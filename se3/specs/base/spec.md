@@ -39,7 +39,7 @@
 ### Requirement: Key Constraints
 - **自举约束**: 本项目是自举项目 —— 同时生成新规范和使用已发布规范开发。生成新规范时，不得更改 `.claude/` 中的已发布规范
 - **spec 只读**: `se3/specs/` 中的 spec 在实现过程中不应被随意修改，修改需通过 spec guardrails 检查
-- **LLM 子进程**: 流程引擎的某些步骤（如 read_spec, analyze）通过 LLM 子进程执行，这些子进程无法访问 CLAUDE.md，只能通过 spec 获取项目约定
+- **LLM 子进程**: 流程引擎的某些步骤（如 analyze, plan）通过 LLM 子进程执行，这些子进程无法访问 CLAUDE.md，只能通过 spec 获取项目约定
 
 ### Requirement: Workflow Conventions
 - 使用 `se3 commit` 代替 `git commit`（强制测试通过、拦截敏感文件）

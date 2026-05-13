@@ -33,7 +33,7 @@ The system SHALL support five workflow types, mapped to different step sequences
 **Optional step (available in pool, not in default sequences):**
 - **summarize** - Generate LLM-based summary and handoff. Can be added to step sequences via `se3.yaml` configuration. When absent, the commit step generates a template-based summary document.
 
-**Note:** `read_spec` and `project_summary` are deprecated — their functionality is now merged into the `analyze` step. Deprecated handlers are retained for backward compatibility with persisted flows.
+**Note:** `project_summary` is deprecated — its functionality is now merged into the `analyze` step. Its deprecated handler is retained for backward compatibility with persisted flows. `read_spec` has been fully removed.
 
 #### Scenario: Feature workflow selection
 - **WHEN** input is classified as "feature-request"
@@ -54,9 +54,9 @@ The feature workflow SHALL follow these steps:
 **1. ANALYZE**
    - Collect structured project context via `ProjectContextCollector.collect()` (programmatic, no LLM)
    - Programmatically list available spec names
-   - Single LLM call to classify task type (feature/bugfix/review/small/directive), determine scope and complexity, and select relevant specs (`selected_specs`)
-   - Post-processing: programmatically load spec content (base spec auto-attached + selected specs)
-   - Outputs: task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content, selected_specs
+   - Single LLM call to classify task type (feature/bugfix/review/small/directive), determine scope and complexity, and select relevant spec items (`selected_items`)
+   - Post-processing: programmatically load spec content (base spec auto-attached + selected items)
+   - Outputs: task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content, selected_items
 
 **2. PLAN** (unified planning step, adapts depth by task_type)
    - Generate change proposal (summary, motivation, files, risks)

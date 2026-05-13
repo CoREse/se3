@@ -731,7 +731,7 @@ When a language is set, a language instruction is appended to the LLM prompt for
 - `update_spec` — always affected
 
 **Unaffected steps (LLM decides language):**
-- `analyze`, `read_spec`, `plan`, `implement`, `test`, `verify_spec`, `commit`
+- `analyze`, `plan`, `implement`, `test`, `verify_spec`, `commit`
 
 **Example configuration:**
 ```yaml
@@ -1046,6 +1046,8 @@ spec_loading:
 - `"items"`: Each involved spec contributes its header (Purpose, Definitions, Constraints) plus only the Requirements that were selected by the analyze step. Base spec is always included in full. This is the default for all steps except `update_spec`.
 - `"full_spec"`: Each involved spec contributes its complete text. Used when the step needs to see all Requirements in a spec (e.g., `update_spec` naming a new spec must check for collisions across all existing spec names).
 
+**Fail-fast on empty selected_items in full_spec mode:** When a step builds inputs in `full_spec` mode and `selected_items` is empty, the spec loader SHALL raise `ValueError` rather than silently degrading to a base-only spec load. An empty `selected_items` in this mode indicates the analyze step failed to pick any relevant items, and proceeding would mask that failure by producing context that *looks* valid but omits all targeted requirements.
+
 **Default behavior:**
 - Steps NOT listed in `spec_loading.steps` use the built-in default: `"items"` for most steps, `"full_spec"` for `update_spec`.
 - The default cannot be changed globally — each step must be explicitly configured if the built-in default is unsuitable.
@@ -1072,6 +1074,13 @@ spec_loading:
 - **WHEN** the `update_spec` step builds its inputs
 - **THEN** `spec_content` contains the full text of all involved specs
 - **AND** the LLM can see all existing spec names to avoid naming collisions when creating a new spec
+
+#### Scenario: full_spec mode with empty selected_items fails fast
+- **GIVEN** a step is configured (or defaults) to `full_spec` loading mode
+- **AND** `selected_items` from the upstream analyze step is empty
+- **WHEN** the spec loader assembles `spec_content`
+- **THEN** the loader raises `ValueError` with a message identifying the empty-`selected_items` condition
+- **AND** the error surfaces upstream rather than silently producing a base-only or single-spec context
 
 ### Requirement: Claude Subprocess Setting Sources Isolation
 

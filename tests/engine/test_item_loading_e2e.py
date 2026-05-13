@@ -262,6 +262,24 @@ class TestStateMachineSelectedItemsPassthrough:
         assert "base" in inputs["relevant_specs"]
         assert "flow-engine" in inputs["relevant_specs"]
 
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
+    def test_update_spec_full_spec_empty_items_propagates_value_error(self, _cfg, sm):
+        """Empty selected_items in full_spec mode must surface as a hard error,
+        not silently degrade to items-mode spec_content."""
+        flow = _make_flow(PROJECT_ROOT)
+        _add_completed_step(flow, StepType.ANALYZE, {
+            "task_type": "feature",
+            "scope": "engine",
+            "complexity": "medium",
+            "reasoning": "Test reasoning",
+            "project_summary": "SE3 project",
+            "relevant_specs": ["base"],
+            "spec_content": "base only",
+            "selected_items": [],
+        })
+        with pytest.raises(ValueError, match="analyze"):
+            sm._build_step_inputs(flow, StepType.UPDATE_SPEC)
+
 
 class TestAnalyzeHandlerItemLevel:
     """Integration test: analyze handler outputs item-level selected_items."""

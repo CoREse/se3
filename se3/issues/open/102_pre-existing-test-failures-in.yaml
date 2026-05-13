@@ -1,0 +1,29 @@
+id: '102'
+title: 'Pre-existing test failures in `src/se3/engine/test_steps.py` are unrelated
+  to this task: `TestTestStep::test_test_failure` (expects test_handler to return
+  COMPLETED but it returns REVISION_NEEDED), `TestCommitStep::test_commit_success`
+  (commit step now requires suggested_version), `TestIssueDiscoveryInjection::test_whitelisted_step_verify_spec`,
+  and `TestStepSequences::test_small_sequence_unchanged` / `test_review_sequence_has_verify_spec`
+  (sequences no longer include SUMMARIZE). Verified pre-existing by stashing the working-tree
+  changes and re-running — same failures appear on the untouched master tree.'
+description: 'Pre-existing test failures in `src/se3/engine/test_steps.py` are unrelated
+  to this task: `TestTestStep::test_test_failure` (expects test_handler to return
+  COMPLETED but it returns REVISION_NEEDED), `TestCommitStep::test_commit_success`
+  (commit step now requires suggested_version), `TestIssueDiscoveryInjection::test_whitelisted_step_verify_spec`,
+  and `TestStepSequences::test_small_sequence_unchanged` / `test_review_sequence_has_verify_spec`
+  (sequences no longer include SUMMARIZE). Verified pre-existing by stashing the working-tree
+  changes and re-running — same failures appear on the untouched master tree.
+
+
+  Suggestion: Track separately; not blocking this flow. These tests assert outdated
+  step-handler / sequence behavior and should be updated independently.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-13T15:05:28.162234'
+updated_at: '2026-05-13T15:05:28.162234'

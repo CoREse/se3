@@ -1121,17 +1121,19 @@ class StateMachine:
             load_mode = SpecLoadingConfig().mode_for(step_type.value)
 
         if load_mode == "full_spec":
+            from .spec_loader import load_for_step
             try:
-                from .spec_loader import load_for_step
                 full_result = load_for_step(
                     step_type=step_type.value,
                     selected_items=selected_items,
                     project_root=self.project_root,
                     mode="full_spec",
                 )
-                inputs["spec_content"] = full_result.text
-                # Update relevant_specs to reflect full-spec load
-                inputs["relevant_specs"] = full_result.relevant_specs
+            except ValueError:
+                # Configuration/data errors (e.g. empty selected_items in
+                # full_spec mode) must surface immediately — they indicate a
+                # broken upstream step, not a recoverable I/O hiccup.
+                raise
             except Exception:
                 logger.warning(
                     "full_spec load failed for step %s; "
@@ -1140,6 +1142,9 @@ class StateMachine:
                     exc_info=True,
                 )
                 # Leave the existing items-mode spec_content in place
+            else:
+                inputs["spec_content"] = full_result.text
+                inputs["relevant_specs"] = full_result.relevant_specs
 
         # Ensure selected_items is always present in inputs (may be empty)
         inputs["selected_items"] = selected_items
