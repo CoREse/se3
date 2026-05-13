@@ -261,4 +261,4 @@ See [VERSIONS.md](VERSIONS.md) for the complete version history.
 
 ## License
 
-MIT
+Apache-2.0
