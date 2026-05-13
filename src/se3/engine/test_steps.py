@@ -34,7 +34,9 @@ class TestAnalyzeStep:
             "scope": "backend",
             "complexity": "medium",
             "reasoning": "New user login feature",
-            "selected_specs": ["flow-engine"],
+            "selected_items": [
+                {"spec": "flow-engine", "requirement_name": "13 步流程池"},
+            ],
         })
         MockLLMCaller.return_value = mock_caller
 
@@ -76,20 +78,22 @@ class TestAnalyzeStep:
         assert "spec_content" in step.outputs
         assert "base" in step.outputs["spec_content"]
         assert "flow-engine" in step.outputs["spec_content"]
+        # selected_specs must NOT appear in outputs (output-side cleanup)
+        assert "selected_specs" not in step.outputs
 
     @patch("se3.engine.steps.analyze.list_spec_names", return_value=["base"])
     @patch("se3.engine.steps.analyze.ProjectContextCollector")
     @patch("se3.engine.steps.analyze.ContextBuilder")
     @patch("se3.engine.steps.analyze.LLMCaller")
-    def test_analyze_empty_selected_specs_loads_base(self, MockLLMCaller, MockContextBuilder, MockCollector, mock_list_specs):
-        """Test that base spec is loaded even when LLM returns empty selected_specs."""
+    def test_analyze_empty_selected_items_loads_base(self, MockLLMCaller, MockContextBuilder, MockCollector, mock_list_specs):
+        """Test that base spec is loaded even when LLM returns empty selected_items."""
         mock_caller = MagicMock()
         mock_caller.call.return_value = json.dumps({
             "task_type": "small",
             "scope": "readme",
             "complexity": "simple",
             "reasoning": "Typo fix",
-            "selected_specs": [],
+            "selected_items": [],
         })
         MockLLMCaller.return_value = mock_caller
 
@@ -124,7 +128,11 @@ class TestAnalyzeStep:
             "scope": "auth module",
             "complexity": "medium",
             "reasoning": "Auth feature",
-            "selected_specs": ["nonexistent-spec", "also-fake", "flow-engine"],
+            "selected_items": [
+                {"spec": "nonexistent-spec", "requirement_name": "X"},
+                {"spec": "also-fake", "requirement_name": "Y"},
+                {"spec": "flow-engine", "requirement_name": "13 步流程池"},
+            ],
         })
         MockLLMCaller.return_value = mock_caller
 
@@ -151,6 +159,52 @@ class TestAnalyzeStep:
         assert "flow-engine" in step.outputs["spec_content"]
         assert "nonexistent-spec" not in step.outputs["relevant_specs"]
         assert "also-fake" not in step.outputs["relevant_specs"]
+
+    @patch("se3.engine.steps.analyze.list_spec_names", return_value=["base", "flow-engine"])
+    @patch("se3.engine.steps.analyze.ProjectContextCollector")
+    @patch("se3.engine.steps.analyze.ContextBuilder")
+    @patch("se3.engine.steps.analyze.LLMCaller")
+    def test_analyze_outputs_omit_selected_specs(
+        self, MockLLMCaller, MockContextBuilder, MockCollector, mock_list_specs
+    ):
+        """analyze handler MUST NOT write 'selected_specs' to step.outputs.
+
+        The output-side has been migrated to 'selected_items'. This guards
+        against accidental re-introduction of the legacy key.
+        """
+        mock_caller = MagicMock()
+        # Even if the LLM emits both keys, only selected_items should appear
+        # in step.outputs.
+        mock_caller.call.return_value = json.dumps({
+            "task_type": "feature",
+            "scope": "engine",
+            "complexity": "medium",
+            "reasoning": "test",
+            "selected_items": [
+                {"spec": "flow-engine", "requirement_name": "13 步流程池"},
+            ],
+            "selected_specs": ["flow-engine"],
+        })
+        MockLLMCaller.return_value = mock_caller
+
+        mock_collector_inst = MagicMock()
+        mock_collector_inst.collect.return_value = {"git": {"branch": "main"}}
+        MockCollector.return_value = mock_collector_inst
+
+        mock_builder = MagicMock()
+        mock_builder.specs_dir = Path("/tmp/specs")
+        mock_builder._load_spec_content.side_effect = lambda name: f"# {name}"
+        MockContextBuilder.return_value = mock_builder
+
+        flow = FlowInstance(task_description="Test")
+        step = Step(step_type=StepType.ANALYZE)
+        step.inputs["task_description"] = "Test"
+
+        result = analyze_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        assert "selected_specs" not in step.outputs
+        assert "selected_items" in step.outputs
 
     @patch("se3.engine.steps.analyze.LLMCaller")
     def test_analyze_invalid_json(self, MockLLMCaller):

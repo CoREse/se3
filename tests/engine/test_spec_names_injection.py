@@ -639,7 +639,7 @@ class TestHandlerIntegrationNegative:
             "scope": "engine",
             "complexity": "simple",
             "reasoning": "r",
-            "selected_specs": [],
+            "selected_items": [],
         })
         with patch("se3.engine.steps.analyze.LLMCaller") as mock_cls:
             mock_caller = Mock()

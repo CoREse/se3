@@ -111,6 +111,29 @@ class TestRenderAnalyze:
         assert "base:Project Identity" in content
 
     @patch("se3.engine.step_renderers.render_full")
+    def test_analyze_renderer_shows_spec_items(self, mock_render_full):
+        """G4 acceptance test: analyze renderer displays 'Relevant Spec Items'
+        and renders each item as ``spec:requirement_name`` (e.g., flow-engine:FE-3).
+        Guards against regressions where the renderer reverts to showing
+        relevant_specs / spec names only.
+        """
+        step = _make_step(StepType.ANALYZE, {
+            "task_type": "feature",
+            "selected_items": [
+                {"spec": "flow-engine", "requirement_name": "FE-3"},
+            ],
+            "spec_content": "ignored payload",
+            "project_summary": "ignored payload",
+        })
+
+        from se3.engine.step_renderers import _render_analyze
+        _render_analyze(step)
+
+        content = mock_render_full.call_args[0][0]
+        assert "Relevant Spec Items" in content
+        assert "flow-engine:FE-3" in content
+
+    @patch("se3.engine.step_renderers.render_full")
     def test_no_selected_items_no_section(self, mock_render_full):
         step = _make_step(StepType.ANALYZE, {
             "task_type": "feature",

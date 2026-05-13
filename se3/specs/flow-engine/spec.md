@@ -311,8 +311,7 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 | 步骤 | 职责 | LLM 参与 | JSON 模式 | Read-Only | 输入 | 输出 |
 |------|------|---------|-----------|-----------|------|------|
 | `discovery` | 需求探索（多轮对话） | 是 | STRICT | **是** | initial_description | refined_description, discovery_summary |
-| `analyze` | 分析任务类型和范围；收集项目上下文；选择并加载相关 spec items | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content, selected_specs, selected_items |
-| ~~`read_spec`~~ | ~~读取相关 spec 文件~~ (deprecated — merged into analyze) | 否（程序自动） | - | **是** | scope | relevant_specs, spec_content |
+| `analyze` | 分析任务类型和范围；收集项目上下文；选择并加载相关 spec items | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content, selected_items |
 | `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type, project_summary | plan{proposal,design}, task_groups, spec_changes |
 | `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed, estimated_test_duration |
 | `test` | 运行测试验证 | 否（程序执行） | - | 否 | - | test_results, tests_passed |
@@ -412,7 +411,6 @@ The step type enum SHALL retain deprecated values with stub handlers that forwar
 
 **Retained entries (analyze merge):**
 - `StepTypeValue.PROJECT_SUMMARY` — deprecated, forwards to project_summary_handler
-- `StepTypeValue.READ_SPEC` — deprecated, forwards to read_spec_handler
 
 **Behavior:**
 - Stub handlers log a deprecation warning with the flow ID and step ID
@@ -424,19 +422,19 @@ The step type enum SHALL retain deprecated values with stub handlers that forwar
 - **THEN** the stub handler forwards execution to plan_handler
 - **AND** a deprecation warning is logged
 
-#### Scenario: Resuming a persisted flow with PROJECT_SUMMARY or READ_SPEC steps
-- **WHEN** a flow persisted with `PROJECT_SUMMARY` or `READ_SPEC` step types is resumed
-- **THEN** the stub handler forwards execution to the original handler (project_summary_handler or read_spec_handler respectively)
+#### Scenario: Resuming a persisted flow with PROJECT_SUMMARY steps
+- **WHEN** a flow persisted with `PROJECT_SUMMARY` step type is resumed
+- **THEN** the stub handler forwards execution to project_summary_handler
 - **AND** a deprecation warning is logged
 
 #### Scenario: New flows use unified PLAN step
 - **WHEN** a new flow is created
 - **THEN** the step sequence contains only `PLAN`, never `PROPOSE`, `DESIGN`, or `PLAN_TASKS`
 
-#### Scenario: New flows do not include PROJECT_SUMMARY or READ_SPEC
+#### Scenario: New flows do not include PROJECT_SUMMARY
 - **WHEN** a new flow is created
-- **THEN** the step sequence does not contain `PROJECT_SUMMARY` or `READ_SPEC`
-- **AND** their functionality is provided by the `ANALYZE` step
+- **THEN** the step sequence does not contain `PROJECT_SUMMARY`
+- **AND** its functionality is provided by the `ANALYZE` step
 
 ### Requirement: 步骤内 LLM 调用
 
@@ -496,7 +494,7 @@ The flow engine SHALL enforce a prompt-level file modification prohibition for r
 
 Each entry in the step pool (`STEP_POOL`) SHALL include a `read_only` boolean attribute. Steps marked `read_only: true` are:
 - `discovery`, `analyze`, `plan`, `self_check`, `verify_spec`, `version_analyze`, `summarize`
-- Deprecated steps (`project_summary`, `read_spec`)
+- Deprecated steps (`project_summary`)
 
 Steps explicitly marked `read_only: false`:
 - `implement`, `test`, `update_spec`, `commit`, `confirm`
@@ -568,7 +566,7 @@ Returns the injection prompt fragment, or an empty string when the step is not i
 | `update_spec` | yes | Already prompted to use Read; spec-names list makes it more reliable |
 | `self_check` | yes | Self-review may touch unpreselected specs |
 | `design`, `propose` (deprecated) | yes, via forwarding | Deprecated stub handlers forward to `plan_handler`, which looks up the injection under `"plan"`. They are therefore covered transitively and are **not** listed in `SPEC_NAMES_INJECTION_DEFAULT_STEPS` themselves. |
-| `analyze`, `discovery`, `read_spec` | no | Already natively list specs via their own prompt templates |
+| `analyze`, `discovery` | no | Already natively list specs via their own prompt templates |
 | `summarize`, `commit` | no (FORBIDDEN) | No spec awareness needed for summary/commit |
 | `confirm_llm_review` | no (initial) | Review output aligns with task_description; conservative default |
 
@@ -964,7 +962,7 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 
 **输入构建规则：**
 - 所有步骤接收 `task_description` 和 `flow_id`
-- `analyze` 输出 `task_type`、`scope`、`complexity`、`reasoning`、`project_summary`、`relevant_specs`、`spec_content`、`selected_specs`、`selected_items`；其中 `project_summary` 由 `ProjectContextCollector.collect()` 程序化生成（非 LLM），`spec_content` 由后处理程序化加载（base spec 自动附加 + LLM 选择的 spec items），`selected_items` 为 LLM 选中的 `[{spec, requirement_name, tags}]` 列表
+- `analyze` 输出 `task_type`、`scope`、`complexity`、`reasoning`、`project_summary`、`relevant_specs`、`spec_content`、`selected_items`；其中 `project_summary` 由 `ProjectContextCollector.collect()` 程序化生成（非 LLM），`spec_content` 由后处理程序化加载（base spec 自动附加 + LLM 选择的 spec items），`selected_items` 为 LLM 选中的 `[{spec, requirement_name, tags}]` 列表
 - `plan` 接收 `spec_content`（从 analyze）、`task_type`、`scope`、`project_summary`（从 analyze），输出 `plan`（含 proposal + design）、`task_groups` 和 `spec_changes`（仅 full depth）
 - `implement` 接收 `design_doc`（从 plan.design 映射）、`task_groups`、`spec_content`（从 analyze）、`project_summary`（从 analyze）；输出新增 `pre_session_version`（implement 入口时项目版本号，用于版本基线审计）与 `session_commits`（DAG/worktree 路径下 implement 阶段在主分支上引入的 commit 清单，列表元素为 `{sha, subject, files}`；非 worktree 路径或未产生 commit 时为空列表）
 - `self_check` 接收 `test_results`（从 test）、`changes_made`（从 implement）、`spec_content`（从 analyze）、`task_groups`（从 plan，用作「功能遗漏」维度的 scope 参考）、`fix_iteration`（当前 fix loop 迭代次数）、`self_check_pass_index`（本轮 fix-loop 内的 1..N 序号）、`self_check_passes_required`（来自 `workflow.self_check_passes_required`）、`self_check_convergence_enabled`（来自 `workflow.self_check_convergence_enabled`，默认 false）、`prev_self_check_issues`（仅在 `convergence_enabled=true` 且 `pass_index=1` 时注入，承载上一轮 fix-loop 末尾 self_check 的 issues 作为收敛对比基线）
@@ -2323,7 +2321,7 @@ se3 status [--format json]
   "status": "RUNNING",
   "state": {
     "current_step_id": "...",
-    "selected_steps": ["analyze", "read_spec", ...],
+    "selected_steps": ["analyze", "plan", ...],
     "steps": {...}
   }
 }
