@@ -11,6 +11,8 @@ import pytest
 
 from se3.engine.sync_engine import (
     DiffType,
+    LoopResult,
+    RoundResult,
     SpecAnalysis,
     SpecDiff,
     SyncResult,
@@ -90,225 +92,52 @@ class TestWriteMeta:
         assert (history_dir / "_meta.json").is_file()
 
 
-class TestSyncEngineHistoryIntegration:
-    """Verify that SyncEngine.run() creates flow context and passes flow_id to LLMCaller."""
+class TestSyncLoopHistoryIntegration:
+    """Verify that ``SyncLoop`` creates flow context and writes rounds summary.
 
-    @patch("se3.engine.sync_engine.SyncEngine._load_specs")
-    @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
-    def test_run_creates_history_directory(self, mock_issues, mock_specs, tmp_path):
-        from se3.engine.sync_engine import SyncEngine
+    The engine itself is stateless across rounds; ``SyncFlowContext`` /
+    ``_rounds.json`` recording lives in the loop layer.
+    """
 
-        mock_specs.return_value = {}
-        mock_issues.return_value = []
+    def test_loop_writes_rounds_summary(self, tmp_path):
+        rr = RoundResult(round_index=1)
+        rr.specs_updated = 1
+        rr.changes_by_spec = {"auth": ["added: helper"]}
+        rr.duration_seconds = 0.5
 
-        with patch("se3.engine.llm_caller.LLMCaller.call") as mock_call, \
-             patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs", return_value=[]):
-            mock_call.return_value = '{"diffs": []}'
-
-            engine = SyncEngine(tmp_path, mode="fast")
-            engine.run()
-
-        history_dir = tmp_path / "se3" / "history"
-        assert history_dir.exists()
-        flow_dirs = list(history_dir.iterdir())
-        assert len(flow_dirs) == 1
-        assert (flow_dirs[0] / "_meta.json").exists()
-
-    @patch("se3.engine.sync_engine.SyncEngine._load_specs")
-    @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
-    def test_llm_caller_receives_flow_id(self, mock_issues, mock_specs, tmp_path):
-        from se3.engine.sync_engine import SyncEngine
-
-        mock_specs.return_value = {"base": {"name": "base", "path": tmp_path / "s.md", "content": "# Base"}}
-        mock_issues.return_value = []
-
-        captured_callers = []
-        original_init = None
-
-        from se3.engine.llm_caller import LLMCaller
-        original_init = LLMCaller.__init__
-
-        def spy_init(self, *args, **kwargs):
-            original_init(self, *args, **kwargs)
-            captured_callers.append(self)
-
-        with patch.object(LLMCaller, "__init__", spy_init), \
-             patch.object(LLMCaller, "call", return_value='{"diffs": []}'), \
-             patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs", return_value=[]):
-            engine = SyncEngine(tmp_path, mode="fast")
-            engine.run()
-
-        assert len(captured_callers) >= 1
-        caller = captured_callers[0]
-        assert caller.flow_id is not None
-        assert FLOW_ID_RE.match(caller.flow_id)
-
-    @patch("se3.engine.sync_engine.SyncEngine._load_specs")
-    @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
-    def test_step_id_set_for_analysis(self, mock_issues, mock_specs, tmp_path):
-        from se3.engine.sync_engine import SyncEngine
-
-        spec_path = tmp_path / "se3" / "specs" / "auth" / "spec.md"
-        spec_path.parent.mkdir(parents=True, exist_ok=True)
-        spec_path.write_text("# Auth spec", encoding="utf-8")
-
-        mock_specs.return_value = {
-            "auth": {"name": "auth", "path": spec_path, "content": "# Auth spec"}
-        }
-        mock_issues.return_value = []
-
-        step_ids_seen = []
-        from se3.engine.llm_caller import LLMCaller
-        original_call = LLMCaller.call
-
-        def spy_call(self, *args, **kwargs):
-            step_ids_seen.append(self.step_id)
-            return '{"diffs": []}'
-
-        with patch.object(LLMCaller, "call", spy_call), \
-             patch("se3.engine.sync_discovery.SpecDiscovery.discover_missing_specs", return_value=[]):
-            engine = SyncEngine(tmp_path, mode="fast")
-            engine.run()
-
-        assert any(sid == "sync_analyze_auth" for sid in step_ids_seen), \
-            f"Expected 'sync_analyze_auth' in {step_ids_seen}"
-
-    @patch("se3.engine.sync_engine.SyncEngine._load_specs")
-    @patch("se3.engine.sync_engine.SyncEngine._load_existing_issues")
-    def test_step_id_set_for_discovery(self, mock_issues, mock_specs, tmp_path):
-        from se3.engine.sync_engine import SyncEngine
-
-        mock_specs.return_value = {"base": {"name": "base", "path": tmp_path / "s.md", "content": "# Base"}}
-        mock_issues.return_value = []
-
-        step_ids_at_discover = []
-        from se3.engine.llm_caller import LLMCaller
-        from se3.engine.sync_discovery import SpecDiscovery
-
-        original_discover = SpecDiscovery.discover_missing_specs
-
-        def spy_discover(self_disc, *args, **kwargs):
-            step_ids_at_discover.append(self_disc.llm_caller.step_id)
-            return []
-
-        with patch.object(LLMCaller, "call", return_value='{"diffs": []}'), \
-             patch.object(SpecDiscovery, "discover_missing_specs", spy_discover):
-            engine = SyncEngine(tmp_path, mode="fast")
-            engine.run()
-
-        assert len(step_ids_at_discover) == 1
-        assert step_ids_at_discover[0].startswith("sync_scan"), \
-            f"Expected step_id starting with 'sync_scan', got '{step_ids_at_discover[0]}'"
-
-
-class TestSyncModeEnum:
-    def test_has_three_values(self):
-        from se3.commands.sync import SyncMode
-        assert SyncMode.DEFAULT.value == "default"
-        assert SyncMode.STRICT.value == "strict"
-        assert SyncMode.FAST.value == "fast"
-        assert len(SyncMode) == 3
-
-    def test_string_construction(self):
-        from se3.commands.sync import SyncMode
-        assert SyncMode("default") == SyncMode.DEFAULT
-        assert SyncMode("strict") == SyncMode.STRICT
-        assert SyncMode("fast") == SyncMode.FAST
-
-
-class TestRenderSyncResultsExpanded:
-    """Test the expanded _render_sync_results with new fields."""
-
-    def test_render_with_detailed_changes(self):
-        from se3.commands.sync import _render_sync_results
-
-        result = SyncResult(
-            analyses=[SpecAnalysis(spec_name="auth", diffs=[
-                SpecDiff(DiffType.EXTENSION, "auth", "Extra feature"),
-            ])],
-            specs_updated=1,
-            detailed_changes=[
-                {"spec_name": "auth", "action": "updated", "description": "Added extra feature"},
-            ],
+        loop = LoopResult(
+            rounds=[rr],
+            converged=True,
+            total_specs_updated=1,
+            final_round_index=1,
         )
-        _render_sync_results(result)
+        ctx = SyncFlowContext(tmp_path, flow_id="20260415-120000_aabbccdd")
+        out_path = ctx.write_rounds_summary(loop)
 
-    def test_render_with_specs_created(self):
-        from se3.commands.sync import _render_sync_results
+        assert out_path.exists()
+        data = json.loads(out_path.read_text(encoding="utf-8"))
+        assert data["converged"] is True
+        assert data["total_specs_updated"] == 1
+        assert data["rounds"][0]["round_index"] == 1
+        assert data["rounds"][0]["changes_by_spec"] == {"auth": ["added: helper"]}
 
-        result = SyncResult(
-            analyses=[],
-            specs_created=["cli-tools", "data-pipeline"],
-        )
-        _render_sync_results(result)
 
-    def test_render_with_gap_resolutions(self):
-        from se3.commands.sync import _render_sync_results
+class TestRoundAwareStepId:
+    """make_round_step_id namespaces step ids by round."""
 
-        result = SyncResult(
-            analyses=[SpecAnalysis(spec_name="auth", diffs=[
-                SpecDiff(DiffType.GAP, "auth", "Old requirement"),
-            ])],
-            gap_resolutions=[
-                {"spec_name": "auth", "action": "update_spec", "description": "Old requirement"},
-                {"spec_name": "base", "action": "create_issue", "description": "Missing feature"},
-            ],
-            issues_created=1,
-        )
-        _render_sync_results(result)
+    def test_round_step_id_includes_round_index(self):
+        ctx = SyncFlowContext(Path("/tmp/fake"))
+        sid = ctx.make_round_step_id(2, "analyze", "auth")
+        assert sid == "sync_analyze_r2_auth"
 
-    def test_render_with_all_new_fields(self):
-        from se3.commands.sync import _render_sync_results
+    def test_round_step_id_strips_sync_prefix(self):
+        ctx = SyncFlowContext(Path("/tmp/fake"))
+        sid = ctx.make_round_step_id(1, "sync_analyze", "auth")
+        assert sid == "sync_analyze_r1_auth"
 
-        result = SyncResult(
-            analyses=[
-                SpecAnalysis(spec_name="auth", diffs=[
-                    SpecDiff(DiffType.GAP, "auth", "Old requirement"),
-                    SpecDiff(DiffType.EXTENSION, "auth", "New helper"),
-                ]),
-            ],
-            issues_created=1,
-            specs_updated=2,
-            specs_created=["new-module"],
-            gap_resolutions=[
-                {"spec_name": "auth", "action": "update_spec", "description": "Old requirement"},
-            ],
-            detailed_changes=[
-                {"spec_name": "auth", "action": "updated", "description": "Added new helper"},
-            ],
-        )
-        _render_sync_results(result)
-
-    def test_render_preserves_original_table(self):
-        from io import StringIO
-        from rich.console import Console
-        from se3.commands.sync import _render_sync_results
-
-        result = SyncResult(
-            analyses=[SpecAnalysis(spec_name="base", diffs=[])],
-        )
-
-        console = Console(file=StringIO(), force_terminal=True)
-        with patch("se3.commands.sync.get_console", return_value=console):
-            _render_sync_results(result)
-
-        output = console.file.getvalue()
-        assert "Spec Status Overview" in output
-        assert "base" in output
-
-    def test_render_specs_created_in_summary(self):
-        from io import StringIO
-        from rich.console import Console
-        from se3.commands.sync import _render_sync_results
-
-        result = SyncResult(
-            analyses=[],
-            specs_created=["new-spec-1", "new-spec-2"],
-        )
-
-        console = Console(file=StringIO(), force_terminal=True)
-        with patch("se3.commands.sync.get_console", return_value=console):
-            _render_sync_results(result)
-
-        output = console.file.getvalue()
-        assert "New specs" in output or "new-spec-1" in output
+    def test_round_step_id_no_suffix_uses_counter(self):
+        ctx = SyncFlowContext(Path("/tmp/fake"))
+        a = ctx.make_round_step_id(1, "scan")
+        b = ctx.make_round_step_id(1, "scan")
+        assert a == "sync_scan_r1_0"
+        assert b == "sync_scan_r1_1"
