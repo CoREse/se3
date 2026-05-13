@@ -61,11 +61,8 @@ Respond in JSON format:
     "reasoning": "explanation",
     "selected_items": [
         {{"spec": "spec-name", "requirement_name": "Requirement Name"}}
-    ],
-    "selected_specs": ["spec-name-1", "spec-name-2"]
+    ]
 }}
-
-The `selected_items` field is the primary selection mechanism. The `selected_specs` field is deprecated but retained for backward compatibility — derive it from the distinct spec names in `selected_items`.
 
 Task description:
 ---
@@ -232,13 +229,6 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 len(non_base_selected_ids), len(loaded_ids), missing,
             )
 
-        # Derive selected_specs from selected_items for backward compatibility
-        selected_specs = list({
-            item["spec"]
-            for item in selected_items
-            if isinstance(item, dict) and item.get("spec")
-        })
-
         # Store outputs
         step.outputs["task_type"] = task_type
         step.outputs["scope"] = result.get("scope", "")
@@ -248,7 +238,6 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         step.outputs["relevant_specs"] = load_result.relevant_specs
         step.outputs["spec_content"] = load_result.text
         step.outputs["selected_items"] = selected_items
-        step.outputs["selected_specs"] = selected_specs  # deprecated, kept for compat
 
         # Persist selected_items in flow context for cross-session /
         # cross-CONFIRM resilience — downstream steps that scan history
