@@ -84,6 +84,16 @@ Base your gap/extension/conflict analysis on what the code actually does, not on
 - Focus on functional differences, not stylistic or naming conventions.
 - Do NOT report differences in comments, documentation style, or whitespace.
 
+## Important: One-Directional Sync
+
+This analysis drives a one-directional spec update — the spec will be
+rewritten to match the code, never the reverse. Only report what the code
+actually does today; ignore aspirations that exist in the spec but not in
+the code (those will be removed). Do not flag missing-but-planned features
+as gaps — gaps here mean "the spec describes something the code no longer
+does." User intent for not-yet-built features belongs in the issue tracker,
+not in this analysis.
+
 ## Output Format
 
 Return a JSON object with this structure:
