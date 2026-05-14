@@ -14,6 +14,19 @@ from typing import Any, Dict, List, Optional
 from .llm_caller import LLMCaller, LLMCallError
 from .sync_engine import DiffType, SpecAnalysis, SpecDiff, strip_markdown_fences
 
+# Sentinels used in SpecAnalysis.failed_analysis_reason. The analyzer
+# distinguishes two failure modes so downstream reporting can suggest the
+# right remediation:
+#   * "infrastructure_failure" — LLM call exhausted retries, returned an
+#     empty/near-empty response, or raised in transit. The agent never
+#     produced output the framework could meaningfully evaluate.
+#   * "llm_output_format_error" — agent did return content but it was not
+#     valid JSON. The model is reachable; the prompt or parsing contract
+#     is the suspect.
+_REASON_INFRASTRUCTURE = "infrastructure_failure"
+_REASON_OUTPUT_FORMAT = "llm_output_format_error"
+_EMPTY_RESPONSE_THRESHOLD = 10
+
 logger = logging.getLogger(__name__)
 
 _ANALYSIS_JSON_SCHEMA = """\
@@ -225,14 +238,8 @@ class SyncAnalyzer:
         )
         return SpecAnalysis(
             spec_name=spec_name,
-            diffs=[
-                SpecDiff(
-                    diff_type=DiffType.CONFLICT,
-                    spec_name=spec_name,
-                    description=f"Analysis failed after {max_attempts} attempts: {last_error}",
-                    code_location="",
-                )
-            ],
+            diffs=[],
+            failed_analysis_reason=_REASON_INFRASTRUCTURE,
         )
 
     def _parse_analysis_response(self, spec_name: str, response: str) -> SpecAnalysis:
@@ -248,17 +255,25 @@ class SyncAnalyzer:
         try:
             data = json.loads(response)
         except json.JSONDecodeError as e:
-            logger.error("Failed to parse JSON response for spec '%s': %s", spec_name, e)
+            # Empty / near-empty / None responses are an infrastructure
+            # signal (the agent never produced output). Non-empty but
+            # malformed JSON is a contract violation by the LLM that we
+            # bucket separately so reporting can hint at the right
+            # remediation (retry vs. fix the prompt). Either way we do
+            # NOT fabricate a CONFLICT diff: that historically poisoned
+            # convergence by pretending the spec had real drift.
+            if response is None or len(response.strip()) < _EMPTY_RESPONSE_THRESHOLD:
+                reason = _REASON_INFRASTRUCTURE
+            else:
+                reason = _REASON_OUTPUT_FORMAT
+            logger.error(
+                "SyncAnalyzer: failed to parse JSON response for spec '%s' (%s): %s",
+                spec_name, reason, e,
+            )
             return SpecAnalysis(
                 spec_name=spec_name,
-                diffs=[
-                    SpecDiff(
-                        diff_type=DiffType.CONFLICT,
-                        spec_name=spec_name,
-                        description=f"JSON parse error: {e}",
-                        code_location="",
-                    )
-                ],
+                diffs=[],
+                failed_analysis_reason=reason,
             )
 
         raw_diffs = data.get("diffs", [])

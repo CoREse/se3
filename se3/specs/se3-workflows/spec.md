@@ -9,7 +9,7 @@ Define the standard workflows for SE3 development using the Flow Engine's 13-ste
 
 ### Requirement: Workflow Types
 
-The system SHALL support five workflow types, mapped to different step sequences from the step pool:
+The system SHALL support six workflow types, mapped to different step sequences from the step pool:
 
 | Type | Steps | When Used |
 |------|-------|-----------|
@@ -18,22 +18,25 @@ The system SHALL support five workflow types, mapped to different step sequences
 | `review` | analyze → verify_spec | Code review, audit, or analysis |
 | `small` | analyze → implement → test → version_analyze → commit | Minor fixes, typos, simple changes |
 | `directive` | analyze → plan → implement → version_analyze → commit | Following specific instructions (plan uses shallow depth) |
+| `discovery` | discovery → analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit | Exploratory requirements gathering via multi-turn conversation, triggered by `--discover` flag |
 
-**Step Pool (9 active steps in default sequences):**
-1. **analyze** - Analyze task type and scope, collect project context, select and load relevant specs
-2. **plan** - Unified planning: proposal + design + task breakdown (adapts depth by task_type)
-3. **implement** - Write code implementation
-4. **test** - Run tests to verify
-5. **self_check** - LLM code review for logic completeness, robustness, functional gaps, and test coverage gaps (excludes spec compliance)
-6. **verify_spec** - Check implementation vs spec
-7. **update_spec** - Update spec records
-8. **version_analyze** - Analyze changes to determine SemVer bump type and generate commit message
-9. **commit** - Commit changes (generates template summary when summarize step is absent)
+**Step Pool (11 active steps in default sequences):**
+1. **discovery** - Multi-turn requirements exploration with user, generates refined task description
+2. **analyze** - Analyze task type and scope, collect project context, select and load relevant specs
+3. **plan** - Unified planning: proposal + design + task breakdown (adapts depth by task_type)
+4. **implement** - Write code implementation
+5. **test** - Run tests to verify
+6. **self_check** - LLM code review for logic completeness, robustness, functional gaps, and test coverage gaps (excludes spec compliance)
+7. **verify_spec** - Check implementation vs spec
+8. **update_spec** - Update spec records
+9. **version_analyze** - Analyze changes to determine SemVer bump type and generate commit message
+10. **commit** - Commit changes (generates template summary when summarize step is absent)
+11. **confirm** - Review and confirm previous step output (human or LLM review gate). Inserted after configured steps via `se3.yaml` confirmation settings, not in default sequences.
 
 **Optional step (available in pool, not in default sequences):**
 - **summarize** - Generate LLM-based summary and handoff. Can be added to step sequences via `se3.yaml` configuration. When absent, the commit step generates a template-based summary document.
 
-**Note:** `project_summary` is deprecated — its functionality is now merged into the `analyze` step. Its deprecated handler is retained for backward compatibility with persisted flows. `read_spec` has been fully removed.
+**Note:** `project_summary` is deprecated — its functionality is now merged into the `analyze` step. Its deprecated handler is retained for backward compatibility with persisted flows. `read_spec` has been fully removed. The deprecated `propose`, `design`, and `plan_tasks` step types are retained for backward compatibility (their functionality is merged into the unified `plan` step).
 
 #### Scenario: Feature workflow selection
 - **WHEN** input is classified as "feature-request"
@@ -46,6 +49,39 @@ The system SHALL support five workflow types, mapped to different step sequences
 #### Scenario: Small workflow selection
 - **WHEN** the change is simple (no spec changes needed, ≤3 tasks)
 - **THEN** the system uses the small workflow for efficiency
+
+#### Scenario: Discovery workflow selection
+- **WHEN** the `--discover` flag is passed to `se3 run`
+- **THEN** the system uses the discovery workflow (discovery → analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit)
+- **AND** the analyze step MUST NOT auto-detect "discovery" as a task type — it is exclusively triggerable via `--discover`
+
+### Requirement: Discovery Workflow
+
+The discovery workflow SHALL explore requirements through multi-turn conversation before proceeding with implementation:
+
+**0. DISCOVERY** (pre-analysis exploration)
+   - Engage user in multi-turn conversation to clarify requirements
+   - Ask clarifying questions about scope, constraints, and desired outcomes
+   - Handle evaluative/inquisitive inputs (e.g., "Is this correct?", "Review this change") with substantive assessment rather than re-asking for task definition
+   - May read specs and source code to ask better-informed questions
+   - Generate a refined task description (`refined_description`)
+   - Await programmatic user confirmation (type "1" to confirm) before proceeding
+   - MUST NOT produce implementation plans, design proposals, or code during discovery
+   - Outputs: refined_description, discovery_summary, requirements_clarified
+
+**1. ANALYZE** through **9. COMMIT** — same as feature workflow after discovery completes.
+
+#### Scenario: Discovery with multi-turn clarification
+- **WHEN** user runs `se3 run --discover "Improve performance"`
+- **THEN** the system enters discovery mode and asks clarifying questions
+- **AND** the conversation continues until the user confirms the refined description
+- **AND** then proceeds through the full feature workflow
+
+#### Scenario: Discovery with evaluative input
+- **WHEN** user runs `se3 run --discover "Is this caching approach correct?"`
+- **THEN** the system reads relevant code and engages in substantive technical discussion
+- **AND** does NOT re-ask "what is the task scope" but instead probes the substance of the evaluation
+- **AND** converges on a consensus correct approach through discussion
 
 ### Requirement: Feature Workflow
 
@@ -251,7 +287,7 @@ All workflows SHALL be accessed through the unified `se3 run` command.
 
 **Entry Patterns:**
 ```bash
-# Feature workflow
+# Feature workflow (auto-detected)
 se3 run "Implement user authentication"
 
 # Bugfix workflow  
@@ -262,6 +298,9 @@ se3 run "Review the auth module" --type=review
 
 # Small workflow
 se3 run "Fix typo in README" --type=small
+
+# Discovery workflow (only via --discover flag)
+se3 run --discover "Explore requirements for new API"
 ```
 
 The analyze step SHALL auto-detect task type if not specified, but explicit type SHALL override.
@@ -277,6 +316,12 @@ The analyze step SHALL auto-detect task type if not specified, but explicit type
 - **WHEN** user executes `se3 run "Implement new feature"`
 - **THEN** the analyze step auto-detects the task type
 - **AND** selects appropriate workflow
+
+#### Scenario: Entry with discovery flag
+- **GIVEN** user wants to explore requirements before implementation
+- **WHEN** user executes `se3 run --discover "Task description"`
+- **THEN** the system enters discovery workflow regardless of auto-detected type
+- **AND** the discovery step engages in multi-turn conversation before proceeding to analyze
 
 ### Requirement: Step Retry and Recovery
 

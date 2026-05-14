@@ -22,11 +22,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from . import sync_checkpoint as _checkpoint_module
+from .sync_checkpoint import SyncCheckpoint
 from .sync_engine import LoopResult, RoundResult, SyncEngine
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_OSCILLATION_WINDOW = 8
+_DEFAULT_INFRA_FAILURE_THRESHOLD = 3
 
 
 @dataclass
@@ -139,11 +142,16 @@ class SyncLoop:
         interactive: bool = False,
         progress_callback: Optional[Callable[..., None]] = None,
         oscillation_window: int = _DEFAULT_OSCILLATION_WINDOW,
+        infrastructure_failure_threshold: int = _DEFAULT_INFRA_FAILURE_THRESHOLD,
+        resume_from: Optional[SyncCheckpoint] = None,
+        prompt_resume_or_exit: Optional[Callable[[Dict[str, Any]], str]] = None,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be >= 1")
         if stable_rounds < 1:
             raise ValueError("stable_rounds must be >= 1")
+        if infrastructure_failure_threshold < 1:
+            raise ValueError("infrastructure_failure_threshold must be >= 1")
 
         self.project_root = Path(project_root)
         self.max_rounds = max_rounds
@@ -151,6 +159,13 @@ class SyncLoop:
         self.interactive = interactive
         self.progress_callback = progress_callback
         self.oscillation_window = oscillation_window
+        self.infrastructure_failure_threshold = infrastructure_failure_threshold
+        self.resume_from = resume_from
+        self._consecutive_infra_failures = 0
+        if prompt_resume_or_exit is None:
+            from .sync_interaction import prompt_resume_or_exit as _default_prompt
+            prompt_resume_or_exit = _default_prompt
+        self._prompt_resume_or_exit = prompt_resume_or_exit
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -175,72 +190,176 @@ class SyncLoop:
 
         loop_result = LoopResult()
         stable_count = 0
+        self._consecutive_infra_failures = 0
 
-        for round_index in range(1, self.max_rounds + 1):
-            self._emit("round_start", round_index=round_index)
-
-            project_context = self._build_context(collector)
-
-            round_result = engine.run_once(
-                round_index=round_index,
-                flow_ctx=flow_ctx,
-                llm_caller=llm_caller,
-                project_context=project_context,
-                specs=None,  # let SyncEngine reload each round
-                do_discovery=(round_index == 1),
-                progress_callback=self._wrap_progress(round_index),
+        start_round = 1
+        skip_specs: set[str] = set()
+        if self.resume_from is not None:
+            still_in_sync, changed = _checkpoint_module.recompute_in_sync(
+                self.resume_from, self.project_root
             )
-
-            loop_result.rounds.append(round_result)
-            loop_result.total_specs_updated += round_result.specs_updated
-            for name in round_result.specs_created:
-                if name not in loop_result.total_specs_created:
-                    loop_result.total_specs_created.append(name)
-            if round_result.discovery_failed:
-                loop_result.discovery_failed = True
-            loop_result.final_round_index = round_index
-
-            for spec_name, content_hash in round_result.spec_hashes_after.items():
-                detector.record(spec_name, content_hash)
-
+            skip_specs = set(still_in_sync)
+            # The checkpoint's round_index records the round that *failed*;
+            # resume continues from the next slot under the original budget,
+            # so the remaining round budget is `max_rounds - round_index`.
+            start_round = max(1, self.resume_from.round_index + 1)
             self._emit(
-                "round_end",
-                round_index=round_index,
-                specs_updated=round_result.specs_updated,
-                changes_by_spec=dict(round_result.changes_by_spec),
+                "resuming",
+                round_index=start_round,
+                skipped_specs=sorted(skip_specs),
+                changed_specs=sorted(changed),
+            )
+            logger.info(
+                "Resuming sync from round %d; skipping %d still-in-sync specs, "
+                "%d changed specs need re-analysis",
+                start_round, len(skip_specs), len(changed),
             )
 
-            report = detector.detect()
-            if report is not None:
-                loop_result.oscillation_detected = True
-                loop_result.oscillation_report = report.summary()
-                self._emit(
-                    "oscillation",
+        normal_exit = False
+
+        try:
+            round_index = start_round
+            while round_index <= self.max_rounds:
+                self._emit("round_start", round_index=round_index)
+
+                project_context = self._build_context(collector)
+
+                round_result = engine.run_once(
                     round_index=round_index,
-                    report=report,
+                    flow_ctx=flow_ctx,
+                    llm_caller=llm_caller,
+                    project_context=project_context,
+                    specs=None,  # let SyncEngine reload each round
+                    do_discovery=(round_index == 1 and self.resume_from is None),
+                    progress_callback=self._wrap_progress(round_index),
+                    skip_specs=skip_specs if skip_specs else None,
                 )
-                logger.warning("Oscillation detected: %s", report.summary())
-                break
 
-            if round_result.is_stable:
-                stable_count += 1
-                if stable_count >= self.stable_rounds:
-                    loop_result.converged = True
-                    self._emit(
-                        "converged",
+                loop_result.rounds.append(round_result)
+                loop_result.total_specs_updated += round_result.specs_updated
+                for name in round_result.specs_created:
+                    if name not in loop_result.total_specs_created:
+                        loop_result.total_specs_created.append(name)
+                if round_result.discovery_failed:
+                    loop_result.discovery_failed = True
+                loop_result.final_round_index = round_index
+
+                for spec_name, content_hash in round_result.spec_hashes_after.items():
+                    detector.record(spec_name, content_hash)
+
+                self._emit(
+                    "round_end",
+                    round_index=round_index,
+                    specs_updated=round_result.specs_updated,
+                    changes_by_spec=dict(round_result.changes_by_spec),
+                )
+
+                # ----- Infrastructure failure tracking -----
+                infra_failed_count = sum(
+                    1
+                    for a in round_result.analyses
+                    if getattr(a, "failed_analysis_reason", None)
+                    == "infrastructure_failure"
+                )
+                if infra_failed_count > 0:
+                    self._consecutive_infra_failures += 1
+                else:
+                    self._consecutive_infra_failures = 0
+
+                if (
+                    self._consecutive_infra_failures
+                    >= self.infrastructure_failure_threshold
+                ):
+                    # After writing the checkpoint we always clear skip_specs:
+                    # if the user continues, the next round must rebuild the
+                    # in_sync set from fresh analyses, not stale resume state.
+                    skip_specs = set()
+                    should_continue = self._handle_infra_failure_threshold(
+                        round_result=round_result,
+                        loop_result=loop_result,
                         round_index=round_index,
-                        stable_rounds=self.stable_rounds,
                     )
+                    if should_continue:
+                        self._consecutive_infra_failures = 0
+                        round_index += 1
+                        continue
+                    else:
+                        # User chose to exit (non-TTY or explicit signal).
+                        # Checkpoint already persisted; bail out without
+                        # clearing it.
+                        cp_path = str(
+                            _checkpoint_module.checkpoint_path(self.project_root)
+                        )
+                        loop_result.paused = True
+                        loop_result.checkpoint_path = cp_path
+                        self._emit(
+                            "paused",
+                            round_index=round_index,
+                            checkpoint_path=cp_path,
+                        )
+                        return loop_result
+
+                # ----- Oscillation -----
+                report = detector.detect()
+                if report is not None:
+                    loop_result.oscillation_detected = True
+                    loop_result.oscillation_report = report.summary()
+                    self._emit(
+                        "oscillation",
+                        round_index=round_index,
+                        report=report,
+                    )
+                    logger.warning("Oscillation detected: %s", report.summary())
+                    normal_exit = True
                     break
+
+                # ----- Stability / convergence -----
+                if round_result.is_stable:
+                    stable_count += 1
+                    if stable_count >= self.stable_rounds:
+                        loop_result.converged = True
+                        self._emit(
+                            "converged",
+                            round_index=round_index,
+                            stable_rounds=self.stable_rounds,
+                        )
+                        normal_exit = True
+                        break
+                else:
+                    stable_count = 0
+
+                # After the first post-resume round, the skip set has served
+                # its purpose; re-analyze normally from then on.
+                skip_specs = set()
+
+                round_index += 1
             else:
-                stable_count = 0
-        else:
-            # Loop fell through without break: max_rounds exhausted.
+                # while loop completed without break: max_rounds exhausted.
+                self._emit(
+                    "max_rounds_exhausted",
+                    round_index=self.max_rounds,
+                    max_rounds=self.max_rounds,
+                )
+                normal_exit = True
+        except KeyboardInterrupt:
+            # The interrupt was raised from inside prompt_resume_or_exit or
+            # any spec-update path. The checkpoint (if any) has already been
+            # written by _handle_infra_failure_threshold; do NOT clear it.
             self._emit(
-                "max_rounds_exhausted",
-                round_index=self.max_rounds,
-                max_rounds=self.max_rounds,
+                "interrupted",
+                checkpoint_path=str(
+                    _checkpoint_module.checkpoint_path(self.project_root)
+                ),
             )
+            raise
+
+        if normal_exit:
+            # Any clean exit path (converged, oscillation, max-rounds) clears
+            # the checkpoint so the next `se3 sync` starts fresh.
+            try:
+                _checkpoint_module.clear(self.project_root)
+            except Exception as exc:  # pragma: no cover — defensive
+                logger.debug("Failed to clear sync checkpoint: %s", exc)
 
         try:
             flow_ctx.write_rounds_summary(loop_result)
@@ -248,6 +367,90 @@ class SyncLoop:
             logger.warning("Failed to persist sync rounds summary: %s", e)
 
         return loop_result
+
+    # ------------------------------------------------------------------
+    # Infrastructure-failure handling
+    # ------------------------------------------------------------------
+
+    def _handle_infra_failure_threshold(
+        self,
+        round_result: RoundResult,
+        loop_result: LoopResult,
+        round_index: int,
+    ) -> bool:
+        """Write checkpoint, prompt user, and return ``True`` if loop should continue.
+
+        Raises ``KeyboardInterrupt`` (propagated) if the user signals exit
+        via Ctrl-C — the caller catches and returns the partial result.
+        """
+        # Build the set of in-sync specs from the LATEST analysis state per
+        # spec across every round so far. Earlier rounds are not authoritative:
+        # if a spec was reported in_sync in round 1 but later analyzed as
+        # drifting in round 2, the round-2 verdict wins. Only specs whose
+        # most recent successful analysis was ``is_in_sync=True`` are recorded
+        # so resume re-analyzes anything where drift was last seen.
+        latest_analysis_by_spec: Dict[str, Any] = {}
+        latest_hash_by_spec: Dict[str, str] = {}
+        for r in loop_result.rounds:
+            for analysis in r.analyses:
+                name = analysis.spec_name
+                latest_analysis_by_spec[name] = analysis
+                h = r.spec_hashes_after.get(name)
+                if h:
+                    latest_hash_by_spec[name] = h
+
+        in_sync_hashes: Dict[str, str] = {}
+        failed_reasons: Dict[str, str] = {}
+        for name, analysis in latest_analysis_by_spec.items():
+            if analysis.analysis_failed:
+                failed_reasons[name] = (
+                    analysis.failed_analysis_reason or "unknown"
+                )
+                continue
+            if analysis.is_in_sync:
+                h = latest_hash_by_spec.get(name)
+                if h:
+                    in_sync_hashes[name] = h
+
+        checkpoint = SyncCheckpoint(
+            round_index=round_index,
+            max_rounds=self.max_rounds,
+            in_sync_specs=in_sync_hashes,
+            failed_analyses=failed_reasons,
+            reason="quota_exhausted",
+        )
+        try:
+            checkpoint_file = _checkpoint_module.save(checkpoint, self.project_root)
+        except OSError as exc:
+            logger.error("Failed to persist sync checkpoint: %s", exc)
+            checkpoint_file = _checkpoint_module.checkpoint_path(self.project_root)
+
+        stats: Dict[str, Any] = {
+            "completed_specs": len(in_sync_hashes),
+            "total_specs": len(round_result.analyses) or len(in_sync_hashes),
+            "round_index": round_index,
+            "max_rounds": self.max_rounds,
+            "in_sync_specs": sorted(in_sync_hashes.keys()),
+            "failure_count": self._consecutive_infra_failures,
+            "checkpoint_path": str(checkpoint_file),
+            "reason": "quota_exhausted",
+        }
+        self._emit(
+            "infra_failure_pause",
+            round_index=round_index,
+            checkpoint_path=str(checkpoint_file),
+            stats=stats,
+        )
+
+        try:
+            decision = self._prompt_resume_or_exit(stats)
+        except KeyboardInterrupt:
+            # Propagate; outer try/except handles the emit and re-raise.
+            raise
+
+        if decision == "continue":
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Helpers

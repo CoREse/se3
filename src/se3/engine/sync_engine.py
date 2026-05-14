@@ -105,6 +105,7 @@ class SpecAnalysis:
     spec_name: str
     diffs: List[SpecDiff] = field(default_factory=list)
     analyzed_at: datetime = field(default_factory=datetime.now)
+    failed_analysis_reason: Optional[str] = None
 
     @property
     def gaps(self) -> List[SpecDiff]:
@@ -122,12 +123,19 @@ class SpecAnalysis:
     def is_in_sync(self) -> bool:
         return len(self.diffs) == 0
 
+    @property
+    def analysis_failed(self) -> bool:
+        return self.failed_analysis_reason is not None
+
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d: Dict[str, Any] = {
             "spec_name": self.spec_name,
             "diffs": [d.to_dict() for d in self.diffs],
             "analyzed_at": self.analyzed_at.isoformat(),
         }
+        if self.failed_analysis_reason is not None:
+            d["failed_analysis_reason"] = self.failed_analysis_reason
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SpecAnalysis:
@@ -141,6 +149,7 @@ class SpecAnalysis:
             spec_name=data["spec_name"],
             diffs=[SpecDiff.from_dict(d) for d in data.get("diffs", [])],
             analyzed_at=analyzed_at,
+            failed_analysis_reason=data.get("failed_analysis_reason"),
         )
 
 
@@ -177,14 +186,21 @@ class RoundResult:
         raises during application, ``specs_updated`` stays at 0 even
         though real drift was detected. Convergence in that case would be
         a lie — the next ``se3 sync`` invocation will rediscover the same
-        drift. Requiring ``all(a.is_in_sync ...)`` keeps convergence
-        honest. When ``analyses`` is empty (scripted RoundResults in
-        tests, or pre-engine fixture data), ``all([]) is True`` falls
-        back to the legacy ``specs_updated == 0`` semantics.
+        drift.
+
+        An analysis whose ``failed_analysis_reason`` is set (LLM output
+        format error or infrastructure failure) does NOT block stability:
+        it produced no diffs to act on this round and may recover on a
+        future run, but it must not pin the loop to "still drifting" and
+        burn rounds re-asking the same question. Such failures are
+        reported separately as a partial-success line. When ``analyses``
+        is empty (scripted RoundResults in tests, or pre-engine fixture
+        data), ``all([]) is True`` falls back to the legacy
+        ``specs_updated == 0`` semantics.
         """
         if self.specs_updated != 0:
             return False
-        return all(a.is_in_sync for a in self.analyses)
+        return all(a.is_in_sync or a.analysis_failed for a in self.analyses)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -212,6 +228,8 @@ class LoopResult:
     total_specs_created: List[str] = field(default_factory=list)
     final_round_index: int = 0
     discovery_failed: bool = False
+    paused: bool = False
+    checkpoint_path: Optional[str] = None
     completed_at: datetime = field(default_factory=datetime.now)
 
     # --- Compatibility helpers ----------------------------------------
@@ -263,6 +281,8 @@ class LoopResult:
             "total_specs_created": list(self.total_specs_created),
             "final_round_index": self.final_round_index,
             "discovery_failed": self.discovery_failed,
+            "paused": self.paused,
+            "checkpoint_path": self.checkpoint_path,
             "completed_at": self.completed_at.isoformat(),
         }
 
@@ -302,8 +322,23 @@ Code location: {code_location}
 
 Precisely locate and remove the outdated requirement described in the gap.
 Keep ALL other existing requirements intact — only remove the specific
-outdated content. Return the complete updated spec content (the full
-markdown document). Do NOT remove any requirements that are still valid.
+outdated content. Do NOT remove any requirements that are still valid.
+
+You can update the spec in TWO ways (choose whichever fits best):
+
+Way A (preferred for small/targeted changes):
+  Use the Edit tool to modify se3/specs/{spec_name}/spec.md directly.
+  Your reply can just describe what you changed.
+
+Way B (for sweeping rewrites or new sections):
+  Do NOT use Edit. Instead, output the COMPLETE new content of spec.md
+  as a single markdown code block. The framework will write it for you.
+
+In either case, the final spec.md MUST:
+- Start with <!-- spec-format: v1 -->
+- Followed by # {spec_name} Specification
+- Contain ## Purpose
+- Contain at least one ### Requirement: section
 """
 
 _SPEC_UPDATE_PROMPT_TEMPLATE = """\
@@ -328,9 +363,24 @@ weaken existing requirements.
 
 ## Instructions
 
-Return the complete updated spec content (the full markdown document).
 Keep all existing requirements intact. Add new sections or requirements
 as needed to cover the extensions found.
+
+You can update the spec in TWO ways (choose whichever fits best):
+
+Way A (preferred for small/targeted changes):
+  Use the Edit tool to modify se3/specs/{spec_name}/spec.md directly.
+  Your reply can just describe what you changed.
+
+Way B (for sweeping rewrites or new sections):
+  Do NOT use Edit. Instead, output the COMPLETE new content of spec.md
+  as a single markdown code block. The framework will write it for you.
+
+In either case, the final spec.md MUST:
+- Start with <!-- spec-format: v1 -->
+- Followed by # {spec_name} Specification
+- Contain ## Purpose
+- Contain at least one ### Requirement: section
 """
 
 _CONFLICT_SPEC_UPDATE_PROMPT = """\
@@ -355,9 +405,24 @@ Code location: {code_location}
 
 ## Instructions
 
-Return the complete updated spec content (the full markdown document).
 Modify only the parts that conflict with the code's behavior.
 Keep all other existing requirements intact.
+
+You can update the spec in TWO ways (choose whichever fits best):
+
+Way A (preferred for small/targeted changes):
+  Use the Edit tool to modify se3/specs/{spec_name}/spec.md directly.
+  Your reply can just describe what you changed.
+
+Way B (for sweeping rewrites or new sections):
+  Do NOT use Edit. Instead, output the COMPLETE new content of spec.md
+  as a single markdown code block. The framework will write it for you.
+
+In either case, the final spec.md MUST:
+- Start with <!-- spec-format: v1 -->
+- Followed by # {spec_name} Specification
+- Contain ## Purpose
+- Contain at least one ### Requirement: section
 """
 
 
@@ -431,6 +496,7 @@ class SyncEngine:
         specs: Optional[Dict[str, Any]] = None,
         do_discovery: bool = False,
         progress_callback: Optional[Callable[..., None]] = None,
+        skip_specs: Optional[set[str]] = None,
     ) -> RoundResult:
         """Execute one stateless sync pass.
 
@@ -444,6 +510,11 @@ class SyncEngine:
                 this round (typically only for round 1 of a loop).
             progress_callback: Optional ``(phase, spec_name, index, total, analysis)``
                 callable. ``phase`` is one of ``analyzing``/``analyzed``/``discovering``.
+            skip_specs: Optional set of spec names to treat as already in-sync.
+                Used on resume to avoid re-analyzing specs that the previous
+                run already confirmed unchanged. Each skipped spec is recorded
+                with an empty-diffs ``SpecAnalysis`` so its hash still flows
+                into ``RoundResult.spec_hashes_after`` for oscillation detection.
 
         Returns:
             ``RoundResult`` capturing every change applied in this round.
@@ -485,9 +556,23 @@ class SyncEngine:
         spec_items = list(specs.items())
         total = len(spec_items)
 
+        skip = set(skip_specs or ())
+
         for i, (spec_name, spec_info) in enumerate(spec_items):
             if progress_callback:
                 progress_callback("analyzing", spec_name, i, total, None)
+
+            if spec_name in skip:
+                # Resume optimization: the previous run already confirmed
+                # this spec was in-sync and its sha256 has not changed on
+                # disk. Skip the LLM round-trip but still record an
+                # in-sync analysis so the rest of the pipeline behaves
+                # identically to a normal "no drift" pass.
+                analysis = SpecAnalysis(spec_name=spec_name, diffs=[])
+                result.analyses.append(analysis)
+                if progress_callback:
+                    progress_callback("analyzed", spec_name, i, total, analysis)
+                continue
 
             llm_caller.step_id = flow_ctx.make_round_step_id(
                 round_index, "analyze", spec_name
@@ -655,43 +740,265 @@ class SyncEngine:
             return True, f"{label_prefix}: {diff.description}"
         return False, ""
 
+    @staticmethod
+    def _snapshot_spec_disk(path: Path) -> Tuple[Optional[float], Optional[str]]:
+        """Return (mtime, sha256) of the file at ``path``.
+
+        Returns ``(None, None)`` when the file does not exist or cannot be
+        read. The sha256 is computed over the raw file bytes so it can be
+        used to detect any byte-level modification by a sub-agent.
+        """
+        try:
+            stat = path.stat()
+        except (OSError, FileNotFoundError):
+            return None, None
+        try:
+            data = path.read_bytes()
+        except OSError:
+            return stat.st_mtime, None
+        return stat.st_mtime, hashlib.sha256(data).hexdigest()
+
+    @staticmethod
+    def _stdout_contains_spec_body(text: str) -> bool:
+        """Heuristic: does ``text`` (after fence stripping) carry a full spec body?
+
+        We accept a stdout payload as a Way-B rewrite when the cleaned text
+        contains either the v1 marker line or a ``# <name> Specification``
+        heading. The check is intentionally loose — final structural
+        validity is enforced by ``validate_spec_structure`` downstream.
+        """
+        if not text:
+            return False
+        stripped = strip_markdown_fences(text.strip()).strip()
+        if not stripped:
+            return False
+        if "<!-- spec-format: v1 -->" in stripped:
+            return True
+        for line in stripped.splitlines():
+            line_stripped = line.strip()
+            if line_stripped.startswith("# ") and line_stripped.lower().rstrip().endswith(
+                "specification"
+            ):
+                return True
+        return False
+
+    def _git_checkout_rollback(self, spec_path: Path) -> bool:
+        """Run ``git checkout HEAD -- <spec_path>`` to revert the file.
+
+        Returns True on success, False on any failure. Failures are logged
+        but never raised — callers decide how to react.
+        """
+        import subprocess
+
+        try:
+            rel = spec_path.relative_to(self.project_root)
+        except ValueError:
+            rel = spec_path
+        try:
+            result = subprocess.run(
+                ["git", "checkout", "HEAD", "--", str(rel)],
+                cwd=str(self.project_root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except (OSError, FileNotFoundError) as exc:
+            logger.error(
+                "git checkout rollback failed for '%s': %s", spec_path, exc
+            )
+            return False
+        if result.returncode != 0:
+            logger.error(
+                "git checkout rollback for '%s' returned non-zero (%d): %s",
+                spec_path, result.returncode, result.stderr.strip(),
+            )
+            return False
+        return True
+
     def _update_spec_via_llm(
         self, spec_name: str, prompt: str, llm_caller: Any, label: str
     ) -> bool:
-        """Shared helper: call LLM to rewrite a spec file with safety guards."""
+        """Call LLM to update a spec, detecting Way A (Edit) vs Way B (rewrite).
+
+        Flow:
+          1. Snapshot the on-disk spec (mtime, sha256) BEFORE the LLM call.
+          2. Invoke the LLM. The sub-agent may either edit the file directly
+             (Way A) or return the full new spec content as its stdout
+             (Way B).
+          3. Snapshot the on-disk spec AFTER the call.
+          4. If the disk changed → Way A: read disk, validate. On failure
+             roll back via ``git checkout HEAD -- <path>``.
+          5. If the disk did not change but stdout looks like a complete
+             spec body → Way B: write stdout to disk, validate. On failure
+             restore the original content and report.
+          6. If neither — log an error and return False.
+        """
+        from .spec_validator import validate_spec_structure
+
         spec_info = self._specs.get(spec_name)
         if not spec_info:
             logger.warning("Spec '%s' not found for %s update", spec_name, label)
             return False
 
+        spec_path = Path(spec_info["path"])
+        original_content = spec_info.get("content", "")
         try:
-            updated_content = llm_caller.call(prompt=prompt, json_mode="off")
-            updated_content = updated_content.strip()
-            updated_content = strip_markdown_fences(updated_content)
+            pre_disk_content = spec_path.read_text(encoding="utf-8")
+        except OSError:
+            pre_disk_content = original_content
+        _, pre_sha = self._snapshot_spec_disk(spec_path)
 
-            if not updated_content:
+        try:
+            raw_stdout = llm_caller.call(prompt=prompt, json_mode="off")
+        except Exception as exc:
+            logger.error(
+                "LLM call failed for %s spec update '%s': %s",
+                label, spec_name, exc,
+            )
+            # The sub-agent may have used the Edit tool (Way A) to mutate the
+            # spec file before the call errored out (e.g. network drop after
+            # a successful file write).  Snapshot disk and validate or roll
+            # back so the next round does not treat half-written content as
+            # authoritative.
+            _, post_sha = self._snapshot_spec_disk(spec_path)
+            disk_changed_on_error = (
+                pre_sha is not None and post_sha is not None
+                and pre_sha != post_sha
+            )
+            if disk_changed_on_error:
                 logger.warning(
-                    "LLM returned empty content for %s spec update '%s'",
-                    label, spec_name,
+                    "LLM call errored but disk changed for spec '%s'; "
+                    "checking for unintended Way-A edit.", spec_name,
                 )
-                return False
+                try:
+                    new_content = spec_path.read_text(encoding="utf-8")
+                except OSError:
+                    self._git_checkout_rollback(spec_path)
+                    spec_info["content"] = pre_disk_content
+                    return False
 
-            if len(updated_content) < len(spec_info["content"]) * 0.5:
-                logger.warning(
-                    "LLM returned suspiciously short content for %s spec update '%s' "
-                    "(%d chars vs original %d chars), skipping update",
-                    label, spec_name,
-                    len(updated_content), len(spec_info["content"]),
-                )
-                return False
-
-            Path(spec_info["path"]).write_text(updated_content, encoding="utf-8")
-            spec_info["content"] = updated_content
-            logger.info("Updated spec '%s' for %s resolution", spec_name, label)
-            return True
-        except Exception as e:
-            logger.error("Failed to update spec '%s' for %s: %s", spec_name, label, e)
+                validation = validate_spec_structure(new_content, spec_name)
+                if validation.passed:
+                    spec_info["content"] = new_content
+                    logger.info(
+                        "Accepted Way-A edit for spec '%s' despite LLM call "
+                        "error; content passed structural validation.", spec_name,
+                    )
+                    return True
+                else:
+                    logger.error(
+                        "Way-A edit for spec '%s' during LLM error failed "
+                        "validation: %s",
+                        spec_name, "; ".join(validation.errors),
+                    )
+                    self._git_checkout_rollback(spec_path)
+                    try:
+                        spec_info["content"] = spec_path.read_text(encoding="utf-8")
+                    except OSError:
+                        spec_info["content"] = pre_disk_content
+                    return False
             return False
+
+        _, post_sha = self._snapshot_spec_disk(spec_path)
+        disk_changed = (pre_sha is not None and post_sha is not None
+                        and pre_sha != post_sha)
+
+        # --- Way A: sub-agent edited the file directly --------------------
+        if disk_changed:
+            try:
+                new_content = spec_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                logger.error(
+                    "Failed to re-read spec '%s' after Way-A edit: %s",
+                    spec_name, exc,
+                )
+                self._git_checkout_rollback(spec_path)
+                spec_info["content"] = pre_disk_content
+                return False
+
+            if len(new_content) < len(original_content) * 0.5:
+                logger.warning(
+                    "Way-A edit for %s spec '%s' is much shorter than "
+                    "original (%d vs %d chars); accepting but flagging.",
+                    label, spec_name, len(new_content), len(original_content),
+                )
+
+            validation = validate_spec_structure(new_content, spec_name)
+            if not validation.passed:
+                logger.error(
+                    "Way-A edit for %s spec '%s' failed structural validation: %s",
+                    label, spec_name, "; ".join(validation.errors),
+                )
+                if self._git_checkout_rollback(spec_path):
+                    try:
+                        restored = spec_path.read_text(encoding="utf-8")
+                    except OSError:
+                        restored = pre_disk_content
+                    spec_info["content"] = restored
+                else:
+                    # Best-effort: write the original content back to disk
+                    # so we are not left with an invalid spec.
+                    try:
+                        spec_path.write_text(pre_disk_content, encoding="utf-8")
+                        spec_info["content"] = pre_disk_content
+                    except OSError as exc:
+                        logger.error(
+                            "Failed to restore spec '%s' after rollback "
+                            "failure: %s", spec_name, exc,
+                        )
+                return False
+
+            spec_info["content"] = new_content
+            logger.info(
+                "Updated spec '%s' for %s resolution via Way-A edit", spec_name, label
+            )
+            return True
+
+        # --- Way B: full-rewrite via stdout -------------------------------
+        cleaned_stdout = ""
+        if isinstance(raw_stdout, str):
+            cleaned_stdout = strip_markdown_fences(raw_stdout.strip()).strip()
+
+        if self._stdout_contains_spec_body(raw_stdout or ""):
+            if len(cleaned_stdout) < len(original_content) * 0.5:
+                logger.warning(
+                    "Way-B rewrite for %s spec '%s' is much shorter than "
+                    "original (%d vs %d chars); accepting but flagging.",
+                    label, spec_name,
+                    len(cleaned_stdout), len(original_content),
+                )
+
+            validation = validate_spec_structure(cleaned_stdout, spec_name)
+            if not validation.passed:
+                logger.error(
+                    "Way-B rewrite for %s spec '%s' failed structural "
+                    "validation: %s",
+                    label, spec_name, "; ".join(validation.errors),
+                )
+                return False
+
+            try:
+                spec_path.write_text(cleaned_stdout, encoding="utf-8")
+            except OSError as exc:
+                logger.error(
+                    "Failed to write Way-B rewrite for spec '%s': %s",
+                    spec_name, exc,
+                )
+                return False
+            spec_info["content"] = cleaned_stdout
+            logger.info(
+                "Updated spec '%s' for %s resolution via Way-B rewrite",
+                spec_name, label,
+            )
+            return True
+
+        # --- Way C: no disk change AND stdout has no spec body ------------
+        logger.error(
+            "LLM call for %s spec '%s' produced neither a disk edit nor a "
+            "complete spec body in stdout; skipping this update.",
+            label, spec_name,
+        )
+        return False
 
     # ------------------------------------------------------------------
     # High-impact deletion handling

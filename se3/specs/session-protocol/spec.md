@@ -74,11 +74,12 @@ The system SHALL classify user input in the analyze step to determine the approp
 **Task Types:**
 | Task Type | Description | Steps Used |
 |-----------|-------------|------------|
-| `feature` | New functionality or significant enhancement | Full 10-step workflow |
-| `bugfix` | Fixing a bug or issue | analyze → plan → implement → test → verify_spec → update_spec → commit → summarize |
-| `review` | Code review, audit, or analysis | analyze → verify_spec → summarize |
-| `small` | Minor fix, typo, or simple change | analyze → implement → test → commit → summarize |
-| `directive` | Following specific instructions | analyze → plan → implement → commit → summarize |
+| `feature` | New functionality or significant enhancement | analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit |
+| `bugfix` | Fixing a bug or issue | analyze → plan → implement → test → self_check → verify_spec → version_analyze → commit |
+| `review` | Code review, audit, or analysis | analyze → verify_spec |
+| `small` | Minor fix, typo, or simple change | analyze → implement → test → version_analyze → commit |
+| `directive` | Following specific instructions | analyze → plan → implement → version_analyze → commit |
+| `discovery` | Exploratory requirement gathering (via `--discover` flag) | discovery → analyze → plan → implement → test → self_check → verify_spec → update_spec → version_analyze → commit |
 
 **Classification Indicators:**
 - Bugfix: "error", "bug", "broken", "fail", "crash", "exception", "not working"
@@ -95,7 +96,7 @@ The system SHALL classify user input in the analyze step to determine the approp
 #### Scenario: Feature classification
 - **WHEN** user input contains feature indicators
 - **THEN** system classifies task type as "feature"
-- **AND** routes to feature workflow (full 11 steps)
+- **AND** routes to feature workflow (analyze through commit)
 
 #### Scenario: Review classification
 - **WHEN** user input contains review indicators

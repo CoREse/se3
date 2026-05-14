@@ -438,6 +438,30 @@ def sync_cmd(
     stable_rounds: int = typer.Option(1, "--stable-rounds", help="Consecutive zero-change rounds required to declare convergence"),
     interactive: bool = typer.Option(False, "--interactive", "-i", help="Pause for approval on high-impact requirement deletions"),
     show_diff: bool = typer.Option(False, "--show-diff", help="Print full per-round change list"),
+    validate_only: bool = typer.Option(
+        False,
+        "--validate-only",
+        help=(
+            "Read-only audit mode: scan se3/specs/*/spec.md, run the "
+            "spec-format v1 structural validator on each, print a "
+            "results table, and exit 0 if every spec passes (1 "
+            "otherwise). Does NOT call the LLM and does NOT write any "
+            "files. Mutually exclusive with --once / --max-rounds / "
+            "--stable-rounds / --interactive / --show-diff (other flags "
+            "are ignored in this mode)."
+        ),
+    ),
+    resume: bool = typer.Option(
+        False,
+        "--resume",
+        help=(
+            "Resume a previous sync run from the checkpoint at "
+            "se3/state/sync_checkpoint.json. Already-in-sync specs whose "
+            "content sha256 has not changed are skipped; changed and "
+            "previously-failed specs are re-analyzed. Mutually exclusive "
+            "with --validate-only."
+        ),
+    ),
 ):
     """Run code → spec sync until convergence.
 
@@ -451,7 +475,25 @@ def sync_cmd(
         se3 sync --max-rounds 5 --stable-rounds 2
         se3 sync --interactive                # approve high-impact deletions
         se3 sync --show-diff                  # also dump per-round changes
+        se3 sync --validate-only              # audit specs without running sync
     """
+    if validate_only and resume:
+        render_text(
+            "--validate-only and --resume are mutually exclusive.",
+            title="Error",
+        )
+        raise typer.Exit(1)
+
+    if validate_only:
+        if once or interactive or show_diff:
+            render_text(
+                "--validate-only ignores --once / --interactive / --show-diff.",
+                title="SE3 Sync",
+            )
+        from .commands.sync import validate_only_command
+        code = validate_only_command()
+        raise typer.Exit(code)
+
     from .commands.sync import sync_command
 
     if once:
@@ -480,6 +522,7 @@ def sync_cmd(
         interactive=interactive,
         show_diff=show_diff,
         once=once,
+        resume=resume,
     )
 
 

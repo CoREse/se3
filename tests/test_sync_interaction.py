@@ -24,6 +24,7 @@ import pytest
 from se3.engine.sync_interaction import (
     HighImpactDeletion,
     SyncInteractionHandler,
+    prompt_resume_or_exit,
 )
 
 
@@ -194,3 +195,44 @@ class TestFilePollingPath:
     def test_no_pending_items_returns_empty(self, tmp_path):
         handler = SyncInteractionHandler(tmp_path, [])
         assert handler.collect_decisions() == {}
+
+
+# ---------------------------------------------------------------------------
+# prompt_resume_or_exit — TTY with EOF returns 'exit'
+# ---------------------------------------------------------------------------
+
+class TestPromptResumeOrExit:
+    def test_tty_eof_returns_exit_and_writes_stderr(self):
+        """When stdin is a TTY but readline() returns '' (EOF), the gate
+        must return 'exit' and write guidance to stderr.
+
+        This guards against the regression where a non-interactive pipeline
+        (stdin closed) would see a falsy line and loop forever, burning
+        LLM calls."""
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = True
+        mock_stdin.readline.return_value = ""
+
+        mock_stdout = MagicMock()
+        mock_stderr = MagicMock()
+
+        with patch("se3.engine.sync_interaction.sys.stdin", mock_stdin):
+            with patch("se3.engine.sync_interaction.sys.stdout", mock_stdout):
+                with patch("se3.engine.sync_interaction.sys.stderr", mock_stderr):
+                    result = prompt_resume_or_exit({
+                        "completed_specs": 3,
+                        "total_specs": 5,
+                        "round_index": 2,
+                        "max_rounds": 10,
+                        "in_sync_specs": ["base"],
+                        "failure_count": 3,
+                        "reason": "quota_exhausted",
+                        "checkpoint_path": "/tmp/cp.json",
+                    })
+
+        assert result == "exit"
+        mock_stdin.readline.assert_called_once()
+        # stderr should contain the EOF-specific guidance
+        stderr_writes = "".join(call[0][0] for call in mock_stderr.write.call_args_list)
+        assert "stdin closed (EOF)" in stderr_writes
+        assert "--resume" in stderr_writes

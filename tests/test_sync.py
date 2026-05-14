@@ -585,11 +585,13 @@ class TestParseAnalysisResponse:
         assert len(result.conflicts) == 1
 
     def test_parse_invalid_json(self, tmp_path):
+        # G4: malformed JSON no longer fabricates a CONFLICT diff. The
+        # analysis is flagged as failed with the format-error reason.
         analyzer = SyncAnalyzer(tmp_path, MagicMock())
         result = analyzer._parse_analysis_response("spec", "not json at all")
-        assert len(result.diffs) == 1
-        assert result.diffs[0].diff_type == DiffType.CONFLICT
-        assert "JSON parse error" in result.diffs[0].description
+        assert result.diffs == []
+        assert result.failed_analysis_reason == "llm_output_format_error"
+        assert result.analysis_failed is True
 
 
 class TestAnalyzeSpec:
@@ -617,6 +619,7 @@ class TestAnalyzeSpec:
         assert call_kwargs.kwargs.get("json_mode") == "extract"
 
     def test_returns_error_analysis_after_max_retries(self, tmp_path):
+        # G4: exhausted retries no longer fabricate a CONFLICT diff.
         from se3.engine.llm_caller import LLMCallError
 
         caller = MagicMock()
@@ -625,8 +628,9 @@ class TestAnalyzeSpec:
         result = analyzer.analyze_spec("broken", "spec", "ctx")
 
         assert caller.call.call_count == 3
-        assert len(result.diffs) == 1
-        assert result.diffs[0].diff_type == DiffType.CONFLICT
+        assert result.diffs == []
+        assert result.failed_analysis_reason == "infrastructure_failure"
+        assert result.analysis_failed is True
 
 
 class TestGenerateBaseSpec:

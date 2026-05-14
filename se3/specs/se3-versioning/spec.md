@@ -3,7 +3,7 @@
 
 ## Purpose
 
-Define version management standards for SE3 projects, including Semantic Versioning adoption, version file detection rules, automatic version bumping mechanisms, and documentation update conventions.
+Define version management standards for SE3 projects, including Semantic Versioning adoption, version file detection rules, and automatic version bumping mechanisms.
 
 ## Requirements
 
@@ -58,7 +58,7 @@ SE3 projects SHALL maintain a single authoritative source for the version number
 
 **Rules:**
 - There MUST be exactly one canonical location where the version is defined
-- All other references to the version (badges, documentation, generated files) MUST derive from this single source
+- All other references to the version MUST derive from this single source
 - The version script interface (`se3/scripts/version.py`) serves as the unified access point to this source
 - Projects MUST NOT maintain independent version numbers in multiple files (e.g., both `pyproject.toml` and `__init__.py` with separate version values)
 
@@ -132,14 +132,20 @@ version:
 
 ### Requirement: Version File Detection
 
-SE3 SHALL automatically detect project type and locate the version file with the following priority:
+SE3 SHALL automatically detect project type and locate the version file.
 
 **Detection Priority (when no version script exists):**
-1. `pyproject.toml` - Python project (PEP 518/621)
-2. `package.json` - Node.js project
-3. `se3.yaml` - Custom configuration for other project types
+1. Explicitly configured `version.file_path` (or `version.version_file`) in `se3.yaml`
+2. `pyproject.toml` — Python project (PEP 518/621)
+3. `package.json` — Node.js project
+4. `setup.py` — Python project (legacy setuptools)
+5. `version.py` — Standalone version file
+6. `src/__init__.py` — Python package init
+7. `src/version.py` — Standalone version file in src
 
-Note: When a version script is present, it takes priority over file detection.
+**Readability Validation:** Each candidate file MUST contain a readable version field. If a handler can identify the file type but the file does not contain an extractable version string (e.g., `pyproject.toml` exists but has no `project.version` or `tool.poetry.version`), the file is skipped and the next candidate is checked.
+
+Note: When a version script is present, it takes priority over all file detection.
 
 **Version Storage Location:**
 
@@ -147,14 +153,18 @@ Note: When a version script is present, it takes priority over file detection.
 |-------------|-----------|------------|
 | Python (PEP 621) | `pyproject.toml` | `project.version` |
 | Python (Poetry) | `pyproject.toml` | `tool.poetry.version` |
+| Python (setuptools) | `setup.py` | `version=` kwarg in `setup()` call |
+| Python (package) | `src/__init__.py` | `__version__` variable |
+| Python (standalone) | `version.py` / `src/version.py` | `__version__` or `version` variable |
 | Node.js | `package.json` | `version` |
-| Custom | `se3.yaml` configured | `version.file_path` |
 
 **Auto-detection Logic:**
-1. Check for `pyproject.toml` - if exists, read version from it
-2. Check for `package.json` - if exists, read version from it
-3. Check `se3.yaml` for explicit `version.file_path`
-4. If none found, skip version bumping
+1. Check for version script first (highest priority)
+2. Check for explicitly configured `version.file_path` (or `version.version_file`) in `se3.yaml`
+3. Iterate candidate files in priority order (`pyproject.toml`, `package.json`, `setup.py`, `version.py`, `src/__init__.py`, `src/version.py`)
+4. For each file, verify a registered handler can read a version from it
+5. Return the first file that passes readability validation
+6. If none found, skip version bumping
 
 #### Scenario: Python Project Detection
 - **GIVEN** project has `pyproject.toml` with `project.version = "1.0.0"`
@@ -167,6 +177,12 @@ Note: When a version script is present, it takes priority over file detection.
 - **WHEN** SE3 detects version file
 - **THEN** returns `package.json` as version file
 - **AND** extracts version `2.1.0`
+
+#### Scenario: File exists but has no readable version
+- **GIVEN** project has `pyproject.toml` with a `[project]` section but no `version` field
+- **WHEN** SE3 detects version file
+- **THEN** `pyproject.toml` is skipped
+- **AND** detection continues to the next candidate
 
 ### Requirement: LLM-Based Version Analysis
 
@@ -197,13 +213,21 @@ Spec changes are prioritized as they directly reflect API contract modifications
 
 The `commit_message` field is generated alongside version analysis. It uses imperative mood, starts with a verb, and does not include task type prefixes. The commit step consumes this field as the primary source for the git commit message subject line.
 
+**LLM Response Handling:**
+The LLM response is parsed via a two-phase extraction pipeline:
+1. **Phase 1**: The raw response is parsed for JSON content (markdown code blocks, raw `{...}` extraction, trailing JSON extraction).
+2. **Phase 2**: If Phase 1 yields no valid JSON with the required `suggested_version` key, a second LLM call extracts structured JSON from the raw response.
+3. The JSON parser includes repair chains for common LLM errors: trailing commas, single quotes, truncated JSON, unescaped interior quotes.
+
+If no parseable JSON with `suggested_version` is produced after both phases, the `version_analyze` step completes with status FAILED. The `commit` step then halts (see Missing Version Handling requirement).
+
 **Semantic Versioning 2.0.0 Decision Criteria (default rules):**
 - **MAJOR**: Incompatible API changes, removed functionality, breaking behavioral changes
 - **MINOR**: New backward-compatible functionality, new features, new optional parameters
 - **PATCH**: Backward-compatible bug fixes, performance improvements, internal refactoring
 - **NONE**: No version-worthy changes (formatting, comments only)
 
-The LLM applies these defaults to compute `suggested_version` from `current_version` when no project-level custom rules file is present. When a custom rules file exists (see Custom Version Rules File requirement), the LLM applies the custom rules in preference to the defaults.
+The LLM applies these defaults to compute `suggested_version` from the pre-session version baseline when no project-level custom rules file is present. When a custom rules file exists (see Custom Version Rules File requirement), the LLM applies the custom rules in preference to the defaults.
 
 **Confidence Levels:**
 - `high`: Clear change type (e.g., obvious breaking change or simple bugfix)
@@ -222,9 +246,16 @@ The LLM applies these defaults to compute `suggested_version` from `current_vers
 - **THEN** it writes `1.3.0` directly (the value from `suggested_version`)
 - **AND** it does NOT recompute the version by applying `bump_type` to `current_version`
 
+#### Scenario: LLM response is empty or unparseable
+- **GIVEN** the LLM returns an empty or non-JSON response
+- **WHEN** the `version_analyze` step processes the response
+- **THEN** the two-phase extraction pipeline attempts repair and re-extraction
+- **AND** if no parseable JSON with `suggested_version` can be extracted, the step completes with status FAILED
+- **AND** the commit step subsequently halts for human intervention
+
 ### Requirement: Single-Session Single-Bump Guarantee
 
-A single `se3 run` session SHALL produce exactly one effective version bump in the project's version files (`pyproject.toml`, `VERSIONS.md`, or the configured equivalents), regardless of whether the `implement` step used a worktree-based DAG-parallel strategy that may have already merged a "bump version" commit into the main branch.
+A single `se3 run` session SHALL produce exactly one effective version bump in the project's version file (`pyproject.toml` or the configured equivalent), regardless of whether the `implement` step used a worktree-based DAG-parallel strategy that may have already merged a "bump version" commit into the main branch.
 
 **Rules:**
 - The `implement` step (including any LLM groups, fix-iteration, or worktree merges back to the main branch) SHALL NOT be the legitimate site of a version-file write. Version-file changes belong exclusively to the `commit` step.
@@ -232,8 +263,8 @@ A single `se3 run` session SHALL produce exactly one effective version bump in t
 - The `implement` step SHALL record `pre_session_version` (entry-time disk version) and, on worktree paths, a `session_commits` list of commits introduced to the main branch during this session. Both fields are forwarded into `version_analyze.inputs` (see flow-engine spec).
 - `pre_session_version` SHALL be captured exactly once per `implement` step — at the **first** entry of the handler — and preserved on every subsequent re-entry (fix-iteration, DAG resume, retry). Re-entries MUST NOT overwrite `pre_session_version` with the current on-disk value, because an earlier worktree group may have already bumped the version file; overwriting would let `version_analyze` compute the bump relative to the post-bump version and produce a second, spurious bump.
 - `session_commits` SHALL be computed against the **flow-wide** baseline recorded at flow init (`flow.baseline_commit` from `state_machine.init_flow`), NOT against the per-entry HEAD. This guarantees that commits merged onto the main branch by earlier `implement` entries remain visible to `version_analyze` after a re-entry, and that the list spans the entire implement phase even when the handler executes in multiple passes.
-- The `version_analyze` LLM prompt SHALL render `pre_session_version` as the baseline `Current Version`, surface the `session_commits` list, and instruct the LLM to treat any version-file modifications inside those commits as if they had not happened. The resulting `suggested_version` is therefore computed once, relative to `pre_session_version`.
-- The `commit` step SHALL unconditionally write `suggested_version` into the version files. When the on-disk version already equals `suggested_version` (because an upstream group merged a matching bump commit), `set_version` is required to be idempotent — the same write is performed and no error is raised; the final on-disk version equals exactly `suggested_version`.
+- The `version_analyze` LLM prompt SHALL render `pre_session_version` as the baseline current version, surface the `session_commits` list, and instruct the LLM to treat any version-file modifications inside those commits as if they had not happened. The resulting `suggested_version` is therefore computed once, relative to `pre_session_version`.
+- The `commit` step SHALL unconditionally write `suggested_version` into the version file. When the on-disk version already equals `suggested_version` (because an upstream group merged a matching bump commit), `set_version` is required to be idempotent — the same write is performed and no error is raised; the final on-disk version equals exactly `suggested_version`.
 
 **Out of scope:** Adjusting the `task_type` prefix or the rendered `bump_type` annotation in the commit message body — these remain governed by their existing requirements.
 
@@ -245,7 +276,7 @@ A single `se3 run` session SHALL produce exactly one effective version bump in t
 - **THEN** the LLM receives `pre_session_version=5.1.0` and a `session_commits` list including the bump commit and the fix-iteration commit
 - **AND** the LLM, instructed to treat the bump commit as if it had not happened, returns `suggested_version=5.2.0` (a single MINOR bump relative to `5.1.0`)
 - **WHEN** the `commit` step runs
-- **THEN** it writes `5.2.0` into `pyproject.toml` / `VERSIONS.md` idempotently (no second 5.2.1 bump)
+- **THEN** it writes `5.2.0` into `pyproject.toml` idempotently (no second 5.2.1 bump)
 - **AND** the final on-disk version equals `5.2.0`
 
 #### Scenario: Re-entry preserves the originally captured pre_session_version
@@ -316,11 +347,12 @@ SE3 SHALL support an optional, project-level natural-language version rules file
 SE3 SHALL provide automatic version bumping integrated into the commit workflow, driven exclusively by `suggested_version` from the `version_analyze` step.
 
 **Bump Process:**
-1. Detect current version from the version file (or version script).
-2. Read `suggested_version` from the completed `version_analyze` step.
-3. If `version_analyze` is missing or did not produce a `suggested_version`, the commit step SHALL fail with a descriptive error (see Missing Version Handling requirement).
-4. Write `suggested_version` verbatim into the version file (atomic write + backup for rollback).
-5. Stage the version file for the upcoming commit.
+1. Detect current version from the version file (or version script). If no version file exists, initialize a new version system with `"0.1.0"` as the default initial version.
+2. Attempt to read the current version from the detected file. If the file exists but has no readable version, attempt auto-repair (script regeneration in script mode, or version system reinitialization in file mode).
+3. Read `suggested_version` from the completed `version_analyze` step.
+4. If `version_analyze` is missing or did not produce a `suggested_version`, the commit step SHALL fail with a descriptive error (see Missing Version Handling requirement).
+5. Write `suggested_version` verbatim into the version file (atomic write + backup for rollback).
+6. Stage the version file for the upcoming commit.
 
 `bump_type` is NOT used to compute the new version. There is no static task-type-to-bump-type lookup table — that mechanism has been removed. `bump_type` survives only as a display hint and a commit-message metadata field.
 
@@ -330,8 +362,6 @@ version:
   enabled: true                       # Enable automatic version bumping
   file_path: null                     # Explicit version file path (null = auto-detect)
   include_in_commit_message: true     # Include version in commit message
-  auto_bump: true                     # Auto-apply suggested_version without confirmation
-  confidence_threshold: null          # Threshold for human confirmation (null = never)
   script_path: null                   # Custom version script path (null = default)
   auto_generate_script: true          # Auto-generate version script if absent
 ```
@@ -357,6 +387,12 @@ Legacy `version` keys that previously controlled a static bump-rules table or a 
 - **WHEN** commit step executes
 - **THEN** no version bumping occurs
 - **AND** existing version is preserved
+
+#### Scenario: No version file exists — initialization
+- **GIVEN** the project has no version file and no version script
+- **WHEN** the commit step runs with version bumping enabled
+- **THEN** a new version system is initialized with `"0.1.0"`
+- **AND** the new version file is created and staged for commit
 
 ### Requirement: Missing Version Handling
 
@@ -414,96 +450,30 @@ When the `version_analyze` step fails or completes without a usable `suggested_v
 - **THEN** the field is recognised and the version is read correctly
 - **AND** tools that emit either `version = "1.2.3"` or `version="1.2.3"` are accepted equivalently
 
-### Requirement: Documentation Updates
-
-SE3 SHALL automatically update README.md and VERSIONS.md when version changes.
-
-**README.md Updates:**
-- Insert/update version badge near the top of the file
-- Use configurable template with placeholder replacement
-- Default badge template: `![Version](https://img.shields.io/badge/version-{version}-blue)`
-- Preserve existing content, only update badge
-
-**VERSIONS.md Updates:**
-- Create file if it doesn't exist with standard header
-- Insert new version entry at the top (newest first)
-- Use configurable template for entry format
-- Preserve existing entries
-
-**Template Placeholders:**
-- `{version}` - The new version string
-- `{date}` - Current date (YYYY-MM-DD)
-- `{changes}` - Summary of changes (from commit message)
-
-**Configuration:**
-```yaml
-version:
-  templates:
-    readme_badge: "![Version](https://img.shields.io/badge/version-{version}-blue)"
-    versions_entry: |
-      ## {version} - {date}
-      
-      {changes}
-      
-  readme_marker: "<!-- SE3-VERSION -->"  # Marker for badge insertion point
-  versions_header: "# Version History\n\n"
-```
-
-#### Scenario: README.md Badge Update
-- **GIVEN** README.md exists without version badge
-- **WHEN** version bumps to `1.3.0`
-- **THEN** badge `![Version](https://img.shields.io/badge/version-1.3.0-blue)` is inserted after the first heading
-
-#### Scenario: VERSIONS.md Entry Creation
-- **GIVEN** VERSIONS.md exists with previous entries
-- **WHEN** version bumps to `1.3.0`
-- **THEN** new entry inserted at the top with current date and change summary
-
 ### Requirement: Version Rollback
 
 SE3 SHALL support rollback of version changes if commit fails.
 
 **Rollback Mechanism:**
-1. Before bumping, create backup of original version
+1. Before writing the new version, save a backup of the original version
 2. If commit fails or is interrupted, restore original version
 3. Clear backup after successful commit
-4. Rollback includes both version file and documentation changes
 
 **Error Handling:**
 - Log rollback attempts and results
 - If rollback fails, log error for manual intervention
-- Preserve backup files until explicit clear or next bump
+- Preserve backup values until explicit clear or next bump
 
 #### Scenario: Commit Failure Rollback
 - **GIVEN** version was bumped from `1.2.3` to `1.3.0`
-- **WHEN** git commit fails (network error, rejected, etc.)
+- **WHEN** git commit fails (rejected, network error, etc.)
 - **THEN** version file is restored to `1.2.3`
-- **AND** README.md/VERSIONS.md changes are reverted
 
 #### Scenario: Successful Commit
 - **GIVEN** version was bumped and committed successfully
 - **WHEN** commit completes
 - **THEN** backup is cleared
 - **AND** version change is permanent
-
-### Requirement: CLI Integration
-
-SE3 SHALL provide CLI commands for manual version management.
-
-**`se3 commit --bump <type>`:**
-- Allow manual version bump during commit
-- Override automatic bump detection
-- Supported types: `major`, `minor`, `patch`
-
-**Version Display:**
-- `se3 status` SHALL display current version
-- Commit output SHALL include version change info
-
-#### Scenario: Manual Version Bump
-- **GIVEN** current version is `1.2.3`
-- **WHEN** user runs `se3 commit --bump minor`
-- **THEN** version bumps to `1.3.0` regardless of task type
-- **AND** commit proceeds with new version
 
 ## Architecture
 
@@ -513,36 +483,35 @@ SE3 SHALL provide CLI commands for manual version management.
 ┌──────────────────────────────────────────────────────────────────┐
 │                      Version Management                           │
 ├──────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐  ┌─────────────────┐  ┌─────────────────────┐  │
-│  │   Config    │  │  VersionBumper   │  │      Updater        │  │
-│  │   Loader    │→ │                  │→ │                     │  │
-│  └─────────────┘  └────────┬────────┘  └─────────────────────┘  │
-│         │                  │                      │              │
-│         │          ┌───────┴───────┐              │              │
-│         │          │               │              │              │
-│         ▼          ▼               ▼              ▼              │
-│  ┌───────────┐ ┌────────────┐ ┌────────────┐ ┌────────────────┐ │
-│  │ se3.yaml  │ │  Script    │ │  Built-in  │ │  README.md     │ │
-│  │script_path│ │  Interface │ │  Handlers  │ │  VERSIONS.md   │ │
-│  │auto_bump  │ │(subprocess)│ │ (fallback) │ │                │ │
-│  └───────────┘ └─────┬──────┘ └────────────┘ └────────────────┘ │
-│                      │                                           │
-│                      ▼                                           │
-│              ┌──────────────┐                                    │
-│              │ Version      │  ← Single Source of Truth          │
-│              │ Source File  │                                    │
-│              └──────────────┘                                    │
+│  ┌─────────────┐  ┌─────────────────┐                            │
+│  │   Config    │  │  VersionBumper   │                            │
+│  │   Loader    │→ │                  │                            │
+│  └─────────────┘  └────────┬────────┘                            │
+│         │                  │                                      │
+│         │          ┌───────┴───────┐                              │
+│         │          │               │                              │
+│         ▼          ▼               ▼                              │
+│  ┌───────────┐ ┌────────────┐ ┌────────────┐                     │
+│  │ se3.yaml  │ │  Script    │ │  Built-in  │                     │
+│  │script_path│ │  Interface │ │  Handlers  │                     │
+│  │enabled    │ │(subprocess)│ │ (fallback) │                     │
+│  └───────────┘ └─────┬──────┘ └─────┬──────┘                     │
+│                      │              │                             │
+│                      ▼              ▼                             │
+│              ┌──────────────────────────┐                        │
+│              │ Version                  │  ← Single Source       │
+│              │ Source File              │     of Truth           │
+│              └──────────────────────────┘                        │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
 ### Integration Points
 
-1. **Commit Step**: Triggers version bump before git commit
+1. **Commit Step**: Triggers version bump before git commit; writes `suggested_version` verbatim to the version file
 2. **Config System**: Loads version settings from se3.yaml
 3. **Version Script**: Script-based interface (priority over built-in handlers)
-4. **Built-in Handlers**: Fallback for pyproject.toml, package.json, etc.
-5. **Engine**: Provides task type context for bump decisions
-6. **Git**: Stages version file changes with code changes
+4. **Built-in Handlers**: Fallback for pyproject.toml, package.json, setup.py, version.py, src/__init__.py
+5. **Git**: Stages version file changes with code changes
 
 ## References
 

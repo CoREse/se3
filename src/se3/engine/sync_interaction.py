@@ -39,6 +39,97 @@ _THREAD_JOIN_TIMEOUT = 5
 _VALID_DECISIONS = {"approve", "skip"}
 
 
+def prompt_resume_or_exit(stats: Dict[str, Any]) -> str:
+    """Prompt the operator to continue or exit after sustained infra failures.
+
+    Used by ``SyncLoop`` when LLM quota is exhausted or the
+    infrastructure-failure threshold is hit. The prompt blocks the run
+    until the user makes a decision; ``Ctrl-C`` raises
+    ``KeyboardInterrupt`` (the loop catches it and persists the
+    checkpoint).
+
+    Args:
+        stats: Dict shown to the user. Keys (all optional, all rendered
+            verbatim if present): ``completed_specs``, ``total_specs``,
+            ``round_index``, ``max_rounds``, ``in_sync_specs`` (iterable
+            of spec names), ``failure_count``, ``checkpoint_path``,
+            ``reason``.
+
+    Returns:
+        ``"continue"`` when the user accepts (Enter on a TTY), or
+        ``"exit"`` when stdin is not a TTY (the caller is expected to
+        treat that as a request to stop and resume later).
+    """
+    completed = stats.get("completed_specs")
+    total = stats.get("total_specs")
+    round_idx = stats.get("round_index")
+    max_rounds = stats.get("max_rounds")
+    in_sync_specs = stats.get("in_sync_specs") or []
+    failure_count = stats.get("failure_count")
+    checkpoint_path = stats.get("checkpoint_path")
+    reason = stats.get("reason") or "infrastructure failure threshold reached"
+
+    lines = []
+    failure_summary = (
+        f"detected {failure_count} consecutive infrastructure failures"
+        if failure_count
+        else "detected sustained infrastructure failures"
+    )
+    lines.append(f"⚠ Sync paused — {failure_summary} ({reason}).")
+    if completed is not None and total is not None:
+        lines.append(f"  Completed specs: {completed}/{total}")
+    if round_idx is not None and max_rounds is not None:
+        lines.append(f"  Current round: {round_idx}/{max_rounds}")
+    if in_sync_specs:
+        names = list(in_sync_specs)
+        head = ", ".join(names[:8])
+        tail = "" if len(names) <= 8 else f", … (+{len(names) - 8} more)"
+        lines.append(f"  In-sync specs: {head}{tail}")
+    if checkpoint_path is not None:
+        lines.append(f"  Checkpoint written: {checkpoint_path}")
+
+    message = "\n".join(lines)
+
+    try:
+        is_tty = sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        is_tty = False
+
+    if not is_tty:
+        sys.stderr.write(message + "\n")
+        sys.stderr.write(
+            "Non-interactive stdin — exiting. Re-run with "
+            "`se3 sync --resume` once the quota / infrastructure recovers.\n"
+        )
+        sys.stderr.flush()
+        return "exit"
+
+    sys.stdout.write(message + "\n")
+    sys.stdout.write(
+        "Press Enter to continue once the quota recovers; press Ctrl-C "
+        "to exit (resume later with `se3 sync --resume`).\n"
+    )
+    sys.stdout.flush()
+
+    try:
+        line = sys.stdin.readline()
+    except KeyboardInterrupt:
+        raise
+    if line == "":
+        # readline() returns "" only on EOF (e.g. Ctrl-D or closed stdin).
+        # We cannot distinguish "user pressed Enter" from "stdin closed"
+        # otherwise, so treat EOF as an explicit exit signal: the caller
+        # persists the checkpoint and stops the loop instead of burning
+        # more LLM calls against a no-op gate.
+        sys.stderr.write(
+            "stdin closed (EOF) — exiting. Re-run with "
+            "`se3 sync --resume` once the quota / infrastructure recovers.\n"
+        )
+        sys.stderr.flush()
+        return "exit"
+    return "continue"
+
+
 @dataclass
 class HighImpactDeletion:
     """A pending whole-requirement removal awaiting human approval."""

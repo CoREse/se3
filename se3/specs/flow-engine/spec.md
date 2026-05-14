@@ -4,7 +4,7 @@
 
 ## Purpose
 
-定义 SE3 3.0 的核心流程引擎（Flow Engine）：一个程序驱动的状态机，通过统一的 `se3 run` 入口控制开发流程的 13 个步骤编排，在每个步骤内调用 LLM 处理需要"思考"的部分。
+定义 SE3 3.0 的核心流程引擎（Flow Engine）：一个程序驱动的状态机，通过统一的 `se3 run` 入口控制开发流程的 16 个步骤编排（5 个活跃步骤 + CONFIRM + DISCOVERY + 4 个已废弃步骤 + 其他），在每个步骤内调用 LLM 处理需要"思考"的部分。
 
 ## Requirements
 
@@ -304,22 +304,22 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 - **THEN** 根据分析结果从固定步骤池中选取后续需要的步骤
 - **AND** 步骤池是预定义的有限集合，不由 LLM 凭空生成
 
-### Requirement: 13 步流程池
+### Requirement: 16 步流程池
 
-流程引擎 SHALL 定义固定的 13 步骤池，所有流程步骤从此池中选取。
+流程引擎 SHALL 定义固定的 16 步骤池（StepType 枚举），所有流程步骤从此池中选取。该池由 5 个活跃步骤 + CONFIRM + DISCOVERY + 4 个已废弃步骤 + 其他组成。下表列出主要步骤；deprecated 步骤的兼容行为见 *Deprecated Step Type Backward Compatibility* requirement。
 
 | 步骤 | 职责 | LLM 参与 | JSON 模式 | Read-Only | 输入 | 输出 |
 |------|------|---------|-----------|-----------|------|------|
 | `discovery` | 需求探索（多轮对话） | 是 | STRICT | **是** | initial_description | refined_description, discovery_summary |
 | `analyze` | 分析任务类型和范围；收集项目上下文；选择并加载相关 spec items | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content, selected_items |
-| `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type, project_summary | plan{proposal,design}, task_groups, spec_changes |
+| `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type, scope, project_summary | plan{proposal,design}, task_groups, spec_changes, total_complexity, estimated_effort |
 | `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed, estimated_test_duration |
 | `test` | 运行测试验证 | 否（程序执行） | - | 否 | - | test_results, tests_passed |
-| `self_check` | LLM 代码审查：逻辑完整性、代码健壮性、功能遗漏、测试未覆盖区域（不检查 spec 合规性） | 是 | TWO_PHASE | **是** | test_results, changes_made, spec_content, task_groups, fix_iteration, self_check_pass_index, self_check_passes_required, self_check_convergence_enabled, prev_self_check_issues (conditional) | issues (structured list with description, severity, location), status, self_check_pass_index, self_check_passes_required |
-| `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, fix_needed, fix_instructions, fix_context |
+| `self_check` | LLM 代码审查：逻辑完整性、代码健壮性、功能遗漏、测试未覆盖区域（不检查 spec 合规性） | 是 | TWO_PHASE | **是** | test_results, changes_made, spec_content, task_groups, fix_iteration, self_check_pass_index, self_check_passes_required, self_check_convergence_enabled, prev_self_check_issues (conditional) | issues (structured list with description, severity, location), status, self_check_pass_index, self_check_passes_required, actionable_count |
+| `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, in_scope_count, out_of_scope_count, fix_needed, fix_instructions, fix_context |
 | `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | 否 | changes_made, verification_result, spec_changes, design_doc, selected_items | updated_specs, new_capabilities, spec_decisions, notes |
 | `version_analyze` | 分析变更确定 suggested_version（权威）+ 生成 commit message | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result, current_version, custom_rules (se3/version-rules.md if present) | **suggested_version**（权威）, bump_type, confidence, reasoning, commit_message |
-| `commit` | 提交变更 | 否（程序执行） | - | 否 | changes_made, bump_type | commit_hash |
+| `commit` | 提交变更 | 否（程序执行） | - | 否 | changes_made, bump_type, commit_message, proposal, updated_specs | commit_hash |
 | `summarize` | 生成总结和 handoff | 是 | 文本 | **是** | all_previous_outputs | summary (Markdown 文本) |
 | ~~`project_summary`~~ | ~~生成项目上下文摘要~~ (deprecated — merged into analyze) | 是 | 文本 | **是** | 项目状态 | 摘要字符串 |
 
@@ -400,6 +400,123 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 - **NOTE** task_groups is intentionally the ONLY plan artifact injected into self_check — `proposal` is redundant with `design`, full `design` is withheld to preserve the verify_spec / self_check responsibility boundary, and neither is added
 - **NOTE** `SELF_CHECK_TASK_GROUPS_MAX_CHARS` lives in `se3/engine/truncation.py` alongside the other shared self_check truncation constants
 
+### Requirement: CONFIRM Step (Dynamically Inserted Review Gate)
+
+The step pool SHALL include a `CONFIRM` step type that does not appear in any default task-type step sequence and is instead inserted dynamically after configured step types, acting as a review gate that can approve the reviewed step (flow continues) or request revision (flow goes back to the reviewed step).
+
+**Step pool attributes:**
+
+| Step | uses_llm | Read-Only | Inputs | Outputs |
+|------|----------|-----------|--------|---------|
+| `confirm` | conditional (LLM reviewer only) | **No** | step_to_review_id, step_to_review_type, reviewer, agents (LLM mode only), max_iterations, task_description, _llm_review_iteration | review_result {approved, feedback, step_to_review_id, step_to_review_type, reviewer?}, revision_feedback, call_file (human mode) |
+
+The CONFIRM step's `read_only` attribute is `False` — the step itself produces no source-file edits, but it is deliberately not marked read-only because (a) on the revision path it triggers re-execution of a non-read-only step and (b) the human reviewer path writes call-file artifacts to `se3/calls/`.
+
+**Configuration-driven insertion:**
+
+CONFIRM steps are inserted via `insert_confirmation_steps(steps, project_root)` (in `se3/config.py`), invoked by `StateMachine._insert_confirmation_steps()` immediately after the default step sequence for a task type is selected. A CONFIRM step is appended after each step type `S` if and only if:
+
+1. `S` appears in the selected step sequence, AND
+2. `S` is a key in the merged `confirmation.steps` dict (global `~/.se3/config.yaml` + project `se3.yaml`).
+
+There is no global on/off switch — opting a step out of confirmation simply means omitting it from `confirmation.steps`. Each `confirmation.steps.<step>` entry has the schema:
+
+```yaml
+confirmation:
+  steps:
+    plan:
+      reviewer: human          # 'human', null (use llm_caller.defaults), or an agent name
+      max_iterations: 3        # LLM-reviewer iteration cap; ignored on human path
+```
+
+**Reviewer modes:**
+
+The `reviewer` field, resolved by `resolve_confirm_inputs(project_root, reviewed_type)` and injected into `step.inputs["reviewer"]` by `state_machine._build_step_inputs`, dispatches to one of two paths:
+
+1. **Human reviewer** (`reviewer == "human"`):
+   - `confirm_handler` writes a JSON call file to `se3/calls/confirm_{step_id}_{timestamp}.json` containing the step being reviewed, the change/flow id, and the call type.
+   - Returns `StepStatus.PAUSED` so the run loop can prompt the user interactively or via an out-of-band response file.
+   - On resume, the handler scans `se3/calls/` for the matching call file and reads its sibling `.response` file (`{stem}.response` JSON with `approved` and `feedback` fields). If the response is present, the handler returns `COMPLETED` (approved) or `REVISION_NEEDED` (changes requested) without re-creating the call file. `max_iterations` is not consulted on this path.
+
+2. **LLM reviewer** (`reviewer != "human"` — either an explicit agent name or `null` to fall back to `llm_caller.defaults`):
+   - `confirm_handler._llm_review()` builds a review prompt via `build_llm_review_prompt(reviewed_type, step_output, task_description, revision_feedback, project_root)` and dispatches it through `LLMCaller` with `step_type="confirm_llm_review"` and `json_mode="two_phase"`.
+   - The LLM response is parsed via `parse_json_response(response, required_keys=["approved"])`; the handler reads `approved` (bool) and `feedback` (string).
+   - The handler maintains `step.inputs["_llm_review_iteration"]` and auto-approves with feedback `Auto-approved: max review iterations (N) reached.` when the iteration counter reaches `max_iterations` (default `3`), preventing infinite review loops.
+   - If the LLM call itself raises, the handler auto-approves with feedback prefixed `Auto-approved due to LLM call failure:` rather than blocking the flow. Malformed JSON responses are treated as `approved == False` with a parse-failure feedback message.
+   - The synchronous path never returns `PAUSED` and never writes a call file.
+
+**State machine routing:**
+
+`StateMachine.transition_to_next()` inspects `current_step.outputs["review_result"]` after a CONFIRM step completes:
+
+- `approved == True`: normal forward progression to the next step in the selected sequence.
+- `approved == False`: the state machine calls `_transition_to_revision(flow, confirm_step, step_to_review_id)`, which re-executes the originally reviewed step with the prior output and revision feedback available to it.
+
+**Defensive fallback:**
+
+If a CONFIRM step is present in the sequence but `resolve_confirm_inputs` returns `None` for the reviewed step type (indicating YAML drift between when `insert_confirmation_steps` ran and when `_build_step_inputs` runs — e.g., the user edited `se3.yaml` mid-flow), the state machine logs a warning and defaults to `reviewer = "human"` with `max_iterations = None`, so the user can manually unblock the flow.
+
+#### Scenario: CONFIRM step inserted only when configured
+- **GIVEN** `confirmation.steps` contains an entry for `plan` but not for `implement`
+- **WHEN** the state machine builds the step sequence for a `feature` task
+- **THEN** a CONFIRM step is appended immediately after `plan` in the sequence
+- **AND** no CONFIRM step is appended after `implement`
+
+#### Scenario: CONFIRM step absent from defaults when nothing is configured
+- **GIVEN** `se3.yaml` has no `confirmation.steps` section (or it is empty)
+- **WHEN** the state machine builds the step sequence
+- **THEN** no CONFIRM step is inserted anywhere in the sequence
+- **AND** the sequence matches the default task-type sequences defined under "16 步流程池"
+
+#### Scenario: Human reviewer pauses awaiting response
+- **WHEN** `confirm_handler` runs with `step.inputs["reviewer"] == "human"` and no prior response file exists
+- **THEN** a JSON call file is written to `se3/calls/confirm_{step_id}_{timestamp}.json`
+- **AND** the call-file path is stored in `step.outputs["call_file"]`
+- **AND** the handler returns `StepStatus.PAUSED`
+
+#### Scenario: Human reviewer resume reads sibling response file
+- **GIVEN** a CONFIRM step previously returned `PAUSED` and wrote `se3/calls/confirm_{step_id}_{ts}.json`
+- **AND** a sibling `se3/calls/confirm_{step_id}_{ts}.response` file exists with `{"approved": true, "feedback": "..."}`
+- **WHEN** the flow resumes and re-runs `confirm_handler` for the same step
+- **THEN** the handler reads the response file, populates `step.outputs["review_result"]` with `approved`, `feedback`, `step_to_review_id`, and `step_to_review_type`
+- **AND** returns `StepStatus.COMPLETED` (or `REVISION_NEEDED` when `approved == false`)
+
+#### Scenario: LLM reviewer approval
+- **WHEN** `confirm_handler` runs with `step.inputs["reviewer"] != "human"` (an agent name or `None`)
+- **AND** the LLM responds with parseable JSON `{"approved": true, "feedback": "..."}`
+- **THEN** the handler returns `StepStatus.COMPLETED`
+- **AND** `step.outputs["review_result"]` includes `reviewer: "llm"`, `approved: true`, and the LLM's feedback
+- **AND** no call file is created
+
+#### Scenario: LLM reviewer revision request
+- **WHEN** the LLM responds with `{"approved": false, "feedback": "..."}`
+- **THEN** the handler returns `StepStatus.REVISION_NEEDED`
+- **AND** the state machine's `transition_to_next()` invokes `_transition_to_revision()` to re-execute the originally reviewed step
+
+#### Scenario: LLM reviewer max iterations auto-approval
+- **GIVEN** `confirmation.steps.<step>.max_iterations` is configured to N (default 3)
+- **WHEN** `step.inputs["_llm_review_iteration"]` has reached N before the LLM call
+- **THEN** the handler skips the LLM call, returns `StepStatus.COMPLETED`, and stores feedback `Auto-approved: max review iterations (N) reached.`
+
+#### Scenario: LLM reviewer call failure does not block flow
+- **WHEN** the LLM call inside `_llm_review` raises any exception
+- **THEN** the handler returns `StepStatus.COMPLETED` with `approved: true` and feedback prefixed `Auto-approved due to LLM call failure:`
+- **AND** the flow continues forward rather than stalling on a broken reviewer
+
+#### Scenario: Revision routes back to the reviewed step
+- **GIVEN** a CONFIRM step completes with `approved == false` and `review_result.step_to_review_id == X`
+- **WHEN** `transition_to_next()` runs
+- **THEN** `_transition_to_revision(flow, confirm_step, X)` is invoked
+- **AND** the step identified by X is re-executed with revision feedback available
+- **AND** the state machine does NOT advance to the step that would normally follow CONFIRM in the selected sequence
+
+#### Scenario: Defensive fallback when CONFIRM config is missing at build-input time
+- **GIVEN** the sequence contains a CONFIRM step (because `confirmation.steps.<reviewed_type>` existed when `insert_confirmation_steps` ran)
+- **AND** `resolve_confirm_inputs(project_root, reviewed_type)` now returns `None` (e.g., `se3.yaml` was edited mid-flow)
+- **WHEN** `_build_step_inputs` constructs inputs for the CONFIRM step
+- **THEN** `step.inputs["reviewer"]` is set to `"human"` and `step.inputs["max_iterations"]` is `None`
+- **AND** a warning is logged identifying the reviewed step type
+
 ### Requirement: Deprecated Step Type Backward Compatibility
 
 The step type enum SHALL retain deprecated values with stub handlers that forward to the appropriate current handler. This ensures persisted flows created before step unification/merges can resume without crashing.
@@ -447,19 +564,19 @@ The step type enum SHALL retain deprecated values with stub handlers that forwar
 4. 解析响应（支持 JSON 和文本）
 5. 存储输出到步骤状态
 
-**Large Prompt Auto-Filing:**
+**Large Prompt Routing via stdin:**
 
-The CLI adapter (`ClaudeCodeRunner._resolve_args()`) SHALL automatically file prompt arguments to temporary files when their UTF-8 byte length exceeds 100 KB (102,400 bytes), preventing `execve()` `E2BIG` errors caused by Linux's `MAX_ARG_STRLEN` limit (128 KB).
+The CLI adapter (`ClaudeCodeRunner._resolve_args()`) SHALL automatically reroute oversized prompt arguments through the spawned Claude subprocess's standard input when their UTF-8 byte length exceeds 100 KB (102,400 bytes), preventing `execve()` `E2BIG` errors caused by Linux's `MAX_ARG_STRLEN` limit (128 KB). No temporary file is written.
 
 - **Threshold:** 100 KB (102,400 bytes). This leaves ~28 KB safety margin below the 128 KB `MAX_ARG_STRLEN` hard limit, covering multi-byte UTF-8 encoding and environment variable space.
-- **Mechanism:** When `-p`/`--prompt` is followed by a plain-text argument (not an `@file` reference) whose `len(prompt_arg.encode('utf-8'))` exceeds the threshold, the prompt content is written to a temp file in `se3/tmp/` (using `NamedTemporaryFile` with `.prompt` suffix, `delete=False`), and the command-line argument is replaced with `@{temp_file_path}`.
-- **Below threshold:** The prompt argument is passed directly on the command line (existing behavior).
+- **Mechanism:** When `-p`/`--prompt` is followed by a plain-text argument (not an `@file` reference) whose `len(prompt_arg.encode('utf-8'))` exceeds the threshold, `_resolve_args()` keeps the `-p`/`--prompt` flag in argv but drops its value, and returns the dropped value as a separate `stdin_prompt` string alongside the resolved argv. The execution paths (`run()`, `popen()`, `run_with_monitor()`) feed `stdin_prompt` to the Claude subprocess via stdin so Claude treats it as the user message.
+- **Why not a temp file:** An earlier `-p @tmpfile` design caused Claude Code to read the file via its Read tool (subject to that tool's 25k-token ceiling) rather than treating the contents as the user message. Routing through stdin delivers the full prompt as the user message regardless of size.
+- **Below threshold:** The prompt argument is passed directly on the command line (existing behavior); `stdin_prompt` is `None`.
+- **`@file` passthrough:** Arguments starting with `@` and explicit `-p @file` forms are left unchanged — that is Claude CLI's documented file-reference syntax and callers using it have asked for that semantic.
+- **Multiple oversized prompts:** Multiple oversized `-p` values in a single invocation is not a supported pattern; the last value wins and a `warnings.warn` is emitted.
 - **Scope:** `_resolve_args()` is called by all three execution paths (`run()`, `popen()`, `run_with_monitor()`), so the protection applies universally.
-- **Temp file cleanup:**
-  - `run()` and `run_with_monitor()`: temp files are tracked and cleaned up in `finally` blocks.
-  - `popen()`: temp files are attached to the process as `proc._se3_temp_files` for caller cleanup; on `Popen` failure, temp files are cleaned up immediately.
-  - On write failure during temp file creation, the orphan file is deleted before re-raising.
-- **Chat history preservation:** `_record_prompt()` in `LLMCaller` executes before `_resolve_args()`, so chat history always records the original prompt text, not the `@file` reference.
+- **stdin writer threading:** When the subprocess is spawned with a `stdin_prompt`, `_spawn_stdin_writer()` writes the payload to `proc.stdin` in a daemon thread, flushes, and closes the stream so Claude observes EOF and proceeds. Performing the write from a background thread prevents deadlock when the prompt exceeds the OS pipe buffer (typically 64 KB) and the child is waiting for EOF before draining stdin. Write failures (`BrokenPipeError`, `OSError`) are swallowed in the writer; they surface as a subprocess error via stdout/returncode.
+- **Chat history preservation:** `_record_prompt()` in `LLMCaller` executes before `_resolve_args()`, so chat history always records the original prompt text.
 
 #### Scenario: 自动注入上下文
 - **WHEN** 流程引擎进入某个步骤
@@ -471,20 +588,27 @@ The CLI adapter (`ClaudeCodeRunner._resolve_args()`) SHALL automatically file pr
 - **THEN** 流程引擎执行重试策略（最多 3 次）
 - **AND** 如果重试仍失败，暂停流程并通知用户
 
-#### Scenario: Large prompt auto-filed to temp file
+#### Scenario: Large prompt rerouted to subprocess stdin
 - **WHEN** a `-p`/`--prompt` argument's UTF-8 byte length exceeds 100 KB (102,400 bytes)
-- **THEN** `_resolve_args()` writes the prompt to a temp file in `se3/tmp/` with `.prompt` suffix
-- **AND** replaces the command-line argument with `@{temp_file_path}`
-- **AND** the temp file is cleaned up after execution completes
+- **THEN** `_resolve_args()` keeps the `-p`/`--prompt` flag in argv but drops its value, and returns the dropped value as a separate `stdin_prompt` string
+- **AND** the execution path feeds `stdin_prompt` to the spawned Claude subprocess via stdin (no temp file is written)
+- **AND** for `popen()` callers, `_spawn_stdin_writer()` writes the payload from a daemon thread, flushes, and closes `proc.stdin` so Claude observes EOF
 
-#### Scenario: Prompt below auto-filing threshold
+#### Scenario: Prompt below stdin-routing threshold
 - **WHEN** a `-p`/`--prompt` argument's UTF-8 byte length is at or below 100 KB
-- **THEN** the prompt is passed directly as a command-line argument (no file creation)
+- **THEN** the prompt is passed directly as a command-line argument
+- **AND** `stdin_prompt` is `None` and the subprocess's stdin is not used for the prompt
 
-#### Scenario: Auto-filing temp file write failure
-- **WHEN** writing the prompt to a temp file fails (e.g., disk full)
-- **THEN** the orphan temp file is deleted before the exception propagates
-- **AND** no stale temp files are left behind
+#### Scenario: Multiple oversized -p values in one invocation
+- **WHEN** a single argv contains more than one oversized `-p`/`--prompt` value
+- **THEN** the last oversized value is the one routed to stdin (last-wins)
+- **AND** `_resolve_args()` emits a `UserWarning` via `warnings.warn(..., stacklevel=2)` indicating that multiple oversized prompts in a single invocation are not supported and only the last is routed to stdin
+- **AND** no exception is raised — execution continues with last-wins semantics so callers passing exactly one oversized prompt are unaffected
+
+#### Scenario: Explicit @file reference is passed through unchanged
+- **WHEN** an argument starts with `@`, or `-p`/`--prompt` is followed by an `@file` reference
+- **THEN** `_resolve_args()` leaves the argument untouched regardless of size
+- **AND** no stdin rerouting is performed for that argument
 
 ### Requirement: Read-Only Step Constraint Injection
 
@@ -603,18 +727,46 @@ Returns the injection prompt fragment, or an empty string when the step is not i
 
 ### Requirement: JSON 提取模式
 
-流程引擎 SHALL 支持三种 JSON 提取模式，根据步骤特性选择最优策略：
+流程引擎 SHALL 支持四种 JSON 提取模式，根据步骤特性选择最优策略：
 
 | 模式 | 描述 | 适用场景 |
 |------|------|----------|
 | **STRICT** | 强制 JSON 格式，失败重试 | 简单输出（analyze） |
 | **EXTRACT** | 要求 JSON 格式，失败时用 LLM 提取 | 中等复杂度（verify_spec, update_spec） |
 | **TWO_PHASE** | 自然生成 + LLM 提取 | 复杂/大输出（plan, implement） |
+| **OFF** | 无 JSON 约束，原样返回 LLM 文本 | 自由文本输出（summarize） |
 
 **模式选择原则：**
 - 简单输出（<1K tokens）：STRICT（成本低，可靠性高）
 - 中等复杂度（1K-5K tokens）：EXTRACT（平衡可靠性和 token 效率）
 - 大输出（>5K tokens）：TWO_PHASE（避免提示词污染，处理截断）
+- 自由文本（Markdown / 散文）：OFF（无 JSON 约束，直接返回原始文本）
+
+**模式解析（`get_json_mode` / `_resolve_json_mode`）：**
+
+`LLMCaller.call()` 与模块级 `get_json_mode()` 按以下优先级解析最终模式：
+
+1. 显式 `json_mode` 参数（字符串 `"strict" | "extract" | "two_phase" | "off"`，大小写不敏感；或对应的 `JsonMode` 枚举值）
+2. `two_phase_json=True` → `TWO_PHASE`
+3. `require_json=True` → `STRICT`
+4. 默认 → `OFF`
+
+当 `json_mode` 字符串无法识别为上述四值之一时，记录一条 warning 日志并回退到 `OFF`，不抛出异常。
+
+#### Scenario: OFF 模式返回原始文本
+- **WHEN** 步骤（如 `summarize`）以 `JsonMode.OFF` 调用 LLM
+- **THEN** prompt 不被 JSON 约束包装
+- **AND** LLM 输出原样返回，不经过 JSON 解析或提取
+- **AND** 适用于生成 Markdown 总结或其他自由文本
+
+#### Scenario: 默认模式为 OFF
+- **WHEN** 调用方未提供 `json_mode`、`require_json`、`two_phase_json` 中的任何一个
+- **THEN** `get_json_mode()` 返回 `JsonMode.OFF`
+
+#### Scenario: 未知 json_mode 字符串回退到 OFF
+- **WHEN** 调用方传入无法识别的 `json_mode` 字符串
+- **THEN** 记录 warning 日志（`Unknown json_mode '<value>', defaulting to 'off'`）
+- **AND** 最终解析为 `JsonMode.OFF`，不抛出异常
 
 #### Scenario: STRICT 模式
 - **WHEN** analyze 步骤需要简单的任务分类
@@ -885,7 +1037,7 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 
 **Post-Dedup Whole-Prompt Safety Cap:**
 
-- After `deduplicate_prompt_lines()` runs, `LLMCaller._call_with_retry()` applies a single whole-prompt length check against `POST_DEDUP_SAFETY_LIMIT` (default 500,000 characters; env-overridable for testing and operational tuning)
+- After `deduplicate_prompt_lines()` runs, `LLMCaller._call_with_retry()` applies a single whole-prompt length check against `POST_DEDUP_SAFETY_LIMIT` (default 500,000 characters; env-overridable via the `SE3_POST_DEDUP_SAFETY_LIMIT` environment variable for testing and operational tuning — values that fail to parse as a positive integer fall back to the default)
 - The cap operates on the deduped `effective_prompt` as a whole, NOT on each history entry individually — this ensures repeated spec content is collapsed by dedup before the cap decides whether truncation is necessary
 - When the deduped prompt exceeds the cap, the cap locates the retry-history region using shared marker/separator constants (defined in a neutral module `se3/engine/retry_context.py` and consumed by both `chat_history.py` and `llm_caller.py`) via a trailing `rfind` of the separator (robust to retry-of-retry replays where multiple history regions may appear), and truncates the **head of the history region** while preserving the **new prompt tail** in full — the semantically most important portion for the model's current task
 - Kept body is rounded to line boundaries to avoid mid-line cuts
@@ -969,7 +1121,7 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - `verify_spec` 接收 `changes_made`、`spec_content`（从 analyze）、`test_results`、`fix_iteration`、`spec_changes`（从 plan 步骤传递，用于区分有意变更与回归）和 `relevant_specs`（从 analyze）
 - `update_spec` 接收 `changes_made`、`verification_result`、`spec_changes`（从 plan 步骤传递，作为变更指引清单）、`design_doc`（从 plan.design 映射，提供架构上下文）、`selected_items`（从 analyze，用于定位相关 spec）；默认以 `full_spec` 模式加载所有 spec 全文，支持命名查重和跨 spec 一致性检查
 - `version_analyze` 接收 `updated_specs`、`changes_made`、`verification_result`、`task_type`、`task_description`、`current_version`（磁盘版本号）、`pre_session_version`（从 implement 透传，作为 LLM 计算 `suggested_version` 的真实基线；缺失时回退到 `current_version`）、`session_commits`（从 implement 透传，列出本 session 在主分支上已经引入的 commit；可能包含被 implement 阶段误写入的版本文件改动，prompt 中要求 LLM 将其视为未发生）
-- `commit` 接收 `changes_made`、`commit_message`（from version_analyze）、`bump_type`（from version_analyze）
+- `commit` 接收 `changes_made`、`commit_message`（from version_analyze）、`bump_type`（from version_analyze）、`proposal`（from plan，供 commit message fallback chain 使用）、`updated_specs`（from update_spec，便于在 commit 时将 spec 变更与代码变更一起提交）
 - `summarize` 接收所有前序输出（when included in step sequence）
 
 #### Scenario: 步骤输入自动构建
@@ -1108,7 +1260,10 @@ The commit step prepends the `task_type` prefix (e.g., `feature:`, `bugfix:`) to
 **版本更新流程：**
 1. 检测项目类型（Python/Node.js）并定位版本文件（pyproject.toml/package.json）
 2. 从 `version_analyze` 步骤读取 **`suggested_version`**（权威字段）
-3. 若 `version_analyze` 失败或未输出 `suggested_version`，commit step 报错并中断流程（携带 current_version 与人工介入提示），不再进行默认 bump 兜底
+3. 若 `version_analyze` 失败或未输出 `suggested_version`，commit step 报错并中断流程（携带 current_version 与人工介入提示），不再进行默认 bump 兜底。这两个失败模式分别抛出独立的 `RuntimeError`，错误信息有所区分以辅助诊断：
+   - `version_analyze` 步骤的最终状态为 `FAILED`：错误信息以 `"version_analyze step failed; cannot determine target version"` 开头，表明上游步骤本身失败（例如 LLM 调用或解析失败），即便存在残留 outputs 也不被信任为权威 `suggested_version`
+   - `version_analyze` 步骤未失败但未产出有效 `suggested_version`（缺失、非字符串、或空字符串）：错误信息以 `"version_analyze did not produce a suggested_version"` 开头，表明步骤名义上完成但未承担版本权威字段的契约
+   - 两条错误均携带 `current_version`（来自 `version_analyze.outputs.current_version`，回退到 `step.inputs.current_version`，再回退到 `"<unknown>"`）以及统一的人工介入指引：重跑 `version_analyze` 或在 `se3/calls/` 下创建 human call 手动提供版本号
 4. 将 `suggested_version` 原样写入版本文件（原子写入 + 备份用于回滚）
 5. 自动更新 README.md 和 VERSIONS.md（如配置了模板）
 6. 将版本文件和文档变更一起提交
@@ -1160,12 +1315,19 @@ version:
 - **AND** 报告错误信息
 
 #### Scenario: suggested_version 缺失时 commit 报错中断
-- **GIVEN** `version_analyze` 步骤已完成但输出中没有 `suggested_version`
-  （或步骤状态为 FAILED）
+- **GIVEN** `version_analyze` 步骤状态非 FAILED，但输出中没有 `suggested_version`（缺失、非字符串、或空字符串）
 - **WHEN** commit 步骤被触发
-- **THEN** commit 步骤抛出 runtime error，错误信息包含当前版本与人工介入指引
+- **THEN** commit 步骤抛出 `RuntimeError`，错误信息以 `"version_analyze did not produce a suggested_version"` 开头，并包含当前版本与人工介入指引
 - **AND** 不进行任何 patch bump 静默兜底
 - **AND** 流程中断，等待用户重新运行 `version_analyze`、修订 `se3/version-rules.md` 或通过已有的人工介入机制提供版本号
+
+#### Scenario: version_analyze 步骤 FAILED 时 commit 抛出独立错误
+- **GIVEN** 最近一次 `version_analyze` 步骤的最终状态为 `FAILED`（例如 LLM 调用失败或解析失败）
+- **WHEN** commit 步骤被触发
+- **THEN** commit 步骤抛出 `RuntimeError`，错误信息以 `"version_analyze step failed; cannot determine target version"` 开头（与「未产出 suggested_version」场景的错误信息明确区分）
+- **AND** 即便 FAILED 步骤的 outputs 中残留有 `suggested_version` 字段，commit 步骤也不会将其作为权威值采用
+- **AND** 错误信息包含当前版本（`current_version`，回退链为 `version_analyze.outputs.current_version` → `step.inputs.current_version` → `"<unknown>"`）与统一的人工介入指引
+- **AND** 流程中断，等待用户重新运行 `version_analyze` 或通过 `se3/calls/` 下的 human call 手动提供版本号
 
 ### Requirement: 错误处理和重试
 
@@ -1410,7 +1572,7 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - **THEN** the sequential strategy line omits the `reason:` suffix, preserving the original display
 
 **Transitive Reduction:**
-- Before DAG parallel execution, the implement step performs transitive reduction on group `depends_on` edges.
+- Before DAG parallel execution, the implement step performs transitive reduction on group `depends_on` edges by calling the `transitive_reduce(groups)` function defined in `se3/engine/transitive_reduction.py`.
 - An edge u→v is redundant if there is a longer path from u to v through intermediate nodes (standard graph theory algorithm using BFS).
 - Example: G2 depends on [G1], G3 depends on [G1, G2] → after reduction: G3 depends on [G2] only (G1 is reachable through G2).
 - This reduces unnecessary pre-merge operations and wait times.
@@ -1451,8 +1613,11 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 **Leaf-Only Merge with LLM Conflict Resolution:**
 - Only leaf nodes (groups with no downstream dependents) merge back to the original branch.
 - Merge conflicts are resolved by LLM with full context including: task descriptions, per-group summaries and files_changed, conflicting file content with conflict markers, and spec content.
-- The LLM resolver retries up to 3 times on failure.
-- There is no fallback to `--theirs` or `pending_human` — the LLM must resolve all conflicts.
+- The LLM resolver retries up to a bounded number of attempts on failure.
+- When the LLM resolver is exhausted, the leaf-merge path SHALL fall back to a deterministic `_take_theirs_fallback`: for every still-conflicting file, run `git checkout --theirs -- <file>` (i.e., accept the leaf branch's version verbatim) and `git add <file>`, then complete the merge commit with `git commit --no-edit`. Rationale: the leaf branch encapsulates the DAG implement output — the commits that MUST be preserved; `ours` (the pre-merge target) is typically upstream content the user already accepted overriding by running implement.
+- Whenever the take-theirs fallback fires, an audit issue SHALL be filed via `IssueManager.create()` recording the flow_id, branch, and list of conflict files that were resolved deterministically (priority `medium`, type `task`, tags `["merge-fallback", "audit"]`). Audit-issue write failures are logged but never block the merge.
+- If the take-theirs fallback's commit itself fails (e.g., from a misconfigured git state), the leaf merge aborts: the merge index is cleaned up and the caller is signaled to fail. There is no `pending_human` escalation on this path.
+- **Scope:** this take-theirs fallback applies ONLY to the DAG leaf-merge inside the `implement` step. The `se3 merge` command path has separate, strictly stricter rules (see *`se3 merge` Conflict Resolution Mechanism*) — every `se3 merge` strategy resolves via LLM-as-editor or escalates to a human MCP call, and SHALL NEVER take-theirs. The two paths are intentionally distinct contracts.
 
 #### Scenario: Leaf merge succeeds
 - **GIVEN** a leaf group completed its work
@@ -1464,9 +1629,29 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - **GIVEN** a leaf group's merge produces conflicts
 - **WHEN** the merge conflict handler runs
 - **THEN** the LLM receives full context (task descriptions, group summaries, conflict markers, specs)
-- **AND** the LLM resolves all conflicting files
-- **AND** the resolver retries up to 3 times if needed
-- **AND** there is no fallback to `--theirs` or `pending_human`
+- **AND** the LLM resolves all conflicting files within the bounded retry budget
+- **AND** if all conflicts are resolved, the merge completes normally
+
+#### Scenario: Leaf merge LLM exhaustion falls back to take-theirs
+- **GIVEN** a leaf group's merge produces conflicts
+- **AND** the LLM conflict resolver exhausts its retry budget without resolving every file
+- **WHEN** the leaf-merge handler runs the deterministic fallback
+- **THEN** for every still-conflicting file, `git checkout --theirs -- <file>` is invoked and the file is staged
+- **AND** the merge is completed with `git commit --no-edit`
+- **AND** an audit issue is filed via `IssueManager.create()` (priority `medium`, tags `["merge-fallback", "audit"]`) listing the flow_id, branch, and conflict files
+- **AND** the merge is reported as successful to the caller
+
+#### Scenario: Take-theirs fallback commit failure aborts the merge
+- **GIVEN** the take-theirs fallback was triggered after LLM exhaustion
+- **WHEN** the final `git commit --no-edit` fails
+- **THEN** the merge index is cleaned up and the leaf merge is reported as failed
+- **AND** no `pending_human` escalation is created on this path
+
+#### Scenario: Take-theirs scope does not extend to `se3 merge`
+- **GIVEN** any `se3 merge` invocation
+- **WHEN** conflicts arise in that command's resolution loop
+- **THEN** the DAG leaf-merge take-theirs fallback is NOT invoked
+- **AND** `se3 merge` follows its own strategy contract (LLM-as-editor or human MCP escalation per `fast` / `safe` / `strict`), never silently accepting either side
 
 **DAG Branch Cleanup:**
 - After all leaf merges complete, the DAG parallel strategy cleans up implementation branches.
@@ -1500,7 +1685,7 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - After a worktree finishes, `_salvage_history_from_worktree` copies history files back to the main repo before the worktree is removed.
   - Only files whose names match `_G\d+\.jsonl$` (i.e. group-specific history generated by this worktree) are salvaged; all other files are skipped.
   - This prevents shared prior-step history files (discovery, analyze, plan, confirm, etc.) from being appended to the main repo N times — once per worktree — which would cause them to display duplicated content in `se3 history show`.
-- If the target file already exists in the main repo (relay chain scenario where multiple `GroupResult` objects share the same worktree), the salvaged file's content is appended (NDJSON is line-based, safe to concatenate).
+- **Append-on-existence policy:** When salvaging a group-history file, if the target path already exists in the main repo, the salvaged file's content SHALL be appended to the existing file (line-based NDJSON concatenation) rather than overwritten. This policy is unconditional — it applies in every case where the target file already exists, including but not limited to the relay-chain scenario where multiple `GroupResult` objects share the same worktree, and also resume/retry paths where a prior partial salvage may have already written content for the same group. NDJSON is line-delimited, so concatenation preserves a valid stream and the merged file is replay-safe.
 - The salvage function deduplicates worktree paths so that a single worktree is only salvaged once even when shared by multiple groups.
 
 #### Scenario: Salvage only copies group-specific history files
@@ -1522,6 +1707,14 @@ The `implement` step SHALL use an intelligent execution strategy that adapts bas
 - **AND** both G1 and G2 produce `GroupResult` objects referencing the same worktree_path
 - **WHEN** history salvage runs after all groups complete
 - **THEN** the shared worktree is only salvaged once (deduplication by worktree_path)
+
+#### Scenario: Salvage appends when the target group-history file already exists
+- **GIVEN** the main repo already contains a group-history file at `se3/history/{flow_id}/{step_id}_G{n}.jsonl` (e.g. from a prior partial salvage, a resumed DAG run, or an earlier worktree that contributed to the same group's history)
+- **AND** a worktree being salvaged carries its own copy of that same target path under its `se3/history/{flow_id}/` directory
+- **WHEN** `_salvage_history_from_worktree` copies the file back to the main repo
+- **THEN** the worktree's file content is appended to the existing main-repo file (NDJSON line-based concatenation)
+- **AND** the existing file content is preserved — no overwrite occurs
+- **AND** the resulting merged file remains a valid NDJSON stream readable by `chat_history` consumers
 
 ### Requirement: `se3 merge` Conflict Resolution Mechanism
 
@@ -1884,7 +2077,7 @@ The `self_check` step renderer SHALL display review status and issues grouped by
 1. **Issues by severity** — issues grouped by severity level (critical, high, medium, low). Each issue shows its description and location.
 
 **Output keys consumed by the renderer:**
-- `status`, `issues`
+- `status`, `issues`, `actionable_count`
 
 ##### Scenario: Self check step failed rendering
 - **WHEN** the self_check step has `step.status == FAILED` (e.g., LLM call failed before producing outputs)
@@ -2085,11 +2278,32 @@ When the state machine records a fix loop iteration in `fix_history`, each entry
 **Fix history formatting for implement prompts:**
 - `_format_fix_history()` renders each iteration using the structured `issues` list (showing up to 5 issues with severity, description, and location) rather than a truncated text summary.
 - The `issues` list is already capped at 10 entries per iteration (via `_cap_issue_list`), keeping the prompt bounded regardless of LLM verbosity.
-- Backward compatibility: old fix_history entries carrying `fix_instructions_summary` are still supported as a fallback.
+- Backward compatibility — legacy `fix_instructions_summary` read path: old fix_history entries persisted before the structured-issues migration may carry a `fix_instructions_summary` string instead of an `issues` list. `_format_fix_history()` SHALL treat this field as an optional fallback: when an iteration entry has no `issues` list (or the list is empty) but does carry a non-empty `fix_instructions_summary`, the formatter renders that summary text in place of the issues block so the legacy entry remains usable in the implement prompt. This read path exists solely to keep pre-migration flows renderable; new entries written by the state machine SHALL NOT include `fix_instructions_summary`, and downstream tooling SHOULD NOT rely on its presence.
 
 **Source-aware storage policy:**
 - Fix instructions from test.py (raw test output: "Tests are failing..." + failures + stderr) are NOT stored in fix_history — the `reason` field ("test_failure") records the trigger, and current test output is always available in the next iteration.
 - Fix instructions from verify_spec (LLM-generated analysis and repair guidance) are preserved via the structured `issues` list, which captures the LLM's diagnostic intent for avoiding repeated fix directions.
+
+**Sliding-window cap (`FIX_HISTORY_MAX_ENTRIES`):**
+
+The `State.fix_history` list SHALL be capped at `FIX_HISTORY_MAX_ENTRIES` (defined in `se3/engine/models.py`, default `100`) by a tail-keep policy: when an append via `State.increment_fix_iteration()` causes the list to exceed the cap, the oldest entries are dropped so only the most recent `FIX_HISTORY_MAX_ENTRIES` entries are retained. The same tail-keep policy is applied at deserialization time (`State.from_dict`) so `engine.json` files written by older builds without the cap are clamped on load.
+
+**Rationale:** the cap bounds memory, on-disk `engine.json` size, and per-transition deepcopy cost in unlimited mode (`workflow.max_fix_iterations = 0`). The default value is held at the same numeric floor as `DEFAULT_MAX_FIX_ITERATIONS` so a flow running with the default fix-loop bound never silently drops history entries — trimming can only happen when the user explicitly raises `workflow.max_fix_iterations` above the cap (e.g. 200) or runs in unlimited mode for more than `FIX_HISTORY_MAX_ENTRIES` iterations.
+
+**Downstream impact on prompts:**
+- verify_spec and self_check fix-context renderers already tail-truncate to 20 entries, so their LLM prompt context is unaffected by the cap once iteration count exceeds 20.
+- `implement._format_fix_history` iterates the full persisted list; for iterations beyond `FIX_HISTORY_MAX_ENTRIES`, early-iteration entries are dropped from the implement-step prompt. A fix loop running past this point on the same task is considered a stuck loop where ancient history adds noise rather than signal.
+
+#### Scenario: fix_history capped at FIX_HISTORY_MAX_ENTRIES on append
+- **GIVEN** `State.fix_history` already contains `FIX_HISTORY_MAX_ENTRIES` entries
+- **WHEN** `State.increment_fix_iteration()` appends another entry
+- **THEN** the list is trimmed back to `FIX_HISTORY_MAX_ENTRIES` entries by dropping the oldest
+- **AND** the most recently appended entry is retained as the last element
+
+#### Scenario: fix_history capped on deserialization
+- **GIVEN** an `engine.json` written by an older build whose persisted `fix_history` exceeds `FIX_HISTORY_MAX_ENTRIES`
+- **WHEN** `State.from_dict()` loads the file
+- **THEN** the loaded `fix_history` is clamped to the most recent `FIX_HISTORY_MAX_ENTRIES` entries via the same tail-keep policy
 
 #### Scenario: Fix history stores structured issues
 - **WHEN** the state machine records a fix loop entry from verify_spec
@@ -2099,6 +2313,14 @@ When the state machine records a fix loop iteration in `fix_history`, each entry
 #### Scenario: Fix history prev_issues cap aligned at 20
 - **WHEN** the state machine builds inputs for the verify_spec step during a fix iteration
 - **THEN** `prev_issues` is capped at 20 entries, matching the verify_spec prompt's display limit
+
+#### Scenario: prev_issues render-time tail cap in fix-context block
+- **GIVEN** the shared `render_fix_context()` helper (`se3/engine/steps/_fix_context.py`), consumed by both `verify_spec` and `self_check` to render the `{fix_context}` slot of their LLM prompts
+- **WHEN** the `prev_issues` list passed in contains more than `PREV_ISSUES_RENDER_TAIL` (default 20) entries
+- **THEN** only the first `PREV_ISSUES_RENDER_TAIL` issues are rendered into the `## Previously Reported Issues` section of the prompt
+- **AND** a trailing line of the form `- ... and N more issues (truncated)` is appended, where N is `len(prev_issues) - PREV_ISSUES_RENDER_TAIL`
+- **AND** this render-time cap is independent of the state-machine input-plumbing cap (also 20): both defaults are deliberately set to the same value so the two layers stay aligned, while the render-time cap acts as the last line of defense if any upstream caller bypasses the input-plumbing cap
+- **AND** `PREV_ISSUES_RENDER_TAIL` is exposed at module level in `_fix_context.py` so tests and other consumers can reference it by name rather than relying on positional substring matches
 
 #### Scenario: test 通过后进行代码自检
 - **WHEN** test 步骤执行完成且 `overall_passed` 为 true
@@ -2227,6 +2449,80 @@ implement 步骤的 FIX_PROMPT SHALL 识别 `fix_context` 中的超时元数据�
 - **AND** 新 spec 首行包含 `<!-- spec-format: v1 -->`
 - **AND** `spec_decisions` 输出记录该决策及 reasoning
 
+### Requirement: Workflow Config Tolerant Parsing
+
+The `WorkflowConfig.from_dict()` parser in `se3/config.py` SHALL apply tolerant parsing to the `workflow.*` fields it accepts from `se3.yaml`, distinguishing between recoverable type-coercion cases (warn and fall back to default) and invariant violations (fail-fast via `ConfigError`). This ensures malformed YAML produces actionable diagnostics without crashing flow startup for benign type mismatches.
+
+**Parsing policy by field:**
+
+| Field | Default | Tolerant Cases (warn + fallback) | Fail-Fast Cases (`ConfigError`) |
+|-------|---------|----------------------------------|---------------------------------|
+| `max_fix_iterations` | `DEFAULT_MAX_FIX_ITERATIONS` (100) | `bool`, `float` (incl. `0.0` — explicit warning that the unlimited sentinel must be literal `int 0` or `null`/`None`, not `0.0`), arbitrary strings or other types not coercible via `int()` | Negative integers (`< 0`) — rejects typos that would otherwise silently disable exhaustion. Only literal `0` or `null` opts into unlimited mode (with `null` normalized to `0`). |
+| `self_check_passes_required` | `DEFAULT_SELF_CHECK_PASSES_REQUIRED` (1) | `bool`, `float`, arbitrary strings or other types not coercible via `int()` | `< 1` after coercion — preserves the documented invariant that at least one pass is required. |
+| `self_check_convergence_enabled` | `DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED` (`false`) | Coerced via `_coerce_bool()`. If `raw_convergence is not None and not isinstance(raw_convergence, (bool, int, float))`: when the value is a string whose stripped/lowercased form is NOT in `{"true", "1", "yes", "on", "false", "0", "no", "off"}`, a warning is emitted; for any other non-(bool/int/float/str) type, a warning is also emitted. Valid string forms (e.g. `"true"`, `"YES"`, `" off "`) coerce silently. | — (no fail-fast cases; always falls back to default on invalid input) |
+
+**Warning format:**
+
+Warnings SHALL include the offending raw value (via `repr()`), the field name, and the fallback default value, so users can locate the malformed entry in their YAML. Example: `workflow.self_check_convergence_enabled='maybe' is not a valid boolean; falling back to default False`.
+
+**Loading entry points:**
+
+- `WorkflowConfig.from_dict(data)` — pure parser, accepts a dict (typically the contents of `se3.yaml`).
+- `WorkflowConfig.load(project_root)` — reads the project YAML via `load_project_yaml` and delegates to `from_dict`; returns defaults when the YAML is missing or empty.
+- `load_workflow_config(project_root=None)` — module-level convenience wrapper defaulting `project_root` to `Path.cwd()`.
+
+#### Scenario: Unlimited sentinel via null
+- **GIVEN** `se3.yaml` contains `workflow.max_fix_iterations: null`
+- **WHEN** `WorkflowConfig.from_dict()` parses it
+- **THEN** `max_fix_iterations` is set to `0` (unlimited)
+- **AND** no warning is emitted
+
+#### Scenario: Float 0.0 is rejected with explicit guidance
+- **GIVEN** `se3.yaml` contains `workflow.max_fix_iterations: 0.0`
+- **WHEN** `WorkflowConfig.from_dict()` parses it
+- **THEN** a warning is emitted explaining that the unlimited sentinel must be the literal int `0` or `null`/`None`, not `0.0`
+- **AND** `max_fix_iterations` falls back to `DEFAULT_MAX_FIX_ITERATIONS`
+
+#### Scenario: Negative max_fix_iterations fails fast
+- **GIVEN** `se3.yaml` contains `workflow.max_fix_iterations: -1`
+- **WHEN** `WorkflowConfig.from_dict()` parses it
+- **THEN** a `ConfigError` is raised explaining that the value must be `>= 0`
+- **AND** the error message guides the user to `0` or `null` for unlimited mode
+
+#### Scenario: self_check_passes_required less than 1 fails fast
+- **GIVEN** `se3.yaml` contains `workflow.self_check_passes_required: 0`
+- **WHEN** `WorkflowConfig.from_dict()` parses it
+- **THEN** a `ConfigError` is raised explaining the value must be `>= 1`
+
+#### Scenario: self_check_passes_required non-integer falls back
+- **GIVEN** `se3.yaml` contains `workflow.self_check_passes_required: "two"` (or a bool/float)
+- **WHEN** `WorkflowConfig.from_dict()` parses it
+- **THEN** a warning is emitted naming the offending value and the fallback default
+- **AND** `self_check_passes_required` is set to `DEFAULT_SELF_CHECK_PASSES_REQUIRED`
+
+#### Scenario: self_check_convergence_enabled string coercion succeeds silently
+- **GIVEN** `se3.yaml` contains `workflow.self_check_convergence_enabled: "true"` (or `"YES"`, `" off "`, etc. — any form in the recognized truthy/falsy set after strip/lowercase)
+- **WHEN** `WorkflowConfig.from_dict()` parses it
+- **THEN** the value is coerced via `_coerce_bool()` without warning
+- **AND** `self_check_convergence_enabled` reflects the coerced boolean
+
+#### Scenario: self_check_convergence_enabled unrecognized string warns and falls back
+- **GIVEN** `se3.yaml` contains `workflow.self_check_convergence_enabled: "maybe"`
+- **WHEN** `WorkflowConfig.from_dict()` parses it
+- **THEN** a warning is emitted naming the offending value and the fallback default
+- **AND** `self_check_convergence_enabled` is set to `DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED` (`false`)
+
+#### Scenario: self_check_convergence_enabled non-scalar warns and falls back
+- **GIVEN** `se3.yaml` contains `workflow.self_check_convergence_enabled` set to a list, dict, or other non-(bool/int/float/str/None) value
+- **WHEN** `WorkflowConfig.from_dict()` parses it
+- **THEN** a warning is emitted naming the offending value and the fallback default
+- **AND** `self_check_convergence_enabled` is set to `DEFAULT_SELF_CHECK_CONVERGENCE_ENABLED`
+
+#### Scenario: Missing or empty workflow section uses defaults
+- **GIVEN** `se3.yaml` has no `workflow:` section, or `workflow:` is not a dict
+- **WHEN** `WorkflowConfig.from_dict()` (or `load()`) is invoked
+- **THEN** a default `WorkflowConfig` is returned with no warnings
+
 ## Architecture
 
 ### 核心组件
@@ -2249,8 +2545,8 @@ implement 步骤的 FIX_PROMPT SHALL 识别 `fix_context` 中的超时元数据�
         ▼                   ▼                   ▼
 ┌──────────────┐    ┌──────────────┐    ┌──────────────┐
 │ Step Handler │    │ Persistence  │    │ LLM Caller   │
-│  (13 steps)  │    │(engine.json) │    │(claude -p)   │
-│  +discovery  │    │              │    │              │
+│  (16 steps)  │    │(engine.json) │    │(claude -p)   │
+│              │    │              │    │              │
 └──────────────┘    └──────────────┘    └──────┬───────┘
                                                │
                                         ┌──────▼───────┐
@@ -2270,7 +2566,7 @@ implement 步骤的 FIX_PROMPT SHALL 识别 `fix_context` 中的超时元数据�
 
 **Step:**
 - step_id: 唯一标识
-- step_type: 步骤类型（13 种之一，包括 discovery 和 self_check）
+- step_type: 步骤类型（16 种之一，包括 discovery、self_check、confirm 与 4 个 deprecated 步骤）
 - status: 步骤状态 (PENDING, RUNNING, COMPLETED, FAILED, RETRYING, PAUSED)
 - inputs: 输入字典
 - outputs: 输出字典（所有值必须是 JSON 可序列化的原始类型；枚举值存入前须转换为字符串 `.value`）

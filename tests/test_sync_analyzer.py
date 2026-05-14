@@ -175,12 +175,16 @@ class TestParseAnalysisResponse:
 
 
 class TestParseInvalidJson:
-    def test_invalid_json_returns_conflict_diff(self, tmp_path):
+    def test_invalid_json_returns_no_diffs_with_format_reason(self, tmp_path):
+        # G4: malformed JSON no longer fabricates a CONFLICT diff. The
+        # analysis is marked as failed with `llm_output_format_error` and
+        # the diffs list stays empty so it does not poison convergence.
         analyzer = SyncAnalyzer(tmp_path, MagicMock())
         result = analyzer._parse_analysis_response("spec", "not valid json {{{")
-        assert len(result.diffs) == 1
-        assert result.diffs[0].diff_type == DiffType.CONFLICT
-        assert "JSON parse error" in result.diffs[0].description
+        assert result.diffs == []
+        assert result.failed_analysis_reason == "llm_output_format_error"
+        assert result.analysis_failed is True
+        assert result.is_in_sync is True
 
     def test_invalid_json_preserves_spec_name(self, tmp_path):
         analyzer = SyncAnalyzer(tmp_path, MagicMock())
@@ -190,8 +194,8 @@ class TestParseInvalidJson:
     def test_truncated_json(self, tmp_path):
         analyzer = SyncAnalyzer(tmp_path, MagicMock())
         result = analyzer._parse_analysis_response("spec", '{"diffs": [{"type": "gap"')
-        assert len(result.diffs) == 1
-        assert result.diffs[0].diff_type == DiffType.CONFLICT
+        assert result.diffs == []
+        assert result.failed_analysis_reason == "llm_output_format_error"
 
 
 # ---------------------------------------------------------------------------
@@ -269,16 +273,18 @@ class TestAnalyzeSpec:
         assert result.diffs[0].diff_type == DiffType.GAP
 
     def test_all_retries_exhausted_returns_error(self, tmp_path):
+        # G4: exhausted retries no longer fabricate a CONFLICT. The
+        # spec is marked failed with the `infrastructure_failure` reason
+        # so the sync loop does not interpret it as real drift.
         caller = MagicMock()
         caller.call.side_effect = LLMCallError("persistent failure")
         analyzer = SyncAnalyzer(tmp_path, caller)
         result = analyzer.analyze_spec("broken", "s", "c")
 
         assert caller.call.call_count == 3
-        assert len(result.diffs) == 1
-        assert result.diffs[0].diff_type == DiffType.CONFLICT
-        assert "3 attempts" in result.diffs[0].description
-        assert "persistent failure" in result.diffs[0].description
+        assert result.diffs == []
+        assert result.failed_analysis_reason == "infrastructure_failure"
+        assert result.analysis_failed is True
 
     def test_error_analysis_has_correct_spec_name(self, tmp_path):
         caller = MagicMock()
@@ -287,7 +293,7 @@ class TestAnalyzeSpec:
         result = analyzer.analyze_spec("my-spec", "s", "c")
 
         assert result.spec_name == "my-spec"
-        assert result.diffs[0].spec_name == "my-spec"
+        assert result.failed_analysis_reason == "infrastructure_failure"
 
     def test_prompt_includes_spec_content_and_context(self, tmp_path):
         caller = MagicMock()

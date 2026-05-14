@@ -153,3 +153,60 @@ Requirements MAY reference other Requirements using explicit literal references.
 - **WHEN** the loader selects item A with max_hops=1
 - **THEN** the output includes A and B
 - **AND** the output does NOT include C
+
+### Requirement: Structural Validation Contract
+
+The spec-format package SHALL expose a `validate_spec_structure(content: str, spec_name: str) -> ValidationResult` function that decides whether a candidate `spec.md` body conforms to format v1 well enough to be safely written to disk and consumed by the rest of the system. The function is the single source of truth shared by `sync_discovery` (rejecting LLM-generated meta summaries when creating new specs), `sync_engine` (verifying disk content after a sub-agent edit or full rewrite), and the `se3 sync --validate-only` CLI audit.
+
+**Result contract:**
+
+1. The function SHALL return a structured `ValidationResult` (a dataclass-like record) carrying a boolean `passed` flag and an `errors` list of human-readable strings naming each failed check.
+2. The function MUST be a pure function over `(content, spec_name)` — no filesystem reads, no network, no LLM, no global state — so it is cheap to call from any layer and deterministic across processes.
+3. The function MUST stay at the stdlib layer (no third-party dependencies) so importing it is free for the discovery, engine, and CLI layers.
+
+**Structural checks (all five MUST be enforced; failing any one causes `passed=False` with that check's error appended):**
+
+1. **v1 marker** — the first non-whitespace line MUST be exactly `<!-- spec-format: v1 -->`. A spec missing this marker fails the structural contract even though the lenient-mode parser still accepts it for read-only purposes; write-back paths MUST refuse to persist such content.
+2. **Specification title** — after the v1 marker, the body MUST contain a top-level heading of the form `# <spec_name> Specification`. The `<spec_name>` token MUST match the directory name (case-sensitive, kebab-case) so a file written into `se3/specs/foo/spec.md` carries `# foo Specification`.
+3. **Purpose section** — the body MUST contain a `## Purpose` second-level heading. The check is a heading-level match, not a content check; an empty Purpose body still fails downstream callers' own heuristics but does not fail this validator.
+4. **At least one Requirement** — the body MUST contain at least one `### Requirement: <name>` heading. A spec with shared sections only and zero Requirements is rejected because it cannot contribute any item to the loader.
+5. **Non-narrative first line** — the first non-comment, non-whitespace line after the v1 marker MUST NOT begin with a narrative-prose prefix. Rejected prefixes (case-insensitive) include `I `, `I'`, `Created`, `Here`, `Let me`, `The spec`, and common Chinese equivalents (e.g., `我`, `这个`, `下面`). This catches sub-agent meta-summary outputs such as `"I have enough context from the source code and usage sites to write the spec. Let me produce it now."` that would otherwise pass the previous "length ≥ 50 chars" heuristic.
+
+**Caller obligations:**
+
+- `sync_discovery` SHALL call this function before writing a newly generated spec to disk. On failure the file is NOT created and the error list is surfaced to the round report.
+- `sync_engine` SHALL call this function after every sub-agent invocation that may have changed a spec — both the Way A (in-place `Edit`) and Way B (full-rewrite markdown) paths. On failure the engine SHALL restore the file via `git checkout HEAD -- <spec-path>` (Way A) or refuse the write (Way B) and SHALL NOT refresh the in-memory cache from invalid content.
+- `se3 sync --validate-only` SHALL run this function against every `se3/specs/**/spec.md` and report each failure with the specific error strings, exiting `1` if any spec fails and `0` otherwise.
+
+#### Scenario: Valid spec passes structural validation
+- **GIVEN** a spec body whose first non-whitespace line is `<!-- spec-format: v1 -->`, followed by `# my-feature Specification`, `## Purpose`, and at least one `### Requirement: ...` heading, with no narrative prefix on the first content line
+- **WHEN** `validate_spec_structure(content, "my-feature")` is called
+- **THEN** the returned result has `passed=True` and `errors == []`
+
+#### Scenario: Missing v1 marker fails
+- **GIVEN** a spec body that does not begin with `<!-- spec-format: v1 -->`
+- **WHEN** `validate_spec_structure(content, name)` is called
+- **THEN** `passed=False` and `errors` contains an entry naming the missing v1 marker
+
+#### Scenario: Sub-agent meta summary is rejected as a narrative first line
+- **GIVEN** a candidate body whose first non-comment line is `"I have enough context from the source code and usage sites to write the spec. Let me produce it now."`
+- **WHEN** the validator runs
+- **THEN** `passed=False` and `errors` includes a narrative-first-line entry
+- **AND** the caller (e.g., `sync_discovery`) does NOT write the file to disk
+
+#### Scenario: Spec with zero Requirements fails
+- **GIVEN** a body with a valid v1 marker, Specification title, and Purpose section, but no `### Requirement:` heading
+- **WHEN** the validator runs
+- **THEN** `passed=False` and `errors` includes a missing-Requirement entry
+
+#### Scenario: Spec name mismatch in Specification title fails
+- **GIVEN** the file is being written into `se3/specs/foo/spec.md` (so `spec_name == "foo"`)
+- **AND** the body's top-level heading reads `# bar Specification`
+- **WHEN** `validate_spec_structure(content, "foo")` is called
+- **THEN** `passed=False` and `errors` names the title/name mismatch
+
+#### Scenario: --validate-only CLI surfaces every failure
+- **GIVEN** the user runs `se3 sync --validate-only` against a project that contains one spec missing its v1 marker and one spec whose first line is a narrative prefix
+- **WHEN** the command executes
+- **THEN** both specs are listed in the failure report with their specific errors
+- **AND** the command exits with status `1`

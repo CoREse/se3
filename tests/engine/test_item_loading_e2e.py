@@ -127,7 +127,7 @@ class TestSpecLoaderItemsMode:
         # The selected requirement should be present
         assert "Requirement: 状态机驱动流程" in result.text
         # Other flow-engine requirements should NOT be present
-        assert "Requirement: 13 步流程池" not in result.text
+        assert "Requirement: 16 步流程池" not in result.text
         assert "Requirement: 统一入口" not in result.text
 
     def test_items_mode_includes_spec_header(self):
@@ -184,7 +184,7 @@ class TestSpecLoaderFullSpecMode:
         # Full spec mode should include ALL requirements from flow-engine
         assert "Requirement: 统一入口" in result.text
         assert "Requirement: 状态机驱动流程" in result.text
-        assert "Requirement: 13 步流程池" in result.text
+        assert "Requirement: 16 步流程池" in result.text
 
     def test_full_spec_mode_includes_base(self):
         result = load_for_step(
@@ -245,7 +245,7 @@ class TestStateMachineSelectedItemsPassthrough:
         # full_spec mode should re-render spec_content from the actual spec files
         assert "spec_content" in inputs
         # The full spec text should be longer than the analyze item-filtered version
-        assert "Requirement: 13 步流程池" in inputs["spec_content"]
+        assert "Requirement: 16 步流程池" in inputs["spec_content"]
 
     @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
     def test_plan_gets_items_mode(self, _cfg, sm):

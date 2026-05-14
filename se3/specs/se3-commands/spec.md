@@ -219,6 +219,8 @@ se3 sync --max-rounds 10              # Hard cap on number of rounds (default 10
 se3 sync --stable-rounds 1            # Consecutive zero-change rounds required to declare convergence (default 1)
 se3 sync --interactive                # Pause for human approval on high-impact deletions
 se3 sync --show-diff                  # Print the full spec diff at end of run
+se3 sync --validate-only              # Only validate on-disk specs against the spec-format v1 structural contract; never call the LLM
+se3 sync --resume                     # Resume a previously interrupted sync run from se3/state/sync_checkpoint.json
 ```
 
 **Option summary:**
@@ -229,6 +231,8 @@ se3 sync --show-diff                  # Print the full spec diff at end of run
 | `--stable-rounds N` | 1 | Number of consecutive zero-change rounds required to declare convergence. Raise to 2+ for higher confidence. |
 | `--interactive` | off | When set, sync pauses and writes a `sync_high_impact_deletion` call file before deleting an entire `### Requirement:` block. Other updates are still applied automatically. |
 | `--show-diff` | off | Print the full aggregated spec diff after the final round. |
+| `--validate-only` | off | Skip every LLM call. Walk `se3/specs/**/spec.md` and run the spec-format v1 structural validator on each file. Exit `0` when every spec passes, `1` when any spec fails. Mutually exclusive with `--resume`. |
+| `--resume` | off | Read `se3/state/sync_checkpoint.json`, skip specs whose content hash still matches the checkpoint's `in_sync_specs` entry, and continue from the saved `round_index`. Mutually exclusive with `--validate-only`. |
 
 **Drift classification (used for log readability only):** Each round's analyzer still classifies drift as *gap* (spec describes something not in code → delete that spec section), *extension* (code does something the spec omits → add a section), or *conflict* (spec describes the behavior differently from the code → modify the section). All three classes resolve to the same kind of action: update the spec. The classification is preserved in round reports so humans can scan what changed.
 
@@ -303,6 +307,96 @@ se3 sync --show-diff                  # Print the full spec diff at end of run
 - **WHEN** any drift is found, including deletions of entire requirement blocks
 - **THEN** the engine applies all updates automatically without writing any call file
 - **AND** the loop relies on oscillation detection and `--max-rounds` to bound risk
+
+#### Scenario: Sub-agent prompt offers two write paths (Way A and Way B)
+- **GIVEN** the sync engine prepares a spec-update prompt for a sub-agent invocation
+- **WHEN** the prompt is rendered
+- **THEN** it presents two paths the sub-agent MAY choose between, without disabling any tools:
+  - **Way A** — use the `Edit` tool to modify `se3/specs/<name>/spec.md` in place; the reply only needs to describe the change
+  - **Way B** — output the complete new content of `spec.md` as a single markdown code block; the framework writes it to disk
+- **AND** in both cases the prompt declares the final `spec.md` MUST start with `<!-- spec-format: v1 -->`, then `# <spec-name> Specification`, contain a `## Purpose` section, and contain at least one `### Requirement:` section
+
+#### Scenario: Way A — sub-agent edits the spec file directly
+- **GIVEN** the engine snapshots the target spec's `(mtime, sha256)` before invoking the sub-agent
+- **WHEN** the sub-agent uses `Edit` to modify `se3/specs/<name>/spec.md` and the on-disk file's hash changes after the call
+- **THEN** the engine re-reads the file from disk
+- **AND** runs `validate_spec_structure(content, spec_name)` from the spec-format structural contract
+- **AND** when validation passes, refreshes the in-memory `_specs[name]["content"]` to match disk and counts the spec as updated
+- **AND** when validation fails, restores the file via `git checkout HEAD -- <spec-path>` and surfaces a structured error so the round records a rollback rather than a successful update
+
+#### Scenario: Way B — sub-agent returns full rewrite as markdown
+- **GIVEN** the on-disk spec hash is unchanged after the sub-agent call
+- **AND** the sub-agent's stdout contains a complete spec.md body
+- **WHEN** the engine parses the response
+- **THEN** the full-rewrite write path is taken (markdown code fences are stripped first)
+- **AND** the written content is validated with `validate_spec_structure(...)`
+- **AND** the in-memory cache is refreshed only after validation passes
+- **AND** a content length safety guard observes when the rewrite is < 50% of the prior length but downgrades the observation to a warning rather than rejecting the update, so legitimate condensations are not blocked
+
+#### Scenario: Way B — neither disk change nor inline spec content
+- **GIVEN** the on-disk spec hash is unchanged after the sub-agent call
+- **AND** the sub-agent's stdout does NOT contain a complete spec.md body
+- **WHEN** the engine evaluates the response
+- **THEN** the spec is left unchanged on disk
+- **AND** the round records an error for that spec and continues with the remaining specs
+- **AND** no in-memory cache refresh occurs
+
+#### Scenario: LLM output format error does not fabricate a CONFLICT diff
+- **GIVEN** the analyzer receives a non-empty response whose JSON payload cannot be parsed
+- **WHEN** the analyzer processes the response
+- **THEN** the spec's `SpecAnalysis` is recorded with `failed_analysis_reason = "llm_output_format_error"` and an empty diff list
+- **AND** the analyzer does NOT synthesize a `CONFLICT` diff to represent the failure
+- **AND** the round's stability calculation treats this spec as a non-blocking failed analysis rather than as an open drift
+
+#### Scenario: Infrastructure failure is distinguished from format error
+- **GIVEN** the analyzer receives an empty, truncated, or otherwise unusable response (network/quota/empty body)
+- **WHEN** the analyzer processes the response
+- **THEN** `failed_analysis_reason = "infrastructure_failure"` is recorded for that spec
+- **AND** the spec is reported under a "partial success" section in the final report, separate from genuinely in-sync specs
+- **AND** the spec is retried on the next round
+
+#### Scenario: Round stability tolerates failed analyses
+- **GIVEN** a round produces zero spec updates
+- **WHEN** every spec in the round is either `is_in_sync = True` or carries a non-null `failed_analysis_reason`
+- **THEN** the round is treated as stable for convergence purposes
+- **AND** the final report enumerates the failed-analysis specs separately so the operator can act on them without the loop spinning forever
+
+#### Scenario: Newly created spec must pass structural validation
+- **GIVEN** sync discovery invokes the LLM to generate a brand-new `se3/specs/<name>/spec.md`
+- **WHEN** the LLM returns content
+- **THEN** the discovery layer calls `validate_spec_structure(content, name)` instead of the legacy "length ≥ 50 chars" heuristic
+- **AND** rejects responses that are sub-agent meta summaries (no v1 marker, no `# <name> Specification` heading, no `## Purpose`, no `### Requirement:`, or a narrative-prose first line such as "I have enough context...")
+- **AND** the file is not created when validation fails
+
+#### Scenario: Quota exhaustion triggers interactive pause and checkpoint
+- **GIVEN** the loop layer counts consecutive infrastructure failures across LLM calls
+- **WHEN** a single call returns a quota-exhaustion signal (e.g., `402 Insufficient Balance` or `InfraErrorType.USAGE_LIMIT`) OR the consecutive infrastructure-failure count crosses the configured threshold (default `3`, configurable as `sync.infrastructure_failure_threshold`)
+- **THEN** the loop writes a checkpoint to `se3/state/sync_checkpoint.json` containing `checkpoint_version=1`, `started_at`, `round_index`, `max_rounds`, the SHA-256 of each currently in-sync spec under `in_sync_specs`, the `failed_analyses` map, and `reason` set to `quota_exhausted` or `manual_interrupt`
+- **AND** prints a status summary (completed specs, current round, in-sync spec names, checkpoint path)
+- **AND** blocks waiting for a user keypress: pressing `Enter` resumes the same in-process run; pressing `Ctrl-C` exits cleanly with a message telling the user to re-run `se3 sync --resume`
+
+#### Scenario: --resume continues from checkpoint and rehashes in-sync specs
+- **GIVEN** a checkpoint exists at `se3/state/sync_checkpoint.json`
+- **WHEN** the user runs `se3 sync --resume`
+- **THEN** the loop loads the checkpoint
+- **AND** for every entry in `in_sync_specs` re-computes the on-disk spec's SHA-256
+- **AND** specs whose hash still matches the checkpoint value are skipped from analysis (they remain considered in-sync)
+- **AND** specs whose hash differs are re-analyzed in the resumed round
+- **AND** the loop continues from `round_index` with the remaining round budget = `max_rounds - round_index`
+- **AND** on successful convergence (or on any normal completion path) the checkpoint file is deleted
+
+#### Scenario: --validate-only audits on-disk specs without invoking the LLM
+- **GIVEN** the user runs `se3 sync --validate-only`
+- **WHEN** the command executes
+- **THEN** every file under `se3/specs/**/spec.md` is read and passed through `validate_spec_structure(content, spec_name)`
+- **AND** failing specs are listed with the specific validation errors (missing v1 marker, missing title, missing Purpose, missing Requirement, narrative first line, etc.)
+- **AND** the exit code is `0` when all specs pass and `1` when at least one spec fails
+- **AND** no sub-agent or LLM call is made under this option
+
+#### Scenario: --validate-only and --resume are mutually exclusive
+- **GIVEN** the user supplies both `--validate-only` and `--resume`
+- **WHEN** the command parses options
+- **THEN** the command exits with a usage error stating the two options cannot be combined
 
 ### Requirement: `se3 sync-respond` Command
 

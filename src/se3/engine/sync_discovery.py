@@ -222,8 +222,25 @@ class SpecDiscovery:
             from .sync_engine import strip_markdown_fences
             spec_content = strip_markdown_fences(spec_content)
 
-            if not spec_content or len(spec_content) < 50:
-                logger.warning("LLM returned insufficient content for spec '%s'", name)
+            from .spec_validator import V1_MARKER, validate_spec_structure
+
+            # Auto-prepend the v1 marker if the LLM forgot it. The
+            # validator below still enforces every other structural
+            # rule, so an LLM that returned a meta summary instead of a
+            # spec body will be rejected even after the marker is
+            # added.
+            if spec_content and not spec_content.lstrip().startswith(V1_MARKER):
+                spec_content = f"{V1_MARKER}\n{spec_content}"
+
+            validation = validate_spec_structure(spec_content, name)
+            if not validation.passed:
+                logger.warning(
+                    "Generated spec '%s' failed structural validation; "
+                    "discarding LLM output.",
+                    name,
+                )
+                for err in validation.errors:
+                    logger.warning("  spec '%s' validation error: %s", name, err)
                 return None
 
             spec_dir = self.project_root / "se3" / "specs" / name

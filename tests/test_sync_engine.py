@@ -54,6 +54,28 @@ def _create_spec(tmp_path, name, content=None):
     return spec_dir
 
 
+def _v1_spec(name: str, extra: str = "") -> str:
+    """Build a spec.md body that passes ``validate_spec_structure``.
+
+    The body includes the v1 marker, a properly named title, a
+    non-empty Purpose section, and one Requirement block — long enough
+    to clear the 50% length safety guard.
+    """
+    base = (
+        f"<!-- spec-format: v1 -->\n"
+        f"# {name} Specification\n\n"
+        f"## Purpose\n\n"
+        "Test spec body that is long enough to clear the 50% safety guard "
+        "for unit tests exercising the sync engine LLM update path. "
+        * 4
+        + "\n\n### Requirement: Sample\n\n"
+        "- The system SHALL behave correctly under unit-test fixtures.\n"
+    )
+    if extra:
+        return base + "\n" + extra
+    return base
+
+
 def _make_flow_ctx(tmp_path):
     return SyncFlowContext(tmp_path)
 
@@ -129,18 +151,17 @@ class TestHashSpecContent:
 
 class TestApplySpecDriftExtension:
     def test_extension_appends_via_llm(self, tmp_path):
-        original = (
-            "# Spec\n\n## Purpose\n"
-            "Original spec body content that is long enough to clear the length guard. "
-            * 4
-        )
+        original = _v1_spec("auth")
         _create_spec(tmp_path, "auth", original)
 
         engine = SyncEngine(tmp_path)
         engine._load_specs()
 
         llm = MagicMock()
-        llm.call.return_value = original + "\n\n## New Section\nExtended content added."
+        llm.call.return_value = (
+            original
+            + "\n\n### Requirement: Helper\n\n- The system SHALL provide the new helper.\n"
+        )
 
         diff = SpecDiff(DiffType.EXTENSION, "auth", "Helper function added", "src/u.py:1")
         applied, label = engine._apply_spec_drift_update(diff, llm)
@@ -148,24 +169,24 @@ class TestApplySpecDriftExtension:
         assert applied is True
         assert "added" in label
         actual = (tmp_path / "se3" / "specs" / "auth" / "spec.md").read_text()
-        assert "New Section" in actual
+        assert "Helper" in actual
 
 
 class TestApplySpecDriftGap:
     def test_gap_rewrites_to_remove_requirement(self, tmp_path):
-        original = (
-            "# Spec\n\n## Purpose\nIntro long enough to clear length guard. " * 4
-            + "\n\n### Requirement: Keep me\n\n- Stay\n\n"
-            "### Requirement: Delete me\n\n- Gone\n"
+        extra = (
+            "### Requirement: Keep me\n\n- The system SHALL keep me.\n\n"
+            "### Requirement: Delete me\n\n- The system SHALL delete me.\n"
         )
+        original = _v1_spec("auth", extra=extra)
         _create_spec(tmp_path, "auth", original)
 
         engine = SyncEngine(tmp_path)
         engine._load_specs()
 
-        rewritten = (
-            "# Spec\n\n## Purpose\nIntro long enough to clear length guard. " * 4
-            + "\n\n### Requirement: Keep me\n\n- Stay\n"
+        rewritten = _v1_spec(
+            "auth",
+            extra="### Requirement: Keep me\n\n- The system SHALL keep me.\n",
         )
         llm = MagicMock()
         llm.call.return_value = rewritten
@@ -185,14 +206,14 @@ class TestApplySpecDriftGap:
 
 class TestApplySpecDriftConflict:
     def test_conflict_rewrites_via_llm(self, tmp_path):
-        original = "# Spec body that is long enough to clear the length safety guard. " * 4
+        original = _v1_spec("auth")
         _create_spec(tmp_path, "auth", original)
 
         engine = SyncEngine(tmp_path)
         engine._load_specs()
 
         llm = MagicMock()
-        llm.call.return_value = original.replace("body", "rewritten body")
+        llm.call.return_value = original.replace("behave", "operate")
 
         diff = SpecDiff(DiffType.CONFLICT, "auth", "Token format mismatch", "src/a.py:1")
         applied, label = engine._apply_spec_drift_update(diff, llm)
@@ -207,7 +228,9 @@ class TestApplySpecDriftConflict:
 
 class TestSpecUpdateLengthGuard:
     def test_short_response_rejected(self, tmp_path):
-        original = "# Long original spec body. " * 20
+        """A short reply that lacks a spec body must be treated as Way-C
+        (skip), since it neither edits disk nor carries a full spec."""
+        original = _v1_spec("auth")
         _create_spec(tmp_path, "auth", original)
 
         engine = SyncEngine(tmp_path)
@@ -224,7 +247,7 @@ class TestSpecUpdateLengthGuard:
         assert actual == original
 
     def test_empty_response_rejected(self, tmp_path):
-        original = "# Long original spec body. " * 20
+        original = _v1_spec("auth")
         _create_spec(tmp_path, "auth", original)
 
         engine = SyncEngine(tmp_path)
@@ -240,13 +263,13 @@ class TestSpecUpdateLengthGuard:
 
 class TestSpecUpdateFenceStripping:
     def test_fence_wrapped_response_is_stripped(self, tmp_path):
-        original = "# Long original spec body. " * 20
+        original = _v1_spec("auth")
         _create_spec(tmp_path, "auth", original)
 
         engine = SyncEngine(tmp_path)
         engine._load_specs()
 
-        replacement = "# Long updated spec body content. " * 20
+        replacement = _v1_spec("auth").replace("Sample", "Updated")
         wrapped = f"```markdown\n{replacement}\n```"
 
         llm = MagicMock()
@@ -375,14 +398,17 @@ class TestRunOnce:
         assert "base" in result.spec_hashes_after
 
     def test_extension_drift_updates_spec(self, tmp_path):
-        original = "# Spec body that is long enough to clear the 50% guard. " * 4
+        original = _v1_spec("auth")
         _create_spec(tmp_path, "auth", original)
 
         engine = SyncEngine(tmp_path)
         flow_ctx = _make_flow_ctx(tmp_path)
 
         llm = MagicMock()
-        llm.call.return_value = original + "\n\n## Extra\nNew section."
+        llm.call.return_value = (
+            original
+            + "\n\n### Requirement: Extra\n\n- The system SHALL include the new section.\n"
+        )
 
         with patch("se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec") as mock_an:
             mock_an.return_value = SpecAnalysis(
@@ -451,10 +477,9 @@ class TestRunOnce:
 
 class TestInteractiveHighImpact:
     def test_interactive_invokes_collect_decisions(self, tmp_path):
-        spec_content = (
-            "# Spec\n## Purpose\np that is long enough to clear length guard. "
-            * 4
-            + "\n\n### Requirement: Foo\n\n- a body content long enough.\n"
+        spec_content = _v1_spec(
+            "auth",
+            extra="### Requirement: Foo\n\n- The system SHALL implement Foo.\n",
         )
         _create_spec(tmp_path, "auth", spec_content)
 
@@ -462,7 +487,7 @@ class TestInteractiveHighImpact:
         flow_ctx = _make_flow_ctx(tmp_path)
         llm = MagicMock()
         llm.call.return_value = spec_content.replace(
-            "### Requirement: Foo\n\n- a body content long enough.\n",
+            "### Requirement: Foo\n\n- The system SHALL implement Foo.\n",
             "",
         )
 
@@ -501,20 +526,16 @@ class TestInteractiveHighImpact:
         )
 
     def test_non_interactive_auto_applies_high_impact(self, tmp_path):
-        spec_content = (
-            "# Spec\n## Purpose\np that is long enough to clear length guard. "
-            * 4
-            + "\n\n### Requirement: Foo\n\n- a body content long enough.\n"
+        spec_content = _v1_spec(
+            "auth",
+            extra="### Requirement: Foo\n\n- The system SHALL implement Foo.\n",
         )
         _create_spec(tmp_path, "auth", spec_content)
 
         engine = SyncEngine(tmp_path, interactive=False)
         flow_ctx = _make_flow_ctx(tmp_path)
         llm = MagicMock()
-        llm.call.return_value = (
-            "# Spec\n## Purpose\np that is long enough to clear length guard. " * 4
-            + "\n"
-        )
+        llm.call.return_value = _v1_spec("auth")
 
         with patch(
             "se3.engine.sync_analyzer.SyncAnalyzer.analyze_spec"
@@ -543,10 +564,9 @@ class TestInteractiveHighImpact:
     def test_keyboard_interrupt_during_approval_propagates(self, tmp_path):
         """Ctrl+C in interactive approval must abort the sync, not silently
         downgrade every pending deletion to ``skip`` and return normally."""
-        spec_content = (
-            "# Spec\n## Purpose\np that is long enough to clear length guard. "
-            * 4
-            + "\n\n### Requirement: Foo\n\n- a body content long enough.\n"
+        spec_content = _v1_spec(
+            "auth",
+            extra="### Requirement: Foo\n\n- The system SHALL implement Foo.\n",
         )
         _create_spec(tmp_path, "auth", spec_content)
 
@@ -632,7 +652,7 @@ class TestProcessCallResponse:
         return call_file
 
     def test_approve_applies_update(self, tmp_path):
-        original = "# Spec body content long enough to clear guard. " * 10
+        original = _v1_spec("auth")
         _create_spec(tmp_path, "auth", original)
 
         call_file = self._write_call_and_response(
@@ -648,7 +668,7 @@ class TestProcessCallResponse:
 
         engine = SyncEngine(tmp_path)
         llm = MagicMock()
-        llm.call.return_value = "# Updated spec body content. " * 10
+        llm.call.return_value = _v1_spec("auth").replace("Sample", "Updated")
         result = engine.process_call_response(call_file, llm)
 
         assert result["specs_updated"] == 1

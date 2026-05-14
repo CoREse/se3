@@ -96,7 +96,7 @@ would silently ignore the developer's main-repo override.
 
 **Configurable options:**
 - `version.enabled`: Enable automatic version bumping (default: true)
-- `version.file_path`: Path to version file (auto-detect if null)
+- `version.version_file`: Path to version file (auto-detect if null)
 - `version.auto_bump`: Auto-apply version bump without confirmation (default: true)
 - `version.script_path`: Custom version script path (default: null = use default `se3/scripts/version.py`)
 - `agents`: Top-level dict registry `{name: {type, cmd, priority?}}` (authoritative identity layer; see Agent Registry requirement)
@@ -129,7 +129,7 @@ would silently ignore the developer's main-repo override.
 - **THEN** the framework runs with built-in default values
 
 #### Scenario: Custom version configuration
-- **WHEN** se3.yaml specifies custom version settings (e.g., `version.file_path` or `version.script_path`)
+- **WHEN** se3.yaml specifies custom version settings (e.g., `version.version_file` or `version.script_path`)
 - **THEN** the framework uses those settings when bumping the version
 
 #### Scenario: Global configuration
@@ -238,7 +238,7 @@ The system SHALL support version management configuration.
 
 **Version section options:**
 - `enabled`: Whether automatic version bumping is enabled (default: true)
-- `file_path`: Path to version file (null = auto-detect)
+- `version_file`: Path to version file (null = auto-detect)
 - `auto_bump`: Apply the LLM-suggested version automatically (default: true)
 - `confidence_threshold`: Require confirmation for low confidence (default: null)
 - `script_path`: Custom version script path (null = use default `se3/scripts/version.py`)
