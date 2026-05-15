@@ -241,6 +241,10 @@ The `se3 issue` Typer app exposes sub-commands `list`, `show`, `create`, and `re
 #### Scenario: `create` interactive flow
 - **WHEN** `se3 issue create` is invoked
 - **THEN** the user is prompted (in order) for `Title`, `Description`, `Type` (default `bug`, prompt lists `KNOWN_TYPES`), `Priority` (default `medium`), and `Tags` (comma-separated, default empty)
+- **AND** in TTY mode, input uses `_read_multiline_input` (from `cli`): Description naturally accepts multiple lines, all fields submit with Ctrl+D, cancel with Ctrl+C
+- **AND** any field cancelled with Ctrl+C prints `"Cancelled."` and exits with code 1
+- **AND** in non-TTY mode (piped stdin, tests), each field reads a single line from `sys.stdin`
+- **AND** empty input for any field falls back to its default value
 - **AND** the tags string is split on commas, individual entries are stripped, and empty entries are discarded
 - **AND** the new issue is created with the provided fields and `"Created issue {id}: {title}"` is printed
 

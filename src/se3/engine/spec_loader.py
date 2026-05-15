@@ -100,13 +100,21 @@ def _assemble_items_text(
 
     Returns (text, relevant_specs, loaded_item_ids).
     """
-    # Collect selected item IDs
+    # Collect selected item IDs.
+    # Expand * wildcard: spec::* means "all items in this spec".
     selected_ids: Set[str] = set()
     for item in selected_items:
         spec = item.get("spec", "").strip()
         req = item.get("requirement_name", "").strip()
         if spec and req:
-            selected_ids.add(f"{spec}::{req}")
+            if req == _ALL_ITEMS_WILDCARD:
+                # Expand to every known item in this spec
+                prefix = f"{spec}::"
+                for key in sorted(index.items):
+                    if key.startswith(prefix):
+                        selected_ids.add(key)
+            else:
+                selected_ids.add(f"{spec}::{req}")
 
     # Resolve 1-hop refs
     extra_ids: Set[str] = set()
@@ -218,6 +226,13 @@ def _assemble_items_text(
     return full_text, relevant_specs, loaded_items
 
 
+# Wildcard requirement_name that means "all items in this spec".
+# When the LLM outputs {"spec": "base", "requirement_name": "*"}, it means
+# "no non-base items are relevant" — base is always loaded in full anyway.
+# When applied to a non-base spec, it selects every requirement in that spec.
+_ALL_ITEMS_WILDCARD = "*"
+
+
 def _assemble_full_text(
     specs_dir: Path,
     selected_items: List[Dict[str, str]],
@@ -225,6 +240,10 @@ def _assemble_full_text(
     """Assemble spec text in 'full_spec' mode.
 
     Returns (text, relevant_specs, loaded_item_ids derived from all items in involved specs).
+
+    Raises ValueError if *selected_items* is empty — by this point the
+    analyze step should have guaranteed a non-empty list (at minimum
+    ``base::*``).
     """
     if not selected_items:
         raise ValueError(
@@ -233,7 +252,9 @@ def _assemble_full_text(
             "items relevant to the task. Check ANALYZE outputs."
         )
 
-    # Determine involved specs from selected items + base
+    # Determine involved specs from selected items + base.
+    # The * wildcard works naturally here: base::* adds "base" (already in
+    # the set), other-spec::* adds that spec's full text.
     involved_specs: Set[str] = {"base"}
     for item in selected_items:
         spec = item.get("spec", "").strip()
@@ -302,6 +323,32 @@ def load_for_step(
         text, relevant_specs, loaded_items = _assemble_items_text(
             index, specs_dir, selected_items
         )
+    elif not selected_items:
+        # full_spec mode with empty selected_items.  This is a safety net:
+        # the analyze step should guarantee non-empty (at minimum base::*),
+        # but pre-existing persisted flows may have empty lists.
+        logger.warning(
+            "full_spec mode with empty selected_items for step=%s; "
+            "loading base spec only (analyze should have produced at "
+            "least base::*)",
+            step_type,
+        )
+        raw_text = _read_spec_text(specs_dir, "base")
+        if raw_text:
+            text = raw_text
+            relevant_specs = ["base"]
+            loaded_items = []
+            try:
+                parsed = parse_spec(raw_text)
+                loaded_items = sorted(
+                    f"base::{req.name}" for req in parsed.requirements
+                )
+            except Exception:
+                pass
+        else:
+            text = ""
+            relevant_specs = []
+            loaded_items = []
     else:
         # full_spec mode — no need for the index
         text, relevant_specs, loaded_items = _assemble_full_text(

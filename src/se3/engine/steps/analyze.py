@@ -50,6 +50,10 @@ ANALYZE_PROMPT = """You are an expert software engineering assistant. Analyze th
 
 5. **selected_items**: Based on the task scope and the available spec items listed below, select which individual Requirements are relevant to this task. Be selective — only include items that are genuinely relevant. The base spec is always loaded automatically, so you do NOT need to select items from it.
 
+   **Wildcard**: Use ``"*"`` as the ``requirement_name`` to select ALL items from a spec. For example, ``{{"spec": "issue-management", "requirement_name": "*"}}`` selects every requirement in the issue-management spec.
+
+   **No relevant items?** If no non-base spec items are relevant, output exactly: ``{{"spec": "base", "requirement_name": "*"}}``. This explicitly signals "no additional specs needed". Never return an empty ``selected_items`` list.
+
 ## Available Items
 {available_items}
 
@@ -60,7 +64,7 @@ Respond in JSON format:
     "complexity": "simple|medium|complex",
     "reasoning": "explanation",
     "selected_items": [
-        {{"spec": "spec-name", "requirement_name": "Requirement Name"}}
+        {{"spec": "spec-name", "requirement_name": "Requirement Name or * for all"}}
     ]
 }}
 
@@ -131,7 +135,23 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # --- LLM call: task classification + spec selection ---
         retry_count = step.inputs.get("retry_count", 0)
         caller = LLMCaller(project_root, flow_id=flow.flow_id, step_id=step.step_id, step_type=step.step_type.value, external_attempt=retry_count, fix_iteration=step.inputs.get("fix_iteration", 0))
-        response = caller.call(prompt=prompt, json_mode="two_phase")
+
+        # Schema hint is critical for TWO_PHASE mode: if Phase 1 produces
+        # markdown prose (not JSON), Phase 2 extraction needs to know the
+        # expected structure to extract selected_items correctly.
+        ANALYZE_SCHEMA_HINT = (
+            '{"task_type": "feature|bugfix|review|small|directive", '
+            '"scope": "description of affected areas", '
+            '"complexity": "simple|medium|complex", '
+            '"reasoning": "explanation", '
+            '"selected_items": [{"spec": "spec-name", "requirement_name": "Requirement Name or * for all items in spec"}]}'
+        )
+        response = caller.call(
+            prompt=prompt,
+            json_mode="two_phase",
+            json_schema_hint=ANALYZE_SCHEMA_HINT,
+            required_keys=["task_type"],
+        )
 
         # Parse JSON response
         result = parse_json_response(response, required_keys=["task_type"])
@@ -202,6 +222,17 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
                         item.get("spec"),
                     )
             selected_items = valid_items
+
+        # Guarantee non-empty selected_items (LLM is instructed to output
+        # base::* when no items are relevant).  If all items were filtered
+        # out (hallucinated spec names), insert base::* as a safe fallback.
+        if not selected_items:
+            logger.warning(
+                "selected_items is empty after filtering; falling back to base::*"
+            )
+            selected_items = [
+                {"spec": "base", "requirement_name": "*"}
+            ]
 
         # Use spec_loader to assemble spec content
         load_result = load_for_step(

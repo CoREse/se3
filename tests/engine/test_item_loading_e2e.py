@@ -263,9 +263,8 @@ class TestStateMachineSelectedItemsPassthrough:
         assert "flow-engine" in inputs["relevant_specs"]
 
     @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
-    def test_update_spec_full_spec_empty_items_propagates_value_error(self, _cfg, sm):
-        """Empty selected_items in full_spec mode must surface as a hard error,
-        not silently degrade to items-mode spec_content."""
+    def test_update_spec_full_spec_empty_items_loads_base(self, _cfg, sm):
+        """Empty selected_items is handled as backward-compat safety net."""
         flow = _make_flow(PROJECT_ROOT)
         _add_completed_step(flow, StepType.ANALYZE, {
             "task_type": "feature",
@@ -277,8 +276,28 @@ class TestStateMachineSelectedItemsPassthrough:
             "spec_content": "base only",
             "selected_items": [],
         })
-        with pytest.raises(ValueError, match="analyze"):
-            sm._build_step_inputs(flow, StepType.UPDATE_SPEC)
+        inputs = sm._build_step_inputs(flow, StepType.UPDATE_SPEC)
+        assert inputs["spec_content"] != "base only"  # full_spec re-renders
+        assert "base" in inputs["relevant_specs"]
+
+    @patch("se3.engine.state_machine.resolve_confirm_inputs", return_value=None)
+    def test_update_spec_full_spec_base_wildcard_loads_base(self, _cfg, sm):
+        """base::* explicitly signals 'no non-base items needed' — loads base only."""
+        flow = _make_flow(PROJECT_ROOT)
+        _add_completed_step(flow, StepType.ANALYZE, {
+            "task_type": "feature",
+            "scope": "engine",
+            "complexity": "medium",
+            "reasoning": "Test reasoning",
+            "project_summary": "SE3 project",
+            "relevant_specs": ["base"],
+            "spec_content": "base only",
+            "selected_items": [
+                {"spec": "base", "requirement_name": "*"},
+            ],
+        })
+        inputs = sm._build_step_inputs(flow, StepType.UPDATE_SPEC)
+        assert "base" in inputs["relevant_specs"]
 
 
 class TestAnalyzeHandlerItemLevel:

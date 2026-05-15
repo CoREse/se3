@@ -116,6 +116,99 @@ class TestCreateCommand:
         assert result.exit_code == 0
         assert "Created issue 001" in result.output
 
+    def test_create_cancelled(self, project_dir):
+        """User cancels at the first prompt (None returned from _prompt_field)."""
+        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("se3.commands.issue_cmd._prompt_field", return_value=None):
+            result = runner.invoke(app, ["create"])
+        assert result.exit_code == 1
+        assert "Cancelled" in result.output
+
+        mgr = IssueManager(project_dir)
+        assert mgr.load("001") is None
+
+    def test_create_uses_prompt_field_with_defaults(self, project_dir):
+        """create_cmd composes mgr.create() correctly from _prompt_field returns."""
+        side_effects = [
+            "Mocked Title",
+            "Mocked description with\nmultiple lines",
+            "feature",
+            "low",
+            "tag1,tag2",
+        ]
+        with patch("se3.commands.issue_cmd.get_project_root", return_value=project_dir), \
+             patch("se3.commands.issue_cmd._prompt_field", side_effect=side_effects) as mock_prompt:
+            result = runner.invoke(app, ["create"])
+
+        assert result.exit_code == 0
+        assert "Created issue 001" in result.output
+        assert mock_prompt.call_count == 5
+
+        mgr = IssueManager(project_dir)
+        issue = mgr.load("001")
+        assert issue is not None
+        assert issue.title == "Mocked Title"
+        assert "multiple lines" in issue.description
+        assert issue.type == "feature"
+        assert issue.priority == "low"
+        assert issue.tags == ["tag1", "tag2"]
+
+
+class TestPromptField:
+    """Unit tests for the _prompt_field helper itself."""
+
+    def test_tty_delegates_to_read_multiline_input(self):
+        from se3.commands import issue_cmd
+
+        with patch.object(issue_cmd.sys, "stdin") as mock_stdin, \
+             patch("se3.cli._read_multiline_input", return_value="user content") as mock_read:
+            mock_stdin.isatty.return_value = True
+            result = issue_cmd._prompt_field("Title", "Enter title:")
+        assert result == "user content"
+        mock_read.assert_called_once_with(prompt_title="Title", prompt_message="Enter title:")
+
+    def test_tty_empty_falls_back_to_default(self):
+        from se3.commands import issue_cmd
+
+        with patch.object(issue_cmd.sys, "stdin") as mock_stdin, \
+             patch("se3.cli._read_multiline_input", return_value=""):
+            mock_stdin.isatty.return_value = True
+            result = issue_cmd._prompt_field("Type", "Enter type:", default="bug")
+        assert result == "bug"
+
+    def test_tty_none_propagates_cancellation(self):
+        from se3.commands import issue_cmd
+
+        with patch.object(issue_cmd.sys, "stdin") as mock_stdin, \
+             patch("se3.cli._read_multiline_input", return_value=None):
+            mock_stdin.isatty.return_value = True
+            result = issue_cmd._prompt_field("Title", "Enter title:", default="ignored")
+        assert result is None
+
+    def test_non_tty_reads_one_line(self):
+        import io
+
+        from se3.commands import issue_cmd
+
+        fake_stdin = io.StringIO("first line\nsecond line\n")
+        fake_stdin.isatty = lambda: False  # type: ignore[method-assign]
+        with patch.object(issue_cmd.sys, "stdin", fake_stdin):
+            first = issue_cmd._prompt_field("F1", "msg")
+            second = issue_cmd._prompt_field("F2", "msg")
+        assert first == "first line"
+        assert second == "second line"
+
+    def test_non_tty_empty_falls_back_to_default(self):
+        import io
+
+        from se3.commands import issue_cmd
+
+        fake_stdin = io.StringIO("\n")
+        fake_stdin.isatty = lambda: False  # type: ignore[method-assign]
+        with patch.object(issue_cmd.sys, "stdin", fake_stdin):
+            result = issue_cmd._prompt_field("Type", "msg", default="bug")
+        assert result == "bug"
+
 
 class TestResetCommand:
     def test_reset_in_progress(self, project_dir, issue_mgr):

@@ -13,6 +13,7 @@ Usage:
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -170,19 +171,79 @@ def show_cmd(
     render_block_footer("cyan")
 
 
+def _prompt_field(title: str, message: str, default: str = "") -> Optional[str]:
+    """Prompt for a single field with TTY/non-TTY dual-mode support.
+
+    TTY mode: delegates to ``_read_multiline_input`` from ``cli`` — users
+    submit with Ctrl+D and cancel with Ctrl+C; Description naturally accepts
+    multiple lines.
+    Non-TTY mode: reads a single line from ``sys.stdin`` so that piped input
+    (e.g. ``CliRunner(input=...)`` in tests) maps one field per line without
+    consuming the rest of stdin.
+    Empty input falls back to ``default``. Returns ``None`` only when the user
+    cancels (Ctrl+C in TTY mode).
+    """
+    if sys.stdin.isatty():
+        # Delayed import to avoid circular import with cli.py
+        from ..cli import _read_multiline_input
+
+        result = _read_multiline_input(prompt_title=title, prompt_message=message)
+        if result is None:
+            return None
+        return result if result else default
+
+    line = sys.stdin.readline()
+    if not line:
+        return default
+    line = line.rstrip("\n").strip()
+    return line if line else default
+
+
 @app.command(name="create")
 def create_cmd():
     """Create a new issue interactively."""
     project_root = get_project_root()
     mgr = IssueManager(project_root)
 
-    title = typer.prompt("Title")
-    description = typer.prompt("Description")
-    issue_type = typer.prompt(
-        f"Type ({'/'.join(KNOWN_TYPES)})", default="bug"
+    title = _prompt_field("Title", "Enter title (Ctrl+D to submit, Ctrl+C to cancel):")
+    if title is None:
+        typer.echo("Cancelled.")
+        raise typer.Exit(1)
+
+    description = _prompt_field(
+        "Description",
+        "Enter description (Ctrl+D to submit, Ctrl+C to cancel):",
     )
-    priority = typer.prompt("Priority (low/medium/high/critical)", default="medium")
-    tags_input = typer.prompt("Tags (comma-separated, or empty)", default="")
+    if description is None:
+        typer.echo("Cancelled.")
+        raise typer.Exit(1)
+
+    issue_type = _prompt_field(
+        "Type",
+        f"Enter type ({'/'.join(KNOWN_TYPES)}) (Ctrl+D to submit, Ctrl+C to cancel):",
+        default="bug",
+    )
+    if issue_type is None:
+        typer.echo("Cancelled.")
+        raise typer.Exit(1)
+
+    priority = _prompt_field(
+        "Priority",
+        "Enter priority (low/medium/high/critical) (Ctrl+D to submit, Ctrl+C to cancel):",
+        default="medium",
+    )
+    if priority is None:
+        typer.echo("Cancelled.")
+        raise typer.Exit(1)
+
+    tags_input = _prompt_field(
+        "Tags",
+        "Enter tags (comma-separated, or empty) (Ctrl+D to submit, Ctrl+C to cancel):",
+        default="",
+    )
+    if tags_input is None:
+        typer.echo("Cancelled.")
+        raise typer.Exit(1)
 
     tags = [t.strip() for t in tags_input.split(",") if t.strip()] if tags_input else []
 
