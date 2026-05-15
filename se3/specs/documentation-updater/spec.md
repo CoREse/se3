@@ -149,6 +149,58 @@ falls back to one of two insertion modes.
 - **WHEN** `update_readme(version)` is invoked
 - **THEN** `FileNotFoundError` is raised
 
+### Requirement: README version header replacement
+
+When the `"readme_header"` template is registered, `_replace_version_header`
+SHALL search the README content for an existing version-style header and
+replace the first match with the rendered header template; if no
+matching header is found, the content is returned unchanged.
+
+- The method MUST be a no-op (return `content` unchanged) when no
+  `"readme_header"` template is present in the registry.
+- When the template IS present, the rendered header SHALL be computed
+  once from the caller-supplied context.
+- The method SHALL try the following header patterns, in order, using
+  multiline matching:
+  1. `^#+ .*[Vv]ersion.*$` — any markdown ATX heading (one or more
+     leading `#`) whose text contains the word `version` (case-
+     insensitive on the `V`).
+  2. `^\*\*[Vv]ersion:\*\*.*$` — a bolded `**Version:**` line.
+- The first pattern that matches SHALL be replaced exactly once
+  (`count=1`) with the rendered header; remaining patterns MUST NOT be
+  applied in the same call.
+- If NEITHER pattern matches, the method MUST return the original
+  `content` unchanged — it MUST NOT insert, prepend, or append a
+  header. (Header insertion is reserved for the badge step; the header
+  step only updates an existing header.)
+
+#### Scenario: Existing markdown version header is replaced
+- **GIVEN** a `"readme_header"` template rendering to `"# Project v2.0.0"`
+- **AND** README content containing a line `## Version 1.0.0`
+- **WHEN** `_replace_version_header` runs
+- **THEN** the `## Version 1.0.0` line is replaced with `# Project v2.0.0`
+- **AND** the rest of the file is preserved
+
+#### Scenario: Bold Version line is replaced
+- **GIVEN** a `"readme_header"` template rendering to `"**Version:** 2.0.0"`
+- **AND** README content containing a line `**Version:** 1.0.0`
+- **WHEN** `_replace_version_header` runs
+- **THEN** the `**Version:** 1.0.0` line is replaced with the rendered header
+
+#### Scenario: No existing header leaves content untouched
+- **GIVEN** a `"readme_header"` template is registered
+- **AND** README content with no markdown version heading and no
+  `**Version:**` line
+- **WHEN** `_replace_version_header` runs
+- **THEN** the returned content is byte-identical to the input
+- **AND** no header is inserted at the top, bottom, or anywhere else
+
+#### Scenario: No header template makes the step a no-op
+- **GIVEN** no `"readme_header"` template is present in the registry
+- **WHEN** `_replace_version_header` runs
+- **THEN** the returned content is byte-identical to the input
+  regardless of any matching headers it may contain
+
 ### Requirement: VERSIONS.md changelog entry insertion
 
 `update_versions_md(version, changes, template_name=None, additional_context=None)`

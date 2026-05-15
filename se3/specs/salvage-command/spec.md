@@ -61,8 +61,8 @@ Step 1 reads the persisted flow via `PersistenceManager.load_flow_tolerant`, whi
 ### Requirement: Git Diff Assessment
 
 Step 2 invokes three `git` subprocesses with `cwd=project_root` to populate a diff info dict:
-- `git status --porcelain` — non-empty lines are stored as `status_lines`, their count as `changed_file_count`, and file paths (substring from index 3 onward) as `changed_files`.
-- `git diff --stat` — stdout stored as `diff_stat`.
+- `git status --porcelain` — non-empty lines are stored as `status_lines`, their count as `changed_file_count`, and file paths (substring from index 3 onward, with trailing whitespace stripped) as `changed_files`.
+- `git diff --stat` — stdout stored as `diff_stat` after `.strip()` removes leading and trailing whitespace.
 - `git diff HEAD` — stdout truncated to the first 4000 characters stored as `diff_summary`.
 
 #### Scenario: Files are modified
@@ -78,6 +78,14 @@ Step 2 invokes three `git` subprocesses with `cwd=project_root` to populate a di
 #### Scenario: Diff summary truncated
 - **WHEN** `git diff HEAD` stdout exceeds 4000 characters
 - **THEN** only the first 4000 characters are kept in `diff_summary`
+
+#### Scenario: Changed file paths trimmed
+- **WHEN** a porcelain status line is parsed
+- **THEN** the substring beginning at index 3 has trailing whitespace stripped before being stored in `changed_files`
+
+#### Scenario: Diff stat whitespace stripped
+- **WHEN** `git diff --stat` stdout has leading or trailing whitespace (including a trailing newline)
+- **THEN** the value stored in `diff_stat` is the stdout with `.strip()` applied
 
 ### Requirement: Salvage Commit
 
@@ -120,7 +128,7 @@ Step 4 creates `auto-discovered`, `source:salvage`-tagged, `medium`-priority iss
 - **WHEN** a flow was loaded
 - **THEN** exactly one issue is created with title `f"Incomplete: {flow.task_description[:80]}"`
 - **AND** the description begins with `"Session interrupted while working on: {flow.task_description}"`
-- **AND** if `flow.state.step_history` is non-empty, a `"**Step history:**"` section lists each step as `f"- {step_type}: {status}"` (using enum `.value` where available)
+- **AND** for each `step_id` in `flow.state.step_history` that resolves to an entry in `flow.state.steps`, a completed-step line `f"- {step_type}: {status}"` is built (using enum `.value` where available); if at least one such line exists, a `"**Step history:**"` section listing them is added
 - **AND** if the current step is identified within history, an `"**Interrupted at step:** {step_type}"` line is added
 - **AND** if `diff_info["changed_files"]` is non-empty, a `"**Changed files:**"` section lists up to 20 files, with a `"- ... and N more"` line when more exist
 

@@ -53,11 +53,18 @@ se3 run --discover "我想做一个用户管理功能"
 
 #### Scenario: 循环模式分支隔离
 - **WHEN** 用户执行 `se3 run --loop`（不带 `--no-worktree`）
-- **THEN** 创建 `loop/{task_id}-{iteration}` 分支从当前 HEAD（task_id 由任务描述 slugify 后截断到 30 字符生成）
+- **THEN** 调用 `create_loop_branch(project_root, task_id=..., iteration=...)` 创建 `loop/{task_id}-{iteration}` 分支从当前 HEAD（task_id 由任务描述 slugify 后截断到 30 字符生成；slugify 结果为空字符串时回退为 `task`）
 - **AND** 在 `se3/worktrees/{branch_safe_name}` 创建 git worktree
 - **AND** 所有任务在 worktree 中执行（文件读写、commit 都在 worktree 内）
 - **AND** 循环结束后提示用户选择：merge / later / discard
 - **NOTE** 向后兼容：`list_loop_branches()` 同时匹配旧格式 `se3-loop/*`（标记为 `[legacy]`）和新格式 `loop/*`
+
+#### Scenario: create_loop_branch legacy fallback when task_id/iteration omitted
+- **GIVEN** a caller invokes `create_loop_branch(project_root, ...)` without providing both `task_id` and `iteration` (either argument is `None`, or both are omitted; both parameters are optional in the function signature, defaulting to `None`)
+- **WHEN** the branch name is computed inside `create_loop_branch` (src/se3/engine/worktree.py:112-146)
+- **THEN** the function falls back to the legacy `se3-loop/{timestamp}` naming format, using the provided `timestamp` argument when present and defaulting to `datetime.now().strftime("%Y%m%d-%H%M%S")` otherwise
+- **AND** the new `loop/{task_id}-{iteration}` format is used only when **both** `task_id` is truthy AND `iteration is not None` are satisfied
+- **NOTE** this fallback path exists at the API level inside `create_loop_branch` itself, independent of the `list_loop_branches()` matcher's legacy compatibility; both branch-name formats remain valid creation outputs of the function and the API continues to accept callers that have not yet adopted the task_id/iteration convention
 
 #### Scenario: 循环模式无隔离
 - **WHEN** 用户执行 `se3 run --loop --no-worktree`
@@ -122,11 +129,11 @@ se3 run --discover "我想做一个用户管理功能"
 
 当 LLM 的 `confirmation` 模式判定需求已明确并生成精炼描述后，discovery 步骤不直接完成，而是返回 `PAUSED` 状态并设置 `awaiting_programmatic_confirm=True`。程序运行循环检测到此标志后，在 discovery 的普通输入框读取用户输入：
 
-- 若 `user_input == "1"`（严格相等，不做 strip/normalize，不允许 `1.`、`1 ok`、` 1 `、`yes` 等变体）—— 视为**确认并继续**，进入实现规划阶段
+- 若 `user_input.rstrip('\n\r') == "1"`（仅剥离尾部换行符以兼容多行输入 UI 产生的 trailing newline 工件；不做其它 strip/normalize，不允许 `1.`、`1 ok`、` 1 `（前导或中间空格）、`yes` 等变体）—— 视为**确认并继续**，进入实现规划阶段
 - 若 `user_input` 为空（用户直接按回车）—— 视为 **no-op**：不清除 `awaiting_programmatic_confirm` 标志，不推进 discovery 对话，不触发任何 LLM 调用，仅重绘已缓存的确认 Panel
 - 其它非空输入 —— 视为**还有问题**：清除 `awaiting_programmatic_confirm` 标志，该输入直接作为下一轮 discovery 的用户输入，不再单独提示输入问题
 
-选择 `1` 而非 `yes` 的理由：`1` 是语言无关的通用符号，为未来非英语界面预留空间。严格 `==` 判定避免 `1. 我还想补充…` 被误判为确认。
+选择 `1` 而非 `yes` 的理由：`1` 是语言无关的通用符号，为未来非英语界面预留空间。`rstrip('\n\r')` 后严格 `==` 判定避免 `1. 我还想补充…` 被误判为确认；尾部换行剥离仅用于兼容多行输入 UI 在用户键入 `1` + 回车时附带的 trailing `\n`，不引入更宽松的归一化语义。
 
 这确保了 LLM 的确认判断不会单方面推进流程，人工始终拥有最终决定权。
 
@@ -170,7 +177,7 @@ se3 run --discover "我想做一个用户管理功能"
 #### Scenario: 程序化确认门控 — 用户确认继续
 - **GIVEN** LLM 在 confirmation 模式下判定需求已明确
 - **AND** discovery 步骤返回 PAUSED 且 `awaiting_programmatic_confirm=True`
-- **WHEN** 程序在 discovery 普通输入框读取用户输入且 `user_input == "1"`（严格相等，不做 strip/normalize）
+- **WHEN** 程序在 discovery 普通输入框读取用户输入且 `user_input.rstrip('\n\r') == "1"`（仅剥离尾部换行符以兼容多行输入 UI 工件，不做其它 strip/normalize）
 - **THEN** 设置 `programmatic_confirmed=True` 到步骤输入
 - **AND** 重新执行 discovery handler，handler 检测到此标志后直接完成步骤
 - **AND** 生成 `discovery_summary` 并设置 `requirements_clarified=True`
@@ -178,7 +185,7 @@ se3 run --discover "我想做一个用户管理功能"
 #### Scenario: 程序化确认门控 — 用户继续探索
 - **GIVEN** LLM 在 confirmation 模式下判定需求已明确
 - **AND** discovery 步骤返回 PAUSED 且 `awaiting_programmatic_confirm=True`
-- **WHEN** 程序在 discovery 普通输入框读取的用户输入不严格等于 `"1"` 且非空（包括 `1.`、`1 ok`、` 1 `、`yes` 等变体）
+- **WHEN** 程序在 discovery 普通输入框读取的用户输入经 `rstrip('\n\r')` 后不严格等于 `"1"` 且去除尾部换行后非空（包括 `1.`、`1 ok`、` 1 `（前导或中间空格）、`yes` 等变体）
 - **THEN** 清除 `awaiting_programmatic_confirm` 标志
 - **AND** 该用户输入直接作为新一轮 discovery 的用户输入，不单独提示输入问题
 
@@ -310,15 +317,15 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 
 | 步骤 | 职责 | LLM 参与 | JSON 模式 | Read-Only | 输入 | 输出 |
 |------|------|---------|-----------|-----------|------|------|
-| `discovery` | 需求探索（多轮对话） | 是 | STRICT | **是** | initial_description | refined_description, discovery_summary |
-| `analyze` | 分析任务类型和范围；收集项目上下文；选择并加载相关 spec items | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content, selected_items |
+| `discovery` | 需求探索（多轮对话） | 是 | STRICT | **是** | initial_description | refined_description, discovery_summary, requirements_clarified |
+| `analyze` | 分析任务类型和范围；收集项目上下文；选择并加载相关 spec items | 是 | STRICT | **是** | task_description | task_type, scope, complexity, reasoning, project_summary, relevant_specs, spec_content |
 | `plan` | 统一规划：提案+设计+任务分解（按 task_type 自适应深度） | 是 | TWO_PHASE | **是** | spec_content, task_description, task_type, scope, project_summary | plan{proposal,design}, task_groups, spec_changes, total_complexity, estimated_effort |
-| `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | completion_status, files_changed, tests_added, implemented_groups, summary, incomplete_tasks, restricted_edits_applied, restricted_edits_failed, estimated_test_duration |
+| `implement` | 编写代码实现 | 是 | TWO_PHASE | 否 | design_doc, task_groups | implemented_groups, files_changed, total_groups |
 | `test` | 运行测试验证 | 否（程序执行） | - | 否 | - | test_results, tests_passed |
-| `self_check` | LLM 代码审查：逻辑完整性、代码健壮性、功能遗漏、测试未覆盖区域（不检查 spec 合规性） | 是 | TWO_PHASE | **是** | test_results, changes_made, spec_content, task_groups, fix_iteration, self_check_pass_index, self_check_passes_required, self_check_convergence_enabled, prev_self_check_issues (conditional) | issues (structured list with description, severity, location), status, self_check_pass_index, self_check_passes_required, actionable_count |
-| `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, in_scope_count, out_of_scope_count, fix_needed, fix_instructions, fix_context |
+| `self_check` | LLM 代码审查：逻辑完整性、代码健壮性、功能遗漏、测试未覆盖区域（不检查 spec 合规性） | 是 | TWO_PHASE | **是** | test_results, changes_made, spec_content, task_groups, fix_iteration, self_check_pass_index, self_check_passes_required, self_check_convergence_enabled, prev_self_check_issues (conditional) | self_check_result, issues (structured list with description, severity, location), actionable_count |
+| `verify_spec` | 检查实现与 spec 一致性 | 是 | EXTRACT | **是** | changes_made, spec_content, test_results, fix_iteration, spec_changes | verification_result, issues, in_scope_count, out_of_scope_count, fix_needed, fix_instructions, fix_context, **verified** (rule-based, computed by code: `(in_scope_count == 0) and tests_passed` — see *verify_spec Unified Priority and Scope Mechanism*) |
 | `update_spec` | 更新 spec 记录变更 | 是 | EXTRACT | 否 | changes_made, verification_result, spec_changes, design_doc, selected_items | updated_specs, new_capabilities, spec_decisions, notes |
-| `version_analyze` | 分析变更确定 suggested_version（权威）+ 生成 commit message | 是 | EXTRACT | **是** | changes_made, updated_specs, verification_result, current_version, custom_rules (se3/version-rules.md if present) | **suggested_version**（权威）, bump_type, confidence, reasoning, commit_message |
+| `version_analyze` | 分析变更确定 suggested_version（权威）+ 生成 commit message | 是 | EXTRACT | **是** | changes_made, summary, verification_result, task_type | **suggested_version**（权威）, bump_type, confidence, reasoning, commit_message |
 | `commit` | 提交变更 | 否（程序执行） | - | 否 | changes_made, bump_type, commit_message, proposal, updated_specs | commit_hash |
 | `summarize` | 生成总结和 handoff | 是 | 文本 | **是** | all_previous_outputs | summary (Markdown 文本) |
 | ~~`project_summary`~~ | ~~生成项目上下文摘要~~ (deprecated — merged into analyze) | 是 | 文本 | **是** | 项目状态 | 摘要字符串 |
@@ -1114,13 +1121,13 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 
 **输入构建规则：**
 - 所有步骤接收 `task_description` 和 `flow_id`
-- `analyze` 输出 `task_type`、`scope`、`complexity`、`reasoning`、`project_summary`、`relevant_specs`、`spec_content`、`selected_items`；其中 `project_summary` 由 `ProjectContextCollector.collect()` 程序化生成（非 LLM），`spec_content` 由后处理程序化加载（base spec 自动附加 + LLM 选择的 spec items），`selected_items` 为 LLM 选中的 `[{spec, requirement_name, tags}]` 列表
+- `analyze` 输出 `task_type`、`scope`、`complexity`、`reasoning`、`project_summary`、`relevant_specs`、`spec_content`；其中 `project_summary` 由 `ProjectContextCollector.collect()` 程序化生成（非 LLM），`spec_content` 由后处理程序化加载（base spec 自动附加 + LLM 选择的 spec items）
 - `plan` 接收 `spec_content`（从 analyze）、`task_type`、`scope`、`project_summary`（从 analyze），输出 `plan`（含 proposal + design）、`task_groups` 和 `spec_changes`（仅 full depth）
-- `implement` 接收 `design_doc`（从 plan.design 映射）、`task_groups`、`spec_content`（从 analyze）、`project_summary`（从 analyze）；输出新增 `pre_session_version`（implement 入口时项目版本号，用于版本基线审计）与 `session_commits`（DAG/worktree 路径下 implement 阶段在主分支上引入的 commit 清单，列表元素为 `{sha, subject, files}`；非 worktree 路径或未产生 commit 时为空列表）
+- `implement` 接收 `design_doc`（从 plan.design 映射）、`task_groups`、`spec_content`（从 analyze）、`project_summary`（从 analyze）
 - `self_check` 接收 `test_results`（从 test）、`changes_made`（从 implement）、`spec_content`（从 analyze）、`task_groups`（从 plan，用作「功能遗漏」维度的 scope 参考）、`fix_iteration`（当前 fix loop 迭代次数）、`self_check_pass_index`（本轮 fix-loop 内的 1..N 序号）、`self_check_passes_required`（来自 `workflow.self_check_passes_required`）、`self_check_convergence_enabled`（来自 `workflow.self_check_convergence_enabled`，默认 false）、`prev_self_check_issues`（仅在 `convergence_enabled=true` 且 `pass_index=1` 时注入，承载上一轮 fix-loop 末尾 self_check 的 issues 作为收敛对比基线）
 - `verify_spec` 接收 `changes_made`、`spec_content`（从 analyze）、`test_results`、`fix_iteration`、`spec_changes`（从 plan 步骤传递，用于区分有意变更与回归）和 `relevant_specs`（从 analyze）
-- `update_spec` 接收 `changes_made`、`verification_result`、`spec_changes`（从 plan 步骤传递，作为变更指引清单）、`design_doc`（从 plan.design 映射，提供架构上下文）、`selected_items`（从 analyze，用于定位相关 spec）；默认以 `full_spec` 模式加载所有 spec 全文，支持命名查重和跨 spec 一致性检查
-- `version_analyze` 接收 `updated_specs`、`changes_made`、`verification_result`、`task_type`、`task_description`、`current_version`（磁盘版本号）、`pre_session_version`（从 implement 透传，作为 LLM 计算 `suggested_version` 的真实基线；缺失时回退到 `current_version`）、`session_commits`（从 implement 透传，列出本 session 在主分支上已经引入的 commit；可能包含被 implement 阶段误写入的版本文件改动，prompt 中要求 LLM 将其视为未发生）
+- `update_spec` 接收 `changes_made`、`verification_result`、`spec_changes`（从 plan 步骤传递，作为变更指引清单）、`design_doc`（从 plan.design 映射，提供架构上下文）；默认以 `full_spec` 模式加载所有 spec 全文，支持命名查重和跨 spec 一致性检查
+- `version_analyze` 接收 `changes_made`、`summary`、`verification_result`、`task_type`
 - `commit` 接收 `changes_made`、`commit_message`（from version_analyze）、`bump_type`（from version_analyze）、`proposal`（from plan，供 commit message fallback chain 使用）、`updated_specs`（from update_spec，便于在 commit 时将 spec 变更与代码变更一起提交）
 - `summarize` 接收所有前序输出（when included in step sequence）
 
@@ -1128,11 +1135,6 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - **WHEN** 流程转换到新步骤
 - **THEN** 根据规则自动构建步骤输入
 - **AND** 包含所有相关的前序输出
-
-#### Scenario: selected_items 透传到下游步骤
-- **WHEN** analyze 步骤输出包含 `selected_items: [{"spec": "flow-engine", "requirement_name": "统一入口"}]`
-- **THEN** state_machine 在构建所有下游步骤输入时透传 `selected_items`
-- **AND** `verify_spec`、`update_spec` 等步骤均可通过 `selected_items` 获知原始选中项
 
 #### Scenario: update_spec 默认以 full_spec 模式加载
 - **WHEN** state_machine 为 update_spec 构建输入
@@ -1147,43 +1149,15 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 - **AND** 判据结果指向 new_spec 时，在 `se3/specs/` 下创建新的 spec 目录和 `spec.md`
 - **AND** 新 spec 文件被创建在 `se3/specs/issue-discovery/spec.md`
 
-#### Scenario: worktree 合回后 version_analyze 收到 commit 清单
-- **GIVEN** implement 步骤启用 worktree 并通过 DAG 并行策略执行
-- **AND** 某个 group 在主分支上引入了 `bump version to 5.2.0` 的 commit，另一个 fix-iteration commit 修改了源码
-- **WHEN** implement 步骤完成并写出 `step.outputs`
-- **THEN** `step.outputs["pre_session_version"]` 等于 implement 入口时磁盘上的版本号（如 `5.1.0`）
-- **AND** `step.outputs["session_commits"]` 为非空列表，列出上述两条 commit 的 `{sha, subject, files}`
-- **AND** state_machine 在为 version_analyze 构建 inputs 时将 `pre_session_version` 与 `session_commits` 透传过去
-- **AND** version_analyze 的 LLM prompt 中包含这两条 commit 清单与 `pre_session_version`
-
-#### Scenario: implement 未启用 worktree 时 session_commits 为空
-- **GIVEN** `implement.use_worktree=false`（或 DAG 退化为线性链 / 单 LLM 调用）
-- **WHEN** implement 步骤完成
-- **THEN** `step.outputs["session_commits"]` 为空列表
-- **AND** `step.outputs["pre_session_version"]` 仍记录 implement 入口时的版本号
-- **AND** state_machine 透传到 version_analyze.inputs 的 `session_commits` 为空列表
-
-#### Scenario: implement 重入时保留首入版本基线
-- **GIVEN** 同一 `implement` Step 第一次进入时把磁盘版本号 `5.1.0` 写入 `step.outputs["pre_session_version"]`
-- **AND** worktree-DAG 中某个 group 随后把 `bump version to 5.2.0` 合并回主分支（磁盘版本变为 `5.2.0`）
-- **WHEN** 同一 Step 因 fix-iteration / DAG resume / 重试 而再次调用 `implement_handler`
-- **THEN** `step.outputs["pre_session_version"]` 保持为 `5.1.0`（首入值），不被覆盖为当前磁盘上的 `5.2.0`
-- **AND** `step.outputs["session_commits"]` 以 `flow.baseline_commit`（`state_machine.init_flow` 时记录的 flow 全局基线）为对比基线重新计算，仍包含上一次入口合入的 `bump version to 5.2.0` commit
-- **AND** version_analyze 拿到的基线仍是 `5.1.0`，不会因为已经发生过一次 bump 而再次触发增量计算
-
 ### Requirement: Version Analyze 步骤
 
 `version_analyze` 步骤 SHALL 使用 LLM 智能分析实际变更内容，依据 Semantic Versioning 2.0.0 规则确定版本变更类型。
 
 **分析输入：**
-- `updated_specs`: Spec 变更（API 契约变化）- **主要判断依据**
 - `changes_made`: 变更的文件列表和详细说明
+- `summary`: 前序步骤生成的工作摘要
 - `verification_result`: 与 spec 的一致性检查结果
 - `task_type`: 任务类型（作为参考，不作为决定因素）
-- `task_description`: 原始任务描述
-- `current_version`: 磁盘上当前版本号（供 LLM 对照）
-- `pre_session_version`: implement 步骤入口时的版本号；作为 LLM 计算 `suggested_version` 的真实基线。缺失时回退为 `current_version`
-- `session_commits`: implement 阶段在主分支上引入的 commit 列表（`[{sha, subject, files}]`，可能为空）。prompt 中指示 LLM 将这些 commit 中对版本文件的修改视为未发生，以 `pre_session_version` 为基线推导 `suggested_version`
 
 **分析输出：**
 ```json
@@ -1197,8 +1171,6 @@ The flow engine SHALL deduplicate repeated contiguous line blocks within a promp
 ```
 
 **权威字段：** `suggested_version` 是 commit step 写入版本文件时直接使用的权威值。`bump_type`、`reasoning`、`confidence` 仅作为展示/commit message 辅助字段，不再用于按 `current_version + bump_type` 反推新版本号。当 `version_analyze` 失败或未输出 `suggested_version` 时，commit step 报错中断流程（见 Commit 步骤版本管理 requirement）。
-
-**自定义规则文件注入：** 当 `<project_root>/se3/version-rules.md` 存在时，其内容作为「项目自定义规则」段注入 LLM prompt，由 LLM 据此推导 `suggested_version`；不存在时回落默认 SemVer 2.0.0 规则。详见 `se3-versioning` 的 *Custom Version Rules File* requirement。
 
 **commit_message 生成规则：**
 - 使用祈使语气（如 "Add feature" 而非 "Added feature"）
@@ -1347,6 +1319,62 @@ version:
 - **WHEN** 用户选择跳过失败步骤
 - **THEN** 将步骤标记为完成
 - **AND** 继续执行后续步骤
+
+### Requirement: Step Status Lifecycle
+
+The `StepStatus` enum (`se3/engine/models.py`) SHALL define the complete set of states a `Step` instance may occupy during a flow's execution. The full set comprises:
+
+| Status | Value | Semantics |
+|--------|-------|-----------|
+| `PENDING` | `pending` | Step has not started yet |
+| `RUNNING` | `running` | Step is currently executing |
+| `COMPLETED` | `completed` | Step finished successfully |
+| `PARTIAL` | `partial` | Step partially completed due to an unrecoverable constraint (e.g., permission restrictions) that the retry mechanism cannot resolve. **Distinct from `FAILED`**: `PARTIAL` is a terminal status for the current attempt — it does NOT trigger the standard retry loop and does NOT count as a successful completion either. The flow may continue with the partial outputs available, or escalate based on downstream consumers' tolerance. |
+| `FAILED` | `failed` | Step failed after exhausting retries |
+| `RETRYING` | `retrying` | Step is currently being retried after a transient failure |
+| `PAUSED` | `paused` | Step is paused awaiting external input (user response, human MCP call response, programmatic confirmation, etc.) |
+| `REVISION_NEEDED` | `revision_needed` | Step requested that the flow revise a prior step (e.g., self_check / verify_spec found issues, or a CONFIRM reviewer rejected the reviewed step). The state machine routes back to the appropriate prior step rather than advancing forward. |
+
+**Persistence and JSON-serialization:** Step status values are stored in `engine.json` as their string `.value` (lowercase identifier). When a step handler stores its own status into `step.outputs` (e.g., as `step.outputs["result"]`), it MUST convert the enum to its `.value` before storing, consistent with the **Step outputs JSON serializability** scenario.
+
+#### Scenario: PARTIAL is distinct from FAILED
+- **WHEN** a step encounters an unrecoverable permission constraint (or analogous condition) that prevents full completion but does not warrant a retry
+- **THEN** the handler SHALL set the step's status to `PARTIAL` rather than `FAILED`
+- **AND** the standard retry loop is NOT triggered for `PARTIAL`
+- **AND** the step is NOT treated as a successful `COMPLETED` either — downstream consumers that depend on full outputs may degrade or escalate accordingly
+
+#### Scenario: All StepStatus values round-trip through persistence
+- **GIVEN** a step in any of `PENDING`, `RUNNING`, `COMPLETED`, `PARTIAL`, `FAILED`, `RETRYING`, `PAUSED`, `REVISION_NEEDED`
+- **WHEN** the flow is persisted to `engine.json` and later loaded
+- **THEN** the loaded step's status equals the original enum value
+- **AND** serialized values use the lowercase string form defined in the enum
+
+### Requirement: Flow Status Lifecycle
+
+The `FlowStatus` enum (`se3/engine/models.py`, mirrored in `se3/engine/schema.py`) SHALL define the complete set of overall states a `FlowInstance` may occupy. The full set comprises:
+
+| Status | Value | Semantics |
+|--------|-------|-----------|
+| `INIT` | `init` | Flow has just been created; no step has started executing yet |
+| `RUNNING` | `running` | Flow is actively executing steps |
+| `PAUSED` | `paused` | Flow is paused awaiting user input, a programmatic confirmation, or a human MCP call response |
+| `COMPLETED` | `completed` | All selected steps finished successfully |
+| `FAILED` | `failed` | Flow encountered an unrecoverable condition (e.g., fix-loop exhaustion) and cannot continue |
+| `RECOVERING` | `recovering` | Reserved state used while the engine is attempting to recover a flow from a prior interruption (e.g., loading state mid-resume). Persisted flows MAY round-trip through this state; downstream tooling SHALL accept it as a valid status value. |
+
+**Persistence and JSON-serialization:** Flow status values are stored in `engine.json` as their string `.value` (lowercase identifier), and the loader SHALL accept every value listed above without raising. Forward compatibility: tooling that consumes `engine.json` SHALL treat `RECOVERING` as a transient state and not assume it is one of `INIT/RUNNING/PAUSED/COMPLETED/FAILED`.
+
+#### Scenario: All FlowStatus values round-trip through persistence
+- **GIVEN** a flow in any of `INIT`, `RUNNING`, `PAUSED`, `COMPLETED`, `FAILED`, `RECOVERING`
+- **WHEN** the flow is persisted to `engine.json` and later loaded
+- **THEN** the loaded flow's status equals the original enum value
+- **AND** serialized values use the lowercase string form defined in the enum
+
+#### Scenario: RECOVERING is accepted by deserialization
+- **GIVEN** an `engine.json` whose top-level `status` field is `"recovering"`
+- **WHEN** the engine loads the file
+- **THEN** the flow is reconstructed with `status == FlowStatus.RECOVERING`
+- **AND** no exception is raised for an unrecognized status value
 
 ### Requirement: plan estimated_loc Output
 
@@ -2048,18 +2076,18 @@ The `analyze` step renderer SHALL display a top-line status bar followed by reas
 
 **Sections (displayed in order when data is present):**
 1. **Reasoning** — the analysis reasoning as a body paragraph.
-2. **Relevant Spec Items** — a bullet list of selected spec item identifiers rendered from `selected_items`, with each entry formatted as `<spec>:<requirement_name>` (e.g., `flow-engine:FE-3`) so cross-spec same-named requirements remain distinguishable.
+2. **Relevant Spec Items** — a bullet list of selected spec identifiers rendered from `relevant_specs`.
 
 **Hidden fields:** `spec_content` and `project_summary` are intentionally omitted from display — they are downstream data payloads, not user-facing information.
 
 **Output keys consumed by the renderer:**
-- `task_type`, `complexity`, `scope`, `reasoning`, `selected_items`
+- `task_type`, `complexity`, `scope`, `reasoning`, `relevant_specs`
 
 ##### Scenario: Analyze rendering with all fields
-- **WHEN** the analyze step completes with `task_type`, `complexity`, `scope`, `reasoning`, and `selected_items`
+- **WHEN** the analyze step completes with `task_type`, `complexity`, `scope`, `reasoning`, and `relevant_specs`
 - **THEN** the renderer displays a status bar with task_type, complexity, and scope
 - **AND** reasoning is shown as a labeled body paragraph
-- **AND** relevant spec items are listed in `<spec>:<requirement_name>` form
+- **AND** relevant spec items are listed
 
 ##### Scenario: Analyze rendering hides internal data
 - **WHEN** the analyze step outputs include `spec_content` or `project_summary`
@@ -2151,20 +2179,124 @@ The `commit` step renderer SHALL display commit details or a no-changes message.
 - Displays `No changes to commit` as a dim message.
 
 **When committed is true:**
-- Top line shows the short commit hash (first 7 characters), optionally followed by the version (e.g. `v1.2.3`) if `version_bumped` is true.
+- Top line shows the short commit hash (first 7 characters).
 - Commit message is displayed below a separator.
 
 **Output keys consumed by the renderer:**
-- `committed`, `commit_hash`, `commit_message`, `version_bumped`, `version`
+- `committed`, `commit_hash`, `commit_message`
 
-##### Scenario: Commit with version bump
-- **WHEN** the commit step completes with `committed: true` and `version_bumped: true`
-- **THEN** the renderer displays the short hash and version on the top line
+##### Scenario: Commit displays short hash and message
+- **WHEN** the commit step completes with `committed: true`
+- **THEN** the renderer displays the short hash on the top line
 - **AND** the commit message is displayed below
 
 ##### Scenario: No changes committed
 - **WHEN** the commit step completes with `committed: false`
 - **THEN** the renderer displays `No changes to commit`
+
+### Requirement: Step Output Renderer Registry
+
+The flow engine SHALL provide a centralized registry mechanism for step output rendering, with a single public entry point (`render_step_output(step)`) that dispatches to step-specific renderers or falls back to a generic default renderer.
+
+**Registry Mechanism (`step_renderers.py`):**
+
+- `STEP_RENDERERS: Dict[StepType, Callable[[Step], None]]` — module-level registry mapping step types to their custom renderer functions.
+- `register_renderer(step_type)` — decorator that registers a function as the renderer for a given `StepType`.
+- `render_step_output(step)` — public entry point: looks up `step.step_type` in `STEP_RENDERERS`; if found, calls the registered renderer; otherwise, falls back to `_default_render(step, title)`.
+- `STEP_DISPLAY_TITLES` — module-level dict mapping every `StepType` (including deprecated types `PROJECT_SUMMARY`, `PROPOSE`, `DESIGN`, `PLAN_TASKS`) to a human-readable title used by both custom renderers and the default fallback.
+
+**Default Renderer (`_default_render`):**
+
+When no custom renderer is registered for a step type, the default renderer iterates `step.outputs`, formatting each key-value pair. Long string values (>300 chars) are previewed (first 200 chars) with a length suffix. Non-completed status is shown explicitly. Error messages are rendered in red at the bottom.
+
+**Helper for partial rendering (`_render_remaining`):**
+
+Custom renderers MAY call `_render_remaining(step, title, skip_keys)` to display any output keys not already covered by their specialized rendering. The remaining keys are rendered under a "{title} — Additional Details" header using the same generic formatting as the default renderer.
+
+**Registered renderers beyond the base set:**
+
+In addition to `analyze`, `self_check`, `verify_spec`, `update_spec`, `commit`, and `implement` (covered under the **Step Output Rendering** Requirement), the registry SHALL include custom renderers for the following step types:
+
+#### Plan Renderer (`PLAN`)
+
+Renders three sections in order when data is present:
+
+1. **Proposal** — when `outputs["plan"]["proposal"]` is a dict, delegates to `render_proposal()`; when a string, renders as a labeled line under title "Planning — Proposal".
+2. **Design** — when `outputs["plan"]["design"]` is a dict, delegates to `render_design()`; when a string, renders as a labeled line under title "Planning — Design".
+3. **Task Groups** — for each group in `outputs["task_groups"]`, renders a line containing group_id (bold), name, task count, total estimated LOC (summed from each task's `estimated_loc`), and dependencies (comma-separated `depends_on` list, or "none").
+
+After the three sections, `_render_remaining` is invoked with skip set `{"plan", "task_groups", "total_complexity", "estimated_effort"}` to render any other output keys. If none of the three sections rendered anything, falls back to `_default_render`.
+
+#### Version Analyze Renderer (`VERSION_ANALYZE`)
+
+Renders:
+- **Top line** — `current_version → suggested_version` (with `suggested_version` styled as cyan bold, marking it as authoritative).
+- **Sub-line** — dim style showing `{bump_type} bump  │  confidence: {confidence}`.
+- **Reasoning** — when present, rendered as a labeled section below a dim horizontal separator.
+- **Error** — when `step.error_message` is present, rendered in red.
+
+Rendered under title "Version Analysis".
+
+#### Summarize Renderer (`SUMMARIZE`)
+
+When `outputs["summary"]` is non-empty, delegates to `render_markdown(summary, title="Work Summary")`. When absent, renders nothing.
+
+#### Test Renderer (`TEST`)
+
+When `outputs["test_results"]` is not a dict, falls back to `_default_render`. Otherwise renders:
+- **Status line** — `PASSED` (green bold) or `FAILED` (red bold) based on `overall_passed` (or legacy `passed`).
+- **Phases line** — count of passed vs. failed phases, followed by a per-phase bullet list with `✓` (green) / `✗` (red) indicators and phase names.
+- **Command line** — the underlying test command, when present.
+
+Rendered under title "Testing".
+
+#### Propose Renderer (`PROPOSE`, deprecated)
+
+Searches `outputs` for the first present key in `("proposal", "proposal_data")` that maps to a dict; when found, delegates to `render_proposal()`, then renders remaining outputs via `_render_remaining` with skip set `{proposal_key, "summary", "files_to_modify", "files_to_create"}`. When no proposal dict is found, falls back to `_default_render`.
+
+This renderer is retained for backward compatibility with persisted flows containing pre-unification `PROPOSE` steps (see **Deprecated Step Type Backward Compatibility** Requirement).
+
+#### Design Renderer (`DESIGN`, deprecated)
+
+Searches `outputs` for the first present key in `("design", "design_doc", "design_document")` that maps to a dict; when found, delegates to `render_design()`, then renders remaining outputs via `_render_remaining` with skip set `{design_key, "decisions", "components", "implementation_plan"}`. When no design dict is found, falls back to `_default_render`.
+
+Retained for backward compatibility with persisted flows containing pre-unification `DESIGN` steps.
+
+#### Scenario: Custom renderer dispatch
+- **WHEN** `render_step_output(step)` is invoked with `step.step_type` registered in `STEP_RENDERERS`
+- **THEN** the registered renderer function is called with the step
+
+#### Scenario: Default renderer fallback
+- **WHEN** `render_step_output(step)` is invoked with a step type not in `STEP_RENDERERS`
+- **THEN** `_default_render(step, title)` is invoked, iterating all outputs with generic formatting
+- **AND** the title is looked up from `STEP_DISPLAY_TITLES`, falling back to `step.step_type.value`
+
+#### Scenario: Plan renderer displays task groups with LOC
+- **WHEN** the plan step completes with non-empty `task_groups`
+- **THEN** each group renders one line containing group_id, name, task count, summed `estimated_loc`, and dependencies
+
+#### Scenario: Version analyze highlights suggested_version
+- **WHEN** the version_analyze step completes
+- **THEN** `suggested_version` is rendered in cyan bold, distinguishing it as the authoritative value used by the commit step
+- **AND** `bump_type` and `confidence` render as dim auxiliary text
+
+#### Scenario: Summarize renderer uses markdown
+- **WHEN** the summarize step completes with non-empty `outputs["summary"]`
+- **THEN** the summary is rendered via `render_markdown` under title "Work Summary"
+
+#### Scenario: Test renderer with structured results
+- **WHEN** the test step completes with `outputs["test_results"]` containing `phases`
+- **THEN** the renderer shows per-phase pass/fail indicators and an overall PASSED/FAILED status line
+
+#### Scenario: Deprecated PROPOSE renderer retained
+- **WHEN** a persisted flow with a `PROPOSE` step is loaded and rendered
+- **THEN** `_render_propose` extracts the proposal dict (under key `proposal` or `proposal_data`) and delegates to `render_proposal()`
+- **AND** remaining outputs are rendered via `_render_remaining`
+
+#### Scenario: Deprecated DESIGN renderer retained
+- **WHEN** a persisted flow with a `DESIGN` step is loaded and rendered
+- **THEN** `_render_design` extracts the design dict (under key `design`, `design_doc`, or `design_document`) and delegates to `render_design()`
+- **AND** remaining outputs are rendered via `_render_remaining`
 
 ### Requirement: Test 步骤配置与多阶段执行
 
@@ -2291,7 +2423,7 @@ The `State.fix_history` list SHALL be capped at `FIX_HISTORY_MAX_ENTRIES` (defin
 **Rationale:** the cap bounds memory, on-disk `engine.json` size, and per-transition deepcopy cost in unlimited mode (`workflow.max_fix_iterations = 0`). The default value is held at the same numeric floor as `DEFAULT_MAX_FIX_ITERATIONS` so a flow running with the default fix-loop bound never silently drops history entries — trimming can only happen when the user explicitly raises `workflow.max_fix_iterations` above the cap (e.g. 200) or runs in unlimited mode for more than `FIX_HISTORY_MAX_ENTRIES` iterations.
 
 **Downstream impact on prompts:**
-- verify_spec and self_check fix-context renderers already tail-truncate to 20 entries, so their LLM prompt context is unaffected by the cap once iteration count exceeds 20.
+- The shared `render_fix_context()` helper used by verify_spec and self_check accepts `fix_history` as a parameter but deliberately does NOT render it into the `{fix_context}` block. Only `prev_issues` (the issues reported in the immediately preceding review pass) is rendered. The `fix_history` parameter is kept in the signature for back-compatibility with existing callers and treated as an explicit no-op (`_ = fix_history`) inside the function. **Rationale:** the iteration-count + trigger-type metadata in fix_history biases self_check / verify_spec reviewers toward over-flagging ("we've been at this N rounds, surely something is still wrong"); for review steps the signal is more harmful than helpful, so the cap on fix_history has no impact on review-step prompts regardless of size.
 - `implement._format_fix_history` iterates the full persisted list; for iterations beyond `FIX_HISTORY_MAX_ENTRIES`, early-iteration entries are dropped from the implement-step prompt. A fix loop running past this point on the same task is considered a stuck loop where ancient history adds noise rather than signal.
 
 #### Scenario: fix_history capped at FIX_HISTORY_MAX_ENTRIES on append
@@ -2523,6 +2655,163 @@ Warnings SHALL include the offending raw value (via `repr()`), the field name, a
 - **WHEN** `WorkflowConfig.from_dict()` (or `load()`) is invoked
 - **THEN** a default `WorkflowConfig` is returned with no warnings
 
+### Requirement: FlowInstance Persistence Schema
+
+The `FlowInstance` dataclass (`se3/engine/models.py`) SHALL persist a fixed set of tracking, integration, and loop-mode fields across runs via `to_dict()` / `from_dict()`. These fields extend the core `flow_id`/`task_description`/`task_type`/`status`/`state` set documented in the **数据模型** section and are required for `se3 run --resume`, `se3 run --loop`, change-tracking integration, and multi-worktree baseline detection to work correctly.
+
+**Field schema:**
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `created_at` | `datetime` | `datetime.now()` | Flow creation timestamp; ISO-formatted on disk. |
+| `updated_at` | `datetime` | `datetime.now()` | Last-mutation timestamp; ISO-formatted on disk. Drives the ordering shown in `se3 history`. |
+| `completed_at` | `datetime \| None` | `None` | Set when the flow reaches a terminal status; ISO-formatted on disk when present. |
+| `change_name` | `str \| None` | `None` | Optional SE3 change name the flow is associated with. Set by `se3 run --change <name>`; consumed by SE3 change-tracking integration. |
+| `change_path` | `Path \| None` | `None` | Filesystem path to the associated change; serialized as a string and rehydrated to `Path` on load. |
+| `source_issue_id` | `str \| None` | `None` | Issue ID (from issue-discovery) that originated this flow, when the flow was triggered from an open issue. Used to thread completion back to the issue tracker. |
+| `baseline_commit` | `str \| None` | `None` | Git HEAD recorded by `init_flow()` at the start of the flow. Used by the commit step's change-detection logic and by DAG worktree salvage (see *步骤间输入传递* and the implement-step worktree management scenarios) so re-entries compute deltas against the original baseline rather than current HEAD. |
+| `is_loop_mode` | `bool` | `False` | True when the flow was started via `se3 run --loop`. Distinguishes loop-mode flows for resume routing, history filtering, and the loop-iteration prompt prefixing described in *循环模式外部包装架构*. |
+| `loop_branch` | `str \| None` | `None` | The `loop/{task_id}-{iteration}` (or legacy `se3-loop/{timestamp}`) branch created for this loop iteration via `create_loop_branch()`. `None` when `is_loop_mode=False` or `--no-worktree` is in effect. |
+| `loop_worktree_path` | `str \| None` | `None` | Filesystem path of the git worktree backing `loop_branch`. `None` when the flow is not running inside a loop worktree. |
+| `loop_original_branch` | `str \| None` | `None` | The branch that was checked out when `se3 run --loop` was invoked. Captured so the loop controller can offer `merge` / `later` / `discard` against the correct destination after the iteration finishes (see *延迟合并* scenario). |
+
+**Persistence rules:**
+
+- `to_dict()` SHALL include every field above using the JSON-friendly representation indicated (ISO strings for datetimes, `str(path)` for `Path`, raw value otherwise).
+- `from_dict()` SHALL accept missing optional fields and substitute their defaults via `data.get(...)`, so flows persisted by older builds (which may not have written every field) continue to load without error.
+- `from_dict()` SHALL convert `change_path` from string back to `Path` when present, and SHALL substitute `False` for a missing `is_loop_mode`.
+
+#### Scenario: All FlowInstance fields round-trip through persistence
+- **GIVEN** a `FlowInstance` populated with non-default values for every field listed above
+- **WHEN** the instance is serialized via `to_dict()` and reconstructed via `from_dict()`
+- **THEN** every field equals its original value (with `Path` correctly rehydrated and datetimes round-tripping through ISO format)
+
+#### Scenario: Older engine.json without loop-mode fields loads cleanly
+- **GIVEN** an `engine.json` written by a build that predates `is_loop_mode` / `loop_branch` / `loop_worktree_path` / `loop_original_branch`
+- **WHEN** `FlowInstance.from_dict()` loads the file
+- **THEN** the missing loop-mode fields default to `False` / `None` and no `KeyError` is raised
+- **AND** the loaded flow can be resumed normally (loop-controller logic interprets the absence of loop fields as "not a loop-mode flow")
+
+#### Scenario: change_path round-trips as Path
+- **GIVEN** a `FlowInstance` with `change_path = Path("se3/changes/auth-rewrite")`
+- **WHEN** the flow is persisted and reloaded
+- **THEN** the loaded instance's `change_path` is a `Path` object (not a `str`) equal to the original
+
+#### Scenario: source_issue_id threads the originating issue
+- **GIVEN** a flow created from an open issue (e.g. via issue-discovery resolution)
+- **WHEN** `source_issue_id` is set on the `FlowInstance` and the flow is persisted
+- **THEN** `to_dict()` includes the issue id and `from_dict()` restores it
+- **AND** downstream tooling (issue tracker integration) can read `flow.source_issue_id` to thread completion back to the originating issue
+
+#### Scenario: baseline_commit anchors change detection
+- **GIVEN** `init_flow()` records the git HEAD as `baseline_commit` on a fresh flow
+- **WHEN** the same flow is resumed in a later session (potentially after intermediate commits on the branch)
+- **THEN** `init_flow()` does not overwrite `baseline_commit` (idempotent on resume, per the *init_flow idempotent on resume* scenario)
+- **AND** the commit step and DAG worktree salvage continue to compute their deltas against the original baseline, not current HEAD
+
+### Requirement: State Tracking Fields and Helper API
+
+The `State` dataclass (`se3/engine/models.py`) SHALL persist the execution state of a flow, including step tracking, global context, review/fix loop counters, and history. It exposes a helper API used by step handlers and the state machine to advance review and fix loops.
+
+**Field schema:**
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `current_step_id` | `str \| None` | `None` | ID of the currently active step. |
+| `step_history` | `List[str]` | `[]` | Ordered list of step IDs executed in this flow (in append order). |
+| `steps` | `Dict[str, Step]` | `{}` | Map of `step_id` → `Step` instances for all steps created in this flow. |
+| `context` | `Dict[str, Any]` | `{}` | Global context shared across steps. Used as a side-channel for the state machine to expose computed values (e.g. `resolved_type`, `fix_iterations`, `fix_history` mirrors) to handlers without changing step inputs. |
+| `selected_steps` | `List[StepType]` | `[]` | The dynamically selected sequence of step types for this flow (chosen by `analyze` and the CONFIRM-insertion step). |
+| `current_step_index` | `int` | `0` | Position within `selected_steps` of the next step to execute. The state machine advances this when transitioning forward; it does NOT advance during fix-loop or revision routing back. |
+| `review_iterations` | `Dict[str, int]` | `{}` | Per-step review iteration counter, keyed by the **reviewed** step's `step_id`. Used by the CONFIRM step's LLM reviewer to bound iterations against `confirmation.steps.<step>.max_iterations`. |
+| `fix_iterations` | `int` | `0` | Global fix-loop counter shared by `test`, `self_check`, and `verify_spec`. Bounded by `workflow.max_fix_iterations` (see *verify_spec Unified Priority and Scope Mechanism*). |
+| `fix_history` | `List[Dict[str, Any]]` | `[]` | Append-only log of fix-loop iterations, capped at `FIX_HISTORY_MAX_ENTRIES` (see *Fix History Structure*). Each entry follows the schema documented under that Requirement. |
+
+**Step ID auto-generation:** `add_step(step)` SHALL auto-generate `step.step_id` when not already set, using the format `NN_steptype_uuid8` where `NN` is the 1-based sequence number derived from `len(step_history) + 1` and `uuid8` is the first eight hex characters of a fresh UUID (e.g. `01_analyze_844c2cf8`). The format is human-readable and sortable so on-disk history files (`se3/history/{flow_id}/{step_id}.jsonl`) order chronologically.
+
+**Helper API:**
+
+- `get_current_step() -> Optional[Step]` — returns the step pointed to by `current_step_id`, or `None`.
+- `add_step(step) -> None` — registers a step in `steps` and appends its ID to `step_history` (idempotent on history append).
+- `get_step_to_review(confirm_step_id) -> Optional[Step]` — given a CONFIRM step's ID, returns the immediately preceding step in `step_history` (the step under review). Returns `None` when the confirm step is not in history or has no predecessor.
+- `increment_review_iteration(step_id) -> int` / `get_review_iteration(step_id) -> int` — bump and read the per-step review counter (1-based; `get_*` returns `0` before the first increment).
+- `increment_fix_iteration(fix_context=None) -> int` — bump the global fix counter, append a `fix_history` entry containing `iteration`, `timestamp`, and any caller-supplied `fix_context` keys, apply the sliding-window cap, and mirror `fix_iterations`/`fix_history` into `context` so handlers can read them via the global context channel.
+- `get_fix_iteration() -> int` — read the current global fix counter (`0` before any increment).
+- `update_task_type(task_type) -> None` / `is_type_pending() -> bool` — record the LLM-resolved task type from `analyze` into `context["resolved_type"]`, and check whether resolution has happened yet. Used to distinguish CLI-provided task types (which arrive on `FlowInstance.task_type`) from the analyze step's classification.
+
+**Context mirroring on fix-iteration increment:** Whenever `increment_fix_iteration()` runs, the post-increment `fix_iterations` integer SHALL be written to `context["fix_iterations"]` and the (clamped) `fix_history` list SHALL be written to `context["fix_history"]`. `from_dict()` SHALL re-mirror the clamped `fix_history` into `context["fix_history"]` when that key is already present in the loaded context dict, so resumed flows do not carry a stale oversized copy.
+
+**Persistence:**
+
+- `to_dict()` SHALL serialize every field above. `selected_steps` is persisted as a list of `StepType.value` strings; `steps` is persisted as a `{step_id: step.to_dict()}` map.
+- `from_dict()` SHALL accept missing keys and substitute defaults (`get_current_step_id` → `None`, `step_history`/`steps`/`context`/`review_iterations` → empty containers, `fix_iterations` → `0`, `current_step_index` → `0`).
+- `from_dict()` SHALL apply the same tail-keep `FIX_HISTORY_MAX_ENTRIES` cap on load that `increment_fix_iteration()` applies on append, so engine.json files written by older builds (or builds with a larger cap) are clamped at deserialization time rather than only on the next increment.
+
+#### Scenario: Step IDs follow NN_steptype_uuid8 format
+- **WHEN** `State.add_step(step)` is called with a Step whose `step_id` is unset
+- **THEN** `step.step_id` is set to `f"{NN:02d}_{step.step_type.value}_{uuid8}"`, where `NN = len(step_history) + 1` (1-based) and `uuid8` is the first 8 hex characters of a fresh UUID
+- **AND** the step is registered in `steps` and its ID is appended to `step_history`
+
+#### Scenario: Review iteration counter is per-step
+- **GIVEN** two CONFIRM-reviewed steps with IDs `X` and `Y` in the same flow
+- **WHEN** `increment_review_iteration(X)` runs twice and `increment_review_iteration(Y)` runs once
+- **THEN** `get_review_iteration(X)` returns `2`, `get_review_iteration(Y)` returns `1`, and unrelated step IDs return `0`
+
+#### Scenario: Fix iteration increment mirrors into context
+- **WHEN** `increment_fix_iteration({"step_id": "...", "reason": "test_failure"})` runs
+- **THEN** the new entry appended to `fix_history` contains `iteration`, `timestamp`, and the caller-supplied fields
+- **AND** `context["fix_iterations"]` equals the post-increment counter
+- **AND** `context["fix_history"]` is the same (clamped) list as `state.fix_history`
+
+#### Scenario: Task type resolution is tracked via context
+- **GIVEN** a fresh `State` with no `resolved_type` in context
+- **WHEN** `is_type_pending()` is called
+- **THEN** it returns `True`
+- **WHEN** `update_task_type("feature")` runs and `is_type_pending()` is called again
+- **THEN** it returns `False` and `state.context["resolved_type"] == "feature"`
+
+#### Scenario: get_step_to_review returns the predecessor in history
+- **GIVEN** `step_history == ["X", "Y_confirm"]` where `Y_confirm` is a CONFIRM step
+- **WHEN** `get_step_to_review("Y_confirm")` is called
+- **THEN** it returns the `Step` object stored under ID `X`
+- **WHEN** `get_step_to_review("missing_id")` is called
+- **THEN** it returns `None` rather than raising
+
+#### Scenario: State round-trips through persistence
+- **GIVEN** a `State` populated with non-default values for every field above (including non-empty `review_iterations`, `fix_iterations`, `fix_history`, `context`, and `selected_steps`)
+- **WHEN** the state is serialized via `to_dict()` and reconstructed via `from_dict()`
+- **THEN** every field equals its original value (with `selected_steps` rehydrated from `.value` strings back to `StepType` enum members and `steps` rehydrated to `Step` instances)
+- **AND** an oversized `fix_history` in the persisted dict is clamped on load via the same tail-keep policy used by `increment_fix_iteration`
+
+### Requirement: Transition Data Model
+
+The `Transition` dataclass (`se3/engine/models.py`) SHALL describe a single step-to-step transition rule as a serializable record, exposed publicly via `se3.engine.__init__` alongside `Step`, `State`, and `FlowInstance` so external tooling (e.g. flow-graph inspectors, visualizers, persisted transition-history consumers) can read and write transition records without depending on the state machine's internal routing logic. The live `StateMachine` implements its forward / fix-loop / revision routing in code rather than by interpreting `Transition` instances at runtime; `Transition` exists as a data-model contract for serialization.
+
+**Field schema:**
+
+| Field | Type | Default | Purpose |
+|-------|------|---------|---------|
+| `from_step` | `StepType` | required | Source step of the transition. |
+| `to_step` | `StepType` | required | Destination step of the transition. |
+| `condition` | `str \| None` | `None` | Optional name of a conditional predicate gating the transition (e.g., a task-type label or guard name). When `None`, the transition is unconditional. |
+| `description` | `str` | `""` | Free-text description for documentation and visualization. |
+
+**Persistence:**
+
+- `Transition.to_dict()` SHALL serialize `from_step` / `to_step` as their `StepType.value` strings, and pass `condition` / `description` through verbatim.
+- `Transition.from_dict()` SHALL accept the same shape, substituting `None` for a missing `condition` and `""` for a missing `description`, and rehydrating the step fields via `StepType(value)`.
+
+#### Scenario: Transition round-trips through to_dict/from_dict
+- **GIVEN** a `Transition` populated with non-default values for `from_step`, `to_step`, `condition`, and `description`
+- **WHEN** the instance is serialized via `to_dict()` and reconstructed via `from_dict()`
+- **THEN** every field equals its original value, with `from_step` / `to_step` rehydrated as `StepType` enum members
+
+#### Scenario: Transition deserialization tolerates missing optional fields
+- **GIVEN** a dict containing only `from_step` and `to_step` values (no `condition`, no `description`)
+- **WHEN** `Transition.from_dict()` loads it
+- **THEN** `condition` defaults to `None` and `description` defaults to `""`
+- **AND** no exception is raised for the missing optional keys
+
 ## Architecture
 
 ### 核心组件
@@ -2561,13 +2850,13 @@ Warnings SHALL include the offending raw value (via `repr()`), the field name, a
 - flow_id: 唯一标识
 - task_description: 任务描述
 - task_type: 任务类型
-- status: 流程状态 (INIT, RUNNING, PAUSED, COMPLETED, FAILED)
+- status: 流程状态 (INIT, RUNNING, PAUSED, COMPLETED, FAILED, RECOVERING) — 详见 *Flow Status Lifecycle* requirement
 - state: 状态对象（当前步骤、步骤历史、已选步骤）
 
 **Step:**
 - step_id: 唯一标识
 - step_type: 步骤类型（16 种之一，包括 discovery、self_check、confirm 与 4 个 deprecated 步骤）
-- status: 步骤状态 (PENDING, RUNNING, COMPLETED, FAILED, RETRYING, PAUSED)
+- status: 步骤状态 (PENDING, RUNNING, COMPLETED, PARTIAL, FAILED, RETRYING, PAUSED, REVISION_NEEDED) — 详见 *Step Status Lifecycle* requirement
 - inputs: 输入字典
 - outputs: 输出字典（所有值必须是 JSON 可序列化的原始类型；枚举值存入前须转换为字符串 `.value`）
 - retry_count: 重试次数

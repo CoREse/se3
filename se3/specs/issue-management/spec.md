@@ -191,6 +191,11 @@ Issues are stored as YAML files under `<project_root>/se3/issues/`, split into `
 - **AND** the file is moved into `se3/issues/closed/` via `shutil.move`
 - **AND** on `OSError` during move the error is re-raised (unlike `update_status`, which swallows it)
 
+#### Scenario: Optional reason recorded in log
+- **WHEN** `close_issue(issue_id, reason)` is called with an optional `reason` string (defaulting to `""`)
+- **THEN** on a successful close-and-move, an info log line is emitted in the form `"Closed issue {id}: {reason}"`
+- **AND** the `reason` is not persisted to the issue's YAML file
+
 ### Requirement: YAML Persistence Format
 
 Issue files are written with `yaml.dump(..., default_flow_style=False, allow_unicode=True, sort_keys=False)` so fields appear in dataclass declaration order, unicode is preserved, and block style is used. Files are read and written as UTF-8.

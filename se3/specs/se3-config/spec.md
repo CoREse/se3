@@ -38,9 +38,31 @@ root for developer-local overrides.
   `se3 history`, `se3 salvage`) SHALL recognise a directory containing
   only `se3.local.yaml` as a valid SE3 project root, for parity with
   `se3.yaml`.
+- Project-root marker detection SHALL additionally recognise the
+  legacy filename `se3.config.yaml` as a project marker, in addition
+  to `se3.local.yaml` and `se3.yaml`. A directory containing only
+  `se3.config.yaml` is treated as a valid SE3 project root by
+  parent-walk detection. This marker is recognised only for
+  project-root identification — `se3.config.yaml` is NOT loaded as a
+  config source by the project-config lookup (which still consults
+  `se3.local.yaml` then `se3.yaml`). The marker check uses
+  `is_file()` semantics so a stray directory or dangling symlink at
+  one of these paths does NOT count as a marker.
 - Warning / deprecation log messages emitted while loading the project
   config SHALL reference the actual filename that was read
   (`se3.local.yaml` when it is present, otherwise `se3.yaml`).
+- When the framework attempts to read `se3.local.yaml` and the file
+  is unreadable or fails YAML parsing, the loader SHALL emit a
+  one-shot WARNING identifying the offending `se3.local.yaml` path
+  and the `se3.yaml` it is shadowing, and noting that project
+  configuration is falling back to built-in defaults until the local
+  file is fixed or removed. This warning fires only for
+  `se3.local.yaml` — a malformed `se3.yaml` does not trigger it,
+  since `se3.yaml` is not itself a silent override. Deduplication is
+  one-shot per `(process, resolved-path)`: a long-running process
+  (daemon, test session, IDE integration) that sees the same path
+  break, get fixed, and break again will NOT re-warn for the second
+  breakage; restarting the process is required for a fresh warning.
 
 **Worktree-aware four-tier lookup:**
 
@@ -165,6 +187,24 @@ would silently ignore the developer's main-repo override.
   `se3 salvage`) performs parent-walk project-root detection
 - **THEN** the directory is recognised as the SE3 project root
 
+#### Scenario: Project detected with only legacy se3.config.yaml
+- **GIVEN** a directory contains `se3.config.yaml` but neither
+  `se3.yaml` nor `se3.local.yaml`
+- **WHEN** any SE3 CLI command performs parent-walk project-root
+  detection
+- **THEN** the directory is recognised as the SE3 project root
+- **AND** the project-config lookup still resolves to the canonical
+  `se3.yaml` location (i.e. `se3.config.yaml` is not loaded as a
+  config source)
+
+#### Scenario: Directory-shaped marker is not treated as project root
+- **GIVEN** a directory contains an entry named `se3.yaml`,
+  `se3.local.yaml`, or `se3.config.yaml` that is itself a directory
+  or a dangling symlink rather than a regular file
+- **WHEN** parent-walk project-root detection inspects the directory
+- **THEN** the directory is NOT recognised as the SE3 project root
+- **AND** the walk continues toward the parent directory
+
 #### Scenario: se3.local.yaml is gitignored by se3 init
 - **WHEN** `se3 init` generates the project `.gitignore`
 - **THEN** the generated `.gitignore` contains an entry that ignores
@@ -224,6 +264,20 @@ would silently ignore the developer's main-repo override.
   the child environment so they reflect the project root, not the
   outer git context
 
+#### Scenario: Malformed se3.local.yaml emits one-shot shadow warning
+- **GIVEN** the project root contains both `se3.yaml` and a
+  `se3.local.yaml` that is unreadable or contains invalid YAML
+- **WHEN** the framework loads the project config
+- **THEN** a WARNING is logged identifying the `se3.local.yaml` path
+  and the `se3.yaml` it is shadowing, and noting that project
+  configuration is falling back to built-in defaults until the local
+  file is fixed or removed
+- **AND** a second load attempt within the same process for the same
+  resolved path does NOT re-emit the warning (one-shot dedup keyed by
+  resolved path)
+- **AND** a malformed `se3.yaml` (with no `se3.local.yaml` present)
+  does NOT trigger this warning
+
 #### Scenario: Loop iterations re-probe worktree identity
 - **GIVEN** SE3 is running in `--loop` mode and each iteration may
   create or remove a worktree
@@ -240,9 +294,33 @@ The system SHALL support version management configuration.
 - `enabled`: Whether automatic version bumping is enabled (default: true)
 - `version_file`: Path to version file (null = auto-detect)
 - `auto_bump`: Apply the LLM-suggested version automatically (default: true)
-- `confidence_threshold`: Require confirmation for low confidence (default: null)
+- `confidence_threshold`: Require confirmation for low confidence (default: null). Documented accepted values are `null` (no threshold — even "low" confidence is auto-confirmed), `"medium"` (require confirmation for "low" confidence), or `"high"` (require confirmation for "medium" or "low" confidence). The `VersionConfig` loader does NOT validate or normalize this value at load time: whatever the user writes is stored verbatim on the config object, with no warning or fail-fast for unknown strings, wrong types (e.g. integers, booleans, lists), or alternate casings. Downstream consumers are responsible for interpreting the stored value and for treating any value other than the three documented forms as a non-threshold (equivalent to `null`). Authors of `se3.yaml` SHOULD therefore use only the documented values, since typos like `"hi"` or `"HIGH"` will not be flagged at config load.
 - `script_path`: Custom version script path (null = use default `se3/scripts/version.py`)
 - `auto_generate_script`: Auto-generate a version script when none is found (default: true)
+- `prerelease_prefix`: Pre-release identifier prefix used when building pre-release version strings (default: `""` — no pre-release component).
+- `prerelease_number`: Numeric suffix paired with `prerelease_prefix` for pre-release version strings (default: `0`).
+- `templates`: Dict of named string templates used when rendering version-related artifacts. Built-in defaults:
+  - `readme_badge`: `"![Version](https://img.shields.io/badge/version-{version}-blue)"`
+  - `versions_entry`: `"## {version} - {date}\n\n{changes}\n"`
+  User-supplied entries are merged on top of the defaults (per-key replace; default keys remain in effect when not overridden).
+- `readme_enabled`: Whether the version bumper updates the project README with the rendered `readme_badge` template (default: `true`).
+- `readme_marker`: Marker string embedded in the README that anchors the version-badge replacement region (default: `"<!-- SE3-VERSION -->"`).
+- `versions_enabled`: Whether the version bumper maintains a `VERSIONS.md`-style history file (default: `true`).
+- `versions_file`: Path (relative to project root) of the version history file (default: `"VERSIONS.md"`).
+- `versions_header`: Header text written at the top of the version history file (default: `"# Version History\n\n"`).
+- `include_in_commit_message`: Whether the new version string is appended to the version-bump commit message (default: `true`).
+
+**Deprecated keys (accepted, ignored, warned):**
+
+The previous fields `bump_rules` and `smart_version_analysis` are
+removed; version decisions now flow through the `version_analyze`
+step's `suggested_version` (optionally guided by
+`se3/version-rules.md`). When either key is present under `version.`
+in `se3.yaml`, a deprecation warning is logged at `VersionConfig`
+load time and the value is ignored. One warning is emitted per
+deprecated key present, so a config that sets both `bump_rules` and
+`smart_version_analysis` produces two warnings. The framework does
+NOT translate these legacy keys into the new schema.
 
 The new version number is computed by the `version_analyze` step's
 `suggested_version` field (see the `se3-versioning` spec). The
@@ -256,6 +334,42 @@ file (see `se3-versioning` *Custom Version Rules File* requirement).
 - **GIVEN** se3.yaml has `version.enabled: false`
 - **WHEN** commit step executes
 - **THEN** no version bump is performed
+
+#### Scenario: User templates merge over defaults
+- **GIVEN** `version.templates: { readme_badge: "v{version}" }` in se3.yaml
+- **WHEN** `VersionConfig` is loaded
+- **THEN** the `readme_badge` template is the user-supplied string
+- **AND** the unspecified `versions_entry` retains its built-in default value
+
+#### Scenario: README and VERSIONS.md updates are independently toggleable
+- **GIVEN** `version.readme_enabled: false` and `version.versions_enabled: true`
+- **WHEN** the version bumper runs
+- **THEN** the README is not rewritten with the rendered `readme_badge` template
+- **AND** the `VERSIONS.md`-style history file at `version.versions_file` is still updated
+
+#### Scenario: Commit message inclusion is configurable
+- **GIVEN** `version.include_in_commit_message: false`
+- **WHEN** the commit step composes the version-bump commit message
+- **THEN** the new version string is NOT appended to the commit message
+
+#### Scenario: confidence_threshold accepts arbitrary values without validation
+- **GIVEN** `version.confidence_threshold` in se3.yaml is set to a
+  value outside the documented set, such as `"hi"`, `"HIGH"`, `42`,
+  `true`, or a list
+- **WHEN** the framework loads `VersionConfig`
+- **THEN** no `ConfigError` is raised and no warning is logged for
+  the unrecognised value
+- **AND** the raw user-supplied value is stored verbatim on the
+  config object
+- **AND** downstream consumers that compare against the documented
+  set (`null` / `"medium"` / `"high"`) treat the unrecognised value
+  as equivalent to `null` (no threshold)
+
+#### Scenario: Deprecated bump_rules / smart_version_analysis ignored with warning
+- **GIVEN** se3.yaml sets `version.bump_rules: …` and/or `version.smart_version_analysis: …`
+- **WHEN** `VersionConfig` is loaded
+- **THEN** a deprecation warning is logged for each deprecated key
+- **AND** the keys have no effect — version decisions are driven by `version_analyze`'s `suggested_version`
 
 ### Requirement: Confirmation Configuration
 
@@ -304,6 +418,29 @@ A string `reviewer` value other than `"human"` MUST resolve to an entry
 in the agent registry. Unknown names produce a startup-time error (see
 Agent Registry requirement for the error-message format; the reference
 location is `confirmation.steps.<step>.reviewer`).
+
+**Step-entry shape validation:**
+
+Each `confirmation.steps.<step>` entry MUST be either `null` (treated
+as an empty `{}`) or a mapping containing only the supported keys
+`reviewer` and `max_iterations`.
+
+- A non-mapping, non-`null` value (e.g. a list, a bare string, a
+  number) is structurally invalid: a WARNING is logged identifying the
+  source, the step name, and the offending type, and the entry is
+  dropped — the step is treated as if it were not listed under
+  `confirmation.steps`.
+- Unknown keys other than `reviewer` and `max_iterations` (for example
+  `enabled`, `model`, typos like `reviewers`) are NOT a fatal error.
+  A WARNING is logged once per `(source, step, sorted-extra-keys)`
+  combination, naming the unknown fields and noting that only
+  `reviewer` and `max_iterations` are supported. The unknown fields
+  are then ignored — the rest of the entry (its valid `reviewer` /
+  `max_iterations` values) is parsed normally.
+- An empty mapping `{}` and `null` are both valid: they leave
+  `reviewer` and `max_iterations` unset and the step falls back to
+  `llm_caller.defaults` for the chain and the built-in default for
+  the iteration cap.
 
 **Global + project merge:**
 
@@ -369,6 +506,24 @@ both pathways converge on the same mechanism.
 - **WHEN** the CONFIRM step executes
 - **THEN** `max_iterations` has no effect — the human MCP call pathway
   waits on the user with no iteration cap
+
+#### Scenario: Unknown fields in a step entry warn and are ignored
+- **GIVEN** `confirmation.steps.plan: { reviewer: human, enabled: true, model: opus }`
+- **WHEN** the framework loads confirmation config
+- **THEN** a WARNING is logged once for the `(source, plan, [enabled, model])`
+  combination naming the unknown fields
+- **AND** the entry is still applied — `plan` is confirmed with
+  `reviewer: human`; the unknown `enabled` and `model` fields have
+  no effect
+
+#### Scenario: Non-mapping step entry warns and is dropped
+- **GIVEN** `confirmation.steps.plan: [reviewer, human]` (a list,
+  bare string, or other non-mapping non-`null` value)
+- **WHEN** the framework loads confirmation config
+- **THEN** a WARNING is logged identifying the source, step name, and
+  the offending type
+- **AND** `plan` is treated as if it were not listed under
+  `confirmation.steps` — no CONFIRM step is inserted after `plan`
 
 #### Scenario: Unknown reviewer name fails fast
 - **GIVEN** `confirmation.steps.plan: { reviewer: ghost }` and `ghost`
@@ -441,7 +596,7 @@ both pathways converge on the same mechanism.
 The system SHALL support configuring merge conflict resolution strategy for loop branch merges.
 
 **Conflict resolver section options:**
-- `conflict_resolver.strategy`: Resolution strategy (default: `"human"`)
+- `conflict_resolver.strategy`: Resolution strategy (default: `"human"`). Any value other than `"human"` or `"llm"` is silently coerced to `"human"` at load time with no warning or error.
   - `"human"`: Preserve conflict state in working tree, create a call file at `se3/calls/merge_conflict_{timestamp}.json` with conflict details, and return `pending_human` to the caller. The user resolves conflicts manually.
   - `"llm"`: Attempt per-file LLM-based conflict resolution. Each conflicting file is sent to the LLM for resolution. If all files are resolved successfully, the merge completes automatically. If any file fails (LLM output still contains conflict markers), falls back to `"human"` mode.
 
@@ -463,7 +618,13 @@ The system SHALL support configuration of the `se3 merge` command via a top-leve
 **Merge section options:**
 - `merge.strategy`: Default conflict-resolution tier for `se3 merge` (default: `"fast"`). Allowed values: `"fast"`, `"safe"`, `"strict"`. The CLI flag `--strategy` overrides this value for a single invocation. The previous values `"default"` and `"robust"` have been removed without silent aliasing: providing them at config load SHALL raise a `ConfigError` whose message points at the replacement (`safe` replaces `default`; `fast` replaces `robust`).
 - `merge.delete_merged_default`: Whether `se3 merge` defaults to deleting merged branches and archiving their bound worktrees under `.se3/archive/` (default: `true`). The CLI flags `--delete-merged` / `--no-delete-merged` override this value for a single invocation.
-- `merge.max_conflict_resolve_iterations`: Maximum number of batched LLM-as-editor rounds the conflict resolver performs per `git merge` invocation before applying the active strategy's cap-exhaustion policy (default: `10`). MUST be a positive integer (`>= 1`); non-positive values trigger a fail-fast `ConfigError` at config load. Non-integer / non-numeric values trigger a WARNING and fall back to the default `10`. The strategy decides what happens on cap exhaustion: `fast` exits with a failure, `safe` escalates to a human MCP call, `strict` never enters the loop in the first place. There is no separate `merge.conflict_resolver` subtree — conflict-resolution behavior is fully determined by `merge.strategy` and this iteration cap.
+- `merge.max_conflict_resolve_iterations`: Maximum number of batched LLM-as-editor rounds the conflict resolver performs per `git merge` invocation before applying the active strategy's cap-exhaustion policy (default: `10`). MUST resolve to a positive integer (`>= 1`) after coercion. The loader passes the raw value through Python's `int(...)` and only catches `TypeError` / `ValueError`:
+  - **Values `int(...)` rejects** — strings that do not parse as integers, lists, dicts, and similar non-numeric types — do NOT fail fast. The loader emits a WARNING identifying the offending value and falls back to the built-in default `10`. The rationale is that a clearly-invalid type is a likely typo where the safest action is to keep `se3 merge` working with sane defaults.
+  - **Values `int(...)` silently coerces** are accepted as the coerced integer and then run through the `>= 1` check with no warning of their own:
+    - Floats such as `2.5` are truncated (`int(2.5) == 2`) and used as-is.
+    - Booleans are coerced via Python's `bool` ⊂ `int` rule: `True` becomes `1` (accepted), `False` becomes `0` which then trips the `>= 1` check and raises a fail-fast `ConfigError`.
+  - Non-positive integer values produced by coercion (literal `0`, `-1`, `False`, etc.) trigger a fail-fast `ConfigError` at config load — a structurally valid but semantically wrong choice is rejected loudly.
+  The strategy decides what happens on cap exhaustion: `fast` exits with a failure, `safe` escalates to a human MCP call, `strict` never enters the loop in the first place. There is no separate `merge.conflict_resolver` subtree — conflict-resolution behavior is fully determined by `merge.strategy` and this iteration cap.
 - `merge.strict_runtime_sync`: Whether `se3 merge` treats a tier A runtime sync collision as a fatal error that halts the merge sequence (default: `false`). When `true`, the old strict behavior is preserved: a collision raises `runtime_sync_collision` and stops the sequence. When `false` (default), collisions are bypassed by writing the source version to a sidecar file (`<dest>.from-<branch>`) and the sequence continues. Accepts boolean values and common string forms (`"true"`, `"false"`, `"1"`, `"0"`, `"yes"`, `"no"`); unrecognized strings fall back to the default `false`.
 
 **Orthogonality with `conflict_resolver.strategy`:**
@@ -511,6 +672,39 @@ merge:
 - **THEN** a `ConfigError` is raised before any `se3 merge` invocation runs
 - **AND** the error message identifies the offending key and value
 
+#### Scenario: max_conflict_resolve_iterations non-coercible value warns and falls back
+- **GIVEN** `merge.max_conflict_resolve_iterations` in se3.yaml is set
+  to a value that Python's `int(...)` rejects with `TypeError` or
+  `ValueError` — for example a non-numeric string like `"ten"`, a
+  list, or a dict
+- **WHEN** the framework loads `MergeConfig`
+- **THEN** no `ConfigError` is raised
+- **AND** a WARNING is logged identifying the offending value and the
+  expected type (positive integer)
+- **AND** the effective `max_conflict_resolve_iterations` is the built-in
+  default `10`
+- **AND** subsequent `se3 merge` invocations use the default cap
+
+#### Scenario: max_conflict_resolve_iterations float value silently truncates
+- **GIVEN** `merge.max_conflict_resolve_iterations: 2.5` in se3.yaml
+- **WHEN** the framework loads `MergeConfig`
+- **THEN** no `ConfigError` is raised and no warning is logged for the
+  type — `int(2.5)` truncates the value to `2`
+- **AND** the effective `max_conflict_resolve_iterations` is `2`
+- **AND** a float that truncates to a non-positive integer (e.g.
+  `0.5` → `0`, `-1.2` → `-1`) is rejected fail-fast by the `>= 1`
+  check, just like a literal `0` or `-1`
+
+#### Scenario: max_conflict_resolve_iterations boolean value coerces to int
+- **GIVEN** `merge.max_conflict_resolve_iterations` in se3.yaml is set
+  to a boolean
+- **WHEN** the framework loads `MergeConfig`
+- **THEN** `True` is coerced to `1` and accepted (no warning, no
+  fail-fast)
+- **AND** `False` is coerced to `0`, which trips the `>= 1` check and
+  raises a fail-fast `ConfigError` — the loader does NOT warn-and-default
+  for `False`
+
 #### Scenario: Independence from conflict_resolver.strategy
 - **GIVEN** `conflict_resolver.strategy: "llm"` and no `merge` section
 - **WHEN** the user runs `se3 merge feat/x`
@@ -537,7 +731,13 @@ merge:
 The system SHALL support configuration for the implement step's execution strategy.
 
 **Implement section options:**
-- `implement.group_loc_threshold`: Total estimated LOC threshold below which all task groups are collapsed into a single LLM call (default: 300). When the sum of `estimated_loc` across all tasks in all groups is at or below this threshold, the implement step merges all groups into one call instead of executing them as separate DAG-parallel groups.
+- `implement.group_loc_threshold`: Total estimated LOC threshold below which all task groups are collapsed into a single LLM call (default: 300). When the sum of `estimated_loc` across all tasks in all groups is at or below this threshold, the implement step merges all groups into one call instead of executing them as separate DAG-parallel groups. The loader passes the raw value through Python's `int(...)` without a surrounding `try/except`, so coercion behavior is whatever `int(...)` natively provides:
+  - **Values `int(...)` rejects** — non-numeric strings, lists, dicts, and similar non-coercible types — propagate the underlying `TypeError` / `ValueError` out of `ImplementConfig.from_dict` and abort config load. There is no clamp-and-warn fallback for this field (unlike `merge.max_conflict_resolve_iterations`, which warns-and-defaults on the same input shapes).
+  - **Values `int(...)` silently coerces** are accepted as the coerced integer with no further validation:
+    - Floats are truncated (`int(2.5) == 2`, `int(-1.7) == -1`) and used as-is.
+    - Booleans are coerced via Python's `bool` ⊂ `int` rule: `True` becomes `1`, `False` becomes `0`.
+    - Numeric strings (e.g. `"500"`) are parsed as their integer value.
+  - Non-positive and negative results (zero, negative integers, `False` → `0`) are NOT rejected — the field has no `>= 1` floor at load time. Authors of `se3.yaml` SHOULD therefore supply a positive integer; surprising values such as `0`, `-5`, or `True` are stored verbatim and may cause unintended collapse / no-collapse behavior downstream.
 - `implement.use_worktree`: Boolean gate for the DAG parallel path's per-group worktree creation (default: `true`). When `false`, the implement step never creates `impl/*` branches or per-group worktrees and executes all groups sequentially on the original branch, regardless of DAG topology. This is the `implement`-step-scoped setting and is orthogonal to the loop mode `--no-worktree` CLI flag, which controls a different layer (whether the whole loop iteration runs in an isolated worktree). Accepts boolean values and common string forms (`"true"`, `"false"`, `"1"`, `"0"`, `"yes"`, `"no"`); unrecognized strings fall back to the default `true`.
 - Environment variable `SE3_IMPLEMENT_USE_WORKTREE`: Overrides `implement.use_worktree` from the environment (useful for CI or one-off runs). Accepts the same string forms as the config value. Takes precedence over `se3.yaml`.
 
@@ -557,6 +757,31 @@ implement:
 - **GIVEN** `implement.group_loc_threshold: 500` in se3.yaml
 - **WHEN** `plan` produces groups with total estimated_loc = 400
 - **THEN** the implement step collapses all groups into a single LLM call
+
+#### Scenario: Non-int-convertible group_loc_threshold aborts config load
+- **GIVEN** `implement.group_loc_threshold` in se3.yaml is set to a
+  value that Python's `int(...)` rejects with `TypeError` or
+  `ValueError` — for example a non-numeric string like `"big"`, a
+  list, or a dict
+- **WHEN** `ImplementConfig.from_dict` parses the value
+- **THEN** the underlying `TypeError` / `ValueError` is NOT caught and
+  propagates out of `from_dict`, aborting config load
+- **AND** no warning is logged and no fallback to the built-in default
+  `300` occurs (this field has no clamp-and-warn safety net)
+
+#### Scenario: Float group_loc_threshold silently truncates
+- **GIVEN** `implement.group_loc_threshold: 299.9` in se3.yaml
+- **WHEN** `ImplementConfig.from_dict` parses the value
+- **THEN** the value is truncated via `int(299.9) == 299` and used as-is
+- **AND** no warning is logged
+
+#### Scenario: Boolean group_loc_threshold coerces to int without validation
+- **GIVEN** `implement.group_loc_threshold: true` in se3.yaml
+- **WHEN** `ImplementConfig.from_dict` parses the value
+- **THEN** `True` is coerced to `1` via Python's `bool` ⊂ `int` rule
+  and stored verbatim
+- **AND** no warning is logged and no `>= 1` floor check is applied
+  (a `False` value would similarly be stored as `0` rather than rejected)
 
 #### Scenario: Disable worktree via se3.yaml
 - **GIVEN** `implement.use_worktree: false` in se3.yaml
@@ -790,6 +1015,37 @@ project configs, `agents` is merged **entry-level by name**: a project
 entry overrides a global entry with the same name; non-conflicting
 entries coexist.
 
+**String shorthand for AgentDef values:**
+
+In addition to the full `AgentDef` dict form, each entry in the
+`agents` dict MAY be written as a bare string. When the value is a
+string, it is treated as shorthand for an `AgentDef` whose `cmd`
+field is the string and whose other fields take the standard
+defaults:
+
+- `type`: `"claude-code"`
+- `cmd`: the string value itself
+- `priority`: `0`
+
+This shorthand is useful for the common case where the agent name is
+descriptive and only the CLI command needs to be specified. Mixing
+shorthand and full-dict forms within the same `agents` dict is
+permitted — each entry is parsed independently.
+
+Example:
+```yaml
+agents:
+  primary: claude                                                  # shorthand
+  opus:    { type: claude-code, cmd: claude-opus, priority: 20 }   # full form
+```
+
+The shorthand resolves to:
+```yaml
+agents:
+  primary: { type: claude-code, cmd: claude,      priority: 0 }
+  opus:    { type: claude-code, cmd: claude-opus, priority: 20 }
+```
+
 **Example:**
 ```yaml
 agents:
@@ -831,6 +1087,25 @@ value is not looked up in the registry.
 - **THEN** each entry is parsed into an `AgentDef` with the given
   `type`, `cmd`, and `priority`
 - **AND** the name is taken from the dict key
+
+#### Scenario: String shorthand expands to AgentDef with defaults
+- **GIVEN** `agents.primary: "claude"` in se3.yaml (a bare string value
+  rather than a dict)
+- **WHEN** the framework loads the agent registry
+- **THEN** the entry is parsed into an `AgentDef` whose `cmd` is
+  `"claude"`, `type` is `"claude-code"`, and `priority` is `0`
+- **AND** the name `primary` is taken from the dict key
+- **AND** the entry can be referenced by name from `llm_caller.defaults`,
+  `llm_caller.steps.<step>`, and `confirmation.steps.<step>.reviewer`
+  exactly like a full-dict entry
+
+#### Scenario: Mixed shorthand and full-dict forms coexist
+- **GIVEN** `agents` contains both a string-shorthand entry and a
+  full-dict entry (e.g. `primary: claude` and
+  `opus: { type: claude-code, cmd: claude-opus, priority: 20 }`)
+- **WHEN** the framework loads the agent registry
+- **THEN** both entries are registered with their respective fields
+- **AND** each entry is parsed independently of the other
 
 #### Scenario: Top-level list form is ignored with warning
 - **WHEN** `agents` is a list at the top level
@@ -928,6 +1203,19 @@ Any name in `llm_caller.defaults` or `llm_caller.steps.<step>` that is
 absent from the agent registry is a startup-time error (see the Agent
 Registry requirement for the error-message format).
 
+**Typo detection on `llm_caller.steps` keys:**
+
+When `llm_caller.steps` contains a key that is not a valid `StepType`
+value (i.e. it does not match any executable step name), the framework
+SHALL log a WARNING identifying the source and the offending key(s),
+noting that the declaration is likely a typo and that those entries
+will be ignored. This warning is idempotent per
+`(source, sorted-unknown-keys)` combination, so it is emitted at most
+once per unique typo set even when the agent-resolution path is invoked
+many times per flow. Unknown step keys are NOT a startup-time error —
+they are dropped silently after the warning and the rest of
+`llm_caller.steps` is parsed normally.
+
 **Example configuration:**
 ```yaml
 agents:
@@ -1016,6 +1304,20 @@ llm_caller:
 - **AND** the error message names the reference location
   (`llm_caller.steps.implement`) and lists registered agent names
 
+#### Scenario: Unknown step key in llm_caller.steps warns once and is ignored
+- **GIVEN** `llm_caller.steps` declares a key that is not a valid
+  `StepType` value (e.g. `implemnt` — a typo of `implement`)
+- **WHEN** the framework resolves per-step agents
+- **THEN** a WARNING is logged identifying the source and the unknown
+  key(s), noting that the declaration is likely a typo and will be
+  ignored
+- **AND** the warning is emitted at most once per
+  `(source, sorted-unknown-keys)` combination even if agent resolution
+  runs many times during the flow
+- **AND** no startup-time configuration error is raised — the unknown
+  entries are silently dropped while valid `llm_caller.steps` entries
+  continue to be parsed normally
+
 #### Scenario: Global defaults replaced by project
 - **GIVEN** global config declares `llm_caller.defaults: [g1, g2]`
 - **AND** project config declares `llm_caller.defaults: [p1]`
@@ -1027,6 +1329,63 @@ llm_caller:
 - **AND** project config declares `llm_caller.steps.implement: [c]`
 - **WHEN** the implement step runs in the project
 - **THEN** the chain is exactly `[c]` — the global list is not merged
+
+### Requirement: Step Sequence Configuration
+
+The system SHALL support appending optional step types to the default step sequence via a top-level `steps` section in `se3.yaml` (or `se3.local.yaml`).
+
+**Purpose:** Some step types (for example `summarize`) are not part of the default executed step sequence but can be opted into per project. The `steps.append` list lets a project add those steps to the end of the sequence without otherwise changing flow ordering.
+
+**Schema:**
+
+```yaml
+steps:
+  append:
+    - summarize
+```
+
+**Semantics:**
+
+- `steps.append` is a list of step-type names. Each name is validated against the framework's `StepType` enum at load time; unknown names are silently ignored (no startup error).
+- Each valid name is appended to the **end** of the existing step sequence, in the order declared.
+- Names already present in the existing sequence are skipped (no duplication); the existing position of the step is preserved.
+- When the `steps` key is absent, is not a dict, or `steps.append` is absent or not a list, the configuration loader returns an empty append list and the step sequence is unchanged.
+- The configuration honors the same project-config lookup rules as the rest of `se3.yaml` (including `se3.local.yaml` precedence and the worktree four-tier lookup).
+
+**Example configuration:**
+```yaml
+steps:
+  append:
+    - summarize
+```
+
+#### Scenario: Default sequence when steps section absent
+- **WHEN** no `steps` section exists in se3.yaml
+- **THEN** the framework runs the default step sequence with no additions
+
+#### Scenario: Append a valid step type
+- **GIVEN** `steps.append: [summarize]` in se3.yaml
+- **AND** `summarize` is a valid `StepType` not already present in the default sequence
+- **WHEN** the framework builds the step sequence for a flow
+- **THEN** `summarize` is appended to the end of the sequence
+
+#### Scenario: Duplicate name in append is ignored
+- **GIVEN** `steps.append: [<step>]` where `<step>` is already present in the default sequence
+- **WHEN** the framework builds the step sequence
+- **THEN** the existing occurrence is preserved
+- **AND** no second copy is appended
+
+#### Scenario: Unknown step name silently ignored
+- **GIVEN** `steps.append: [not_a_real_step]`
+- **WHEN** the framework builds the step sequence
+- **THEN** the unknown name is dropped without raising
+- **AND** other valid names in the same list are still appended
+
+#### Scenario: Malformed steps section is treated as empty
+- **GIVEN** `steps` is not a dict, or `steps.append` is not a list
+- **WHEN** the framework loads the step configuration
+- **THEN** the append list is treated as empty
+- **AND** the step sequence is unchanged
 
 ### Requirement: Spec Loading Configuration
 

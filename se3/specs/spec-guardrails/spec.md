@@ -70,11 +70,6 @@ The system SHALL enforce guardrails through automated checks.
 - **THEN** it compares the spec against the git HEAD version
 - **AND** reports any violations of the guardrails
 
-#### Scenario: Pre-archive check
-- **WHEN** a change is about to be archived
-- **THEN** the system checks for spec drift in `se3/specs/` (with `openspec/specs/` honored as a legacy fallback location)
-- **AND** blocks archiving if violations are found
-
 #### Scenario: Mandatory guardrails after every `se3 merge` commit
 - **GIVEN** a `se3 merge <branch>` invocation produces a merge commit that touches one or more `se3/specs/**/spec.md` files (whether or not those files had textual conflicts)
 - **WHEN** the merge product is evaluated
@@ -366,13 +361,14 @@ In addition to spec-content checks, the guardrails system SHALL validate the **g
 **No-op handling and opt-out:**
 
 - The orchestrator normally filters out the `ours_before_sha == merge_commit_sha` no-op case before invoking the topology check.
+- **Equal-SHA contract violation under enforcement.** When the caller nonetheless invokes `check_merge_result` with `enforce_topology=True` AND `ours_before_sha == merge_commit_sha`, the system SHALL NOT silently treat the equal-SHA case as a passing topology (an empty diff between equal SHAs would otherwise yield `passed=True`). Instead it SHALL emit a `CHECK_FAILURE` topology violation with `topology_check="equal_sha"` so that a caller that accidentally passed the pre-merge SHA twice — or otherwise failed to provide a real post-merge SHA — sees the inconsistency rather than receiving a false green light. In this branch the standard ancestry and parent-count sub-checks SHALL be skipped (they are redundant against equal SHAs). The legitimate no-op path is expected to be filtered BEFORE invoking `check_merge_result`; reaching the check with equal SHAs and topology enforcement on is treated as a contract violation by the caller.
 - Test harnesses that want to exercise only the spec-diff content checks (without setting up a real merge commit) MAY pass `enforce_topology=False` to `check_merge_result` to skip the topology assertions. Production callers SHOULD leave topology enforcement enabled.
 
 **Violation reporting:**
 
 - Topology violations are reported as `CHECK_FAILURE` violations with `file_path="N/A"` (since they describe the commit graph, not a specific file).
-- The violation's structured evidence SHALL include the relevant SHAs, parent count, `min_parents`, `max_fixup_depth` (when applicable), and a `topology_check` discriminator identifying the failing sub-check (`"ancestry"`, `"parent_count"`, or `"parent_count_with_fixup"`).
-- When the git tooling itself fails (e.g., `git merge-base --is-ancestor` or `git rev-list --parents` cannot be executed), the system SHALL emit a `CHECK_FAILURE` violation describing which git invocation failed; it MUST NOT silently treat a tooling failure as a passing topology check.
+- The violation's structured evidence SHALL include the relevant SHAs, parent count, `min_parents`, `max_fixup_depth` (when applicable), and a `topology_check` discriminator identifying the failing sub-check (`"ancestry"`, `"parent_count"`, `"parent_count_with_fixup"`, or `"equal_sha"`).
+- When the git tooling itself fails (e.g., `git merge-base --is-ancestor` or `git rev-list --parents` cannot be executed), the system SHALL emit a `CHECK_FAILURE` violation describing which git invocation failed; it MUST NOT silently treat a tooling failure as a passing topology check. The `CHECK_FAILURE` violation's evidence MAY additionally include `exception_type` and `exception_msg` (the same fields documented under "Guardrail Violation Reporting") so reviewers can see the underlying git tooling exception class and message inline. Note that `CHECK_FAILURE` (used for topology and git-tooling failures) is a distinct violation type from `CHECK_INCOMPLETE` (used for spec-file read failures and changed-file enumeration failures); both may carry `exception_type` / `exception_msg` evidence, but they describe different failure modes and SHALL NOT be conflated by consumers.
 
 #### Scenario: Lost merge commit is caught by ancestry check
 - **GIVEN** a merge was created and then `git reset --soft HEAD~1` discarded the merge commit, leaving the new HEAD on a commit that is no longer a descendant of `ours_before_sha`
@@ -414,6 +410,16 @@ In addition to spec-content checks, the guardrails system SHALL validate the **g
 - **WHEN** the topology check runs
 - **THEN** the system emits a `CHECK_FAILURE` violation describing the failing git command and the exception or stderr text
 - **AND** the check does NOT report a passing topology — a tooling failure is treated as an inconclusive result, not a success
+
+#### Scenario: Equal pre/post SHAs under topology enforcement are rejected, not silently passed
+- **GIVEN** a caller invokes `check_merge_result(ours_before_sha, merge_commit_sha)` with `enforce_topology=True`
+- **AND** `ours_before_sha == merge_commit_sha` (the caller accidentally passed the pre-merge SHA twice, or otherwise failed to supply a real post-merge SHA)
+- **WHEN** the topology check runs
+- **THEN** the system SHALL NOT silently treat the equal-SHA case as a passing topology (an empty diff would otherwise yield `passed=True`)
+- **AND** it emits a `CHECK_FAILURE` topology violation with `topology_check="equal_sha"` and `file_path="N/A"`
+- **AND** the violation's evidence includes `pre_sha` and `post_sha` (which are equal)
+- **AND** the standard ancestry and parent-count sub-checks are skipped for this branch (they are redundant against equal SHAs)
+- **AND** the report's `passed` flag is `False`, surfacing the caller-side contract violation rather than masking it
 
 ### Requirement: Post-Update Spec Index Rebuild and New-Spec Verification
 
@@ -500,6 +506,24 @@ After the `update_spec` step writes spec changes to disk, the system SHALL rebui
 - **AND** the step still returns `StepStatus.COMPLETED`
 - **AND** the spec changes already written to disk are NOT rolled back
 
+### Requirement: Deprecated `check()` Backward-Compatibility Wrapper
+
+The `MergeGuardrailsCheck` class SHALL expose a deprecated `check(ours_before_sha, merge_commit_sha)` method that forwards directly to `check_merge_result(ours_before_sha, merge_commit_sha)` with default arguments (topology enforcement enabled, `max_fixup_depth=0`). This wrapper exists solely to preserve backward compatibility with older callers that invoked `check()` before `check_merge_result` was introduced as the canonical entry point.
+
+**Wrapper contract:**
+
+1. The `check()` method SHALL accept the same two positional arguments — `ours_before_sha` and `merge_commit_sha` — as `check_merge_result`'s required positional parameters.
+2. The wrapper SHALL return the same `GuardrailReport` that `check_merge_result` would return for the same inputs under default options.
+3. The wrapper SHALL be marked deprecated in its docstring; new code SHALL prefer `check_merge_result` directly so it can opt into `enforce_topology` / `topology_max_fixup_depth` controls.
+4. The wrapper SHALL NOT duplicate any check logic — it forwards unconditionally to `check_merge_result` so the two entry points cannot drift apart.
+
+#### Scenario: Legacy `check()` call forwards to `check_merge_result`
+- **GIVEN** a legacy caller invokes `MergeGuardrailsCheck(project_root).check(pre_sha, post_sha)`
+- **WHEN** the wrapper runs
+- **THEN** it returns the same `GuardrailReport` that `check_merge_result(pre_sha, post_sha)` would return
+- **AND** topology enforcement is applied with the default `max_fixup_depth=0`
+- **AND** the wrapper does not implement any independent check logic
+
 ### Requirement: New Spec vs Append Criteria
 
 Before adding a new Requirement to an existing spec, the agent SHALL explicitly evaluate whether the content should instead become a new spec. This decision is made during the `update_spec` step and SHALL be recorded in a structured `spec_decisions` output.
@@ -522,6 +546,25 @@ Before adding a new Requirement to an existing spec, the agent SHALL explicitly 
 - The `update_spec` step prompt SHALL include these four criteria explicitly.
 - The LLM SHALL output a `spec_decisions` array where each entry documents the decision for every new Requirement.
 - The default spec loading mode for `update_spec` is `full_spec` so that the LLM can see all existing spec names and avoid naming collisions.
+
+**`spec_decisions` entry schema:**
+
+Each entry in the `spec_decisions` array SHALL be a JSON object with the following fields:
+
+1. `requirement_name` (string, required) — The human-readable name of the new Requirement being placed (e.g., `"Step Retry Backoff Strategy"`). This lets downstream consumers correlate the decision back to the actual Requirement heading written into the spec.
+2. `decision` (string, required) — One of `"append"` or `"new_spec"`, indicating which branch of the decision rule was taken.
+3. `target_spec` (string, required) — The kebab-case spec directory name under `se3/specs/` where the Requirement was placed. For `append`, this is the name of the existing spec; for `new_spec`, this is the name of the newly created spec directory.
+4. `reasoning` (string, required) — A brief human-readable justification that references which of the four criteria (Conceptual Independence, Dependency Direction, Naming Test, Cross-Scenario Reusability) passed or failed and why the chosen decision follows. The reasoning text supports auditing the LLM's decision without re-running the step.
+
+The `spec_decisions` array SHALL be present in the `update_spec` JSON output whenever a new Requirement is added. If only existing Requirements were modified, the array SHALL be empty. If no spec updates are needed at all, both `specs_updated` and `spec_decisions` SHALL be empty arrays.
+
+#### Scenario: `spec_decisions` entry carries requirement name and reasoning
+- **GIVEN** the `update_spec` step has added a new Requirement to an existing spec
+- **WHEN** the step emits its JSON summary
+- **THEN** the corresponding `spec_decisions` entry contains `requirement_name`, `decision`, `target_spec`, AND `reasoning` fields
+- **AND** `requirement_name` matches the heading text of the new Requirement as written into the spec file
+- **AND** `reasoning` explicitly references which of the four criteria passed or failed to justify the chosen `decision`
+- **AND** downstream consumers can audit the decision from the JSON alone without re-reading the spec or re-running the LLM
 
 #### Scenario: Typical append — related requirement in same domain
 - **GIVEN** the `flow-engine` spec already contains Requirements about step execution and state transitions

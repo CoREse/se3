@@ -361,24 +361,19 @@ The system SHALL record origin and mode metadata directly on the flow instance s
 **Persisted Fields:**
 - `source_issue_id` — Optional issue identifier; set when the flow was started via `--from-issue` and used to link the flow back to the originating issue throughout its lifecycle.
 - `is_loop_mode` — Boolean flag indicating whether this flow instance is executing as part of a `--loop` run.
-- `loop_branch` — The dedicated `se3-loop/*` branch name created for the loop run (when branch isolation is active).
-- `loop_worktree_path` — The filesystem path of the isolated loop worktree (when branch isolation is active).
-- `loop_original_branch` — The branch the user was on when the loop started, recorded so loop changes can be merged back.
 
 **Behavior:**
 - These fields are persisted as part of the flow instance state (e.g. in `se3/state/engine.json`) and survive interruption and resume.
-- `source_issue_id`, `is_loop_mode`, and the loop-related fields are independent of the optional task source markers in [[Task Source Tracking]]; they provide authoritative, machine-readable origin/mode metadata rather than analytics hints.
-- When `--no-worktree` is used or worktree setup falls back, `loop_branch`, `loop_worktree_path`, and `loop_original_branch` MAY remain unset while `is_loop_mode` is still `True`.
+- `source_issue_id` and `is_loop_mode` are independent of the optional task source markers in [[Task Source Tracking]]; they provide authoritative, machine-readable origin/mode metadata rather than analytics hints.
 
 #### Scenario: Issue-sourced flow records source_issue_id
 - **GIVEN** a flow is started via `se3 run --from-issue ISSUE-123`
 - **THEN** the persisted flow instance has `source_issue_id` set to `ISSUE-123`
 - **AND** the value remains set across interrupt and resume
 
-#### Scenario: Loop flow records loop metadata
-- **GIVEN** a flow is started via `se3 run --loop "Task"` with default isolation
+#### Scenario: Loop flow records loop mode flag
+- **GIVEN** a flow is started via `se3 run --loop "Task"`
 - **THEN** the persisted flow instance has `is_loop_mode` set to `True`
-- **AND** records the `loop_branch`, `loop_worktree_path`, and `loop_original_branch` for the run
 
 ### Requirement: User Interjections During Step Execution
 

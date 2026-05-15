@@ -19,6 +19,9 @@ se3 run "Implement feature X"
 # Resume interrupted flow
 se3 run --resume
 
+# Resume a specific flow by ID
+se3 run --flow-id <flow-id>
+
 # Loop mode (continuous execution)
 se3 run --loop
 
@@ -27,7 +30,34 @@ se3 run "Fix bug" --type=bugfix
 
 # Discovery mode
 se3 run --discover "I want to build..."
+
+# Run flow from an existing issue (interactive selection or by ID)
+se3 run --from-issue ""
+se3 run --from-issue <issue-id>
+
+# Attach a named "change" label to the flow
+se3 run "Implement feature X" --change feature-x
+se3 run "Implement feature X" -c feature-x
 ```
+
+**Top-level options:**
+| Option | Default | Behavior |
+|--------|---------|----------|
+| `--type, -t` | `feature` | Task type (see Task Types table). |
+| `--flow-id` | none | Resume a specific flow by its ID, independent of the generic `--resume` interactive selector. When supplied, the command loads the named flow and resumes it directly without prompting; when both `--flow-id` and `--resume` are given, `--flow-id` takes precedence and the interactive selector is skipped. When `--flow-id` is supplied alone (without `--resume`) the behavior is identical to `--resume --flow-id <id>` — resume of the named flow is implied. |
+| `--change, -c` | none | Optional human-readable change name attached to the new flow. The change name is recorded on the flow record (`change_name`) at creation time and displayed in the "New Flow" startup panel as `Change: <name>` when set. The option applies to standard `se3 run "<task>"` invocations as well as to `se3 run --from-issue`; it does NOT apply to `--resume` (resuming a flow does not relabel it) and does NOT alter task-type selection. When omitted, no change label is attached to the flow. |
+
+**Option aliases:** The long-form options on `se3 run` accept short aliases for ergonomic use:
+| Long form | Short alias |
+|-----------|-------------|
+| `--resume` | `-r` |
+| `--discover` | `-d` |
+| `--loop` | `-l` |
+| `--max-iterations` | `-n` |
+| `--type` | `-t` |
+| `--change` | `-c` |
+
+The short aliases are interchangeable with their long forms (e.g. `se3 run -r` is equivalent to `se3 run --resume`, and `se3 run -d "Idea"` is equivalent to `se3 run --discover "Idea"`).
 
 **Task Types:**
 | Type | Description | Steps |
@@ -43,10 +73,22 @@ se3 run --discover "I want to build..."
 - **THEN** the flow engine creates a new flow instance
 - **AND** starts execution from the analyze step
 
+#### Scenario: New task execution with --change label
+- **WHEN** user executes `se3 run "Implement feature X" --change feature-x` (or the short form `-c feature-x`)
+- **THEN** a new flow is created with `change_name` set to `feature-x`
+- **AND** the startup "New Flow" panel includes a `Change: feature-x` line
+- **AND** flow behavior is otherwise identical to a `se3 run "<task>"` invocation without `--change`
+
 #### Scenario: Resume interrupted flow
 - **WHEN** user executes `se3 run --resume` with an active flow
 - **THEN** the flow engine loads the persisted state
 - **AND** continues execution from the interrupted step
+
+#### Scenario: Resume a specific flow by ID
+- **GIVEN** a known flow ID `<flow-id>` (e.g., as printed by `se3 history`)
+- **WHEN** the user executes `se3 run --flow-id <flow-id>` (with or without `--resume`)
+- **THEN** the flow engine loads that specific flow's persisted state and continues execution from the interrupted step
+- **AND** no interactive resume-selection prompt is displayed
 
 #### Scenario: Loop mode execution
 - **WHEN** user executes `se3 run --loop`
@@ -75,6 +117,78 @@ se3 run --discover "I want to build..."
 - **AND** explores requirements through multi-turn conversation
 - **AND** after LLM confirms requirements are clear, prompts the user via the regular discovery input; typing the exact string `1` confirms and proceeds to analyze, any other non-empty input is treated as the next user turn of discovery (empty input is a no-op: the prompt is re-displayed), no separate numbered-choice UI
 
+#### Scenario: Discovery mode forces task type to "discovery"
+- **WHEN** user executes `se3 run --discover "Idea"` (regardless of any `--type` value supplied on the same invocation)
+- **THEN** the flow is started with its task type set to the literal string `"discovery"`
+- **AND** the `"discovery"` task type is a discovery-mode-only task type, distinct from the standard task-type set of `feature` / `bugfix` / `review` / `small` / `directive` in the Task Types table
+- **AND** the standard Task Types step-skipping rules do NOT apply to the `"discovery"` task type; the flow is governed by the flow engine's discovery-mode handling
+
+### Requirement: `se3 run --from-issue` Option
+
+`se3 run` SHALL accept a `--from-issue` option that sources the flow's task description from an existing SE3 issue and synchronizes the issue's status with the flow result. The option is mutually meaningful with the standard run path: when supplied, the flow is non-loop and the task description argument is ignored in favor of the issue's description.
+
+**Interface:**
+```bash
+se3 run --from-issue ""               # Interactive selection from open issues (explicit empty string)
+se3 run --from-issue <issue-id>       # Load the named issue by ID
+```
+
+**Behavior contract:**
+
+1. **Interactive selection.** Because `--from-issue` is declared as a typer option that requires a value, the user MUST supply an explicit empty string (`--from-issue ""`) to trigger interactive selection; running `se3 run --from-issue` with no value at all fails at typer/click argument parsing and never enters the command body. When the supplied value is the empty string, the command lists all open (non-closed) issues with their IDs, titles, and priorities, then prompts the user to enter an issue ID. When no open issues exist, the command prints a "No open issues found" message and exits with a non-zero exit code.
+2. **Issue lookup.** The supplied (or interactively entered) ID is loaded via the issue manager. When no issue with that ID exists, the command prints an error and exits with a non-zero exit code.
+3. **In-progress rejection.** When the loaded issue is already in `in_progress` status, the command refuses to start a new flow and tells the user to run `se3 issue reset <id>` first. Exit code is non-zero.
+4. **Status transition on start.** Before running the flow, the issue's status is transitioned to `in_progress`. When the transition itself raises (invalid transition for the issue's current state), the command prints the error and exits non-zero without starting the flow.
+5. **Flow execution.** The flow runs with the issue's description as the task description, the `--type` option as the task type (default `feature`), `is_loop_mode=False`, and the issue ID recorded on the flow as its source issue.
+6. **Status transition on completion.** When the flow exits with code 0, the issue is transitioned to `resolved`. When the flow exits with any non-zero code, the issue is transitioned back to `open`. Failures of these final status transitions are best-effort (swallowed) so that the flow's exit code remains the command's exit code.
+
+#### Scenario: --from-issue with explicit ID resolves to flow run
+- **GIVEN** an open issue with ID `<id>` and a non-empty description
+- **WHEN** the user runs `se3 run --from-issue <id>`
+- **THEN** the issue is transitioned to `in_progress`
+- **AND** a flow is started with the issue's description as the task and the issue ID recorded as the flow's source issue
+
+#### Scenario: --from-issue with empty-string value triggers interactive selection
+- **GIVEN** at least one open issue exists
+- **WHEN** the user runs `se3 run --from-issue ""` (explicit empty-string value)
+- **THEN** the command lists all open issues with ID, title, and priority
+- **AND** prompts the user to enter an issue ID
+- **AND** proceeds with the entered ID as if it had been supplied directly
+
+#### Scenario: --from-issue with no value at all is rejected by argument parsing
+- **WHEN** the user runs `se3 run --from-issue` with no value following the flag
+- **THEN** typer/click rejects the invocation at argument parsing because `--from-issue` requires a value
+- **AND** the command never enters interactive selection (the user must pass `--from-issue ""` to reach that path)
+
+#### Scenario: --from-issue interactive selection with no open issues
+- **GIVEN** there are no open issues
+- **WHEN** the user runs `se3 run --from-issue ""` (explicit empty-string value)
+- **THEN** the command prints a "No open issues found" message and exits with a non-zero exit code
+- **AND** no flow is started
+
+#### Scenario: --from-issue rejects unknown issue ID
+- **GIVEN** no issue exists with the supplied ID
+- **WHEN** the user runs `se3 run --from-issue <id>`
+- **THEN** the command prints an error indicating the issue was not found and exits with a non-zero exit code
+
+#### Scenario: --from-issue rejects in-progress issue
+- **GIVEN** an issue whose status is already `in_progress`
+- **WHEN** the user runs `se3 run --from-issue <id>`
+- **THEN** the command prints an error directing the user to run `se3 issue reset <id>` first
+- **AND** exits with a non-zero exit code without starting a flow
+
+#### Scenario: --from-issue marks issue resolved on success
+- **GIVEN** the flow started from issue `<id>` exits with code 0
+- **WHEN** the command finalizes
+- **THEN** the issue's status is transitioned to `resolved`
+- **AND** the command exits with code 0
+
+#### Scenario: --from-issue reopens issue on flow failure
+- **GIVEN** the flow started from issue `<id>` exits with a non-zero code
+- **WHEN** the command finalizes
+- **THEN** the issue's status is transitioned back to `open`
+- **AND** the command exits with the flow's non-zero code
+
 ### Requirement: `se3 init` Command
 
 The `se3 init` command SHALL initialize a new SE3 project with the standard directory structure.
@@ -83,6 +197,13 @@ The `se3 init` command SHALL initialize a new SE3 project with the standard dire
 ```bash
 se3 init [--project-root PATH] [--name PROJECT_NAME] [--force]
 ```
+
+**Option aliases:** The long-form options above accept short aliases for ergonomic use:
+| Long form | Short alias |
+|-----------|-------------|
+| `--project-root` | `-p` |
+| `--name` | `-n` |
+| `--force` | `-f` |
 
 **Created Structure:**
 ```
@@ -104,6 +225,124 @@ project/
 - **WHEN** user runs `se3 init --name "My Project"`
 - **THEN** the base spec contains "My Project" as project name
 
+### Requirement: `se3 init` Git Repository Initialization
+
+In addition to creating the SE3 directory structure, `se3 init` SHALL ensure the project root is a git repository and that an appropriate `.gitignore` is present. Both side effects are part of the standard initialization flow and SHALL NOT require any opt-in flag.
+
+**Git repository handling:**
+- When the project root is not already inside a git repository (no `.git` directory found in the root or any ancestor directory), `se3 init` SHALL run `git init` in the project root.
+- When the project root is already inside a git repository, `se3 init` SHALL leave git state untouched and report that a repository already exists.
+- When `git` is not installed (or not on `PATH`) and a `git init` is needed, the failure SHALL be surfaced as a non-fatal status message; the rest of the initialization (configuration file, base spec, `.gitignore` handling) SHALL still complete.
+
+**`.gitignore` handling:** `se3 init` SHALL create or update a `.gitignore` file at the project root with patterns appropriate for an SE3 project. The function returns one of five outcomes, which are surfaced distinctly so the user is never misled about what changed:
+
+| Outcome | Meaning |
+|---------|---------|
+| `created` | The file did not exist (or `--force` was passed); the full default template was written. |
+| `appended` | The file existed without an `se3.local.yaml` ignore pattern; the local-config-ignore block was appended (idempotent — re-running is a no-op). This happens even without `--force`, because the task requires the pattern to be present. |
+| `negated` | The file existed and contained a narrow explicit negation `!se3.local.yaml` (or another negation that targets `se3.local.yaml` without also matching `se3.yaml`); the file is left untouched and a warning is surfaced rather than creating two conflicting last-line-wins rules. |
+| `unchanged` | The file existed and already ignored `se3.local.yaml` (literally or via a broader matching glob such as `*.local.yaml`, `*.local.*`, `se3.local.*`). |
+| `error` | An I/O error prevented reading or writing the file; surfaced distinctly from `unchanged` so the operator sees the real failure. |
+
+**Pattern recognition rules:**
+- Existing pattern detection SHALL normalize gitignore syntax that `fnmatch` does not model: a leading `/` anchor, a leading `**/` recursive-glob, and a trailing `/` directory marker are all stripped before matching.
+- Comment lines (`#…`) and negation lines (`!…`) are ignored when checking whether `se3.local.yaml` is already ignored.
+- A negation line is treated as "narrow" (and triggers the `negated` outcome) only when its pattern matches `se3.local.yaml` but does NOT also match `se3.yaml`. Broad negations such as `!*.yaml`, `!se3.*`, or `!*` are not treated as narrow negations because the user was not explicitly un-ignoring the local config; the standard `appended` path applies.
+
+**Default `.gitignore` template content:** The default template SHALL include at least the following sections:
+- Python build/cache artifacts (`__pycache__/`, `*.py[cod]`, `build/`, `dist/`, `*.egg-info/`, etc.).
+- Virtual environment directories (`venv/`, `.venv`, `env/`, `ENV/`).
+- Common IDE/editor artifacts (`.vscode/`, `.idea/`, `*.swp`, `.DS_Store`, etc.).
+- An SE3 runtime-content block that ignores everything under `/se3/` and then explicitly whitelists `/se3/specs/`, `/se3/issues/`, `/se3/scripts/`, and `/se3/version-rules.md`.
+- An SE3 local-only config block that ignores `se3.local.yaml`.
+
+**`se3.local.yaml` shadowing detection:** When `se3 init` runs, it SHALL detect (but never modify) an existing `se3.local.yaml` file at the project root using `is_file()` semantics — a real regular file shadows `se3.yaml` at load time, while a directory or dangling symlink at that path does not and SHALL NOT trigger the warning. When shadowing is detected, the result surfaces a `local_overrides_yaml` flag so the operator knows the just-generated `se3.yaml` will be shadowed at load time.
+
+**Created Structure (extended):**
+```
+project/
+├── .git/                       # Initialized when not already in a git repo
+├── .gitignore                  # Created or updated with SE3 patterns
+├── se3.yaml                    # Project configuration
+└── se3/
+    └── specs/
+        └── base/
+            └── spec.md         # Base project specification
+```
+
+#### Scenario: Initialize git repository when not already in one
+- **GIVEN** a directory that is not inside any git repository
+- **WHEN** the user runs `se3 init`
+- **THEN** `git init` is executed in the project root
+- **AND** the result reports that a git repository was initialized
+
+#### Scenario: Skip git init when already inside a repository
+- **GIVEN** a directory that is already inside a git repository (a `.git` directory exists in the root or any ancestor)
+- **WHEN** the user runs `se3 init`
+- **THEN** no `git init` is executed
+- **AND** the result reports that a git repository already exists
+
+#### Scenario: Git not installed does not abort init
+- **GIVEN** a directory that is not inside a git repository
+- **AND** the `git` executable is not on `PATH`
+- **WHEN** the user runs `se3 init`
+- **THEN** the git initialization step records a failure message
+- **AND** the remaining steps (config file, base spec, `.gitignore`) still complete
+
+#### Scenario: Create .gitignore from default template
+- **GIVEN** a directory with no existing `.gitignore`
+- **WHEN** the user runs `se3 init`
+- **THEN** `.gitignore` is created with the default template containing Python, virtualenv, IDE, SE3 runtime whitelist (`/se3/*` with explicit unignore for `/se3/specs/`, `/se3/issues/`, `/se3/scripts/`, `/se3/version-rules.md`), and `se3.local.yaml` blocks
+- **AND** the outcome is reported as `created`
+
+#### Scenario: Append local-config block to existing .gitignore
+- **GIVEN** an existing `.gitignore` that does not already ignore `se3.local.yaml` and does not narrowly un-ignore it
+- **WHEN** the user runs `se3 init`
+- **THEN** the local-config-ignore block (comment line + `se3.local.yaml` line) is appended to the file
+- **AND** the outcome is reported as `appended`
+- **AND** running `se3 init` again is a no-op (the next run reports `unchanged`)
+
+#### Scenario: Recognize existing broader pattern
+- **GIVEN** an existing `.gitignore` containing a pattern that already matches `se3.local.yaml` (e.g. the literal line `se3.local.yaml`, or a broader glob such as `*.local.yaml`, `*.local.*`, or `se3.local.*`)
+- **WHEN** the user runs `se3 init`
+- **THEN** the file is not modified
+- **AND** the outcome is reported as `unchanged`
+
+#### Scenario: Refuse to append when narrow negation exists
+- **GIVEN** an existing `.gitignore` that contains an explicit narrow negation such as `!se3.local.yaml` (matches `se3.local.yaml` but not `se3.yaml`)
+- **WHEN** the user runs `se3 init`
+- **THEN** the file is left untouched
+- **AND** the outcome is reported as `negated` with a warning so the operator sees that two conflicting rules were avoided
+
+#### Scenario: Broad negation does not block append
+- **GIVEN** an existing `.gitignore` that contains only a broad negation such as `!*.yaml` (which would also un-ignore `se3.yaml`)
+- **WHEN** the user runs `se3 init`
+- **THEN** the local-config-ignore block is appended normally
+- **AND** the outcome is reported as `appended`
+
+#### Scenario: Force rewrite of existing .gitignore
+- **GIVEN** an existing `.gitignore` with arbitrary user content
+- **WHEN** the user runs `se3 init --force`
+- **THEN** `.gitignore` is overwritten with the full default template
+- **AND** the outcome is reported as `created`
+
+#### Scenario: .gitignore I/O failure reported distinctly
+- **GIVEN** an existing `.gitignore` that cannot be read or written (permission error, etc.)
+- **WHEN** the user runs `se3 init`
+- **THEN** the outcome is reported as `error` with the underlying failure message
+- **AND** the outcome is NOT reported as `unchanged`
+
+#### Scenario: Detect shadowing se3.local.yaml
+- **GIVEN** a project root that contains an existing `se3.local.yaml` regular file
+- **WHEN** the user runs `se3 init`
+- **THEN** the existing `se3.local.yaml` is not modified
+- **AND** the result surfaces a flag indicating that `se3.local.yaml` will shadow `se3.yaml` at load time
+
+#### Scenario: Directory or dangling symlink at se3.local.yaml does not trigger shadow warning
+- **GIVEN** a project root where `se3.local.yaml` is a directory or a dangling symlink (i.e. not a regular file)
+- **WHEN** the user runs `se3 init`
+- **THEN** the shadow-detection flag is NOT raised (the check uses `is_file()`, not `exists()`)
+
 ### Requirement: `se3 guardrails` Command
 
 The `se3 guardrails` command SHALL check spec files against SE3 Spec Guardrails.
@@ -112,6 +351,11 @@ The `se3 guardrails` command SHALL check spec files against SE3 Spec Guardrails.
 ```bash
 se3 guardrails <spec-file> [--original <original-file>]
 ```
+
+**Option aliases:** The long-form options above accept short aliases for ergonomic use:
+| Long form | Short alias |
+|-----------|-------------|
+| `--original` | `-o` |
 
 **Guardrail Checks:**
 1. **must_not_delete**: Detect deleted WHEN/THEN scenarios
@@ -144,8 +388,23 @@ se3 history show <flow_id> --detailed          # Show LLM call details (structur
 se3 history show <flow_id> --detailed --verbose  # Show full response including tool calls
 se3 history show <flow_id> --detailed --json     # Output detailed chat history as JSON
 se3 history restore <flow_id>        # Resume a flow (delegates to se3 run --resume)
+se3 history restore <flow_id> --dry-run    # Print the resume command without executing it
 se3 history archived                 # List only archived flows
+se3 history archived --json          # Output archived flows as JSON
 ```
+
+**Option aliases:** The long-form options on `se3 history list`, `se3 history show`, `se3 history restore`, and `se3 history archived` accept short aliases for ergonomic use:
+| Subcommand | Long form | Short alias |
+|------------|-----------|-------------|
+| `list` | `--archived-only` | `-a` |
+| `list` | `--json` | `-j` |
+| `show` | `--json` | `-j` |
+| `show` | `--detailed` | `-d` |
+| `show` | `--verbose` | `-v` |
+| `restore` | `--dry-run` | `-n` |
+| `archived` | `--json` | `-j` |
+
+The `--active-only` option on `se3 history list` (and the default `se3 history` invocation) is supported as shown in the interface examples but has NO short alias; it MUST be supplied in its long form.
 
 **Data Sources (aggregated by `list` / default command):**
 | Source | Path | Label |
@@ -204,6 +463,21 @@ Results are de-duplicated by `flow_id` and sorted by `updated_at` descending.
 #### Scenario: Restore a flow
 - **WHEN** user runs `se3 history restore <flow_id>`
 - **THEN** delegates to `se3 run --resume --flow-id <flow_id>`
+- **AND** the supplied `<flow_id>` is validated against the union of active, archived, and history-only flows; an exact match wins, otherwise prefix matching is attempted
+- **AND** when the prefix matches multiple flows the command lists the candidates and exits non-zero without delegating
+- **AND** when no exact or unambiguous prefix match exists the command prints `Flow '<flow_id>' not found.` to stderr and exits non-zero
+
+#### Scenario: Restore in dry-run mode prints the resume command without executing
+- **GIVEN** a valid `<flow_id>` that matches a flow (exactly or by unambiguous prefix)
+- **WHEN** the user runs `se3 history restore <flow_id> --dry-run` (or the short form `-n`)
+- **THEN** the command prints `Would restore flow: <resolved-flow-id>` followed by `Command: se3 run --resume --flow-id <resolved-flow-id>`
+- **AND** does NOT invoke `se3 run --resume`
+- **AND** exits with code 0
+
+#### Scenario: List archived flows as JSON
+- **WHEN** the user runs `se3 history archived --json` (or the short form `-j`)
+- **THEN** the command emits the archived flow list as JSON (indented, with non-JSON-serializable values such as datetimes coerced to strings) to stdout instead of rendering the Rich table
+- **AND** when there are no archived flows the output is the JSON serialization of an empty list (no "No archived flows found." message is printed under `--json`)
 
 ### Requirement: `se3 sync` Command
 
@@ -229,7 +503,7 @@ se3 sync --resume                     # Resume a previously interrupted sync run
 | `--once` | off | Run exactly one round and exit, regardless of whether drift remains. Useful for CI gates and single-step inspection. |
 | `--max-rounds N` | 10 | Maximum number of rounds before aborting as non-converged. |
 | `--stable-rounds N` | 1 | Number of consecutive zero-change rounds required to declare convergence. Raise to 2+ for higher confidence. |
-| `--interactive` | off | When set, sync pauses and writes a `sync_high_impact_deletion` call file before deleting an entire `### Requirement:` block. Other updates are still applied automatically. |
+| `--interactive`, `-i` | off | When set, sync pauses and writes a `sync_high_impact_deletion` call file before deleting an entire `### Requirement:` block. Other updates are still applied automatically. The short alias `-i` is equivalent to `--interactive`. |
 | `--show-diff` | off | Print the full aggregated spec diff after the final round. |
 | `--validate-only` | off | Skip every LLM call. Walk `se3/specs/**/spec.md` and run the spec-format v1 structural validator on each file. Exit `0` when every spec passes, `1` when any spec fails. Mutually exclusive with `--resume`. |
 | `--resume` | off | Read `se3/state/sync_checkpoint.json`, skip specs whose content hash still matches the checkpoint's `in_sync_specs` entry, and continue from the saved `round_index`. Mutually exclusive with `--validate-only`. |
@@ -398,6 +672,19 @@ se3 sync --resume                     # Resume a previously interrupted sync run
 - **WHEN** the command parses options
 - **THEN** the command exits with a usage error stating the two options cannot be combined
 
+#### Scenario: --validate-only warns when combined with ignored flags
+- **GIVEN** the user supplies `--validate-only` together with one or more of `--once`, `--interactive`, or `--show-diff`
+- **WHEN** the command parses options
+- **THEN** the command emits a warning that the supplied loop-mode flags are ignored under `--validate-only`
+- **AND** still proceeds to run the structural validation pass (the combination is permitted, only `--resume` is mutually exclusive)
+
+#### Scenario: Range validation on --max-rounds and --stable-rounds
+- **GIVEN** the user supplies `--max-rounds` or `--stable-rounds`
+- **WHEN** the command parses options
+- **THEN** both values MUST be integers >= 1
+- **AND** `--stable-rounds` MUST NOT exceed `--max-rounds`
+- **AND** any violation of these constraints produces a usage error and the command exits with a non-zero status without invoking the LLM or starting the sync loop
+
 ### Requirement: `se3 sync-respond` Command
 
 The `se3 sync-respond` command SHALL process an MCP call response file produced by `se3 sync --interactive` for high-impact deletions.
@@ -431,6 +718,12 @@ The `se3 merge` command SHALL sequentially merge one or more named branches into
 ```bash
 se3 merge <branch> [<branch> ...] [--strategy fast|safe|strict] [--delete-merged | --no-delete-merged]
 ```
+
+**Option aliases:** The long-form options above accept short aliases for ergonomic use:
+| Long form | Short alias |
+|-----------|-------------|
+| `--strategy` | `-s` |
+| `--delete-merged` | `-d` |
 
 When `--strategy` is omitted, the default tier is **`fast`**. The legacy strategy names `default` and `robust` have been removed; passing them to `--strategy` (or setting them in `se3.yaml`'s `merge.strategy`) SHALL be rejected fail-fast with a migration hint pointing at the new name (`safe` replaces `default`; `fast` replaces `robust`). No deprecation-silent alias is provided.
 
@@ -881,6 +1174,131 @@ se3 merge-respond <call-file-path>
 - **WHEN** user runs `se3 merge-respond <call-file-path>`
 - **THEN** the engine consumes the response and resumes the merge sequence (re-applying the resolved contents or skipping the merge per the user's decision)
 
+### Requirement: `se3 issue` Command
+
+The `se3 issue` command group SHALL provide subcommands for managing SE3 project issues. Invoking `se3 issue` without a subcommand SHALL default to listing open issues.
+
+**Interface:**
+```bash
+se3 issue                              # List open issues (default)
+se3 issue list                         # List open issues
+se3 issue list --all                   # List all issues including closed
+se3 issue list --type <type>           # Filter by issue type
+se3 issue show <id>                    # Show detailed information about an issue
+se3 issue create                       # Create a new issue interactively
+se3 issue reset <id>                   # Reset an in-progress issue back to open
+```
+
+**Project root resolution:** The command walks up from the current working directory looking for `.git` or any SE3 config file (`se3.yaml`, `se3.local.yaml`, `se3.config.yaml`). If none is found, the current working directory is used.
+
+**Option aliases:** The long-form options on `se3 issue list` accept short aliases for ergonomic use:
+| Subcommand | Long form | Short alias |
+|------------|-----------|-------------|
+| `list` | `--all` | `-a` |
+| `list` | `--type` | `-t` |
+
+**Issue fields and rendering:**
+- Each issue carries an ID, title, type, status, priority, tags, description, created timestamp, and updated timestamp.
+- Status values include `open`, `in_progress`, `resolved`, `wont_fix`, and `closed`.
+- Lists render via a Rich table whose columns are ID, Title (truncated to 50 characters with an ellipsis when longer), Type, Status, Priority, Tags, and Created.
+- Status, priority, and type are color-coded for readability.
+
+#### Scenario: Default invocation lists open issues
+- **WHEN** the user runs `se3 issue` with no subcommand
+- **THEN** the command lists open issues (equivalent to `se3 issue list`)
+
+#### Scenario: List all issues including closed
+- **WHEN** the user runs `se3 issue list --all`
+- **THEN** the table includes resolved, closed, and won't-fix issues in addition to open ones
+
+#### Scenario: Filter list by type
+- **WHEN** the user runs `se3 issue list --type bug`
+- **THEN** only issues with type `bug` are displayed
+
+#### Scenario: Empty list message
+- **GIVEN** no issues match the active filter
+- **WHEN** the user runs `se3 issue list` (with or without `--all` / `--type`)
+- **THEN** the command prints a "No issues found" style message instead of rendering an empty table
+
+#### Scenario: Show issue details
+- **GIVEN** an issue with ID `<id>` exists
+- **WHEN** the user runs `se3 issue show <id>`
+- **THEN** the command renders the issue's title, type, status, priority, tags, created/updated timestamps, and description inside a bordered display block
+
+#### Scenario: Show non-existent issue
+- **GIVEN** no issue exists with the supplied ID
+- **WHEN** the user runs `se3 issue show <id>`
+- **THEN** the command prints an error message to stderr and exits with a non-zero exit code
+
+#### Scenario: Create issue interactively
+- **WHEN** the user runs `se3 issue create`
+- **THEN** the command prompts for title, description, type (default `bug`), priority (default `medium`), and comma-separated tags
+- **AND** persists a new issue and prints its assigned ID and title
+
+#### Scenario: Reset in-progress issue
+- **GIVEN** an issue currently in `in_progress` status
+- **WHEN** the user runs `se3 issue reset <id>`
+- **THEN** the issue's status is reset to `open`
+- **AND** the command prints a confirmation message
+
+#### Scenario: Reset rejects invalid transitions
+- **WHEN** `se3 issue reset <id>` is called against an issue whose current status cannot transition back to `open`
+- **THEN** the command prints the underlying error message to stderr and exits with a non-zero exit code
+
+### Requirement: `se3 salvage` Command
+
+The `se3 salvage` command SHALL perform best-effort recovery from an abnormally terminated SE3 session. The pipeline is composed of five independently fault-tolerant steps; the failure of any one step SHALL NOT abort the remaining steps.
+
+**Interface:**
+```bash
+se3 salvage [--project-root PATH]
+```
+
+**Pipeline steps (executed in order):**
+1. **Read session state** — tolerantly load the active flow via the persistence manager's `load_flow_tolerant()` path. Corrupted or missing state SHALL NOT raise; warnings are logged and the step records `SKIP` when no session is found.
+2. **Assess git diff** — collect `git status --porcelain`, `git diff --stat`, and a truncated `git diff HEAD` (capped at 4000 chars) along with the list of changed files.
+3. **Commit changes** — when there are uncommitted changes, `git add -A` and create a salvage commit with message `[salvage] <task_desc>\n\nSalvage commit: <N> files from interrupted session.` (`<task_desc>` is the loaded flow's task description truncated to 80 chars, or `unknown task` when no flow is available). The commit uses `--no-verify`. When nothing is to be committed, the step records `SKIP`.
+4. **Create salvage issues** — when a flow was loaded, create issues capturing the incomplete task, the completed-step trail, and the current step at interruption.
+5. **Archive session** — move the active session state into the archive area; `SKIP` when no active session exists.
+
+**Project root resolution:** When `--project-root` is omitted, the command walks up from the current working directory looking for `.git` or any SE3 config file (`se3.yaml`, `se3.local.yaml`, `se3.config.yaml`). If no project root can be located, the command prints a red error and exits non-zero.
+
+**Exit code:** `0` when every step finished with `OK` or `SKIP`; `1` when any step recorded a `FAIL` status or no project root could be located.
+
+After salvage, the user is expected to continue work via `se3 run --from-issue`.
+
+#### Scenario: Salvage with uncommitted changes and a loaded flow
+- **GIVEN** an interrupted SE3 session whose state is loadable and whose working tree has uncommitted changes
+- **WHEN** the user runs `se3 salvage`
+- **THEN** the read-session step records `OK` with the loaded flow ID
+- **AND** the assess-git-diff step records the changed file count
+- **AND** the commit-changes step stages all changes, writes a `[salvage] <task_desc>` commit using `--no-verify`, and records the resulting commit hash
+- **AND** the create-issues step creates one or more issues describing the incomplete task and the completed-step trail
+- **AND** the archive-session step archives the active session
+- **AND** the command exits with code 0
+
+#### Scenario: Salvage with no session and no uncommitted changes
+- **GIVEN** a project with no active session and a clean working tree
+- **WHEN** the user runs `se3 salvage`
+- **THEN** the read-session step records `SKIP`
+- **AND** the commit-changes step records `SKIP` with the reason `Nothing to commit`
+- **AND** the create-issues step records `SKIP`
+- **AND** the archive-session step records `SKIP`
+- **AND** the command exits with code 0
+
+#### Scenario: Salvage step failures are isolated
+- **GIVEN** a project where one pipeline step (e.g., create-issues) raises an exception
+- **WHEN** the user runs `se3 salvage`
+- **THEN** the failing step is recorded as `FAIL` with a truncated error detail
+- **AND** all remaining steps still execute in order
+- **AND** the command exits with code 1 because at least one step failed
+
+#### Scenario: Salvage cannot find a project root
+- **GIVEN** the current working directory is not inside a project containing `.git`, `se3.yaml`, `se3.local.yaml`, or `se3.config.yaml`
+- **WHEN** the user runs `se3 salvage` without `--project-root`
+- **THEN** the command prints an error indicating no project root was found
+- **AND** exits with code 1 without executing any pipeline step
+
 ## Command Summary
 
 | Command | Purpose | Status |
@@ -889,10 +1307,12 @@ se3 merge-respond <call-file-path>
 | `se3 init` | Initialize SE3 project structure | **Required** |
 | `se3 guardrails` | Check spec against guardrails | **Required** |
 | `se3 history` | View and manage flow history | **Required** |
+| `se3 issue` | Manage SE3 project issues (list/show/create/reset) | **Required** |
 | `se3 sync` | Check and synchronize specs with project code | **Required** |
 | `se3 sync-respond` | Process MCP call response for sync conflicts | **Required** |
 | `se3 merge` | Sequentially merge one or more branches into current with LLM-assisted conflict resolution | **Required** |
 | `se3 merge-respond` | Process MCP call response for merge conflicts | **Required** |
+| `se3 salvage` | Best-effort recovery from an abnormally terminated session | **Required** |
 
 ### Requirement: Loop Mode CLI Options
 
