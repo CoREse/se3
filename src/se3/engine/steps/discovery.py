@@ -534,7 +534,22 @@ def _run_discovery_round(
         external_attempt=retry_count,
         fix_iteration=step.inputs.get("fix_iteration", 0),
     )
-    response = caller.call(prompt=prompt, json_mode="two_phase")
+    # Schema hint is critical for TWO_PHASE mode: if Phase 1 produces
+    # markdown prose (not JSON), Phase 2 extraction needs to know the
+    # expected structure to extract mode/content/refined_description.
+    DISCOVERY_SCHEMA_HINT = (
+        '{"mode": "question|synthesis|confirmation", '
+        '"content": "Your message to the user", '
+        '"questions": ["question1", "question2"], '
+        '"refined_description": "The refined task description", '
+        '"thinking": "Brief explanation of your approach"}'
+    )
+    response = caller.call(
+        prompt=prompt,
+        json_mode="two_phase",
+        json_schema_hint=DISCOVERY_SCHEMA_HINT,
+        required_keys=["mode", "content"],
+    )
 
     # Parse JSON response
     result = parse_json_response(response)

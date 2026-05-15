@@ -198,7 +198,12 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
             agents=agents,
             fix_iteration=step.inputs.get("fix_iteration", 0),
         )
-        response = caller.call(prompt=prompt, json_mode="two_phase")
+        response = caller.call(
+            prompt=prompt,
+            json_mode="two_phase",
+            json_schema_hint='{"approved": true/false, "feedback": "Your detailed feedback here"}',
+            required_keys=["approved"],
+        )
 
         # Parse response using robust JSON parser that handles markdown
         # code fences, NDJSON streams, and other common LLM output formats
