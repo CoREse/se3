@@ -1,4 +1,3 @@
-```python
 """Tests for incremental sync optimizations: deps capture, per-spec deps
 union, the touched-files tracking infrastructure (G3), and discovery
 convergence tracking (G4)."""
@@ -613,4 +612,1093 @@ class TestDiscoveryConvergedAttribute:
             loop.run()
 
         assert loop.discovery_converged is False
-```
+
+
+# ============================================================================
+# G5: Three-level skip mechanism & per-spec convergence
+# ============================================================================
+
+
+def _round_with_analyses(
+    idx: int,
+    spec_names: List[str],
+    in_sync: Optional[Dict[str, bool]] = None,
+    created: Optional[List[str]] = None,
+    new_subsystems: int = 0,
+    touched_files: Optional[Dict[str, List[str]]] = None,
+    failed: Optional[Dict[str, str]] = None,
+) -> RoundResult:
+    """Create a RoundResult with SpecAnalysis entries per spec."""
+    rr = RoundResult(round_index=idx)
+    rr.new_subsystems_count = new_subsystems
+    if created:
+        rr.specs_created = list(created)
+    in_sync_map = in_sync or {}
+    touched_map = touched_files or {}
+    failed_map = failed or {}
+    updated = 0
+    for name in spec_names:
+        is_sync = in_sync_map.get(name, True)
+        tfiles = touched_map.get(name, [])
+        reason = failed_map.get(name)
+        if reason:
+            analysis = SpecAnalysis(
+                spec_name=name,
+                diffs=[],
+                failed_analysis_reason=reason,
+                touched_files=tfiles,
+            )
+        elif is_sync:
+            analysis = SpecAnalysis(spec_name=name, diffs=[], touched_files=tfiles)
+        else:
+            from se3.engine.sync_engine import DiffType, SpecDiff
+            diff = SpecDiff(
+                diff_type=DiffType.EXTENSION,
+                spec_name=name,
+                description=f"drift in {name}",
+            )
+            analysis = SpecAnalysis(
+                spec_name=name,
+                diffs=[diff],
+                touched_files=tfiles,
+            )
+            updated += 1
+        rr.analyses.append(analysis)
+        rr.spec_hashes_after[name] = f"hash_{name}_{idx}"
+        if tfiles:
+            rr.per_spec_deps[name] = sorted(set(tfiles))
+    rr.specs_updated = updated
+    for name in spec_names:
+        rr.changes_by_spec.setdefault(name, []).append(f"round {idx} change")
+    return rr
+
+
+def _write_sync_state_file(root: Path, fp: str, discovery_converged: bool = True,
+                           spec_deps: Optional[Dict] = None) -> None:
+    """Write a minimal sync_state.json for testing."""
+    from se3.engine.sync_state import state_path
+    p = state_path(root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "state_version": 1,
+        "converged_at": "2026-01-01T00:00:00Z",
+        "code_fingerprint": fp,
+        "discovery_converged": discovery_converged,
+        "spec_deps": spec_deps or {},
+        "obsolete_specs": [],
+    }
+    p.write_text(json.dumps(data), encoding="utf-8")
+
+
+class _CallTrackingEngine:
+    """Engine stand-in that records calls and returns scripted results."""
+
+    def __init__(self, project_root: Path, interactive: bool = False) -> None:
+        self.project_root = project_root
+        self.interactive = interactive
+        self.calls: List[Dict[str, Any]] = []
+        self.script: List[RoundResult] = []
+        self._specs: Dict[str, Any] = {}
+
+    def run_once(self, **kwargs: Any) -> RoundResult:
+        self.calls.append(kwargs)
+        if not self.script:
+            raise AssertionError("CallTrackingEngine ran out of scripted rounds")
+        return self.script.pop(0)
+
+    def _load_specs(self) -> Dict[str, Any]:
+        return dict(self._specs)
+
+
+# ---------------------------------------------------------------------------
+# Level 1: Global shutter
+# ---------------------------------------------------------------------------
+
+
+class TestLevel1GlobalShutter:
+    """Level 1: sync_state with matching code_fingerprint → 0 LLM calls."""
+
+    def test_global_shutter_hit_zero_llm_calls(self, tmp_path, monkeypatch):
+        """When fingerprint matches and discovery_converged, return immediately."""
+        import subprocess
+
+        # Init git so compute_code_fingerprint works
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=str(tmp_path), check=True)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('hello')")
+        subprocess.run(["git", "add", "src/main.py"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(tmp_path), check=True)
+
+        from se3.engine.sync_state import compute_code_fingerprint
+        fp = compute_code_fingerprint(tmp_path)
+
+        _write_sync_state_file(tmp_path, fp, discovery_converged=True)
+
+        # Patch SyncEngine to count calls
+        engine_holder = {}
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        result = loop.run()
+
+        assert result.converged is True
+        eng = engine_holder.get("engine")
+        if eng is not None:
+            assert len(eng.calls) == 0
+
+    def test_global_shutter_skipped_on_mismatched_fingerprint(
+        self, tmp_path, monkeypatch
+    ):
+        """When fingerprint differs, proceed to normal sync."""
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=str(tmp_path), check=True)
+
+        # Write sync_state with a fingerprint that won't match
+        _write_sync_state_file(tmp_path, "deadbeef", discovery_converged=True)
+
+        engine_holder = {}
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng._specs = {
+                "spec_a": {
+                    "name": "spec_a",
+                    "path": str(tmp_path / "se3" / "specs" / "spec_a" / "spec.md"),
+                    "content": "# test",
+                },
+            }
+            eng.script = [
+                _round_with_analyses(1, ["spec_a"], in_sync={"spec_a": True},
+                                     new_subsystems=0),
+            ]
+            if "engine" not in engine_holder:
+                engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        result = loop.run()
+
+        # Not via global shutter — engine was called
+        eng = engine_holder.get("engine")
+        assert eng is not None
+        assert len(eng.calls) > 0
+
+    def test_global_shutter_skipped_when_discovery_not_converged(
+        self, tmp_path, monkeypatch
+    ):
+        """When discovery_converged is False, level 1 does NOT trigger."""
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=str(tmp_path), check=True)
+
+        from se3.engine.sync_state import compute_code_fingerprint
+        fp = compute_code_fingerprint(tmp_path)
+
+        _write_sync_state_file(tmp_path, fp, discovery_converged=False)
+
+        engine_holder = {}
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng._specs = {
+                "spec_a": {
+                    "name": "spec_a",
+                    "path": str(tmp_path / "se3" / "specs" / "spec_a" / "spec.md"),
+                    "content": "# test",
+                },
+            }
+            eng.script = [
+                _round_with_analyses(1, ["spec_a"], in_sync={"spec_a": True},
+                                     new_subsystems=0),
+            ]
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        result = loop.run()
+
+        eng = engine_holder.get("engine")
+        assert eng is not None
+        assert len(eng.calls) > 0  # should proceed to normal sync
+
+    def test_force_skips_global_shutter(self, tmp_path, monkeypatch):
+        """--force ignores sync_state."""
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"], cwd=str(tmp_path), check=True)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('hello')")
+        subprocess.run(["git", "add", "src/main.py"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=str(tmp_path), check=True)
+
+        from se3.engine.sync_state import compute_code_fingerprint
+        fp = compute_code_fingerprint(tmp_path)
+        _write_sync_state_file(tmp_path, fp, discovery_converged=True)
+
+        engine_holder = {}
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng._specs = {
+                "spec_a": {
+                    "name": "spec_a",
+                    "path": str(tmp_path / "se3" / "specs" / "spec_a" / "spec.md"),
+                    "content": "# test",
+                },
+            }
+            eng.script = [
+                _round_with_analyses(1, ["spec_a"], in_sync={"spec_a": True},
+                                     new_subsystems=0),
+            ]
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1, force=True)
+        result = loop.run()
+
+        eng = engine_holder.get("engine")
+        assert eng is not None
+        assert len(eng.calls) > 0  # force should bypass cache
+
+
+# ---------------------------------------------------------------------------
+# Level 2: Per-spec gate
+# ---------------------------------------------------------------------------
+
+
+class TestLevel2PerSpecGate:
+    """Level 2: per-spec deps hash match → skip; file-set change invalidates."""
+
+    def _setup_git_repo(self, tmp_path: Path, files: Dict[str, str]) -> str:
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"],
+                       cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"],
+                       cwd=str(tmp_path), check=True)
+        for rel_path, content in files.items():
+            full = tmp_path / rel_path
+            full.parent.mkdir(parents=True, exist_ok=True)
+            full.write_text(content)
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"],
+                       cwd=str(tmp_path), check=True)
+        from se3.engine.sync_state import compute_code_fingerprint
+        return compute_code_fingerprint(tmp_path)
+
+    def _make_patched_loop(self, tmp_path, monkeypatch, spec_deps=None,
+                           discovery_converged=True, force=False):
+        """Set up patched SyncLoop with sync_state."""
+        from se3.engine.sync_state import compute_file_content_hash
+
+        fp = self._setup_git_repo(tmp_path, {"src/main.py": "hello",
+                                              "src/util.py": "world"})
+        _write_sync_state_file(tmp_path, fp, discovery_converged=discovery_converged,
+                               spec_deps=spec_deps)
+
+        engine_holder = {}
+        spec_a_path = tmp_path / "se3" / "specs" / "spec_a" / "spec.md"
+        spec_b_path = tmp_path / "se3" / "specs" / "spec_b" / "spec.md"
+        spec_a_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_b_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_a_path.write_text("# Spec A\n## Purpose\nTest.\n### Requirement: R1\n")
+        spec_b_path.write_text("# Spec B\n## Purpose\nTest.\n### Requirement: R1\n")
+
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng._specs = {
+                "spec_a": {"name": "spec_a", "path": str(spec_a_path),
+                           "content": spec_a_path.read_text()},
+                "spec_b": {"name": "spec_b", "path": str(spec_b_path),
+                           "content": spec_b_path.read_text()},
+            }
+            eng.script = [
+                _round_with_analyses(1, ["spec_a", "spec_b"],
+                                     in_sync={"spec_a": True, "spec_b": True},
+                                     new_subsystems=0),
+            ]
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+        return engine_holder
+
+    def test_spec_skipped_when_all_deps_match(self, tmp_path, monkeypatch):
+        """Spec whose spec_hash and all dep file hashes match is skipped."""
+        from se3.engine.sync_state import compute_file_content_hash
+
+        # Create the files first, then compute hashes
+        h_main = compute_file_content_hash(tmp_path / "src" / "main.py") if (tmp_path / "src" / "main.py").exists() else None
+
+        # We set up git first, then compute hashes
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"],
+                       cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"],
+                       cwd=str(tmp_path), check=True)
+        (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src" / "main.py").write_text("hello")
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"],
+                       cwd=str(tmp_path), check=True)
+
+        from se3.engine.sync_state import compute_file_content_hash
+        h_main = compute_file_content_hash(tmp_path / "src" / "main.py")
+
+        spec_deps = {
+            "spec_a": {
+                "spec_hash": "any",
+                "deps": {"src/main.py": h_main},
+            },
+        }
+        _write_sync_state_file(tmp_path, "non-matching-fp", discovery_converged=True,
+                               spec_deps=spec_deps)
+
+        spec_a_path = tmp_path / "se3" / "specs" / "spec_a" / "spec.md"
+        spec_b_path = tmp_path / "se3" / "specs" / "spec_b" / "spec.md"
+        spec_a_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_b_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_a_path.write_text("# Spec A\n## Purpose\nTest.\n### Requirement: R1\n")
+        spec_b_path.write_text("# Spec B\n## Purpose\nTest.\n### Requirement: R1\n")
+
+        engine_holder = {}
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng._specs = {
+                "spec_a": {"name": "spec_a", "path": str(spec_a_path),
+                           "content": spec_a_path.read_text()},
+                "spec_b": {"name": "spec_b", "path": str(spec_b_path),
+                           "content": spec_b_path.read_text()},
+            }
+            eng.script = [
+                _round_with_analyses(1, ["spec_a", "spec_b"],
+                                     in_sync={"spec_a": True, "spec_b": True},
+                                     new_subsystems=0),
+            ]
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        loop.run()
+
+        eng = engine_holder["engine"]
+        assert len(eng.calls) == 1
+        skip = eng.calls[0].get("skip_specs") or set()
+        assert "spec_a" in skip
+
+    def test_spec_not_skipped_when_dep_hash_differs(self, tmp_path, monkeypatch):
+        """Spec with a dep file whose content changed is NOT skipped."""
+        import subprocess
+        from se3.engine.sync_state import compute_code_fingerprint
+
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"],
+                       cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"],
+                       cwd=str(tmp_path), check=True)
+        (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src" / "main.py").write_text("hello")
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"],
+                       cwd=str(tmp_path), check=True)
+
+        spec_deps = {
+            "spec_a": {
+                "spec_hash": "any",
+                "deps": {"src/main.py": "wrong_hash"},
+            },
+        }
+        _write_sync_state_file(tmp_path, "non-matching-fp", discovery_converged=True,
+                               spec_deps=spec_deps)
+
+        spec_a_path = tmp_path / "se3" / "specs" / "spec_a" / "spec.md"
+        spec_b_path = tmp_path / "se3" / "specs" / "spec_b" / "spec.md"
+        spec_a_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_b_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_a_path.write_text("# Spec A\n## Purpose\nTest.\n### Requirement: R1\n")
+        spec_b_path.write_text("# Spec B\n## Purpose\nTest.\n### Requirement: R1\n")
+
+        engine_holder = {}
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng._specs = {
+                "spec_a": {"name": "spec_a", "path": str(spec_a_path),
+                           "content": spec_a_path.read_text()},
+                "spec_b": {"name": "spec_b", "path": str(spec_b_path),
+                           "content": spec_b_path.read_text()},
+            }
+            eng.script = [
+                _round_with_analyses(1, ["spec_a", "spec_b"],
+                                     in_sync={"spec_a": True, "spec_b": True},
+                                     new_subsystems=0),
+            ]
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        loop.run()
+
+        eng = engine_holder["engine"]
+        skip = eng.calls[0].get("skip_specs") or set()
+        assert "spec_a" not in skip
+
+    def test_file_set_change_invalidates_all_level2_skips(self, tmp_path, monkeypatch):
+        """Adding a new file invalidates all per-spec skip decisions."""
+        import subprocess
+        from se3.engine.sync_state import compute_code_fingerprint, compute_file_content_hash
+
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"],
+                       cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"],
+                       cwd=str(tmp_path), check=True)
+        (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src" / "main.py").write_text("hello")
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"],
+                       cwd=str(tmp_path), check=True)
+
+        fp = compute_code_fingerprint(tmp_path)
+        h_main = compute_file_content_hash(tmp_path / "src" / "main.py")
+        spec_deps = {
+            "spec_a": {"spec_hash": "any", "deps": {"src/main.py": h_main}},
+        }
+        _write_sync_state_file(tmp_path, "non-matching-fp", discovery_converged=True,
+                               spec_deps=spec_deps)
+
+        # Add a new file that is NOT in the recorded deps
+        (tmp_path / "src" / "new_file.py").write_text("new content")
+
+        spec_a_path = tmp_path / "se3" / "specs" / "spec_a" / "spec.md"
+        spec_b_path = tmp_path / "se3" / "specs" / "spec_b" / "spec.md"
+        spec_a_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_b_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_a_path.write_text("# Spec A\n## Purpose\nTest.\n### Requirement: R1\n")
+        spec_b_path.write_text("# Spec B\n## Purpose\nTest.\n### Requirement: R1\n")
+
+        engine_holder = {}
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng._specs = {
+                "spec_a": {"name": "spec_a", "path": str(spec_a_path),
+                           "content": spec_a_path.read_text()},
+                "spec_b": {"name": "spec_b", "path": str(spec_b_path),
+                           "content": spec_b_path.read_text()},
+            }
+            eng.script = [
+                _round_with_analyses(1, ["spec_a", "spec_b"],
+                                     in_sync={"spec_a": True, "spec_b": True},
+                                     new_subsystems=0),
+            ]
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        loop.run()
+
+        eng = engine_holder["engine"]
+        skip = eng.calls[0].get("skip_specs") or set()
+        # All level-2 skips invalidated
+        assert "spec_a" not in skip
+        # Discovery should be forced
+        assert eng.calls[0].get("do_discovery") is True
+
+    def test_no_skip_when_deps_empty(self, tmp_path, monkeypatch):
+        """Spec with empty deps in cache is not skipped (conservative)."""
+        import subprocess
+        from se3.engine.sync_state import compute_code_fingerprint
+
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"],
+                       cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"],
+                       cwd=str(tmp_path), check=True)
+
+        spec_deps = {"spec_a": {"spec_hash": "any", "deps": {}}}
+        _write_sync_state_file(tmp_path, "non-matching-fp", discovery_converged=True,
+                               spec_deps=spec_deps)
+
+        spec_a_path = tmp_path / "se3" / "specs" / "spec_a" / "spec.md"
+        spec_a_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_a_path.write_text("# Spec A\n## Purpose\nTest.\n### Requirement: R1\n")
+
+        engine_holder = {}
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng._specs = {
+                "spec_a": {"name": "spec_a", "path": str(spec_a_path),
+                           "content": spec_a_path.read_text()},
+            }
+            eng.script = [
+                _round_with_analyses(1, ["spec_a"], in_sync={"spec_a": True},
+                                     new_subsystems=0),
+            ]
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        loop.run()
+
+        eng = engine_holder["engine"]
+        skip = eng.calls[0].get("skip_specs") or set()
+        assert "spec_a" not in skip
+
+    def test_new_spec_not_in_cache_not_skipped(self, tmp_path, monkeypatch):
+        """Spec that exists on disk but not in sync_state cache is NOT skipped."""
+        import subprocess
+        from se3.engine.sync_state import compute_code_fingerprint, compute_file_content_hash
+
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"],
+                       cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"],
+                       cwd=str(tmp_path), check=True)
+        (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src" / "main.py").write_text("hello")
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"],
+                       cwd=str(tmp_path), check=True)
+
+        h_main = compute_file_content_hash(tmp_path / "src" / "main.py")
+        # Only spec_a in cache, not spec_b
+        spec_deps = {
+            "spec_a": {"spec_hash": "any", "deps": {"src/main.py": h_main}},
+        }
+        _write_sync_state_file(tmp_path, "non-matching-fp", discovery_converged=True,
+                               spec_deps=spec_deps)
+
+        spec_a_path = tmp_path / "se3" / "specs" / "spec_a" / "spec.md"
+        spec_b_path = tmp_path / "se3" / "specs" / "spec_b" / "spec.md"
+        spec_a_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_b_path.parent.mkdir(parents=True, exist_ok=True)
+        spec_a_path.write_text("# Spec A\n## Purpose\nTest.\n### Requirement: R1\n")
+        spec_b_path.write_text("# Spec B\n## Purpose\nTest.\n### Requirement: R1\n")
+
+        engine_holder = {}
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng._specs = {
+                "spec_a": {"name": "spec_a", "path": str(spec_a_path),
+                           "content": spec_a_path.read_text()},
+                "spec_b": {"name": "spec_b", "path": str(spec_b_path),
+                           "content": spec_b_path.read_text()},
+            }
+            eng.script = [
+                _round_with_analyses(1, ["spec_a", "spec_b"],
+                                     in_sync={"spec_a": True, "spec_b": True},
+                                     new_subsystems=0),
+            ]
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        loop.run()
+
+        eng = engine_holder["engine"]
+        skip = eng.calls[0].get("skip_specs") or set()
+        assert "spec_a" in skip
+        assert "spec_b" not in skip
+
+
+# ---------------------------------------------------------------------------
+# Level 3: Per-spec early exit
+# ---------------------------------------------------------------------------
+
+
+class TestLevel3PerSpecEarlyExit:
+    """Level 3: specs individually converge and exit early."""
+
+    def _make_patched_loop_g3(self, tmp_path, monkeypatch, script, stable_rounds=2):
+        """Helper that patches for level-3 testing."""
+        engine_holder = {}
+
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            # Only set the script for the first engine (the main loop one).
+            # Subsequent engine creations (e.g. _write_sync_state → _engine_specs)
+            # get a fresh engine without script and don't overwrite the holder.
+            if "engine" not in engine_holder:
+                eng.script = list(script)
+                engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+        return engine_holder
+
+    def test_spec_exits_after_stable_rounds_zero_drift(self, tmp_path, monkeypatch):
+        """Spec A reaches stable_rounds consecutive 0-drift → exits from subsequent rounds.
+        B has drift in round 1, so A converges first. Round 3: A is in skip set."""
+        script = [
+            # Round 1: A in-sync, B has drift
+            _round_with_analyses(1, ["A", "B"], in_sync={"A": True, "B": False},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+            # Round 2: A in-sync (counter=2→converged), B in-sync (counter=1)
+            _round_with_analyses(2, ["A", "B"], in_sync={"A": True, "B": True},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+            # Round 3: A in skip set, B in-sync (counter=2→converged)
+            _round_with_analyses(3, ["A", "B"], in_sync={"A": True, "B": True},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+        ]
+        engine_holder = self._make_patched_loop_g3(tmp_path, monkeypatch, script,
+                                                    stable_rounds=2)
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=2)
+        result = loop.run()
+
+        assert result.converged is True
+        eng = engine_holder["engine"]
+        # Round 3: A should be in the skip set (per-spec converged after round 2)
+        round3_skip = eng.calls[2].get("skip_specs") or set()
+        assert "A" in round3_skip
+
+    def test_drift_resets_per_spec_counter(self, tmp_path, monkeypatch):
+        """A single drift resets the consecutive 0-drift counter for that spec."""
+        # Round 1: in-sync → counter=1
+        # Round 2: drift → counter=0
+        # Round 3: in-sync → counter=1
+        # Round 4: in-sync → counter=2 → converged!
+        script = [
+            _round_with_analyses(1, ["A"], in_sync={"A": True},
+                                 touched_files={"A": ["a.py"]}),
+            _round_with_analyses(2, ["A"], in_sync={"A": False},
+                                 touched_files={"A": ["a.py"]}),
+            _round_with_analyses(3, ["A"], in_sync={"A": True},
+                                 touched_files={"A": ["a.py"]}),
+            _round_with_analyses(4, ["A"], in_sync={"A": True},
+                                 touched_files={"A": ["a.py"]}),
+        ]
+        engine_holder = self._make_patched_loop_g3(tmp_path, monkeypatch, script,
+                                                    stable_rounds=2)
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=2)
+        result = loop.run()
+
+        assert result.converged is True
+        eng = engine_holder["engine"]
+        # After round 2 (drift), A's counter is reset → not in skip set for round 3
+        round3_skip = eng.calls[2].get("skip_specs") or set()
+        assert "A" not in round3_skip
+
+    def test_one_spec_drift_does_not_reset_others(self, tmp_path, monkeypatch):
+        """Spec B's drift does NOT reset already-converged Spec A.
+        A converges after rounds 2-3 (2 consecutive 0-drift).
+        B keeps drifting until round 4, when it finally is in-sync.
+        Round 5 gives B its second consecutive 0-drift → convergence."""
+        # A: round1=drift, r2=sync, r3=sync → counter=2 after r3 → converged
+        # B: round1=drift, r2=drift, r3=drift, r4=sync → counter=1 after r4
+        # Round 5: B=sync → counter=2 → converged
+        script = [
+            _round_with_analyses(1, ["A", "B"], in_sync={"A": False, "B": False},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+            _round_with_analyses(2, ["A", "B"], in_sync={"A": True, "B": False},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+            _round_with_analyses(3, ["A", "B"], in_sync={"A": True, "B": False},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+            _round_with_analyses(4, ["A", "B"], in_sync={"A": True, "B": True},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+            _round_with_analyses(5, ["A", "B"], in_sync={"A": True, "B": True},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+        ]
+        engine_holder = self._make_patched_loop_g3(tmp_path, monkeypatch, script,
+                                                    stable_rounds=2)
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=2)
+        result = loop.run()
+
+        assert result.converged is True
+        eng = engine_holder["engine"]
+        # Round 4: A should be in skip set (converged after round 3)
+        round4_skip = eng.calls[3].get("skip_specs") or set()
+        assert "A" in round4_skip
+        # B should NOT be in skip set (still drifting)
+        assert "B" not in round4_skip
+
+    def test_level3_works_without_cache(self, tmp_path, monkeypatch):
+        """Level 3 per-spec early exit works even without sync_state cache."""
+        # A: round1=drift, round2=sync, round3=sync → converged after r3
+        # B: round1=sync, round2=sync → converged after r2
+        script = [
+            _round_with_analyses(1, ["A", "B"], in_sync={"A": False, "B": True},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+            _round_with_analyses(2, ["A", "B"], in_sync={"A": True, "B": True},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+            _round_with_analyses(3, ["A", "B"], in_sync={"A": True, "B": True},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+        ]
+        engine_holder = self._make_patched_loop_g3(tmp_path, monkeypatch, script,
+                                                    stable_rounds=2)
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=2)
+        result = loop.run()
+        assert result.converged is True
+
+
+# ---------------------------------------------------------------------------
+# SyncState write on convergence
+# ---------------------------------------------------------------------------
+
+
+class TestSyncStateWriteOnConvergence:
+    """sync_state is written after convergence."""
+
+    def test_sync_state_written_after_convergence(self, tmp_path, monkeypatch):
+        """After convergence, sync_state.json is created."""
+        import subprocess
+        from se3.engine.sync_state import state_path
+
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"],
+                       cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"],
+                       cwd=str(tmp_path), check=True)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("hello")
+        subprocess.run(["git", "add", "src/main.py"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"],
+                       cwd=str(tmp_path), check=True)
+
+        spec_a_dir = tmp_path / "se3" / "specs" / "spec-a"
+        spec_a_dir.mkdir(parents=True)
+        (spec_a_dir / "spec.md").write_text(
+            "<!-- spec-format: v1 -->\n# spec-a Specification\n"
+            "## Purpose\nTest.\n### Requirement: R1\n"
+        )
+
+        engine_holder = {}
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng._specs = {
+                "spec-a": {
+                    "name": "spec-a",
+                    "path": str(spec_a_dir / "spec.md"),
+                    "content": (spec_a_dir / "spec.md").read_text(),
+                },
+            }
+            eng.script = [
+                _round_with_analyses(1, ["spec-a"], in_sync={"spec-a": True},
+                                     touched_files={"spec-a": ["src/main.py"]},
+                                     new_subsystems=0),
+            ]
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        result = loop.run()
+
+        assert result.converged is True
+        assert state_path(tmp_path).exists()
+
+        from se3.engine.sync_state import load
+        saved = load(tmp_path)
+        assert saved is not None
+        assert saved.discovery_converged is True
+        assert "spec-a" in saved.spec_deps
+
+    def test_sync_state_not_written_with_failed_analysis(self, tmp_path, monkeypatch):
+        """sync_state is NOT written when there are unresolved failed analyses."""
+        import subprocess
+        from se3.engine.sync_state import state_path
+
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+
+        engine_holder = {}
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng.script = [
+                _round_with_analyses(1, ["A"], in_sync={"A": True},
+                                     failed={"A": "infrastructure_failure"},
+                                     new_subsystems=0),
+            ]
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        result = loop.run()
+
+        assert not state_path(tmp_path).exists()
+
+    def test_sync_state_persists_for_next_sync(self, tmp_path, monkeypatch):
+        """Second sync with unchanged tree hits level-1 shutter."""
+        import subprocess
+        from se3.engine.sync_state import state_path
+
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "test@test"],
+                       cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"],
+                       cwd=str(tmp_path), check=True)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("hello")
+        subprocess.run(["git", "add", "src/main.py"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"],
+                       cwd=str(tmp_path), check=True)
+
+        spec_a_dir = tmp_path / "se3" / "specs" / "spec-a"
+        spec_a_dir.mkdir(parents=True)
+        (spec_a_dir / "spec.md").write_text(
+            "<!-- spec-format: v1 -->\n# spec-a Specification\n"
+            "## Purpose\nTest.\n### Requirement: R1\n"
+        )
+
+        # First sync
+        engine_holder1 = {}
+        def factory1(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng._specs = {
+                "spec-a": {
+                    "name": "spec-a",
+                    "path": str(spec_a_dir / "spec.md"),
+                    "content": (spec_a_dir / "spec.md").read_text(),
+                },
+            }
+            eng.script = [
+                _round_with_analyses(1, ["spec-a"], in_sync={"spec-a": True},
+                                     touched_files={"spec-a": ["src/main.py"]},
+                                     new_subsystems=0),
+            ]
+            engine_holder1["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory1)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop1 = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        result1 = loop1.run()
+        assert result1.converged is True
+        assert state_path(tmp_path).exists()
+
+        # Second sync: should hit level-1 shutter
+        engine_holder2 = {}
+        def factory2(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            engine_holder2["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory2)
+
+        loop2 = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        result2 = loop2.run()
+        assert result2.converged is True
+
+        eng2 = engine_holder2.get("engine")
+        if eng2 is not None:
+            assert len(eng2.calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Skip set correctness
+# ---------------------------------------------------------------------------
+
+
+class TestSkipSetCorrectness:
+    """Verify skip_specs handling is correct with per-spec convergence."""
+
+    def test_per_spec_converged_added_to_skip_set(self, tmp_path, monkeypatch):
+        """Per-spec converged specs are added to the skip set.
+        A is in-sync from round 1, reaches stable_rounds=2 after round 2."""
+        script = [
+            _round_with_analyses(1, ["A", "B"], in_sync={"A": True, "B": False},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]},
+                                 new_subsystems=0),
+            _round_with_analyses(2, ["A", "B"], in_sync={"A": True, "B": True},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]},
+                                 new_subsystems=0),
+            _round_with_analyses(3, ["A", "B"], in_sync={"A": True, "B": True},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]},
+                                 new_subsystems=0),
+        ]
+        engine_holder = {}
+        def factory(project_root, interactive=False):
+            eng = _CallTrackingEngine(project_root, interactive=interactive)
+            eng.script = list(script)
+            engine_holder["engine"] = eng
+            return eng
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=2)
+        result = loop.run()
+        assert result.converged is True
+
+        eng = engine_holder["engine"]
+        # Round 2: A has 1 drift-free round → not yet in skip set
+        round2_skip = eng.calls[1].get("skip_specs") or set()
+        assert "A" not in round2_skip
+
+        # Round 3: A has 2 drift-free rounds → in skip set
+        round3_skip = eng.calls[2].get("skip_specs") or set()
+        assert "A" in round3_skip

@@ -15,14 +15,17 @@ that depends on cross-round history lives here.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections import deque
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from . import sync_checkpoint as _checkpoint_module
+from . import sync_state as _sync_state_module
 from .sync_checkpoint import SyncCheckpoint
 from .sync_engine import LoopResult, RoundResult, SyncEngine
 
@@ -145,6 +148,7 @@ class SyncLoop:
         infrastructure_failure_threshold: int = _DEFAULT_INFRA_FAILURE_THRESHOLD,
         resume_from: Optional[SyncCheckpoint] = None,
         prompt_resume_or_exit: Optional[Callable[[Dict[str, Any]], str]] = None,
+        force: bool = False,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be >= 1")
@@ -161,6 +165,7 @@ class SyncLoop:
         self.oscillation_window = oscillation_window
         self.infrastructure_failure_threshold = infrastructure_failure_threshold
         self.resume_from = resume_from
+        self.force = force
         self._consecutive_infra_failures = 0
         if prompt_resume_or_exit is None:
             from .sync_interaction import prompt_resume_or_exit as _default_prompt
@@ -222,6 +227,85 @@ class SyncLoop:
                 start_round, len(skip_specs), len(changed),
             )
 
+        # ── Level 1 & 2: load sync_state, evaluate skip gates ──────────────
+        pre_loop_sync_state = None
+        level_2_skip_specs: set[str] = set()
+        force_discovery = False
+
+        if not self.force and self.resume_from is None:
+            pre_loop_sync_state = _sync_state_module.load(self.project_root)
+
+        # Level 1 — global shutter
+        if pre_loop_sync_state and pre_loop_sync_state.discovery_converged:
+            current_fp = _sync_state_module.compute_code_fingerprint(
+                self.project_root
+            )
+            if current_fp == pre_loop_sync_state.code_fingerprint:
+                loop_result.converged = True
+                loop_result.final_round_index = 0
+                self._emit(
+                    "converged",
+                    round_index=0,
+                    stable_rounds=self.stable_rounds,
+                )
+                self.discovery_converged = True
+                logger.info(
+                    "Level-1 global shutter: code fingerprint matches, "
+                    "0 LLM calls."
+                )
+                return loop_result
+
+        # Level 2 — per-spec gate (only if discovery was converged in cache)
+        if pre_loop_sync_state and pre_loop_sync_state.discovery_converged:
+            file_set_changed = _sync_state_module.detect_file_set_change(
+                pre_loop_sync_state, self.project_root
+            )
+            if file_set_changed:
+                discovery_converged = False
+                discovery_stable_count = 0
+                force_discovery = True
+                logger.info(
+                    "Level-2 guard: file-set change detected, "
+                    "invalidating all per-spec skips and forcing discovery."
+                )
+            else:
+                # Pre-load specs to evaluate per-spec gate.
+                all_specs = engine._load_specs()
+                for spec_name in all_specs:
+                    entry = pre_loop_sync_state.spec_deps.get(spec_name)
+                    if not entry:
+                        continue
+                    deps = entry.get("deps", {})
+                    if not deps:
+                        continue
+                    current_hashes: Dict[str, str] = {}
+                    all_present = True
+                    for dep_path in deps:
+                        h = _sync_state_module.compute_file_content_hash(
+                            self.project_root / dep_path
+                        )
+                        if h is None:
+                            all_present = False
+                            break
+                        current_hashes[dep_path] = h
+                    if all_present and pre_loop_sync_state.spec_in_sync(
+                        spec_name, current_hashes
+                    ):
+                        level_2_skip_specs.add(spec_name)
+                if level_2_skip_specs:
+                    logger.info(
+                        "Level-2 per-spec gate: %d spec(s) in-sync from cache: %s",
+                        len(level_2_skip_specs),
+                        sorted(level_2_skip_specs),
+                    )
+
+        # Per-spec convergence tracking (Level 3).
+        per_spec_zero_drift: Dict[str, int] = {}
+        per_spec_converged: Set[str] = set()
+
+        # Initial skip set includes level-2 cache hits.
+        skip_specs = level_2_skip_specs.copy()
+
         normal_exit = False
 
         try:
@@ -234,8 +318,14 @@ class SyncLoop:
                 # Discovery: run every round until converged (or never on resume).
                 if self.resume_from is not None:
                     do_discovery = False
+                elif force_discovery:
+                    do_discovery = True
+                    force_discovery = False  # only force the first round
                 else:
                     do_discovery = not discovery_converged
+
+                # Build skip set for this round: level-2 cache hits + per-spec converged.
+                round_skip = skip_specs | per_spec_converged
 
                 round_result = engine.run_once(
                     round_index=round_index,
@@ -245,7 +335,7 @@ class SyncLoop:
                     specs=None,  # let SyncEngine reload each round
                     do_discovery=do_discovery,
                     progress_callback=self._wrap_progress(round_index),
-                    skip_specs=skip_specs if skip_specs else None,
+                    skip_specs=round_skip if round_skip else None,
                 )
 
                 # Track discovery convergence: count consecutive rounds
@@ -282,7 +372,27 @@ class SyncLoop:
                     changes_by_spec=dict(round_result.changes_by_spec),
                 )
 
-                # ----- Infrastructure failure tracking -----
+                # ── Per-spec convergence tracking (Level 3) ──────────────
+                any_drift_this_round = False
+                for analysis in round_result.analyses:
+                    name = analysis.spec_name
+                    if analysis.analysis_failed:
+                        continue
+                    if analysis.is_in_sync:
+                        per_spec_zero_drift[name] = (
+                            per_spec_zero_drift.get(name, 0) + 1
+                        )
+                        if (
+                            per_spec_zero_drift[name]
+                            >= self.stable_rounds
+                        ):
+                            per_spec_converged.add(name)
+                    else:
+                        per_spec_zero_drift[name] = 0
+                        per_spec_converged.discard(name)
+                        any_drift_this_round = True
+
+                # ── Infrastructure failure tracking ───────────────────────
                 infra_failed_count = sum(
                     1
                     for a in round_result.analyses
@@ -298,9 +408,6 @@ class SyncLoop:
                     self._consecutive_infra_failures
                     >= self.infrastructure_failure_threshold
                 ):
-                    # After writing the checkpoint we always clear skip_specs:
-                    # if the user continues, the next round must rebuild the
-                    # in_sync set from fresh analyses, not stale resume state.
                     skip_specs = set()
                     should_continue = self._handle_infra_failure_threshold(
                         round_result=round_result,
@@ -312,9 +419,6 @@ class SyncLoop:
                         round_index += 1
                         continue
                     else:
-                        # User chose to exit (non-TTY or explicit signal).
-                        # Checkpoint already persisted; bail out without
-                        # clearing it.
                         cp_path = str(
                             _checkpoint_module.checkpoint_path(self.project_root)
                         )
@@ -327,7 +431,7 @@ class SyncLoop:
                         )
                         return loop_result
 
-                # ----- Oscillation -----
+                # ── Oscillation ───────────────────────────────────────────
                 report = detector.detect()
                 if report is not None:
                     loop_result.oscillation_detected = True
@@ -341,10 +445,33 @@ class SyncLoop:
                     normal_exit = True
                     break
 
-                # ----- Stability / convergence -----
-                if round_result.is_stable:
-                    stable_count += 1
-                    if stable_count >= self.stable_rounds:
+                # ── Convergence ───────────────────────────────────────────
+                # Compute the set of all specs seen across every round.
+                all_specs_seen: Set[str] = set()
+                for r in loop_result.rounds:
+                    for a in r.analyses:
+                        all_specs_seen.add(a.spec_name)
+                all_specs_seen.update(level_2_skip_specs)
+
+                # Collect specs that had a failed analysis in this round.
+                specs_failed_this_round: Set[str] = set()
+                for analysis in round_result.analyses:
+                    if analysis.analysis_failed:
+                        specs_failed_this_round.add(analysis.spec_name)
+
+                # Per-spec convergence: every seen spec has individually
+                # reached stable_rounds consecutive 0-drift rounds, OR has
+                # a persistent failed analysis (doesn't block convergence
+                # but prevents sync_state from being written — checked in
+                # _write_sync_state). Discovery must also be converged.
+                if all_specs_seen:
+                    per_spec_done = all(
+                        per_spec_zero_drift.get(name, 0)
+                        >= self.stable_rounds
+                        or name in specs_failed_this_round
+                        for name in all_specs_seen
+                    )
+                    if per_spec_done and discovery_converged:
                         loop_result.converged = True
                         self._emit(
                             "converged",
@@ -354,7 +481,21 @@ class SyncLoop:
                         normal_exit = True
                         break
                 else:
-                    stable_count = 0
+                    # Fallback: traditional global stability for test
+                    # fixtures that provide RoundResults with empty analyses.
+                    if round_result.is_stable:
+                        stable_count += 1
+                        if stable_count >= self.stable_rounds:
+                            loop_result.converged = True
+                            self._emit(
+                                "converged",
+                                round_index=round_index,
+                                stable_rounds=self.stable_rounds,
+                            )
+                            normal_exit = True
+                            break
+                    else:
+                        stable_count = 0
 
                 # After the first post-resume round, the skip set has served
                 # its purpose; re-analyze normally from then on.
@@ -385,6 +526,19 @@ class SyncLoop:
         # (and future sync_state writing) can inspect it.
         self.discovery_converged = discovery_converged
 
+        # ── Write sync_state on genuine convergence ──────────────────────
+        if loop_result.converged and normal_exit:
+            try:
+                engine_specs = engine._load_specs()
+            except Exception:
+                engine_specs = {}
+            self._write_sync_state(
+                loop_result=loop_result,
+                discovery_converged=discovery_converged,
+                level_2_skip_specs=level_2_skip_specs,
+                engine_specs=engine_specs,
+            )
+
         if normal_exit:
             # Any clean exit path (converged, oscillation, max-rounds) clears
             # the checkpoint so the next `se3 sync` starts fresh.
@@ -399,6 +553,109 @@ class SyncLoop:
             logger.warning("Failed to persist sync rounds summary: %s", e)
 
         return loop_result
+
+    # ------------------------------------------------------------------
+    # SyncState persistence
+    # ------------------------------------------------------------------
+
+    def _write_sync_state(
+        self,
+        loop_result: LoopResult,
+        discovery_converged: bool,
+        level_2_skip_specs: set[str],
+        engine_specs: Dict[str, Any] | None = None,
+    ) -> None:
+        """Write sync_state.json only when sync truly converged and there are
+        no unresolved failed analyses."""
+        # Do not write when there are unresolved failed analyses.
+        for r in loop_result.rounds:
+            for analysis in r.analyses:
+                if analysis.analysis_failed:
+                    logger.info(
+                        "Not writing sync_state: spec '%s' has unresolved "
+                        "failed analysis.",
+                        analysis.spec_name,
+                    )
+                    return
+
+        try:
+            code_fp = _sync_state_module.compute_code_fingerprint(self.project_root)
+        except Exception:
+            logger.debug("Failed to compute code fingerprint; skipping sync_state")
+            return
+
+        # Union of per-spec deps across ALL rounds (union, not snapshot).
+        deps_union: Dict[str, Set[str]] = {}
+        for r in loop_result.rounds:
+            for spec_name, files in r.per_spec_deps.items():
+                if spec_name in level_2_skip_specs:
+                    continue  # was never analyzed this sync, keep cached deps
+                if spec_name not in deps_union:
+                    deps_union[spec_name] = set()
+                deps_union[spec_name].update(files)
+
+        # Build spec_deps: hash each spec's current content + dep file hashes.
+        spec_deps: Dict[str, Dict[str, Any]] = {}
+        if deps_union:
+            if engine_specs is None:
+                try:
+                    engine_specs = self._engine_specs()
+                except Exception:
+                    logger.debug("Failed to load specs for sync_state; skipping")
+                    return
+            for spec_name, files in deps_union.items():
+                spec_info = engine_specs.get(spec_name)
+                if not spec_info:
+                    continue
+                spec_path = spec_info.get("path")
+                if not spec_path:
+                    continue
+                try:
+                    content = Path(spec_path).read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                spec_hash = hashlib.sha256(
+                    content.encode("utf-8")
+                ).hexdigest()
+
+                dep_hashes: Dict[str, str] = {}
+                for rel_path in sorted(files):
+                    h = _sync_state_module.compute_file_content_hash(
+                        self.project_root / rel_path
+                    )
+                    if h:
+                        dep_hashes[rel_path] = h
+
+                spec_deps[spec_name] = {
+                    "spec_hash": spec_hash,
+                    "deps": dep_hashes,
+                }
+
+        # Carry forward cached spec deps that were never analyzed this sync.
+        for spec_name in level_2_skip_specs:
+            if spec_name in spec_deps:
+                continue
+            cached = _sync_state_module.load(self.project_root)
+            if cached and spec_name in cached.spec_deps:
+                spec_deps[spec_name] = dict(cached.spec_deps[spec_name])
+
+        state = _sync_state_module.SyncState(
+            converged_at=datetime.now(timezone.utc).isoformat(),
+            code_fingerprint=code_fp,
+            discovery_converged=discovery_converged,
+            spec_deps=spec_deps,
+            obsolete_specs=[],  # handled in G8
+        )
+        _sync_state_module.save(state, self.project_root)
+        logger.info(
+            "Wrote sync_state: fingerprint=%s, %d spec(s), discovery_converged=%s",
+            code_fp[:12], len(spec_deps), discovery_converged,
+        )
+
+    def _engine_specs(self) -> Dict[str, Any]:
+        """Return the spec dict from a fresh engine._load_specs() call."""
+        engine = SyncEngine(self.project_root, interactive=self.interactive)
+        return engine._load_specs()
 
     # ------------------------------------------------------------------
     # Infrastructure-failure handling

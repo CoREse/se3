@@ -206,6 +206,7 @@ def sync_command(
     once: bool = False,
     project_root: Optional[Path] = None,
     resume: bool = False,
+    force: bool = False,
 ) -> None:
     """Run ``SyncLoop`` and render the final report.
 
@@ -324,6 +325,7 @@ def sync_command(
         interactive=interactive,
         progress_callback=progress_callback,
         resume_from=checkpoint,
+        force=force,
     )
 
     try:

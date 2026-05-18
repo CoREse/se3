@@ -462,6 +462,15 @@ def sync_cmd(
             "with --validate-only."
         ),
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "Ignore sync_state.json cache and force a full analysis of "
+            "all specs from scratch. After convergence, the cache is "
+            "rewritten with fresh results."
+        ),
+    ),
 ):
     """Run code → spec sync until convergence.
 
@@ -523,6 +532,7 @@ def sync_cmd(
         show_diff=show_diff,
         once=once,
         resume=resume,
+        force=force,
     )
 
 
