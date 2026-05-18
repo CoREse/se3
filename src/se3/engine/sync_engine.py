@@ -107,6 +107,7 @@ class SpecAnalysis:
     analyzed_at: datetime = field(default_factory=datetime.now)
     failed_analysis_reason: Optional[str] = None
     touched_files: List[str] = field(default_factory=list)
+    code_fully_absent: bool = False
 
     @property
     def gaps(self) -> List[SpecDiff]:
@@ -137,6 +138,8 @@ class SpecAnalysis:
         }
         if self.failed_analysis_reason is not None:
             d["failed_analysis_reason"] = self.failed_analysis_reason
+        if self.code_fully_absent:
+            d["code_fully_absent"] = self.code_fully_absent
         return d
 
     @classmethod
@@ -153,6 +156,7 @@ class SpecAnalysis:
             analyzed_at=analyzed_at,
             failed_analysis_reason=data.get("failed_analysis_reason"),
             touched_files=list(data.get("touched_files", [])),
+            code_fully_absent=bool(data.get("code_fully_absent", False)),
         )
 
 
@@ -237,6 +241,9 @@ class LoopResult:
     paused: bool = False
     checkpoint_path: Optional[str] = None
     completed_at: datetime = field(default_factory=datetime.now)
+    obsolete_specs: List[str] = field(default_factory=list)
+    obsolete_specs_deleted: List[str] = field(default_factory=list)
+    obsolete_specs_kept: List[str] = field(default_factory=list)
 
     # --- Compatibility helpers ----------------------------------------
     # These properties expose a flattened view of the final round so legacy
@@ -290,6 +297,9 @@ class LoopResult:
             "paused": self.paused,
             "checkpoint_path": self.checkpoint_path,
             "completed_at": self.completed_at.isoformat(),
+            "obsolete_specs": list(self.obsolete_specs),
+            "obsolete_specs_deleted": list(self.obsolete_specs_deleted),
+            "obsolete_specs_kept": list(self.obsolete_specs_kept),
         }
 
     def to_json(self) -> str:
@@ -503,6 +513,7 @@ class SyncEngine:
         do_discovery: bool = False,
         progress_callback: Optional[Callable[..., None]] = None,
         skip_specs: Optional[set[str]] = None,
+        spec_deps: Optional[Dict[str, List[str]]] = None,
     ) -> RoundResult:
         """Execute one stateless sync pass.
 
@@ -521,6 +532,10 @@ class SyncEngine:
                 run already confirmed unchanged. Each skipped spec is recorded
                 with an empty-diffs ``SpecAnalysis`` so its hash still flows
                 into ``RoundResult.spec_hashes_after`` for oscillation detection.
+            spec_deps: Optional dict mapping spec_name -> list of dependency
+                file paths (accumulated across rounds). Passed to the analyzer
+                so it can detect when all deps are missing and inject the code
+                absence confirmation prompt.
 
         Returns:
             ``RoundResult`` capturing every change applied in this round.
@@ -585,8 +600,13 @@ class SyncEngine:
             )
             llm_caller.step_type = "sync_analyze"
 
+            spec_dep_list = None
+            if spec_deps:
+                spec_dep_list = spec_deps.get(spec_name)
+
             analysis = analyzer.analyze_spec(
-                spec_name, spec_info["content"], project_context
+                spec_name, spec_info["content"], project_context,
+                deps=spec_dep_list,
             )
             result.analyses.append(analysis)
 

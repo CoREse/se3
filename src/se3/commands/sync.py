@@ -158,6 +158,20 @@ def _render_loop_result(loop_result, show_diff: bool) -> None:
             f"\nHigh-impact deletions processed: {high_impact_total}"
         )
 
+    if getattr(loop_result, "obsolete_specs_deleted", None):
+        deleted_specs = list(loop_result.obsolete_specs_deleted)
+        if deleted_specs:
+            summary_line += (
+                f"\nObsolete specs deleted: {', '.join(deleted_specs)}"
+            )
+
+    if getattr(loop_result, "obsolete_specs_kept", None):
+        kept_specs = list(loop_result.obsolete_specs_kept)
+        if kept_specs:
+            summary_line += (
+                f"\nObsolete specs kept: {', '.join(kept_specs)}"
+            )
+
     if getattr(loop_result, "discovery_failed", False):
         summary_line += (
             "\n[yellow]Warning: spec discovery failed during round 1; "
@@ -206,6 +220,7 @@ def sync_command(
     once: bool = False,
     project_root: Optional[Path] = None,
     resume: bool = False,
+    confirm_cleanup: bool = False,
 ) -> None:
     """Run ``SyncLoop`` and render the final report.
 
@@ -217,6 +232,7 @@ def sync_command(
         once: Informational flag for the banner; the CLI layer already
             collapses ``max_rounds`` / ``stable_rounds`` to ``1`` in this case.
         project_root: Project root directory. Auto-detected if None.
+        confirm_cleanup: When True, prompt before deleting each obsolete spec.
     """
     from ..engine import sync_checkpoint as _sync_checkpoint
     from ..engine.sync_loop import SyncLoop
@@ -245,7 +261,7 @@ def sync_command(
         f"Mode: [bold]{mode_label}[/bold]\n"
         f"Project: {project_root}\n"
         f"max_rounds={max_rounds}, stable_rounds={stable_rounds}, "
-        f"interactive={interactive}"
+        f"interactive={interactive}, confirm_cleanup={confirm_cleanup}"
     )
     if checkpoint is not None:
         console.print(
@@ -324,6 +340,7 @@ def sync_command(
         interactive=interactive,
         progress_callback=progress_callback,
         resume_from=checkpoint,
+        confirm_cleanup=confirm_cleanup,
     )
 
     try:

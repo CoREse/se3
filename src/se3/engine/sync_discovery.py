@@ -8,9 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import subprocess
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,18 @@ Return a complete markdown spec document following this structure:
 Include all significant requirements and scenarios discovered from the code. \
 The spec should accurately reflect the current implementation, not aspirational features.
 """
+
+
+def _do_delete_spec_dir(spec_dir: Path, spec_name: str) -> None:
+    """Delete a spec directory and log the result."""
+    try:
+        shutil.rmtree(spec_dir)
+        logger.info("Deleted obsolete spec directory '%s' at %s", spec_name, spec_dir)
+    except OSError as exc:
+        logger.error(
+            "Failed to delete obsolete spec directory '%s' at %s: %s",
+            spec_name, spec_dir, exc,
+        )
 
 
 class SpecDiscovery:
@@ -254,6 +267,62 @@ class SpecDiscovery:
         except Exception as e:
             logger.error("Failed to generate spec for '%s': %s", name, e)
             return None
+
+    @staticmethod
+    def delete_obsolete_specs(
+        project_root: Path,
+        obsolete_specs: List[str],
+        confirm: bool = False,
+    ) -> Dict[str, Any]:
+        """Delete obsolete spec directories after convergence.
+
+        Args:
+            project_root: Project root directory.
+            obsolete_specs: List of spec names to delete.
+            confirm: If True, prompt user interactively for each spec.
+                If False, delete all directly without interaction.
+
+        Returns:
+            Dict with keys ``deleted`` (list of spec names deleted) and
+            ``kept`` (list of spec names kept/not deleted).
+        """
+        deleted: List[str] = []
+        kept: List[str] = []
+
+        for spec_name in sorted(obsolete_specs):
+            spec_dir = project_root / "se3" / "specs" / spec_name
+            if not spec_dir.is_dir():
+                logger.debug(
+                    "Obsolete spec dir '%s' not found, skipping deletion", spec_name
+                )
+                kept.append(spec_name)
+                continue
+
+            if confirm:
+                try:
+                    answer = input(
+                        f"Delete obsolete spec '{spec_name}'? "
+                        f"[y/N]: "
+                    ).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    logger.info(
+                        "User interrupted during obsolete spec confirmation; "
+                        "keeping '%s'", spec_name
+                    )
+                    kept.append(spec_name)
+                    continue
+
+                if answer in ("y", "yes"):
+                    _do_delete_spec_dir(spec_dir, spec_name)
+                    deleted.append(spec_name)
+                else:
+                    logger.info("User chose to keep obsolete spec '%s'", spec_name)
+                    kept.append(spec_name)
+            else:
+                _do_delete_spec_dir(spec_dir, spec_name)
+                deleted.append(spec_name)
+
+        return {"deleted": deleted, "kept": kept}
 
     def _get_directory_tree(self, root: Path) -> str:
         """Get a filtered directory tree of the project.

@@ -462,6 +462,15 @@ def sync_cmd(
             "with --validate-only."
         ),
     ),
+    confirm_cleanup: bool = typer.Option(
+        False,
+        "--confirm-cleanup",
+        help=(
+            "When obsolete specs are detected (code entirely removed), "
+            "prompt for confirmation before deleting each one. Without "
+            "this flag, obsolete specs are deleted automatically."
+        ),
+    ),
 ):
     """Run code → spec sync until convergence.
 
@@ -523,6 +532,7 @@ def sync_cmd(
         show_diff=show_diff,
         once=once,
         resume=resume,
+        confirm_cleanup=confirm_cleanup,
     )
 
 

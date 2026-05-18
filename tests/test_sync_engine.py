@@ -453,7 +453,7 @@ class TestRunOnce:
 
         llm = MagicMock()
 
-        def record_step(spec_name, content, ctx):
+        def record_step(spec_name, content, ctx, deps=None):
             seen_step_ids.append(llm.step_id)
             return SpecAnalysis(spec_name=spec_name, diffs=[])
 

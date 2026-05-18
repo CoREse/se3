@@ -145,6 +145,7 @@ class SyncLoop:
         infrastructure_failure_threshold: int = _DEFAULT_INFRA_FAILURE_THRESHOLD,
         resume_from: Optional[SyncCheckpoint] = None,
         prompt_resume_or_exit: Optional[Callable[[Dict[str, Any]], str]] = None,
+        confirm_cleanup: bool = False,
     ) -> None:
         if max_rounds < 1:
             raise ValueError("max_rounds must be >= 1")
@@ -166,6 +167,7 @@ class SyncLoop:
             from .sync_interaction import prompt_resume_or_exit as _default_prompt
             prompt_resume_or_exit = _default_prompt
         self._prompt_resume_or_exit = prompt_resume_or_exit
+        self.confirm_cleanup = confirm_cleanup
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -194,11 +196,19 @@ class SyncLoop:
 
         start_round = 1
         skip_specs: set[str] = set()
+        # Accumulated per-spec deps: union of touched_files across all analyzed rounds.
+        _accumulated_deps: Dict[str, set] = {}
+        # Obsolete spec candidates: specs whose deps are all gone AND whose
+        # analyzer confirmed code_fully_absent.
+        obsolete_candidates: set[str] = set()
         if self.resume_from is not None:
             still_in_sync, changed = _checkpoint_module.recompute_in_sync(
                 self.resume_from, self.project_root
             )
             skip_specs = set(still_in_sync)
+            # Restore obsolete candidates from checkpoint so they survive
+            # interruption and --resume cycles.
+            obsolete_candidates = set(self.resume_from.obsolete_specs or [])
             # The checkpoint's round_index records the round that *failed*;
             # resume continues from the next slot under the original budget,
             # so the remaining round budget is `max_rounds - round_index`.
@@ -208,11 +218,13 @@ class SyncLoop:
                 round_index=start_round,
                 skipped_specs=sorted(skip_specs),
                 changed_specs=sorted(changed),
+                obsolete_candidates=sorted(obsolete_candidates),
             )
             logger.info(
                 "Resuming sync from round %d; skipping %d still-in-sync specs, "
-                "%d changed specs need re-analysis",
+                "%d changed specs need re-analysis, %d obsolete candidates",
                 start_round, len(skip_specs), len(changed),
+                len(obsolete_candidates),
             )
 
         normal_exit = False
@@ -224,6 +236,14 @@ class SyncLoop:
 
                 project_context = self._build_context(collector)
 
+                # Build spec_deps from accumulated per-spec deps for this round.
+                round_spec_deps: Dict[str, List[str]] = {}
+                if _accumulated_deps:
+                    round_spec_deps = {
+                        name: sorted(paths)
+                        for name, paths in _accumulated_deps.items()
+                    }
+
                 round_result = engine.run_once(
                     round_index=round_index,
                     flow_ctx=flow_ctx,
@@ -233,6 +253,7 @@ class SyncLoop:
                     do_discovery=(round_index == 1 and self.resume_from is None),
                     progress_callback=self._wrap_progress(round_index),
                     skip_specs=skip_specs if skip_specs else None,
+                    spec_deps=round_spec_deps if round_spec_deps else None,
                 )
 
                 loop_result.rounds.append(round_result)
@@ -243,6 +264,20 @@ class SyncLoop:
                 if round_result.discovery_failed:
                     loop_result.discovery_failed = True
                 loop_result.final_round_index = round_index
+
+                # Accumulate per-spec deps (union across rounds) and update
+                # obsolete candidates.
+                for spec_name, paths in round_result.per_spec_deps.items():
+                    if spec_name not in _accumulated_deps:
+                        _accumulated_deps[spec_name] = set()
+                    _accumulated_deps[spec_name].update(paths)
+
+                obsolete_candidates = self._update_obsolete_candidates(
+                    round_result=round_result,
+                    accumulated_deps=_accumulated_deps,
+                    previous_candidates=obsolete_candidates,
+                    project_root=self.project_root,
+                )
 
                 for spec_name, content_hash in round_result.spec_hashes_after.items():
                     detector.record(spec_name, content_hash)
@@ -278,6 +313,7 @@ class SyncLoop:
                         round_result=round_result,
                         loop_result=loop_result,
                         round_index=round_index,
+                        obsolete_candidates=obsolete_candidates,
                     )
                     if should_continue:
                         self._consecutive_infra_failures = 0
@@ -318,10 +354,28 @@ class SyncLoop:
                     stable_count += 1
                     if stable_count >= self.stable_rounds:
                         loop_result.converged = True
+                        loop_result.obsolete_specs = sorted(obsolete_candidates)
+                        # Delete obsolete specs after convergence, before
+                        # clearing checkpoint.
+                        if obsolete_candidates:
+                            from .sync_discovery import SpecDiscovery
+                            result = SpecDiscovery.delete_obsolete_specs(
+                                project_root=self.project_root,
+                                obsolete_specs=sorted(obsolete_candidates),
+                                confirm=self.confirm_cleanup,
+                            )
+                            loop_result.obsolete_specs_deleted = result["deleted"]
+                            loop_result.obsolete_specs_kept = result["kept"]
+                            self._emit(
+                                "obsolete_cleanup",
+                                deleted=result["deleted"],
+                                kept=result["kept"],
+                            )
                         self._emit(
                             "converged",
                             round_index=round_index,
                             stable_rounds=self.stable_rounds,
+                            obsolete_specs=sorted(obsolete_candidates),
                         )
                         normal_exit = True
                         break
@@ -369,6 +423,61 @@ class SyncLoop:
         return loop_result
 
     # ------------------------------------------------------------------
+    # Obsolete candidate tracking
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _check_all_deps_missing(
+        deps: set, project_root: Path
+    ) -> bool:
+        """Return True if deps is non-empty and ALL referenced files are absent."""
+        if not deps:
+            return False
+        for rel_path in deps:
+            if (project_root / rel_path).exists():
+                return False
+        return True
+
+    @staticmethod
+    def _update_obsolete_candidates(
+        round_result: RoundResult,
+        accumulated_deps: Dict[str, set],
+        previous_candidates: set,
+        project_root: Path,
+    ) -> set:
+        """Update the obsolete candidate set after a round.
+
+        - A spec enters the candidate set when its accumulated deps are all
+          missing from disk AND the round's analysis confirms code_fully_absent.
+        - A spec exits the candidate set when code reappears (deps files exist
+          again, or code_fully_absent is False).
+        - Specs that never had deps (cold start, never analyzed) are unaffected.
+        """
+        candidates = set(previous_candidates)
+
+        for analysis in round_result.analyses:
+            spec_name = analysis.spec_name
+            spec_deps = accumulated_deps.get(spec_name, set())
+
+            # Only evaluate specs that have accumulated deps.
+            if not spec_deps:
+                continue
+
+            deps_all_missing = SyncLoop._check_all_deps_missing(
+                spec_deps, project_root
+            )
+
+            if deps_all_missing and analysis.code_fully_absent:
+                # All known files gone + LLM confirmed code is absent → candidate.
+                candidates.add(spec_name)
+            elif not deps_all_missing or not analysis.code_fully_absent:
+                # Code has reappeared (deps files exist again, or LLM didn't
+                # confirm full absence) → remove from candidates.
+                candidates.discard(spec_name)
+
+        return candidates
+
+    # ------------------------------------------------------------------
     # Infrastructure-failure handling
     # ------------------------------------------------------------------
 
@@ -377,6 +486,7 @@ class SyncLoop:
         round_result: RoundResult,
         loop_result: LoopResult,
         round_index: int,
+        obsolete_candidates: Optional[set] = None,
     ) -> bool:
         """Write checkpoint, prompt user, and return ``True`` if loop should continue.
 
@@ -418,6 +528,7 @@ class SyncLoop:
             in_sync_specs=in_sync_hashes,
             failed_analyses=failed_reasons,
             reason="quota_exhausted",
+            obsolete_specs=sorted(obsolete_candidates) if obsolete_candidates else [],
         )
         try:
             checkpoint_file = _checkpoint_module.save(checkpoint, self.project_root)
