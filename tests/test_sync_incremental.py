@@ -1702,3 +1702,214 @@ class TestSkipSetCorrectness:
         # Round 3: A has 2 drift-free rounds → in skip set
         round3_skip = eng.calls[2].get("skip_specs") or set()
         assert "A" in round3_skip
+
+# ---------------------------------------------------------------------------
+# G7: CLI options (--force / --confirm-cleanup) and result reporting
+# ---------------------------------------------------------------------------
+
+
+def _patch_loop_engine(tmp_path, monkeypatch, script, specs=None):
+    """Patch SyncEngine / LLMCaller / collector for an in-process loop run."""
+    engine_holder: Dict[str, Any] = {}
+
+    def factory(project_root, interactive=False):
+        eng = _CallTrackingEngine(project_root, interactive=interactive)
+        if "engine" not in engine_holder:
+            eng.script = list(script)
+            eng._specs = dict(specs or {})
+            engine_holder["engine"] = eng
+        return eng
+
+    monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", factory)
+    monkeypatch.setattr(
+        "se3.engine.llm_caller.LLMCaller",
+        lambda **kwargs: MagicMock(name="LLMCaller"),
+    )
+    fake_collector = MagicMock()
+    fake_collector.collect.return_value = {"git": {}, "specs": []}
+    monkeypatch.setattr(
+        "se3.engine.project_context.ProjectContextCollector",
+        lambda project_root: fake_collector,
+    )
+    return engine_holder
+
+
+class TestG7ResultRendering:
+    """G7 task 2: the final report surfaces in-sync / skip / obsolete stats."""
+
+    def _render(self, capsys, **fields):
+        from se3.commands.sync import _render_loop_result
+        from se3.engine.sync_engine import LoopResult
+
+        result = LoopResult(**fields)
+        _render_loop_result(result, show_diff=False)
+        return capsys.readouterr().out
+
+    def test_level_1_in_sync_reports_zero_llm_calls(self, capsys):
+        out = self._render(capsys, converged=True, level_1_cache_hit=True)
+        assert "0 LLM calls" in out
+        assert "in-sync" in out
+
+    def test_level_1_suppresses_level_2_3_lines(self, capsys):
+        out = self._render(
+            capsys,
+            converged=True,
+            level_1_cache_hit=True,
+            level_2_skipped_specs=["a", "b"],
+            level_3_early_exit_specs=["c"],
+        )
+        assert "Level-2 cache" not in out
+        assert "Level-3 early exit" not in out
+
+    def test_level_2_skipped_count_visible(self, capsys):
+        out = self._render(
+            capsys,
+            converged=True,
+            level_2_skipped_specs=["spec_a", "spec_b", "spec_c"],
+        )
+        assert "Level-2 cache" in out
+        assert "3 spec(s) skipped" in out
+
+    def test_level_3_early_exit_visible(self, capsys):
+        out = self._render(
+            capsys,
+            converged=True,
+            level_3_early_exit_specs=["spec_x", "spec_y"],
+        )
+        assert "Level-3 early exit" in out
+        assert "2 spec(s)" in out
+
+    def test_obsolete_deleted_and_kept_visible(self, capsys):
+        out = self._render(
+            capsys,
+            converged=True,
+            obsolete_specs_deleted=["dead_one"],
+            obsolete_specs_kept=["maybe_dead"],
+        )
+        assert "Obsolete specs deleted" in out
+        assert "dead_one" in out
+        assert "Obsolete specs kept" in out
+        assert "maybe_dead" in out
+
+    def test_normal_convergence_has_no_skip_lines(self, capsys):
+        out = self._render(capsys, converged=True)
+        assert "Level-2 cache" not in out
+        assert "Level-3 early exit" not in out
+
+
+class TestG7ForceFlag:
+    """G7 task 1: --force ignores the cache and rewrites sync_state."""
+
+    def test_force_rewrites_sync_state_after_convergence(
+        self, tmp_path, monkeypatch
+    ):
+        import subprocess
+        from se3.engine.sync_state import compute_code_fingerprint, state_path, load
+
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"],
+                       cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"],
+                       cwd=str(tmp_path), check=True)
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('hi')")
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"],
+                       cwd=str(tmp_path), check=True)
+
+        fp = compute_code_fingerprint(tmp_path)
+        _write_sync_state_file(tmp_path, fp, discovery_converged=True)
+        stale = state_path(tmp_path).read_text(encoding="utf-8")
+        assert "2026-01-01T00:00:00Z" in stale
+
+        script = [
+            _round_with_analyses(1, ["spec_a"], in_sync={"spec_a": True},
+                                 touched_files={"spec_a": ["src/main.py"]},
+                                 new_subsystems=0),
+        ]
+        engine_holder = _patch_loop_engine(tmp_path, monkeypatch, script)
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1, force=True)
+        result = loop.run()
+
+        assert result.converged is True
+        assert result.level_1_cache_hit is False
+        assert len(engine_holder["engine"].calls) > 0
+
+        rewritten = load(tmp_path)
+        assert rewritten is not None
+        assert rewritten.converged_at != "2026-01-01T00:00:00Z"
+
+
+class TestG7ConfirmCleanup:
+    """G7 task 1: --confirm-cleanup is threaded into obsolete-spec deletion."""
+
+    def _run_with_obsolete(self, tmp_path, monkeypatch, confirm_cleanup):
+        delete_calls: List[Dict[str, Any]] = []
+
+        def fake_delete(project_root, obsolete_specs, confirm):
+            delete_calls.append(
+                {"obsolete_specs": list(obsolete_specs), "confirm": confirm}
+            )
+            return {"deleted": list(obsolete_specs) if not confirm else [],
+                    "kept": [] if not confirm else list(obsolete_specs)}
+
+        monkeypatch.setattr(
+            "se3.engine.sync_discovery.SpecDiscovery.delete_obsolete_specs",
+            staticmethod(fake_delete),
+        )
+        monkeypatch.setattr(
+            SyncLoop,
+            "_update_obsolete_candidates",
+            staticmethod(lambda **kw: {"ghost_spec"}),
+        )
+
+        script = [
+            _round_with_analyses(1, ["A"], in_sync={"A": True},
+                                 touched_files={"A": ["a.py"]}),
+            _round_with_analyses(2, ["A"], in_sync={"A": True},
+                                 touched_files={"A": ["a.py"]}),
+        ]
+        _patch_loop_engine(tmp_path, monkeypatch, script)
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1,
+                        confirm_cleanup=confirm_cleanup)
+        result = loop.run()
+        return result, delete_calls
+
+    def test_confirm_cleanup_true_passes_confirm(self, tmp_path, monkeypatch):
+        result, delete_calls = self._run_with_obsolete(
+            tmp_path, monkeypatch, confirm_cleanup=True
+        )
+        assert result.converged is True
+        assert len(delete_calls) == 1
+        assert delete_calls[0]["confirm"] is True
+        assert delete_calls[0]["obsolete_specs"] == ["ghost_spec"]
+
+    def test_confirm_cleanup_false_deletes_directly(self, tmp_path, monkeypatch):
+        result, delete_calls = self._run_with_obsolete(
+            tmp_path, monkeypatch, confirm_cleanup=False
+        )
+        assert result.converged is True
+        assert len(delete_calls) == 1
+        assert delete_calls[0]["confirm"] is False
+        assert result.obsolete_specs_deleted == ["ghost_spec"]
+
+
+class TestG7Level3Telemetry:
+    """G7 task 2: LoopResult records level-3 early-exit specs."""
+
+    def test_level_3_early_exit_specs_recorded(self, tmp_path, monkeypatch):
+        script = [
+            _round_with_analyses(1, ["A", "B"], in_sync={"A": True, "B": False},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+            _round_with_analyses(2, ["A", "B"], in_sync={"A": True, "B": True},
+                                 touched_files={"A": ["a.py"], "B": ["b.py"]}),
+        ]
+        _patch_loop_engine(tmp_path, monkeypatch, script)
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        result = loop.run()
+
+        assert result.converged is True
+        assert set(result.level_3_early_exit_specs) == {"A", "B"}
