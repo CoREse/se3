@@ -42,9 +42,10 @@ class SyncCheckpoint:
     reason: str = "quota_exhausted"
     started_at: str = field(default_factory=lambda: datetime.now().isoformat())
     checkpoint_version: int = CHECKPOINT_SCHEMA_VERSION
+    obsolete_specs: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        d: Dict[str, Any] = {
             "checkpoint_version": self.checkpoint_version,
             "started_at": self.started_at,
             "round_index": self.round_index,
@@ -53,6 +54,9 @@ class SyncCheckpoint:
             "failed_analyses": dict(self.failed_analyses),
             "reason": self.reason,
         }
+        if self.obsolete_specs:
+            d["obsolete_specs"] = list(self.obsolete_specs)
+        return d
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> SyncCheckpoint:
@@ -64,6 +68,7 @@ class SyncCheckpoint:
             in_sync_specs=dict(data.get("in_sync_specs") or {}),
             failed_analyses=dict(data.get("failed_analyses") or {}),
             reason=str(data.get("reason") or "quota_exhausted"),
+            obsolete_specs=list(data.get("obsolete_specs") or []),
         )
 
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .llm_caller import LLMCaller, LLMCallError
 from .sync_engine import DiffType, SpecAnalysis, SpecDiff, strip_markdown_fences
@@ -39,8 +39,31 @@ _ANALYSIS_JSON_SCHEMA = """\
       "code_location": "file_path:line_number or description of code area",
       "confidence": "high | low  (only for conflict type — how confident you are about resolving this automatically)"
     }
-  ]
+  ],
+  "code_fully_absent": false
 }"""
+
+_CODE_ABSENCE_PROMPT = """\
+## Code Absence Confirmation
+
+All previously-known source files for this spec no longer exist on disk.
+The subsystem described by this spec may have been entirely removed from the codebase.
+
+Before reporting normal diffs, you MUST first determine whether ANY code described
+by this spec still exists ANYWHERE in the project. Search broadly using Grep and
+Glob for the subsystem's key identifiers (class names, function names, file paths
+mentioned in the spec).
+
+In your JSON response, set **code_fully_absent** to:
+
+- **true** — After thorough search, you confirm that 100% of the code this spec
+  describes has been removed. Every feature, function, and class the spec mentions
+  no longer exists anywhere in the codebase.
+- **false** — Some code related to this spec still exists (even if moved, renamed,
+  or partially removed), OR you found at least one surviving file.
+
+This field is REQUIRED. If you are uncertain, default to false (safer to keep the
+spec than to wrongly delete it).\n\n"""
 
 _ANALYSIS_PROMPT_TEMPLATE = """\
 You are an expert software engineer performing a spec-code synchronization analysis.
@@ -173,6 +196,8 @@ class SyncAnalyzer:
         spec_name: str,
         spec_content: str,
         project_context: str,
+        deps: Optional[List[str]] = None,
+        all_deps_missing: bool = False,
     ) -> str:
         """Build the LLM prompt for spec-code comparison.
 
@@ -180,22 +205,30 @@ class SyncAnalyzer:
             spec_name: Name of the spec being analyzed.
             spec_content: Full text content of the spec file.
             project_context: Project context string (file tree, git info, etc).
+            deps: Optional list of dependency file paths (relative to project root).
+                When non-empty and all_deps_missing is True, injects the code
+                absence confirmation section into the prompt.
+            all_deps_missing: Whether all files in deps no longer exist on disk.
 
         Returns:
             Formatted prompt string for the LLM.
         """
-        return _ANALYSIS_PROMPT_TEMPLATE.format(
+        base_prompt = _ANALYSIS_PROMPT_TEMPLATE.format(
             spec_name=spec_name,
             spec_content=spec_content,
             project_context=project_context,
             json_schema=_ANALYSIS_JSON_SCHEMA,
         )
+        if deps and all_deps_missing:
+            base_prompt += _CODE_ABSENCE_PROMPT
+        return base_prompt
 
     def analyze_spec(
         self,
         spec_name: str,
         spec_content: str,
         project_context: str,
+        deps: Optional[List[str]] = None,
     ) -> SpecAnalysis:
         """Analyze a single spec against project code using LLM.
 
@@ -206,11 +239,18 @@ class SyncAnalyzer:
             spec_name: Name of the spec being analyzed.
             spec_content: Full text content of the spec.
             project_context: Project context string.
+            deps: Optional list of dependency file paths (relative to project
+                root). When non-empty and all files are missing from disk, the
+                prompt includes a code absence confirmation section.
 
         Returns:
             SpecAnalysis with the list of diffs found.
         """
-        prompt = self._build_analysis_prompt(spec_name, spec_content, project_context)
+        all_deps_missing = self._check_all_deps_missing(deps)
+        prompt = self._build_analysis_prompt(
+            spec_name, spec_content, project_context,
+            deps=deps, all_deps_missing=all_deps_missing,
+        )
 
         max_attempts = 3
         last_error: Optional[Exception] = None
@@ -254,8 +294,11 @@ class SyncAnalyzer:
         Returns:
             SpecAnalysis populated with parsed diffs.
         """
+        # Strip markdown code fences before parsing — the LLM may wrap the
+        # JSON in ```json ... ``` fences even in EXTRACT mode.
+        stripped = strip_markdown_fences(response)
         try:
-            data = json.loads(response)
+            data = json.loads(stripped)
         except json.JSONDecodeError as e:
             # Empty / near-empty / None responses are an infrastructure
             # signal (the agent never produced output). Non-empty but
@@ -264,7 +307,7 @@ class SyncAnalyzer:
             # remediation (retry vs. fix the prompt). Either way we do
             # NOT fabricate a CONFLICT diff: that historically poisoned
             # convergence by pretending the spec had real drift.
-            if response is None or len(response.strip()) < _EMPTY_RESPONSE_THRESHOLD:
+            if response is None or len(stripped.strip()) < _EMPTY_RESPONSE_THRESHOLD:
                 reason = _REASON_INFRASTRUCTURE
             else:
                 reason = _REASON_OUTPUT_FORMAT
@@ -305,7 +348,21 @@ class SyncAnalyzer:
                 )
             )
 
-        return SpecAnalysis(spec_name=spec_name, diffs=diffs)
+        code_fully_absent = bool(data.get("code_fully_absent", False))
+
+        return SpecAnalysis(
+            spec_name=spec_name, diffs=diffs, code_fully_absent=code_fully_absent,
+        )
+
+    def _check_all_deps_missing(self, deps: Optional[List[str]]) -> bool:
+        """Return True if deps is non-empty and ALL referenced files are absent."""
+        if not deps:
+            return False
+        for rel_path in deps:
+            abs_path = self.project_root / rel_path
+            if abs_path.exists():
+                return False
+        return True
 
     def generate_base_spec(self, project_context: str) -> str:
         """Generate a base spec for projects that don't have one.
