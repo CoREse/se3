@@ -98,14 +98,106 @@ class ConnectionManager:
             return False
 
 
+class UiHub:
+    """Fan-out hub for web-frontend WebSocket clients.
+
+    The frontend (``static/app.js``) dials ``/ws/ui`` and expects a realtime
+    push of the whole machine list whenever a daemon's state changes. This hub
+    tracks those browser sockets and broadcasts to all of them at once. Unlike
+    :class:`ConnectionManager` it is keyed by nothing — frontend clients are
+    anonymous and interchangeable.
+    """
+
+    def __init__(self) -> None:
+        self._clients: set = set()
+        self._lock = asyncio.Lock()
+
+    async def register(self, websocket: Any) -> None:
+        async with self._lock:
+            self._clients.add(websocket)
+        logger.info("UI client connected (%d total)", len(self._clients))
+
+    async def unregister(self, websocket: Any) -> None:
+        async with self._lock:
+            self._clients.discard(websocket)
+        logger.info("UI client disconnected (%d total)", len(self._clients))
+
+    @property
+    def client_count(self) -> int:
+        """Number of currently-connected frontend clients."""
+        return len(self._clients)
+
+    async def broadcast(self, payload: Dict[str, Any]) -> None:
+        """Send *payload* (a JSON-serializable dict) to every UI client."""
+        async with self._lock:
+            clients = list(self._clients)
+        if not clients:
+            return
+        import json
+
+        text = json.dumps(payload, ensure_ascii=False, default=str)
+        dead = []
+        for client in clients:
+            try:
+                await client.send_text(text)
+            except Exception:  # pragma: no cover - best effort
+                dead.append(client)
+        if dead:
+            async with self._lock:
+                for client in dead:
+                    self._clients.discard(client)
+
+
+async def _push_state(hub: Optional["UiHub"], state: ServerState, kind: str) -> None:
+    """Broadcast the current machine list to all UI clients (best effort)."""
+    if hub is None or hub.client_count == 0:
+        return
+    machines = await state.get_machines_full()
+    await hub.broadcast({"type": kind, "machines": machines})
+
+
+async def handle_ui_connection(
+    websocket: Any, hub: "UiHub", state: ServerState
+) -> None:
+    """Serve one web-frontend WebSocket connection.
+
+    Accepts the socket, sends an initial full ``snapshot``, registers the
+    client with the hub, then idles reading frames purely so a client
+    disconnect is detected promptly. Frontend clients are not expected to send
+    anything meaningful; any frame they do send is ignored.
+    """
+    await websocket.accept()
+    await hub.register(websocket)
+    try:
+        machines = await state.get_machines_full()
+        await websocket.send_text(
+            __import__("json").dumps(
+                {"type": "snapshot", "machines": machines},
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+        while True:
+            # The frontend only listens; reading drives disconnect detection.
+            await websocket.receive_text()
+    except Exception:  # WebSocketDisconnect and friends
+        logger.debug("UI connection ended", exc_info=True)
+    finally:
+        await hub.unregister(websocket)
+
+
 async def handle_daemon_connection(
-    websocket: Any, manager: ConnectionManager, state: ServerState
+    websocket: Any,
+    manager: ConnectionManager,
+    state: ServerState,
+    hub: Optional["UiHub"] = None,
 ) -> None:
     """Serve one daemon WebSocket connection end to end.
 
     Accepts the socket, validates the opening ``HELLO``, registers the machine,
     answers with ``WELCOME``, then runs the receive + heartbeat loops until the
-    daemon disconnects or the heartbeat times out.
+    daemon disconnects or the heartbeat times out. Connection and state changes
+    are mirrored to web-frontend clients via *hub*.
     """
     await websocket.accept()
     machine_id: Optional[str] = None
@@ -145,14 +237,16 @@ async def handle_daemon_connection(
         await state.register_machine(machine_id, hostname, se3_version)
         await manager.connect(machine_id, websocket)
         await websocket.send_text(protocol.make_welcome(SERVER_VERSION).to_json())
+        await _push_state(hub, state, "status_update")
 
-        await _serve_loop(websocket, manager, state, machine_id)
+        await _serve_loop(websocket, manager, state, machine_id, hub)
     except Exception:  # WebSocketDisconnect and friends
         logger.debug("Daemon connection ended", exc_info=True)
     finally:
         if machine_id is not None:
             await manager.disconnect(machine_id, websocket)
             await state.mark_offline(machine_id)
+            await _push_state(hub, state, "status_update")
 
 
 async def _serve_loop(
@@ -160,6 +254,7 @@ async def _serve_loop(
     manager: ConnectionManager,
     state: ServerState,
     machine_id: str,
+    hub: Optional["UiHub"] = None,
 ) -> None:
     """Run the receive loop alongside a heartbeat loop; stop when either ends."""
     last_seen = {"ts": time.time()}
@@ -173,7 +268,7 @@ async def _serve_loop(
             except protocol.ProtocolError as exc:
                 logger.warning("Dropping malformed frame from %s: %s", machine_id, exc)
                 continue
-            await _handle_message(message, state, machine_id)
+            await _handle_message(message, state, machine_id, hub)
 
     async def heartbeat() -> None:
         seq = 0
@@ -209,13 +304,17 @@ async def _serve_loop(
 
 
 async def _handle_message(
-    message: protocol.Message, state: ServerState, machine_id: str
+    message: protocol.Message,
+    state: ServerState,
+    machine_id: str,
+    hub: Optional["UiHub"] = None,
 ) -> None:
     """Apply one inbound daemon message to the server state."""
     if message.type == protocol.MSG_STATUS_UPDATE:
         snapshot = message.payload.get("snapshot") or {}
         if isinstance(snapshot, dict):
             await state.update_status(machine_id, snapshot)
+            await _push_state(hub, state, "status_update")
     elif message.type == protocol.MSG_PONG:
         await state.touch(machine_id)
     elif message.type == protocol.MSG_CALL_NOTIFICATION:

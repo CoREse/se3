@@ -203,6 +203,16 @@ class ServerState:
             record = self._machines.get(machine_id)
             return record.to_dict() if record is not None else None
 
+    async def get_machines_full(self) -> List[Dict[str, Any]]:
+        """Return full dicts (machines *with* their nested flows).
+
+        Used to build the realtime payload broadcast to web-frontend clients,
+        which need the flow list in a single frame rather than one REST call
+        per machine.
+        """
+        async with self._lock:
+            return [m.to_dict(include_flows=True) for m in self._machines.values()]
+
     async def get_machine_flows(
         self, machine_id: str
     ) -> Optional[List[Dict[str, Any]]]:

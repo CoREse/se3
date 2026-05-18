@@ -26,14 +26,19 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, HTTPException, WebSocket
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from se3.daemon import protocol
 
 from .state import ServerState
-from .ws import ConnectionManager, handle_daemon_connection
+from .ws import (
+    ConnectionManager,
+    UiHub,
+    handle_daemon_connection,
+    handle_ui_connection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,15 +69,23 @@ def create_app() -> FastAPI:
     app = FastAPI(title="SE3 Central Server", version=protocol.PROTOCOL_VERSION)
     state = ServerState()
     manager = ConnectionManager()
+    ui_hub = UiHub()
     # Expose for tests / introspection.
     app.state.server_state = state
     app.state.connection_manager = manager
+    app.state.ui_hub = ui_hub
 
     # -- daemon WebSocket endpoint -----------------------------------------
 
     @app.websocket("/ws")
     async def daemon_ws(websocket: WebSocket) -> None:
-        await handle_daemon_connection(websocket, manager, state)
+        await handle_daemon_connection(websocket, manager, state, ui_hub)
+
+    # -- web-frontend WebSocket endpoint -----------------------------------
+
+    @app.websocket("/ws/ui")
+    async def ui_ws(websocket: WebSocket) -> None:
+        await handle_ui_connection(websocket, ui_hub, state)
 
     # -- REST API ----------------------------------------------------------
 
@@ -161,13 +174,15 @@ def create_app() -> FastAPI:
         return {"status": "dispatched", "machine_id": machine_id, "call_id": call_id}
 
     # -- frontend (static files) -------------------------------------------
-
-    @app.get("/")
-    async def index() -> FileResponse:
-        return FileResponse(STATIC_DIR / "index.html")
+    # Mounted last so the API routes and WebSocket endpoints above take
+    # precedence. ``html=True`` serves ``index.html`` for ``/`` and lets the
+    # bundled ``style.css`` / ``app.js`` load from the same origin, so the
+    # frontend's WebSocket connects back without a cross-origin step.
 
     if STATIC_DIR.is_dir():
-        app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+        app.mount(
+            "/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static"
+        )
 
     return app
 

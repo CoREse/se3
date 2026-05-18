@@ -310,3 +310,55 @@ def test_respond_flow_unknown_flow_404(client_and_app):
     client, _ = client_and_app
     resp = client.post("/api/flows/ghost/respond", json={"response": "x"})
     assert resp.status_code == 404
+
+
+# --------------------------------------------------------------------------
+# Web-frontend WebSocket (/ws/ui) + broadcast
+# --------------------------------------------------------------------------
+
+
+def test_static_assets_served(client_and_app):
+    client, _ = client_and_app
+    # index.html (via html=True directory serving)
+    assert "SE3" in client.get("/").text
+    css = client.get("/style.css")
+    assert css.status_code == 200 and "control plane" in css.text.lower()
+    js = client.get("/app.js")
+    assert js.status_code == 200 and "WebSocket" in js.text
+
+
+def test_ui_ws_receives_initial_snapshot(client_and_app):
+    client, _ = client_and_app
+    with client.websocket_connect("/ws/ui") as ui:
+        import json
+
+        msg = json.loads(ui.receive_text())
+        assert msg["type"] == "snapshot"
+        assert msg["machines"] == []
+
+
+def test_ui_ws_broadcasts_daemon_status_update(client_and_app):
+    import json
+
+    client, _ = client_and_app
+    with client.websocket_connect("/ws/ui") as ui:
+        snapshot = json.loads(ui.receive_text())
+        assert snapshot["type"] == "snapshot"
+
+        with client.websocket_connect("/ws") as daemon:
+            daemon.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+            protocol.decode(daemon.receive_text())  # WELCOME
+            # Daemon connect triggers a broadcast to the UI client.
+            on_connect = json.loads(ui.receive_text())
+            assert on_connect["type"] == "status_update"
+
+            daemon.send_text(
+                protocol.make_status_update(
+                    _snapshot("m1", [{"flow_id": "f1", "status": "running"}])
+                ).to_json()
+            )
+            update = json.loads(ui.receive_text())
+            assert update["type"] == "status_update"
+            machines = update["machines"]
+            assert machines and machines[0]["machine_id"] == "m1"
+            assert machines[0]["flows"][0]["flow_id"] == "f1"

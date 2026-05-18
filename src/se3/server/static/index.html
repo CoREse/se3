@@ -4,17 +4,94 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SE3 Control Plane</title>
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <h1>SE3 Central Server</h1>
-  <p>
-    The server backend is running. The dashboard web frontend is delivered
-    separately; until then, the REST API under <code>/api</code> and the
-    daemon WebSocket endpoint at <code>/ws</code> are available.
-  </p>
-  <ul>
-    <li><a href="/api/health">/api/health</a></li>
-    <li><a href="/api/machines">/api/machines</a></li>
-  </ul>
+  <header class="topbar">
+    <h1>SE3&nbsp;Control&nbsp;Plane</h1>
+    <div class="topbar-right">
+      <span id="conn-status" class="conn conn-connecting">connecting&hellip;</span>
+      <button id="new-task-btn" type="button">+ New Task</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <aside class="machines-pane">
+      <h2>Machines</h2>
+      <ul id="machine-list" class="machine-list">
+        <li class="empty">No machines connected.</li>
+      </ul>
+    </aside>
+
+    <section class="flows-pane">
+      <h2 id="flows-heading">Flows</h2>
+      <div id="flow-list" class="flow-list">
+        <p class="empty">Select a machine to view its flows.</p>
+      </div>
+    </section>
+  </main>
+
+  <!-- Flow detail drawer -->
+  <div id="flow-detail" class="drawer hidden">
+    <div class="drawer-head">
+      <h3 id="detail-title">Flow</h3>
+      <button id="detail-close" type="button" class="icon-btn">&times;</button>
+    </div>
+    <div id="detail-body" class="drawer-body"></div>
+  </div>
+
+  <!-- New task modal -->
+  <div id="new-task-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Publish New Task</h3>
+        <button id="new-task-close" type="button" class="icon-btn">&times;</button>
+      </div>
+      <form id="new-task-form" class="modal-body">
+        <label for="nt-machine">Target machine</label>
+        <select id="nt-machine" required></select>
+
+        <label for="nt-type">Task type</label>
+        <select id="nt-type">
+          <option value="feature">feature</option>
+          <option value="bugfix">bugfix</option>
+          <option value="review">review</option>
+          <option value="small">small</option>
+          <option value="directive">directive</option>
+        </select>
+
+        <label for="nt-task">Task description</label>
+        <textarea id="nt-task" rows="5" required
+                  placeholder="Describe the task to run&hellip;"></textarea>
+
+        <p id="nt-error" class="form-error hidden"></p>
+        <div class="modal-actions">
+          <button type="submit" id="nt-submit">Publish</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Interjection / call response modal -->
+  <div id="call-modal" class="modal hidden">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3>Respond to Flow</h3>
+        <button id="call-close" type="button" class="icon-btn">&times;</button>
+      </div>
+      <form id="call-form" class="modal-body">
+        <div id="call-info" class="call-info"></div>
+        <label for="call-response">Your response</label>
+        <textarea id="call-response" rows="4" required
+                  placeholder="Type your response&hellip;"></textarea>
+        <p id="call-error" class="form-error hidden"></p>
+        <div class="modal-actions">
+          <button type="submit" id="call-submit">Send response</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
 </body>
 </html>
