@@ -446,6 +446,102 @@ app.add_typer(history_app, name="history", help="View and manage session history
 app.add_typer(issue_app, name="issue", help="Manage SE3 issues")
 
 
+# ---------------------------------------------------------------------------
+# se3 daemon — the resident control-plane process
+# ---------------------------------------------------------------------------
+daemon_app = typer.Typer(
+    name="daemon",
+    help="Resident control-plane daemon (supervises local flows, dials the server)",
+)
+
+
+@daemon_app.command(name="start")
+def daemon_start_cmd(
+    server_url: Optional[str] = typer.Option(
+        None, "--server-url", help="Central server URL the daemon dials out to"
+    ),
+    foreground: bool = typer.Option(
+        False, "--foreground", help="Run the daemon in the foreground (do not detach)"
+    ),
+):
+    """Start the SE3 daemon.
+
+    By default the daemon is launched as a detached background process. Pass
+    ``--foreground`` to run it in the current terminal.
+    """
+    # Deferred import: the daemon package must not affect core CLI startup.
+    from .daemon import DaemonConfig, DaemonAlreadyRunning, start_daemon
+
+    config = DaemonConfig(server_url=server_url)
+    try:
+        result = start_daemon(config, foreground=foreground)
+    except DaemonAlreadyRunning as exc:
+        render_text(str(exc), title="Daemon")
+        raise typer.Exit(1)
+    if not foreground:
+        status = result.get("status")
+        pid = result.get("pid")
+        render_text(f"Daemon {status} (pid={pid})", title="Daemon")
+    raise typer.Exit(0)
+
+
+@daemon_app.command(name="stop")
+def daemon_stop_cmd():
+    """Stop the running SE3 daemon."""
+    from .daemon import DaemonConfig, stop_daemon
+
+    result = stop_daemon(DaemonConfig())
+    status = result.get("status")
+    if status == "not_running":
+        render_text("Daemon is not running.", title="Daemon")
+        raise typer.Exit(0)
+    if status == "stop_timeout":
+        render_text(
+            f"Daemon (pid={result.get('pid')}) did not stop within the timeout.",
+            title="Daemon",
+        )
+        raise typer.Exit(1)
+    render_text(f"Daemon stopped (pid={result.get('pid')}).", title="Daemon")
+    raise typer.Exit(0)
+
+
+@daemon_app.command(name="status")
+def daemon_status_cmd(
+    json_output: bool = typer.Option(
+        False, "--json", "-j", help="Emit status as JSON"
+    ),
+):
+    """Show the SE3 daemon's running state and tracked flows."""
+    from .daemon import DaemonConfig, daemon_status
+
+    status = daemon_status(DaemonConfig())
+    if json_output:
+        import json as _json
+
+        typer.echo(_json.dumps(status, indent=2, ensure_ascii=False, default=str))
+        raise typer.Exit(0)
+
+    if not status.get("running"):
+        render_text("Daemon is not running.", title="Daemon Status")
+        raise typer.Exit(0)
+
+    lines = [
+        f"Running: yes (pid={status.get('pid')})",
+        f"Machine: {status.get('machine_id')}",
+        f"Server:  {status.get('server_url') or '(not configured)'}",
+    ]
+    tracked = status.get("tracked_flows") or []
+    lines.append(f"Tracked flows: {len(tracked)}")
+    for rec in tracked:
+        flow_id = rec.get("flow_id") or "(unknown)"
+        lines.append(f"  - pid={rec.get('pid')} flow={flow_id} ({rec.get('origin')})")
+    render_text("\n".join(lines), title="Daemon Status")
+    raise typer.Exit(0)
+
+
+app.add_typer(daemon_app, name="daemon", help="Manage the SE3 daemon")
+
+
 @app.command(name="sync")
 def sync_cmd(
     once: bool = typer.Option(False, "--once", help="Run a single sync round (no convergence loop)"),
