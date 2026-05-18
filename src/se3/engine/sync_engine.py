@@ -231,6 +231,10 @@ class LoopResult:
     paused: bool = False
     checkpoint_path: Optional[str] = None
     completed_at: datetime = field(default_factory=datetime.now)
+    # Spec names that produced llm_output_format_error during the run.
+    # Accumulated across rounds; persisted so the final report can surface
+    # them even though they are excluded from later rounds.
+    format_error_specs: set = field(default_factory=set)
 
     # --- Compatibility helpers ----------------------------------------
     # These properties expose a flattened view of the final round so legacy

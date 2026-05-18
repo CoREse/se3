@@ -192,6 +192,11 @@ class SyncLoop:
         stable_count = 0
         self._consecutive_infra_failures = 0
 
+        # Specs that produced llm_output_format_error — persist across rounds
+        # so they are not re-analyzed (the LLM already failed to produce
+        # valid JSON for them; retrying wastes tokens).
+        format_error_specs: set[str] = set()
+
         start_round = 1
         skip_specs: set[str] = set()
         if self.resume_from is not None:
@@ -266,6 +271,25 @@ class SyncLoop:
                 else:
                     self._consecutive_infra_failures = 0
 
+                # ----- Format error tracking -----
+                # Specs that produced llm_output_format_error are excluded
+                # from subsequent rounds — retrying wastes tokens because
+                # the LLM already failed to produce valid JSON for this
+                # spec and the format contract is unlikely to self-heal.
+                round_format_errors = {
+                    a.spec_name
+                    for a in round_result.analyses
+                    if getattr(a, "failed_analysis_reason", None)
+                    == "llm_output_format_error"
+                }
+                if round_format_errors:
+                    format_error_specs |= round_format_errors
+                    logger.warning(
+                        "Format error(s) in round %d for specs: %s — "
+                        "excluding from subsequent rounds",
+                        round_index, sorted(round_format_errors),
+                    )
+
                 if (
                     self._consecutive_infra_failures
                     >= self.infrastructure_failure_threshold
@@ -330,7 +354,10 @@ class SyncLoop:
 
                 # After the first post-resume round, the skip set has served
                 # its purpose; re-analyze normally from then on.
-                skip_specs = set()
+                # Format-error specs persist — they are excluded for the
+                # rest of this sync run because the LLM already failed to
+                # produce valid JSON for them.
+                skip_specs = set(format_error_specs)
 
                 round_index += 1
             else:
@@ -360,6 +387,10 @@ class SyncLoop:
                 _checkpoint_module.clear(self.project_root)
             except Exception as exc:  # pragma: no cover — defensive
                 logger.debug("Failed to clear sync checkpoint: %s", exc)
+
+        # Surface format-error specs so the CLI renderer can include them
+        # in the final report even when they were excluded from later rounds.
+        loop_result.format_error_specs = set(format_error_specs)
 
         try:
             flow_ctx.write_rounds_summary(loop_result)

@@ -71,6 +71,52 @@ def _spawn_stdin_writer(proc: subprocess.Popen, payload: str) -> threading.Threa
     return t
 
 
+def _spawn_stderr_reader(
+    proc: subprocess.Popen,
+    log_file: Optional[Path] = None,
+) -> threading.Thread:
+    """Drain ``proc.stderr`` in a daemon thread so the pipe never fills.
+
+    The child process's stderr is kept separate from stdout so that NDJSON
+    on stdout stays clean.  Stderr lines are written to ``log_file`` when
+    provided, and also echoed to the parent's stderr for live visibility.
+    Failures are swallowed; they'll surface via the child's returncode.
+    """
+    def _reader() -> None:
+        log_fh = None
+        if log_file is not None:
+            try:
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                log_fh = open(log_file, "a", encoding="utf-8")
+            except Exception:
+                pass
+        try:
+            assert proc.stderr is not None
+            for line in proc.stderr:
+                if log_fh is not None:
+                    try:
+                        log_fh.write(line)
+                        log_fh.flush()
+                    except Exception:
+                        pass
+                try:
+                    print(line.rstrip("\n"), file=sys.stderr)
+                except Exception:
+                    pass
+        except (BrokenPipeError, OSError, ValueError):
+            pass
+        finally:
+            if log_fh is not None:
+                try:
+                    log_fh.close()
+                except Exception:
+                    pass
+
+    t = threading.Thread(target=_reader, name="claude-stderr-reader", daemon=True)
+    t.start()
+    return t
+
+
 USAGE_LIMIT_KEYWORDS = [
     "usage limit",
     "rate limit",
@@ -604,7 +650,7 @@ class ClaudeCodeRunner(AgentRunner):
         proc = subprocess.Popen(
             full_cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=subprocess.PIPE,
             stdin=stdin_arg,
             cwd=cwd,
             env=env,
@@ -614,6 +660,14 @@ class ClaudeCodeRunner(AgentRunner):
 
         if stdin_prompt is not None:
             _spawn_stdin_writer(proc, stdin_prompt)
+
+        # Drain stderr in a background thread so the pipe never fills and
+        # the NDJSON on stdout stays clean.  Use a dedicated log file so
+        # stderr content is auditable without mixing into stdout.
+        _stderr_log = None
+        if log_file is not None:
+            _stderr_log = log_file.parent / f"{log_file.name}.stderr"
+        _spawn_stderr_reader(proc, log_file=_stderr_log)
 
         output_buffer = []
         last_activity = time.time()

@@ -252,16 +252,13 @@ class SyncAnalyzer:
         Returns:
             SpecAnalysis populated with parsed diffs.
         """
+        # Strip markdown code fences before parsing — the LLM may wrap
+        # its JSON response in ```json / ``` even when instructed not to.
+        response = strip_markdown_fences(response)
+
         try:
             data = json.loads(response)
         except json.JSONDecodeError as e:
-            # Empty / near-empty / None responses are an infrastructure
-            # signal (the agent never produced output). Non-empty but
-            # malformed JSON is a contract violation by the LLM that we
-            # bucket separately so reporting can hint at the right
-            # remediation (retry vs. fix the prompt). Either way we do
-            # NOT fabricate a CONFLICT diff: that historically poisoned
-            # convergence by pretending the spec had real drift.
             if response is None or len(response.strip()) < _EMPTY_RESPONSE_THRESHOLD:
                 reason = _REASON_INFRASTRUCTURE
             else:

@@ -184,6 +184,16 @@ def _render_loop_result(loop_result, show_diff: bool) -> None:
                 f"failures (reasons: {reasons_str})"
             )
 
+    # Format error specs are excluded from subsequent rounds once they
+    # fail — surface them separately so the operator can act on them.
+    fmt_err_specs = getattr(loop_result, "format_error_specs", None)
+    if fmt_err_specs:
+        summary_line += (
+            f"\nFormat errors: {len(fmt_err_specs)} spec(s) excluded from "
+            f"re-analysis due to llm_output_format_error: "
+            f"{', '.join(sorted(fmt_err_specs))}"
+        )
+
     render_block_header(title, color)
     console.print(summary_line)
     console.print("")

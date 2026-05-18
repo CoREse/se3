@@ -610,3 +610,228 @@ class TestSyncLoopValidation:
     def test_rejects_stable_rounds_zero(self, tmp_path):
         with pytest.raises(ValueError):
             SyncLoop(tmp_path, stable_rounds=0)
+
+
+# ---------------------------------------------------------------------------
+# G1: Format error handling — llm_output_format_error must not cause
+# pointless re-analysis of the same spec in subsequent rounds.
+# ---------------------------------------------------------------------------
+
+def _round_with_analyses(
+    idx: int,
+    analyses: List[SpecAnalysis],
+    updated: int = 0,
+    hashes: Optional[Dict[str, str]] = None,
+) -> RoundResult:
+    rr = RoundResult(round_index=idx)
+    rr.specs_updated = updated
+    rr.spec_hashes_after = dict(hashes or {})
+    for a in analyses:
+        rr.analyses.append(a)
+    return rr
+
+
+class TestFormatErrorHandling:
+    def test_format_error_spec_excluded_from_subsequent_rounds(
+        self, tmp_path, patched_loop_deps
+    ):
+        """When a spec produces llm_output_format_error in round 1, it must
+        be excluded from analysis in round 2.  Round 1 carries an actual
+        spec update so it does not converge immediately."""
+        broken = SpecAnalysis(
+            spec_name="broken-spec",
+            diffs=[],
+            failed_analysis_reason="llm_output_format_error",
+        )
+        healthy = SpecAnalysis(
+            spec_name="healthy-spec",
+            diffs=[SpecDiff(DiffType.EXTENSION, "healthy-spec", "new function")],
+        )
+
+        round1 = _round_with_analyses(
+            1,
+            analyses=[broken, healthy],
+            updated=1,  # non-zero so the round is not stable
+            hashes={"broken-spec": "H1", "healthy-spec": "H2"},
+        )
+        round2 = _round(
+            2, updated=0,
+            hashes={"healthy-spec": "H2"},
+        )
+
+        scripted = [round1, round2]
+
+        def _engine_factory(project_root, interactive=False):
+            eng = _ScriptedEngine(project_root, interactive=interactive)
+            eng.script = scripted
+            patched_loop_deps["engine"] = eng
+            return eng
+
+        with patch("se3.engine.sync_loop.SyncEngine", _engine_factory):
+            loop_result = SyncLoop(tmp_path, max_rounds=10).run()
+
+        # Round 2 should have skip_specs containing the broken spec
+        eng = patched_loop_deps["engine"]
+        round2_call = eng.calls[1]
+        skip = round2_call.get("skip_specs")
+        assert skip is not None, "Expected skip_specs in round 2 call"
+        assert "broken-spec" in skip, (
+            f"Format-error spec 'broken-spec' should be in skip_specs, got {skip}"
+        )
+        assert "healthy-spec" not in skip
+
+        assert loop_result.converged is True
+
+    def test_format_error_specs_surfaced_in_loop_result(
+        self, tmp_path, patched_loop_deps
+    ):
+        """format_error_specs must be present in LoopResult so the CLI
+        renderer can surface them in the final report."""
+        broken_a = SpecAnalysis(
+            spec_name="a",
+            diffs=[],
+            failed_analysis_reason="llm_output_format_error",
+        )
+        broken_b = SpecAnalysis(
+            spec_name="b",
+            diffs=[],
+            failed_analysis_reason="llm_output_format_error",
+        )
+
+        round1 = _round_with_analyses(
+            1, analyses=[broken_a, broken_b], updated=1, hashes={}
+        )
+        round2 = _round(2, updated=0, hashes={})
+
+        scripted = [round1, round2]
+
+        def _engine_factory(project_root, interactive=False):
+            eng = _ScriptedEngine(project_root, interactive=interactive)
+            eng.script = scripted
+            patched_loop_deps["engine"] = eng
+            return eng
+
+        with patch("se3.engine.sync_loop.SyncEngine", _engine_factory):
+            loop_result = SyncLoop(tmp_path, max_rounds=10).run()
+
+        assert loop_result.format_error_specs == {"a", "b"}
+
+    def test_format_error_does_not_block_convergence(
+        self, tmp_path, patched_loop_deps
+    ):
+        """A format error should not block convergence — the spec is
+        excluded and the rest of the sync continues normally.
+        Round 1 has a real spec update so the loop does not end on round 1."""
+        broken = SpecAnalysis(
+            spec_name="broken",
+            diffs=[],
+            failed_analysis_reason="llm_output_format_error",
+        )
+
+        round1 = _round_with_analyses(
+            1, analyses=[broken], updated=1, hashes={"broken": "H1"},
+        )
+        round2 = _round(2, updated=0, hashes={})
+
+        scripted = [round1, round2]
+
+        def _engine_factory(project_root, interactive=False):
+            eng = _ScriptedEngine(project_root, interactive=interactive)
+            eng.script = scripted
+            patched_loop_deps["engine"] = eng
+            return eng
+
+        with patch("se3.engine.sync_loop.SyncEngine", _engine_factory):
+            loop_result = SyncLoop(tmp_path, max_rounds=10).run()
+
+        assert loop_result.converged is True
+        assert len(loop_result.rounds) == 2
+        assert loop_result.format_error_specs == {"broken"}
+
+    def test_format_error_accumulates_across_rounds(
+        self, tmp_path, patched_loop_deps
+    ):
+        """Format errors from different rounds accumulate.  Each round
+        carries a real update (updated>0) so the loop continues, and
+        format-error specs are excluded from later rounds."""
+        broken1 = SpecAnalysis(
+            spec_name="spec-a",
+            diffs=[],
+            failed_analysis_reason="llm_output_format_error",
+        )
+
+        round1 = _round_with_analyses(
+            1, analyses=[broken1], updated=1, hashes={"spec-a": "H1"},
+        )
+        # Round 2: spec-a is skipped (format error), spec-b gets a format error
+        broken2 = SpecAnalysis(
+            spec_name="spec-b",
+            diffs=[],
+            failed_analysis_reason="llm_output_format_error",
+        )
+        round2 = _round_with_analyses(
+            2, analyses=[broken2], updated=1, hashes={"spec-b": "H2"},
+        )
+        round3 = _round(3, updated=0, hashes={})
+
+        scripted = [round1, round2, round3]
+
+        def _engine_factory(project_root, interactive=False):
+            eng = _ScriptedEngine(project_root, interactive=interactive)
+            eng.script = scripted
+            patched_loop_deps["engine"] = eng
+            return eng
+
+        with patch("se3.engine.sync_loop.SyncEngine", _engine_factory):
+            loop_result = SyncLoop(tmp_path, max_rounds=10).run()
+
+        # Both format-error specs should be in the result
+        assert loop_result.format_error_specs == {"spec-a", "spec-b"}
+
+        # Round 2 should skip spec-a; Round 3 should skip both
+        eng = patched_loop_deps["engine"]
+        assert len(eng.calls) == 3
+        assert "spec-a" in (eng.calls[1].get("skip_specs") or set()), \
+            "Round 2 should skip spec-a (format error from round 1)"
+        round3_skip = eng.calls[2].get("skip_specs") or set()
+        assert "spec-a" in round3_skip, \
+            "Round 3 should skip spec-a (persistent format error)"
+        assert "spec-b" in round3_skip, \
+            "Round 3 should skip spec-b (format error from round 2)"
+
+    def test_infrastructure_failure_retried_not_excluded(
+        self, tmp_path, patched_loop_deps
+    ):
+        """infrastructure_failure is NOT treated as a format error — those
+        specs should still be re-analyzed in subsequent rounds."""
+        infra = SpecAnalysis(
+            spec_name="flaky",
+            diffs=[],
+            failed_analysis_reason="infrastructure_failure",
+        )
+
+        round1 = _round_with_analyses(
+            1, analyses=[infra], updated=1, hashes={"flaky": "H1"},
+        )
+        round2 = _round(2, updated=0, hashes={"flaky": "H1"})
+
+        scripted = [round1, round2]
+
+        def _engine_factory(project_root, interactive=False):
+            eng = _ScriptedEngine(project_root, interactive=interactive)
+            eng.script = scripted
+            patched_loop_deps["engine"] = eng
+            return eng
+
+        with patch("se3.engine.sync_loop.SyncEngine", _engine_factory):
+            loop_result = SyncLoop(tmp_path, max_rounds=10).run()
+
+        # infrastructure_failure specs must NOT appear in format_error_specs
+        assert loop_result.format_error_specs == set()
+
+        # Infrastructure failure specs should NOT be skipped in round 2
+        eng = patched_loop_deps["engine"]
+        skip = eng.calls[1].get("skip_specs")
+        if skip:
+            assert "flaky" not in skip
+        assert loop_result.converged is True

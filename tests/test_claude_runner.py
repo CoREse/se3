@@ -696,3 +696,108 @@ class TestClaudeSubprocessSettingSources:
         with patch("se3.config.Path.home", return_value=tmp_path):
             with pytest.raises(ValueError, match="setting_sources"):
                 load_claude_subprocess_config(tmp_path)
+
+
+# =============================================================================
+# G1: Stderr Isolation — child stderr never mixed into stdout NDJSON
+# =============================================================================
+
+class TestStderrIsolation:
+    """The child process's stderr MUST be kept separate from stdout so that
+    NDJSON on stdout stays clean for downstream JSON parsers."""
+
+    def test_child_stderr_pipe_not_merged_to_stdout(self, tmp_path):
+        """_run_single_with_monitor uses stderr=PIPE, not stderr=STDOUT."""
+        from se3.claude_runner import _SingleRunResult
+
+        runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
+        captured_kwargs = {}
+
+        def fake_monitor(self, *, full_cmd, **_kwargs):
+            captured_kwargs.update(_kwargs)
+            return _SingleRunResult(
+                returncode=0, output="", success=True, should_retry=False,
+            )
+
+        with patch.object(
+            ClaudeCodeRunner, "_run_single_with_monitor",
+            side_effect=fake_monitor,
+        ):
+            runner.run_with_monitor(["-p", "hi"], cwd=tmp_path)
+
+    def test_popen_stderr_uses_pipe_not_devnull(self):
+        """popen() passes stderr=PIPE (not DEVNULL) to subprocess.Popen
+        so the runner can drain it without merging into stdout."""
+        runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
+        mock_proc = MagicMock(spec=subprocess.Popen)
+
+        captured_kwargs = {}
+        def mock_popen_ctor(cmd, **kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_proc
+
+        with patch("subprocess.Popen", side_effect=mock_popen_ctor):
+            runner.popen(["-p", "small"])
+        assert captured_kwargs.get("stderr") == subprocess.PIPE
+
+    def test_monitored_child_uses_separate_stderr(self):
+        """_run_single_with_monitor passes stderr=PIPE, not STDOUT."""
+        runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0  # already exited
+        mock_proc.stdout = MagicMock()
+        mock_proc.stdout.read.return_value = ""
+        mock_proc.stderr = MagicMock()
+
+        captured_kwargs = {}
+        def mock_popen(cmd, **kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_proc
+
+        with patch("subprocess.Popen", side_effect=mock_popen), \
+             patch("shutil.which", return_value="/usr/bin/claude-a"), \
+             patch("se3.claude_runner._spawn_stderr_reader", return_value=MagicMock()):
+            try:
+                runner._run_single_with_monitor(
+                    full_cmd=["claude-a", "-p", "hi"],
+                    cmd_name="claude-a", cmd_index=0,
+                    log_file=None,
+                    wall_timeout=None, inactivity_timeout=1800,
+                    cwd=None, env={},
+                    on_output=None, on_activity=None,
+                    start_time=0,
+                )
+            except Exception:
+                pass  # We only care about kwargs, not the result
+
+        assert captured_kwargs.get("stderr") == subprocess.PIPE, (
+            f"Expected stderr=PIPE, got {captured_kwargs.get('stderr')}"
+        )
+
+    def test_run_with_monitor_stdout_prefix_does_not_contain_stderr_messages(self, tmp_path):
+        """run_with_monitor wraps output with '=== Command: ... ===' prefix.
+        The [claude-runner] status messages go to sys.stderr (parent), not
+        into output."""
+        from se3.claude_runner import MonitoredResult
+
+        runner = ClaudeCodeRunner(command={"cmd": "claude-a", "priority": 10})
+
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 0  # already exited
+        mock_proc.stdout = MagicMock()
+        mock_proc.stdout.read.return_value = '{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}'
+        mock_proc.returncode = 0
+        mock_proc.stderr = MagicMock()
+
+        with patch("subprocess.Popen", return_value=mock_proc), \
+             patch("shutil.which", return_value="/usr/bin/claude-a"), \
+             patch("se3.claude_runner._spawn_stderr_reader", return_value=MagicMock()), \
+             patch("sys.stderr"):
+            result = runner.run_with_monitor(["-p", "hi"], cwd=tmp_path)
+
+        assert isinstance(result, MonitoredResult)
+        # Output should start with the command prefix, not contain
+        # [claude-runner] messages (those go to the parent's stderr).
+        assert result.output.startswith("=== Command: claude-a ===")
+        assert "[claude-runner] Running command" not in result.output
+        assert "[claude-runner] Command" not in result.output

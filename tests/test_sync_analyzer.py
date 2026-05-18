@@ -198,6 +198,51 @@ class TestParseInvalidJson:
         assert result.failed_analysis_reason == "llm_output_format_error"
 
 
+class TestParseAnalysisResponseWithFences:
+    """G1: After stripping markdown code fences, fenced JSON responses must
+    parse correctly — the LLM may wrap output in ```json / ``` even when
+    instructed not to."""
+
+    def test_fenced_json_parsed_correctly(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = '```json\n{"diffs": [{"type": "gap", "description": "missing"}]}\n```'
+        result = analyzer._parse_analysis_response("spec", response)
+        assert len(result.diffs) == 1
+        assert result.diffs[0].diff_type == DiffType.GAP
+        assert result.diffs[0].description == "missing"
+        assert result.failed_analysis_reason is None
+
+    def test_fenced_with_extra_whitespace(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = '  ```json\n{"diffs": []}\n```  '
+        result = analyzer._parse_analysis_response("spec", response)
+        assert result.is_in_sync
+        assert result.failed_analysis_reason is None
+
+    def test_unfenced_json_still_works(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = '{"diffs": [{"type": "extension", "description": "extra"}]}'
+        result = analyzer._parse_analysis_response("spec", response)
+        assert len(result.diffs) == 1
+        assert result.diffs[0].diff_type == DiffType.EXTENSION
+
+    def test_fenced_response_empty_diffs(self, tmp_path):
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = '```json\n{"diffs": []}\n```'
+        result = analyzer._parse_analysis_response("spec", response)
+        assert result.is_in_sync
+        assert result.failed_analysis_reason is None
+
+    def test_nested_fences_within_json_not_stripped(self, tmp_path):
+        # Only outermost fences are stripped; inner ``` inside JSON
+        # values should not cause premature strip_markdown_fences failure.
+        analyzer = SyncAnalyzer(tmp_path, MagicMock())
+        response = '```json\n{"diffs": [{"type": "gap", "description": "use: ```code```"}], "other": [{"inner": "```more```"}]}\n```'
+        result = analyzer._parse_analysis_response("spec", response)
+        assert len(result.diffs) == 1
+        assert "```code```" in result.diffs[0].description
+
+
 # ---------------------------------------------------------------------------
 # analyze_spec — LLM call + retry logic
 # ---------------------------------------------------------------------------
