@@ -1327,6 +1327,151 @@ class TestDisplayDiscoveryMessageWithNarrative:
         assert "Hello" in str(group.renderables[0].markup)
 
 
+class TestProposedDescriptionBlock:
+    """Test the nested cyan reverse-color block wrapping refined_description."""
+
+    def test_block_structure_and_boundaries(self):
+        """Helper returns cyan title, Markdown, and cyan footer in se3 layout."""
+        from rich.markdown import Markdown
+        from rich.text import Text
+        from se3.engine.steps.discovery import _proposed_description_block
+
+        block = _proposed_description_block("# My refined task")
+
+        # First element is the cyan reverse-color title
+        title = block[0]
+        assert isinstance(title, Text)
+        assert "## Proposed Task Description" in title.plain
+        assert title.style.bgcolor.name == "cyan"
+
+        # Markdown of refined_description sits between title and footer
+        markdown_elems = [r for r in block if isinstance(r, Markdown)]
+        assert len(markdown_elems) == 1
+        assert "My refined task" in str(markdown_elems[0].markup)
+
+        # Footer is the last non-blank element: cyan, whitespace-only
+        footer = block[-2]
+        assert isinstance(footer, Text)
+        assert footer.style.bgcolor.name == "cyan"
+        assert footer.plain.strip() == ""
+        # Trailing blank line
+        assert block[-1].plain == ""
+
+        # Forced blank line between content and footer
+        md_idx = block.index(markdown_elems[0])
+        footer_idx = block.index(footer)
+        assert any(
+            isinstance(block[i], Text) and block[i].plain == ""
+            for i in range(md_idx + 1, footer_idx)
+        )
+
+
+class TestDisplayDiscoveryMessageProposedBlock:
+    """Both modes wrap refined_description in the same nested cyan block."""
+
+    @staticmethod
+    def _is_cyan(renderable):
+        from rich.style import Style
+        from rich.text import Text
+        return (
+            isinstance(renderable, Text)
+            and isinstance(renderable.style, Style)
+            and renderable.style.bgcolor is not None
+            and renderable.style.bgcolor.name == "cyan"
+        )
+
+    @classmethod
+    def _cyan_titles(cls, group):
+        return [
+            r for r in group.renderables
+            if cls._is_cyan(r) and "## Proposed Task Description" in r.plain
+        ]
+
+    @classmethod
+    def _cyan_footers(cls, group):
+        return [
+            r for r in group.renderables
+            if cls._is_cyan(r) and r.plain.strip() == ""
+        ]
+
+    @patch("se3.engine.display.get_console")
+    def test_confirmation_mode_has_cyan_block(self, mock_console):
+        from rich.console import Group
+        from rich.markdown import Markdown
+
+        _display_discovery_message(
+            "analysis content",
+            "refined task here",
+            questions=None,
+            is_confirmation=True,
+            raw_result_text=None,
+        )
+
+        # Outer block: header + blank + Group + blank + footer + blank = 6
+        assert mock_console.return_value.print.call_count == 6
+        group = mock_console.return_value.print.call_args_list[2][0][0]
+        assert isinstance(group, Group)
+
+        titles = self._cyan_titles(group)
+        footers = self._cyan_footers(group)
+        assert len(titles) == 1
+        assert len(footers) == 1
+
+        # refined_description Markdown sits between cyan title and footer
+        title_idx = group.renderables.index(titles[0])
+        footer_idx = group.renderables.index(footers[0])
+        assert title_idx < footer_idx
+        between = group.renderables[title_idx + 1:footer_idx]
+        md = [r for r in between if isinstance(r, Markdown)
+              and "refined task here" in str(r.markup)]
+        assert len(md) == 1
+
+    @patch("se3.engine.display.get_console")
+    def test_synthesis_with_questions_has_cyan_block(self, mock_console):
+        from rich.console import Group
+        from rich.markdown import Markdown
+        from rich.text import Text
+
+        _display_discovery_message(
+            "synthesis content",
+            "refined task here",
+            questions=["q1", "q2"],
+            is_confirmation=False,
+            raw_result_text=None,
+        )
+
+        assert mock_console.return_value.print.call_count == 6
+        group = mock_console.return_value.print.call_args_list[2][0][0]
+        assert isinstance(group, Group)
+
+        titles = self._cyan_titles(group)
+        footers = self._cyan_footers(group)
+        assert len(titles) == 1
+        assert len(footers) == 1
+
+        # No plain single-line "Proposed Task Description:" Text heading remains
+        plain_headings = [
+            r for r in group.renderables
+            if isinstance(r, Text) and r.plain == "Proposed Task Description:"
+        ]
+        assert plain_headings == []
+
+        # refined_description Markdown between cyan title and footer
+        title_idx = group.renderables.index(titles[0])
+        footer_idx = group.renderables.index(footers[0])
+        between = group.renderables[title_idx + 1:footer_idx]
+        md = [r for r in between if isinstance(r, Markdown)
+              and "refined task here" in str(r.markup)]
+        assert len(md) == 1
+
+        # Questions section still rendered after the cyan block
+        q_heading = [
+            r for r in group.renderables
+            if isinstance(r, Text) and r.plain == "Questions:"
+        ]
+        assert len(q_heading) == 1
+
+
 class TestRestoreDiscoveryDisplayWithRawText:
     """Test _restore_discovery_display passes raw_result_text from history."""
 

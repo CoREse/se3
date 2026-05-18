@@ -228,11 +228,15 @@ When `raw_result_text` is provided (the raw LLM output from which JSON was extra
 
 | Mode | `content` field | `refined_description` field | Structural elements |
 |------|----------------|---------------------------|---------------------|
-| Confirmation (`is_confirmation=True`) | Markdown | Markdown | Confirmation prompt hint as styled `Text` (see Confirmation phase content display) |
-| Synthesis + questions | Markdown | Markdown (under "Proposed Task Description:" heading) | Heading as styled `Text`, numbered questions as `Text` |
+| Confirmation (`is_confirmation=True`) | Markdown | Markdown, wrapped in a nested cyan reverse-color block (see Proposed Task Description block) | Confirmation prompt hint as styled `Text` (see Confirmation phase content display) |
+| Synthesis + questions | Markdown | Markdown, wrapped in a nested cyan reverse-color block (see Proposed Task Description block) | Numbered questions as `Text` |
 | Synthesis (no questions) | Markdown | Markdown (under "Proposed Task Description:" heading) | Heading as styled `Text`, confirmation prompt as styled `Text` |
 | Question | Markdown | — | Numbered questions as `Text` |
 | General | Markdown | — | — |
+
+**Proposed Task Description block:**
+
+In the **Confirmation** (`is_confirmation=True`) and **Synthesis + questions** modes, the LLM-produced `refined_description` SHALL NOT be appended as bare Markdown (nor introduced by a single plain `Proposed Task Description:` heading line). Instead it SHALL be wrapped in a *nested* se3 reverse-color block that gives the user a framework-rendered, unambiguous start/end boundary for the proposed description. This block is produced by a shared module-private helper (`_proposed_description_block`) so both modes render byte-identically. The block reuses the same reverse-color primitives that back `render_block_header` / `render_block_footer` — `_reverse_title` (a reverse-color title row) and `_reverse_footer` (a fixed-width, whitespace-only reverse-color footer block) from the **Block Rendering Visual Style** Requirement — but is constructed as embeddable Rich renderables rather than direct `console.print` calls, so it can be placed inside the single `Group` printed under the `## Discovery` heading. The block uses the `cyan` accent color, distinct from the outer blue Discovery block, so it is visually layered apart from the surrounding LLM `content` text and (in Synthesis + questions mode) the trailing yellow Questions section. The renderable sequence is: a cyan `_reverse_title` row (e.g. `Proposed Task Description / 最终任务描述`), a blank line, the `refined_description` rendered via `rich.markdown.Markdown`, a blank line, a cyan `_reverse_footer` block, and a trailing blank line. The block is purely a framework-level visual container: it does not modify the LLM-produced text, and the footer block contains only whitespace characters styled with a background color, so copying it to the clipboard yields only blank characters with no visible border glyphs.
 
 **Confirmation phase content display:**
 
@@ -249,9 +253,18 @@ When the discovery step enters the confirmation phase (`is_confirmation=True`), 
 - **GIVEN** LLM enters confirmation mode with both `content` (analysis text) and `refined_description`
 - **WHEN** the confirmation display is rendered
 - **THEN** the full `content` from the LLM response is displayed as markdown
-- **AND** the `refined_description` is displayed as markdown below it
+- **AND** the `refined_description` is displayed below it as markdown, wrapped in the nested cyan reverse-color block (see Proposed Task Description block)
 - **AND** a styled prompt hint is rendered at the bottom of the Group (under the `## Discovery` heading) as Rich `Text` (not markdown), communicating the `1` confirmation affordance
 - **AND** the user can review the complete analysis before choosing to confirm or continue exploration
+
+##### Scenario: Refined description wrapped in nested cyan boundary block
+- **GIVEN** the discovery step renders a message in either Confirmation (`is_confirmation=True`) mode or Synthesis + questions mode, with a non-empty `refined_description`
+- **WHEN** `_display_discovery_message()` renders the message
+- **THEN** the `refined_description` is wrapped in a nested se3 reverse-color block produced by the shared `_proposed_description_block` helper: a cyan `_reverse_title` row, a blank line, the `refined_description` as `rich.markdown.Markdown`, a blank line, a cyan `_reverse_footer` block, and a trailing blank line
+- **AND** the nested block uses the `cyan` accent color, visually distinct from the outer blue Discovery block
+- **AND** the user can determine the complete start/end extent of the `refined_description` solely from the se3-rendered reverse-color title and footer, without relying on dashed lines or any "最终任务描述" wording that may incidentally appear inside the LLM text
+- **AND** the `_reverse_footer` block contains only whitespace characters, so copying it yields no visible border glyphs
+- **AND** both modes render the block identically, and no single plain `Proposed Task Description:` heading line is emitted
 
 ##### Scenario: Narrative text from raw LLM output prefixed to Discovery rendering
 - **GIVEN** `last_raw_result` contains narrative text outside any JSON code block (e.g., Phase 1 LLM output with analysis followed by a fenced JSON object)

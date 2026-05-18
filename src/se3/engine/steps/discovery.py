@@ -730,6 +730,38 @@ def _extract_narrative_from_raw(raw_text: Optional[str]) -> str:
     return "\n\n".join(parts)
 
 
+def _proposed_description_block(refined_description: str) -> list:
+    """Build a nested se3 reverse-color block wrapping the refined description.
+
+    The block uses ``cyan`` (distinct from the outer blue Discovery block) and
+    follows the standard se3 block layout: a reverse-color title row, a blank
+    line, the refined description rendered as Markdown, a blank line, a
+    fixed-width reverse-color footer block, and a trailing blank line.
+
+    This gives the user a clear, se3-rendered start/end boundary for the
+    LLM-produced ``refined_description`` without relying on any dashed lines or
+    "最终任务描述" wording that may incidentally appear in the LLM text itself.
+
+    Args:
+        refined_description: The LLM-produced proposed task description.
+
+    Returns:
+        A list of Rich renderables ready to be appended into the Group.
+    """
+    from rich.markdown import Markdown
+    from rich.text import Text
+    from ..display import _reverse_footer, _reverse_title
+
+    return [
+        _reverse_title("Proposed Task Description / 最终任务描述", "cyan"),
+        Text(""),
+        Markdown(refined_description),
+        Text(""),
+        _reverse_footer("cyan"),
+        Text(""),
+    ]
+
+
 def _display_discovery_message(
     content: str,
     refined_description: Optional[str],
@@ -762,12 +794,12 @@ def _display_discovery_message(
         renderables.append(Text(""))
 
     if refined_description and is_confirmation:
-        # Final confirmation - show LLM content as markdown, then refined description
+        # Final confirmation - show LLM content as markdown, then refined
+        # description wrapped in a nested cyan se3 block with clear boundaries.
         if content:
             renderables.append(Markdown(content))
             renderables.append(Text(""))
-        renderables.append(Markdown(refined_description))
-        renderables.append(Text(""))
+        renderables.extend(_proposed_description_block(refined_description))
         # Non-normative hint: advertise the '1' confirmation affordance
         hint = Text()
         hint.append("Type ", style="dim")
@@ -781,9 +813,7 @@ def _display_discovery_message(
         if content:
             renderables.append(Markdown(content))
             renderables.append(Text(""))
-        renderables.append(Text("Proposed Task Description:", style="bold cyan"))
-        renderables.append(Markdown(refined_description))
-        renderables.append(Text(""))
+        renderables.extend(_proposed_description_block(refined_description))
         renderables.append(Text("Questions:", style="bold yellow"))
         for i, q in enumerate(questions, 1):
             renderables.append(Text(f"  {i}. {q}"))
