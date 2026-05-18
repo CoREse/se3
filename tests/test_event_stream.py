@@ -216,17 +216,32 @@ def test_cli_sink_is_a_sink():
     assert issubclass(CliSink, Sink)
 
 
-def test_cli_sink_renders_flow_lifecycle(captured_console):
+def test_cli_sink_flow_lifecycle_is_noop(captured_console):
+    """Flow-level events are a no-op in CliSink — the CLI orchestrator renders
+    the New Flow panel / summary directly, so the sink must not double-render.
+    """
     sink = CliSink()
-    sink.consume(new_event(EventType.FLOW_COMPLETED, message="all done"))
-    out = captured_console.export_text()
-    assert "Flow completed" in out
-    assert "all done" in out
+    for et in (
+        EventType.FLOW_STARTED,
+        EventType.FLOW_COMPLETED,
+        EventType.FLOW_FAILED,
+        EventType.FLOW_PAUSED,
+        EventType.INTERJECTION_NEEDED,
+        EventType.CALL_NEEDED,
+    ):
+        sink.consume(new_event(et, message="ignored"))
+    assert captured_console.export_text() == ""
 
 
 def test_cli_sink_step_output_is_noop(captured_console):
     """Raw STEP_OUTPUT events render nothing — the per-step renderer owns it."""
     CliSink().consume(new_event(EventType.STEP_OUTPUT, data={"x": 1}))
+    assert captured_console.export_text() == ""
+
+
+def test_cli_sink_step_started_is_noop(captured_console):
+    """STEP_STARTED renders nothing — output is presented on completion."""
+    CliSink().consume(new_event(EventType.STEP_STARTED, step_id="s1"))
     assert captured_console.export_text() == ""
 
 

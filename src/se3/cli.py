@@ -177,6 +177,7 @@ def run_cmd(
     merge: Optional[str] = typer.Option(None, "--merge", help="Merge an existing loop branch (e.g. se3-loop/20260324-120000)"),
     list_loops: bool = typer.Option(False, "--list-loops", help="List existing unmerged loop branches"),
     from_issue: Optional[str] = typer.Option(None, "--from-issue", help="Run flow from an existing issue (ID or interactive selection)"),
+    output_format: str = typer.Option("cli", "--output-format", help="Output sink: 'cli' (Rich rendering, default) or 'json' (structured NDJSON event stream)"),
 ):
     """SE3 Run — Unified entry point for the flow engine.
 
@@ -189,6 +190,16 @@ def run_cmd(
     """
     from .commands.run import run_flow, run_loop_mode, get_project_root, handle_resume_interactive, SE3_DIR
     from .engine.prompt_history import get_prompt_history
+
+    # Validate the output-format sink selection (the outermost sink choice).
+    output_format = (output_format or "cli").lower()
+    if output_format not in ("cli", "json"):
+        render_full(
+            f"Error: invalid --output-format '{output_format}'. "
+            "Choose 'cli' or 'json'.",
+            title="Error",
+        )
+        raise typer.Exit(1)
 
     project_root = get_project_root()
 
@@ -218,6 +229,7 @@ def run_cmd(
             prompt_history=prompt_history,
             no_worktree=no_worktree,
             merge_branch=merge,
+            output_format=output_format,
         )
         raise typer.Exit(exit_code)
 
@@ -269,6 +281,7 @@ def run_cmd(
             is_loop_mode=False,
             prompt_history=prompt_history,
             source_issue_id=issue.id,
+            output_format=output_format,
         )
 
         # Update issue status based on result
@@ -293,6 +306,7 @@ def run_cmd(
                 project_root=project_root,
                 flow_id=target_flow_id,
                 prompt_history=prompt_history,
+                output_format=output_format,
             )
             raise typer.Exit(exit_code)
         else:
@@ -330,6 +344,7 @@ def run_cmd(
         change_name=change,
         is_loop_mode=False,
         prompt_history=prompt_history,
+        output_format=output_format,
     )
     raise typer.Exit(exit_code)
 

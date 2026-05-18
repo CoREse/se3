@@ -43,7 +43,8 @@ try:
         get_console,
         render_full,
     )
-    from ..engine.step_renderers import render_step_output
+    from ..engine.event_stream import EventEmitter, EventType, new_event
+    from ..engine.sink import CliSink, JsonSink
     from ..cli import _read_multiline_input
 except ImportError:
     # Direct import for development
@@ -64,7 +65,8 @@ except ImportError:
         get_console,
         render_full,
     )
-    from engine.step_renderers import render_step_output
+    from engine.event_stream import EventEmitter, EventType, new_event
+    from engine.sink import CliSink, JsonSink
     from cli import _read_multiline_input
 
 
@@ -673,6 +675,7 @@ def run_flow(
     is_loop_mode: bool = False,
     prompt_history: Any = None,
     source_issue_id: Optional[str] = None,
+    output_format: str = "cli",
 ) -> int:
     """Run a flow to completion.
 
@@ -684,6 +687,10 @@ def run_flow(
         change_name: Optional change name
         is_loop_mode: Whether to run in loop mode
         source_issue_id: Optional issue ID that triggered this flow
+        output_format: Outermost event-stream sink selection — ``"cli"`` hangs
+            the Rich rendering :class:`CliSink` (default, byte-identical to the
+            historical CLI output), ``"json"`` hangs the structured
+            :class:`JsonSink` (NDJSON to stdout) for daemon consumption.
 
     Returns:
         Exit code (0 for success, non-zero for failure)
@@ -702,6 +709,7 @@ def run_flow(
             project_root, flow_id, task_description, task_type, change_name,
             is_loop_mode, persistence, state_machine, prompt_history,
             source_issue_id=source_issue_id,
+            output_format=output_format,
         )
     finally:
         # Restore original signal handler
@@ -719,11 +727,24 @@ def _run_flow_impl(
     state_machine: StateMachine,
     prompt_history: Any = None,
     source_issue_id: Optional[str] = None,
+    output_format: str = "cli",
 ) -> int:
     """Internal implementation of flow execution."""
     # Register all step handlers
     for step_type, handler in STEP_HANDLERS.items():
         state_machine.register_handler(step_type, handler)
+
+    # Build the unified event stream and hang the outermost sink. ``se3 run``
+    # is caller-agnostic: it always emits the same structured event stream and
+    # only the tail sink differs. ``cli`` hangs the Rich rendering CliSink
+    # (byte-identical to the historical CLI output — flow-level events are a
+    # no-op there and step output is rendered exactly as before); ``json``
+    # hangs JsonSink, which writes NDJSON to stdout for daemon consumption.
+    emitter = EventEmitter()
+    if output_format == "json":
+        emitter.subscribe(JsonSink())
+    else:
+        emitter.subscribe(CliSink())
 
     # Load or create flow
     try:
@@ -808,6 +829,18 @@ def _run_flow_impl(
         display_error(str(exc))
         return 2
 
+    # Emit FLOW_STARTED once the flow is created/loaded and initialized. The
+    # human-facing "New Flow"/"Flow Info" panel was already rendered above by
+    # the existing render_full() calls — CliSink no-ops this event so CLI
+    # output is unchanged; JsonSink forwards it for the daemon.
+    emitter.emit(new_event(
+        EventType.FLOW_STARTED,
+        flow_id=flow.flow_id,
+        task_description=flow.task_description,
+        task_type=flow.task_type,
+        is_loop_mode=is_loop_mode,
+    ))
+
     # Execute flow
     while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED):
         current_step = flow.state.get_current_step()
@@ -861,6 +894,15 @@ def _run_flow_impl(
 
         step_start_time = datetime.now()
 
+        # Emit STEP_STARTED — no-op in CliSink (the per-step renderer presents
+        # output only on completion), forwarded by JsonSink.
+        emitter.emit(new_event(
+            EventType.STEP_STARTED,
+            flow_id=flow.flow_id,
+            step_id=current_step.step_id,
+            step_type=step_type_value,
+        ))
+
         # Special handling for CONFIRM steps on resume - check for existing response
         if current_step.step_type == StepType.CONFIRM and flow_id and current_step.status == StepStatus.PAUSED:
             existing_result = _check_confirm_response(flow, current_step, project_root)
@@ -873,6 +915,10 @@ def _run_flow_impl(
                 except KeyboardInterrupt:
                     result = _handle_step_interrupt(flow, current_step, persistence, prompt_history)
                     if result is None:
+                        emitter.emit(new_event(
+                            EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                            step_id=current_step.step_id, step_type=step_type_value,
+                        ))
                         return 130
                     continue
 
@@ -888,12 +934,32 @@ def _run_flow_impl(
             except KeyboardInterrupt:
                 result = _handle_step_interrupt(flow, current_step, persistence, prompt_history)
                 if result is None:
+                    emitter.emit(new_event(
+                        EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                        step_id=current_step.step_id, step_type=step_type_value,
+                    ))
                     return 130
                 continue
 
-        # Display step output with full content (skip for CONFIRM and DISCOVERY — handled by prompt)
+        # Emit the step's terminal event (skip for CONFIRM/DISCOVERY/PLAN —
+        # their output is presented by the interactive prompt). CliSink routes
+        # STEP_COMPLETED/STEP_FAILED to step_renderers.render_step_output(),
+        # producing byte-identical CLI output to the previous direct call;
+        # JsonSink forwards the structured event. run.py itself no longer
+        # imports render_step_output — rendering lives entirely in the sink.
         if current_step.step_type not in (StepType.CONFIRM, StepType.DISCOVERY, StepType.PLAN):
-            render_step_output(current_step)
+            step_event_type = (
+                EventType.STEP_FAILED
+                if result == StepStatus.FAILED
+                else EventType.STEP_COMPLETED
+            )
+            emitter.emit(new_event(
+                step_event_type,
+                flow_id=flow.flow_id,
+                step_id=current_step.step_id,
+                step_type=step_type_value,
+                step=current_step,
+            ))
 
         # Handle CONFIRM step PAUSED state - prompt user for approval
         if current_step.step_type == StepType.CONFIRM and result == StepStatus.PAUSED:
@@ -909,6 +975,10 @@ def _run_flow_impl(
             confirm_result = _handle_confirm_pause(flow, current_step, persistence, project_root, prompt_history)
             if confirm_result is None:
                 # User chose to exit
+                emitter.emit(new_event(
+                    EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                    step_id=current_step.step_id, step_type=step_type_value,
+                ))
                 return 130
             # Re-run confirm step to process the response
             current_step.status = StepStatus.PENDING
@@ -922,6 +992,10 @@ def _run_flow_impl(
 
             if user_response is None:
                 # User chose to exit
+                emitter.emit(new_event(
+                    EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                    step_id=current_step.step_id, step_type=step_type_value,
+                ))
                 return 130
 
             # Store user response and re-run discovery step.
@@ -994,13 +1068,21 @@ def _run_flow_impl(
         state_machine.transition_to_next(flow)
         persistence.save_flow(flow)
 
-    # Flow complete
+    # Flow complete. Emit the terminal flow event (no-op in CliSink — the
+    # human-facing summary line below is rendered as before; forwarded by
+    # JsonSink for the daemon).
     if flow.status == FlowStatus.COMPLETED:
+        emitter.emit(new_event(
+            EventType.FLOW_COMPLETED, flow_id=flow.flow_id,
+        ))
         display_success("Flow completed successfully!")
         return 0
     elif flow.status == FlowStatus.FAILED:
         current_step = flow.state.get_current_step()
         error_msg = current_step.error_message if current_step else "Unknown error"
+        emitter.emit(new_event(
+            EventType.FLOW_FAILED, flow_id=flow.flow_id, message=error_msg,
+        ))
         display_error(f"Flow failed: {error_msg}")
         return 1
     else:
@@ -1071,6 +1153,7 @@ def run_loop_mode(
     prompt_history: Any = None,
     no_worktree: bool = False,
     merge_branch: Optional[str] = None,
+    output_format: str = "cli",
 ) -> int:
     """Run in Ralph Loop mode - repeat a user prompt across iterations.
 
@@ -1086,10 +1169,14 @@ def run_loop_mode(
         prompt_history: Prompt input history
         no_worktree: If True, disable branch isolation (run on current branch)
         merge_branch: If provided, merge this loop branch and exit
+        output_format: Event-stream sink selection forwarded to each
+            iteration's ``run_flow`` (``"cli"`` or ``"json"``).
 
     Returns:
         Exit code
     """
+    import functools
+
     from ..engine.loop_controller import LoopController
 
     controller = LoopController(
@@ -1151,7 +1238,7 @@ def run_loop_mode(
             get_console().print(Rule(f"[bold]Loop #{iteration}[/bold]", style="cyan"))
 
             result = controller.run_iteration(
-                run_flow_fn=run_flow,
+                run_flow_fn=functools.partial(run_flow, output_format=output_format),
                 task=initial_task,
                 task_type=task_type,
             )

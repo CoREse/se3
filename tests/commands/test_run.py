@@ -124,7 +124,7 @@ class TestResumeDetection:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         # Call run_flow with resume (flow_id provided)
-        with patch("se3.commands.run.render_step_output"):
+        with patch("se3.engine.step_renderers.render_step_output"):
             with patch("se3.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
@@ -153,7 +153,7 @@ class TestResumeDetection:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         # Call run_flow with resume
-        with patch("se3.commands.run.render_step_output"):
+        with patch("se3.engine.step_renderers.render_step_output"):
             with patch("se3.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
@@ -190,7 +190,7 @@ class TestResumeDetection:
         mock_sm.persistence.save_flow = MagicMock()
 
         # Call run_flow without flow_id (new flow)
-        with patch("se3.commands.run.render_step_output"):
+        with patch("se3.engine.step_renderers.render_step_output"):
             with patch("se3.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
@@ -226,7 +226,7 @@ class TestResumeDetection:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         # Call run_flow with resume
-        with patch("se3.commands.run.render_step_output"):
+        with patch("se3.engine.step_renderers.render_step_output"):
             with patch("se3.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
@@ -264,7 +264,7 @@ class TestResumeDetection:
         original_status = self.implement_step.status
 
         # Call run_flow with resume
-        with patch("se3.commands.run.render_step_output"):
+        with patch("se3.engine.step_renderers.render_step_output"):
             with patch("se3.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
@@ -297,7 +297,7 @@ class TestResumeDetection:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         with caplog.at_level(logging.INFO):
-            with patch("se3.commands.run.render_step_output"):
+            with patch("se3.engine.step_renderers.render_step_output"):
                 with patch("se3.commands.run.render_full"):
                     run_flow(
                             project_root=self.project_root,
@@ -383,7 +383,7 @@ class TestResumeFailedFlow:
         mock_sm.run_step.return_value = StepStatus.COMPLETED
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
-        with patch("se3.commands.run.render_step_output"):
+        with patch("se3.engine.step_renderers.render_step_output"):
             with patch("se3.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
@@ -408,7 +408,7 @@ class TestResumeFailedFlow:
         mock_sm.run_step.return_value = StepStatus.COMPLETED
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
-        with patch("se3.commands.run.render_step_output"):
+        with patch("se3.engine.step_renderers.render_step_output"):
             with patch("se3.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
@@ -441,7 +441,7 @@ class TestResumeFailedFlow:
         mock_sm.run_step.return_value = StepStatus.COMPLETED
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
-        with patch("se3.commands.run.render_step_output"):
+        with patch("se3.engine.step_renderers.render_step_output"):
             with patch("se3.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
@@ -467,7 +467,7 @@ class TestResumeFailedFlow:
         mock_sm.run_step.return_value = StepStatus.COMPLETED
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
-        with patch("se3.commands.run.render_step_output"):
+        with patch("se3.engine.step_renderers.render_step_output"):
             with patch("se3.commands.run.render_full"):
                 run_flow(
                         project_root=self.project_root,
@@ -498,7 +498,7 @@ class TestResumeFailedFlow:
         mock_sm.transition_to_next.side_effect = lambda flow: setattr(flow, 'status', FlowStatus.COMPLETED)
 
         with caplog.at_level(logging.INFO):
-            with patch("se3.commands.run.render_step_output"):
+            with patch("se3.engine.step_renderers.render_step_output"):
                 with patch("se3.commands.run.render_full"):
                     run_flow(
                             project_root=self.project_root,
@@ -768,3 +768,111 @@ class TestHandleStepInterrupt:
         assert step.status == StepStatus.RUNNING
         # No interjection persisted
         assert "user_interjections" not in flow.state.context
+
+
+class TestOutputFormatEventStream:
+    """Test --output-format wiring: the unified event stream + pluggable sink.
+
+    CLI mode keeps byte-identical output (step rendering routed through
+    CliSink -> render_step_output); JSON mode emits NDJSON to stdout.
+    """
+
+    def setup_method(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.project_root = Path(self.tmpdir)
+        (self.project_root / "se3" / "state").mkdir(parents=True, exist_ok=True)
+
+        self.flow = FlowInstance(
+            flow_id="evt-flow-001",
+            task_description="Event stream task",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+        )
+        self.flow.state.selected_steps = [StepType.IMPLEMENT]
+        self.flow.state.current_step_index = 0
+        self.step = Step(
+            step_type=StepType.IMPLEMENT,
+            status=StepStatus.RUNNING,
+            step_id="implement-evt",
+            inputs={},
+            outputs={"summary": "did work"},
+        )
+        self.flow.state.add_step(self.step)
+        self.flow.state.current_step_id = "implement-evt"
+        PersistenceManager(self.project_root).save_flow(self.flow)
+
+    def teardown_method(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _run(self, mock_sm_class, mock_pm_class, output_format):
+        mock_pm = MagicMock()
+        mock_pm_class.return_value = mock_pm
+        mock_pm.load_flow.return_value = self.flow
+
+        mock_sm = MagicMock()
+        mock_sm_class.return_value = mock_sm
+        mock_sm.run_step.return_value = StepStatus.COMPLETED
+        mock_sm.transition_to_next.side_effect = (
+            lambda flow: setattr(flow, "status", FlowStatus.COMPLETED)
+        )
+        with patch("se3.commands.run.render_full"):
+            return run_flow(
+                project_root=self.project_root,
+                flow_id="evt-flow-001",
+                output_format=output_format,
+            )
+
+    @patch("se3.commands.run.PersistenceManager")
+    @patch("se3.commands.run.StateMachine")
+    @patch("se3.commands.run.STEP_HANDLERS", {})
+    def test_json_mode_emits_valid_ndjson(
+        self, mock_sm_class, mock_pm_class, capsys
+    ):
+        """--output-format json writes NDJSON lifecycle events to stdout."""
+        self._run(mock_sm_class, mock_pm_class, "json")
+        out = capsys.readouterr().out
+
+        events = []
+        for line in out.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # Rich panels may interleave; only JSON lines count
+            if isinstance(obj, dict) and "type" in obj:
+                events.append(obj["type"])
+
+        # The full flow lifecycle is present as structured NDJSON.
+        assert "flow_started" in events
+        assert "step_started" in events
+        assert "step_completed" in events
+        assert "flow_completed" in events
+
+    @patch("se3.commands.run.PersistenceManager")
+    @patch("se3.commands.run.StateMachine")
+    @patch("se3.commands.run.STEP_HANDLERS", {})
+    def test_cli_mode_routes_step_output_through_renderer(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """CLI mode (default) renders step output via the existing
+        step_renderers.render_step_output entry point (byte-identical path)."""
+        with patch("se3.engine.step_renderers.render_step_output") as mock_render:
+            exit_code = self._run(mock_sm_class, mock_pm_class, "cli")
+
+        assert exit_code == 0
+        mock_render.assert_called_once_with(self.step)
+
+    @patch("se3.commands.run.PersistenceManager")
+    @patch("se3.commands.run.StateMachine")
+    @patch("se3.commands.run.STEP_HANDLERS", {})
+    def test_json_mode_does_not_call_cli_renderer(
+        self, mock_sm_class, mock_pm_class
+    ):
+        """JSON mode does not route through the Rich step renderer."""
+        with patch("se3.engine.step_renderers.render_step_output") as mock_render:
+            self._run(mock_sm_class, mock_pm_class, "json")
+
+        mock_render.assert_not_called()

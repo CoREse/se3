@@ -43,15 +43,26 @@ class CliSink(Sink):
     """Rich-rendering sink — the CLI-mode tail of the event stream.
 
     ``CliSink`` delegates entirely to the pre-existing rendering functions in
-    ``display.py`` and ``step_renderers.py``; it adds no rendering logic of its
-    own. This is what keeps CLI output byte-for-byte identical to today's
-    ``se3 run``: the same renderers, called with the same step objects.
+    ``step_renderers.py``; it adds no rendering logic of its own. This is what
+    keeps CLI output byte-for-byte identical to today's ``se3 run``: the same
+    renderers, called with the same step objects.
 
     Step-scoped completion/failure events whose ``data`` carries a ``"step"``
     object are routed to ``step_renderers.render_step_output(step)`` — the same
-    single entry point the current CLI uses. Flow-level lifecycle events render
-    a concise status line; raw ``STEP_OUTPUT`` events are intentionally a no-op
-    (the per-step renderer already presents the full output on completion).
+    single entry point the current CLI uses.
+
+    Flow-level lifecycle events (``FLOW_STARTED`` / ``FLOW_COMPLETED`` /
+    ``FLOW_FAILED`` / ``FLOW_PAUSED`` / ``INTERJECTION_NEEDED`` /
+    ``CALL_NEEDED``) are intentionally a **no-op** here: in CLI mode the
+    ``se3 run`` orchestrator already renders the human-facing "New Flow"
+    panel, the per-step ``✓ completed`` line, and the closing
+    ``display_success`` / ``display_error`` summary directly. Having the sink
+    also render these would double the output and regress the CLI. The sink's
+    sole visible responsibility is step-output rendering; flow-level events
+    exist on the stream purely for the structured (``JsonSink``) consumer.
+
+    Raw ``STEP_OUTPUT`` and ``STEP_STARTED`` events are likewise a no-op — the
+    per-step renderer already presents the full output once the step finishes.
     """
 
     def __init__(self, console: Optional[object] = None) -> None:
@@ -68,22 +79,11 @@ class CliSink(Sink):
             display.set_console(console)
 
     def consume(self, event: Event) -> None:
-        et = event.type
-
-        if et in (EventType.STEP_COMPLETED, EventType.STEP_FAILED):
+        if event.type in (EventType.STEP_COMPLETED, EventType.STEP_FAILED):
             self._render_step(event)
-        elif et == EventType.FLOW_STARTED:
-            self._render_status(event, "Flow started", "blue")
-        elif et == EventType.FLOW_COMPLETED:
-            self._render_status(event, "Flow completed", "green")
-        elif et == EventType.FLOW_FAILED:
-            self._render_status(event, "Flow failed", "red")
-        elif et == EventType.FLOW_PAUSED:
-            self._render_status(event, "Flow paused", "yellow")
-        elif et in (EventType.INTERJECTION_NEEDED, EventType.CALL_NEEDED):
-            self._render_status(event, et.value.replace("_", " "), "yellow")
-        # STEP_STARTED / STEP_OUTPUT: no-op — the per-step renderer presents
-        # the complete output once the step finishes, matching current CLI.
+        # All other event types — flow-level lifecycle, STEP_STARTED,
+        # STEP_OUTPUT — are deliberately a no-op (see the class docstring):
+        # the CLI orchestrator owns that rendering directly.
 
     # -- internals ---------------------------------------------------------
 
@@ -95,17 +95,6 @@ class CliSink(Sink):
         from .step_renderers import render_step_output
 
         render_step_output(step)
-
-    def _render_status(self, event: Event, label: str, color: str) -> None:
-        """Render a flow-level lifecycle line via the shared display block."""
-        from .display import get_console, render_block_footer, render_block_header
-
-        message = event.data.get("message", "")
-        render_block_header(label, color)
-        if message:
-            get_console().print(message)
-            get_console().print("")
-        render_block_footer(color)
 
 
 class JsonSink(Sink):
