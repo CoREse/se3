@@ -495,6 +495,8 @@ se3 sync --interactive                # Pause for human approval on high-impact 
 se3 sync --show-diff                  # Print the full spec diff at end of run
 se3 sync --validate-only              # Only validate on-disk specs against the spec-format v1 structural contract; never call the LLM
 se3 sync --resume                     # Resume a previously interrupted sync run from se3/state/sync_checkpoint.json
+se3 sync --force                      # Ignore the sync_state.json incremental cache and force a full analysis
+se3 sync --confirm-cleanup            # Prompt for human approval before deleting each obsolete spec
 ```
 
 **Option summary:**
@@ -507,6 +509,8 @@ se3 sync --resume                     # Resume a previously interrupted sync run
 | `--show-diff` | off | Print the full aggregated spec diff after the final round. |
 | `--validate-only` | off | Skip every LLM call. Walk `se3/specs/**/spec.md` and run the spec-format v1 structural validator on each file. Exit `0` when every spec passes, `1` when any spec fails. Mutually exclusive with `--resume`. |
 | `--resume` | off | Read `se3/state/sync_checkpoint.json`, skip specs whose content hash still matches the checkpoint's `in_sync_specs` entry, and continue from the saved `round_index`. Mutually exclusive with `--validate-only`. |
+| `--force`, `-f` | off | Ignore the persistent `se3/state/sync_state.json` incremental cache: the level-1 global shutter and level-2 per-spec gate (see *Incremental Sync Optimization*) are disabled and every spec is analyzed in full. The sync_state file is rewritten after the run converges. The short alias `-f` is equivalent to `--force`. |
+| `--confirm-cleanup` | off | After convergence, instead of deleting obsolete specs outright, present an interactive prompt for each obsolete-spec candidate so a human can choose *delete* or *keep* per spec. |
 
 **Drift classification (used for log readability only):** Each round's analyzer still classifies drift as *gap* (spec describes something not in code → delete that spec section), *extension* (code does something the spec omits → add a section), or *conflict* (spec describes the behavior differently from the code → modify the section). All three classes resolve to the same kind of action: update the spec. The classification is preserved in round reports so humans can scan what changed.
 
@@ -524,7 +528,7 @@ se3 sync --resume                     # Resume a previously interrupted sync run
 - **GIVEN** the project has no `se3/specs/base/` directory
 - **WHEN** user runs `se3 sync`
 - **THEN** the engine first explores the project codebase and generates a base spec in the first round
-- **AND** subsequent rounds only update existing specs (no new discovery)
+- **AND** discovery continues to run each subsequent round until it converges (see *Single-Run Discovery Convergence*), after which only existing-spec updates proceed
 
 #### Scenario: Spec drift detected — unified update
 - **WHEN** any drift is found between a spec and the code, of any classification (gap / extension / conflict)
@@ -684,6 +688,121 @@ se3 sync --resume                     # Resume a previously interrupted sync run
 - **THEN** both values MUST be integers >= 1
 - **AND** `--stable-rounds` MUST NOT exceed `--max-rounds`
 - **AND** any violation of these constraints produces a usage error and the command exits with a non-zero status without invoking the LLM or starting the sync loop
+
+### Requirement: Incremental Sync Optimization
+
+`se3 sync` SHALL maintain a persistent incremental cache at `se3/state/sync_state.json` (the *sync_state*) recording the last successful convergence, and SHALL use it to skip redundant LLM analysis across and within `se3 sync` invocations. The sync_state is managed by the `engine/sync_state.py` module and is distinct from `sync_checkpoint.json`: the checkpoint is an interruption-recovery temporary file (deleted on successful completion), while the sync_state is a long-lived build cache of the *last successful converged* state.
+
+**sync_state contents:** `state_version` (schema version), `converged_at` (ISO timestamp), `code_fingerprint` (a global content fingerprint of the project working tree), `discovery_converged` (boolean), `spec_deps` (per-spec map of `spec_hash` plus the dependency file set with each file's content hash), and `obsolete_specs` (the obsolete-spec candidate set).
+
+**code_fingerprint** SHALL be a content fingerprint, not an mtime snapshot: the blob SHA of every `git ls-files` tracked file is sorted and hashed together, untracked files not excluded by `.gitignore` have their content hashed in, and the `se3/` directory is excluded so spec/state writes do not self-perturb the fingerprint. Content changes, additions, deletions, and renames all change the fingerprint; a pure mtime change does not.
+
+**Write discipline:** the sync_state is written or updated ONLY when the run genuinely converges (`converged=True`) with no unresolved `failed_analyses`; otherwise it is left untouched so a non-converged run is never mistaken for a cached converged state.
+
+**Cache self-invalidation:** a `state_version` mismatch, a missing file, or corrupt JSON SHALL all be treated as *no cache* — the run falls back to a full analysis and never falsely reports in-sync.
+
+**Three-level skip mechanism:**
+
+- **Level 1 — cross-invocation global shutter (before the round loop):** load the sync_state; if it exists AND `discovery_converged` is true AND `code_fingerprint` matches the current working tree, the entire code tree is frozen since the last convergence — the command reports `in-sync (0 LLM calls)`, sets `converged=True`, and exits with zero LLM calls.
+- **Level 2 — cross-invocation per-spec gate (before the round loop, when the global fingerprint differs):** for each spec, if its `spec_hash` is unchanged AND every file in its `deps` still has an unchanged content hash, the spec is marked in-sync and skipped for *all rounds* of this sync; otherwise it enters the round loop. The gate is evaluated once before the loop and the skip set applies to the whole run. **New-file fallback:** if the working tree shows any file *addition, deletion, or rename*, all level-2 skips are voided, the run falls back to a full analysis, and discovery is forced to re-run to convergence — level-2 skip is sound only for pure content modifications of already-known files.
+- **Level 3 — within-run per-spec early exit (during the round loop):** the round loop tracks, per spec, the count of consecutive zero-drift rounds; once a spec reaches `stable_rounds` consecutive zero-drift rounds it is individually converged and removed from subsequent rounds. Because source code is frozen within a single sync (sync only rewrites `spec.md`), a spec that has held zero drift for `stable_rounds` rounds necessarily remains in-sync. The whole sync ends when every spec that entered the loop has per-spec converged (or `max_rounds` is exhausted); one spec's drift does NOT reset another already-converged spec's stable count.
+
+**General fallback:** on first introduction (no sync_state), when `discovery_converged` is false, or on cache self-invalidation, levels 1 and 2 do not take effect and the run is a full analysis (level 3 still applies). `--force` disables levels 1 and 2 explicitly and rewrites the sync_state after convergence; manually deleting `se3/state/sync_state.json` has the same effect. `--resume` still drives off the checkpoint; levels 1 and 2 apply only to a fresh (non-resume) sync.
+
+**Per-spec dependency discovery (sound-set obligations):** a spec's `deps` set is collected gcc `-M`-style by capturing every `Read`/`Grep`/`Glob` tool-call file path touched while analyzing that spec, normalized to a project-relative path. A spec's `deps` is the **union** of touched paths across *all rounds in which it was analyzed* during the converged sync — the union is a conservative superset (over-tracking only costs a redundant re-analysis; under-tracking would cause an unsound skip). `deps` are persisted ONLY at the genuine convergence point, where each spec has already held `stable_rounds` zero-drift rounds, so the persisted deps inherently carry convergence validation. **Known limitation (accepted):** a pre-existing related file that the agent never reads in *any* round of a sync will not enter `deps`, so a later modification of that file will not trigger re-analysis of the spec — the dependency discovery is heuristic (agent browsing), not declarative. This is mitigated by multi-round union widening, the file add/delete/rename fallback, and the `--force` / manual-deletion escape hatch, and is documented here as an accepted known limitation.
+
+#### Scenario: Level-1 global shutter reports in-sync with zero LLM calls
+- **GIVEN** a `se3/state/sync_state.json` exists with `discovery_converged=true` and a `code_fingerprint`
+- **AND** the current working tree's content fingerprint equals that `code_fingerprint`
+- **WHEN** the user runs `se3 sync` (without `--force` and without `--resume`)
+- **THEN** the command reports `in-sync (0 LLM calls)`, treats the run as `converged=True`, and exits without making any LLM call
+
+#### Scenario: Level-2 per-spec gate skips specs with unchanged deps
+- **GIVEN** a sync_state exists but the global `code_fingerprint` no longer matches the working tree
+- **AND** the working tree shows only content modifications of already-known files (no additions, deletions, or renames)
+- **WHEN** the user runs `se3 sync`
+- **THEN** for each spec whose `spec_hash` is unchanged and every `deps` file content hash is unchanged, the spec is marked in-sync and skipped for all rounds of this run
+- **AND** specs whose `spec_hash` or any `deps` file hash changed enter the round loop and are analyzed normally
+
+#### Scenario: File addition/deletion/rename voids level-2 skips
+- **GIVEN** a sync_state exists and the global fingerprint differs
+- **WHEN** the working tree contains a file that was added, deleted, or renamed relative to the cached state
+- **THEN** all level-2 per-spec skips are voided and every spec is analyzed in full
+- **AND** discovery is forced to re-run until it converges
+
+#### Scenario: Level-3 per-spec early exit removes stable specs from later rounds
+- **GIVEN** a multi-round sync with several specs in the round loop
+- **WHEN** a spec records `stable_rounds` consecutive rounds with zero drift
+- **THEN** that spec is treated as per-spec converged and is not analyzed in subsequent rounds
+- **AND** a different spec drifting in a later round does NOT reset the converged spec's stable count or re-introduce it
+
+#### Scenario: --force ignores the sync_state cache
+- **GIVEN** a sync_state exists that would otherwise trigger a level-1 or level-2 skip
+- **WHEN** the user runs `se3 sync --force`
+- **THEN** levels 1 and 2 are disabled and every spec is analyzed in full
+- **AND** the sync_state file is rewritten after the run converges
+
+#### Scenario: First run without a cache falls back to full analysis
+- **GIVEN** no `se3/state/sync_state.json` exists (first introduction), or the file is missing/corrupt/has a mismatched `state_version`
+- **WHEN** the user runs `se3 sync`
+- **THEN** the run is treated as having no cache — levels 1 and 2 do not take effect and a full analysis is performed
+- **AND** the run never falsely reports in-sync
+- **AND** on convergence a fresh sync_state is written
+
+#### Scenario: sync_state is written only on genuine convergence
+- **GIVEN** a sync run that ends without convergence, or that converges with unresolved `failed_analyses`
+- **WHEN** the run finishes
+- **THEN** `se3/state/sync_state.json` is NOT written or updated, so a non-converged state is never cached as converged
+
+### Requirement: Single-Run Discovery Convergence
+
+Within a single `se3 sync` invocation, the discovery phase (missing-subsystem detection) SHALL run every round until it converges on its own, rather than running only once in the first round.
+
+Discovery is considered converged when it discovers **0 new subsystems** for `stable_rounds` consecutive rounds (reusing the same `stable_rounds` semantics as analyze convergence). The convergence signal is "this round found 0 new subsystems" — NOT a comparison of consecutive rounds' raw discovery output, because round 1 generating new specs changes project state so consecutive raw outputs necessarily differ. Once discovery has converged, it is not run again for the remainder of that sync. Whether discovery converged (`discovery_converged`) is recorded in the sync_state.
+
+#### Scenario: Discovery runs each round until it finds zero new subsystems
+- **GIVEN** a `se3 sync` run where discovery finds new subsystems in early rounds
+- **WHEN** discovery returns 0 new subsystems for `stable_rounds` consecutive rounds
+- **THEN** discovery is considered converged and is not run again for the rest of the sync
+- **AND** `discovery_converged=true` is recorded in the sync_state on convergence
+
+### Requirement: Obsolete Spec Cleanup
+
+`se3 sync` SHALL detect and remove obsolete specs — specs describing a subsystem whose code has been wholly removed — so that orphaned specs do not persist and burn tokens indefinitely.
+
+**Detection scope:** a spec becomes an obsolete *candidate* only under case (a) — *whole-code removal*: every file in the spec's `deps` set no longer exists AND that round's analyze confirms the code the spec describes is 100% absent. Case (b) — *speculative or duplicate specs* — is out of scope (a purely subjective judgement, unsafe to delegate to a single LLM call).
+
+**Mark during sync, delete after convergence:** during the round loop the candidate set is only *marked*, updated per round (a spec leaves the candidate set if its code reappears or is referenced again), and persisted into the sync_state `obsolete_specs` field so it survives interruption and `--resume`. Deletion is executed only after the whole sync converges (before the convergence-point sync_state write), using the convergence-point `obsolete_specs` as the final verdict, and the result is reported to the user.
+
+**Deletion behavior:** the default behavior deletes the obsolete `se3/specs/<name>/` directories outright. With `--confirm-cleanup`, after convergence an interactive prompt is shown per obsolete-spec candidate so a human chooses *delete* or *keep*. Because `se3/specs/` is git-tracked, an erroneous deletion is recoverable from git history — this serves as the misdeletion fallback, with no separate archive directory. Deletion is a risk-asymmetric operation, so it is constrained by a mechanical hard gate (`deps` fully invalid), LLM confirmation only, post-convergence timing, and the optional human interaction.
+
+#### Scenario: Spec with fully-invalid deps and confirmed-absent code becomes an obsolete candidate
+- **GIVEN** a spec whose every `deps` file no longer exists on disk
+- **WHEN** that round's analyze confirms the code the spec describes is 100% absent
+- **THEN** the spec is added to the obsolete-spec candidate set
+- **AND** the candidate set is persisted into the sync_state `obsolete_specs` field
+
+#### Scenario: Reappearing code removes a spec from the obsolete candidate set
+- **GIVEN** a spec previously marked as an obsolete candidate
+- **WHEN** a later round finds the spec's code present or referenced again
+- **THEN** the spec is removed from the obsolete-spec candidate set
+
+#### Scenario: Obsolete specs are deleted after convergence by default
+- **GIVEN** a `se3 sync` run that converges with a non-empty obsolete-spec candidate set
+- **WHEN** the run is not given `--confirm-cleanup`
+- **THEN** the obsolete `se3/specs/<name>/` directories are deleted outright after convergence and before the sync_state is written
+- **AND** the deleted specs are reported to the user
+
+#### Scenario: --confirm-cleanup prompts per obsolete spec
+- **GIVEN** a converged `se3 sync` run with obsolete-spec candidates
+- **WHEN** the user ran `se3 sync --confirm-cleanup`
+- **THEN** an interactive prompt is shown for each obsolete-spec candidate offering *delete* or *keep*
+- **AND** only the specs the user chooses to delete are removed; kept specs are left on disk
+
+#### Scenario: Obsolete candidate set survives interruption and resume
+- **GIVEN** a sync run that marked obsolete-spec candidates and was then interrupted
+- **WHEN** the user runs `se3 sync --resume`
+- **THEN** the `obsolete_specs` set persisted in the sync_state is restored and not lost
 
 ### Requirement: `se3 sync-respond` Command
 

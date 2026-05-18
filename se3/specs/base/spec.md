@@ -16,12 +16,13 @@
   - `cli.py` — CLI 入口，注册所有命令
   - `commands/` — 各 CLI 子命令实现
   - `engine/` — 流程引擎核心（state machine, steps, context builder, LLM caller）
-    - `engine/sync_engine.py` — `se3 sync` 单轮无状态引擎（spec ↔ code drift 分析与回写）
-    - `engine/sync_loop.py` — `se3 sync` 跨轮编排（收敛检测、振荡守卫、连续基础设施失败计数、checkpoint 写入与 `--resume` 续跑）
-    - `engine/sync_analyzer.py` — sync 阶段的 spec/code 对比与 LLM 响应解析；JSON 解析失败时记录 `failed_analysis_reason` 而不再合成伪 CONFLICT diff
-    - `engine/sync_discovery.py` — sync 首轮在缺失 spec 时通过 LLM 生成新 spec；新建 spec 必须通过 `spec_validator.validate_spec_structure(...)` 才落盘
+    - `engine/sync_engine.py` — `se3 sync` 单轮无状态引擎（spec ↔ code drift 分析与回写）；`run_once` 接受每轮的 analyze_specs 子集与 do_discovery 标志，聚合本轮每个 spec analyze 所 touch 的文件到累计 deps,并暴露 discovery 本轮新发现子系统数与过时 spec 候选
+    - `engine/sync_loop.py` — `se3 sync` 跨轮编排（收敛检测、振荡守卫、连续基础设施失败计数、checkpoint 写入与 `--resume` 续跑）；轮循环前依据 sync_state 做第 1 级全局快门与第 2 级 per-spec 闸门跳过,轮循环内做第 3 级 per-spec 提前退出(跟踪每个 spec 连续 0 drift 轮数),收敛后执行过时 spec 删除并写入 sync_state
+    - `engine/sync_analyzer.py` — sync 阶段的 spec/code 对比与 LLM 响应解析；解析前剥离 markdown fence 再 `json.loads`；JSON 解析失败时记录 `failed_analysis_reason` 而不再合成伪 CONFLICT diff；消费 llm_caller 暴露的本次调用 touched-files 供 per-spec 依赖跟踪
+    - `engine/sync_discovery.py` — sync 内通过 LLM 发现缺失 spec 并生成新 spec(每轮可被调用、跑到自身收敛)；新建 spec 必须通过 `spec_validator.validate_spec_structure(...)` 才落盘；并提供过时 spec 删除入口 `delete_obsolete_specs`(收敛后删除 `se3/specs/<name>/` 目录,默认直删,可选逐个人工确认)
     - `engine/sync_interaction.py` — sync 流程的交互式提示（高风险删除审批、配额耗尽暂停等）
     - `engine/sync_checkpoint.py` — sync 续跑用的轻量持久化模块（schema v1 dataclass，原子写入 `se3/state/sync_checkpoint.json`，按 SHA-256 重算 in-sync spec）
+    - `engine/sync_state.py` — sync 持久化增量优化的缓存模块：`SyncState` dataclass（`state_version` / `converged_at` / `code_fingerprint` / `discovery_converged` / `spec_deps` / `obsolete_specs`），原子写入 `se3/state/sync_state.json`，JSON 损坏 / 版本不匹配 / 文件缺失一律返回无缓存；提供 `compute_code_fingerprint`（git ls-files blob sha 排序整体 hash + untracked 未忽略文件内容 hash，排除 `se3/`）、文件内容 hash、文件增/删/重命名检测;记录『上次成功收敛』快照,与 `sync_checkpoint.py`（中断恢复临时态）语义、生命周期完全不同
     - `engine/spec_validator.py` — 纯函数式 spec 结构校验器，强制 spec-format v1 契约（v1 marker、`# <name> Specification` 标题、`## Purpose`、至少一个 `### Requirement:`、首行非叙述句）；供 sync_discovery、sync_engine、`se3 sync --validate-only` 三处复用
     - `engine/state_machine.py` — `se3 run` 流程引擎的有限状态机核心，驱动 step 间转移与上下文流转
     - `engine/steps/` — `se3 run` 各步骤（analyze / plan / implement / verify 等）的具体实现包
@@ -52,6 +53,7 @@
   - `specs/` — 项目规范（已提交到 git）
   - `state/` — 流程引擎状态（gitignored），存放多种运行时持久化产物：
     - `state/sync_checkpoint.json` — `se3 sync` 中断时的续跑 checkpoint（正常收敛 / `--resume` 成功完成时被清除）
+    - `state/sync_state.json` — `se3 sync` 的持久化增量缓存（『上次成功收敛』快照），记录全局内容指纹、discovery 是否收敛、每个 spec 的 spec_hash 与依赖文件集、过时 spec 候选集；仅在 sync 真正收敛且无未解决失败分析时写入；与 `sync_checkpoint.json` 不同——后者是中断恢复临时态、收敛即清除，前者是跨调用长期存在的构建缓存；被 `/se3/*` 的 `.gitignore` 规则忽略（必需属性：被 git 跟踪会导致跨机器携带陈旧缓存而误判 in-sync）
     - `state/engine.json` — `se3 run` 状态机的持久化状态（当前 step、上下文、迭代计数等），用于支持流程中断后通过 `--resume` 续跑
     - `state/known_test_failures.json` — 已知/允许失败的测试清单，供流程引擎在 verify 阶段区分新引入回归与历史既存失败
     - `state/merge.lock` — `se3 merge` 进程级互斥锁文件（基于 `fcntl.flock` + PID stale 检测），防止并发 merge

@@ -283,6 +283,27 @@ When no explicit `on_output` callback is given, the caller installs a `StreamJSO
 - **THEN** a summary line shows message count, tool-call count, total text chars, and elapsed seconds
 - **AND** all three id→cache dicts are cleared to prevent leaks on stream interruption
 
+### Requirement: Touched-Files Capture for Dependency Tracking
+
+The `StreamJSONTracker` SHALL capture, gcc `-M`-style, the set of file paths touched by `Read`, `Grep`, and `Glob` tool calls during a `call()` invocation, normalized to project-relative paths. This lets the `se3 sync` engine discover each spec's dependency file set from the analyzer agent's actual execution, rather than relying on the LLM to self-report dependencies.
+
+When a streamed `assistant` message contains a `tool_use` content item:
+- If the tool name is `Read`, the input's `file_path` is recorded.
+- If the tool name is `Grep` or `Glob`, the input's `path` (or equivalent search path) is recorded.
+- Each recorded path is normalized to a project-relative path before being added to the tracker's accumulating set.
+
+The tracker exposes the accumulated set via a `touched_files` property; `LLMCaller` resets the set at the start of each `call()` and exposes the most recent call's result via a `last_touched_files` property for the analyzer to consume.
+
+#### Scenario: Read/Grep/Glob tool calls recorded as touched files
+- **WHEN** an `assistant` message contains a `tool_use` item for `Read`, `Grep`, or `Glob`
+- **THEN** the file path / search path from the tool input is normalized to a project-relative path and added to the tracker's `touched_files` set
+- **AND** `tool_use` items for other tools (e.g. `Edit`, `Write`, `Bash`) do not add entries to the touched-files set
+
+#### Scenario: touched-files set exposed per call
+- **WHEN** a `call()` invocation completes
+- **THEN** `LLMCaller.last_touched_files` returns the set of project-relative paths touched by that call's `Read`/`Grep`/`Glob` tool calls
+- **AND** the set is reset at the start of the next `call()` so it never leaks across invocations
+
 ### Requirement: Result Text Extraction Modes
 
 The caller exposes two post-call extractors used by different consumers.

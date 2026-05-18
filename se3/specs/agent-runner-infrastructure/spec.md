@@ -159,11 +159,18 @@ When a stdin-routed prompt is present, the writing MUST happen on a background d
 
 ### Requirement: Monitored Execution with Activity Streaming
 
-`run_with_monitor` MUST stream the child's combined stdout+stderr line-by-line, recording per-line activity, optionally writing to a log file in real time, and invoking `on_output` / `on_activity` callbacks.
+`run_with_monitor` MUST stream the child's stdout line-by-line, recording per-line activity, optionally writing to a log file in real time, and invoking `on_output` / `on_activity` callbacks. The child's stderr is kept on a separate pipe (NOT merged into stdout) and drained by a background daemon thread, so the NDJSON carried on stdout stays clean for downstream JSON parsing.
 
 #### Scenario: child spawn settings
 - **WHEN** the monitored child is started
-- **THEN** it is spawned with `stdout=PIPE`, `stderr=STDOUT` (merged), `bufsize=1`, `universal_newlines=True`
+- **THEN** it is spawned with `stdout=PIPE`, `stderr=PIPE` (separate, not merged), `bufsize=1`, `universal_newlines=True`
+- **AND** a background daemon thread drains `proc.stderr` so the pipe never fills, optionally echoing it to the parent's stderr and to a dedicated `<log_file>.stderr` sidecar file when a `log_file` is configured
+
+#### Scenario: stderr status messages isolated from parsed stdout
+- **GIVEN** the runner prints status messages such as `[claude-runner] Running command: '<cmd>'` and `[claude-runner] Command '<cmd>' succeeded`
+- **WHEN** the monitored child runs
+- **THEN** those status messages are written only to the parent's `sys.stderr`, never to the captured stdout stream
+- **AND** because the child's own stderr is on a separate pipe, no `[claude-runner]` status text or child stderr noise is interleaved into the stdout NDJSON consumed by `LLMCaller`'s JSON parser
 
 #### Scenario: missing command short-circuit
 - **WHEN** `shutil.which(cmd_name)` returns `None`

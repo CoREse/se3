@@ -1,6 +1,3 @@
-The working tree file is already a clean, correct 3-way merge — it combines the G7 version (Level 1/2/3 caching, obsolete-spec handling, sync_state) with G1's `format_error_specs` tracking. No conflict markers remain. Here is the fully resolved content:
-
-```python
 """SyncLoop — Multi-round convergence controller for one-directional sync.
 
 The loop wraps ``SyncEngine`` and adds cross-round orchestration:
@@ -326,8 +323,10 @@ class SyncLoop:
         per_spec_zero_drift: Dict[str, int] = {}
         per_spec_converged: Set[str] = set()
 
-        # Initial skip set includes level-2 cache hits.
-        skip_specs = level_2_skip_specs.copy()
+        # Initial skip set includes level-2 cache hits plus any specs the
+        # resume path already marked still-in-sync from the checkpoint
+        # (level-2 is empty on resume, so this union preserves both).
+        skip_specs = skip_specs | level_2_skip_specs
 
         normal_exit = False
 
@@ -512,32 +511,23 @@ class SyncLoop:
                     break
 
                 # ── Convergence ───────────────────────────────────────────
-                # Compute the set of all specs seen across every round.
-                all_specs_seen: Set[str] = set()
-                for r in loop_result.rounds:
-                    for a in r.analyses:
-                        all_specs_seen.add(a.spec_name)
-                all_specs_seen.update(level_2_skip_specs)
-
-                # Collect specs that had a failed analysis in this round.
-                specs_failed_this_round: Set[str] = set()
-                for analysis in round_result.analyses:
-                    if analysis.analysis_failed:
-                        specs_failed_this_round.add(analysis.spec_name)
-
-                # Per-spec convergence: every seen spec has individually
-                # reached stable_rounds consecutive 0-drift rounds, OR has
-                # a persistent failed analysis (doesn't block convergence
-                # but prevents sync_state from being written — checked in
-                # _write_sync_state). Discovery must also be converged.
-                if all_specs_seen:
-                    per_spec_done = all(
-                        per_spec_zero_drift.get(name, 0)
-                        >= self.stable_rounds
-                        or name in specs_failed_this_round
-                        for name in all_specs_seen
-                    )
-                    if per_spec_done and discovery_converged:
+                # Loop exit is gated on global round stability: a round
+                # counts toward convergence only when it is stable — no spec
+                # content was written this round AND every analyzed spec is
+                # either in-sync or carries a non-blocking failed analysis
+                # (see RoundResult.is_stable). Per-spec early exit (Level 3)
+                # only shrinks the analyzed set; because is_stable requires
+                # every *analyzed* spec to be in-sync, stable_rounds
+                # consecutive stable rounds give the same per-spec guarantee
+                # without a separate per-spec gate. Discovery must also have
+                # converged — except on resume, where discovery is
+                # intentionally never run, so resume does not require it.
+                discovery_ok = (
+                    discovery_converged or self.resume_from is not None
+                )
+                if round_result.is_stable and discovery_ok:
+                    stable_count += 1
+                    if stable_count >= self.stable_rounds:
                         loop_result.converged = True
                         loop_result.obsolete_specs = sorted(obsolete_candidates)
                         # Delete obsolete specs after convergence, before
@@ -565,21 +555,7 @@ class SyncLoop:
                         normal_exit = True
                         break
                 else:
-                    # Fallback: traditional global stability for test
-                    # fixtures that provide RoundResults with empty analyses.
-                    if round_result.is_stable:
-                        stable_count += 1
-                        if stable_count >= self.stable_rounds:
-                            loop_result.converged = True
-                            self._emit(
-                                "converged",
-                                round_index=round_index,
-                                stable_rounds=self.stable_rounds,
-                            )
-                            normal_exit = True
-                            break
-                    else:
-                        stable_count = 0
+                    stable_count = 0
 
                 # After the first post-resume round, the skip set has served
                 # its purpose; re-analyze normally from then on.
@@ -953,4 +929,3 @@ class SyncLoop:
             cb(phase, **kwargs)
         except Exception:
             logger.debug("progress_callback raised on phase=%s", phase, exc_info=True)
-```
