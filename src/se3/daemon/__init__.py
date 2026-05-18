@@ -35,8 +35,10 @@ from .daemon import (
     start_daemon,
     stop_daemon,
 )
+from .client import DaemonClient
 from .spawner import DaemonSpawner, SpawnedProcess
 from .supervisor import DaemonSupervisor, FlowRecord
+from . import protocol
 
 __all__ = [
     "DaemonAggregator",
@@ -49,8 +51,10 @@ __all__ = [
     "daemon_status",
     "start_daemon",
     "stop_daemon",
+    "DaemonClient",
     "DaemonSpawner",
     "SpawnedProcess",
     "DaemonSupervisor",
     "FlowRecord",
+    "protocol",
 ]

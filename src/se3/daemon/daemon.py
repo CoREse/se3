@@ -110,6 +110,9 @@ class Daemon:
             self.aggregator.add_project_root(root)
         self._stop_event: Optional[asyncio.Event] = None
         self._running = False
+        # The outbound WebSocket client to the central server. Created lazily
+        # in serve() only when a server_url is configured.
+        self._client: Optional["object"] = None
 
     # -- public control surface -------------------------------------------
 
@@ -152,18 +155,62 @@ class Daemon:
             logger.info("Daemon interrupted")
 
     async def serve(self) -> None:
-        """The async main: write pidfile, poll, then clean up on shutdown."""
+        """The async main: write pidfile, poll, dial the server, then clean up.
+
+        The aggregation poll loop and the optional outbound server client both
+        run as concurrent tasks on this single event loop and share the same
+        ``stop_event``.
+        """
         self.config.pid_dir.mkdir(parents=True, exist_ok=True)
         self._write_pidfile()
         self._stop_event = asyncio.Event()
         self._running = True
         self._install_signal_handlers()
         logger.info("SE3 daemon started (pid=%s)", os.getpid())
+
+        tasks = [asyncio.create_task(self._poll_loop())]
+        client_task = self._start_server_client()
+        if client_task is not None:
+            tasks.append(client_task)
         try:
-            await self._poll_loop()
+            await asyncio.gather(*tasks)
         finally:
             self._running = False
             self._shutdown()
+
+    def _start_server_client(self) -> Optional["asyncio.Task"]:
+        """Create the outbound :class:`DaemonClient` task when a server is set.
+
+        Returns ``None`` when no ``server_url`` is configured, so a daemon run
+        purely for local supervision pays no WebSocket cost.
+        """
+        if not self.config.server_url:
+            return None
+        # Deferred import: the client module touches the optional 'websockets'
+        # dependency, so it must not load on the local-only path.
+        from .client import DaemonClient
+
+        client = DaemonClient(
+            self.config.server_url,
+            machine_id=self.aggregator.machine_id,
+            hostname=self.aggregator.hostname,
+            se3_version=_se3_version(),
+            snapshot_provider=lambda: self.aggregator.get_snapshot().to_dict(),
+            spawn_handler=self._handle_spawn_request,
+        )
+        self._client = client
+        assert self._stop_event is not None
+        return asyncio.create_task(client.run(self._stop_event))
+
+    def _handle_spawn_request(
+        self, task_description: str, project_root: str, task_type: str
+    ) -> SpawnedProcess:
+        """Adapt a server SPAWN_FLOW into a :meth:`request_spawn` call."""
+        return self.request_spawn(
+            task_description,
+            project_root=project_root or None,
+            task_type=task_type or "feature",
+        )
 
     async def _poll_loop(self) -> None:
         """Aggregate local state on a fixed interval until the stop event fires."""
@@ -260,6 +307,16 @@ class DaemonAlreadyRunning(RuntimeError):
 
 
 # -- module-level lifecycle helpers ---------------------------------------
+
+
+def _se3_version() -> str:
+    """Return the installed SE3 version string (best-effort)."""
+    try:
+        import se3
+
+        return str(getattr(se3, "__version__", "unknown"))
+    except Exception:  # pragma: no cover - defensive
+        return "unknown"
 
 
 def _read_pidfile(pid_file: Path) -> Optional[Dict[str, object]]:

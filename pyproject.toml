@@ -14,11 +14,25 @@ dependencies = [
     "prompt-toolkit>=3.0.0",
 ]
 
+[project.optional-dependencies]
+# Heavy web dependencies for the central server (`se3-server`). Kept out of
+# the core `[project].dependencies` so a core-only `pip install se3` stays
+# dependency-clean. `websockets` is also what the daemon's outbound client
+# uses to dial the server.
+server = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "websockets>=12.0",
+]
+
 [project.scripts]
 se3 = "se3.cli:app"
+se3-server = "se3.server:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/se3"]
+# Ship the server's bundled static frontend assets in the wheel.
+artifacts = ["src/se3/server/static/**"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
