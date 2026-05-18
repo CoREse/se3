@@ -106,6 +106,7 @@ class SpecAnalysis:
     diffs: List[SpecDiff] = field(default_factory=list)
     analyzed_at: datetime = field(default_factory=datetime.now)
     failed_analysis_reason: Optional[str] = None
+    touched_files: List[str] = field(default_factory=list)
 
     @property
     def gaps(self) -> List[SpecDiff]:
@@ -132,6 +133,7 @@ class SpecAnalysis:
             "spec_name": self.spec_name,
             "diffs": [d.to_dict() for d in self.diffs],
             "analyzed_at": self.analyzed_at.isoformat(),
+            "touched_files": list(self.touched_files),
         }
         if self.failed_analysis_reason is not None:
             d["failed_analysis_reason"] = self.failed_analysis_reason
@@ -150,6 +152,7 @@ class SpecAnalysis:
             diffs=[SpecDiff.from_dict(d) for d in data.get("diffs", [])],
             analyzed_at=analyzed_at,
             failed_analysis_reason=data.get("failed_analysis_reason"),
+            touched_files=list(data.get("touched_files", [])),
         )
 
 
@@ -170,6 +173,8 @@ class RoundResult:
     #              "description": str, "requirement_names": list[str]}
     high_impact_deletions: List[Dict[str, Any]] = field(default_factory=list)
     discovery_failed: bool = False
+    # Per-spec touched file union for this round: spec_name -> sorted list of relative paths
+    per_spec_deps: Dict[str, List[str]] = field(default_factory=dict)
 
     @property
     def is_stable(self) -> bool:
@@ -213,6 +218,7 @@ class RoundResult:
             "duration_seconds": self.duration_seconds,
             "high_impact_deletions": list(self.high_impact_deletions),
             "discovery_failed": self.discovery_failed,
+            "per_spec_deps": {k: list(v) for k, v in self.per_spec_deps.items()},
         }
 
 
@@ -627,6 +633,13 @@ class SyncEngine:
                 llm_caller=llm_caller,
                 result=result,
             )
+
+        # Aggregate per-spec touched files from this round's analyses
+        for analysis in result.analyses:
+            if analysis.touched_files:
+                result.per_spec_deps[analysis.spec_name] = sorted(
+                    set(analysis.touched_files)
+                )
 
         for name, info in self._specs.items():
             try:

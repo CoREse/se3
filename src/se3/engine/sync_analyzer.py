@@ -222,7 +222,9 @@ class SyncAnalyzer:
                     json_mode="extract",
                     json_schema_hint=_ANALYSIS_JSON_SCHEMA,
                 )
-                return self._parse_analysis_response(spec_name, response)
+                analysis = self._parse_analysis_response(spec_name, response)
+                analysis.touched_files = sorted(self.llm_caller.last_touched_files)
+                return analysis
             except (LLMCallError, Exception) as e:
                 last_error = e
                 logger.warning(
