@@ -319,6 +319,26 @@ class SyncLoop:
 
         loop_result.level_2_skipped_specs = sorted(level_2_skip_specs)
 
+        # Seed accumulated per-spec deps with the dependency paths recorded in
+        # the cached sync_state. These historical paths point at files that may
+        # have been deleted since the last converged sync; feeding them to the
+        # analyzer (via round_spec_deps) lets the code-absence confirmation
+        # prompt fire so a spec whose subsystem code was fully removed can be
+        # confirmed obsolete. Without this seed, _accumulated_deps would only
+        # ever contain files the agent touched THIS run — all of which exist,
+        # since sync never modifies source code — so the obsolete-spec
+        # mechanism would never trigger. Fresh per-spec deps captured during
+        # this run's rounds are unioned on top of this seed.
+        if pre_loop_sync_state and pre_loop_sync_state.spec_deps:
+            for spec_name, entry in pre_loop_sync_state.spec_deps.items():
+                if not isinstance(entry, dict):
+                    continue
+                cached_deps = entry.get("deps", {})
+                if cached_deps:
+                    _accumulated_deps.setdefault(spec_name, set()).update(
+                        cached_deps.keys()
+                    )
+
         # Per-spec convergence tracking (Level 3).
         per_spec_zero_drift: Dict[str, int] = {}
         per_spec_converged: Set[str] = set()
@@ -405,6 +425,7 @@ class SyncLoop:
                     accumulated_deps=_accumulated_deps,
                     previous_candidates=obsolete_candidates,
                     project_root=self.project_root,
+                    skip_specs=round_skip,
                 )
 
                 for spec_name, content_hash in round_result.spec_hashes_after.items():
@@ -472,7 +493,11 @@ class SyncLoop:
                     self._consecutive_infra_failures
                     >= self.infrastructure_failure_threshold
                 ):
-                    skip_specs = set()
+                    # Re-analyze everything after an infra-failure recovery,
+                    # but keep the Level-2 cross-call cache hits skipped: those
+                    # come from a prior converged sync and are unaffected by
+                    # this run's infrastructure failures.
+                    skip_specs = set(level_2_skip_specs)
                     should_continue = self._handle_infra_failure_threshold(
                         round_result=round_result,
                         loop_result=loop_result,
@@ -557,12 +582,15 @@ class SyncLoop:
                 else:
                     stable_count = 0
 
-                # After the first post-resume round, the skip set has served
-                # its purpose; re-analyze normally from then on.
-                # Format-error specs persist — they are excluded for the
-                # rest of this sync run because the LLM already failed to
-                # produce valid JSON for them.
-                skip_specs = set(format_error_specs)
+                # After the first post-resume round, the resume skip set has
+                # served its purpose; re-analyze those specs normally from then
+                # on. Two skip sources DO persist for the whole run:
+                #   * Level-2 per-spec cache hits — a cross-call cache from a
+                #     prior converged sync; re-analyzing them defeats the
+                #     cache's purpose (each analysis is ~500s).
+                #   * Format-error specs — the LLM already failed to produce
+                #     valid JSON for them; retrying wastes tokens.
+                skip_specs = set(format_error_specs) | level_2_skip_specs
 
                 round_index += 1
             else:
@@ -751,6 +779,7 @@ class SyncLoop:
         accumulated_deps: Dict[str, set],
         previous_candidates: set,
         project_root: Path,
+        skip_specs: Optional[Set[str]] = None,
     ) -> set:
         """Update the obsolete candidate set after a round.
 
@@ -759,11 +788,23 @@ class SyncLoop:
         - A spec exits the candidate set when code reappears (deps files exist
           again, or code_fully_absent is False).
         - Specs that never had deps (cold start, never analyzed) are unaffected.
+        - Specs in *skip_specs* are ignored entirely: ``SyncEngine.run_once``
+          appends a synthetic ``SpecAnalysis(diffs=[])`` for every skipped spec
+          (Level-2 cache hit or Level-3 per-spec convergence). That synthetic
+          analysis always carries the default ``code_fully_absent=False``, so
+          processing it would wrongly evict a spec that was already marked
+          obsolete in an earlier round. A skipped spec's candidate status is
+          left exactly as it was.
         """
         candidates = set(previous_candidates)
+        skip = set(skip_specs or ())
 
         for analysis in round_result.analyses:
             spec_name = analysis.spec_name
+            if spec_name in skip:
+                # Synthetic placeholder analysis for a skipped spec — not a
+                # real verdict, so neither add nor discard.
+                continue
             spec_deps = accumulated_deps.get(spec_name, set())
 
             # Only evaluate specs that have accumulated deps.

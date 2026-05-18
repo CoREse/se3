@@ -381,6 +381,42 @@ class TestUpdateObsoleteCandidates:
         )
         assert "new-spec" not in candidates
 
+    def test_skipped_spec_does_not_evict_candidate(self, tmp_path):
+        """A spec in skip_specs carries a synthetic placeholder analysis with
+        the default code_fully_absent=False. That synthetic analysis must NOT
+        evict the spec from the candidate set — its candidate status is frozen
+        for rounds in which it is skipped (Level-2 / Level-3 early exit)."""
+        analysis = SpecAnalysis(spec_name="gone", code_fully_absent=False)
+        round_result = RoundResult(
+            round_index=3, analyses=[analysis], per_spec_deps={},
+        )
+        accumulated_deps = {"gone": {"src/deleted.py"}}
+        candidates = SyncLoop._update_obsolete_candidates(
+            round_result=round_result,
+            accumulated_deps=accumulated_deps,
+            previous_candidates={"gone"},
+            project_root=tmp_path,
+            skip_specs={"gone"},
+        )
+        assert "gone" in candidates
+
+    def test_skipped_spec_not_added_as_new_candidate(self, tmp_path):
+        """A skipped spec is not freshly added to the candidate set either —
+        its synthetic analysis is not a real verdict."""
+        analysis = SpecAnalysis(spec_name="gone", code_fully_absent=False)
+        round_result = RoundResult(
+            round_index=3, analyses=[analysis], per_spec_deps={},
+        )
+        accumulated_deps = {"gone": {"src/deleted.py"}}
+        candidates = SyncLoop._update_obsolete_candidates(
+            round_result=round_result,
+            accumulated_deps=accumulated_deps,
+            previous_candidates=set(),
+            project_root=tmp_path,
+            skip_specs={"gone"},
+        )
+        assert "gone" not in candidates
+
 
 # ---------------------------------------------------------------------------
 # 6. SyncCheckpoint.obsolete_specs field
@@ -649,6 +685,122 @@ class TestCheckAllDepsMissing:
     def test_none_deps(self, tmp_path):
         result = SyncLoop._check_all_deps_missing(set(), tmp_path)
         assert result is False
+
+
+# ---------------------------------------------------------------------------
+# 12. End-to-end: full SyncLoop.run() detects and deletes an obsolete spec
+# ---------------------------------------------------------------------------
+
+class TestObsoleteSpecEndToEnd:
+    """Drive a real ``SyncLoop.run()`` where a cached ``sync_state`` recorded a
+    spec's deps and those dep files are now gone. Exercises the full wiring:
+    cached ``sync_state.spec_deps`` → ``_accumulated_deps`` seed → ``spec_deps``
+    passed to ``run_once`` → obsolete candidate → deletion after convergence.
+    """
+
+    def _init_git(self, tmp_path):
+        import subprocess
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.email", "t@t"],
+                       cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "config", "user.name", "T"],
+                       cwd=str(tmp_path), check=True)
+        (tmp_path / "src").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "src" / "main.py").write_text("print('hi')")
+        subprocess.run(["git", "add", "-A"], cwd=str(tmp_path), check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "init"],
+                       cwd=str(tmp_path), check=True)
+
+    def test_obsolete_spec_detected_and_deleted_end_to_end(
+        self, tmp_path, monkeypatch
+    ):
+        from se3.engine.sync_state import state_path
+
+        self._init_git(tmp_path)
+
+        # Cached sync_state: 'obsolete-feature' recorded a dependency file that
+        # no longer exists on disk — its subsystem code was deleted.
+        sp = state_path(tmp_path)
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps({
+            "state_version": 1,
+            "converged_at": "2026-01-01T00:00:00Z",
+            "code_fingerprint": "stale-fingerprint",
+            "discovery_converged": True,
+            "spec_deps": {
+                "obsolete-feature": {
+                    "spec_hash": "x",
+                    "deps": {"src/old_feature.py": "abc123"},
+                },
+            },
+            "obsolete_specs": [],
+        }))
+
+        # The obsolete spec's spec.md still exists on disk (only its code was
+        # deleted, not the spec).
+        _make_spec_dir(tmp_path, "obsolete-feature")
+        spec_path = tmp_path / "se3" / "specs" / "obsolete-feature" / "spec.md"
+
+        calls: list = []
+
+        class _Engine:
+            """Engine stand-in: records run_once kwargs and returns a round
+            whose analyzer confirmed code_fully_absent for the obsolete spec."""
+
+            def __init__(self, project_root, interactive=False):
+                self.project_root = project_root
+                self.interactive = interactive
+                self._specs = {
+                    "obsolete-feature": {
+                        "name": "obsolete-feature",
+                        "path": str(spec_path),
+                        "content": spec_path.read_text(),
+                    },
+                }
+
+            def run_once(self, **kwargs):
+                calls.append(kwargs)
+                analysis = SpecAnalysis(
+                    spec_name="obsolete-feature",
+                    diffs=[],
+                    code_fully_absent=True,
+                )
+                rr = RoundResult(round_index=kwargs["round_index"])
+                rr.analyses = [analysis]
+                rr.spec_hashes_after = {"obsolete-feature": "h1"}
+                return rr
+
+            def _load_specs(self):
+                return dict(self._specs)
+
+        monkeypatch.setattr("se3.engine.sync_loop.SyncEngine", _Engine)
+        monkeypatch.setattr(
+            "se3.engine.llm_caller.LLMCaller",
+            lambda **kwargs: MagicMock(name="LLMCaller"),
+        )
+        fake_collector = MagicMock()
+        fake_collector.collect.return_value = {"git": {}, "specs": []}
+        monkeypatch.setattr(
+            "se3.engine.project_context.ProjectContextCollector",
+            lambda project_root: fake_collector,
+        )
+
+        loop = SyncLoop(tmp_path, max_rounds=10, stable_rounds=1)
+        result = loop.run()
+
+        # The cached historical deps were fed to the analyzer via spec_deps.
+        assert calls, "engine.run_once was never called"
+        passed_deps = calls[0].get("spec_deps") or {}
+        assert "obsolete-feature" in passed_deps, (
+            "cached sync_state deps never reached run_once"
+        )
+        assert "src/old_feature.py" in passed_deps["obsolete-feature"]
+
+        # The spec was detected obsolete and its directory deleted.
+        assert result.converged is True
+        assert "obsolete-feature" in result.obsolete_specs
+        assert "obsolete-feature" in result.obsolete_specs_deleted
+        assert not (tmp_path / "se3" / "specs" / "obsolete-feature").exists()
 
 
 # ---------------------------------------------------------------------------
