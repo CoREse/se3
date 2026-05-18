@@ -22,6 +22,21 @@ from .spec_loader import (
     load_for_step,
     load_full,
 )
+from .event_stream import (
+    Event,
+    EventType,
+    EventEmitter,
+    new_event,
+)
+from .sink import (
+    Sink,
+    CliSink,
+    JsonSink,
+)
+
+# ``EventStream`` is the public name for the in-memory pub/sub emitter that
+# ``se3 run`` drives; ``EventEmitter`` is its implementation class.
+EventStream = EventEmitter
 
 __all__ = [
     "Step",
@@ -49,4 +64,12 @@ __all__ = [
     "LoadResult",
     "load_for_step",
     "load_full",
+    "Event",
+    "EventType",
+    "EventEmitter",
+    "EventStream",
+    "new_event",
+    "Sink",
+    "CliSink",
+    "JsonSink",
 ]
