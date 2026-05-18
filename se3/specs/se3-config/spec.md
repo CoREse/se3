@@ -1568,3 +1568,43 @@ file access. Recommended alternatives:
   Claude CLI subprocess is spawned
 - **AND** the error message lists the allowed values
   (`user`, `project`, `local`)
+
+### Requirement: Daemon and Server Configuration
+
+The SE3 daemon (`se3 daemon`) and the central server (`se3-server`) each
+expose a small set of runtime configuration parameters. Unlike the
+`se3.yaml`-driven options above, these parameters are currently sourced
+from CLI flags and built-in dataclass / argparse defaults rather than
+from `se3.yaml`; they are documented here so the configuration surface
+of the daemon/server feature has a single registered home.
+
+**Daemon parameters** (`DaemonConfig` in `src/se3/daemon/daemon.py`):
+
+- `daemon.poll_interval` — Seconds between the daemon aggregator polls
+  of `se3/state`, `se3/logs`, `se3/calls`, and `se3/issues`
+  (default: `2.0`).
+- `daemon.server_url` — The central-server URL the daemon dials out to.
+  Supplied via `se3 daemon start --server-url <url>`; when unset
+  (default: `null`/`None`) the daemon runs purely locally and does not
+  open an outbound connection.
+
+**Server parameters** (`se3-server` entry point in
+`src/se3/server/app.py`):
+
+- `server.host` — Bind host for the central server
+  (default: `127.0.0.1`). Supplied via `se3-server --host <host>`.
+- `server.port` — Bind port for the central server
+  (default: `8080`). Supplied via `se3-server --port <port>`.
+
+#### Scenario: Daemon runs locally without a server URL
+- **WHEN** the daemon is started without `--server-url`
+- **THEN** `daemon.server_url` is `null` and the daemon does not open an
+  outbound connection to a central server
+- **AND** the daemon still supervises and aggregates local flows,
+  polling at the `daemon.poll_interval` cadence
+
+#### Scenario: Server binds to configured host and port
+- **WHEN** `se3-server` is started without `--host` / `--port`
+- **THEN** the server binds to `server.host` `127.0.0.1` and
+  `server.port` `8080`
+- **AND** supplying `--host` / `--port` overrides those defaults

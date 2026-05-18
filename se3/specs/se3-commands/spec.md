@@ -46,6 +46,7 @@ se3 run "Implement feature X" -c feature-x
 | `--type, -t` | `feature` | Task type (see Task Types table). |
 | `--flow-id` | none | Resume a specific flow by its ID, independent of the generic `--resume` interactive selector. When supplied, the command loads the named flow and resumes it directly without prompting; when both `--flow-id` and `--resume` are given, `--flow-id` takes precedence and the interactive selector is skipped. When `--flow-id` is supplied alone (without `--resume`) the behavior is identical to `--resume --flow-id <id>` — resume of the named flow is implied. |
 | `--change, -c` | none | Optional human-readable change name attached to the new flow. The change name is recorded on the flow record (`change_name`) at creation time and displayed in the "New Flow" startup panel as `Change: <name>` when set. The option applies to standard `se3 run "<task>"` invocations as well as to `se3 run --from-issue`; it does NOT apply to `--resume` (resuming a flow does not relabel it) and does NOT alter task-type selection. When omitted, no change label is attached to the flow. |
+| `--output-format` | `cli` | Outermost event-stream sink selection. `cli` (default) hangs the existing Rich rendering sink and produces output byte-for-byte identical to current `se3 run`. `json` hangs the structured NDJSON sink — the form a daemon uses when it spawns a flow. `se3 run` itself does not branch on the caller; only the tail sink differs. An unrecognized value is rejected with a clear error and a non-zero exit. (See the *Event Stream and Sink Interface* requirement in the `flow-engine` spec.) |
 
 **Option aliases:** The long-form options on `se3 run` accept short aliases for ergonomic use:
 | Long form | Short alias |
@@ -1444,6 +1445,48 @@ The system SHALL provide the following CLI options for loop mode:
 | `--no-worktree` | Disable branch isolation in loop mode |
 | `--merge BRANCH` | Merge an existing loop branch (shows diff summary, prompts confirmation) |
 | `--list-loops` | List existing unmerged loop branches with commit counts |
+
+### Requirement: `se3 daemon` Command
+
+The system SHALL provide `se3 daemon` as a subcommand group that manages the resident control-plane daemon. The daemon supervises this machine's `se3 run` flows, can spawn new flows on behalf of a remote caller, aggregates state under `se3/state|logs|calls|issues`, and maintains an outbound connection to a central server. `se3 daemon` is registered into the existing typer app (`se3.cli:app`) as a sub-typer; it is NOT a separate binary. All imports of the `se3.daemon` package are deferred into the command bodies so the core CLI startup is unaffected.
+
+**Interface:**
+```bash
+se3 daemon start                          # Start the daemon (detached background process)
+se3 daemon start --foreground             # Run the daemon in the current terminal
+se3 daemon start --server-url ws://host   # Start with a central-server URL to dial out to
+se3 daemon stop                           # Stop the running daemon
+se3 daemon status                         # Show daemon running state and tracked flows
+se3 daemon status --json                  # Emit status as JSON
+```
+
+**Subcommands:**
+
+| Subcommand | Options | Behavior |
+|------------|---------|----------|
+| `start` | `--server-url`, `--foreground` | Starts the daemon. By default it is launched as a detached background process; `--foreground` runs it in the current terminal. `--server-url` records the central-server URL the daemon dials out to. When a daemon is already running, the command reports it and exits non-zero. |
+| `stop` | — | Stops the running daemon. Reports `not running` when none is up (exit 0), and reports a stop timeout with a non-zero exit when the process does not exit within the grace period. |
+| `status` | `--json, -j` | Reports whether the daemon is running, its pid, machine id, configured server URL, and the list of tracked flows. `--json` emits the status as JSON instead of the rendered panel. |
+
+#### Scenario: Start the daemon
+- **WHEN** the user runs `se3 daemon start`
+- **THEN** the daemon is launched as a detached background process
+- **AND** the command reports the daemon status and pid
+
+#### Scenario: Start refuses when already running
+- **GIVEN** a daemon is already running
+- **WHEN** the user runs `se3 daemon start`
+- **THEN** the command reports that the daemon is already running and exits with a non-zero code
+
+#### Scenario: Stop the daemon
+- **WHEN** the user runs `se3 daemon stop` with a running daemon
+- **THEN** the daemon process is stopped and the command reports the stopped pid
+- **AND** when no daemon is running, the command reports `not running` and exits 0
+
+#### Scenario: Status reports tracked flows
+- **WHEN** the user runs `se3 daemon status`
+- **THEN** the command reports whether the daemon is running, its pid, machine id, server URL, and tracked flows
+- **AND** `se3 daemon status --json` emits the same information as JSON
 
 ## Error Codes
 

@@ -49,6 +49,8 @@
   - `utils.py` — 共享工具函数（如 `discover_specs`、specs 目录解析等，支持 `se3/specs/` 优先、`specs/` 回退、`openspec/specs/` 遗留路径）
   - `core/` — 核心工具子包
     - `utils.py` — 跨框架共享的核心工具函数（如 `truncate_preview` 等格式化辅助函数）
+  - `daemon/` — 常驻控制面 daemon 包（`se3 daemon` 子命令的实现），与核心同包同 wheel、版本同步演进；负责发现/监管本机 `se3 run` 流程、代为 spawn 新流程、聚合 `se3/state|logs|calls|issues` 状态，并维持一条到中心服务器的出站连接（具体子模块见 "Daemon Modules" Requirement）
+  - `server/` — 中心服务器后端 + 自带网页前端包；不是核心 `se3` 的子命令，通过独立 console_scripts 入口 `se3-server` 启动；web 重依赖（FastAPI/uvicorn/websockets）经 `pyproject.toml` optional-dependencies（`se3[server]`）隔离，未安装时核心 CLI 不受影响（具体子模块见 "Server Modules" Requirement）
 - `se3/` — SE3 运行时目录（gitignored，除 specs/）
   - `specs/` — 项目规范（已提交到 git）
   - `state/` — 流程引擎状态（gitignored），存放多种运行时持久化产物：
@@ -102,6 +104,7 @@
 - `merge_respond.py` — `se3 merge-respond <call-file-path>`，处理 merge 流程中通过 MCP call 队列写出的人工/外部响应文件
 - `salvage_cmd.py` — `se3 salvage`，从异常终止的会话中尽力抢救工作；容错地读取 session state、评估 git diff、提交既有改动、为未完成工作创建 issue 并归档会话，每步独立容错
 - `cli.py::guardrails_cmd` — `se3 guardrails`，对 `se3/specs/` 下的 spec 文件执行 SE3 Spec Guardrails 检查（spec-format v1 契约、结构性约束等），用于在 commit / sync / CI 等阶段拦截不合规的 spec 改动；该命令直接在 `src/se3/cli.py` 中通过 `@app.command(name="guardrails")` 注册，没有独立的 `commands/guardrails_cmd.py` 模块文件
+- `cli.py::daemon_app` — `se3 daemon`，常驻控制面 daemon 的管理子命令组（`start` / `stop` / `status`），通过 `add_typer` 注册到 `cli.py` 的 sub-typer。`start` 默认以 detached 后台进程启动 daemon（`--foreground` 不脱离终端，`--server-url` 指定中心服务器地址）；`stop` 停止运行中的 daemon；`status` 报告 daemon 运行状态与已跟踪流程（`--json` 输出 JSON）。该命令组直接在 `src/se3/cli.py` 中定义，daemon 实现位于 `src/se3/daemon/` 包；对 `daemon` 包的 import 一律延迟到命令体内，使核心 CLI 启动不受影响
 - `merge/` — merge 相关支撑模块子包，供 `merge_cmd.py` 与 `engine/merge/` 使用：
   - `failure_reason.py` — `FailureReason` IntEnum，替代旧 orchestrator 中散落的 ~60 个 failure_reason 字符串字面量，便于 downstream 类型化分派
   - `result_model.py` — merge orchestrator 的类型化结果模型，按 per-branch 结果（success / failure / skipped）拆分，区分 `newly_merged` / `already_merged_branches` / `with_warnings`
@@ -151,6 +154,9 @@
   - `tool_formatters.py` — 基于 `TOOL_FORMATTERS` 字典注册表的 per-tool 的 `tool_use` / `tool_result` 预览格式化器，被 `llm_caller.py`（流式输出）与 `chat_history.py`（历史回看）共用；未知工具回退到通用 formatter
   - `step_renderers.py` — Step 输出渲染注册表，提供单一入口 `render_step_output`，按 step 类型分派渲染器，未注册类型使用默认通用渲染器
   - `logging_config.py` — 结构化（JSON 格式）日志配置，提供 step 跟踪、时延与 LLM 指标
+- **事件流与可插拔 sink**
+  - `event_stream.py` — `se3 run` 的统一结构化事件流：定义 `EventType` 枚举（`flow_started` / `step_started` / `step_output` / `step_completed` / `step_failed` / `flow_paused` / `flow_completed` / `flow_failed` / `interjection_needed` / `call_needed`）、`Event` dataclass、`new_event` 工厂函数与进程内 pub/sub 发射器 `EventEmitter`（`subscribe` / `unsubscribe` / `emit` / `scope`）。`se3 run` 内部只发射这一条流，不感知调用方
+  - `sink.py` — 事件流末端的可插拔 sink：`Sink` ABC（`consume(event)`）及两个具体实现——`CliSink`（委托现有 `step_renderers.py` 渲染，保持 CLI 输出逐字节兼容）与 `JsonSink`（将事件序列化为 NDJSON，供 daemon 模式消费）。「CLI 还是 daemon」退化为最外层 `--output-format` 开关下的一次 sink 选择
 - **子包**
   - `formatters/` — 输出 formatter 子包；当前包含 `task_formatter.py` 等具体 formatter 实现，由 `output_formatter.py` 注册
   - `utils/` — 引擎内通用工具子包；当前包含 `json_parser.py` 等共享解析辅助
@@ -249,4 +255,30 @@
   - `pyyaml>=6.0` — YAML 配置解析（`se3.yaml`、`se3.local.yaml` 等）
   - `rich>=13.0.0` — 终端富文本渲染（日志、表格、状态显示等）
   - `prompt-toolkit>=3.0.0` — 交互式命令行输入支持（用于交互式 prompt、人工调用队列等需要终端输入的场景）
+  - `psutil>=5.9.0` — 跨平台进程探测（`claude_runner.py` 的 hang 检测、`daemon/supervisor.py` 的本机 `se3 run` 进程发现），是核心运行时依赖
+- 中心服务器的 web 重依赖经 `pyproject.toml` 的 `[project.optional-dependencies]` 隔离，仅在安装 `se3[server]` extra 时引入，不污染核心 CLI 安装：
+  - `fastapi` — 中心服务器后端的 web 框架
+  - `uvicorn` — ASGI 服务器，由 `se3-server` 入口启动
+  - `websockets` — daemon↔服务器与前端的 WebSocket 协议支持
+- 仅安装 `se3`（不含 `[server]`）时核心 `se3` 命令族不得因 server 代码而出现 import 错误；对 `se3.server` 包及其重依赖的引用必须延迟到 `se3-server` 入口实际运行时
 - 新增运行时依赖时必须同步更新 `pyproject.toml`，且在该 spec 中登记，便于子进程 / 子智能体了解可用库
+
+### Requirement: Daemon Modules
+
+`src/se3/daemon/` 是常驻控制面 daemon 的实现包，由 `se3 daemon` 子命令（在 `cli.py` 中注册）驱动。daemon 比 `se3 run` 活得久，是 CLI 退出后唯一能持续聚合状态、对外提供稳定端点的部件。新增 daemon 子模块必须在此 spec 中登记，避免 LLM 子进程在缺少 CLAUDE.md 时无法发现模块边界。
+
+- `daemon.py` — daemon 进程入口与生命周期：`DaemonConfig`（配置 dataclass）、`Daemon`（asyncio 事件循环）、`start_daemon` / `stop_daemon` / `daemon_status` 函数，以及 pidfile / 状态文件管理；`DaemonAlreadyRunning` 异常
+- `supervisor.py` — `DaemonSupervisor`，发现并监管本机的 `se3 run` 进程（通过 `psutil` 扫描与 `engine.json` 读取），追踪进程生命周期与清理
+- `spawner.py` — `DaemonSpawner`，以 `subprocess` 代为 spawn 新的 `se3 run --output-format json` 子进程（支持从远端发布新任务），管理其参数与环境；`SpawnedProcess` 记录
+- `aggregator.py` — `DaemonAggregator`，轮询 `se3/state/`、`se3/logs/`、`se3/calls/`、`se3/issues/` 并聚合为统一状态快照（`MachineStatus`）
+- `client.py` — `DaemonClient`，维持一条到中心服务器的出站 WebSocket 连接（daemon 主动拨入，对 NAT 友好），上报聚合状态、接收下发指令并路由到 supervisor / spawner；断线后按指数退避重连
+- `protocol.py` — daemon↔服务器 WebSocket 协议的单一来源：`PROTOCOL_VERSION`、消息类型常量（`MSG_HELLO` / `MSG_WELCOME` / `MSG_STATUS_UPDATE` / `MSG_SPAWN_FLOW` / `MSG_RESPOND_CALL` / `MSG_CALL_NOTIFICATION` / `MSG_PING` / `MSG_PONG`）与 `make_*` 消息构造器；同时被 daemon 与 `se3.server` 包 import，确保协议 schema 不漂移
+
+### Requirement: Server Modules
+
+`src/se3/server/` 是中心服务器后端 + 自带网页前端的独立包，经 `pyproject.toml` 的 optional-dependencies（`se3[server]`）隔离 web 重依赖，通过独立 console_scripts 入口 `se3-server` 启动——不做成核心 `se3` 的子命令。新增 server 子模块必须在此 spec 中登记。
+
+- `app.py` — FastAPI 应用入口：`create_app` 装配路由，`run` / `main` 通过 `uvicorn` 启动并解析 `--host` / `--port`；提供 REST API（机器 / 流程查询、远程发布新任务）并将 `static/` 挂载到 `/`
+- `ws.py` — WebSocket 端点：管理 daemon 连接池（连接 / 断开 / 心跳）与前端 `UiHub` 广播通道，路由协议消息（daemon→server 状态上报、server→daemon 指令下发）
+- `state.py` — `ServerState`，内存中的多机 / 多 flow 聚合状态存储（本次交付不含数据库持久化）
+- `static/` — 纯静态网页前端（`index.html` / `style.css` / `app.js`），无构建步骤；通过 `/ws/ui` WebSocket 接收实时状态，提供查看进度、远程发布任务与响应 interjection/call 的界面

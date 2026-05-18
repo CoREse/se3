@@ -2825,6 +2825,51 @@ The `Transition` dataclass (`se3/engine/models.py`) SHALL describe a single step
 - **THEN** `condition` defaults to `None` and `description` defaults to `""`
 - **AND** no exception is raised for the missing optional keys
 
+### Requirement: Event Stream and Sink Interface
+
+`se3 run` SHALL emit a single unified structured event stream internally and SHALL NOT branch its behavior on the caller. Rendering degrades to a pluggable *sink* at the tail of that stream; "CLI vs daemon" degrades to one sink selection at the outermost layer.
+
+**Event stream (`se3/engine/event_stream.py`):**
+
+- `EventType` — a `str`-valued enum covering the flow lifecycle: `FLOW_STARTED`, `STEP_STARTED`, `STEP_OUTPUT`, `STEP_COMPLETED`, `STEP_FAILED`, `FLOW_PAUSED`, `FLOW_COMPLETED`, `FLOW_FAILED`, `INTERJECTION_NEEDED`, `CALL_NEEDED`.
+- `Event` — a dataclass carrying `type`, `timestamp`, optional `flow_id` / `step_id` / `step_type`, and a `data` payload dict; it exposes `to_dict()` for serialization.
+- `new_event(event_type, *, flow_id=None, step_id=None, step_type=None, timestamp=None, **data)` — convenience factory used by `run_flow`; keyword payload arguments are collected into `data`.
+- `EventEmitter` — an in-memory pub/sub hub. `subscribe(sink)` / `unsubscribe(sink)` manage an ordered subscriber list; `emit(event)` fans the event out to every subscribed sink in subscription order. A sink that raises during `consume()` MUST NOT abort delivery to the remaining sinks — the event stream is best-effort and a rendering fault MUST NOT break the flow. `scope()` is a context manager that restores the subscriber list on exit.
+
+**Sink interface (`se3/engine/sink.py`):**
+
+- `Sink` — an ABC declaring `consume(event: Event) -> None`.
+- `CliSink` — the CLI-mode tail. It delegates step-output rendering entirely to the pre-existing `step_renderers.render_step_output(step)` and adds no rendering logic of its own, keeping CLI output byte-for-byte identical to today's `se3 run`. Flow-level lifecycle events and raw `STEP_STARTED` / `STEP_OUTPUT` events are deliberately a no-op in `CliSink` because the `se3 run` orchestrator already renders those directly; having the sink render them too would double the CLI output.
+- `JsonSink` — the daemon-mode tail. It serializes each event via `Event.to_dict()` and writes one line of JSON (NDJSON) per event, using `default=str` so non-serializable payload values degrade gracefully. It supports a compact (default) and a `pretty` mode.
+
+#### Scenario: EventEmitter fans out to all subscribed sinks
+- **WHEN** an `Event` is emitted on an `EventEmitter` with multiple subscribed sinks
+- **THEN** every subscribed sink's `consume()` is invoked, in subscription order
+- **AND** a sink that has been `unsubscribe()`d no longer receives subsequently emitted events
+
+#### Scenario: A failing sink does not abort delivery
+- **GIVEN** an `EventEmitter` with two subscribed sinks where the first raises in `consume()`
+- **WHEN** an event is emitted
+- **THEN** the exception from the first sink is swallowed
+- **AND** the second sink still receives the event
+
+#### Scenario: CliSink renders step output via the existing renderer
+- **WHEN** `CliSink` consumes a `STEP_COMPLETED` or `STEP_FAILED` event whose `data` carries a `"step"` object
+- **THEN** the event is routed to `step_renderers.render_step_output(step)` — the same entry point the current CLI uses
+- **AND** flow-level lifecycle events (`FLOW_STARTED` / `FLOW_COMPLETED` / `FLOW_PAUSED` / etc.) and raw `STEP_OUTPUT` / `STEP_STARTED` events are a no-op in `CliSink`
+
+#### Scenario: JsonSink emits one NDJSON line per event
+- **WHEN** `JsonSink` consumes an event
+- **THEN** it writes exactly one newline-terminated line of valid JSON (the `Event.to_dict()` payload) to its destination stream
+
+#### Scenario: se3 run --output-format selects the outermost sink
+- **WHEN** the user runs `se3 run "<task>"` without `--output-format` (or with `--output-format cli`)
+- **THEN** a `CliSink` is subscribed and CLI output is byte-for-byte identical to current `se3 run` behavior
+- **WHEN** the user runs `se3 run "<task>" --output-format json` (the form a daemon uses when it spawns a flow)
+- **THEN** a `JsonSink` is subscribed and the flow emits its structured NDJSON event stream
+- **AND** `se3 run` itself does not branch on the caller — only the tail sink differs
+- **AND** an unrecognized `--output-format` value is rejected with a clear error and a non-zero exit
+
 ## Architecture
 
 ### 核心组件
