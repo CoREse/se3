@@ -12,6 +12,11 @@ dependencies = [
     "pyyaml>=6.0",
     "rich>=13.0.0",
     "prompt-toolkit>=3.0.0",
+    # Subprocess resource monitoring: hang detection in the agent runner
+    # (`claude_runner.py`, Linux only) and process discovery in the daemon
+    # supervisor (`daemon/supervisor.py`). Both import it defensively, but it
+    # is a real runtime dependency of the core package and so is declared here.
+    "psutil>=5.9.0",
 ]
 
 [project.optional-dependencies]
