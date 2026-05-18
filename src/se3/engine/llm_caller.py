@@ -10,7 +10,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from ..agent_runner import AgentRunner, InfraErrorType
 from ..claude_runner import ClaudeCodeRunner, ClaudeRunner
@@ -247,7 +247,7 @@ class StreamJSONTracker:
     # Maximum number of cached tool entries before oldest are evicted
     _MAX_CACHE_SIZE = 100
 
-    def __init__(self, stream_prefix: str = ''):
+    def __init__(self, stream_prefix: str = '', project_root: Optional[Path] = None):
         self.stream_prefix = stream_prefix
         self.message_count = 0
         self.tool_calls = []
@@ -259,6 +259,8 @@ class StreamJSONTracker:
         self._tool_use_id_to_name: Dict[str, str] = {}  # Map tool_use_id -> tool_name
         self._tool_use_id_to_input: Dict[str, dict] = {}  # Cache Edit/Write inputs for diff
         self._tool_use_id_to_old_content: Dict[str, Optional[str]] = {}  # Cache Write target file content
+        self._touched_files: Set[str] = set()
+        self._project_root = project_root
 
     def _handle_tool_result(self, tool_use_id: str, content: Any, is_error: bool) -> None:
         """Handle a single tool_result event.
@@ -348,6 +350,15 @@ class StreamJSONTracker:
                                         self._tool_use_id_to_input.pop(oldest, None)
                                         self._tool_use_id_to_old_content.pop(oldest, None)
                                         self._tool_use_id_to_name.pop(oldest, None)
+                            # Record touched file paths for dependency tracking
+                            if name == 'Read':
+                                fp = tool_input.get('file_path', '')
+                                if fp:
+                                    self._record_touched_path(fp)
+                            elif name in ('Grep', 'Glob'):
+                                fp = tool_input.get('path', '')
+                                if fp:
+                                    self._record_touched_path(fp)
                             # Format and print tool_use preview
                             preview = format_tool_use_preview(name, tool_input)
                             # Only add leading newline if previous output didn't end with one
@@ -383,6 +394,21 @@ class StreamJSONTracker:
         except json.JSONDecodeError:
             # Not valid JSON, might be a partial line
             pass
+
+    def _record_touched_path(self, path: str) -> None:
+        """Record a file path touched by a tool, normalized to project-relative."""
+        p = Path(path)
+        if self._project_root and p.is_absolute():
+            try:
+                p = p.relative_to(self._project_root)
+            except ValueError:
+                return
+        self._touched_files.add(str(p))
+
+    @property
+    def touched_files(self) -> Set[str]:
+        """Return the set of project-relative file paths touched by tool calls."""
+        return set(self._touched_files)
 
     def print_summary(self) -> None:
         """Print final summary of the stream."""
@@ -439,6 +465,11 @@ class LLMCaller:
         # Available after call() returns, for callers that need the full
         # LLM output text (not just the parsed JSON).
         self.last_raw_result: Optional[str] = None
+
+        # Last set of project-relative file paths touched by Read/Grep/Glob
+        # tool calls during the most recent call(). Used by SyncAnalyzer to
+        # build per-spec dependency sets.
+        self._last_touched_files: Set[str] = set()
 
         # Agent management
         # Resolution order when ``agents`` is not explicitly provided:
@@ -497,6 +528,12 @@ class LLMCaller:
         if cache_key not in self._runner_cache:
             self._runner_cache[cache_key] = self._create_runner(agent)
         return self._runner_cache[cache_key]
+
+    @property
+    def last_touched_files(self) -> Set[str]:
+        """Return the set of project-relative file paths touched by the most
+        recent ``call()`` invocation's Read/Grep/Glob tool calls."""
+        return set(self._last_touched_files)
 
     def _rotate_agent(self) -> bool:
         """Rotate to the next agent in the list.
@@ -933,6 +970,9 @@ class LLMCaller:
         """
         original_prompt = prompt
 
+        # Reset touched-files tracking for this call
+        self._last_touched_files = set()
+
         env = dict(os.environ)
         env.pop("CLAUDECODE", None)
 
@@ -1014,7 +1054,10 @@ class LLMCaller:
                     )
                 else:
                     set_project_root(self.project_root)
-                    stream_tracker = StreamJSONTracker(stream_prefix=self.stream_prefix)
+                    stream_tracker = StreamJSONTracker(
+                        stream_prefix=self.stream_prefix,
+                        project_root=self.project_root,
+                    )
 
                     def on_stream_output(line: str) -> None:
                         stream_tracker.process_line(line)
@@ -1030,6 +1073,9 @@ class LLMCaller:
 
                     if result.success:
                         stream_tracker.print_summary()
+                        self._last_touched_files = stream_tracker.touched_files
+                    else:
+                        self._last_touched_files = set()
 
                 # Record the response (whether success, failure, or interrupted)
                 self._record_response(result.output or "", self.external_attempt)

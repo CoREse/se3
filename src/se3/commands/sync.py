@@ -105,7 +105,17 @@ def _render_loop_result(loop_result, show_diff: bool) -> None:
     oscillation = bool(getattr(loop_result, "oscillation_detected", False))
     paused = bool(getattr(loop_result, "paused", False))
 
-    if converged:
+    level_1_cache_hit = bool(getattr(loop_result, "level_1_cache_hit", False))
+
+    if converged and level_1_cache_hit:
+        title = "Sync — Already In Sync"
+        color = "green"
+        summary_line = (
+            "in-sync (0 LLM calls). The code fingerprint is unchanged "
+            "since the last converged sync; the global shutter skipped "
+            "every spec. Nothing to update."
+        )
+    elif converged:
         title = "Sync Converged"
         color = "green"
         summary_line = (
@@ -157,6 +167,41 @@ def _render_loop_result(loop_result, show_diff: bool) -> None:
         summary_line += (
             f"\nHigh-impact deletions processed: {high_impact_total}"
         )
+
+    # Incremental-skip telemetry (G7). The level-1 branch already states
+    # "0 LLM calls"; only report level 2/3 for the non-shutter paths.
+    if not level_1_cache_hit:
+        level_2_skipped = list(
+            getattr(loop_result, "level_2_skipped_specs", []) or []
+        )
+        if level_2_skipped:
+            summary_line += (
+                f"\nLevel-2 cache: {len(level_2_skipped)} spec(s) skipped "
+                f"for the whole run ({', '.join(level_2_skipped)})"
+            )
+        level_3_early = list(
+            getattr(loop_result, "level_3_early_exit_specs", []) or []
+        )
+        if level_3_early:
+            summary_line += (
+                f"\nLevel-3 early exit: {len(level_3_early)} spec(s) "
+                f"converged and left the round loop early "
+                f"({', '.join(level_3_early)})"
+            )
+
+    if getattr(loop_result, "obsolete_specs_deleted", None):
+        deleted_specs = list(loop_result.obsolete_specs_deleted)
+        if deleted_specs:
+            summary_line += (
+                f"\nObsolete specs deleted: {', '.join(deleted_specs)}"
+            )
+
+    if getattr(loop_result, "obsolete_specs_kept", None):
+        kept_specs = list(loop_result.obsolete_specs_kept)
+        if kept_specs:
+            summary_line += (
+                f"\nObsolete specs kept: {', '.join(kept_specs)}"
+            )
 
     if getattr(loop_result, "discovery_failed", False):
         summary_line += (
@@ -216,6 +261,8 @@ def sync_command(
     once: bool = False,
     project_root: Optional[Path] = None,
     resume: bool = False,
+    force: bool = False,
+    confirm_cleanup: bool = False,
 ) -> None:
     """Run ``SyncLoop`` and render the final report.
 
@@ -227,6 +274,7 @@ def sync_command(
         once: Informational flag for the banner; the CLI layer already
             collapses ``max_rounds`` / ``stable_rounds`` to ``1`` in this case.
         project_root: Project root directory. Auto-detected if None.
+        confirm_cleanup: When True, prompt before deleting each obsolete spec.
     """
     from ..engine import sync_checkpoint as _sync_checkpoint
     from ..engine.sync_loop import SyncLoop
@@ -255,7 +303,7 @@ def sync_command(
         f"Mode: [bold]{mode_label}[/bold]\n"
         f"Project: {project_root}\n"
         f"max_rounds={max_rounds}, stable_rounds={stable_rounds}, "
-        f"interactive={interactive}"
+        f"interactive={interactive}, confirm_cleanup={confirm_cleanup}"
     )
     if checkpoint is not None:
         console.print(
@@ -334,6 +382,8 @@ def sync_command(
         interactive=interactive,
         progress_callback=progress_callback,
         resume_from=checkpoint,
+        force=force,
+        confirm_cleanup=confirm_cleanup,
     )
 
     try:

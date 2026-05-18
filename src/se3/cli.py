@@ -462,6 +462,24 @@ def sync_cmd(
             "with --validate-only."
         ),
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help=(
+            "Ignore sync_state.json cache and force a full analysis of "
+            "all specs from scratch. After convergence, the cache is "
+            "rewritten with fresh results."
+        ),
+    ),
+    confirm_cleanup: bool = typer.Option(
+        False,
+        "--confirm-cleanup",
+        help=(
+            "When obsolete specs are detected (code entirely removed), "
+            "prompt for confirmation before deleting each one. Without "
+            "this flag, obsolete specs are deleted automatically."
+        ),
+    ),
 ):
     """Run code → spec sync until convergence.
 
@@ -485,9 +503,10 @@ def sync_cmd(
         raise typer.Exit(1)
 
     if validate_only:
-        if once or interactive or show_diff:
+        if once or interactive or show_diff or force or confirm_cleanup:
             render_text(
-                "--validate-only ignores --once / --interactive / --show-diff.",
+                "--validate-only ignores --once / --interactive / "
+                "--show-diff / --force / --confirm-cleanup.",
                 title="SE3 Sync",
             )
         from .commands.sync import validate_only_command
@@ -523,6 +542,8 @@ def sync_cmd(
         show_diff=show_diff,
         once=once,
         resume=resume,
+        force=force,
+        confirm_cleanup=confirm_cleanup,
     )
 
 
