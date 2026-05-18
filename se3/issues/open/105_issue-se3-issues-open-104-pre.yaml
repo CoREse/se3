@@ -1,0 +1,25 @@
+id: '105'
+title: Issue se3/issues/open/104_pre-existing-test-failures-2.yaml tracks two failing
+  spec_format tests (test_base_spec_requirement_count, test_flow_engine_spec_requirement_count).
+  This fix iteration updated those test assertions (16→18 base, 40→41 flow-engine)
+  to match the spec changes, so the referenced tests now pass. The auto-discovered
+  issue file is now stale and could be closed.
+description: 'Issue se3/issues/open/104_pre-existing-test-failures-2.yaml tracks two
+  failing spec_format tests (test_base_spec_requirement_count, test_flow_engine_spec_requirement_count).
+  This fix iteration updated those test assertions (16→18 base, 40→41 flow-engine)
+  to match the spec changes, so the referenced tests now pass. The auto-discovered
+  issue file is now stale and could be closed.
+
+
+  Suggestion: Optionally run `se3 issue` to close issue 104, since the tests it references
+  are now passing. Not blocking — this is tracked separately.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-18T18:25:26.720141'
+updated_at: '2026-05-18T18:25:26.720141'

@@ -181,6 +181,37 @@ class TestSpawner:
         assert rc is not None
         assert not spawned.is_running
 
+    def test_spawn_high_volume_output_does_not_deadlock(self, tmp_path, monkeypatch):
+        """A child emitting far more than the OS pipe buffer must still finish.
+
+        Regression test: with stdout/stderr piped and undrained, a child that
+        writes >64 KB blocks on write() and deadlocks. Redirecting to log files
+        lets it always run to completion.
+        """
+        script = tmp_path / "noisy_se3.py"
+        # Emit ~512 KB on stdout and ~512 KB on stderr — well past the pipe buffer.
+        script.write_text(
+            "import sys\n"
+            "for i in range(4000):\n"
+            "    sys.stdout.write('x' * 128 + '\\n')\n"
+            "    sys.stderr.write('e' * 128 + '\\n')\n"
+            "sys.stdout.flush()\n"
+            "sys.stderr.flush()\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            spawner_mod, "_resolve_se3_command", lambda: [sys.executable, str(script)]
+        )
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn("noisy task", project_root=str(tmp_path))
+        # Without continuous draining this wait() would hang forever.
+        rc = spawner.wait(spawned.pid, timeout=15)
+        assert rc == 0
+        assert spawned.stdout_log is not None and spawned.stdout_log.exists()
+        assert spawned.stderr_log is not None and spawned.stderr_log.exists()
+        assert spawned.stdout_log.stat().st_size > 64 * 1024
+        spawner.reap()
+
     def test_orphans_and_reap(self, fake_se3, tmp_path):
         spawner = DaemonSpawner()
         spawned = spawner.spawn("task", project_root=str(tmp_path))

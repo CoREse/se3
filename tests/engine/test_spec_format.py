@@ -467,7 +467,7 @@ class TestRealSpecFiles:
     def test_base_spec_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "base" / "spec.md").read_text()
         parsed = parse_spec(text)
-        assert len(parsed.requirements) == 16
+        assert len(parsed.requirements) == 18
         names = [r.name for r in parsed.requirements]
         assert "Project Identity" in names
         assert "Directory Structure" in names
@@ -478,7 +478,7 @@ class TestRealSpecFiles:
     def test_flow_engine_spec_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "flow-engine" / "spec.md").read_text()
         parsed = parse_spec(text)
-        assert len(parsed.requirements) == 40
+        assert len(parsed.requirements) == 41
 
     def test_spec_guardrails_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "spec-guardrails" / "spec.md").read_text()

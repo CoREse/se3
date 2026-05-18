@@ -6,8 +6,13 @@ never an in-process caller: this keeps ``se3 run`` independently testable and
 ensures a daemon crash does not take a running flow down with it.
 
 The spawner deliberately passes ``--output-format json`` so the child emits the
-unified structured event stream as NDJSON on stdout — :meth:`iter_events` then
-yields those events back as parsed dicts.
+unified structured event stream as NDJSON on stdout. Because a real flow emits
+far more output than the OS pipe buffer can hold (~64 KB), the child's stdout
+and stderr are redirected to per-flow log files under
+``<project_root>/se3/logs/daemon/`` rather than to ``subprocess.PIPE``. This
+guarantees the child can always write without blocking — even when nothing
+actively consumes its output — so a spawned flow never deadlocks. :meth:`iter_events`
+tails the stdout log file and yields the NDJSON events back as parsed dicts.
 """
 
 from __future__ import annotations
@@ -39,6 +44,10 @@ class SpawnedProcess:
         task_description: The task passed to ``se3 run``.
         args: The full argv used to launch the child.
         started_at: Unix epoch seconds at spawn time.
+        stdout_log: File the child's stdout (NDJSON event stream) is written
+            to, or ``None`` when output was redirected to ``/dev/null``.
+        stderr_log: File the child's stderr is written to, or ``None`` when
+            output was redirected to ``/dev/null``.
     """
 
     process: subprocess.Popen
@@ -46,6 +55,8 @@ class SpawnedProcess:
     task_description: str
     args: List[str] = field(default_factory=list)
     started_at: float = field(default_factory=time.time)
+    stdout_log: Optional[Path] = None
+    stderr_log: Optional[Path] = None
 
     @property
     def pid(self) -> int:
@@ -71,6 +82,8 @@ class SpawnedProcess:
             "returncode": self.returncode,
             "is_running": self.is_running,
             "started_at": self.started_at,
+            "stdout_log": str(self.stdout_log) if self.stdout_log else None,
+            "stderr_log": str(self.stderr_log) if self.stderr_log else None,
         }
 
 
@@ -110,6 +123,7 @@ class DaemonSpawner:
         self._on_spawn = on_spawn
         self._on_exit = on_exit
         self._processes: Dict[int, SpawnedProcess] = {}
+        self._spawn_counter = 0
 
     # -- spawning ----------------------------------------------------------
 
@@ -127,6 +141,12 @@ class DaemonSpawner:
         The child runs ``se3 run <task> --type <task_type> --output-format json``
         with the daemon's environment inherited (so the Python path stays
         correct) and ``cwd`` set to *project_root*.
+
+        The child's stdout and stderr are redirected to per-flow log files (not
+        to OS pipes) so the child can always write without blocking, even when
+        no caller is draining its output. This is essential because a real flow
+        emits far more than the ~64 KB OS pipe buffer would hold; piping
+        without a reader would deadlock the child.
         """
         cwd = str(Path(project_root).resolve()) if project_root else os.getcwd()
         args = _resolve_se3_command() + [
@@ -144,21 +164,37 @@ class DaemonSpawner:
         if env:
             child_env.update(env)
 
-        logger.info("Spawning se3 run flow in %s", cwd)
-        process = subprocess.Popen(
-            args,
-            cwd=cwd,
-            env=child_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+        self._spawn_counter += 1
+        stdout_path, stderr_path = self._allocate_log_paths(cwd)
+        stdout_target, stderr_target, open_handles = self._open_log_targets(
+            stdout_path, stderr_path
         )
+
+        logger.info("Spawning se3 run flow in %s", cwd)
+        try:
+            process = subprocess.Popen(
+                args,
+                cwd=cwd,
+                env=child_env,
+                stdout=stdout_target,
+                stderr=stderr_target,
+                stdin=subprocess.DEVNULL,
+            )
+        finally:
+            # The child has dup'd its own descriptors; the daemon must not keep
+            # the parent-side handles open or it leaks fds over its lifetime.
+            for handle in open_handles:
+                try:
+                    handle.close()
+                except OSError:  # pragma: no cover - defensive
+                    pass
         spawned = SpawnedProcess(
             process=process,
             project_root=cwd,
             task_description=task_description,
             args=args,
+            stdout_log=stdout_path,
+            stderr_log=stderr_path,
         )
         self._processes[spawned.pid] = spawned
 
@@ -180,6 +216,52 @@ class DaemonSpawner:
                 logger.exception("on_spawn callback failed")
 
         return spawned
+
+    def _allocate_log_paths(
+        self, cwd: str
+    ) -> tuple[Optional[Path], Optional[Path]]:
+        """Return (stdout_log, stderr_log) paths for a new flow, or (None, None).
+
+        Logs live under ``<project_root>/se3/logs/daemon/``. When that
+        directory cannot be created, returns ``(None, None)`` so the caller
+        falls back to ``/dev/null``.
+        """
+        log_dir = Path(cwd) / "se3" / "logs" / "daemon"
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+        except OSError:  # pragma: no cover - defensive
+            logger.warning("Could not create daemon log dir %s", log_dir)
+            return None, None
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        base = f"flow_{stamp}_{self._spawn_counter}"
+        return log_dir / f"{base}.ndjson", log_dir / f"{base}.stderr.log"
+
+    @staticmethod
+    def _open_log_targets(
+        stdout_path: Optional[Path], stderr_path: Optional[Path]
+    ) -> tuple[object, object, List[object]]:
+        """Open the log files for redirection.
+
+        Returns ``(stdout_target, stderr_target, open_handles)`` where the
+        targets are passed to :class:`subprocess.Popen` and ``open_handles`` is
+        the list of file objects the caller must close once the child holds its
+        own descriptors. Falls back to ``subprocess.DEVNULL`` when a path is
+        ``None`` or cannot be opened.
+        """
+        handles: List[object] = []
+
+        def _open(path: Optional[Path]) -> object:
+            if path is None:
+                return subprocess.DEVNULL
+            try:
+                handle = open(path, "wb")  # noqa: SIM115 - closed by caller
+            except OSError:  # pragma: no cover - defensive
+                logger.warning("Could not open daemon log file %s", path)
+                return subprocess.DEVNULL
+            handles.append(handle)
+            return handle
+
+        return _open(stdout_path), _open(stderr_path), handles
 
     # -- introspection -----------------------------------------------------
 
@@ -211,24 +293,45 @@ class DaemonSpawner:
         return spawned.process.wait(timeout=timeout)
 
     def iter_events(self, pid: int) -> Iterator[Dict[str, object]]:
-        """Yield parsed NDJSON event dicts from a spawned child's stdout.
+        """Yield parsed NDJSON event dicts by tailing a spawned child's stdout log.
 
-        Each non-blank stdout line of the ``--output-format json`` child is a
-        single JSON object; malformed lines are skipped. Iteration ends when
-        the child closes stdout.
+        Each non-blank line of the ``--output-format json`` child's stdout log
+        is a single JSON object; malformed lines are skipped. The tail keeps
+        polling for new lines while the child runs and ends once the child has
+        exited and the log has been fully drained.
         """
         spawned = self._processes.get(pid)
-        if spawned is None or spawned.process.stdout is None:
+        if spawned is None or spawned.stdout_log is None:
             return
-        for line in spawned.process.stdout:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                yield json.loads(line)
-            except ValueError:
-                logger.debug("Skipping non-JSON child stdout line")
-                continue
+        try:
+            handle = open(spawned.stdout_log, "r", encoding="utf-8")
+        except OSError:
+            return
+        try:
+            while True:
+                line = handle.readline()
+                if line == "":
+                    # EOF: only stop once the child has exited (so no further
+                    # writes are possible); otherwise wait for more output.
+                    if spawned.process.poll() is not None:
+                        # One final read to catch lines flushed between the
+                        # poll and this read.
+                        line = handle.readline()
+                        if line == "":
+                            break
+                    else:
+                        time.sleep(0.05)
+                        continue
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except ValueError:
+                    logger.debug("Skipping non-JSON child stdout line")
+                    continue
+        finally:
+            handle.close()
 
     # -- termination -------------------------------------------------------
 

@@ -1,0 +1,31 @@
+id: '104'
+title: Pre-existing test failures (2 tests)
+description: '**2 pre-existing test failure(s)** detected during flow execution.
+
+  These failures were NOT introduced by the current change.
+
+
+  **Failing tests:**
+
+  - `tests/engine/test_spec_format.py::TestRealSpecFiles::test_base_spec_requirement_count`:
+  test failed (details in pytest output)
+
+  - `tests/engine/test_spec_format.py::TestRealSpecFiles::test_flow_engine_spec_requirement_count`:
+  test failed (details in pytest output)
+
+
+  **Task:** 好了，终于到了这一步了，要开始做我一直想做的一个功能：终端控制。现在的se3只能在cli运行，这对于这个vibe coding显然不是最优的：我需要随时随地，都能查看我手下的AI做到哪步了，以及发布新的任务（远程监工）。那么就有以下几个路径：1.
+  在这台运行se3的机器上弄一个web服务，我登陆web网页端来查看和发布任务。2. 在一个服务器上跑服务，每个se3都可以接入这个服务器，我连接服务器来查看和发布任务。这第二点又分为两个套路：a.传统的web服务和api，b.
+  小龙虾之类的，然后通过飞书之类的方法通讯。你来严谨全面仔细地分析下什么是最优的方案。
+
+
+  These tests should be investigated and fixed to prevent the broken-window effect.'
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:test-pre-existing
+created_at: '2026-05-18T18:11:36.723434'
+updated_at: '2026-05-18T18:11:36.723434'
