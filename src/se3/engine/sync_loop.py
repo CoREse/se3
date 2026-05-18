@@ -192,6 +192,13 @@ class SyncLoop:
         stable_count = 0
         self._consecutive_infra_failures = 0
 
+        # Discovery convergence tracking (per-sync-call state).
+        # Discovery runs every round until *stable_rounds* consecutive
+        # rounds produce 0 new subsystems; after that it is skipped for
+        # the rest of this sync invocation.
+        discovery_converged = False
+        discovery_stable_count = 0
+
         start_round = 1
         skip_specs: set[str] = set()
         if self.resume_from is not None:
@@ -224,16 +231,37 @@ class SyncLoop:
 
                 project_context = self._build_context(collector)
 
+                # Discovery: run every round until converged (or never on resume).
+                if self.resume_from is not None:
+                    do_discovery = False
+                else:
+                    do_discovery = not discovery_converged
+
                 round_result = engine.run_once(
                     round_index=round_index,
                     flow_ctx=flow_ctx,
                     llm_caller=llm_caller,
                     project_context=project_context,
                     specs=None,  # let SyncEngine reload each round
-                    do_discovery=(round_index == 1 and self.resume_from is None),
+                    do_discovery=do_discovery,
                     progress_callback=self._wrap_progress(round_index),
                     skip_specs=skip_specs if skip_specs else None,
                 )
+
+                # Track discovery convergence: count consecutive rounds
+                # that produced 0 new subsystems.
+                if do_discovery:
+                    if round_result.new_subsystems_count == 0:
+                        discovery_stable_count += 1
+                        if discovery_stable_count >= self.stable_rounds:
+                            discovery_converged = True
+                            logger.info(
+                                "Discovery converged after %d consecutive "
+                                "rounds with 0 new subsystems.",
+                                discovery_stable_count,
+                            )
+                    else:
+                        discovery_stable_count = 0
 
                 loop_result.rounds.append(round_result)
                 loop_result.total_specs_updated += round_result.specs_updated
@@ -352,6 +380,10 @@ class SyncLoop:
                 ),
             )
             raise
+
+        # Persist discovery convergence status on the instance so callers
+        # (and future sync_state writing) can inspect it.
+        self.discovery_converged = discovery_converged
 
         if normal_exit:
             # Any clean exit path (converged, oscillation, max-rounds) clears

@@ -170,6 +170,7 @@ class RoundResult:
     #              "description": str, "requirement_names": list[str]}
     high_impact_deletions: List[Dict[str, Any]] = field(default_factory=list)
     discovery_failed: bool = False
+    new_subsystems_count: int = 0
 
     @property
     def is_stable(self) -> bool:
@@ -213,6 +214,7 @@ class RoundResult:
             "duration_seconds": self.duration_seconds,
             "high_impact_deletions": list(self.high_impact_deletions),
             "discovery_failed": self.discovery_failed,
+            "new_subsystems_count": self.new_subsystems_count,
         }
 
 
@@ -663,6 +665,7 @@ class SyncEngine:
             llm_caller.step_type = "sync_scan"
             discovery = SpecDiscovery(self.project_root, llm_caller)
             discovered = discovery.discover_missing_specs(specs)
+            result.new_subsystems_count = len(discovered)
 
             for subsystem in discovered:
                 spec_path = discovery.generate_spec_for_subsystem(subsystem)
