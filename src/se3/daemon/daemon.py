@@ -238,6 +238,7 @@ class Daemon:
             se3_version=_se3_version(),
             snapshot_provider=lambda: self.aggregator.get_snapshot().to_dict(),
             spawn_handler=self._handle_spawn_request,
+            respond_handler=self._handle_respond_request,
             history_provider=self.history_reader,
         )
         self._client = client
@@ -258,6 +259,67 @@ class Daemon:
             task_type=task_type or "feature",
             discover=discover,
         )
+
+    def _handle_respond_request(
+        self, call_id: str, project_root: str, response: object
+    ) -> None:
+        """Adapt a server RESPOND_CALL: write the response file, then resume.
+
+        Writing ``<call_id>.response.json`` into ``se3/calls/`` is only half the
+        job. A daemon-spawned flow (``se3 run --output-format json``) exits its
+        process when it pauses for a human call — e.g. a discovery
+        clarification — so after the response file is written nothing would
+        re-run ``se3 run``: the flow would stay PAUSED forever and a
+        web-published discovery task would never advance past its first
+        question. So once the answer is durably on disk we re-spawn the paused
+        flow with ``--resume`` to carry the conversation forward.
+        """
+        from .client import _default_respond_handler
+
+        _default_respond_handler(call_id, project_root, response)
+        self._resume_paused_flow(project_root)
+
+    def _resume_paused_flow(self, project_root: str) -> None:
+        """Re-spawn the project's flow with ``--resume`` when it is PAUSED.
+
+        Best-effort: a missing/unreadable ``engine.json``, a non-PAUSED flow,
+        or a flow that already has a live ``se3 run`` process is left alone.
+        """
+        root = Path(project_root).resolve() if project_root else Path.cwd()
+        engine_json = root / "se3" / "state" / "engine.json"
+        try:
+            data = json.loads(engine_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.debug("No readable engine.json under %s; skipping resume", root)
+            return
+        flow_id = data.get("flow_id")
+        status = str(data.get("status") or "").upper()
+        if not flow_id:
+            return
+        if status != "PAUSED":
+            # RUNNING flows have a live process; COMPLETED/FAILED must not be
+            # re-run. Only a PAUSED flow needs (and is safe for) a resume.
+            logger.debug("Flow %s is %s, not PAUSED; skipping resume", flow_id, status)
+            return
+        # Guard against a double-spawn: if a se3 run process is already alive
+        # for this project (e.g. an interactive run), resuming would race two
+        # writers on the same engine.json.
+        for record in self.supervisor.flows:
+            if record.project_root == str(root) and DaemonSupervisor.is_alive(
+                record.pid
+            ):
+                logger.info(
+                    "Flow %s already has a live process (pid=%s); skipping resume",
+                    flow_id,
+                    record.pid,
+                )
+                return
+        try:
+            self.spawner.resume(str(flow_id), project_root=str(root))
+            self.aggregator.add_project_root(str(root))
+            logger.info("Resumed paused flow %s after web call response", flow_id)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to resume paused flow %s", flow_id)
 
     async def _poll_loop(self) -> None:
         """Aggregate local state on a fixed interval until the stop event fires."""

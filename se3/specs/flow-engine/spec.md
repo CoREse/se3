@@ -203,6 +203,18 @@ se3 run --discover "我想做一个用户管理功能"
 - **WHEN** 流程进入 `analyze` 步骤
 - **THEN** `refined_description` 自动作为 `task_description` 传递给 analyze
 
+**非交互模式下的澄清问答：**
+
+当 discovery 步骤运行在非交互模式（由 daemon 代为 spawn、`--output-format json`、无可用终端）时，没有可阻塞读取的输入框。此时 discovery 步骤 SHALL NOT 阻塞终端输入，而是将澄清提问写为 `se3/calls/` 目录下的 call 文件并返回 `PAUSED` 状态，复用既有的 call/response 机制让用户在网页通过「Respond to Flow」交互应答；用户的响应文件被消费后，流程通过 `se3 run --resume` 等价路径恢复并进入下一轮 discovery。不为网页起步的 discovery 任务新建专门的交互式对话界面 —— 多轮澄清问答统一复用既有 call/response 通道。
+
+#### Scenario: 非交互模式 discovery 通过 call/response 提问
+- **GIVEN** discovery 任务由 daemon 代为 spawn（`se3 run --discover --output-format json`，无可用终端）
+- **WHEN** discovery 步骤需要向用户提出澄清问题
+- **THEN** 不阻塞终端输入，而是将提问写为 `se3/calls/` 下的 call 文件
+- **AND** 步骤返回 `PAUSED` 状态
+- **AND** 用户在网页通过既有的「Respond to Flow」交互应答该 call
+- **AND** 响应文件被消费后流程恢复并进入下一轮 discovery 对话
+
 #### Scenario: Discovery LLM JSON 提取失败时的友好错误提示
 - **GIVEN** discovery 步骤执行 LLM 调用使用 two-phase JSON 模式
 - **WHEN** LLM 返回叙述性文本而非有效 JSON，导致 `LLMCallError`（消息包含 "JSON extraction failed"）

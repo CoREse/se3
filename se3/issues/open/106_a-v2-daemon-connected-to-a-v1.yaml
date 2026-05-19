@@ -1,0 +1,22 @@
+id: '106'
+title: A v2 daemon connected to a v1 server keeps sending MSG_HISTORY_INDEX/MSG_HISTORY_DATA
+  frames that the v1 server rejects as unknown types (ProtocolError) without the daemon
+  detecting the version mismatch and disabling history mode.
+description: 'A v2 daemon connected to a v1 server keeps sending MSG_HISTORY_INDEX/MSG_HISTORY_DATA
+  frames that the v1 server rejects as unknown types (ProtocolError) without the daemon
+  detecting the version mismatch and disabling history mode.
+
+
+  Suggestion: Optionally compare PROTOCOL_VERSION advertised in WELCOME and gate history
+  pushes when the server speaks an older revision. Not blocking — old/new peers still
+  interoperate per the protocol.py docstring contract.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-19T14:41:19.930858'
+updated_at: '2026-05-19T14:41:19.930858'

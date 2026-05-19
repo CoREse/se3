@@ -167,7 +167,52 @@ class DaemonSpawner:
             args.append("--discover")
         if extra_args:
             args.extend(extra_args)
+        return self._launch(args, cwd, task_description, env)
 
+    def resume(
+        self,
+        flow_id: str,
+        *,
+        project_root: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+    ) -> SpawnedProcess:
+        """Resume a paused flow by spawning ``se3 run --resume --flow-id``.
+
+        A daemon-spawned flow (``se3 run --output-format json``) exits its
+        process whenever it pauses for a human call — for example a discovery
+        clarification. Once the web UI answers and the daemon writes the
+        ``.response`` file, *something* must re-run ``se3 run --resume`` for the
+        paused flow or it would stay PAUSED forever and never reach analyze /
+        implement. This method is that something: it relaunches the flow with
+        ``--resume --flow-id <flow_id>`` so the conversation continues from the
+        persisted state.
+        """
+        cwd = str(Path(project_root).resolve()) if project_root else os.getcwd()
+        args = _resolve_se3_command() + [
+            "run",
+            "--resume",
+            "--flow-id",
+            str(flow_id),
+            "--output-format",
+            "json",
+        ]
+        logger.info("Resuming flow %s in %s", flow_id, cwd)
+        return self._launch(args, cwd, f"[resume {flow_id}]", env)
+
+    def _launch(
+        self,
+        args: List[str],
+        cwd: str,
+        task_description: str,
+        env: Optional[Dict[str, str]],
+    ) -> SpawnedProcess:
+        """Start *args* as a detached ``se3 run`` child and track it.
+
+        Shared by :meth:`spawn` and :meth:`resume`: both differ only in the
+        argv they build; the environment inheritance, per-flow log-file
+        redirection, supervisor registration and ``on_spawn`` callback are
+        identical.
+        """
         child_env = os.environ.copy()
         if env:
             child_env.update(env)

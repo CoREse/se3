@@ -246,6 +246,25 @@ class TestSpawner:
         assert spawned.pid in [s.pid for s in reaped]
         assert spawner.orphans() == []
 
+    def test_resume_builds_resume_argv(self, fake_se3, tmp_path):
+        spawner = DaemonSpawner()
+        spawned = spawner.resume("flow-xyz", project_root=str(tmp_path))
+        assert "--resume" in spawned.args
+        assert "--flow-id" in spawned.args
+        assert "flow-xyz" in spawned.args
+        assert "--output-format" in spawned.args
+        assert "json" in spawned.args
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
+    def test_resume_registers_with_supervisor(self, fake_se3, tmp_path):
+        sup = DaemonSupervisor()
+        spawner = DaemonSpawner(supervisor=sup)
+        spawned = spawner.resume("flow-xyz", project_root=str(tmp_path))
+        assert sup.get(spawned.pid) is not None
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
 
 # --------------------------------------------------------------------------
 # DaemonAggregator
@@ -339,6 +358,64 @@ class TestDaemonLifecycle:
         spawned = daemon.request_spawn("task", project_root=str(proj))
         assert proj.resolve() in daemon.aggregator.project_roots
         daemon.spawner.wait(spawned.pid, timeout=10)
+        daemon.spawner.reap()
+
+    def test_resume_paused_flow_spawns_resume(self, fake_se3, tmp_path):
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-paused", status="paused")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        daemon._resume_paused_flow(str(proj))
+        procs = daemon.spawner.processes
+        assert len(procs) == 1
+        assert "--resume" in procs[0].args
+        assert "flow-paused" in procs[0].args
+        assert proj.resolve() in daemon.aggregator.project_roots
+        daemon.spawner.wait(procs[0].pid, timeout=10)
+        daemon.spawner.reap()
+
+    def test_resume_skips_non_paused_flow(self, fake_se3, tmp_path):
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, status="running")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        daemon._resume_paused_flow(str(proj))
+        assert daemon.spawner.processes == []
+
+    def test_resume_noop_without_engine_json(self, fake_se3, tmp_path):
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        daemon._resume_paused_flow(str(proj))
+        assert daemon.spawner.processes == []
+
+    def test_resume_skips_when_live_process_exists(self, fake_se3, tmp_path):
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, status="paused")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        sleeper = _spawn_sleeper(30)
+        try:
+            daemon.supervisor.register(sleeper.pid, str(proj))
+            daemon._resume_paused_flow(str(proj))
+            assert daemon.spawner.processes == []
+        finally:
+            sleeper.terminate()
+            sleeper.wait(timeout=10)
+
+    def test_handle_respond_writes_response_and_resumes(self, fake_se3, tmp_path):
+        proj = tmp_path / "proj"
+        _make_engine_json(proj, flow_id="flow-disc", status="paused")
+        daemon = Daemon(DaemonConfig(pid_dir=tmp_path / "rt"))
+        daemon._handle_respond_request(
+            "discovery_step_123", str(proj), "1"
+        )
+        response_file = (
+            proj / "se3" / "calls" / "discovery_step_123.response.json"
+        )
+        assert response_file.exists()
+        procs = daemon.spawner.processes
+        assert len(procs) == 1
+        assert "--resume" in procs[0].args
+        assert "flow-disc" in procs[0].args
+        daemon.spawner.wait(procs[0].pid, timeout=10)
         daemon.spawner.reap()
 
     def test_poll_once_writes_status(self, tmp_path):

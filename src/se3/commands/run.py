@@ -937,6 +937,15 @@ def _run_flow_impl(
                 logger.info(f"Retrying failed step from breakpoint: {current_step.step_id} ({current_step.step_type.value})")
                 persistence.save_flow(flow)
 
+            # A flow persisted as PAUSED (e.g. a non-interactive discovery
+            # pause awaiting a web response) is being actively resumed now —
+            # flip it back to RUNNING so its on-disk status reflects reality
+            # and the daemon does not mistake a live resume for a still-paused
+            # flow needing another --resume.
+            if flow.status == FlowStatus.PAUSED:
+                flow.status = FlowStatus.RUNNING
+                persistence.save_flow(flow)
+
             # Display flow info with full content
             content = [
                 f"Resuming flow: {flow.flow_id}",
@@ -1159,6 +1168,13 @@ def _run_flow_impl(
                 if user_response is _DISCOVERY_AWAITING:
                     # Call file written / still unanswered — pause and exit so
                     # the flow can be resumed once a web response arrives.
+                    # Persist FlowStatus.PAUSED: this process is exiting while
+                    # the flow still has work to do, and the daemon keys its
+                    # resume decision off this on-disk status (only a PAUSED
+                    # flow is re-spawned with --resume once the web answer is
+                    # written).
+                    flow.status = FlowStatus.PAUSED
+                    persistence.save_flow(flow)
                     emitter.emit(new_event(
                         EventType.FLOW_PAUSED, flow_id=flow.flow_id,
                         step_id=current_step.step_id, step_type=step_type_value,

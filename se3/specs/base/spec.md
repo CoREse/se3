@@ -270,15 +270,16 @@
 - `daemon.py` — daemon 进程入口与生命周期：`DaemonConfig`（配置 dataclass）、`Daemon`（asyncio 事件循环）、`start_daemon` / `stop_daemon` / `daemon_status` 函数，以及 pidfile / 状态文件管理；`DaemonAlreadyRunning` 异常
 - `supervisor.py` — `DaemonSupervisor`，发现并监管本机的 `se3 run` 进程（通过 `psutil` 扫描与 `engine.json` 读取），追踪进程生命周期与清理
 - `spawner.py` — `DaemonSpawner`，以 `subprocess` 代为 spawn 新的 `se3 run --output-format json` 子进程（支持从远端发布新任务），管理其参数与环境；`SpawnedProcess` 记录
-- `aggregator.py` — `DaemonAggregator`，轮询 `se3/state/`、`se3/logs/`、`se3/calls/`、`se3/issues/` 并聚合为统一状态快照（`MachineStatus`）
-- `client.py` — `DaemonClient`，维持一条到中心服务器的出站 WebSocket 连接（daemon 主动拨入，对 NAT 友好），上报聚合状态、接收下发指令并路由到 supervisor / spawner；断线后按指数退避重连
-- `protocol.py` — daemon↔服务器 WebSocket 协议的单一来源：`PROTOCOL_VERSION`、`DEFAULT_SERVER_PORT`（中心服务器默认端口 `8080`，由 `se3-server` 的 `--port` 默认值与 daemon 客户端的 URL 端口补全共同引用）、消息类型常量（`MSG_HELLO` / `MSG_WELCOME` / `MSG_STATUS_UPDATE` / `MSG_SPAWN_FLOW` / `MSG_RESPOND_CALL` / `MSG_CALL_NOTIFICATION` / `MSG_PING` / `MSG_PONG`）与 `make_*` 消息构造器；同时被 daemon 与 `se3.server` 包 import，确保协议 schema 不漂移
+- `aggregator.py` — `DaemonAggregator`，轮询 `se3/state/`、`se3/logs/`、`se3/calls/`、`se3/issues/` 并聚合为统一状态快照（`MachineStatus`）；枚举 `se3/calls/` 待应答 call 时跳过已存在同名响应文件（`.response` / `.response.json`）的项，避免历史已应答 call 被误报为 pending
+- `client.py` — `DaemonClient`，维持一条到中心服务器的出站 WebSocket 连接（daemon 主动拨入，对 NAT 友好），上报聚合状态、接收下发指令并路由到 supervisor / spawner；断线后按指数退避重连；连接后上报历史 session 索引（`MSG_HISTORY_INDEX`），在 status loop 中以增量 append 模式推送活跃 session 的历史数据（`MSG_HISTORY_DATA`），并处理入站的按需历史拉取请求（`MSG_HISTORY_REQUEST`）回以 `MSG_HISTORY_DATA`
+- `history.py` — 历史 session 索引构建与按游标增量读取：枚举 `se3/history/` 与 `se3/state/archive/` 构建历史 session 索引（任务描述、状态、时间等），区分活跃 / 非活跃 session；按 per-flow per-step 的 jsonl 文件游标做增量读取，使活跃 session 的对话记录可增量上报而无需每轮重传整份 jsonl
+- `protocol.py` — daemon↔服务器 WebSocket 协议的单一来源：`PROTOCOL_VERSION`（当前为 `"2"`）、`DEFAULT_SERVER_PORT`（中心服务器默认端口 `8080`，由 `se3-server` 的 `--port` 默认值与 daemon 客户端的 URL 端口补全共同引用）、消息类型常量（`MSG_HELLO` / `MSG_WELCOME` / `MSG_STATUS_UPDATE` / `MSG_SPAWN_FLOW` / `MSG_RESPOND_CALL` / `MSG_CALL_NOTIFICATION` / `MSG_PING` / `MSG_PONG`，以及历史相关的 `MSG_HISTORY_INDEX`（daemon→server 历史 session 索引）/ `MSG_HISTORY_REQUEST`（server→daemon 按需拉取某历史 session 记录）/ `MSG_HISTORY_DATA`（daemon→server 历史数据响应，支持 full / append 两种模式与游标））与 `make_*` 消息构造器（含 `make_history_index` / `make_history_request` / `make_history_data`；`make_spawn_flow` 增加 `discover` 字段以透传「从 discovery 起步」标志）；同时被 daemon 与 `se3.server` 包 import，确保协议 schema 不漂移。对端遇到未知 `type` 应忽略，以保证新旧版本混连不崩
 
 ### Requirement: Server Modules
 
 `src/se3/server/` 是中心服务器后端 + 自带网页前端的独立包，经 `pyproject.toml` 的 optional-dependencies（`se3[server]`）隔离 web 重依赖，通过独立 console_scripts 入口 `se3-server` 启动——不做成核心 `se3` 的子命令。新增 server 子模块必须在此 spec 中登记。
 
-- `app.py` — FastAPI 应用入口：`create_app` 装配路由，`run` / `main` 通过 `uvicorn` 启动并解析 `--host` / `--port`；提供 REST API（机器 / 流程查询、远程发布新任务）并将 `static/` 挂载到 `/`
-- `ws.py` — WebSocket 端点：管理 daemon 连接池（连接 / 断开 / 心跳）与前端 `UiHub` 广播通道，路由协议消息（daemon→server 状态上报、server→daemon 指令下发）
-- `state.py` — `ServerState`，内存中的多机 / 多 flow 聚合状态存储（本次交付不含数据库持久化）
-- `static/` — 纯静态网页前端（`index.html` / `style.css` / `app.js`），无构建步骤；通过 `/ws/ui` WebSocket 接收实时状态，提供查看进度、远程发布任务与响应 interjection/call 的界面
+- `app.py` — FastAPI 应用入口：`create_app` 装配路由，`run` / `main` 通过 `uvicorn` 启动并解析 `--host` / `--port`；提供 REST API（机器 / 流程查询、远程发布新任务）并将 `static/` 挂载到 `/`；新增历史查询端点 `GET /api/history`（历史 session 列表）与 `GET /api/history/{flow_id}`（某 session 的 step 对话记录），缓存未命中时向对应 daemon 发 `MSG_HISTORY_REQUEST` 并等待数据返回
+- `ws.py` — WebSocket 端点：管理 daemon 连接池（连接 / 断开 / 心跳）与前端 `UiHub` 广播通道，路由协议消息（daemon→server 状态上报、server→daemon 指令下发）；同时路由历史消息（`MSG_HISTORY_INDEX` / `MSG_HISTORY_DATA`）写入 `ServerState` 并向 `/ws/ui` 广播
+- `state.py` — `ServerState`，内存中的多机 / 多 flow 聚合状态存储（本次交付不含数据库持久化）；额外缓存历史 session 索引与已拉取的历史数据（仅作内存中转 / 缓存，不落地持久化）
+- `static/` — 纯静态网页前端（`index.html` / `style.css` / `app.js`），无构建步骤；通过 `/ws/ui` WebSocket 接收实时状态，提供查看进度、远程发布任务与响应 interjection/call 的界面；新建任务表单提供「从 discovery step 起步」选项；并提供历史 session 列表、单个 session 的 step 对话详情与活跃 session 实时滚动三块历史视图

@@ -1,0 +1,21 @@
+id: '107'
+title: 'history.py read_flow() reads jsonl via splitlines() with no validation that
+  the inbound cursor dict is shaped {filename: int}; a malformed cursor relies on
+  int() coercion to degrade gracefully.'
+description: 'history.py read_flow() reads jsonl via splitlines() with no validation
+  that the inbound cursor dict is shaped {filename: int}; a malformed cursor relies
+  on int() coercion to degrade gracefully.
+
+
+  Suggestion: Defensive only; current int(... or 0) coercion already prevents crashes.
+  Could add explicit cursor-shape validation if hardening untrusted input later.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-19T14:41:19.932219'
+updated_at: '2026-05-19T14:41:19.932219'
