@@ -238,23 +238,50 @@ class DaemonAggregator:
         )
 
     def _enumerate_calls(self, root: Path) -> List[PendingCall]:
-        """List pending human-call files under ``se3/calls/`` for *root*."""
+        """List genuinely pending human-call files under ``se3/calls/``.
+
+        An answered call's ``.json`` request file and its sibling
+        ``.response`` / ``.response.json`` answer file both linger in the
+        directory indefinitely (``se3 history`` and friends rely on them).
+        Such answered calls MUST NOT be reported as pending, so we first
+        collect the base name of every answered call, then emit only those
+        call files that have no matching response sibling — and never emit
+        the response files themselves.
+        """
         calls_dir = root / "se3" / "calls"
         if not calls_dir.is_dir():
             return []
+
+        entries = [
+            entry
+            for entry in sorted(calls_dir.iterdir())
+            if entry.is_file() and not entry.name.startswith(".")
+        ]
+
+        # Collect the base names of calls that already have a response file.
+        answered: Set[str] = set()
+        for entry in entries:
+            name = entry.name
+            if name.endswith(".response.json"):
+                answered.add(name[: -len(".response.json")])
+            elif name.endswith(".response"):
+                answered.add(name[: -len(".response")])
+
         calls: List[PendingCall] = []
-        for entry in sorted(calls_dir.iterdir()):
-            if not entry.is_file():
+        for entry in entries:
+            name = entry.name
+            # Response files are answers, not pending calls — skip them.
+            if name.endswith(".response.json") or name.endswith(".response"):
                 continue
-            if entry.name.startswith("."):
+            # Skip calls that already have a sibling response file.
+            if entry.stem in answered:
                 continue
-            kind = "response" if "respon" in entry.stem.lower() else "call"
             calls.append(
                 PendingCall(
                     call_id=entry.stem,
                     path=str(entry),
                     project_root=str(root),
-                    kind=kind,
+                    kind="call",
                     created_at=_safe_mtime(entry) or 0.0,
                 )
             )
