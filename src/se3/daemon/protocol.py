@@ -37,6 +37,13 @@ from typing import Any, Dict, FrozenSet
 # server advertise it in HELLO / WELCOME so a mismatch can be surfaced.
 PROTOCOL_VERSION = "1"
 
+# Default TCP port for the central server. This is the *single source of
+# truth* for the default port: ``se3-server`` binds it when ``--port`` is
+# omitted, and the daemon client fills it in when ``--server-url`` carries no
+# explicit port. Keeping it here — alongside the wire protocol — guarantees
+# both sides agree and removes the duplicated ``8080`` magic numbers.
+DEFAULT_SERVER_PORT = 8080
+
 # -- message types: daemon -> server --------------------------------------
 MSG_HELLO = "hello"
 MSG_STATUS_UPDATE = "status_update"
