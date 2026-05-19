@@ -11,6 +11,7 @@ is kept for backward compatibility.
 """
 
 import os
+import re
 import select
 import subprocess
 import sys
@@ -127,6 +128,81 @@ USAGE_LIMIT_KEYWORDS = [
     "hit your limit",
     "you've hit your limit",
 ]
+
+
+# --- CLI-subprocess confirmation-prompt capture -------------------------------
+#
+# A child Claude process may, at the CLI/PTY layer, print an interactive
+# confirmation prompt (e.g. ``按 1 确定`` or ``Press 1 to confirm``) and then
+# block waiting for a keystroke on stdin.  ``run_with_monitor`` can be given an
+# ``on_confirm`` callback so such prompts are surfaced to the engine and the
+# answer routed back to the child's stdin.
+#
+# The pattern set below is intentionally *conservative*: a line is treated as a
+# confirmation prompt only when it strongly resembles one.  Ordinary NDJSON
+# stream output and prose never match, so unrecognized lines are an exact
+# no-op and existing stdout parsing / streaming rendering is unaffected.
+
+_CONFIRM_PATTERNS = [
+    # Chinese: 按 1 确定 / 按 1 继续 / 输入 1 确认
+    re.compile(r"按\s*\d.*?(确定|确认|继续|是)"),
+    re.compile(r"(?:请)?输入\s*\d.*?(确定|确认|继续)"),
+    # English: "Press 1 to confirm" / "press [Enter] to continue"
+    re.compile(r"\bpress\s+\S+\s+to\s+(?:confirm|continue|proceed)\b", re.IGNORECASE),
+    # English yes/no bracket prompts: [y/N] (y/n) [Y/n] [n/y]
+    re.compile(r"[\[(]\s*y(?:es)?\s*/\s*no?\s*[\])]", re.IGNORECASE),
+    re.compile(r"[\[(]\s*no?\s*/\s*y(?:es)?\s*[\])]", re.IGNORECASE),
+    # Explicit confirm question: "Do you want to continue?"
+    re.compile(r"\bdo you want to (?:continue|proceed)\b", re.IGNORECASE),
+]
+
+# Best-effort extraction of selectable option labels from "1) foo  2) bar"
+# style lines.  Options may legitimately be empty for prompts that do not
+# enumerate their choices inline.
+_OPTION_PATTERN = re.compile(r"(?:^|[\s,，、(\[])(\d)\s*[\.)、:：]")
+
+
+def detect_confirmation_prompt(line: str) -> Optional[Tuple[str, List[str]]]:
+    """Detect a CLI-subprocess confirmation prompt in a line of child output.
+
+    Returns ``(prompt_text, options)`` when ``line`` conservatively matches a
+    known confirmation-prompt pattern, otherwise ``None``.  ``prompt_text`` is
+    the stripped line; ``options`` is a best-effort list of the numeric labels
+    found inline (possibly empty).  Structured NDJSON lines (starting with
+    ``{`` or ``[``) and any non-matching prose yield ``None`` so callers treat
+    them as ordinary output.
+    """
+    if not line:
+        return None
+    stripped = line.strip()
+    if not stripped:
+        return None
+    # NDJSON stream lines are structured output, never interactive prompts.
+    if stripped[0] in "{[":
+        return None
+    for pattern in _CONFIRM_PATTERNS:
+        if pattern.search(stripped):
+            options = [m.group(1) for m in _OPTION_PATTERN.finditer(stripped)]
+            return stripped, options
+    return None
+
+
+def _write_stdin_response(proc: subprocess.Popen, text: str) -> None:
+    """Write a confirmation response to the child's stdin.
+
+    A trailing newline is appended when absent so the child reads a complete
+    line.  Failures (closed pipe, already-exited child) are swallowed — a
+    confirmation that cannot be delivered degrades to a no-op rather than
+    crashing the monitor loop.
+    """
+    if proc.stdin is None:
+        return
+    try:
+        payload = text if text.endswith("\n") else text + "\n"
+        proc.stdin.write(payload)
+        proc.stdin.flush()
+    except (BrokenPipeError, OSError, ValueError):
+        pass
 
 
 class ClaudeCodeRunner(AgentRunner):
@@ -507,6 +583,9 @@ class ClaudeCodeRunner(AgentRunner):
         env: Optional[Dict[str, str]] = None,
         on_output: Optional[Callable[[str], None]] = None,
         on_activity: Optional[Callable[[], None]] = None,
+        on_confirm: Optional[
+            Callable[[str, List[str], Callable[[], bool]], Optional[str]]
+        ] = None,
     ) -> "MonitoredResult":
         """Run Claude with activity-based monitoring (single command, no fallback).
 
@@ -525,6 +604,14 @@ class ClaudeCodeRunner(AgentRunner):
             env: Environment variables.
             on_output: Callback for each line of output.
             on_activity: Callback for activity detection.
+            on_confirm: Optional callback invoked when a CLI-subprocess
+                confirmation prompt is detected in the child's output. It
+                receives ``(prompt_text, options, is_alive)`` and returns the
+                answer string to write back to the child's stdin, or ``None``
+                to leave the prompt unanswered. ``is_alive()`` reports whether
+                the child is still running, so a blocking callback can stop
+                waiting once the child exits. When supplied, the child is
+                spawned with a writable stdin pipe.
 
         Returns:
             MonitoredResult with exit code, output, and metadata.
@@ -564,6 +651,7 @@ class ClaudeCodeRunner(AgentRunner):
                 on_activity=on_activity,
                 start_time=start_time,
                 stdin_prompt=stdin_prompt,
+                on_confirm=on_confirm,
             )
 
             output = f"=== Command: {cmd_name} ===\n{result.output}"
@@ -617,6 +705,9 @@ class ClaudeCodeRunner(AgentRunner):
         on_activity: Optional[Callable[[], None]],
         start_time: float,
         stdin_prompt: Optional[str] = None,
+        on_confirm: Optional[
+            Callable[[str, List[str], Callable[[], bool]], Optional[str]]
+        ] = None,
     ) -> "_SingleRunResult":
         """Run a single command with monitoring and enhanced hang detection."""
 
@@ -643,6 +734,10 @@ class ClaudeCodeRunner(AgentRunner):
         # Unicode input (e.g., Chinese character deletion); DEVNULL in
         # non-interactive mode to prevent hanging.
         if stdin_prompt is not None:
+            stdin_arg = subprocess.PIPE
+        elif on_confirm is not None:
+            # Keep a writable stdin pipe open so confirmation-prompt answers
+            # captured via ``on_confirm`` can be routed back to the child.
             stdin_arg = subprocess.PIPE
         else:
             stdin_arg = None if sys.stdin.isatty() else subprocess.DEVNULL
@@ -720,6 +815,30 @@ class ClaudeCodeRunner(AgentRunner):
                                 on_output(line)
                             if on_activity:
                                 on_activity()
+                            if on_confirm is not None:
+                                detected = detect_confirmation_prompt(line)
+                                if detected is not None:
+                                    prompt_text, options = detected
+                                    try:
+                                        answer = on_confirm(
+                                            prompt_text,
+                                            options,
+                                            lambda: proc.poll() is None,
+                                        )
+                                    except Exception as exc:  # noqa: BLE001
+                                        answer = None
+                                        print(
+                                            f"[claude-runner] on_confirm callback "
+                                            f"error: {exc}",
+                                            file=sys.stderr,
+                                        )
+                                    if answer is not None:
+                                        _write_stdin_response(proc, answer)
+                                    # The callback may have blocked while
+                                    # awaiting a response; reset the activity
+                                    # clock so that wait does not trip the
+                                    # inactivity-hang detector.
+                                    last_activity = time.time()
                     except Exception:
                         pass
                 else:
@@ -850,6 +969,13 @@ class ClaudeCodeRunner(AgentRunner):
             )
 
         finally:
+            # Close the stdin pipe (if any) so a child still blocked on a
+            # confirmation read sees EOF and can wind down cleanly.
+            try:
+                if proc.stdin is not None and not proc.stdin.closed:
+                    proc.stdin.close()
+            except Exception:
+                pass
             if log_fh:
                 log_fh.close()
             if proc.poll() is None:
