@@ -45,6 +45,7 @@ try:
     )
     from ..engine.event_stream import EventEmitter, EventType, new_event
     from ..engine.sink import CliSink, JsonSink
+    from ..engine.interaction_calls import drain_interjection_requests
     from ..cli import _read_multiline_input
 except ImportError:
     # Direct import for development
@@ -67,6 +68,7 @@ except ImportError:
     )
     from engine.event_stream import EventEmitter, EventType, new_event
     from engine.sink import CliSink, JsonSink
+    from engine.interaction_calls import drain_interjection_requests
     from cli import _read_multiline_input
 
 
@@ -423,6 +425,107 @@ def _handle_step_interrupt(flow: FlowInstance, current_step: Any, persistence: P
     persistence.save_flow(flow)
     # Return a special marker to indicate retry
     return StepStatus.PENDING
+
+
+# Poll interval (seconds) while waiting for a non-interactive
+# retry_decision call file to be answered.
+_RETRY_DECISION_POLL_INTERVAL = 2.0
+
+
+def _handle_step_failure_noninteractive(
+    flow: FlowInstance,
+    current_step: Any,
+    persistence: PersistenceManager,
+    project_root: Path,
+) -> Optional[str]:
+    """Resolve a step failure without a TTY via a ``retry_decision`` call file.
+
+    When ``sys.stdin`` is not a terminal there is nobody to answer the
+    interactive Retry/Skip/Abort prompt, so the decision is surfaced as a
+    ``retry_decision`` interaction call file (options retry / skip / abort,
+    context carrying the error summary). The step is marked PAUSED and the
+    process polls for the sibling ``.response`` answer.
+
+    Returns:
+        The chosen decision (``"retry"`` / ``"skip"`` / ``"abort"``), or
+        ``None`` when the wait was interrupted (Ctrl-C).
+    """
+    import time
+
+    try:
+        from ..engine.interaction_calls import (
+            KIND_RETRY_DECISION,
+            read_call_response,
+            write_interaction_call,
+        )
+    except ImportError:
+        from engine.interaction_calls import (
+            KIND_RETRY_DECISION,
+            read_call_response,
+            write_interaction_call,
+        )
+
+    step_type_value = (
+        current_step.step_type.value
+        if hasattr(current_step.step_type, "value")
+        else str(current_step.step_type)
+    )
+    error_msg = current_step.error_message or "Unknown error"
+    max_retries = 3
+    options = [
+        {"value": "retry", "label": "Retry this step"},
+        {"value": "skip", "label": "Skip to next step"},
+        {"value": "abort", "label": "Abort flow"},
+    ]
+    context = {
+        "flow_id": flow.flow_id,
+        "step_id": current_step.step_id,
+        "step_type": step_type_value,
+        "error": error_msg,
+        "retry_count": current_step.retry_count,
+        "retries_remaining": max(0, max_retries - current_step.retry_count),
+    }
+    prompt = (
+        f"Step '{step_type_value}' failed: {error_msg}\n\n"
+        "Choose how to proceed — retry the step, skip it, or abort the flow."
+    )
+
+    call_file = write_interaction_call(
+        project_root, KIND_RETRY_DECISION, prompt, context, options,
+    )
+    current_step.outputs["retry_decision_call_file"] = str(call_file)
+    current_step.status = StepStatus.PAUSED
+    persistence.save_flow(flow)
+    get_console().print(
+        f"[yellow]No TTY — wrote retry-decision call file:[/yellow] {call_file}\n"
+        "[dim]Waiting for a retry/skip/abort response…[/dim]"
+    )
+
+    # Poll for the response file written by the web console / daemon.
+    while True:
+        response = read_call_response(call_file)
+        if response is not None:
+            break
+        try:
+            time.sleep(_RETRY_DECISION_POLL_INTERVAL)
+        except KeyboardInterrupt:
+            return None
+
+    decision: Optional[str] = None
+    for key in ("choice", "decision", "option", "response", "value"):
+        val = response.get(key)
+        if isinstance(val, str) and val.strip():
+            decision = val.strip().lower()
+            break
+    if decision not in ("retry", "skip", "abort"):
+        logger.warning(
+            "Unrecognized retry_decision response %r — defaulting to abort", response
+        )
+        decision = "abort"
+
+    # The decision has been consumed — drop the pointer.
+    current_step.outputs.pop("retry_decision_call_file", None)
+    return decision
 
 
 def _restore_discovery_display(current_step: Any) -> None:
@@ -1017,6 +1120,23 @@ def _run_flow_impl(
             flow.status = FlowStatus.COMPLETED
             break
 
+        # Step boundary: consume any interjection requests dropped by the
+        # daemon (server MSG_INTERJECT_FLOW downlink) and fold them into
+        # flow.state.context["user_interjections"]. They then reach the
+        # current step (recomposed below) and every later step via
+        # state_machine._build_step_inputs.
+        drained = drain_interjection_requests(flow, project_root)
+        if drained and "task_description" in current_step.inputs:
+            from ..engine.task_description import compose_task_description_with_interjections
+            from ..engine.state_machine import _effective_task_description_base
+            current_step.inputs["task_description"] = (
+                compose_task_description_with_interjections(
+                    base=_effective_task_description_base(flow),
+                    interjections=flow.state.context["user_interjections"],
+                )
+            )
+            persistence.save_flow(flow)
+
         # If the current step already finished (process crashed after the step
         # handler returned but before transition_to_next was saved), advance
         # without re-running the step.
@@ -1221,11 +1341,27 @@ def _run_flow_impl(
                 persistence.save_flow(flow)
                 return 1
 
-            # Ask user whether to retry, skip, or abort
-            options = ["Retry this step", "Skip to next step", "Abort flow"]
-            choice = prompt_user_choice("What would you like to do?", options)
+            # Decide retry / skip / abort. With a TTY, use the interactive
+            # prompt (zero behaviour change). Without one, surface the
+            # decision as a retry_decision call file, pause, and poll for
+            # the response so the web console can answer it.
+            if sys.stdin.isatty():
+                options = ["Retry this step", "Skip to next step", "Abort flow"]
+                choice = prompt_user_choice("What would you like to do?", options)
+                decision = ("retry", "skip", "abort")[choice]
+            else:
+                decision = _handle_step_failure_noninteractive(
+                    flow, current_step, persistence, project_root
+                )
+                if decision is None:
+                    # Ctrl-C while waiting for the response — pause and exit.
+                    emitter.emit(new_event(
+                        EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                        step_id=current_step.step_id, step_type=step_type_value,
+                    ))
+                    return 130
 
-            if choice == 0:
+            if decision == "retry":
                 # Reset step status and retry from where it left off
                 current_step.status = StepStatus.PENDING
                 current_step.inputs["resumed"] = True
@@ -1233,7 +1369,7 @@ def _run_flow_impl(
                 current_step.retry_count += 1
                 persistence.save_flow(flow)
                 continue
-            elif choice == 1:
+            elif decision == "skip":
                 # Force step to completed so transition works
                 current_step.status = StepStatus.COMPLETED
                 state_machine.transition_to_next(flow)
