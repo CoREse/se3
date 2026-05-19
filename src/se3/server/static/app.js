@@ -632,29 +632,250 @@ function renderStepGroup(group) {
   const sec = el("div", "history-step");
   sec.appendChild(el("h5", "history-step-title", group.label));
   for (const item of group.records) {
-    sec.appendChild(renderRecord(item.norm));
+    sec.appendChild(renderConversationRecord(item.norm));
   }
   return sec;
 }
 
-function renderRecord(norm) {
+// ---------------------------------------------------------------------------
+// Conversation rendering engine
+// ---------------------------------------------------------------------------
+//
+// A self-contained renderer shared by the history view and (G3) the running
+// flow drawer. Three layers:
+//   renderMarkdown(text)      — lightweight Markdown → DOM (no dependencies)
+//   renderToolMarkers(text)   — split inline [Tool: …] markers into own blocks
+//   renderConversationRecord  — a role-tagged bubble around the above
+//
+// Everything is built with createElement / textContent / createTextNode, so
+// arbitrary assistant text can never inject HTML.
+
+// --- inline span rendering -------------------------------------------------
+
+// Render `**bold**` / `__bold__` and `*italic*` / `_italic_` within one line.
+function renderEmphasisLine(parent, text) {
+  const RE = /(\*\*|__)(.+?)\1|(\*|_)([^*_]+?)\3/g;
+  let last = 0;
+  let m;
+  while ((m = RE.exec(text)) !== null) {
+    if (m.index > last) {
+      parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+    }
+    if (m[1]) {
+      parent.appendChild(el("strong", null, m[2]));
+    } else {
+      parent.appendChild(el("em", null, m[4]));
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) {
+    parent.appendChild(document.createTextNode(text.slice(last)));
+  }
+}
+
+// Render emphasis across a multi-line block, turning `\n` into <br>.
+function renderEmphasis(parent, text) {
+  const lines = String(text == null ? "" : text).split("\n");
+  lines.forEach((line, idx) => {
+    if (idx > 0) parent.appendChild(document.createElement("br"));
+    renderEmphasisLine(parent, line);
+  });
+}
+
+// Render inline content: pull out `code spans` first (literal inside), then
+// apply emphasis to the remaining text.
+function renderInline(parent, text) {
+  const parts = String(text == null ? "" : text).split(/(`[^`]+`)/);
+  for (const part of parts) {
+    if (!part) continue;
+    if (part.length >= 2 && part[0] === "`" && part[part.length - 1] === "`") {
+      parent.appendChild(el("code", "md-inline-code", part.slice(1, -1)));
+    } else {
+      renderEmphasis(parent, part);
+    }
+  }
+}
+
+// --- block rendering -------------------------------------------------------
+
+const MD_LIST_RE = /^\s*([-*+]|\d+[.)])\s+/;
+const MD_HEADING_RE = /^(#{1,6})\s+(.*)$/;
+const MD_FENCE_RE = /^\s*(```+|~~~+)(.*)$/;
+const MD_QUOTE_RE = /^\s*>\s?/;
+
+// Lightweight Markdown renderer: headings, fenced/inline code, ordered &
+// unordered lists, blockquotes, bold/italic, paragraphs. Returns a
+// DocumentFragmentNode ready to append.
+function renderMarkdown(text) {
+  const frag = document.createDocumentFragment();
+  const lines = String(text == null ? "" : text).split("\n");
+  let i = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // fenced code block
+    const fence = line.match(MD_FENCE_RE);
+    if (fence) {
+      const marker = fence[1][0];
+      const lang = fence[2].trim();
+      const closeRe = new RegExp("^\\s*\\" + marker + "{3,}\\s*$");
+      const buf = [];
+      i += 1;
+      while (i < lines.length && !closeRe.test(lines[i])) {
+        buf.push(lines[i]);
+        i += 1;
+      }
+      i += 1; // consume the closing fence (or run off the end)
+      const pre = el("pre", "md-code");
+      const code = el("code", null, buf.join("\n"));
+      if (lang) code.dataset.lang = lang;
+      pre.appendChild(code);
+      frag.appendChild(pre);
+      continue;
+    }
+
+    // blank line — paragraph separator
+    if (!line.trim()) { i += 1; continue; }
+
+    // heading
+    const h = line.match(MD_HEADING_RE);
+    if (h) {
+      const level = h[1].length;
+      const node = el("h" + level, "md-h md-h" + level);
+      renderInline(node, h[2]);
+      frag.appendChild(node);
+      i += 1;
+      continue;
+    }
+
+    // list — consume consecutive items of the same family
+    if (MD_LIST_RE.test(line)) {
+      const ordered = /^\s*\d+[.)]\s+/.test(line);
+      const list = el(ordered ? "ol" : "ul", "md-list");
+      while (i < lines.length && MD_LIST_RE.test(lines[i])) {
+        const li = el("li");
+        renderInline(li, lines[i].replace(MD_LIST_RE, ""));
+        list.appendChild(li);
+        i += 1;
+      }
+      frag.appendChild(list);
+      continue;
+    }
+
+    // blockquote
+    if (MD_QUOTE_RE.test(line)) {
+      const buf = [];
+      while (i < lines.length && MD_QUOTE_RE.test(lines[i])) {
+        buf.push(lines[i].replace(MD_QUOTE_RE, ""));
+        i += 1;
+      }
+      const bq = el("blockquote", "md-quote");
+      renderInline(bq, buf.join("\n"));
+      frag.appendChild(bq);
+      continue;
+    }
+
+    // paragraph — gather until a blank line or a block-level marker
+    const buf = [];
+    while (i < lines.length && lines[i].trim() &&
+           !MD_FENCE_RE.test(lines[i]) &&
+           !MD_HEADING_RE.test(lines[i]) &&
+           !MD_LIST_RE.test(lines[i]) &&
+           !MD_QUOTE_RE.test(lines[i])) {
+      buf.push(lines[i]);
+      i += 1;
+    }
+    const p = el("p", "md-p");
+    renderInline(p, buf.join("\n"));
+    frag.appendChild(p);
+  }
+  return frag;
+}
+
+// --- inline tool-call markers ---------------------------------------------
+
+// Tool names that the streaming/history layers embed inline as `[Name: …]`.
+const TOOL_MARKER_NAMES = [
+  "Tool", "Read", "Bash", "Edit", "Write", "Grep", "Glob", "Task",
+  "MultiEdit", "NotebookEdit", "WebFetch", "WebSearch", "LS", "TodoWrite",
+  "Search", "Fetch",
+];
+const TOOL_MARKER_RE = new RegExp(
+  "\\[(" + TOOL_MARKER_NAMES.join("|") + ")\\b[^\\]\\n]*\\]", "g");
+
+// Render one `[Name: detail]` marker as a standalone, visually distinct block.
+function renderToolBlock(name, raw) {
+  const inner = raw.replace(/^\[/, "").replace(/\]$/, "");
+  const colon = inner.indexOf(":");
+  const detail = colon >= 0 ? inner.slice(colon + 1).trim() : "";
+  const block = el("div", "tool-marker");
+  block.appendChild(el("span", "tool-marker-name", name));
+  if (detail) block.appendChild(el("span", "tool-marker-detail", detail));
+  return block;
+}
+
+// Split `text` on inline tool markers: marker spans become standalone tool
+// blocks, the surrounding prose still flows through the Markdown renderer.
+// Returns an array of Nodes.
+function renderToolMarkers(text) {
+  const src = String(text == null ? "" : text);
+  const nodes = [];
+  let last = 0;
+  let m;
+  TOOL_MARKER_RE.lastIndex = 0;
+  while ((m = TOOL_MARKER_RE.exec(src)) !== null) {
+    if (m.index > last) {
+      const chunk = src.slice(last, m.index);
+      if (chunk.trim()) nodes.push(renderMarkdown(chunk));
+    }
+    nodes.push(renderToolBlock(m[1], m[0]));
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) {
+    const chunk = src.slice(last);
+    if (chunk.trim()) nodes.push(renderMarkdown(chunk));
+  }
+  if (!nodes.length) nodes.push(renderMarkdown(src));
+  return nodes;
+}
+
+// --- record bubble ---------------------------------------------------------
+
+// Render a single normalized record as a role-tagged conversation bubble.
+// assistant bodies flow through tool-marker + Markdown rendering; user/system
+// bodies are shown as literal whitespace-preserving text.
+function renderConversationRecord(norm) {
   const known = ["user", "assistant", "system"].includes(norm.role);
-  const row = el("div", "history-record role-" + (known ? norm.role : "other"));
+  const role = known ? norm.role : "other";
+  const row = el("div", "history-record conv-record role-" + role);
 
   const head = el("div", "history-record-head");
   head.appendChild(el("span", "record-role", norm.role));
-  if (norm.timestamp != null) {
-    head.appendChild(el("span", "record-time", formatTime(norm.timestamp)));
+  const right = el("div", "record-head-right");
+  if (norm.attempt != null && norm.attempt !== "" && Number(norm.attempt) > 1) {
+    right.appendChild(el("span", "record-attempt", "attempt " + norm.attempt));
   }
+  if (norm.timestamp != null) {
+    right.appendChild(el("span", "record-time", formatTime(norm.timestamp)));
+  }
+  head.appendChild(right);
   row.appendChild(head);
 
-  row.appendChild(el("pre", "record-body", recordText(norm)));
+  const bubble = el("div", "conv-bubble");
+  const content = typeof norm.content === "string" ? norm.content : "";
+  if (!content) {
+    bubble.appendChild(
+      el("p", "md-p conv-empty", "(no readable content for this record)"));
+  } else if (role === "assistant") {
+    for (const node of renderToolMarkers(content)) bubble.appendChild(node);
+  } else {
+    // user / system: literal text — these are large structured prompts whose
+    // exact whitespace matters; do not Markdown-mangle them.
+    bubble.appendChild(el("pre", "conv-plain", content));
+  }
+  row.appendChild(bubble);
   return row;
-}
-
-function recordText(norm) {
-  if (typeof norm.content === "string" && norm.content !== "") return norm.content;
-  return "(no readable content for this record)";
 }
 
 function scrollHistoryToBottom() {
