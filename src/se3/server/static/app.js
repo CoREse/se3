@@ -18,6 +18,7 @@ const state = {
   historySessions: [],    // [{flow_id, task_description, status, updated_at, ...}]
   selectedHistoryId: null,// flow whose records are shown in the history detail
   historyRecords: [],     // records currently rendered in the history detail
+  connStale: false,       // true while the WS is down — data may be stale
 };
 
 let ws = null;
@@ -58,6 +59,29 @@ function hasPendingCall(flow) {
 }
 
 // ---------------------------------------------------------------------------
+// Toast notifications
+// ---------------------------------------------------------------------------
+//
+// Lightweight, dependency-free transient feedback. `kind` is one of
+// "success" / "error" / "info"; the toast auto-dismisses after a few seconds.
+
+function showToast(kind, message) {
+  const container = $("toast-container");
+  if (!container) return;
+  const k = ["success", "error", "info"].includes(kind) ? kind : "info";
+  const toast = el("div", "toast toast-" + k, String(message || ""));
+  container.appendChild(toast);
+  // Force a layout frame so the entry transition runs.
+  requestAnimationFrame(() => toast.classList.add("toast-show"));
+  // Errors linger a little longer than success/info messages.
+  const ttl = k === "error" ? 6000 : 4000;
+  setTimeout(() => {
+    toast.classList.remove("toast-show");
+    setTimeout(() => toast.remove(), 300);
+  }, ttl);
+}
+
+// ---------------------------------------------------------------------------
 // WebSocket client (with exponential-backoff reconnect)
 // ---------------------------------------------------------------------------
 
@@ -65,6 +89,16 @@ function setConnStatus(kind, label) {
   const node = $("conn-status");
   node.className = "conn conn-" + kind;
   node.textContent = label;
+}
+
+// Toggle the "data may be stale" banners shown over the history view and the
+// flow detail drawer while the WebSocket connection is down.
+function setStale(stale) {
+  state.connStale = !!stale;
+  for (const id of ["history-stale", "drawer-stale"]) {
+    const node = $(id);
+    if (node) node.classList.toggle("hidden", !stale);
+  }
 }
 
 function connect() {
@@ -75,8 +109,19 @@ function connect() {
   ws = new WebSocket(url);
 
   ws.onopen = () => {
+    // A reconnect (rather than the first connect) means the views may be
+    // showing stale data — clear the banners and refresh what's open.
+    const wasReconnect = reconnectAttempts > 0 || state.connStale;
     reconnectAttempts = 0;
     setConnStatus("connected", "connected");
+    setStale(false);
+    if (wasReconnect) {
+      if (state.selectedFlowId) refreshFlowDetail();
+      if (isHistoryOpen()) {
+        fetchHistoryIndex();
+        if (state.selectedHistoryId) openHistorySession(state.selectedHistoryId);
+      }
+    }
   };
 
   ws.onmessage = (event) => {
@@ -99,6 +144,7 @@ function connect() {
 
   ws.onclose = () => {
     setConnStatus("disconnected", "disconnected");
+    setStale(true);
     scheduleReconnect();
   };
 
@@ -716,13 +762,17 @@ async function submitNewTask(event) {
     });
     if (resp.status === 202) {
       closeNewTask();
+      showToast("success", "Task published.");
     } else {
       const detail = await resp.json().catch(() => ({}));
-      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+      const message = detail.detail || `Server returned ${resp.status}.`;
+      showFormError(errBox, message);
+      showToast("error", `Could not publish task: ${message}`);
       submit.disabled = false;
     }
   } catch (err) {
     showFormError(errBox, "Network error — could not reach the server.");
+    showToast("error", "Could not publish task — network error.");
     submit.disabled = false;
   }
 }
@@ -784,13 +834,17 @@ async function submitCall(event) {
     );
     if (resp.ok) {
       closeCallModal();
+      showToast("success", "Response sent.");
     } else {
       const detail = await resp.json().catch(() => ({}));
-      showFormError(errBox, detail.detail || `Server returned ${resp.status}.`);
+      const message = detail.detail || `Server returned ${resp.status}.`;
+      showFormError(errBox, message);
+      showToast("error", `Could not send response: ${message}`);
       submit.disabled = false;
     }
   } catch (err) {
     showFormError(errBox, "Network error — could not reach the server.");
+    showToast("error", "Could not send response — network error.");
     submit.disabled = false;
   }
 }
