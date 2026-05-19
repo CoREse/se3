@@ -441,3 +441,77 @@ class TestDaemonLifecycle:
             stop_result = stop_daemon(config, timeout=15)
         assert stop_result["status"] in ("stopped", "not_running")
         assert daemon_status(config).get("running") is False
+
+
+# --------------------------------------------------------------------------
+# CLI start — visible degradation / connection warnings
+# --------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """A controllable clock so connection-poll tests run without real waits."""
+
+    def __init__(self, start: float = 1000.0):
+        self.now = start
+
+    def time(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TestDaemonStartWarnings:
+    def test_precheck_warns_when_websockets_missing(self, monkeypatch, capsys):
+        """The CLI front-end shouts when 'websockets' is unavailable."""
+        from se3 import cli as cli_mod
+
+        # Force `import websockets` inside the precheck to fail.
+        monkeypatch.setitem(sys.modules, "websockets", None)
+        cli_mod._precheck_websockets("ws://host:8080")
+        out = capsys.readouterr().out
+        assert "websockets" in out
+        assert "local-only" in out.lower()
+        assert "pip install 'se3[server]'" in out
+
+    def test_report_connection_warns_when_not_connected(self, monkeypatch, capsys):
+        """A status file showing a last_error surfaces a front-end warning."""
+        from se3 import cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "time", _FakeClock())
+
+        def fake_status(_config):
+            return {"connected": False, "last_error": "connection refused"}
+
+        cli_mod._report_connection_result(object(), fake_status)
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert "connection refused" in out
+
+    def test_report_connection_warns_when_pending(self, monkeypatch, capsys):
+        """When no verdict lands before the timeout, say so rather than lie."""
+        from se3 import cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "time", _FakeClock())
+
+        def fake_status(_config):
+            return {"connected": False, "last_error": None}
+
+        cli_mod._report_connection_result(object(), fake_status)
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert "not connected" in out.lower()
+
+    def test_report_connection_confirms_when_connected(self, monkeypatch, capsys):
+        """A connected daemon gets a positive confirmation line."""
+        from se3 import cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "time", _FakeClock())
+
+        def fake_status(_config):
+            return {"connected": True, "last_error": None}
+
+        cli_mod._report_connection_result(object(), fake_status)
+        out = capsys.readouterr().out
+        assert "connected" in out.lower()
+        assert "WARNING" not in out
