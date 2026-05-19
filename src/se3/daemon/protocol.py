@@ -24,7 +24,8 @@ Message directions
   :data:`MSG_CALL_NOTIFICATION`, :data:`MSG_PONG`,
   :data:`MSG_HISTORY_INDEX`, :data:`MSG_HISTORY_DATA`.
 * server → daemon: :data:`MSG_WELCOME`, :data:`MSG_SPAWN_FLOW`,
-  :data:`MSG_RESPOND_CALL`, :data:`MSG_PING`, :data:`MSG_HISTORY_REQUEST`.
+  :data:`MSG_RESPOND_CALL`, :data:`MSG_PING`, :data:`MSG_HISTORY_REQUEST`,
+  :data:`MSG_INTERJECT_FLOW`.
 
 Backward compatibility
 ----------------------
@@ -68,6 +69,28 @@ MSG_SPAWN_FLOW = "spawn_flow"
 MSG_RESPOND_CALL = "respond_call"
 MSG_PING = "ping"
 MSG_HISTORY_REQUEST = "history_request"
+MSG_INTERJECT_FLOW = "interject_flow"
+
+# -- call-file kinds ------------------------------------------------------
+# Every interaction that needs a human in the loop while a flow runs is
+# unified onto one carrier: a JSON file under a project's ``se3/calls/``
+# directory whose ``kind`` field tells the UI how to render it. These are the
+# recognized values; the daemon aggregator falls back to :data:`CALL_KIND_CALL`
+# for any legacy call file that carries no ``kind`` metadata.
+CALL_KIND_CALL = "call"  # a pending MCP / human call (the original mechanism)
+CALL_KIND_INTERJECTION = "interjection"  # a mid-flow Ctrl-C interjection request
+CALL_KIND_RETRY_DECISION = "retry_decision"  # a retry / skip / abort failure decision
+CALL_KIND_CLI_CONFIRM = "cli_confirm"  # a CLI subprocess confirmation prompt
+
+#: Every recognized call-file ``kind``.
+CALL_KINDS: FrozenSet[str] = frozenset(
+    {
+        CALL_KIND_CALL,
+        CALL_KIND_INTERJECTION,
+        CALL_KIND_RETRY_DECISION,
+        CALL_KIND_CLI_CONFIRM,
+    }
+)
 
 #: Valid values for the ``mode`` field of a :data:`MSG_HISTORY_DATA` payload.
 HISTORY_MODE_FULL = "full"
@@ -87,7 +110,14 @@ DAEMON_TO_SERVER: FrozenSet[str] = frozenset(
 )
 #: Messages a server is allowed to send to a daemon.
 SERVER_TO_DAEMON: FrozenSet[str] = frozenset(
-    {MSG_WELCOME, MSG_SPAWN_FLOW, MSG_RESPOND_CALL, MSG_PING, MSG_HISTORY_REQUEST}
+    {
+        MSG_WELCOME,
+        MSG_SPAWN_FLOW,
+        MSG_RESPOND_CALL,
+        MSG_PING,
+        MSG_HISTORY_REQUEST,
+        MSG_INTERJECT_FLOW,
+    }
 )
 #: Every known message type.
 ALL_MESSAGE_TYPES: FrozenSet[str] = DAEMON_TO_SERVER | SERVER_TO_DAEMON
@@ -256,6 +286,30 @@ def make_respond_call(
             "call_id": call_id,
             "project_root": project_root,
             "response": response,
+        },
+    )
+
+
+def make_interject_flow(
+    flow_id: str,
+    text: str,
+    *,
+    project_root: str = "",
+) -> Message:
+    """server → daemon: deliver a mid-flow interjection for a running flow.
+
+    *text* is the user-typed instruction to fold into the running flow (the
+    same content a local operator would type at the Ctrl-C interjection
+    prompt). The daemon resolves *flow_id* to its project root and writes an
+    interjection request file the running ``se3 run`` consumes at a step
+    boundary.
+    """
+    return Message(
+        type=MSG_INTERJECT_FLOW,
+        payload={
+            "flow_id": flow_id,
+            "text": text,
+            "project_root": project_root,
         },
     )
 
