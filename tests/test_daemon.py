@@ -549,13 +549,18 @@ class TestDaemonStartWarnings:
         assert "pip install 'se3[server]'" in out
 
     def test_report_connection_warns_when_not_connected(self, monkeypatch, capsys):
-        """A status file showing a last_error surfaces a front-end warning."""
+        """A fresh status file still showing a last_error at the deadline warns."""
         from se3 import cli as cli_mod
 
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
         def fake_status(_config):
-            return {"connected": False, "last_error": "connection refused"}
+            return {
+                "started_at": 1000.0,
+                "updated_at": 1000.0,
+                "connected": False,
+                "last_error": "connection refused",
+            }
 
         cli_mod._report_connection_result(object(), fake_status)
         out = capsys.readouterr().out
@@ -569,7 +574,12 @@ class TestDaemonStartWarnings:
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
         def fake_status(_config):
-            return {"connected": False, "last_error": None}
+            return {
+                "started_at": 1000.0,
+                "updated_at": 1000.0,
+                "connected": False,
+                "last_error": None,
+            }
 
         cli_mod._report_connection_result(object(), fake_status)
         out = capsys.readouterr().out
@@ -583,9 +593,68 @@ class TestDaemonStartWarnings:
         monkeypatch.setattr(cli_mod, "time", _FakeClock())
 
         def fake_status(_config):
-            return {"connected": True, "last_error": None}
+            return {
+                "started_at": 1000.0,
+                "updated_at": 1000.0,
+                "connected": True,
+                "last_error": None,
+            }
 
         cli_mod._report_connection_result(object(), fake_status)
         out = capsys.readouterr().out
         assert "connected" in out.lower()
         assert "WARNING" not in out
+
+    def test_report_connection_treats_transient_error_as_non_final(
+        self, monkeypatch, capsys
+    ):
+        """A first-dial error must not be reported if backoff reconnects."""
+        from se3 import cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "time", _FakeClock())
+
+        calls = {"n": 0}
+
+        def fake_status(_config):
+            calls["n"] += 1
+            # First poll: transient error; later polls: connected.
+            if calls["n"] < 3:
+                return {
+                    "started_at": 1000.0,
+                    "updated_at": 1000.0,
+                    "connected": False,
+                    "last_error": "connection refused",
+                }
+            return {
+                "started_at": 1000.0,
+                "updated_at": 1000.5,
+                "connected": True,
+                "last_error": "connection refused",
+            }
+
+        cli_mod._report_connection_result(object(), fake_status)
+        out = capsys.readouterr().out
+        assert "connected" in out.lower()
+        assert "WARNING" not in out
+
+    def test_report_connection_ignores_stale_status_file(self, monkeypatch, capsys):
+        """A status file predating the current daemon must not be trusted."""
+        from se3 import cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "time", _FakeClock())
+
+        def fake_status(_config):
+            # updated_at < started_at: leftover from a hard-killed daemon
+            # that recorded a (now meaningless) connected=True.
+            return {
+                "started_at": 1000.0,
+                "updated_at": 500.0,
+                "connected": True,
+                "last_error": None,
+            }
+
+        cli_mod._report_connection_result(object(), fake_status)
+        out = capsys.readouterr().out
+        # The stale connected=True is ignored; we report pending instead.
+        assert "WARNING" in out
+        assert "not connected" in out.lower()

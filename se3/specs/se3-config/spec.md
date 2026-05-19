@@ -1586,7 +1586,13 @@ of the daemon/server feature has a single registered home.
 - `daemon.server_url` — The central-server URL the daemon dials out to.
   Supplied via `se3 daemon start --server-url <url>`; when unset
   (default: `null`/`None`) the daemon runs purely locally and does not
-  open an outbound connection.
+  open an outbound connection. When the supplied URL omits an explicit
+  port, the daemon client normalizes it by completing the port to the
+  shared default server port (`DEFAULT_SERVER_PORT`); an explicit port
+  in the URL is preserved as given. This prevents a bare `ws://host`
+  from silently falling back to the WebSocket-standard port 80 while
+  the server listens on the default port, which left the central
+  server with no machine registration.
 
 **Server parameters** (`se3-server` entry point in
 `src/se3/server/app.py`):
@@ -1594,7 +1600,16 @@ of the daemon/server feature has a single registered home.
 - `server.host` — Bind host for the central server
   (default: `127.0.0.1`). Supplied via `se3-server --host <host>`.
 - `server.port` — Bind port for the central server
-  (default: `8080`). Supplied via `se3-server --port <port>`.
+  (default: `DEFAULT_SERVER_PORT`, `8080`). Supplied via
+  `se3-server --port <port>`.
+
+**Shared default port.** The default server port is defined once as the
+`DEFAULT_SERVER_PORT` constant (value `8080`) in
+`src/se3/daemon/protocol.py` — the single source of truth for the
+daemon↔server protocol — and is referenced by both the `se3-server`
+`--port` default and the daemon client's URL normalization. The two
+sides therefore cannot drift apart, and the value is not duplicated as
+a magic number.
 
 #### Scenario: Daemon runs locally without a server URL
 - **WHEN** the daemon is started without `--server-url`
@@ -1606,5 +1621,12 @@ of the daemon/server feature has a single registered home.
 #### Scenario: Server binds to configured host and port
 - **WHEN** `se3-server` is started without `--host` / `--port`
 - **THEN** the server binds to `server.host` `127.0.0.1` and
-  `server.port` `8080`
+  `server.port` `DEFAULT_SERVER_PORT` (`8080`)
 - **AND** supplying `--host` / `--port` overrides those defaults
+
+#### Scenario: Server URL without an explicit port is completed to the default
+- **WHEN** the daemon is started with `--server-url ws://host` (no port)
+- **THEN** the daemon client normalizes the URL by completing the port
+  to `DEFAULT_SERVER_PORT` (`8080`), matching the server's default
+- **AND** when the URL already carries an explicit port, that port is
+  preserved unchanged

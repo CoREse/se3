@@ -1464,9 +1464,9 @@ se3 daemon status --json                  # Emit status as JSON
 
 | Subcommand | Options | Behavior |
 |------------|---------|----------|
-| `start` | `--server-url`, `--foreground` | Starts the daemon. By default it is launched as a detached background process; `--foreground` runs it in the current terminal. `--server-url` records the central-server URL the daemon dials out to. When a daemon is already running, the command reports it and exits non-zero. |
+| `start` | `--server-url`, `--foreground` | Starts the daemon. By default it is launched as a detached background process; `--foreground` runs it in the current terminal. `--server-url` records the central-server URL the daemon dials out to; when the URL omits a port it is completed to the shared default server port (see the *Daemon and Server Configuration* requirement in the `se3-config` spec). When `--server-url` is supplied, the command surfaces central-server connection problems in the CLI foreground: if the `websockets` dependency is missing it prints a visible warning before launch, and after launch it briefly polls the daemon status file and warns when the daemon did not connect (e.g. `websockets not installed`, handshake/connection failure). These warnings are advisory — `se3 daemon start` does not fail solely because the central-server connection degraded. When a daemon is already running, the command reports it and exits non-zero. |
 | `stop` | — | Stops the running daemon. Reports `not running` when none is up (exit 0), and reports a stop timeout with a non-zero exit when the process does not exit within the grace period. |
-| `status` | `--json, -j` | Reports whether the daemon is running, its pid, machine id, configured server URL, and the list of tracked flows. `--json` emits the status as JSON instead of the rendered panel. |
+| `status` | `--json, -j` | Reports whether the daemon is running, its pid, machine id, configured server URL, the real central-server connection state, and the list of tracked flows. The connection line reflects the live `DaemonClient` state read from the daemon status file — `local-only` when no server URL is configured, `connected` when the outbound connection is established, or `not connected` with the underlying reason — rather than echoing the configured URL. `--json` emits the status as JSON instead of the rendered panel. |
 
 #### Scenario: Start the daemon
 - **WHEN** the user runs `se3 daemon start`
@@ -1487,6 +1487,20 @@ se3 daemon status --json                  # Emit status as JSON
 - **WHEN** the user runs `se3 daemon status`
 - **THEN** the command reports whether the daemon is running, its pid, machine id, server URL, and tracked flows
 - **AND** `se3 daemon status --json` emits the same information as JSON
+
+#### Scenario: Status reports the real central-server connection state
+- **GIVEN** a daemon started with `--server-url` but unable to reach the central server
+- **WHEN** the user runs `se3 daemon status`
+- **THEN** the output includes a connection line reporting `not connected` with the underlying reason (e.g. `websockets not installed`)
+- **AND** the line reflects the live `DaemonClient` connection state from the daemon status file rather than echoing the configured URL
+- **AND** when no server URL is configured the connection line reports `local-only`
+
+#### Scenario: Start warns when the central-server connection degrades
+- **GIVEN** the `websockets` dependency is not installed
+- **WHEN** the user runs `se3 daemon start --server-url ws://host`
+- **THEN** the command prints a visible warning in the CLI foreground that the central-server connection is unavailable, with the reason
+- **AND** the warning is shown in addition to the daemon log entry, not only written to the log
+- **AND** the daemon still starts in local-only mode and the command does not fail solely because of the degraded connection
 
 ## Error Codes
 

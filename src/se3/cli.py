@@ -487,18 +487,40 @@ def _report_connection_result(config, daemon_status_fn) -> None:
     read back the result via the status file. Polling is bounded so ``start``
     never hangs; if no verdict lands in time we say so rather than claim
     success.
+
+    Two correctness requirements:
+
+    * **Freshness** — a hard-killed previous daemon can leave a stale
+      ``daemon_status.json`` behind. Status fields are only trusted once the
+      file has been (re)written by the freshly-started daemon, i.e. once its
+      ``updated_at`` is at or after the new daemon's ``started_at``.
+    * **Transient errors are non-final** — the daemon's first dial may fail
+      and record ``last_error`` before exponential-backoff reconnects ~1s
+      later. We therefore keep polling on a recorded error and only report
+      failure if the daemon is still not connected at the deadline.
     """
     deadline = time.time() + 8.0
     connected = False
     last_error = None
     while time.time() < deadline:
         status = daemon_status_fn(config)
-        if status.get("connected"):
-            connected = True
-            break
-        last_error = status.get("last_error")
-        if last_error:
-            break
+        started_at = status.get("started_at")
+        updated_at = status.get("updated_at")
+        # Ignore a status file that predates the current daemon: it is a
+        # leftover from a previous (possibly hard-killed) instance and its
+        # connection fields say nothing about this start.
+        is_fresh = (
+            updated_at is not None
+            and started_at is not None
+            and updated_at >= started_at
+        )
+        if is_fresh:
+            if status.get("connected"):
+                connected = True
+                break
+            # A recorded error is treated as transient: remember it for the
+            # final verdict but keep polling in case backoff reconnects.
+            last_error = status.get("last_error") or last_error
         time.sleep(0.3)
     if connected:
         render_text("Connection: connected to the central server.", title="Daemon")

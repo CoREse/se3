@@ -272,7 +272,7 @@
 - `spawner.py` — `DaemonSpawner`，以 `subprocess` 代为 spawn 新的 `se3 run --output-format json` 子进程（支持从远端发布新任务），管理其参数与环境；`SpawnedProcess` 记录
 - `aggregator.py` — `DaemonAggregator`，轮询 `se3/state/`、`se3/logs/`、`se3/calls/`、`se3/issues/` 并聚合为统一状态快照（`MachineStatus`）
 - `client.py` — `DaemonClient`，维持一条到中心服务器的出站 WebSocket 连接（daemon 主动拨入，对 NAT 友好），上报聚合状态、接收下发指令并路由到 supervisor / spawner；断线后按指数退避重连
-- `protocol.py` — daemon↔服务器 WebSocket 协议的单一来源：`PROTOCOL_VERSION`、消息类型常量（`MSG_HELLO` / `MSG_WELCOME` / `MSG_STATUS_UPDATE` / `MSG_SPAWN_FLOW` / `MSG_RESPOND_CALL` / `MSG_CALL_NOTIFICATION` / `MSG_PING` / `MSG_PONG`）与 `make_*` 消息构造器；同时被 daemon 与 `se3.server` 包 import，确保协议 schema 不漂移
+- `protocol.py` — daemon↔服务器 WebSocket 协议的单一来源：`PROTOCOL_VERSION`、`DEFAULT_SERVER_PORT`（中心服务器默认端口 `8080`，由 `se3-server` 的 `--port` 默认值与 daemon 客户端的 URL 端口补全共同引用）、消息类型常量（`MSG_HELLO` / `MSG_WELCOME` / `MSG_STATUS_UPDATE` / `MSG_SPAWN_FLOW` / `MSG_RESPOND_CALL` / `MSG_CALL_NOTIFICATION` / `MSG_PING` / `MSG_PONG`）与 `make_*` 消息构造器；同时被 daemon 与 `se3.server` 包 import，确保协议 schema 不漂移
 
 ### Requirement: Server Modules
 
