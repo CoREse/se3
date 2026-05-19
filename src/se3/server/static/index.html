@@ -57,21 +57,39 @@
     </div>
   </div>
 
-  <!-- Flow detail drawer -->
-  <div id="flow-detail" class="drawer hidden">
-    <div class="drawer-head">
-      <h3 id="detail-title">Flow</h3>
-      <button id="detail-close" type="button" class="icon-btn">&times;</button>
+  <!-- Running-flow chat view — a full-screen, history-parity layout: a
+       sidebar for Overview/Steps/Machine, a scrollable conversation as the
+       main body, prominent intervention items, and a docked reply box. -->
+  <div id="flow-view" class="flow-view hidden">
+    <div class="flow-view-head">
+      <h3 id="flow-view-title">Flow</h3>
+      <button id="flow-view-close" type="button" class="icon-btn">&times;</button>
     </div>
-    <div id="drawer-stale" class="stale-banner hidden">
+    <div id="flow-view-stale" class="stale-banner hidden">
       &#9888; 连接断开，数据可能陈旧
     </div>
-    <div id="detail-body" class="drawer-body"></div>
-    <div class="drawer-conversation">
-      <h4>Conversation</h4>
-      <div id="detail-conversation" class="history-detail">
-        <p class="empty">Select a flow to view its conversation.</p>
-      </div>
+    <div class="flow-view-body">
+      <aside class="flow-sidebar">
+        <div id="flow-sidebar-body" class="flow-sidebar-body">
+          <p class="empty">Loading flow details&hellip;</p>
+        </div>
+      </aside>
+      <section class="flow-main">
+        <div id="flow-conversation" class="history-detail flow-conversation">
+          <p class="empty">Select a flow to view its conversation.</p>
+        </div>
+        <div id="flow-interventions" class="flow-interventions"></div>
+        <form id="flow-reply-form" class="flow-reply">
+          <div id="flow-reply-context" class="flow-reply-context">
+            No pending interaction right now.
+          </div>
+          <div class="flow-reply-row">
+            <textarea id="flow-reply-input" rows="2" disabled
+                      placeholder="No pending interaction&hellip;"></textarea>
+            <button type="submit" id="flow-reply-submit" disabled>Send</button>
+          </div>
+        </form>
+      </section>
     </div>
   </div>
 
@@ -107,26 +125,6 @@
         <p id="nt-error" class="form-error hidden"></p>
         <div class="modal-actions">
           <button type="submit" id="nt-submit">Publish</button>
-        </div>
-      </form>
-    </div>
-  </div>
-
-  <!-- Interjection / call response modal -->
-  <div id="call-modal" class="modal hidden">
-    <div class="modal-card">
-      <div class="modal-head">
-        <h3>Respond to Flow</h3>
-        <button id="call-close" type="button" class="icon-btn">&times;</button>
-      </div>
-      <form id="call-form" class="modal-body">
-        <div id="call-info" class="call-info"></div>
-        <label for="call-response">Your response</label>
-        <textarea id="call-response" rows="4" required
-                  placeholder="Type your response&hellip;"></textarea>
-        <p id="call-error" class="form-error hidden"></p>
-        <div class="modal-actions">
-          <button type="submit" id="call-submit">Send response</button>
         </div>
       </form>
     </div>

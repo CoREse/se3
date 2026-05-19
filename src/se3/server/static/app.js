@@ -4,6 +4,12 @@
  * Connects to the central server's `/ws/ui` WebSocket for realtime machine /
  * flow state, renders the dashboard, and drives the REST API for flow detail,
  * task publishing, and interjection/call responses.
+ *
+ * A running flow opens in a full-screen chat view (`#flow-view`): a sidebar
+ * carries Overview / Steps / Machine, the conversation is the scrollable main
+ * body, every human-intervention point (pending MCP call, interjection, retry
+ * decision, CLI confirmation) is surfaced as a prominent intervention item,
+ * and a docked reply box is the single, always-present way to respond.
  */
 "use strict";
 
@@ -14,14 +20,18 @@
 const state = {
   machines: [],           // [{machine_id, hostname, online, flows: [...]}]
   selectedMachineId: null,
-  selectedFlowId: null,   // flow open in the detail drawer
+  selectedFlowId: null,   // flow open in the full-screen flow view
+  flowDetail: null,       // last fetched flow object (for the open flow view)
+  flowMachineId: null,    // machine id owning the open flow
+  flowConversationRecords: [],   // conversation records shown in the flow view
+  flowInterventions: [],  // intervention entries derived from pending_calls
+  flowReplyTargetId: null,// id of the intervention the reply box targets
   historySessions: [],    // [{flow_id, task_description, status, updated_at, ...}]
   selectedHistoryId: null,// flow whose records are shown in the history detail
   historyRecords: [],     // records currently rendered in the history detail
-  drawerConversationRecords: [], // conversation records shown in the flow drawer
   connStale: false,       // true while the WS is down — data may be stale
-  detailLoaded: false,    // true once the open drawer's flow detail has rendered
-  detailFetchFailures: 0, // consecutive /api/flows/{id} failures for the drawer
+  detailLoaded: false,    // true once the open flow's detail has rendered
+  detailFetchFailures: 0, // consecutive /api/flows/{id} failures for the view
 };
 
 let ws = null;
@@ -47,6 +57,14 @@ function statusClass(status) {
   return "unknown";
 }
 
+// A flow is "active" while it can still consume a human interaction — it is
+// either making progress (running/init/recovering) or parked awaiting one
+// (paused). Completed/failed flows are terminal and accept no further input.
+function isActiveFlow(flow) {
+  const s = String((flow && flow.status) || "").toLowerCase();
+  return ["running", "paused", "init", "recovering"].includes(s);
+}
+
 function findFlow(flowId) {
   for (const m of state.machines) {
     for (const f of m.flows || []) {
@@ -56,9 +74,12 @@ function findFlow(flowId) {
   return null;
 }
 
+function pendingCalls(flow) {
+  return flow && Array.isArray(flow.pending_calls) ? flow.pending_calls : [];
+}
+
 function hasPendingCall(flow) {
-  return Array.isArray(flow.pending_calls) &&
-    flow.pending_calls.some((c) => (c.kind || "call") === "call");
+  return pendingCalls(flow).length > 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,10 +116,10 @@ function setConnStatus(kind, label) {
 }
 
 // Toggle the "data may be stale" banners shown over the history view and the
-// flow detail drawer while the WebSocket connection is down.
+// running-flow view while the WebSocket connection is down.
 function setStale(stale) {
   state.connStale = !!stale;
-  for (const id of ["history-stale", "drawer-stale"]) {
+  for (const id of ["history-stale", "flow-view-stale"]) {
     const node = $(id);
     if (node) node.classList.toggle("hidden", !stale);
   }
@@ -124,7 +145,7 @@ function connect() {
         // Re-pull the conversation snapshot so records emitted during the
         // outage (whose `history_data` append deltas were never delivered)
         // are backfilled — mirroring the history view's re-fetch below.
-        loadDrawerConversation(state.selectedFlowId);
+        loadFlowConversation(state.selectedFlowId);
       }
       if (isHistoryOpen()) {
         fetchHistoryIndex();
@@ -188,12 +209,12 @@ function applyMachines(machines) {
   renderMachines();
   renderFlows();
 
-  // Refresh the detail drawer if its flow is still around.
+  // Refresh the open flow view if its flow is still around.
   if (state.selectedFlowId) {
     if (findFlow(state.selectedFlowId)) {
       refreshFlowDetail();
     } else {
-      closeDrawer();
+      closeFlowView();
     }
   }
 }
@@ -271,12 +292,9 @@ function renderFlowCard(flow) {
   head.append(task, badge);
 
   if (hasPendingCall(flow)) {
-    const callBadge = el("span", "badge badge-call", "⚠ needs response");
-    callBadge.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openCallModal(flow);
-    });
-    head.appendChild(callBadge);
+    // The badge is purely an indicator — opening the flow view (below) is the
+    // single entry point; there is no separate context-less call modal.
+    head.appendChild(el("span", "badge badge-call", "⚠ needs response"));
   }
 
   const bar = el("div", "progress");
@@ -293,51 +311,71 @@ function renderFlowCard(flow) {
   );
 
   card.append(head, bar, meta);
-  card.addEventListener("click", () => openDrawer(flow.flow_id));
+  card.addEventListener("click", () => openFlowView(flow.flow_id));
   return card;
 }
 
 // ---------------------------------------------------------------------------
-// Render: flow detail drawer
+// Running-flow chat view
 // ---------------------------------------------------------------------------
+//
+// A full-screen view (parity with the history view): the sidebar carries
+// Overview / Steps / Machine, the conversation is the scrollable main body,
+// intervention items are pinned above a docked reply box. There is no narrow
+// drawer and no context-less call modal — every interaction lives here.
 
 const STEP_ICONS = {
   completed: "✓", failed: "✗", running: "⟳",
   paused: "⏸", pending: "⏸", partial: "◐", retrying: "⟳",
 };
 
-function openDrawer(flowId) {
+function isFlowViewOpen() {
+  return !$("flow-view").classList.contains("hidden");
+}
+
+function openFlowView(flowId) {
   state.selectedFlowId = flowId;
-  state.drawerConversationRecords = [];
+  state.flowDetail = null;
+  state.flowMachineId = null;
+  state.flowConversationRecords = [];
+  state.flowInterventions = [];
+  state.flowReplyTargetId = null;
   state.detailLoaded = false;
   state.detailFetchFailures = 0;
-  $("flow-detail").classList.remove("hidden");
-  // Show a loading placeholder until the first detail fetch resolves, so the
-  // Overview/Steps area is never an unexplained blank panel.
-  renderDetailPlaceholder("Loading flow details…");
+
+  $("flow-view").classList.remove("hidden");
+  $("flow-view-title").textContent = "Flow";
+  renderSidebarPlaceholder("Loading flow details…");
+  $("flow-interventions").innerHTML = "";
+  resetReplyBox();
+
   refreshFlowDetail();
   // Fetch the flow's conversation snapshot; WS history_data deltas append live.
-  loadDrawerConversation(flowId);
-  // Poll the REST endpoint while the drawer is open (WS updates also refresh).
+  loadFlowConversation(flowId);
+  // Poll the REST endpoint while the view is open (WS updates also refresh).
   if (detailPollTimer) clearInterval(detailPollTimer);
   detailPollTimer = setInterval(refreshFlowDetail, 3000);
 }
 
-function closeDrawer() {
+function closeFlowView() {
   state.selectedFlowId = null;
-  state.drawerConversationRecords = [];
-  $("flow-detail").classList.add("hidden");
+  state.flowDetail = null;
+  state.flowMachineId = null;
+  state.flowConversationRecords = [];
+  state.flowInterventions = [];
+  state.flowReplyTargetId = null;
+  $("flow-view").classList.add("hidden");
   if (detailPollTimer) {
     clearInterval(detailPollTimer);
     detailPollTimer = null;
   }
 }
 
-// Fetch the initial conversation snapshot for a flow drawer. Mirrors the
+// Fetch the initial conversation snapshot for the open flow. Mirrors the
 // history view: a one-shot `/api/history/{flow_id}` pull, after which the WS
 // `history_data` push keeps an active flow's conversation up to date.
-async function loadDrawerConversation(flowId) {
-  const container = $("detail-conversation");
+async function loadFlowConversation(flowId) {
+  const container = $("flow-conversation");
   container.innerHTML = "";
   // Drop any reconciliation state left by a previously-open flow so a stray
   // append for this flow can't merge into the prior flow's detached sections.
@@ -356,14 +394,12 @@ async function loadDrawerConversation(flowId) {
     const data = await resp.json();
     if (state.selectedFlowId !== flowId) return;
     // Merge the snapshot with whatever is already in the array: `history_data`
-    // appends that arrived during the await (and, on a reconnect re-fetch, any
-    // records carried over from before). The snapshot is authoritative, but any
-    // record not present in it is preserved rather than discarded.
+    // appends that arrived during the await, plus any locally-spliced replies.
     const snapshot = Array.isArray(data.records) ? data.records : [];
-    state.drawerConversationRecords = mergeSnapshotWithLiveAppends(
-      snapshot, state.drawerConversationRecords);
-    renderConversation(container, state.drawerConversationRecords);
-    scrollDrawerConversationToBottom();
+    state.flowConversationRecords = mergeSnapshotWithLiveAppends(
+      snapshot, state.flowConversationRecords);
+    renderConversation(container, state.flowConversationRecords);
+    scrollFlowConversationToBottom();
   } catch (_) {
     if (state.selectedFlowId !== flowId) return;
     container.innerHTML = "";
@@ -371,27 +407,27 @@ async function loadDrawerConversation(flowId) {
   }
 }
 
-function scrollDrawerConversationToBottom() {
-  const c = $("detail-conversation");
+function scrollFlowConversationToBottom() {
+  const c = $("flow-conversation");
   c.scrollTop = c.scrollHeight;
 }
 
-// Render a single-message placeholder into the drawer's Overview/Steps body.
-function renderDetailPlaceholder(message) {
-  const body = $("detail-body");
+// Render a single-message placeholder into the flow view's sidebar.
+function renderSidebarPlaceholder(message) {
+  const body = $("flow-sidebar-body");
   body.innerHTML = "";
   body.appendChild(el("p", "empty", message));
 }
 
 // Record a failed detail fetch. While the flow has never loaded, surface an
-// explicit error in the Overview/Steps body once retries keep failing — rather
-// than leaving a permanently blank panel. A previously-rendered detail view is
-// left intact on a transient blip; the 3s poll will refresh it.
+// explicit error in the sidebar once retries keep failing — rather than
+// leaving a permanently blank panel. A previously-rendered sidebar is left
+// intact on a transient blip; the 3s poll will refresh it.
 function noteDetailFetchFailure(message) {
   state.detailFetchFailures += 1;
   if (state.detailLoaded) return;
   if (state.detailFetchFailures >= 2) {
-    renderDetailPlaceholder(message + " Retrying…");
+    renderSidebarPlaceholder(message + " Retrying…");
   }
 }
 
@@ -413,31 +449,36 @@ async function refreshFlowDetail() {
     }
     state.detailFetchFailures = 0;
     state.detailLoaded = true;
-    renderFlowDetail(data.flow, data.machine_id);
+    state.flowDetail = data.flow;
+    state.flowMachineId = data.machine_id || null;
+    renderFlowSidebar(data.flow, data.machine_id);
+    renderInterventions(data.flow);
   } catch (_) {
     if (state.selectedFlowId !== flowId) return;
     noteDetailFetchFailure("Network error loading flow details.");
   }
 }
 
-function renderFlowDetail(flow, machineId) {
-  $("detail-title").textContent =
+// Render the sidebar: Overview, Steps, and Machine. Rebuilt wholesale on each
+// 3s poll — the panel is small, so a full rebuild does not visibly flicker.
+function renderFlowSidebar(flow, machineId) {
+  $("flow-view-title").textContent =
     flow.task_description || flow.flow_id || "Flow";
 
-  const body = $("detail-body");
+  const body = $("flow-sidebar-body");
   body.innerHTML = "";
 
-  // -- overview --
-  const overview = el("div", "detail-section");
-  overview.appendChild(el("h4", null, "Overview"));
   const kv = (k, v) => {
     const row = el("div", "kv");
     row.append(el("span", "k", k), el("span", "v", String(v)));
     return row;
   };
   const sc = statusClass(flow.status);
+
+  // -- overview --
+  const overview = el("div", "detail-section");
+  overview.appendChild(el("h4", null, "Overview"));
   overview.appendChild(kv("Status", flow.status || "unknown"));
-  overview.appendChild(kv("Machine", machineId || "-"));
   overview.appendChild(kv("Type", flow.task_type || "-"));
   overview.appendChild(kv(
     "Progress",
@@ -445,18 +486,8 @@ function renderFlowDetail(flow, machineId) {
     `(${Math.round((flow.progress || 0) * 100)}%)`,
   ));
   if (flow.current_step) overview.appendChild(kv("Current step", flow.current_step));
-  if (flow.updated_at) overview.appendChild(kv("Updated", flow.updated_at));
+  if (flow.updated_at) overview.appendChild(kv("Updated", formatTime(flow.updated_at)));
   body.appendChild(overview);
-
-  // -- pending call --
-  if (hasPendingCall(flow)) {
-    const callSec = el("div", "detail-section");
-    callSec.appendChild(el("h4", null, "Action required"));
-    const respondBtn = el("button", null, "Respond to pending call");
-    respondBtn.addEventListener("click", () => openCallModal(flow));
-    callSec.appendChild(respondBtn);
-    body.appendChild(callSec);
-  }
 
   // -- steps --
   const steps = Array.isArray(flow.step_history) ? flow.step_history : [];
@@ -489,10 +520,345 @@ function renderFlowDetail(flow, machineId) {
   }
   body.appendChild(stepSec);
 
-  // The flow's turn-by-turn conversation is rendered into the dedicated
-  // `#detail-conversation` region (a sibling of `#detail-body`), not here —
-  // that region survives the 3s detail poll and is fed by loadDrawerConversation
-  // plus live `history_data` WS deltas, replacing the old single summary box.
+  // -- machine --
+  const machineSec = el("div", "detail-section");
+  machineSec.appendChild(el("h4", null, "Machine"));
+  machineSec.appendChild(kv("Machine", machineId || "-"));
+  if (flow.flow_id) machineSec.appendChild(kv("Flow id", flow.flow_id));
+  body.appendChild(machineSec);
+}
+
+// ---------------------------------------------------------------------------
+// Intervention items
+// ---------------------------------------------------------------------------
+//
+// Every point at which a running flow needs a human is collapsed onto the same
+// carrier — a `pending_calls` entry tagged with a `kind`. The four kinds plus
+// a frontend-initiated interjection are rendered as prominent, default-
+// expanded intervention items that never blend into ordinary conversation
+// bubbles. The docked reply box targets exactly one of them at a time.
+
+const KIND_META = {
+  call: {
+    label: "MCP call",
+    hint: "A pending MCP call is awaiting your response.",
+    icon: "⚙",
+  },
+  interjection: {
+    label: "Interjection",
+    hint: "Send an additional instruction into the running flow.",
+    icon: "✎",
+  },
+  retry_decision: {
+    label: "Retry decision",
+    hint: "A step failed — reply with how to proceed (e.g. retry / skip / abort).",
+    icon: "↻",
+  },
+  cli_confirm: {
+    label: "CLI confirmation",
+    hint: "The CLI subprocess is waiting for a confirmation.",
+    icon: "⌨",
+  },
+};
+
+// Canonicalize a raw `kind` field; unknown kinds degrade to a plain "call".
+function normalizeKind(kind) {
+  const k = String(kind || "call").toLowerCase();
+  return KIND_META[k] ? k : "call";
+}
+
+// Derive the ordered list of intervention entries for a flow. Each pending
+// call becomes one entry; for an active flow with no interjection already
+// pending, a synthetic interjection entry is always appended so the chat box
+// can be used to interject at any time. Pure: depends only on `flow`.
+function computeInterventions(flow) {
+  const entries = pendingCalls(flow).map((c, i) => {
+    const kind = normalizeKind(c.kind);
+    return {
+      id: "call:" + (c.call_id || ("idx" + i)),
+      kind: kind,
+      callId: String(c.call_id || ""),
+      prompt: String(c.prompt || c.message || ""),
+      context: c.context != null ? c.context : null,
+      options: Array.isArray(c.options) ? c.options : [],
+      synthetic: false,
+    };
+  });
+  const hasInterjection = entries.some((e) => e.kind === "interjection");
+  if (isActiveFlow(flow) && !hasInterjection) {
+    entries.push({
+      id: "interjection:new",
+      kind: "interjection",
+      callId: "",
+      prompt: "",
+      context: null,
+      options: [],
+      synthetic: true,
+    });
+  }
+  return entries;
+}
+
+// Rebuild the intervention region and re-sync the reply box. Called from the
+// 3s detail poll; selection (`flowReplyTargetId`) and the typed-but-unsent
+// reply text are deliberately preserved across rebuilds.
+function renderInterventions(flow) {
+  const region = $("flow-interventions");
+  region.innerHTML = "";
+  const entries = computeInterventions(flow);
+  state.flowInterventions = entries;
+
+  // Keep the prior selection if it still exists; otherwise prefer the first
+  // real pending call (a call needing an answer) over the synthetic
+  // interjection, falling back to whatever is first.
+  if (!entries.some((e) => e.id === state.flowReplyTargetId)) {
+    const firstCall = entries.find((e) => !e.synthetic);
+    state.flowReplyTargetId = (firstCall || entries[0] || {}).id || null;
+  }
+
+  for (const entry of entries) {
+    region.appendChild(renderInterventionItem(entry));
+  }
+  updateReplyBox(flow);
+}
+
+// Render one intervention entry as a prominent, default-expanded card. The
+// card body shows the kind, prompt, optional context, and any options. The
+// whole card is a click target that selects it as the reply box's target.
+function renderInterventionItem(entry) {
+  const meta = KIND_META[entry.kind] || KIND_META.call;
+  const card = el("div", "intervention kind-" + entry.kind);
+  if (entry.id === state.flowReplyTargetId) card.classList.add("selected");
+
+  const head = el("div", "intervention-head");
+  head.append(
+    el("span", "intervention-icon", meta.icon),
+    el("span", "intervention-kind", meta.label),
+  );
+  if (entry.callId) {
+    const cid = el("span", "intervention-callid", entry.callId);
+    cid.title = "call id: " + entry.callId;
+    head.appendChild(cid);
+  }
+  card.appendChild(head);
+
+  if (entry.prompt) {
+    const prompt = el("div", "intervention-prompt");
+    prompt.appendChild(renderMarkdown(entry.prompt));
+    card.appendChild(prompt);
+  } else {
+    card.appendChild(el("div", "intervention-hint", meta.hint));
+  }
+
+  if (entry.context != null && entry.context !== "") {
+    const ctx = el("div", "intervention-context");
+    ctx.append(
+      el("span", "intervention-context-label", "context"),
+      el("pre", "intervention-context-body",
+        typeof entry.context === "string"
+          ? entry.context
+          : safeStringify(entry.context)),
+    );
+    card.appendChild(ctx);
+  }
+
+  if (entry.options.length) {
+    const opts = el("div", "intervention-options");
+    for (const opt of entry.options) {
+      const optText = optionText(opt);
+      const btn = el("button", "intervention-option", optionLabel(opt));
+      btn.type = "button";
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        // An option is a one-click reply: select this entry and send it.
+        state.flowReplyTargetId = entry.id;
+        sendReply(state.selectedFlowId, entry, optText);
+      });
+      opts.appendChild(btn);
+    }
+    card.appendChild(opts);
+  }
+
+  // Clicking anywhere on the card (outside an option button) targets it.
+  card.addEventListener("click", () => {
+    if (state.flowReplyTargetId === entry.id) return;
+    state.flowReplyTargetId = entry.id;
+    if (state.flowDetail) renderInterventions(state.flowDetail);
+    $("flow-reply-input").focus();
+  });
+
+  return card;
+}
+
+// An option may be a plain string or `{label, value}`; resolve both shapes.
+function optionLabel(opt) {
+  if (opt && typeof opt === "object") {
+    return String(opt.label != null ? opt.label : (opt.value != null ? opt.value : ""));
+  }
+  return String(opt);
+}
+function optionText(opt) {
+  if (opt && typeof opt === "object") {
+    return String(opt.value != null ? opt.value : (opt.label != null ? opt.label : ""));
+  }
+  return String(opt);
+}
+
+function safeStringify(value) {
+  try { return JSON.stringify(value, null, 2); }
+  catch (_) { return String(value); }
+}
+
+// Sync the docked reply box to the current intervention selection: enable it
+// and label its target when there is a pending interaction, disable it with an
+// explanatory line when there is none.
+function updateReplyBox(flow) {
+  const entries = state.flowInterventions || [];
+  const input = $("flow-reply-input");
+  const submit = $("flow-reply-submit");
+  const ctx = $("flow-reply-context");
+
+  if (!entries.length) {
+    input.disabled = true;
+    submit.disabled = true;
+    input.placeholder = "No pending interaction…";
+    ctx.textContent = isActiveFlow(flow)
+      ? "No pending interaction right now — nothing to respond to."
+      : "This flow has ended — no further interaction is possible.";
+    ctx.className = "flow-reply-context";
+    return;
+  }
+
+  let target = entries.find((e) => e.id === state.flowReplyTargetId);
+  if (!target) {
+    target = entries[0];
+    state.flowReplyTargetId = target.id;
+  }
+  const meta = KIND_META[target.kind] || KIND_META.call;
+
+  input.disabled = false;
+  submit.disabled = false;
+  input.placeholder = target.kind === "interjection"
+    ? "Type an instruction to interject into this running flow…"
+    : "Type your response to this call…";
+
+  ctx.className = "flow-reply-context active";
+  ctx.innerHTML = "";
+  ctx.append(
+    el("span", "flow-reply-to", "Replying to"),
+    el("span", "flow-reply-kind kind-" + target.kind, meta.label),
+  );
+  const where = target.callId
+    ? ` · call ${target.callId}`
+    : (target.kind === "interjection" ? " · running flow" : "");
+  if (where) ctx.appendChild(el("span", "flow-reply-where", where));
+  if (target.prompt) {
+    ctx.appendChild(el("span", "flow-reply-preview",
+      " — " + truncate(target.prompt, 120)));
+  }
+}
+
+function resetReplyBox() {
+  const input = $("flow-reply-input");
+  input.value = "";
+  input.disabled = true;
+  $("flow-reply-submit").disabled = true;
+  const ctx = $("flow-reply-context");
+  ctx.className = "flow-reply-context";
+  ctx.textContent = "No pending interaction right now.";
+}
+
+function truncate(text, max) {
+  const s = String(text || "").replace(/\s+/g, " ").trim();
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
+// ---------------------------------------------------------------------------
+// Reply submission
+// ---------------------------------------------------------------------------
+//
+// One docked box, two destinations. A reply to a call / retry_decision /
+// cli_confirm entry POSTs to `/respond` keyed by `call_id`; an interjection
+// POSTs to `/interject`. On success the reply is spliced into the conversation
+// in place so the operator sees it without waiting for a refresh.
+
+function submitReply(event) {
+  event.preventDefault();
+  const entries = state.flowInterventions || [];
+  const target = entries.find((e) => e.id === state.flowReplyTargetId);
+  if (!state.selectedFlowId || !target) {
+    showToast("error", "No interaction is selected to respond to.");
+    return;
+  }
+  const input = $("flow-reply-input");
+  const text = input.value.trim();
+  if (!text) {
+    showToast("error", "Response must not be empty.");
+    return;
+  }
+  sendReply(state.selectedFlowId, target, text);
+}
+
+async function sendReply(flowId, target, text) {
+  if (!flowId || !target || !text) return;
+  const submit = $("flow-reply-submit");
+  submit.disabled = true;
+  try {
+    let resp;
+    if (target.kind === "interjection") {
+      resp = await fetch(`/api/flows/${encodeURIComponent(flowId)}/interject`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: text }),
+      });
+    } else {
+      resp = await fetch(`/api/flows/${encodeURIComponent(flowId)}/respond`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ response: text, call_id: target.callId }),
+      });
+    }
+    if (resp.ok) {
+      if (state.selectedFlowId === flowId) $("flow-reply-input").value = "";
+      appendLocalReply(flowId, target, text);
+      showToast("success", target.kind === "interjection"
+        ? "Interjection sent."
+        : "Response sent.");
+    } else {
+      const detail = await resp.json().catch(() => ({}));
+      const message = detail.detail || `Server returned ${resp.status}.`;
+      showToast("error", `Could not send: ${message}`);
+    }
+  } catch (_) {
+    showToast("error", "Could not send — network error reaching the server.");
+  } finally {
+    // Re-enable per the live intervention state — the box may now have no
+    // pending target (e.g. the call was answered) and should stay disabled.
+    if (state.selectedFlowId === flowId && state.flowDetail) {
+      updateReplyBox(state.flowDetail);
+    } else {
+      submit.disabled = false;
+    }
+  }
+}
+
+// Splice a just-sent reply into the conversation as its own record so it is
+// visible immediately, without waiting for the next `history_data` push.
+function appendLocalReply(flowId, target, text) {
+  if (state.selectedFlowId !== flowId) return;
+  const meta = KIND_META[target.kind] || KIND_META.call;
+  const record = {
+    step_id: "interaction",
+    message: {
+      role: "user",
+      content: text,
+      timestamp: Date.now(),
+      step_type: meta.label + " response",
+    },
+  };
+  state.flowConversationRecords = state.flowConversationRecords.concat([record]);
+  renderConversation($("flow-conversation"), state.flowConversationRecords, true);
+  scrollFlowConversationToBottom();
 }
 
 // ---------------------------------------------------------------------------
@@ -542,8 +908,8 @@ function applyHistoryIndex(sessions) {
 }
 
 // Push handler: incremental (or full) records for one flow. The same flow may
-// be open in both the history view and the drawer; each keeps its own record
-// array so they update independently without double-appending each other.
+// be open in both the history view and the running-flow view; each keeps its
+// own record array so they update independently without double-appending.
 function applyHistoryData(msg) {
   const records = Array.isArray(msg.records) ? msg.records : [];
   const append = msg.mode === "append";
@@ -560,15 +926,15 @@ function applyHistoryData(msg) {
     if (stick) scrollHistoryToBottom();
   }
 
-  // -- running-flow drawer consumer --
+  // -- running-flow view consumer --
   if (state.selectedFlowId === msg.flow_id) {
-    const stick = !append || isNearBottom($("detail-conversation"));
-    state.drawerConversationRecords = append
-      ? state.drawerConversationRecords.concat(records)
+    const stick = !append || isNearBottom($("flow-conversation"));
+    state.flowConversationRecords = append
+      ? state.flowConversationRecords.concat(records)
       : records;
     renderConversation(
-      $("detail-conversation"), state.drawerConversationRecords, append);
-    if (stick) scrollDrawerConversationToBottom();
+      $("flow-conversation"), state.flowConversationRecords, append);
+    if (stick) scrollFlowConversationToBottom();
   }
 }
 
@@ -756,7 +1122,7 @@ function recordKey(rec) {
   return [
     n.stepId, n.role, String(n.timestamp), String(n.attempt),
     content.length, content.slice(0, 96),
-  ].join("");
+  ].join("");
 }
 
 // Merge a freshly-fetched snapshot with append records that arrived during the
@@ -779,6 +1145,32 @@ function tsValue(ts) {
 }
 
 // ---------------------------------------------------------------------------
+// Record classification (pure, role-based)
+// ---------------------------------------------------------------------------
+//
+// Folding is decided *only* from the structured `role` field — never by
+// guessing from text — so the call is deterministic and never misfires.
+// `user` / `system` are template-style prompt messages: they default to a
+// collapsed one-line chip. `assistant` (the real product) and anything else
+// default to an expanded bubble. `human` is already folded into `user` by
+// `normalizeRecord`, so it lands in the collapsible set too.
+
+const COLLAPSIBLE_ROLES = ["user", "system"];
+
+// True when a record's role marks it as a template-style prompt message that
+// should default to a collapsed chip rather than an expanded bubble.
+function isCollapsibleRole(role) {
+  return COLLAPSIBLE_ROLES.includes(String(role || "").toLowerCase());
+}
+
+// One-line label for a collapsed chip, e.g. "system prompt · discovery".
+function chipLabel(norm) {
+  const role = String((norm && norm.role) || "message");
+  const ctx = (norm && (norm.stepType || norm.stepId)) || "";
+  return ctx ? `${role} prompt · ${ctx}` : `${role} prompt`;
+}
+
+// ---------------------------------------------------------------------------
 // History records rendering
 // ---------------------------------------------------------------------------
 //
@@ -790,14 +1182,14 @@ function stepKey(norm) {
 
 // Render a flat list of raw records into `container` as a CLI-style, step-
 // grouped conversation. Shared verbatim by the history view and the running-
-// flow drawer so both present identical grouping / bubbles / folding.
+// flow view so both present identical grouping / bubbles / folding.
 //
 // Incremental updates: an active flow streams `history_data` appends every LLM
 // turn. A full rebuild on each append would recreate every `makeFoldable` /
-// `makeRawToggle` in its default collapsed state, collapsing a 130KB record the
-// reader had just expanded. So when `append` is set, only the new tail records
-// are built and inserted into the existing DOM — bubbles already on screen (and
-// any folds / raw panels the reader opened) are left untouched.
+// `makeRawToggle` / chip in its default collapsed state, collapsing a record
+// the reader had just expanded. So when `append` is set, only the new tail
+// records are built and inserted into the existing DOM — bubbles already on
+// screen (and any folds / chips / raw panels the reader opened) are untouched.
 //
 // Per-container reconciliation state lives on `container.__convState`:
 //   { count: number of raw records already rendered,
@@ -874,8 +1266,8 @@ function renderHistoryRecords(flowId, records, append) {
 // Conversation rendering engine
 // ---------------------------------------------------------------------------
 //
-// A self-contained renderer shared by the history view and (G3) the running
-// flow drawer. Three layers:
+// A self-contained renderer shared by the history view and the running flow
+// view. Three layers:
 //   renderMarkdown(text)      — lightweight Markdown → DOM (no dependencies)
 //   renderToolMarkers(text)   — split inline [Tool: …] markers into own blocks
 //   renderConversationRecord  — a role-tagged bubble around the above
@@ -1180,14 +1572,83 @@ function makeRawToggle(norm) {
 // --- record bubble ---------------------------------------------------------
 
 // Render a single normalized record as a role-tagged conversation bubble.
-// assistant bodies flow through tool-marker + Markdown rendering; user/system
-// bodies are shown as literal whitespace-preserving text. Long bodies fold by
-// default, and each record gets a "view raw" toggle.
+//
+// Classification is strictly role-based (see `isCollapsibleRole`): `user` /
+// `system` template-style prompts default to a collapsed one-line chip — their
+// content is not deleted, just not shown until clicked — while `assistant` (and
+// anything else) renders as an expanded bubble. assistant bodies flow through
+// tool-marker + Markdown rendering; user/system bodies stay literal,
+// whitespace-preserving text. Long bodies still fold by default.
 function renderConversationRecord(norm) {
   const known = ["user", "assistant", "system"].includes(norm.role);
   const role = known ? norm.role : "other";
   const row = el("div", "history-record conv-record role-" + role);
 
+  const content = typeof norm.content === "string" ? norm.content : "";
+
+  // Build the inner bubble lazily so a collapsed chip pays nothing until the
+  // reader expands it.
+  const buildBubble = () => {
+    const bubble = el("div", "conv-bubble");
+    if (!content) {
+      bubble.appendChild(
+        el("p", "md-p conv-empty", "(no readable content for this record)"));
+    } else if (role === "assistant") {
+      // assistant: tool-marker split + Markdown, rebuilt lazily on expand.
+      const buildFull = () => {
+        const frag = document.createDocumentFragment();
+        for (const node of renderToolMarkers(content)) frag.appendChild(node);
+        return frag;
+      };
+      bubble.appendChild(makeFoldable(buildFull, content));
+    } else {
+      // user / system / other: literal text — these are large structured
+      // prompts whose exact whitespace matters; do not Markdown-mangle them.
+      const buildFull = () => el("pre", "conv-plain", content);
+      bubble.appendChild(makeFoldable(buildFull, content));
+    }
+    return bubble;
+  };
+
+  if (isCollapsibleRole(norm.role)) {
+    // Template-style prompt: collapse to a one-line chip by default. The chip
+    // header carries the role/step label; clicking expands the full record
+    // (head + bubble + raw toggle) and clicking again collapses it. Content is
+    // never removed — only hidden.
+    const wrap = el("div", "msg-chip-wrap collapsed");
+    const label = chipLabel(norm);
+    const chip = el("button", "msg-chip", "▸ " + label);
+    chip.type = "button";
+    const detail = el("div", "msg-chip-detail");
+    let built = false;
+    let expanded = false;
+    chip.addEventListener("click", () => {
+      expanded = !expanded;
+      if (expanded && !built) {
+        detail.appendChild(renderRecordHead(norm));
+        detail.appendChild(buildBubble());
+        const rawToggle = makeRawToggle(norm);
+        if (rawToggle) detail.appendChild(rawToggle);
+        built = true;
+      }
+      wrap.classList.toggle("collapsed", !expanded);
+      chip.textContent = (expanded ? "▾ " : "▸ ") + label;
+    });
+    wrap.append(chip, detail);
+    row.appendChild(wrap);
+    return row;
+  }
+
+  // assistant / other: expanded by default.
+  row.appendChild(renderRecordHead(norm));
+  row.appendChild(buildBubble());
+  const rawToggle = makeRawToggle(norm);
+  if (rawToggle) row.appendChild(rawToggle);
+  return row;
+}
+
+// Build the role / attempt / timestamp header line for one record.
+function renderRecordHead(norm) {
   const head = el("div", "history-record-head");
   head.appendChild(el("span", "record-role", norm.role));
   const right = el("div", "record-head-right");
@@ -1198,33 +1659,7 @@ function renderConversationRecord(norm) {
     right.appendChild(el("span", "record-time", formatTime(norm.timestamp)));
   }
   head.appendChild(right);
-  row.appendChild(head);
-
-  const bubble = el("div", "conv-bubble");
-  const content = typeof norm.content === "string" ? norm.content : "";
-  if (!content) {
-    bubble.appendChild(
-      el("p", "md-p conv-empty", "(no readable content for this record)"));
-  } else if (role === "assistant") {
-    // assistant: tool-marker split + Markdown, rebuilt lazily on expand.
-    const buildFull = () => {
-      const frag = document.createDocumentFragment();
-      for (const node of renderToolMarkers(content)) frag.appendChild(node);
-      return frag;
-    };
-    bubble.appendChild(makeFoldable(buildFull, content));
-  } else {
-    // user / system: literal text — these are large structured prompts whose
-    // exact whitespace matters; do not Markdown-mangle them.
-    const buildFull = () => el("pre", "conv-plain", content);
-    bubble.appendChild(makeFoldable(buildFull, content));
-  }
-  row.appendChild(bubble);
-
-  const rawToggle = makeRawToggle(norm);
-  if (rawToggle) row.appendChild(rawToggle);
-
-  return row;
+  return head;
 }
 
 // #history-detail is a flex column with no overflow — it never scrolls.
@@ -1311,78 +1746,6 @@ async function submitNewTask(event) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Interjection / call response
-// ---------------------------------------------------------------------------
-
-let activeCall = null;  // { flowId, callId }
-
-function openCallModal(flow) {
-  const pending = (flow.pending_calls || []).filter(
-    (c) => (c.kind || "call") === "call",
-  );
-  const call = pending[0] || {};
-  activeCall = { flowId: flow.flow_id, callId: call.call_id || "" };
-
-  const info = $("call-info");
-  info.innerHTML = "";
-  info.append(
-    el("div", null, `Flow: ${flow.task_description || flow.flow_id}`),
-    el("div", null, `Call: ${call.call_id || "(unnamed)"}`),
-    el("div", null, `Type: ${call.kind || "call"} — human confirmation needed`),
-  );
-
-  $("call-response").value = "";
-  $("call-error").classList.add("hidden");
-  $("call-submit").disabled = false;
-  $("call-modal").classList.remove("hidden");
-}
-
-function closeCallModal() {
-  activeCall = null;
-  $("call-modal").classList.add("hidden");
-}
-
-async function submitCall(event) {
-  event.preventDefault();
-  if (!activeCall) return;
-  const errBox = $("call-error");
-  errBox.classList.add("hidden");
-
-  const response = $("call-response").value.trim();
-  if (!response) return showFormError(errBox, "Response must not be empty.");
-
-  const submit = $("call-submit");
-  submit.disabled = true;
-  try {
-    const resp = await fetch(
-      `/api/flows/${encodeURIComponent(activeCall.flowId)}/respond`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          response: response,
-          call_id: activeCall.callId,
-        }),
-      },
-    );
-    if (resp.ok) {
-      closeCallModal();
-      showToast("success", "Response sent.");
-    } else {
-      const detail = await resp.json().catch(() => ({}));
-      const message = detail.detail || `Server returned ${resp.status}.`;
-      showFormError(errBox, message);
-      showToast("error", `Could not send response: ${message}`);
-      submit.disabled = false;
-    }
-  } catch (err) {
-    showFormError(errBox, "Network error — could not reach the server.");
-    showToast("error", "Could not send response — network error.");
-    submit.disabled = false;
-  }
-}
-
 function showFormError(node, message) {
   node.textContent = message;
   node.classList.remove("hidden");
@@ -1397,22 +1760,43 @@ function init() {
   $("new-task-close").addEventListener("click", closeNewTask);
   $("new-task-form").addEventListener("submit", submitNewTask);
 
-  $("detail-close").addEventListener("click", closeDrawer);
+  $("flow-view-close").addEventListener("click", closeFlowView);
 
   $("history-btn").addEventListener("click", openHistory);
   $("history-close").addEventListener("click", closeHistory);
 
-  $("call-close").addEventListener("click", closeCallModal);
-  $("call-form").addEventListener("submit", submitCall);
+  $("flow-reply-form").addEventListener("submit", submitReply);
+  // Ctrl/Cmd+Enter submits the reply box without leaving the textarea.
+  $("flow-reply-input").addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault();
+      $("flow-reply-form").requestSubmit();
+    }
+  });
 
   // Click the modal backdrop to dismiss.
-  for (const id of ["new-task-modal", "call-modal"]) {
-    $(id).addEventListener("click", (e) => {
-      if (e.target.id === id) $(id).classList.add("hidden");
-    });
-  }
+  $("new-task-modal").addEventListener("click", (e) => {
+    if (e.target.id === "new-task-modal") closeNewTask();
+  });
 
   connect();
 }
 
-document.addEventListener("DOMContentLoaded", init);
+if (typeof document !== "undefined") {
+  document.addEventListener("DOMContentLoaded", init);
+}
+
+// Expose the pure, DOM-free helpers for lightweight Node assertion tests.
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    isCollapsibleRole,
+    chipLabel,
+    normalizeKind,
+    computeInterventions,
+    normalizeRecord,
+    isActiveFlow,
+    truncate,
+    optionLabel,
+    optionText,
+  };
+}
