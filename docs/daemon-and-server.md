@@ -74,9 +74,9 @@ se3 daemon status --json                  # Emit the status as JSON
 
 | Subcommand | Options | Behavior |
 |------------|---------|----------|
-| `start` | `--server-url <url>`, `--foreground` | Starts the daemon. By default it is launched as a **detached background process**; `--foreground` runs it in the current terminal instead. `--server-url` records the central-server URL the daemon dials out to. If a daemon is already running, the command reports it and exits non-zero. |
+| `start` | `--server-url <url>`, `--foreground` | Starts the daemon. By default it is launched as a **detached background process**; `--foreground` runs it in the current terminal instead. `--server-url` records the central-server URL the daemon dials out to — a port may be given explicitly (`ws://host:9000`), and when omitted it is completed to the default server port **8080** (matching the `se3-server` default). If a daemon is already running, the command reports it and exits non-zero. |
 | `stop` | — | Stops the running daemon (sends `SIGTERM` and waits for it to exit). Reports `not running` and exits `0` when none is up; reports a stop timeout with a non-zero exit if the process does not exit within the grace period. |
-| `status` | `--json`, `-j` | Reports whether the daemon is running, its pid, machine id, configured server URL, and the list of tracked flows. `--json` emits the same information as JSON instead of a rendered panel. |
+| `status` | `--json`, `-j` | Reports whether the daemon is running, its pid, machine id, configured server URL, the **real outbound-connection state** (see below), and the list of tracked flows. `--json` emits the same information as JSON instead of a rendered panel. |
 
 ### The `se3-server` command
 
@@ -157,6 +157,22 @@ call-response instructions back down the same socket.
 A daemon started **without** `--server-url` skips all of this — it opens no
 outbound connection and just supervises and aggregates flows locally.
 
+**Port handling.** The `--server-url` value may carry an explicit port
+(`ws://host:9000`). When the port is omitted (`ws://host`), the daemon
+completes the URL to the **default server port 8080** instead of letting the
+WebSocket scheme fall back to its implicit port 80. `8080` is the same default
+`se3-server` binds to, so a daemon started with `ws://host` and a server
+started with no `--port` flag agree out of the box; defining the default in a
+single shared constant keeps the two ends aligned.
+
+**Seeing the real connection state.** Connecting to a server is best-effort:
+if the `se3[server]` extra is missing or the dial fails, the daemon logs the
+reason and degrades to local-only operation instead of crashing. Because
+`--server-url` only *records* a URL, it is not proof the daemon actually
+connected — always confirm with `se3 daemon status` (see
+[the status / runtime files](#runtime-files-pidfile-and-status-file) below),
+which reports the true outbound-connection state.
+
 ### Foreground vs. background (detached) mode
 
 `se3 daemon start` supports two modes:
@@ -183,11 +199,30 @@ or for running isolated daemons side by side):
 | File | Purpose |
 |------|---------|
 | `~/.se3/daemon.pid` | Pidfile. Holds the daemon's pid, start time, server URL, and machine id. Guards against duplicate starts and is the source of truth for `stop` / `status`. Removed on clean shutdown. |
-| `~/.se3/daemon_status.json` | Latest aggregated status snapshot, rewritten on every poll. This is what `se3 daemon status` reads to list tracked flows without contacting the daemon process. Removed on clean shutdown. |
-| `~/.se3/daemon.log` | Log output of a detached (background) daemon — its stdout and stderr are redirected here. |
+| `~/.se3/daemon_status.json` | Latest aggregated status snapshot, rewritten on every poll. This is what `se3 daemon status` reads to list tracked flows without contacting the daemon process. It also carries the **real outbound-connection state** — see below. Removed on clean shutdown. |
+| `~/.se3/daemon.log` | Log output of a detached (background) daemon — its stdout and stderr are redirected here. Every line is timestamped, so logs from different daemon starts can be told apart. |
 
 Both the pidfile and the status file are written atomically (temp file +
 rename) so a crash mid-write cannot corrupt them.
+
+#### Connection state in `status`
+
+`daemon_status.json` records the daemon's **actual** outbound-connection
+result, not just the configured URL, and `se3 daemon status` surfaces it on a
+dedicated `Connection:` line:
+
+- `Connection: local-only (no server configured)` — started without
+  `--server-url`.
+- `Connection: connected` — the outbound WebSocket to the server is up.
+- `Connection: not connected (<reason>)` — a `--server-url` was given but the
+  daemon is not connected; the reason is shown verbatim, e.g.
+  `websockets not installed` (the `se3[server]` extra is missing) or the dial
+  error. This is the case where the machine will *not* appear in the server's
+  machine list even though `se3 daemon start` reported success.
+
+So a configured `Server:` URL plus a `Connection: not connected` line is the
+signature of a silent degrade — the fix is usually `pip install 'se3[server]'`
+or correcting the URL/port.
 
 ### Flow discovery and supervision
 

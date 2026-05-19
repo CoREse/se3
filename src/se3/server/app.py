@@ -187,7 +187,12 @@ def create_app() -> FastAPI:
     return app
 
 
-def run(host: str = "127.0.0.1", port: int = 8080, *, log_level: str = "info") -> None:
+def run(
+    host: str = "127.0.0.1",
+    port: int = protocol.DEFAULT_SERVER_PORT,
+    *,
+    log_level: str = "info",
+) -> None:
     """Start the SE3 central server with uvicorn (blocking)."""
     import uvicorn
 
@@ -208,7 +213,12 @@ def main(argv: Optional[list] = None) -> None:
         prog="se3-server", description="SE3 central control-plane server"
     )
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080)")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=protocol.DEFAULT_SERVER_PORT,
+        help=f"Bind port (default: {protocol.DEFAULT_SERVER_PORT})",
+    )
     parser.add_argument(
         "--log-level", default="info", help="uvicorn log level (default: info)"
     )

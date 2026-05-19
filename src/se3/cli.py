@@ -3,6 +3,7 @@
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -455,10 +456,78 @@ daemon_app = typer.Typer(
 )
 
 
+def _precheck_websockets(server_url: str) -> None:
+    """Warn loudly on the CLI front-end when the WebSocket dep is missing.
+
+    A daemon started with ``--server-url`` but without the ``websockets``
+    package silently degrades to local-only mode (see
+    ``DaemonClient.run``), so the machine never registers with the central
+    server. The degradation is otherwise only logged to ``~/.se3/daemon.log``;
+    this surfaces it where the user actually is.
+    """
+    try:
+        import websockets  # type: ignore  # noqa: F401
+    except Exception:
+        render_text(
+            "WARNING: the 'websockets' package is not installed.\n"
+            "The daemon will start in LOCAL-ONLY mode and will NOT connect to\n"
+            f"the central server ({server_url}); this machine will not appear\n"
+            "in the web dashboard's machine list.\n"
+            "Install it with: pip install 'se3[server]'",
+            title="Daemon",
+            # Render via Rich Text so the '[server]' extra is not eaten as markup.
+            style="default",
+        )
+
+
+def _report_connection_result(config, daemon_status_fn) -> None:
+    """Poll the daemon status file and report the real connection outcome.
+
+    A detached daemon dials the server on its own event loop, so the CLI must
+    read back the result via the status file. Polling is bounded so ``start``
+    never hangs; if no verdict lands in time we say so rather than claim
+    success.
+    """
+    deadline = time.time() + 8.0
+    connected = False
+    last_error = None
+    while time.time() < deadline:
+        status = daemon_status_fn(config)
+        if status.get("connected"):
+            connected = True
+            break
+        last_error = status.get("last_error")
+        if last_error:
+            break
+        time.sleep(0.3)
+    if connected:
+        render_text("Connection: connected to the central server.", title="Daemon")
+    elif last_error:
+        render_text(
+            f"WARNING: the daemon could not connect to the central server: "
+            f"{last_error}.\n"
+            "This machine will not appear in the web dashboard's machine list "
+            "until it connects.",
+            title="Daemon",
+        )
+    else:
+        render_text(
+            "WARNING: the daemon has not connected to the central server yet.\n"
+            "Run 'se3 daemon status' to check the current connection state.",
+            title="Daemon",
+        )
+
+
 @daemon_app.command(name="start")
 def daemon_start_cmd(
     server_url: Optional[str] = typer.Option(
-        None, "--server-url", help="Central server URL the daemon dials out to"
+        None,
+        "--server-url",
+        help=(
+            "Central server URL the daemon dials out to. A port may be given "
+            "explicitly (ws://host:9000); when omitted it is completed to the "
+            "default server port 8080 (matching the se3-server default)."
+        ),
     ),
     foreground: bool = typer.Option(
         False, "--foreground", help="Run the daemon in the foreground (do not detach)"
@@ -470,7 +539,12 @@ def daemon_start_cmd(
     ``--foreground`` to run it in the current terminal.
     """
     # Deferred import: the daemon package must not affect core CLI startup.
-    from .daemon import DaemonConfig, DaemonAlreadyRunning, start_daemon
+    from .daemon import DaemonConfig, DaemonAlreadyRunning, start_daemon, daemon_status
+
+    # Pre-check the WebSocket dependency before launching so the user is told
+    # up front when the daemon will silently fall back to local-only mode.
+    if server_url:
+        _precheck_websockets(server_url)
 
     config = DaemonConfig(server_url=server_url)
     try:
@@ -482,6 +556,10 @@ def daemon_start_cmd(
         status = result.get("status")
         pid = result.get("pid")
         render_text(f"Daemon {status} (pid={pid})", title="Daemon")
+        # The detached daemon dials the server on its own; read the real
+        # connection result back from the status file.
+        if server_url:
+            _report_connection_result(config, daemon_status)
     raise typer.Exit(0)
 
 
@@ -530,6 +608,15 @@ def daemon_status_cmd(
         f"Machine: {status.get('machine_id')}",
         f"Server:  {status.get('server_url') or '(not configured)'}",
     ]
+    # Real outbound-connection state, distinct from the configured-URL echo
+    # above: a configured URL does not mean the daemon actually connected.
+    if not status.get("server_url"):
+        lines.append("Connection: local-only (no server configured)")
+    elif status.get("connected"):
+        lines.append("Connection: connected")
+    else:
+        reason = status.get("last_error") or "not connected"
+        lines.append(f"Connection: not connected ({reason})")
     tracked = status.get("tracked_flows") or []
     lines.append(f"Tracked flows: {len(tracked)}")
     for rec in tracked:

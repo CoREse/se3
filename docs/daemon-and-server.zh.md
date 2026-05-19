@@ -67,9 +67,9 @@ se3 daemon status --json                  # 以 JSON 形式输出状态
 
 | 子命令 | 选项 | 行为 |
 |--------|------|------|
-| `start` | `--server-url <url>`、`--foreground` | 启动 daemon。默认以**脱离终端的后台进程**启动;`--foreground` 则改为在当前终端中运行。`--server-url` 记录 daemon 要拨入的中心服务器地址。若已有 daemon 在运行,命令会报告并以非零码退出。 |
+| `start` | `--server-url <url>`、`--foreground` | 启动 daemon。默认以**脱离终端的后台进程**启动;`--foreground` 则改为在当前终端中运行。`--server-url` 记录 daemon 要拨入的中心服务器地址 —— 端口可显式指定(`ws://host:9000`),未指定时会补全为默认服务器端口 **8080**(与 `se3-server` 默认值一致)。若已有 daemon 在运行,命令会报告并以非零码退出。 |
 | `stop` | —— | 停止运行中的 daemon(发送 `SIGTERM` 并等待其退出)。若没有 daemon 在运行,报告 `not running` 并以 `0` 退出;若进程在宽限期内未退出,报告停止超时并以非零码退出。 |
-| `status` | `--json`、`-j` | 报告 daemon 是否在运行、其 pid、机器 id、配置的服务器地址,以及已跟踪流程的列表。`--json` 以 JSON 形式输出同样的信息,而非渲染的面板。 |
+| `status` | `--json`、`-j` | 报告 daemon 是否在运行、其 pid、机器 id、配置的服务器地址、**真实的出站连接状态**(见下文),以及已跟踪流程的列表。`--json` 以 JSON 形式输出同样的信息,而非渲染的面板。 |
 
 ### `se3-server` 命令
 
@@ -146,6 +146,18 @@ WebSocket。服务器永远不会反向主动连接 daemon。
 未带 `--server-url` 启动的 daemon 会跳过上述全部环节 —— 它不开启任何出站连接,
 只在本地监管并聚合流程。
 
+**端口处理。** `--server-url` 的取值可携带显式端口(`ws://host:9000`)。当端口
+被省略时(`ws://host`),daemon 会把 URL 补全为**默认服务器端口 8080**,而不是
+让 WebSocket scheme 回退到它隐式的 80 端口。`8080` 正是 `se3-server` 默认绑定的
+端口,因此用 `ws://host` 启动的 daemon 与不带 `--port` 启动的服务器开箱即对齐;
+默认端口在一处共享常量中定义,使两端始终一致。
+
+**查看真实的连接状态。** 连上服务器是尽力而为的:若缺少 `se3[server]` extra 或
+拨号失败,daemon 会记录原因并降级为纯本地运行,而不是崩溃。由于 `--server-url`
+只是*记录*一个 URL,它并不能证明 daemon 真的连上了 —— 请始终用
+`se3 daemon status` 确认(见下文
+[运行时文件](#运行时文件pidfile-与状态文件)),它会报告真实的出站连接状态。
+
 ### 前台模式 vs 后台(detached)模式
 
 `se3 daemon start` 支持两种模式:
@@ -169,11 +181,26 @@ daemon 默认把运行时文件放在 `~/.se3/`。该目录可用 `SE3_DAEMON_DI
 | 文件 | 用途 |
 |------|------|
 | `~/.se3/daemon.pid` | pidfile。保存 daemon 的 pid、启动时间、服务器地址与机器 id。用于防止重复启动,也是 `stop` / `status` 的事实来源。干净关停时被删除。 |
-| `~/.se3/daemon_status.json` | 最新的聚合状态快照,每次轮询时被改写。`se3 daemon status` 读取它来列出已跟踪流程,无需联系 daemon 进程本身。干净关停时被删除。 |
-| `~/.se3/daemon.log` | 脱离终端(后台)运行的 daemon 的日志输出 —— 其 stdout 与 stderr 被重定向到这里。 |
+| `~/.se3/daemon_status.json` | 最新的聚合状态快照,每次轮询时被改写。`se3 daemon status` 读取它来列出已跟踪流程,无需联系 daemon 进程本身。它还携带**真实的出站连接状态** —— 见下文。干净关停时被删除。 |
+| `~/.se3/daemon.log` | 脱离终端(后台)运行的 daemon 的日志输出 —— 其 stdout 与 stderr 被重定向到这里。每一行都带时间戳,因此可分辨日志出自哪一次 daemon 启动。 |
 
 pidfile 与状态文件都以原子方式写入(临时文件 + rename),因此写到一半崩溃也不会
 损坏它们。
+
+#### `status` 中的连接状态
+
+`daemon_status.json` 记录的是 daemon **真实的**出站连接结果,而不仅是配置的
+URL;`se3 daemon status` 会把它呈现在专门的 `Connection:` 行上:
+
+- `Connection: local-only (no server configured)` —— 启动时未带 `--server-url`。
+- `Connection: connected` —— 到服务器的出站 WebSocket 已建立。
+- `Connection: not connected (<原因>)` —— 给了 `--server-url` 但 daemon 未连接;
+  原因会原样显示,例如 `websockets not installed`(缺少 `se3[server]` extra)
+  或拨号错误。正是这种情形下,即便 `se3 daemon start` 报告了成功,该机器仍**不会**
+  出现在服务器的机器列表中。
+
+因此,配置了 `Server:` URL 却同时出现 `Connection: not connected` 行,就是静默
+降级的特征 —— 修复办法通常是 `pip install 'se3[server]'`,或更正 URL / 端口。
 
 ### 流程的发现与监管
 

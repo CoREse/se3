@@ -23,16 +23,38 @@ from se3.daemon.daemon import Daemon, DaemonConfig
 @pytest.mark.parametrize(
     "given,expected",
     [
+        # Host already carries an explicit port -> kept verbatim.
         ("localhost:8080", "ws://localhost:8080/ws"),
         ("ws://host:9", "ws://host:9/ws"),
         ("http://host:8080", "ws://host:8080/ws"),
-        ("https://host", "wss://host/ws"),
         ("ws://host:8080/ws", "ws://host:8080/ws"),
         ("host:8080/", "ws://host:8080/ws"),
+        # A non-default explicit port is never overwritten.
+        ("ws://host:9000", "ws://host:9000/ws"),
+        ("ws://host:9000/ws", "ws://host:9000/ws"),
+        # No port -> the shared DEFAULT_SERVER_PORT is filled in.
+        ("ws://host", "ws://host:8080/ws"),
+        ("wss://host", "wss://host:8080/ws"),
+        ("https://host", "wss://host:8080/ws"),
+        ("http://host", "ws://host:8080/ws"),
+        ("host", "ws://host:8080/ws"),
+        ("host/ws", "ws://host:8080/ws"),
+        # A custom path is preserved alongside the filled-in port.
+        ("ws://host/daemon", "ws://host:8080/daemon"),
+        ("ws://host:9000/daemon", "ws://host:9000/daemon"),
+        # IPv6 literals: brackets are not mistaken for a port separator.
+        ("ws://[::1]", "ws://[::1]:8080/ws"),
+        ("ws://[::1]:9000", "ws://[::1]:9000/ws"),
+        ("ws://[::1]:9000/ws", "ws://[::1]:9000/ws"),
     ],
 )
 def test_normalize_ws_url(given, expected):
     assert _normalize_ws_url(given) == expected
+
+
+def test_normalize_ws_url_default_port_is_shared_constant():
+    """The filled-in port comes from protocol.DEFAULT_SERVER_PORT."""
+    assert _normalize_ws_url("ws://host") == f"ws://host:{protocol.DEFAULT_SERVER_PORT}/ws"
 
 
 # --------------------------------------------------------------------------

@@ -56,10 +56,14 @@ RespondHandler = Callable[[str, str, Any], Any]
 
 
 def _normalize_ws_url(server_url: str) -> str:
-    """Return a ``ws://.../ws`` URL from a user-supplied server URL.
+    """Return a ``ws://host:port/ws`` URL from a user-supplied server URL.
 
-    Accepts bare hosts (``host:8080``), ``http(s)://`` and ``ws(s)://`` URLs,
-    and appends the ``/ws`` daemon endpoint path when none is present.
+    Accepts bare hosts (``host`` or ``host:8080``), ``http(s)://`` and
+    ``ws(s)://`` URLs, and appends the ``/ws`` daemon endpoint path when none
+    is present. When the host carries no explicit port, the shared
+    :data:`~se3.daemon.protocol.DEFAULT_SERVER_PORT` is filled in so the
+    daemon and ``se3-server`` agree on the same default (a bare ``ws://host``
+    would otherwise fall back to the WebSocket-standard port 80).
     """
     url = server_url.strip()
     if url.startswith("http://"):
@@ -71,9 +75,19 @@ def _normalize_ws_url(server_url: str) -> str:
     # Split off any path component already supplied.
     scheme, _, rest = url.partition("://")
     host, slash, path = rest.partition("/")
+    # Fill in the default port when the host carries none. An IPv6 literal is
+    # bracketed (``[::1]``), so only a ``:`` *after* the closing bracket is a
+    # port separator; a bare host has a port iff it contains a ``:``.
+    if host:
+        if host.startswith("["):
+            has_port = "]:" in host
+        else:
+            has_port = ":" in host
+        if not has_port:
+            host = f"{host}:{protocol.DEFAULT_SERVER_PORT}"
     if not slash or not path or path == "/":
         return f"{scheme}://{host}/ws"
-    return url
+    return f"{scheme}://{host}/{path}"
 
 
 class DaemonClient:
