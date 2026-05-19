@@ -55,6 +55,14 @@ def _make_engine_json(root, *, flow_id="flow-abc", status="running", index=2):
     return payload
 
 
+class _FakeClient:
+    """Minimal stand-in for DaemonClient exposing connected/last_error."""
+
+    def __init__(self, *, connected: bool, last_error):
+        self.connected = connected
+        self.last_error = last_error
+
+
 # --------------------------------------------------------------------------
 # DaemonSupervisor
 # --------------------------------------------------------------------------
@@ -327,6 +335,93 @@ class TestDaemonLifecycle:
         payload = json.loads(config.status_file.read_text(encoding="utf-8"))
         assert payload["snapshot"]["flows"]
 
+    def test_write_status_without_client(self, tmp_path):
+        """No server_url configured -> connection fields mark local-only."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj)
+        config = DaemonConfig(pid_dir=tmp_path / "rt", project_roots=[str(proj)])
+        daemon = Daemon(config)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+        assert daemon._client is None
+        daemon._poll_once()  # must not raise with _client is None
+        payload = json.loads(config.status_file.read_text(encoding="utf-8"))
+        assert payload["connected"] is False
+        assert payload["last_error"] is None
+        assert payload["server_configured"] is False
+
+    def test_write_status_with_connected_client(self, tmp_path):
+        """A connected client surfaces connected=True / last_error=None."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj)
+        config = DaemonConfig(pid_dir=tmp_path / "rt", project_roots=[str(proj)])
+        daemon = Daemon(config)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+        daemon._client = _FakeClient(connected=True, last_error=None)
+        daemon._poll_once()
+        payload = json.loads(config.status_file.read_text(encoding="utf-8"))
+        assert payload["connected"] is True
+        assert payload["last_error"] is None
+        assert payload["server_configured"] is True
+
+    def test_write_status_with_failed_client(self, tmp_path):
+        """A disconnected client surfaces connected=False with its last_error."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj)
+        config = DaemonConfig(pid_dir=tmp_path / "rt", project_roots=[str(proj)])
+        daemon = Daemon(config)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+        daemon._client = _FakeClient(
+            connected=False, last_error="websockets not installed"
+        )
+        daemon._poll_once()
+        payload = json.loads(config.status_file.read_text(encoding="utf-8"))
+        assert payload["connected"] is False
+        assert payload["last_error"] == "websockets not installed"
+        assert payload["server_configured"] is True
+
+    def test_daemon_status_exposes_connection_fields(self, tmp_path):
+        """daemon_status() surfaces connected/last_error from the status file."""
+        config = DaemonConfig(pid_dir=tmp_path)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+        config.pid_file.write_text(
+            json.dumps({"pid": os.getpid(), "server_url": "ws://host:8080"}),
+            encoding="utf-8",
+        )
+        config.status_file.write_text(
+            json.dumps(
+                {
+                    "updated_at": time.time(),
+                    "server_configured": True,
+                    "connected": False,
+                    "last_error": "connection refused",
+                    "tracked_flows": [],
+                    "snapshot": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        status = daemon_status(config)
+        assert status["running"] is True
+        assert status["connected"] is False
+        assert status["last_error"] == "connection refused"
+        assert status["server_configured"] is True
+
+    def test_daemon_status_connection_defaults_when_absent(self, tmp_path):
+        """A status file lacking connection fields yields safe defaults."""
+        config = DaemonConfig(pid_dir=tmp_path)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+        config.pid_file.write_text(
+            json.dumps({"pid": os.getpid()}), encoding="utf-8"
+        )
+        config.status_file.write_text(
+            json.dumps({"updated_at": time.time(), "snapshot": {}}),
+            encoding="utf-8",
+        )
+        status = daemon_status(config)
+        assert status["connected"] is False
+        assert status["last_error"] is None
+        assert status["server_configured"] is False
+
     def test_background_start_stop(self, tmp_path, monkeypatch):
         """End-to-end: start a detached daemon, query status, stop it."""
         monkeypatch.setenv("SE3_DAEMON_DIR", str(tmp_path))
@@ -346,3 +441,77 @@ class TestDaemonLifecycle:
             stop_result = stop_daemon(config, timeout=15)
         assert stop_result["status"] in ("stopped", "not_running")
         assert daemon_status(config).get("running") is False
+
+
+# --------------------------------------------------------------------------
+# CLI start — visible degradation / connection warnings
+# --------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """A controllable clock so connection-poll tests run without real waits."""
+
+    def __init__(self, start: float = 1000.0):
+        self.now = start
+
+    def time(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TestDaemonStartWarnings:
+    def test_precheck_warns_when_websockets_missing(self, monkeypatch, capsys):
+        """The CLI front-end shouts when 'websockets' is unavailable."""
+        from se3 import cli as cli_mod
+
+        # Force `import websockets` inside the precheck to fail.
+        monkeypatch.setitem(sys.modules, "websockets", None)
+        cli_mod._precheck_websockets("ws://host:8080")
+        out = capsys.readouterr().out
+        assert "websockets" in out
+        assert "local-only" in out.lower()
+        assert "pip install 'se3[server]'" in out
+
+    def test_report_connection_warns_when_not_connected(self, monkeypatch, capsys):
+        """A status file showing a last_error surfaces a front-end warning."""
+        from se3 import cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "time", _FakeClock())
+
+        def fake_status(_config):
+            return {"connected": False, "last_error": "connection refused"}
+
+        cli_mod._report_connection_result(object(), fake_status)
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert "connection refused" in out
+
+    def test_report_connection_warns_when_pending(self, monkeypatch, capsys):
+        """When no verdict lands before the timeout, say so rather than lie."""
+        from se3 import cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "time", _FakeClock())
+
+        def fake_status(_config):
+            return {"connected": False, "last_error": None}
+
+        cli_mod._report_connection_result(object(), fake_status)
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert "not connected" in out.lower()
+
+    def test_report_connection_confirms_when_connected(self, monkeypatch, capsys):
+        """A connected daemon gets a positive confirmation line."""
+        from se3 import cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "time", _FakeClock())
+
+        def fake_status(_config):
+            return {"connected": True, "last_error": None}
+
+        cli_mod._report_connection_result(object(), fake_status)
+        out = capsys.readouterr().out
+        assert "connected" in out.lower()
+        assert "WARNING" not in out
