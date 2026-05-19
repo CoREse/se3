@@ -98,6 +98,65 @@ class ConnectionManager:
             return False
 
 
+class HistoryRequestRegistry:
+    """Tracks in-flight on-demand history pulls awaiting a daemon reply.
+
+    A REST handler that needs a flow's history but finds the cache empty
+    sends a ``MSG_HISTORY_REQUEST`` to the owning daemon and parks an
+    :class:`asyncio.Future` here keyed by ``flow_id``. When the matching
+    ``MSG_HISTORY_DATA`` arrives on the daemon receive loop it resolves every
+    waiter for that flow. Lives entirely in process memory.
+    """
+
+    def __init__(self) -> None:
+        self._waiters: Dict[str, list] = {}
+
+    def register(self, flow_id: str) -> "asyncio.Future":
+        """Park and return a future that resolves when *flow_id* data lands."""
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._waiters.setdefault(flow_id, []).append(fut)
+        return fut
+
+    def resolve(self, flow_id: str, data: Any) -> None:
+        """Resolve every waiter parked for *flow_id* with *data*."""
+        for fut in self._waiters.pop(flow_id, []):
+            if not fut.done():
+                fut.set_result(data)
+
+    def discard(self, flow_id: str, fut: "asyncio.Future") -> None:
+        """Drop a single waiter (e.g. after a timeout) without resolving it."""
+        waiters = self._waiters.get(flow_id)
+        if not waiters:
+            return
+        if fut in waiters:
+            waiters.remove(fut)
+        if not waiters:
+            self._waiters.pop(flow_id, None)
+
+
+async def request_history(
+    manager: ConnectionManager,
+    state: ServerState,
+    flow_id: str,
+    *,
+    cursor: Optional[Dict[str, Any]] = None,
+    project_root: str = "",
+) -> bool:
+    """Send a ``MSG_HISTORY_REQUEST`` to the daemon owning *flow_id*.
+
+    Resolves the owning machine via the history index / live flow set and
+    routes the request down its WebSocket. Returns ``False`` when no
+    connected daemon owns the flow.
+    """
+    machine_id = await state.find_machine_for_history_flow(flow_id)
+    if machine_id is None or not manager.is_connected(machine_id):
+        return False
+    message = protocol.make_history_request(
+        flow_id, project_root=project_root, cursor=cursor
+    )
+    return await manager.send_to(machine_id, message)
+
+
 class UiHub:
     """Fan-out hub for web-frontend WebSocket clients.
 
@@ -156,6 +215,28 @@ async def _push_state(hub: Optional["UiHub"], state: ServerState, kind: str) -> 
     await hub.broadcast({"type": kind, "machines": machines})
 
 
+async def _push_history_index(hub: Optional["UiHub"], state: ServerState) -> None:
+    """Broadcast the aggregated history index to all UI clients (best effort)."""
+    if hub is None or hub.client_count == 0:
+        return
+    sessions = await state.get_history_index()
+    await hub.broadcast({"type": "history_index", "sessions": sessions})
+
+
+async def _push_history_data(
+    hub: Optional["UiHub"],
+    flow_id: str,
+    mode: str,
+    records: list,
+) -> None:
+    """Broadcast a history-data delta for *flow_id* to all UI clients."""
+    if hub is None or hub.client_count == 0:
+        return
+    await hub.broadcast(
+        {"type": "history_data", "flow_id": flow_id, "mode": mode, "records": records}
+    )
+
+
 async def handle_ui_connection(
     websocket: Any, hub: "UiHub", state: ServerState
 ) -> None:
@@ -191,13 +272,15 @@ async def handle_daemon_connection(
     manager: ConnectionManager,
     state: ServerState,
     hub: Optional["UiHub"] = None,
+    registry: Optional["HistoryRequestRegistry"] = None,
 ) -> None:
     """Serve one daemon WebSocket connection end to end.
 
     Accepts the socket, validates the opening ``HELLO``, registers the machine,
     answers with ``WELCOME``, then runs the receive + heartbeat loops until the
     daemon disconnects or the heartbeat times out. Connection and state changes
-    are mirrored to web-frontend clients via *hub*.
+    are mirrored to web-frontend clients via *hub*. Inbound ``MSG_HISTORY_DATA``
+    frames resolve any on-demand pull parked in *registry*.
     """
     await websocket.accept()
     machine_id: Optional[str] = None
@@ -239,7 +322,7 @@ async def handle_daemon_connection(
         await websocket.send_text(protocol.make_welcome(SERVER_VERSION).to_json())
         await _push_state(hub, state, "status_update")
 
-        await _serve_loop(websocket, manager, state, machine_id, hub)
+        await _serve_loop(websocket, manager, state, machine_id, hub, registry)
     except Exception:  # WebSocketDisconnect and friends
         logger.debug("Daemon connection ended", exc_info=True)
     finally:
@@ -255,6 +338,7 @@ async def _serve_loop(
     state: ServerState,
     machine_id: str,
     hub: Optional["UiHub"] = None,
+    registry: Optional["HistoryRequestRegistry"] = None,
 ) -> None:
     """Run the receive loop alongside a heartbeat loop; stop when either ends."""
     last_seen = {"ts": time.time()}
@@ -268,7 +352,7 @@ async def _serve_loop(
             except protocol.ProtocolError as exc:
                 logger.warning("Dropping malformed frame from %s: %s", machine_id, exc)
                 continue
-            await _handle_message(message, state, machine_id, hub)
+            await _handle_message(message, state, machine_id, hub, registry)
 
     async def heartbeat() -> None:
         seq = 0
@@ -308,6 +392,7 @@ async def _handle_message(
     state: ServerState,
     machine_id: str,
     hub: Optional["UiHub"] = None,
+    registry: Optional["HistoryRequestRegistry"] = None,
 ) -> None:
     """Apply one inbound daemon message to the server state."""
     if message.type == protocol.MSG_STATUS_UPDATE:
@@ -322,5 +407,31 @@ async def _handle_message(
         # notification just refreshes liveness so the UI reacts promptly.
         await state.touch(machine_id)
         logger.info("Call notification from %s: %s", machine_id, message.payload.get("call"))
+    elif message.type == protocol.MSG_HISTORY_INDEX:
+        # The daemon reports the complete index of history sessions it can
+        # serve; cache it and let UI clients refresh their history list.
+        sessions = message.payload.get("sessions") or []
+        if isinstance(sessions, list):
+            await state.update_history_index(machine_id, sessions)
+            await _push_history_index(hub, state)
+    elif message.type == protocol.MSG_HISTORY_DATA:
+        # History records — either an on-demand pull's reply or an active
+        # flow's incremental append. Cache them, resolve any waiting REST
+        # handler, and stream the delta to UI clients.
+        flow_id = str(message.payload.get("flow_id") or "")
+        mode = str(message.payload.get("mode") or "")
+        records = message.payload.get("records") or []
+        cursor = message.payload.get("cursor") or {}
+        if flow_id and isinstance(records, list):
+            await state.append_history(
+                flow_id,
+                mode,
+                records,
+                cursor=cursor if isinstance(cursor, dict) else {},
+                machine_id=machine_id,
+            )
+            if registry is not None:
+                registry.resolve(flow_id, await state.get_history(flow_id))
+            await _push_history_data(hub, flow_id, mode, records)
     else:  # pragma: no cover - decode() restricts to known daemon->server types
         logger.debug("Ignoring unexpected daemon message type %s", message.type)

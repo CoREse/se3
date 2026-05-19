@@ -10,6 +10,8 @@ daemons and exposes it to the web frontend:
 * ``GET /api/flows/{id}`` — one flow's detail;
 * ``POST /api/flows`` — publish a new task (routed to a daemon as SPAWN_FLOW);
 * ``POST /api/flows/{id}/respond`` — answer a flow's pending interjection/call;
+* ``GET /api/history`` — the aggregated history-session index;
+* ``GET /api/history/{id}`` — one flow's history records (pulled on demand);
 * ``/`` and ``/static`` — the bundled web frontend (static files).
 
 The heavy web dependencies (``fastapi``, ``uvicorn``) are isolated in the
@@ -21,6 +23,7 @@ point and checks for the extra before importing this module.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Any, Optional
@@ -35,14 +38,20 @@ from se3.daemon import protocol
 from .state import ServerState
 from .ws import (
     ConnectionManager,
+    HistoryRequestRegistry,
     UiHub,
     handle_daemon_connection,
     handle_ui_connection,
+    request_history,
 )
 
 logger = logging.getLogger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+
+#: Seconds a ``GET /api/history/{flow_id}`` cache-miss waits for the owning
+#: daemon to answer the on-demand ``MSG_HISTORY_REQUEST`` before giving up.
+HISTORY_PULL_TIMEOUT = 10.0
 
 
 # -- request models --------------------------------------------------------
@@ -70,16 +79,20 @@ def create_app() -> FastAPI:
     state = ServerState()
     manager = ConnectionManager()
     ui_hub = UiHub()
+    history_registry = HistoryRequestRegistry()
     # Expose for tests / introspection.
     app.state.server_state = state
     app.state.connection_manager = manager
     app.state.ui_hub = ui_hub
+    app.state.history_registry = history_registry
 
     # -- daemon WebSocket endpoint -----------------------------------------
 
     @app.websocket("/ws")
     async def daemon_ws(websocket: WebSocket) -> None:
-        await handle_daemon_connection(websocket, manager, state, ui_hub)
+        await handle_daemon_connection(
+            websocket, manager, state, ui_hub, history_registry
+        )
 
     # -- web-frontend WebSocket endpoint -----------------------------------
 
@@ -172,6 +185,41 @@ def create_app() -> FastAPI:
                 detail=f"failed to deliver RESPOND_CALL to '{machine_id}'",
             )
         return {"status": "dispatched", "machine_id": machine_id, "call_id": call_id}
+
+    # -- history API -------------------------------------------------------
+    # The server is a pure in-memory relay: ``/api/history`` serves the
+    # aggregated index daemons have pushed, and ``/api/history/{flow_id}``
+    # serves cached records, pulling them on demand from the owning daemon
+    # on a cache miss. Nothing here is persisted to disk.
+
+    @app.get("/api/history")
+    async def list_history() -> dict:
+        sessions = await state.get_history_index()
+        return {"sessions": sessions, "count": len(sessions)}
+
+    @app.get("/api/history/{flow_id}")
+    async def history_detail(flow_id: str) -> dict:
+        cached = await state.get_history(flow_id)
+        if cached is not None:
+            return {"flow_id": flow_id, "cached": True, **cached}
+        # Cache miss: pull on demand from the daemon owning this flow.
+        fut = history_registry.register(flow_id)
+        sent = await request_history(manager, state, flow_id)
+        if not sent:
+            history_registry.discard(flow_id, fut)
+            raise HTTPException(
+                status_code=404,
+                detail=f"no connected daemon owns history for flow '{flow_id}'",
+            )
+        try:
+            data = await asyncio.wait_for(fut, timeout=HISTORY_PULL_TIMEOUT)
+        except asyncio.TimeoutError:
+            history_registry.discard(flow_id, fut)
+            raise HTTPException(
+                status_code=504,
+                detail=f"timed out pulling history for flow '{flow_id}'",
+            )
+        return {"flow_id": flow_id, "cached": False, **(data or {})}
 
     # -- frontend (static files) -------------------------------------------
     # Mounted last so the API routes and WebSocket endpoints above take
