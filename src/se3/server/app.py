@@ -10,6 +10,7 @@ daemons and exposes it to the web frontend:
 * ``GET /api/flows/{id}`` — one flow's detail;
 * ``POST /api/flows`` — publish a new task (routed to a daemon as SPAWN_FLOW);
 * ``POST /api/flows/{id}/respond`` — answer a flow's pending interjection/call;
+* ``POST /api/flows/{id}/interject`` — inject a mid-flow instruction into a flow;
 * ``GET /api/history`` — the aggregated history-session index;
 * ``GET /api/history/{id}`` — one flow's history records (pulled on demand);
 * ``/`` and ``/static`` — the bundled web frontend (static files).
@@ -72,6 +73,12 @@ class RespondRequest(BaseModel):
 
     response: Any
     call_id: str = ""
+
+
+class InterjectRequest(BaseModel):
+    """Body of ``POST /api/flows/{id}/interject`` — inject a mid-flow instruction."""
+
+    text: str
 
 
 def create_app() -> FastAPI:
@@ -189,6 +196,34 @@ def create_app() -> FastAPI:
                 detail=f"failed to deliver RESPOND_CALL to '{machine_id}'",
             )
         return {"status": "dispatched", "machine_id": machine_id, "call_id": call_id}
+
+    @app.post("/api/flows/{flow_id}/interject")
+    async def interject_flow(flow_id: str, req: InterjectRequest) -> JSONResponse:
+        text = req.text.strip()
+        if not text:
+            raise HTTPException(status_code=422, detail="'text' must not be empty")
+        result = await state.get_flow(flow_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"flow '{flow_id}' not found")
+        machine_id, flow = result
+        if not manager.is_connected(machine_id):
+            raise HTTPException(
+                status_code=503,
+                detail=f"machine '{machine_id}' owning flow '{flow_id}' is not connected",
+            )
+        message = protocol.make_interject_flow(
+            flow_id, text, project_root=flow.get("project_root", "")
+        )
+        ok = await manager.send_to(machine_id, message)
+        if not ok:
+            raise HTTPException(
+                status_code=503,
+                detail=f"failed to deliver INTERJECT_FLOW to '{machine_id}'",
+            )
+        return JSONResponse(
+            status_code=202,
+            content={"status": "dispatched", "machine_id": machine_id, "flow_id": flow_id},
+        )
 
     # -- history API -------------------------------------------------------
     # The server is a pure in-memory relay: ``/api/history`` serves the

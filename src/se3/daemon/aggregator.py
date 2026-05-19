@@ -21,7 +21,9 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
+
+from . import protocol
 
 logger = logging.getLogger(__name__)
 
@@ -30,17 +32,29 @@ DEFAULT_POLL_INTERVAL = 2.0
 
 @dataclass
 class PendingCall:
-    """A queued human call awaiting a response.
+    """A queued interaction awaiting a human response.
 
-    Mirrors a file under a project's ``se3/calls/`` directory (the interjection
-    / human-call queue mechanism).
+    Mirrors a file under a project's ``se3/calls/`` directory — the unified
+    carrier for every interaction that needs a human in the loop while a flow
+    runs. The file's ``kind`` field (one of
+    :data:`~se3.daemon.protocol.CALL_KINDS`) tells the UI how to render it:
+    a pending MCP call, a mid-flow interjection request, a retry / failure
+    decision, or a CLI subprocess confirmation prompt.
+
+    The display fields (``prompt`` / ``context`` / ``options`` / ``step_id``)
+    are read straight from the call file's JSON body when present; a legacy
+    call file with no metadata reports ``kind="call"`` and leaves them empty.
     """
 
     call_id: str
     path: str
     project_root: str
-    kind: str = "call"
+    kind: str = protocol.CALL_KIND_CALL
     created_at: float = 0.0
+    prompt: str = ""
+    context: Dict[str, Any] = field(default_factory=dict)
+    options: List[Any] = field(default_factory=list)
+    step_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, object]:
         return {
@@ -49,6 +63,10 @@ class PendingCall:
             "project_root": self.project_root,
             "kind": self.kind,
             "created_at": self.created_at,
+            "prompt": self.prompt,
+            "context": self.context,
+            "options": self.options,
+            "step_id": self.step_id,
         }
 
 
@@ -276,16 +294,50 @@ class DaemonAggregator:
             # Skip calls that already have a sibling response file.
             if entry.stem in answered:
                 continue
-            calls.append(
-                PendingCall(
-                    call_id=entry.stem,
-                    path=str(entry),
-                    project_root=str(root),
-                    kind="call",
-                    created_at=_safe_mtime(entry) or 0.0,
-                )
-            )
+            calls.append(self._parse_call_file(entry, root))
         return calls
+
+    @staticmethod
+    def _parse_call_file(entry: Path, root: Path) -> PendingCall:
+        """Build a :class:`PendingCall` from one ``se3/calls/`` file.
+
+        Reads the file's JSON body to recover the display metadata
+        (``kind`` / ``prompt`` / ``context`` / ``options`` / ``step_id``). A
+        legacy call file that is not JSON, or carries no ``kind``, falls back
+        to :data:`~se3.daemon.protocol.CALL_KIND_CALL` with empty display
+        fields so old flows keep working unchanged.
+        """
+        call = PendingCall(
+            call_id=entry.stem,
+            path=str(entry),
+            project_root=str(root),
+            kind=protocol.CALL_KIND_CALL,
+            created_at=_safe_mtime(entry) or 0.0,
+        )
+        data = _read_json(entry)
+        if not isinstance(data, dict):
+            return call
+
+        kind = data.get("kind")
+        if isinstance(kind, str) and kind in protocol.CALL_KINDS:
+            call.kind = kind
+
+        prompt = data.get("prompt") or data.get("message")
+        if isinstance(prompt, str):
+            call.prompt = prompt
+
+        context = data.get("context")
+        if isinstance(context, dict):
+            call.context = context
+
+        options = data.get("options")
+        if isinstance(options, list):
+            call.options = options
+
+        step_id = data.get("step_id")
+        if step_id is not None:
+            call.step_id = str(step_id)
+        return call
 
     @staticmethod
     def _read_summary(state_dir: Path, flow_id: Optional[str]) -> Optional[str]:

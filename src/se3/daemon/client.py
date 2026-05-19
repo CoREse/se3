@@ -281,6 +281,8 @@ class DaemonClient:
             self._handle_respond(message.payload)
         elif message.type == protocol.MSG_HISTORY_REQUEST:
             await self._handle_history_request(ws, message.payload)
+        elif message.type == protocol.MSG_INTERJECT_FLOW:
+            self._handle_interject(message.payload)
         else:  # pragma: no cover - defensive; decode() already validates
             logger.debug("Ignoring unexpected server message type %s", message.type)
 
@@ -315,6 +317,62 @@ class DaemonClient:
             logger.info("RESPOND_CALL handled for call %s", call_id)
         except Exception:
             logger.exception("RESPOND_CALL handler failed")
+
+    def _handle_interject(self, payload: Dict[str, Any]) -> None:
+        """Route an INTERJECT_FLOW instruction to an interjection request file.
+
+        The server delivers the user-typed instruction for a running flow; the
+        daemon resolves the flow's project root and writes an interjection
+        request file the running ``se3 run`` consumes at its next step
+        boundary. A flow / project root that cannot be resolved is logged as a
+        warning rather than crashing the client.
+        """
+        flow_id = str(payload.get("flow_id") or "").strip()
+        text = str(payload.get("text") or "")
+        if not flow_id:
+            logger.warning("Ignoring INTERJECT_FLOW with empty flow_id")
+            return
+        if not text.strip():
+            logger.warning("Ignoring INTERJECT_FLOW for flow %s with empty text", flow_id)
+            return
+        project_root = self._resolve_interject_root(flow_id, payload)
+        if project_root is None:
+            logger.warning(
+                "INTERJECT_FLOW: cannot resolve project root for flow %s; dropping",
+                flow_id,
+            )
+            return
+        try:
+            _write_interjection_request(project_root, flow_id, text)
+            logger.info("INTERJECT_FLOW handled for flow %s", flow_id)
+        except Exception:
+            logger.exception("INTERJECT_FLOW handler failed for flow %s", flow_id)
+
+    def _resolve_interject_root(
+        self, flow_id: str, payload: Dict[str, Any]
+    ) -> Optional[Path]:
+        """Resolve the project root for an INTERJECT_FLOW target flow.
+
+        Prefers the ``project_root`` the server stamped onto the payload (it
+        carries it from the flow snapshot); failing that, tries to match the
+        flow against the current machine snapshot.
+        """
+        explicit = str(payload.get("project_root") or "").strip()
+        if explicit:
+            return Path(explicit).resolve()
+        try:
+            snapshot = self._snapshot_provider()
+        except Exception:
+            logger.debug("Snapshot lookup for INTERJECT_FLOW failed", exc_info=True)
+            return None
+        for flow in (snapshot or {}).get("flows") or []:
+            if not isinstance(flow, dict):
+                continue
+            if str(flow.get("flow_id") or "") == flow_id:
+                root = str(flow.get("project_root") or "").strip()
+                if root:
+                    return Path(root).resolve()
+        return None
 
     async def _handle_history_request(self, ws: Any, payload: Dict[str, Any]) -> None:
         """Answer a server HISTORY_REQUEST with a HISTORY_DATA reply.
@@ -429,6 +487,34 @@ class DaemonClient:
             except Exception:
                 logger.debug("HISTORY_DATA send failed", exc_info=True)
                 return
+
+
+def _write_interjection_request(project_root: Path, flow_id: str, text: str) -> Path:
+    """Write a mid-flow interjection request file for *flow_id*.
+
+    The file lands under ``<project_root>/se3/state/interjections/`` — a queue
+    directory the running ``se3 run`` drains at step boundaries to fold the
+    instruction into ``flow.state.context["user_interjections"]``. Each request
+    gets a unique filename so concurrent interjections never collide, and is
+    written atomically (temp + rename).
+    """
+    requests_dir = project_root / "se3" / "state" / "interjections"
+    requests_dir.mkdir(parents=True, exist_ok=True)
+    stamp = f"{time.time():.6f}".replace(".", "")
+    target = requests_dir / f"interject_{flow_id}_{stamp}.json"
+    payload = {
+        "flow_id": flow_id,
+        "text": text,
+        "requested_at": time.time(),
+        "source": "daemon-client",
+    }
+    tmp = target.with_suffix(target.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    tmp.replace(target)
+    return target
 
 
 def _default_respond_handler(call_id: str, project_root: str, response: Any) -> None:
