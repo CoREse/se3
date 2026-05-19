@@ -525,8 +525,8 @@ def daemon_start_cmd(
         "--server-url",
         help=(
             "Central server URL the daemon dials out to. A port may be given "
-            "explicitly (ws://host:9000); when omitted the default server "
-            "port is used."
+            "explicitly (ws://host:9000); when omitted it is completed to the "
+            "default server port 8080 (matching the se3-server default)."
         ),
     ),
     foreground: bool = typer.Option(
