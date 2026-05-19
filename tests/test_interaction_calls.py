@@ -1,3 +1,5 @@
+Resolving in favor of the HEAD (G6) version. The source module `se3/engine/interaction_calls.py` is being merged to expose the G1/G6 protocol-backed API (`write_call`, `read_call`, `read_response`, `classify_kind`, `write_interjection_request`, `drain_interjection_requests(project_root)`, `write_retry_decision_call`) plus protocol `make_interject_flow`/`CALL_KINDS`. The incoming G2 test targets a different, colliding API (`drain_interjection_requests(flow, project_root)` is a different function with the same name), so the two test files cannot be unioned. The HEAD test matches the API surface the already-merged G1/G3/G6 branches established.
+
 """Tests for the unified interaction-call channel.
 
 Covers the three layers that turn every human-in-the-loop interaction in a
@@ -342,3 +344,11 @@ def test_write_retry_decision_call_shape(tmp_path: Path):
     assert data["context"]["step_type"] == "implement"
     assert data["context"]["error"] == "boom"
     assert "boom" in data["prompt"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))
+
+---
+
+⚠️ One thing you should know before relying on this: the surrounding merge is in a worse state than this one file. `src/se3/engine/interaction_calls.py`, `src/se3/daemon/protocol.py`, and `src/se3/commands/run.py` still contain conflict markers — and the HEAD side of `interaction_calls.py` and `protocol.py` has a prior agent's *chat reply text* committed into the file body instead of code. `run.py` also mixes both APIs (`drain_interjection_requests(project_root)` at line 369 vs `drain_interjection_requests(flow, project_root)` at line 1312 — same name, incompatible signatures). The test file I produced will only pass once those source conflicts are resolved to the G1/G6 API surface. You'll want to fix those files before running pytest.
