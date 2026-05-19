@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -346,3 +347,76 @@ class TestDaemonLifecycle:
             stop_result = stop_daemon(config, timeout=15)
         assert stop_result["status"] in ("stopped", "not_running")
         assert daemon_status(config).get("running") is False
+
+
+# --------------------------------------------------------------------------
+# Daemon logging configuration
+# --------------------------------------------------------------------------
+
+
+class TestDaemonLogging:
+    @pytest.fixture(autouse=True)
+    def _restore_root_logger(self):
+        """Snapshot and restore root logger state around each test."""
+        import logging
+
+        root = logging.getLogger()
+        saved_handlers = list(root.handlers)
+        saved_level = root.level
+        yield
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+
+    def test_log_format_includes_timestamp(self):
+        from se3.daemon.daemon import DAEMON_LOG_FORMAT
+
+        assert "%(asctime)s" in DAEMON_LOG_FORMAT
+
+    def test_configure_installs_timestamped_handler(self):
+        import logging
+
+        from se3.daemon.daemon import _configure_daemon_logging
+
+        _configure_daemon_logging()
+        tagged = [
+            h
+            for h in logging.getLogger().handlers
+            if getattr(h, "_se3_daemon_log_handler", False)
+        ]
+        assert len(tagged) == 1
+        assert "%(asctime)s" in tagged[0].formatter._fmt
+
+    def test_configure_is_idempotent(self):
+        import logging
+
+        from se3.daemon.daemon import _configure_daemon_logging
+
+        _configure_daemon_logging()
+        _configure_daemon_logging()
+        _configure_daemon_logging()
+        tagged = [
+            h
+            for h in logging.getLogger().handlers
+            if getattr(h, "_se3_daemon_log_handler", False)
+        ]
+        assert len(tagged) == 1
+
+    def test_handler_emits_timestamped_line(self):
+        import io
+        import logging
+
+        from se3.daemon.daemon import _configure_daemon_logging
+
+        _configure_daemon_logging()
+        handler = next(
+            h
+            for h in logging.getLogger().handlers
+            if getattr(h, "_se3_daemon_log_handler", False)
+        )
+        stream = io.StringIO()
+        handler.setStream(stream)
+        logging.getLogger("se3.daemon.daemon").info("hello daemon")
+        output = stream.getvalue()
+        assert "hello daemon" in output
+        # A timestamp line begins with a 4-digit year.
+        assert re.match(r"^\d{4}-\d\d-\d\d ", output)

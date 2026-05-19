@@ -43,6 +43,37 @@ PID_FILENAME = "daemon.pid"
 STATUS_FILENAME = "daemon_status.json"
 LOG_FILENAME = "daemon.log"
 
+#: Log format for the daemon process; the leading ``%(asctime)s`` is what makes
+#: every line in ``~/.se3/daemon.log`` (and the foreground terminal) attributable
+#: to a particular run.
+DAEMON_LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+#: Attribute stamped on the handler installed by :func:`_configure_daemon_logging`
+#: so a re-entrant call can detect and skip a second install.
+_DAEMON_HANDLER_TAG = "_se3_daemon_log_handler"
+
+
+def _configure_daemon_logging() -> None:
+    """Install a timestamped log handler for the daemon process.
+
+    Called from the daemon process entry point (:meth:`Daemon.run_forever`),
+    never from the core ``se3`` CLI, so it does not pollute the CLI's logging.
+    In detached mode stderr is redirected to ``daemon.log``; in foreground mode
+    it goes to the terminal — both inherit the ``%(asctime)s`` timestamp.
+
+    Idempotent: the installed handler is tagged, so repeated calls within one
+    process never stack handlers or duplicate log lines.
+    """
+    root = logging.getLogger()
+    for handler in root.handlers:
+        if getattr(handler, _DAEMON_HANDLER_TAG, False):
+            return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter(DAEMON_LOG_FORMAT))
+    setattr(handler, _DAEMON_HANDLER_TAG, True)
+    root.addHandler(handler)
+    if root.level == logging.NOTSET or root.level > logging.INFO:
+        root.setLevel(logging.INFO)
+
 
 def _default_pid_dir() -> Path:
     """Return the default directory for daemon runtime files.
@@ -149,6 +180,7 @@ class Daemon:
 
     def run_forever(self) -> None:
         """Run the daemon in the foreground until stopped (blocking)."""
+        _configure_daemon_logging()
         try:
             asyncio.run(self.serve())
         except KeyboardInterrupt:  # pragma: no cover - interactive
