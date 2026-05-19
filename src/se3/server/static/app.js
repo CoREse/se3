@@ -15,6 +15,9 @@ const state = {
   machines: [],           // [{machine_id, hostname, online, flows: [...]}]
   selectedMachineId: null,
   selectedFlowId: null,   // flow open in the detail drawer
+  historySessions: [],    // [{flow_id, task_description, status, updated_at, ...}]
+  selectedHistoryId: null,// flow whose records are shown in the history detail
+  historyRecords: [],     // records currently rendered in the history detail
 };
 
 let ws = null;
@@ -83,9 +86,14 @@ function connect() {
     } catch (_) {
       return;
     }
+    if (!msg || typeof msg !== "object") return;
     // Both "snapshot" (on connect) and "status_update" carry the full list.
-    if (msg && Array.isArray(msg.machines)) {
+    if (Array.isArray(msg.machines)) {
       applyMachines(msg.machines);
+    } else if (msg.type === "history_index" && Array.isArray(msg.sessions)) {
+      applyHistoryIndex(msg.sessions);
+    } else if (msg.type === "history_data" && msg.flow_id) {
+      applyHistoryData(msg);
     }
   };
 
@@ -355,6 +363,213 @@ function renderFlowDetail(flow, machineId) {
 }
 
 // ---------------------------------------------------------------------------
+// History view
+// ---------------------------------------------------------------------------
+//
+// The server is a pure in-memory relay: `/api/history` returns the aggregated
+// session index daemons push, and `/api/history/{flow_id}` returns a flow's
+// step-by-step conversation records (pulled on demand for historical flows).
+// Active flows additionally stream incremental `history_data` deltas over
+// `/ws/ui`, which we append live and scroll into view.
+
+function isHistoryOpen() {
+  return !$("history-view").classList.contains("hidden");
+}
+
+function openHistory() {
+  $("history-view").classList.remove("hidden");
+  renderHistoryList();
+  fetchHistoryIndex();
+}
+
+function closeHistory() {
+  $("history-view").classList.add("hidden");
+  state.selectedHistoryId = null;
+  state.historyRecords = [];
+}
+
+async function fetchHistoryIndex() {
+  try {
+    const resp = await fetch("/api/history");
+    if (!resp.ok) return;
+    const data = await resp.json();
+    if (Array.isArray(data.sessions)) {
+      state.historySessions = data.sessions;
+      renderHistoryList();
+    }
+  } catch (_) {
+    /* transient — a WS history_index push will refresh it */
+  }
+}
+
+// Push handler: the daemon's full session index, rebroadcast by the server.
+function applyHistoryIndex(sessions) {
+  state.historySessions = sessions;
+  if (isHistoryOpen()) renderHistoryList();
+}
+
+// Push handler: incremental (or full) records for one flow.
+function applyHistoryData(msg) {
+  if (!isHistoryOpen() || state.selectedHistoryId !== msg.flow_id) return;
+  const records = Array.isArray(msg.records) ? msg.records : [];
+  if (msg.mode === "append") {
+    state.historyRecords = state.historyRecords.concat(records);
+  } else {
+    state.historyRecords = records;
+  }
+  renderHistoryRecords(msg.flow_id, state.historyRecords);
+  scrollHistoryToBottom();
+}
+
+function formatTime(ts) {
+  if (ts == null || ts === "") return "";
+  let d;
+  if (typeof ts === "number") {
+    // Epoch seconds (server uses time.time()) vs milliseconds.
+    d = new Date(ts < 1e12 ? ts * 1000 : ts);
+  } else {
+    d = new Date(ts);
+  }
+  return isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
+}
+
+function renderHistoryList() {
+  const list = $("history-list");
+  list.innerHTML = "";
+  const sessions = state.historySessions || [];
+  if (!sessions.length) {
+    list.appendChild(el("p", "empty", "No history sessions reported."));
+    return;
+  }
+  for (const s of sessions) {
+    const card = el("div", "history-item");
+    if (s.flow_id === state.selectedHistoryId) card.classList.add("selected");
+
+    const head = el("div", "history-item-head");
+    const task = el("span", "history-task",
+      s.task_description || s.flow_id || "(untitled session)");
+    task.title = s.task_description || s.flow_id || "";
+    const sc = statusClass(s.status);
+    head.append(task, el("span", "badge badge-" + sc, s.status || "unknown"));
+    if (s.active) head.appendChild(el("span", "badge badge-live", "● live"));
+    card.appendChild(head);
+
+    const meta = el("div", "history-item-meta");
+    meta.append(
+      el("span", null, s.machine_id || ""),
+      el("span", null, formatTime(s.updated_at || s.created_at)),
+    );
+    card.appendChild(meta);
+
+    card.addEventListener("click", () => openHistorySession(s.flow_id));
+    list.appendChild(card);
+  }
+}
+
+function historyTitle(flowId) {
+  const s = (state.historySessions || []).find((x) => x.flow_id === flowId);
+  return (s && s.task_description) || flowId || "Session";
+}
+
+async function openHistorySession(flowId) {
+  state.selectedHistoryId = flowId;
+  state.historyRecords = [];
+  renderHistoryList();
+  $("history-detail-title").textContent = historyTitle(flowId);
+
+  const detail = $("history-detail");
+  detail.innerHTML = "";
+  detail.appendChild(el("p", "empty", "Loading records…"));
+
+  try {
+    const resp = await fetch(`/api/history/${encodeURIComponent(flowId)}`);
+    // The user may have clicked another session while this was in flight.
+    if (state.selectedHistoryId !== flowId) return;
+    if (!resp.ok) {
+      detail.innerHTML = "";
+      detail.appendChild(el("p", "empty",
+        `Could not load history for this session (${resp.status}).`));
+      return;
+    }
+    const data = await resp.json();
+    if (state.selectedHistoryId !== flowId) return;
+    state.historyRecords = Array.isArray(data.records) ? data.records : [];
+    renderHistoryRecords(flowId, state.historyRecords);
+    scrollHistoryToBottom();
+  } catch (_) {
+    if (state.selectedHistoryId !== flowId) return;
+    detail.innerHTML = "";
+    detail.appendChild(el("p", "empty", "Network error loading session history."));
+  }
+}
+
+// Records carry a step identifier; group them so each step's conversation is
+// shown under its own heading.
+function stepKey(rec) {
+  return String(rec.step_id || rec.step_type || "step");
+}
+
+function renderHistoryRecords(flowId, records) {
+  const detail = $("history-detail");
+  detail.innerHTML = "";
+  if (!records.length) {
+    detail.appendChild(el("p", "empty", "No conversation records for this session."));
+    return;
+  }
+  const order = [];
+  const byStep = new Map();
+  for (const rec of records) {
+    const key = stepKey(rec);
+    if (!byStep.has(key)) {
+      byStep.set(key, { label: rec.step_type || rec.step_id || "step", records: [] });
+      order.push(key);
+    }
+    byStep.get(key).records.push(rec);
+  }
+  for (const key of order) {
+    detail.appendChild(renderStepGroup(byStep.get(key)));
+  }
+}
+
+function renderStepGroup(group) {
+  const sec = el("div", "history-step");
+  sec.appendChild(el("h5", "history-step-title", group.label));
+  for (const rec of group.records) {
+    sec.appendChild(renderRecord(rec));
+  }
+  return sec;
+}
+
+function renderRecord(rec) {
+  const role = String(rec.role || rec.type || "log").toLowerCase();
+  const known = ["user", "assistant", "system"].includes(role);
+  const row = el("div", "history-record role-" + (known ? role : "other"));
+
+  const head = el("div", "history-record-head");
+  head.appendChild(el("span", "record-role", role));
+  const ts = rec.timestamp != null ? rec.timestamp : rec.time;
+  if (ts != null) head.appendChild(el("span", "record-time", formatTime(ts)));
+  row.appendChild(head);
+
+  row.appendChild(el("pre", "record-body", recordText(rec)));
+  return row;
+}
+
+function recordText(rec) {
+  if (typeof rec.content === "string") return rec.content;
+  if (rec.content != null) {
+    try { return JSON.stringify(rec.content, null, 2); } catch (_) { /* fall through */ }
+  }
+  if (rec.text != null) return String(rec.text);
+  try { return JSON.stringify(rec, null, 2); } catch (_) { return String(rec); }
+}
+
+function scrollHistoryToBottom() {
+  const detail = $("history-detail");
+  detail.scrollTop = detail.scrollHeight;
+}
+
+// ---------------------------------------------------------------------------
 // New task form
 // ---------------------------------------------------------------------------
 
@@ -499,6 +714,9 @@ function init() {
   $("new-task-form").addEventListener("submit", submitNewTask);
 
   $("detail-close").addEventListener("click", closeDrawer);
+
+  $("history-btn").addEventListener("click", openHistory);
+  $("history-close").addEventListener("click", closeHistory);
 
   $("call-close").addEventListener("click", closeCallModal);
   $("call-form").addEventListener("submit", submitCall);
