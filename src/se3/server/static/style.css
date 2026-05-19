@@ -320,6 +320,20 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   margin: 8px 0 0;
 }
 
+.modal-body label.checkbox-label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  margin: 12px 0 2px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.modal-body label.checkbox-label input {
+  width: auto;
+  margin: 0;
+}
+
 .call-info {
   background: var(--bg);
   border: 1px solid var(--yellow);

@@ -133,6 +133,7 @@ class DaemonSpawner:
         *,
         project_root: Optional[str] = None,
         task_type: str = "feature",
+        discover: bool = False,
         extra_args: Optional[List[str]] = None,
         env: Optional[Dict[str, str]] = None,
     ) -> SpawnedProcess:
@@ -141,6 +142,11 @@ class DaemonSpawner:
         The child runs ``se3 run <task> --type <task_type> --output-format json``
         with the daemon's environment inherited (so the Python path stays
         correct) and ``cwd`` set to *project_root*.
+
+        When *discover* is true, ``--discover`` is appended so the flow starts
+        from the discovery step (the web ``POST /api/flows`` "start from
+        discovery" option threads its ``discover`` flag down to here via the
+        SPAWN_FLOW payload).
 
         The child's stdout and stderr are redirected to per-flow log files (not
         to OS pipes) so the child can always write without blocking, even when
@@ -157,6 +163,8 @@ class DaemonSpawner:
             "--output-format",
             "json",
         ]
+        if discover:
+            args.append("--discover")
         if extra_args:
             args.extend(extra_args)
 

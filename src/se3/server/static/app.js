@@ -585,6 +585,7 @@ function openNewTask() {
     }
   }
   $("nt-task").value = "";
+  $("nt-discover").checked = false;
   $("nt-error").classList.add("hidden");
   $("nt-submit").disabled = false;
   $("new-task-modal").classList.remove("hidden");
@@ -602,6 +603,7 @@ async function submitNewTask(event) {
   const machineId = $("nt-machine").value.trim();
   const task = $("nt-task").value.trim();
   const taskType = $("nt-type").value;
+  const discover = $("nt-discover").checked;
 
   if (!machineId) return showFormError(errBox, "Select a target machine.");
   if (!task) return showFormError(errBox, "Task description must not be empty.");
@@ -616,6 +618,7 @@ async function submitNewTask(event) {
         machine_id: machineId,
         task: task,
         task_type: taskType,
+        discover: discover,
       }),
     });
     if (resp.status === 202) {

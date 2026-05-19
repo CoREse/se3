@@ -49,8 +49,9 @@ _STATUS_INTERVAL = 5.0
 
 #: Type of the snapshot provider — returns a JSON-serializable machine snapshot.
 SnapshotProvider = Callable[[], Dict[str, Any]]
-#: Type of the spawn handler — called with (task_description, project_root, task_type).
-SpawnHandler = Callable[[str, str, str], Any]
+#: Type of the spawn handler — called with
+#: (task_description, project_root, task_type, discover).
+SpawnHandler = Callable[[str, str, str, bool], Any]
 #: Type of the respond handler — called with (call_id, project_root, response).
 RespondHandler = Callable[[str, str, Any], Any]
 
@@ -270,11 +271,12 @@ class DaemonClient:
             return
         project_root = str(payload.get("project_root") or "")
         task_type = str(payload.get("task_type") or "feature")
+        discover = bool(payload.get("discover", False))
         if self._spawn_handler is None:
             logger.warning("Received SPAWN_FLOW but no spawn handler is configured")
             return
         try:
-            self._spawn_handler(task, project_root, task_type)
+            self._spawn_handler(task, project_root, task_type, discover)
             logger.info("SPAWN_FLOW handled: %s", task[:80])
         except Exception:
             logger.exception("SPAWN_FLOW handler failed")

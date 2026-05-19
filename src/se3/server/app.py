@@ -64,6 +64,7 @@ class NewFlowRequest(BaseModel):
     task: str
     task_type: str = "feature"
     project_root: str = ""
+    discover: bool = False
 
 
 class RespondRequest(BaseModel):
@@ -140,7 +141,10 @@ def create_app() -> FastAPI:
                 detail=f"machine '{machine_id}' is not connected",
             )
         message = protocol.make_spawn_flow(
-            task, project_root=req.project_root, task_type=req.task_type
+            task,
+            project_root=req.project_root,
+            task_type=req.task_type,
+            discover=req.discover,
         )
         ok = await manager.send_to(machine_id, message)
         if not ok:
