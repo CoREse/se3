@@ -55,6 +55,14 @@ def _make_engine_json(root, *, flow_id="flow-abc", status="running", index=2):
     return payload
 
 
+class _FakeClient:
+    """Minimal stand-in for DaemonClient exposing connected/last_error."""
+
+    def __init__(self, *, connected: bool, last_error):
+        self.connected = connected
+        self.last_error = last_error
+
+
 # --------------------------------------------------------------------------
 # DaemonSupervisor
 # --------------------------------------------------------------------------
@@ -326,6 +334,93 @@ class TestDaemonLifecycle:
         assert config.status_file.exists()
         payload = json.loads(config.status_file.read_text(encoding="utf-8"))
         assert payload["snapshot"]["flows"]
+
+    def test_write_status_without_client(self, tmp_path):
+        """No server_url configured -> connection fields mark local-only."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj)
+        config = DaemonConfig(pid_dir=tmp_path / "rt", project_roots=[str(proj)])
+        daemon = Daemon(config)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+        assert daemon._client is None
+        daemon._poll_once()  # must not raise with _client is None
+        payload = json.loads(config.status_file.read_text(encoding="utf-8"))
+        assert payload["connected"] is False
+        assert payload["last_error"] is None
+        assert payload["server_configured"] is False
+
+    def test_write_status_with_connected_client(self, tmp_path):
+        """A connected client surfaces connected=True / last_error=None."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj)
+        config = DaemonConfig(pid_dir=tmp_path / "rt", project_roots=[str(proj)])
+        daemon = Daemon(config)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+        daemon._client = _FakeClient(connected=True, last_error=None)
+        daemon._poll_once()
+        payload = json.loads(config.status_file.read_text(encoding="utf-8"))
+        assert payload["connected"] is True
+        assert payload["last_error"] is None
+        assert payload["server_configured"] is True
+
+    def test_write_status_with_failed_client(self, tmp_path):
+        """A disconnected client surfaces connected=False with its last_error."""
+        proj = tmp_path / "proj"
+        _make_engine_json(proj)
+        config = DaemonConfig(pid_dir=tmp_path / "rt", project_roots=[str(proj)])
+        daemon = Daemon(config)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+        daemon._client = _FakeClient(
+            connected=False, last_error="websockets not installed"
+        )
+        daemon._poll_once()
+        payload = json.loads(config.status_file.read_text(encoding="utf-8"))
+        assert payload["connected"] is False
+        assert payload["last_error"] == "websockets not installed"
+        assert payload["server_configured"] is True
+
+    def test_daemon_status_exposes_connection_fields(self, tmp_path):
+        """daemon_status() surfaces connected/last_error from the status file."""
+        config = DaemonConfig(pid_dir=tmp_path)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+        config.pid_file.write_text(
+            json.dumps({"pid": os.getpid(), "server_url": "ws://host:8080"}),
+            encoding="utf-8",
+        )
+        config.status_file.write_text(
+            json.dumps(
+                {
+                    "updated_at": time.time(),
+                    "server_configured": True,
+                    "connected": False,
+                    "last_error": "connection refused",
+                    "tracked_flows": [],
+                    "snapshot": {},
+                }
+            ),
+            encoding="utf-8",
+        )
+        status = daemon_status(config)
+        assert status["running"] is True
+        assert status["connected"] is False
+        assert status["last_error"] == "connection refused"
+        assert status["server_configured"] is True
+
+    def test_daemon_status_connection_defaults_when_absent(self, tmp_path):
+        """A status file lacking connection fields yields safe defaults."""
+        config = DaemonConfig(pid_dir=tmp_path)
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+        config.pid_file.write_text(
+            json.dumps({"pid": os.getpid()}), encoding="utf-8"
+        )
+        config.status_file.write_text(
+            json.dumps({"updated_at": time.time(), "snapshot": {}}),
+            encoding="utf-8",
+        )
+        status = daemon_status(config)
+        assert status["connected"] is False
+        assert status["last_error"] is None
+        assert status["server_configured"] is False
 
     def test_background_start_stop(self, tmp_path, monkeypatch):
         """End-to-end: start a detached daemon, query status, stop it."""

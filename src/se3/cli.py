@@ -530,6 +530,15 @@ def daemon_status_cmd(
         f"Machine: {status.get('machine_id')}",
         f"Server:  {status.get('server_url') or '(not configured)'}",
     ]
+    # Real outbound-connection state, distinct from the configured-URL echo
+    # above: a configured URL does not mean the daemon actually connected.
+    if not status.get("server_url"):
+        lines.append("Connection: local-only (no server configured)")
+    elif status.get("connected"):
+        lines.append("Connection: connected")
+    else:
+        reason = status.get("last_error") or "not connected"
+        lines.append(f"Connection: not connected ({reason})")
     tracked = status.get("tracked_flows") or []
     lines.append(f"Tracked flows: {len(tracked)}")
     for rec in tracked:

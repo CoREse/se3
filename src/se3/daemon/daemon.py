@@ -280,13 +280,35 @@ class Daemon:
     def _write_status(
         self, snapshot: MachineStatus, flows: List["object"]
     ) -> None:
-        """Persist the latest snapshot so ``se3 daemon status`` can read it."""
+        """Persist the latest snapshot so ``se3 daemon status`` can read it.
+
+        The outbound :class:`~se3.daemon.client.DaemonClient`'s live
+        ``connected`` / ``last_error`` are written here so ``se3 daemon
+        status`` reflects the *real* connection state rather than merely
+        echoing the configured URL. When no client exists (no ``server_url``
+        configured) the connection fields mark an unconfigured outbound link
+        instead of misreporting a connection.
+        """
+        client = self._client
+        if client is not None:
+            server_configured = True
+            connected = bool(getattr(client, "connected", False))
+            last_error = getattr(client, "last_error", None)
+        else:
+            # No server_url configured: the daemon runs local-only and never
+            # opens an outbound connection.
+            server_configured = False
+            connected = False
+            last_error = None
         payload = {
             "pid": os.getpid(),
             "updated_at": time.time(),
             "server_url": self.config.server_url,
             "machine_id": snapshot.machine_id,
             "hostname": snapshot.hostname,
+            "server_configured": server_configured,
+            "connected": connected,
+            "last_error": last_error,
             "tracked_flows": [
                 rec.to_dict() for rec in flows if hasattr(rec, "to_dict")
             ],
@@ -522,6 +544,16 @@ def daemon_status(config: Optional[DaemonConfig] = None) -> Dict[str, object]:
         result["updated_at"] = status_payload.get("updated_at")
         result["tracked_flows"] = status_payload.get("tracked_flows", [])
         result["snapshot"] = status_payload.get("snapshot", {})
+        # Real outbound-connection state, written by Daemon._write_status.
+        result["server_configured"] = status_payload.get(
+            "server_configured", bool(payload.get("server_url"))
+        )
+        result["connected"] = status_payload.get("connected", False)
+        result["last_error"] = status_payload.get("last_error")
     else:
+        # No status file yet: fall back to safe defaults.
         result["tracked_flows"] = []
+        result["server_configured"] = bool(payload.get("server_url"))
+        result["connected"] = False
+        result["last_error"] = None
     return result
