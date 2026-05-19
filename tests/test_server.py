@@ -56,6 +56,7 @@ def test_typed_constructors():
         "task_description": "do it",
         "project_root": "/p",
         "task_type": "bugfix",
+        "discover": False,
     }
 
     respond = protocol.make_respond_call("c1", {"ans": True}, project_root="/p")

@@ -1,0 +1,296 @@
+"""Tests for the daemon-side history reader (:mod:`se3.daemon.history`)."""
+
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from se3.daemon import history as history_mod
+from se3.daemon.history import DaemonHistoryReader, SessionMeta
+from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
+
+
+# --------------------------------------------------------------------------
+# helpers
+# --------------------------------------------------------------------------
+
+
+def _write_jsonl(path, lines):
+    """Write *lines* (list of dicts) as a jsonl file at *path*."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8"
+    )
+
+
+def _append_jsonl(path, lines):
+    """Append *lines* (list of dicts) to an existing jsonl file."""
+    with path.open("a", encoding="utf-8") as fh:
+        for line in lines:
+            fh.write(json.dumps(line) + "\n")
+
+
+def _msg(role, content, step_type="analyze"):
+    return {"role": role, "content": content, "raw_json": [], "step_type": step_type}
+
+
+def _make_reader(*roots):
+    """Build a reader whose project-roots provider yields *roots*."""
+    return DaemonHistoryReader(project_roots_provider=lambda: list(roots))
+
+
+# --------------------------------------------------------------------------
+# index construction
+# --------------------------------------------------------------------------
+
+
+def test_build_index_enumerates_all_sources(tmp_path):
+    """build_index returns metadata for active, archived and history-only flows."""
+    # Active flow (engine.json) — running, so it counts as active.
+    state_dir = tmp_path / "se3" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps(
+            {
+                "flow_id": "active-1",
+                "task_description": "build the thing",
+                "task_type": "feature",
+                "status": "RUNNING",
+                "updated_at": "2026-05-19T10:00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # Archived flow.
+    archive_dir = state_dir / "archive"
+    archive_dir.mkdir()
+    (archive_dir / "engine_20260101_000000.json").write_text(
+        json.dumps(
+            {
+                "flow_id": "archived-1",
+                "task_description": "old work",
+                "status": "completed",
+                "updated_at": "2026-01-01T00:00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # History-only flow (no engine.json).
+    hist_dir = tmp_path / "se3" / "history" / "hist-1"
+    _write_jsonl(hist_dir / "01_analyze.jsonl", [_msg("user", "explore")])
+
+    metas = _make_reader(tmp_path).build_index()
+    by_id = {m.flow_id: m for m in metas}
+
+    assert set(by_id) == {"active-1", "archived-1", "hist-1"}
+    assert by_id["active-1"].source == "active"
+    assert by_id["archived-1"].source == "archived"
+    assert by_id["hist-1"].source == "history"
+
+
+def test_build_index_distinguishes_active_flows(tmp_path):
+    """A non-terminal engine.json flow is active; a completed one is not."""
+    state_dir = tmp_path / "se3" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps({"flow_id": "f1", "status": "RUNNING"}), encoding="utf-8"
+    )
+    running = _make_reader(tmp_path).build_index()[0]
+    assert running.active is True
+
+    (state_dir / "engine.json").write_text(
+        json.dumps({"flow_id": "f1", "status": "completed"}), encoding="utf-8"
+    )
+    done = _make_reader(tmp_path).build_index()[0]
+    assert done.active is False
+
+
+def test_history_only_flow_metadata_without_engine_json(tmp_path):
+    """A history-only flow still yields best-effort metadata when engine.json is gone."""
+    hist_dir = tmp_path / "se3" / "history" / "orphan-1"
+    _write_jsonl(
+        hist_dir / "01_analyze.jsonl",
+        [_msg("user", "Task description:\n----\nrefactor auth\n----\n")],
+    )
+    (hist_dir / "_meta.json").write_text(
+        json.dumps({"created_at": "2026-05-01T00:00:00", "type": "bugfix"}),
+        encoding="utf-8",
+    )
+
+    meta = _make_reader(tmp_path).build_index()[0]
+    assert meta.flow_id == "orphan-1"
+    assert meta.status == "history"
+    assert meta.task_type == "bugfix"
+    assert "refactor auth" in meta.task_description
+    assert meta.step_count == 1
+    assert meta.active is False
+
+
+def test_build_index_dedups_by_flow_id(tmp_path):
+    """A flow present in both engine.json and history/ appears once (active wins)."""
+    state_dir = tmp_path / "se3" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps({"flow_id": "dup-1", "status": "RUNNING"}), encoding="utf-8"
+    )
+    _write_jsonl(
+        tmp_path / "se3" / "history" / "dup-1" / "01_analyze.jsonl",
+        [_msg("user", "hi")],
+    )
+    metas = _make_reader(tmp_path).build_index()
+    assert [m.flow_id for m in metas] == ["dup-1"]
+    assert metas[0].source == "active"
+
+
+def test_session_meta_to_dict_round_trip():
+    meta = SessionMeta(flow_id="x", project_root="/p", active=True)
+    data = meta.to_dict()
+    assert data["flow_id"] == "x"
+    assert data["active"] is True
+    assert set(data) == {
+        "flow_id",
+        "project_root",
+        "task_description",
+        "task_type",
+        "status",
+        "created_at",
+        "updated_at",
+        "active",
+        "source",
+        "step_count",
+    }
+
+
+# --------------------------------------------------------------------------
+# incremental cursor reads
+# --------------------------------------------------------------------------
+
+
+def test_read_flow_first_read_is_full(tmp_path):
+    """The first read (no cursor) returns a full snapshot of every record."""
+    hist_dir = tmp_path / "se3" / "history" / "f1"
+    _write_jsonl(
+        hist_dir / "01_analyze.jsonl",
+        [_msg("user", "q1"), _msg("assistant", "a1")],
+    )
+    _write_jsonl(
+        hist_dir / "02_plan.jsonl",
+        [_msg("user", "q2", step_type="plan")],
+    )
+
+    read = _make_reader(tmp_path).read_flow("f1")
+    assert read.mode == HISTORY_MODE_FULL
+    assert len(read.records) == 3
+    assert read.records[0]["step_id"] == "01_analyze"
+    assert read.records[2]["step_id"] == "02_plan"
+    assert read.cursor == {"01_analyze.jsonl": 2, "02_plan.jsonl": 1}
+
+
+def test_read_flow_second_read_appends_only_new(tmp_path):
+    """A read with a cursor returns only lines appended since the cursor."""
+    reader = _make_reader(tmp_path)
+    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    _write_jsonl(jsonl, [_msg("user", "q1")])
+
+    first = reader.read_flow("f1")
+    assert first.mode == HISTORY_MODE_FULL
+    assert len(first.records) == 1
+
+    # Nothing new yet.
+    same = reader.read_flow("f1", cursor=first.cursor)
+    assert same.mode == HISTORY_MODE_APPEND
+    assert same.records == []
+    assert same.cursor == first.cursor
+
+    # Append two messages, then read incrementally.
+    _append_jsonl(jsonl, [_msg("assistant", "a1"), _msg("user", "q2")])
+    delta = reader.read_flow("f1", cursor=same.cursor)
+    assert delta.mode == HISTORY_MODE_APPEND
+    assert [r["message"]["content"] for r in delta.records] == ["a1", "q2"]
+    assert delta.cursor == {"01_analyze.jsonl": 3}
+
+
+def test_read_flow_missing_flow_returns_empty(tmp_path):
+    read = _make_reader(tmp_path).read_flow("does-not-exist")
+    assert read.mode == HISTORY_MODE_FULL
+    assert read.records == []
+
+
+def test_read_flow_caps_records_and_advances_cursor(tmp_path, monkeypatch):
+    """When records exceed the cap the read truncates and the cursor advances partially."""
+    monkeypatch.setattr(history_mod, "MAX_RECORDS_PER_REPORT", 2)
+    reader = _make_reader(tmp_path)
+    jsonl = tmp_path / "se3" / "history" / "f1" / "01_analyze.jsonl"
+    _write_jsonl(jsonl, [_msg("user", f"m{i}") for i in range(5)])
+
+    first = reader.read_flow("f1")
+    assert len(first.records) == 2
+    assert first.cursor == {"01_analyze.jsonl": 2}
+
+    second = reader.read_flow("f1", cursor=first.cursor)
+    assert [r["message"]["content"] for r in second.records] == ["m2", "m3"]
+    assert second.cursor == {"01_analyze.jsonl": 4}
+
+    third = reader.read_flow("f1", cursor=second.cursor)
+    assert [r["message"]["content"] for r in third.records] == ["m4"]
+    assert third.cursor == {"01_analyze.jsonl": 5}
+
+
+def test_read_flow_skips_malformed_lines(tmp_path):
+    """Blank and unparseable lines are skipped without aborting the read."""
+    hist_dir = tmp_path / "se3" / "history" / "f1"
+    hist_dir.mkdir(parents=True)
+    (hist_dir / "01_analyze.jsonl").write_text(
+        json.dumps(_msg("user", "ok"))
+        + "\n\nnot-json\n"
+        + json.dumps(_msg("assistant", "fine"))
+        + "\n",
+        encoding="utf-8",
+    )
+    read = _make_reader(tmp_path).read_flow("f1")
+    assert [r["message"]["content"] for r in read.records] == ["ok", "fine"]
+    # The cursor still counts every physical line so a resume does not re-scan.
+    assert read.cursor == {"01_analyze.jsonl": 4}
+
+
+# --------------------------------------------------------------------------
+# active-flow incremental reads
+# --------------------------------------------------------------------------
+
+
+def test_read_active_flows_only_returns_active(tmp_path):
+    """read_active_flows reads incrementally for active flows only."""
+    state_dir = tmp_path / "se3" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps({"flow_id": "live", "status": "RUNNING"}), encoding="utf-8"
+    )
+    _write_jsonl(
+        tmp_path / "se3" / "history" / "live" / "01_analyze.jsonl",
+        [_msg("user", "q1")],
+    )
+    # An archived (terminal) flow must be ignored by read_active_flows.
+    archive_dir = state_dir / "archive"
+    archive_dir.mkdir()
+    (archive_dir / "engine_20260101_000000.json").write_text(
+        json.dumps({"flow_id": "done", "status": "completed"}), encoding="utf-8"
+    )
+    _write_jsonl(
+        tmp_path / "se3" / "history" / "done" / "01_analyze.jsonl",
+        [_msg("user", "old")],
+    )
+
+    reader = _make_reader(tmp_path)
+    reads = reader.read_active_flows({})
+    assert [r.flow_id for r in reads] == ["live"]
+    assert reads[0].mode == HISTORY_MODE_FULL
+    assert len(reads[0].records) == 1
+
+    # A subsequent call with the stored cursor yields an empty append.
+    cursors = {r.flow_id: r.cursor for r in reads}
+    again = reader.read_active_flows(cursors)
+    assert again[0].mode == HISTORY_MODE_APPEND
+    assert again[0].records == []

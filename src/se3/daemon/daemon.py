@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from .aggregator import DaemonAggregator, MachineStatus
+from .history import DaemonHistoryReader
 from .spawner import DaemonSpawner, SpawnedProcess
 from .supervisor import DaemonSupervisor
 
@@ -139,6 +140,11 @@ class Daemon:
         )
         for root in self.config.project_roots:
             self.aggregator.add_project_root(root)
+        # Reads se3/history of every root the aggregator tracks; injected into
+        # the outbound DaemonClient as its history_provider.
+        self.history_reader = DaemonHistoryReader(
+            project_roots_provider=lambda: self.aggregator.project_roots
+        )
         self._stop_event: Optional[asyncio.Event] = None
         self._running = False
         # The outbound WebSocket client to the central server. Created lazily
@@ -229,6 +235,7 @@ class Daemon:
             se3_version=_se3_version(),
             snapshot_provider=lambda: self.aggregator.get_snapshot().to_dict(),
             spawn_handler=self._handle_spawn_request,
+            history_provider=self.history_reader,
         )
         self._client = client
         assert self._stop_event is not None

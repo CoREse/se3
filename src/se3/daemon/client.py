@@ -53,6 +53,9 @@ SnapshotProvider = Callable[[], Dict[str, Any]]
 SpawnHandler = Callable[[str, str, str], Any]
 #: Type of the respond handler — called with (call_id, project_root, response).
 RespondHandler = Callable[[str, str, Any], Any]
+#: Type of the history provider — a :class:`~se3.daemon.history.DaemonHistoryReader`
+#: (or any object exposing ``build_index`` / ``read_flow`` / ``read_active_flows``).
+HistoryProvider = Any
 
 
 def _normalize_ws_url(server_url: str) -> str:
@@ -103,6 +106,7 @@ class DaemonClient:
         snapshot_provider: SnapshotProvider,
         spawn_handler: Optional[SpawnHandler] = None,
         respond_handler: Optional[RespondHandler] = None,
+        history_provider: Optional[HistoryProvider] = None,
         status_interval: float = _STATUS_INTERVAL,
     ) -> None:
         """Create a client.
@@ -117,6 +121,10 @@ class DaemonClient:
             spawn_handler: Callable invoked for an incoming SPAWN_FLOW.
             respond_handler: Callable invoked for an incoming RESPOND_CALL;
                 when ``None`` the client writes the response file itself.
+            history_provider: A :class:`~se3.daemon.history.DaemonHistoryReader`
+                used to report the history index, push active-flow increments
+                and answer HISTORY_REQUEST pulls. When ``None`` history support
+                is disabled and the client behaves as before.
             status_interval: Seconds between STATUS_UPDATE pushes.
         """
         self.server_url = _normalize_ws_url(server_url)
@@ -126,11 +134,16 @@ class DaemonClient:
         self._snapshot_provider = snapshot_provider
         self._spawn_handler = spawn_handler
         self._respond_handler = respond_handler or _default_respond_handler
+        self._history_provider = history_provider
         self.status_interval = max(0.5, float(status_interval))
 
         self._seq = 0
         self._connected = False
         self._last_error: Optional[str] = None
+        # History push state, reset on every (re)connection so a freshly
+        # connected server always receives a fresh index and full snapshots.
+        self._last_index: Optional[list] = None
+        self._history_cursors: Dict[str, Dict[str, int]] = {}
 
     # -- introspection -----------------------------------------------------
 
@@ -202,10 +215,15 @@ class DaemonClient:
         async with websockets.connect(self.server_url, open_timeout=10) as ws:
             self._connected = True
             self._last_error = None
+            # A new session: forget prior history state so the server gets a
+            # fresh index and full active-flow snapshots after every reconnect.
+            self._last_index = None
+            self._history_cursors = {}
             # Announce ourselves, then push a full snapshot immediately so a
             # freshly (re)connected server has state before the first tick.
             await self._send(ws, protocol.make_hello(self.machine_id, self.hostname, self.se3_version))
             await self._push_status(ws)
+            await self._push_history(ws, force_index=True)
             logger.info("Connected to central server; HELLO sent")
 
             recv_task = asyncio.create_task(self._receive_loop(ws, stop_event))
@@ -245,6 +263,7 @@ class DaemonClient:
             else:
                 break
             await self._push_status(ws)
+            await self._push_history(ws)
 
     # -- message handling --------------------------------------------------
 
@@ -259,6 +278,8 @@ class DaemonClient:
             self._handle_spawn(message.payload)
         elif message.type == protocol.MSG_RESPOND_CALL:
             self._handle_respond(message.payload)
+        elif message.type == protocol.MSG_HISTORY_REQUEST:
+            await self._handle_history_request(ws, message.payload)
         else:  # pragma: no cover - defensive; decode() already validates
             logger.debug("Ignoring unexpected server message type %s", message.type)
 
@@ -293,6 +314,48 @@ class DaemonClient:
         except Exception:
             logger.exception("RESPOND_CALL handler failed")
 
+    async def _handle_history_request(self, ws: Any, payload: Dict[str, Any]) -> None:
+        """Answer a server HISTORY_REQUEST with a HISTORY_DATA reply.
+
+        The server sends this when the web UI opens a flow whose records the
+        server has not cached. The (optional) ``cursor`` lets the server ask
+        for an incremental delta; an absent cursor requests a full snapshot.
+        """
+        provider = self._history_provider
+        if provider is None:
+            logger.warning("Received HISTORY_REQUEST but no history provider configured")
+            return
+        flow_id = str(payload.get("flow_id") or "").strip()
+        if not flow_id:
+            logger.warning("Ignoring HISTORY_REQUEST with empty flow_id")
+            return
+        project_root = str(payload.get("project_root") or "") or None
+        cursor = payload.get("cursor") or {}
+        try:
+            read = provider.read_flow(flow_id, project_root=project_root, cursor=cursor)
+        except Exception:
+            logger.exception("HISTORY_REQUEST read failed for flow %s", flow_id)
+            return
+        try:
+            await self._send(
+                ws,
+                protocol.make_history_data(
+                    read.flow_id,
+                    read.mode,
+                    read.records,
+                    cursor=read.cursor,
+                    seq=self._next_seq(),
+                ),
+            )
+            logger.info(
+                "HISTORY_REQUEST answered for flow %s (%d record(s), %s)",
+                flow_id,
+                len(read.records),
+                read.mode,
+            )
+        except Exception:
+            logger.debug("HISTORY_DATA send failed", exc_info=True)
+
     # -- sending -----------------------------------------------------------
 
     async def _send(self, ws: Any, message: protocol.Message) -> None:
@@ -313,6 +376,57 @@ class DaemonClient:
             # The receive loop will observe the closed socket and trigger a
             # reconnect; nothing more to do here.
             logger.debug("STATUS_UPDATE send failed", exc_info=True)
+
+    async def _push_history(self, ws: Any, *, force_index: bool = False) -> None:
+        """Report the history index (on change) and push active-flow deltas.
+
+        The index is re-sent only when it actually changed since the last push
+        (or when *force_index* is set, used right after a (re)connect). Active
+        flows are read incrementally off ``self._history_cursors`` so each tick
+        ships only the conversation lines appended since the previous push.
+        """
+        provider = self._history_provider
+        if provider is None:
+            return
+        try:
+            index = [meta.to_dict() for meta in provider.build_index()]
+        except Exception:
+            logger.exception("History index build failed; skipping history push")
+            return
+        if force_index or index != self._last_index:
+            self._last_index = index
+            try:
+                await self._send(
+                    ws, protocol.make_history_index(index, seq=self._next_seq())
+                )
+            except Exception:
+                logger.debug("HISTORY_INDEX send failed", exc_info=True)
+                return
+        try:
+            reads = provider.read_active_flows(self._history_cursors)
+        except Exception:
+            logger.exception("Active-flow history read failed")
+            return
+        for read in reads:
+            # Always advance the stored cursor, even for an empty delta, so the
+            # next tick continues from the right position.
+            self._history_cursors[read.flow_id] = read.cursor
+            if not read.records:
+                continue
+            try:
+                await self._send(
+                    ws,
+                    protocol.make_history_data(
+                        read.flow_id,
+                        read.mode,
+                        read.records,
+                        cursor=read.cursor,
+                        seq=self._next_seq(),
+                    ),
+                )
+            except Exception:
+                logger.debug("HISTORY_DATA send failed", exc_info=True)
+                return
 
 
 def _default_respond_handler(call_id: str, project_root: str, response: Any) -> None:
