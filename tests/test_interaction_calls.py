@@ -1,5 +1,3 @@
-Resolving in favor of the HEAD (G6) version. The source module `se3/engine/interaction_calls.py` is being merged to expose the G1/G6 protocol-backed API (`write_call`, `read_call`, `read_response`, `classify_kind`, `write_interjection_request`, `drain_interjection_requests(project_root)`, `write_retry_decision_call`) plus protocol `make_interject_flow`/`CALL_KINDS`. The incoming G2 test targets a different, colliding API (`drain_interjection_requests(flow, project_root)` is a different function with the same name), so the two test files cannot be unioned. The HEAD test matches the API surface the already-merged G1/G3/G6 branches established.
-
 """Tests for the unified interaction-call channel.
 
 Covers the three layers that turn every human-in-the-loop interaction in a
@@ -346,9 +344,56 @@ def test_write_retry_decision_call_shape(tmp_path: Path):
     assert "boom" in data["prompt"]
 
 
+# --------------------------------------------------------------------------
+# interaction_calls: make_cli_confirm_handler
+# --------------------------------------------------------------------------
+
+
+def test_cli_confirm_handler_returns_answer_when_response_arrives(tmp_path: Path):
+    handler = interaction_calls.make_cli_confirm_handler(
+        tmp_path, flow_id="f1", step_id="s1", poll_interval=0.01
+    )
+    calls = tmp_path / "se3" / "calls"
+
+    answered = {"done": False}
+
+    def is_alive() -> bool:
+        # On the second poll, drop the answer in and report the child alive.
+        if not answered["done"]:
+            answered["done"] = True
+            return True
+        # Write the response, then keep reporting alive so the handler reads it.
+        for path in calls.glob("*.json"):
+            if path.name.endswith(".response.json"):
+                continue
+            interaction_calls.write_response(path, {"response": "1"})
+        return True
+
+    assert handler("Press 1", ["1", "2"], is_alive) == "1"
+
+
+def test_cli_confirm_handler_marks_orphan_consumed_when_child_exits(tmp_path: Path):
+    """A child that exits before answering leaves a consumed call file."""
+    handler = interaction_calls.make_cli_confirm_handler(
+        tmp_path, flow_id="f1", step_id="s1", poll_interval=0.01
+    )
+    calls = tmp_path / "se3" / "calls"
+
+    # is_alive() reports the subprocess as already gone — no answer will come.
+    assert handler("Press 1", ["1", "2"], lambda: False) is None
+
+    call_files = [
+        p for p in calls.glob("*.json") if not p.name.endswith(".response.json")
+    ]
+    assert len(call_files) == 1
+    call_file = call_files[0]
+    # The orphaned call file is marked consumed so the aggregator stops
+    # enumerating it as an actionable pending interaction.
+    response = interaction_calls.read_response(call_file)
+    assert response is not None
+    assert response.get("consumed") is True
+    assert response.get("skipped") == "subprocess_exited"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
-
----
-
-⚠️ One thing you should know before relying on this: the surrounding merge is in a worse state than this one file. `src/se3/engine/interaction_calls.py`, `src/se3/daemon/protocol.py`, and `src/se3/commands/run.py` still contain conflict markers — and the HEAD side of `interaction_calls.py` and `protocol.py` has a prior agent's *chat reply text* committed into the file body instead of code. `run.py` also mixes both APIs (`drain_interjection_requests(project_root)` at line 369 vs `drain_interjection_requests(flow, project_root)` at line 1312 — same name, incompatible signatures). The test file I produced will only pass once those source conflicts are resolved to the G1/G6 API surface. You'll want to fix those files before running pytest.

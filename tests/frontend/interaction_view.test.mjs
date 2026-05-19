@@ -1,68 +1,32 @@
 // Lightweight, dependency-free assertion script for the web console's
-// running-flow chat view pure functions.
+// running-flow chat view classification contract.
 //
 //   Run:  node tests/frontend/interaction_view.test.mjs
 //
-// The web frontend (src/se3/server/static/app.js) has no build step and no
-// module system, so its pure helpers cannot be imported directly. This file
-// is therefore the *executable contract* for three deterministic pieces of
-// classification logic the chat view depends on. The reference
-// implementations below MUST stay byte-for-byte equivalent to the functions
-// shipped in app.js — if app.js diverges, this script fails and the divergence
-// is caught before it reaches the UI.
+// This file imports the *real* pure helpers exported by the web frontend
+// (src/se3/server/static/app.js) rather than reimplementing them. app.js has
+// no build step and no module system in the browser, but it appends a
+// `module.exports` block guarded by `typeof module !== "undefined"` so Node
+// can `require()` the same source the browser ships. Testing the shipped
+// functions directly means a divergence in app.js is caught here — a
+// reimplemented reference copy could silently drift out of sync, so it is
+// deliberately avoided.
 //
-// Why this matters (echoes issue 109): the collapse/expand decision is made
-// from the structured `role` field of each record — never by guessing from
-// message text — so prompt-template messages collapse to a chip and genuine
-// assistant output / intervention items stay expanded, deterministically.
+// Why this matters (echoes issues 109 / 110): the collapse/expand decision is
+// made from the structured `role` field of each record — never by guessing
+// from message text — so prompt-template messages collapse to a chip and
+// genuine assistant output / intervention items stay expanded,
+// deterministically.
 
-// ---------------------------------------------------------------------------
-// Reference implementations (keep in sync with app.js)
-// ---------------------------------------------------------------------------
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
 
-// Map a raw record role onto one of the three rendering buckets. `human` is
-// folded into `user`; anything unrecognised is treated as `system` so it is
-// collapsed rather than mistaken for assistant output.
-function classifyRole(role) {
-  const r = String(role || '').toLowerCase().trim();
-  if (r === 'assistant') return 'assistant';
-  if (r === 'user' || r === 'human') return 'user';
-  return 'system';
-}
-
-// user/system messages are prompt-template noise: collapse them to a
-// one-line, click-to-expand chip. Assistant output is the real product and
-// stays expanded.
-function shouldCollapseMessage(role) {
-  return classifyRole(role) !== 'assistant';
-}
-
-// The four interaction-call kinds the backend emits. An unknown/missing kind
-// degrades to `call` — matching the daemon aggregator's backward-compatible
-// treatment of legacy call files.
-const CALL_KINDS = ['call', 'interjection', 'retry_decision', 'cli_confirm'];
-
-function interventionItemType(kind) {
-  return CALL_KINDS.includes(kind) ? kind : 'call';
-}
-
-// Human-facing label for an intervention entry, branched by kind.
-function interventionLabel(kind) {
-  switch (interventionItemType(kind)) {
-    case 'interjection':    return 'Interjection';
-    case 'retry_decision':  return 'Retry / failure decision';
-    case 'cli_confirm':     return 'CLI confirmation';
-    default:                return 'Pending call';
-  }
-}
-
-// One-line chip label for a collapsed prompt-template message, e.g.
-// "system prompt · discovery mode".
-function chipLabel(role, meta) {
-  const bucket = classifyRole(role);
-  const tag = meta && meta.mode ? ` · ${meta.mode}` : '';
-  return `${bucket} prompt${tag}`;
-}
+const require = createRequire(import.meta.url);
+const here = path.dirname(fileURLToPath(import.meta.url));
+const app = require(
+  path.join(here, "..", "..", "src", "se3", "server", "static", "app.js"),
+);
 
 // ---------------------------------------------------------------------------
 // Tiny assertion harness
@@ -82,60 +46,71 @@ function eq(actual, expected, label) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// classifyRole
-// ---------------------------------------------------------------------------
-
-eq(classifyRole('assistant'), 'assistant', 'assistant -> assistant');
-eq(classifyRole('user'), 'user', 'user -> user');
-eq(classifyRole('human'), 'user', 'human folds into user');
-eq(classifyRole('system'), 'system', 'system -> system');
-eq(classifyRole('Assistant'), 'assistant', 'role match is case-insensitive');
-eq(classifyRole('  user  '), 'user', 'role is trimmed');
-eq(classifyRole('tool'), 'system', 'unknown role -> system');
-eq(classifyRole(''), 'system', 'empty role -> system');
-eq(classifyRole(null), 'system', 'null role -> system');
-eq(classifyRole(undefined), 'system', 'undefined role -> system');
+// `collapseDecision` is the chat view's actual collapse rule: a raw record is
+// first normalized (which folds `human` into `user`) and the normalized role
+// drives `isCollapsibleRole`. Both halves come straight from app.js.
+function collapseDecision(rawRecord) {
+  const norm = app.normalizeRecord(rawRecord);
+  return app.isCollapsibleRole(norm.role);
+}
 
 // ---------------------------------------------------------------------------
-// shouldCollapseMessage  (chip-collapse decision)
+// normalizeRecord: role classification is structural, not text-based
 // ---------------------------------------------------------------------------
 
-eq(shouldCollapseMessage('assistant'), false, 'assistant output stays expanded');
-eq(shouldCollapseMessage('user'), true, 'user prompt collapses to a chip');
-eq(shouldCollapseMessage('human'), true, 'human prompt collapses to a chip');
-eq(shouldCollapseMessage('system'), true, 'system prompt collapses to a chip');
-eq(shouldCollapseMessage('tool'), true, 'unknown role collapses to a chip');
-// Determinism guard: identical text, different role -> opposite decision,
+eq(app.normalizeRecord({ message: { role: "assistant", content: "x" } }).role,
+   "assistant", "assistant role preserved");
+eq(app.normalizeRecord({ message: { role: "user", content: "x" } }).role,
+   "user", "user role preserved");
+eq(app.normalizeRecord({ message: { role: "human", content: "x" } }).role,
+   "user", "human folds into user");
+eq(app.normalizeRecord({ message: { role: "system", content: "x" } }).role,
+   "system", "system role preserved");
+eq(app.normalizeRecord({ message: { role: "Assistant", content: "x" } }).role,
+   "assistant", "role classification is case-insensitive");
+
+// ---------------------------------------------------------------------------
+// isCollapsibleRole + collapseDecision (chip-collapse rule)
+// ---------------------------------------------------------------------------
+
+eq(app.isCollapsibleRole("user"), true, "user prompt collapses to a chip");
+eq(app.isCollapsibleRole("system"), true, "system prompt collapses to a chip");
+eq(app.isCollapsibleRole("assistant"), false, "assistant output stays expanded");
+
+eq(collapseDecision({ message: { role: "assistant", content: "hello" } }),
+   false, "assistant record stays expanded");
+eq(collapseDecision({ message: { role: "user", content: "hello" } }),
+   true, "user record collapses");
+eq(collapseDecision({ message: { role: "human", content: "hello" } }),
+   true, "human record collapses (folded to user)");
+eq(collapseDecision({ message: { role: "system", content: "hello" } }),
+   true, "system record collapses");
+
+// Determinism guard: identical content, different role -> opposite decision,
 // proving the decision never inspects message text.
-eq(shouldCollapseMessage('assistant') === shouldCollapseMessage('system'), false,
-   'collapse decision is driven by role, not text');
+eq(collapseDecision({ message: { role: "assistant", content: "SAME" } })
+     === collapseDecision({ message: { role: "system", content: "SAME" } }),
+   false, "collapse decision is driven by role, not text");
 
 // ---------------------------------------------------------------------------
-// interventionItemType  (kind branching)
+// normalizeKind: interaction-call kind branching
 // ---------------------------------------------------------------------------
 
-eq(interventionItemType('call'), 'call', 'call kind');
-eq(interventionItemType('interjection'), 'interjection', 'interjection kind');
-eq(interventionItemType('retry_decision'), 'retry_decision', 'retry_decision kind');
-eq(interventionItemType('cli_confirm'), 'cli_confirm', 'cli_confirm kind');
-eq(interventionItemType('mystery'), 'call', 'unknown kind -> call');
-eq(interventionItemType(undefined), 'call', 'missing kind -> call');
-
-eq(interventionLabel('interjection'), 'Interjection', 'interjection label');
-eq(interventionLabel('retry_decision'), 'Retry / failure decision', 'retry label');
-eq(interventionLabel('cli_confirm'), 'CLI confirmation', 'cli_confirm label');
-eq(interventionLabel('call'), 'Pending call', 'call label');
-eq(interventionLabel('bogus'), 'Pending call', 'unknown kind label -> Pending call');
+eq(app.normalizeKind("call"), "call", "call kind");
+eq(app.normalizeKind("interjection"), "interjection", "interjection kind");
+eq(app.normalizeKind("retry_decision"), "retry_decision", "retry_decision kind");
+eq(app.normalizeKind("cli_confirm"), "cli_confirm", "cli_confirm kind");
+eq(app.normalizeKind("mystery"), "call", "unknown kind degrades to call");
+eq(app.normalizeKind(undefined), "call", "missing kind degrades to call");
 
 // ---------------------------------------------------------------------------
-// chipLabel
+// chipLabel: one-line label for a collapsed prompt-template message
 // ---------------------------------------------------------------------------
 
-eq(chipLabel('system', { mode: 'discovery mode' }), 'system prompt · discovery mode',
-   'system chip with mode');
-eq(chipLabel('user', {}), 'user prompt', 'user chip without mode');
-eq(chipLabel('human', null), 'user prompt', 'human chip folds to user');
+eq(app.chipLabel({ role: "system", stepType: "discovery" }),
+   "system prompt · discovery", "system chip with step context");
+eq(app.chipLabel({ role: "user", stepType: "" }),
+   "user prompt", "user chip without context");
 
 // ---------------------------------------------------------------------------
 // Summary

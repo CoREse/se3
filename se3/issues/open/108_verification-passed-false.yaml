@@ -1,0 +1,12 @@
+id: '108'
+title: Verification passed=False 与验证摘要内容自相矛盾
+description: 自动化验证将 passed 标记为 False,但其 summary 明确陈述所有 8 项任务范围已满足、根因已在源头修复、测试全部通过。状态布尔值与文字结论不一致,可能是验证流程的记录缺陷,会误导后续会话判断任务是否完成。
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-19T15:52:33.325375'
+updated_at: '2026-05-19T15:52:33.325375'

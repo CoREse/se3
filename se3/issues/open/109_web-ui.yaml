@@ -1,0 +1,12 @@
+id: '109'
+title: Web UI 改动缺少自动化前端测试覆盖
+description: 本次重做引入了 normalizeRecord 解包、Markdown 渲染、step 分组等核心逻辑,但前端为原生 JS、无构建步骤,验收依赖人工冒烟。解包逻辑等纯函数部分缺乏回归测试,服务端记录契约一旦变动易再次回归。
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-19T15:52:33.326877'
+updated_at: '2026-05-19T15:52:33.326877'

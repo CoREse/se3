@@ -214,7 +214,7 @@ There is no two-stage "first Ctrl+C interrupts / second Ctrl+C exits" state mach
 
 ### Requirement: Step Failure Interactive Recovery
 
-When a step transitions to `StepStatus.FAILED`, the orchestrator SHALL present an interactive Retry/Skip/Abort prompt to the operator, subject to a hard retry ceiling, rather than immediately failing the flow.
+When a step transitions to `StepStatus.FAILED`, the orchestrator SHALL obtain a Retry/Skip/Abort recovery decision, subject to a hard retry ceiling, rather than immediately failing the flow. On an interactive terminal the decision is collected via a prompt; off a terminal it is externalized as a `retry_decision` call file and resolved out-of-band.
 
 **Recovery Flow** (`_run_flow` orchestrator loop in `src/se3/commands/run.py`):
 
@@ -223,8 +223,9 @@ When a step transitions to `StepStatus.FAILED`, the orchestrator SHALL present a
 3. If `retry_count >= 3`:
    - The operator is informed that max retries have been reached.
    - The flow is **auto-failed** (no prompt): `flow.status` is set to `FlowStatus.FAILED`, state is persisted, and the process exits with code 1.
-4. If `retry_count < 3`:
-   - The operator is shown a choice prompt: **"Retry this step"** / **"Skip to next step"** / **"Abort flow"**.
+4. If `retry_count < 3`, the recovery decision is sourced according to whether the process owns a terminal (`sys.stdin.isatty()`):
+   - **On a TTY (interactive):** the operator is shown a choice prompt: **"Retry this step"** / **"Skip to next step"** / **"Abort flow"**.
+   - **Off a TTY (daemon-spawned `se3 run --output-format json`, CI, a pipe):** there is no operator to host a blocking prompt, so the decision is externalized as a `retry_decision`-kind call file under `se3/calls/` (written via `interaction_calls.write_retry_decision_call`, embedding the failed step's id/type, the error message, and the current retry count). If no sibling response file exists yet, the flow is set to `FlowStatus.PAUSED`, a `FLOW_PAUSED` event is emitted, state is persisted, and the process returns — the decision is made out-of-band (e.g. through the web console) and applied on the next `se3 run --resume`. If a sibling response file is already present (a resumed run), its `decision` value (`retry` / `skip` / `abort`, defaulting to `abort` when missing or unrecognized) is consumed and the call file plus both `.response` / `.response.json` siblings are removed so a later failure of the same step writes a fresh call.
 
 **Choice Outcomes:**
 
@@ -282,6 +283,20 @@ The `retry_count` on the step model is distinct from the `inputs["retry_count"]`
 - **AND** the flow is auto-failed without displaying the Retry/Skip/Abort prompt
 - **AND** `flow.status` is set to `FAILED`
 - **AND** the process exits with code 1
+
+#### Scenario: Non-interactive failure externalizes the decision and pauses
+- **GIVEN** a step transitions to `FAILED` with `current_step.retry_count < 3` and the process does not own a terminal (`sys.stdin.isatty()` is false)
+- **WHEN** the orchestrator processes the failed result and no response file exists yet
+- **THEN** a `retry_decision`-kind call file is written under `se3/calls/` carrying the failed step's id/type, the error message, and the retry count
+- **AND** `flow.status` is set to `PAUSED`, a `FLOW_PAUSED` event is emitted, and flow state is persisted
+- **AND** no interactive Retry/Skip/Abort prompt is shown
+
+#### Scenario: Non-interactive failure consumes an out-of-band decision on resume
+- **GIVEN** a `retry_decision` call file exists with a sibling response file recording a `decision` of `retry`, `skip`, or `abort`
+- **WHEN** the orchestrator processes the failed step off a terminal
+- **THEN** the recorded decision is applied with the same Retry/Skip/Abort outcomes as the interactive prompt
+- **AND** the call file and both `.response` / `.response.json` siblings are removed so a later failure of the same step writes a fresh call
+- **AND** a missing or unrecognized `decision` value defaults to `abort`
 
 ### Requirement: CONFIRM Steps and REVISION_NEEDED Transitions
 
@@ -379,6 +394,10 @@ User-typed instructions captured during a Ctrl+C interrupt SHALL persist across 
 - The current step's `inputs["task_description"]` is recomposed via `compose_task_description_with_interjections(base=_effective_task_description_base(flow), interjections=flow.state.context["user_interjections"])`. The base is the un-decorated source (the discovery `refined_description` if discovery ran, otherwise `flow.task_description`) — NOT the step's already-composed task_description, to avoid emitting a duplicate `## Additional Instructions` section.
 - The step is reset to `StepStatus.PENDING` and state is persisted before the re-run.
 
+**Web-Console Interjections** (`_drain_pending_interjections` in `src/se3/commands/run.py`):
+- A mid-flow instruction typed into the web console is delivered to the running flow out-of-band: the server sends `MSG_INTERJECT_FLOW`, the daemon writes an `interjection`-kind call file under the flow's `se3/calls/`, and the `se3 run` process drains it at the top of the run loop (a step boundary) via `interaction_calls.drain_interjection_requests`.
+- Each drained instruction is appended to `flow.state.context["user_interjections"]` using the same entry shape as a Ctrl+C interjection (`text`, `step_id`, `step_type`, ISO `timestamp`), additionally tagged with `source: "web-console"`, and the current step's `task_description` is recomposed via `compose_task_description_with_interjections` so the instruction takes effect — identical to the Ctrl+C path.
+
 **Downstream Propagation:**
 - Subsequently constructed steps pick up the same interjection list at construction time via the engine's step-input builder (`state_machine._build_step_inputs`), which composes interjections onto every new step's `task_description`. The interrupt handler does NOT mutate already-constructed downstream step inputs; propagation happens because downstream steps are built later and read the live `flow.state.context["user_interjections"]`.
 
@@ -400,6 +419,12 @@ User-typed instructions captured during a Ctrl+C interrupt SHALL persist across 
 - **WHEN** the user submits empty input at the "Additional Instruction" prompt
 - **THEN** no entry is appended to `user_interjections`
 - **AND** the current step is reset to `PENDING` and re-runs unchanged
+
+#### Scenario: Web-console interjection drained at a step boundary
+- **GIVEN** the daemon has written one or more `interjection`-kind call files for the running flow (from a `MSG_INTERJECT_FLOW`)
+- **WHEN** the run loop reaches a step boundary and drains pending interjection requests
+- **THEN** each instruction is appended to `flow.state.context["user_interjections"]` with `text`, `step_id`, `step_type`, ISO `timestamp`, and `source: "web-console"`
+- **AND** the current step's `task_description` is recomposed via `compose_task_description_with_interjections` so the instruction takes effect
 
 ### Requirement: Session Commit Cadence
 

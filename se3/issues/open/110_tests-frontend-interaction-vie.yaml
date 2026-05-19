@@ -1,0 +1,33 @@
+id: '110'
+title: tests/frontend/interaction_view.test.mjs claims its reference implementations
+  'MUST stay byte-for-byte equivalent to the functions shipped in app.js' and will
+  catch divergence, but it never imports app.js and uses different function names
+  (`classifyRole`/`shouldCollapseMessage`/`chipLabel(role,meta)`) than app.js (`isCollapsibleRole`/`COLLAPSIBLE_ROLES`/`chipLabel(norm)`).
+  It cannot actually detect divergence. (test_app_pure.mjs does provide genuine coverage
+  by importing app.js.) Also, neither .mjs file is executed by the Python-only pytest
+  suite, so frontend regression coverage is manual — this overlaps with already-tracked
+  issue 109.
+description: 'tests/frontend/interaction_view.test.mjs claims its reference implementations
+  ''MUST stay byte-for-byte equivalent to the functions shipped in app.js'' and will
+  catch divergence, but it never imports app.js and uses different function names
+  (`classifyRole`/`shouldCollapseMessage`/`chipLabel(role,meta)`) than app.js (`isCollapsibleRole`/`COLLAPSIBLE_ROLES`/`chipLabel(norm)`).
+  It cannot actually detect divergence. (test_app_pure.mjs does provide genuine coverage
+  by importing app.js.) Also, neither .mjs file is executed by the Python-only pytest
+  suite, so frontend regression coverage is manual — this overlaps with already-tracked
+  issue 109.
+
+
+  Suggestion: Either soften the misleading ''byte-for-byte / executable contract''
+  comment in interaction_view.test.mjs, or rewrite it to import app.js''s real exports
+  like test_app_pure.mjs does. Optionally wire a pytest shim that shells out to `node`
+  so the .mjs tests run in CI.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-19T19:00:29.689462'
+updated_at: '2026-05-19T19:00:29.689462'

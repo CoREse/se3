@@ -3,7 +3,7 @@
 
 ## Purpose
 
-The agent-runner-infrastructure subsystem is the subprocess execution layer that drives the Claude Code CLI for every LLM call made by SE3. It defines an abstract `AgentRunner` interface (with a `RunResult` dataclass and `InfraErrorType` taxonomy) plus a concrete `ClaudeCodeRunner` adapter that handles process spawning, real-time output streaming, stdout/stderr capture, hang detection via psutil resource probes, wall-clock and inactivity timeout enforcement, usage-limit keyword scanning, and a large-prompt rerouting path that moves oversized `-p`/`--prompt` values to stdin to avoid Linux `execve()` `E2BIG` failures. The runner wraps exactly one Claude CLI command per instance; multi-command rotation/fallback is owned by `LLMCaller` upstream.
+The agent-runner-infrastructure subsystem is the subprocess execution layer that drives the Claude Code CLI for every LLM call made by SE3. It defines an abstract `AgentRunner` interface (with a `RunResult` dataclass and `InfraErrorType` taxonomy) plus a concrete `ClaudeCodeRunner` adapter that handles process spawning, real-time output streaming, stdout/stderr capture, hang detection via psutil resource probes, wall-clock and inactivity timeout enforcement, usage-limit keyword scanning, a large-prompt rerouting path that moves oversized `-p`/`--prompt` values to stdin to avoid Linux `execve()` `E2BIG` failures, and a conservative CLI-subprocess confirmation-prompt capture path that surfaces interactive child prompts (e.g. `按 1 确定` / `Press 1 to confirm`) to the engine via an optional `on_confirm` callback. The runner wraps exactly one Claude CLI command per instance; multi-command rotation/fallback is owned by `LLMCaller` upstream.
 
 ## Requirements
 
@@ -18,7 +18,7 @@ The subsystem MUST expose an `AgentRunner` abstract base class defining the cont
 
 #### Scenario: run_with_monitor method signature
 - **WHEN** a subclass implements `AgentRunner.run_with_monitor`
-- **THEN** it MUST accept `args`, optional `log_file`, optional `wall_timeout`, `inactivity_timeout` defaulting to 1800 seconds, optional `cwd`/`env`, and optional `on_output`/`on_activity` callbacks
+- **THEN** it MUST accept `args`, optional `log_file`, optional `wall_timeout`, `inactivity_timeout` defaulting to 1800 seconds, optional `cwd`/`env`, optional `on_output`/`on_activity` callbacks, and an optional `on_confirm` callback
 - **AND** it MUST return a `MonitoredResult` (or compatible type)
 
 #### Scenario: detect_infra_error method signature
@@ -295,6 +295,42 @@ User-initiated Ctrl+C MUST not lose buffered output; the monitor MUST kill the c
 #### Scenario: interrupted propagated to MonitoredResult
 - **WHEN** `_run_single_with_monitor` returns with `interrupted=True`
 - **THEN** the outer `run_with_monitor` returns a `MonitoredResult(interrupted=True)` carrying the same returncode and prefixed output
+
+### Requirement: CLI-Subprocess Confirmation-Prompt Capture
+
+A child Claude process may, at the CLI/PTY layer, print an interactive confirmation prompt (e.g. `按 1 确定` or `Press 1 to confirm`) and then block waiting for a keystroke on stdin. `run_with_monitor` MUST accept an optional `on_confirm` callback so such prompts are surfaced to the engine and the chosen answer routed back to the child's stdin, closing the previously-missing channel for subprocess-level confirmations. When `on_confirm` is not supplied, this path is an exact no-op and existing stdout parsing / streaming behavior is unchanged.
+
+**Detection (`detect_confirmation_prompt`):**
+
+The module exposes `detect_confirmation_prompt(line) -> Optional[Tuple[str, List[str]]]`. The detection MUST be deliberately *conservative*: a line is treated as a confirmation prompt only when it strongly matches one of a fixed set of `_CONFIRM_PATTERNS` (Chinese `按 N …(确定|确认|继续|是)` / `输入 N …`, English `press <key> to (confirm|continue|proceed)`, `[y/N]`-style yes/no bracket prompts, and explicit `Do you want to (continue|proceed)` questions). Structured NDJSON lines (a stripped line whose first character is `{` or `[`) and any non-matching prose MUST yield `None` so callers treat them as ordinary output. On a match it returns `(prompt_text, options)` where `prompt_text` is the stripped line and `options` is a best-effort list of inline numeric labels (possibly empty).
+
+**Callback contract:**
+
+- `on_confirm` has the signature `(prompt_text: str, options: List[str], is_alive: Callable[[], bool]) -> Optional[str]`. `is_alive()` reports whether the child is still running, so a blocking callback can stop waiting once the child exits.
+- When `on_confirm` is supplied, the child MUST be spawned with a writable stdin pipe (`stdin=subprocess.PIPE`) so the answer can be delivered, even when no large-prompt stdin payload is present.
+- A non-`None` return value is written to the child's stdin (a trailing newline is appended when absent); a `None` return leaves the prompt unanswered. Stdin-write failures (closed pipe, already-exited child) are swallowed and degrade to a no-op.
+- An exception raised inside `on_confirm` MUST NOT abort the monitor loop: it is caught, logged to `sys.stderr` as `[claude-runner] on_confirm callback error: <e>`, and treated as `None`.
+- Because a confirmation callback may block while awaiting a response, the activity clock (`last_activity`) is reset after the callback returns so the wait does not trip the inactivity-hang detector.
+
+#### Scenario: confirmation prompt detected and answered
+- **WHEN** a monitored child emits a line that matches a `_CONFIRM_PATTERNS` entry and `on_confirm` is supplied
+- **THEN** `detect_confirmation_prompt` returns `(prompt_text, options)` and `on_confirm(prompt_text, options, is_alive)` is invoked
+- **AND** a non-`None` answer is written back to the child's stdin with a trailing newline
+- **AND** `last_activity` is reset so the blocking callback does not trip inactivity-hang detection
+
+#### Scenario: structured and non-matching lines are a no-op
+- **WHEN** a monitored line is NDJSON (starts with `{` or `[`) or does not match any confirmation pattern
+- **THEN** `detect_confirmation_prompt` returns `None` and `on_confirm` is not invoked
+- **AND** the line flows through the normal stdout draining path unchanged
+
+#### Scenario: on_confirm absent
+- **WHEN** `run_with_monitor` is called without an `on_confirm` callback
+- **THEN** no confirmation detection is performed and the child's stdin handling is unchanged (`None` on a TTY, `subprocess.DEVNULL` otherwise, unless a large-prompt stdin payload forces a `PIPE`)
+
+#### Scenario: callback failure does not abort the monitor
+- **WHEN** `on_confirm` raises an exception
+- **THEN** the exception is caught and logged to `sys.stderr` as `[claude-runner] on_confirm callback error: <e>`
+- **AND** the prompt is treated as unanswered and the monitor loop continues
 
 ### Requirement: Resource Cleanup on Exit Paths
 

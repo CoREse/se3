@@ -1043,6 +1043,19 @@ class LLMCaller:
                     f"external_attempt {self.external_attempt}, agent '{current_agent_name}'"
                 )
 
+                # Capture CLI-subprocess confirmation prompts emitted by the
+                # child Claude process (e.g. "按 1 确定") and surface them as a
+                # ``cli_confirm`` interaction call file so the web console can
+                # answer them — otherwise the child would block on stdin and
+                # stall the whole flow.
+                from .interaction_calls import make_cli_confirm_handler
+
+                on_confirm = make_cli_confirm_handler(
+                    self.project_root,
+                    flow_id=self.flow_id,
+                    step_id=self.step_id,
+                )
+
                 if on_output:
                     result = current_runner.run_with_monitor(
                         args=args,
@@ -1051,6 +1064,7 @@ class LLMCaller:
                         cwd=self.project_root,
                         env=env,
                         on_output=on_output,
+                        on_confirm=on_confirm,
                     )
                 else:
                     set_project_root(self.project_root)
@@ -1069,6 +1083,7 @@ class LLMCaller:
                         cwd=self.project_root,
                         env=env,
                         on_output=on_stream_output,
+                        on_confirm=on_confirm,
                     )
 
                     if result.success:

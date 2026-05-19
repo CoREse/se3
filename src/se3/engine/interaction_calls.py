@@ -1,127 +1,166 @@
-```python
-"""Unified human-interaction call files for a running flow.
+"""Unified interaction-call file channel (``se3/calls/``).
 
-Every environment in which a running flow needs a human to step in — a
-pending MCP call, a Ctrl-C interjection, a retry/skip/abort failure
-decision, a CLI subprocess confirmation prompt — is collapsed onto a
-single on-disk carrier: a ``kind``-tagged JSON file under ``se3/calls/``.
-The daemon aggregator reads those files and enriches them into
-``PendingCall`` entries; the web console renders each ``kind`` as a
-distinct, default-expanded interaction item.
+Every point in a running flow that needs a human in the loop — a pending MCP
+call, a Ctrl-C mid-flow interjection, a retry/failure decision, or a CLI
+subprocess confirmation prompt — is represented by the *same* artifact: a JSON
+file under ``<project_root>/se3/calls/``. The file carries a ``kind`` field
+(one of the ``CALL_KIND_*`` constants defined in :mod:`se3.daemon.protocol`)
+plus display metadata (``prompt``, ``context``, ``options``) so the daemon
+aggregator and the web console can render and route the interaction without
+guessing at free text.
 
-This module owns three primitives:
+This module is the single producer/consumer helper for those files:
 
-* :func:`write_interaction_call` — write a ``kind``-tagged call file.
-* :func:`read_call_response` — read its sibling ``.response`` answer.
-* :func:`drain_interjection_requests` — consume mid-run interjection
-  request files and fold them into ``flow.state.context``.
+* :func:`write_call` writes a call file of any kind.
+* :func:`read_call` parses one back, defaulting legacy files without a
+  ``kind`` field to :data:`~se3.daemon.protocol.CALL_KIND_CALL`.
+* :func:`read_response` / :func:`write_response` handle the sibling answer
+  file (``<stem>.response`` or ``<stem>.response.json``).
+* :func:`write_interjection_request` is the daemon-side producer for a
+  mid-flow interjection; :func:`drain_interjection_requests` is the
+  ``se3 run`` step-boundary consumer.
+* :func:`write_retry_decision_call` writes the no-TTY failure-decision call.
 
-Interjection *requests* travel the opposite direction (server → daemon →
-run.py): the daemon drops a request file under ``se3/interjections/`` and
-``run.py`` consumes it at a step boundary, folding the text into the same
-``user_interjections`` list the Ctrl-C path uses.
+The format is deliberately backward compatible: a call file produced by an
+older SE3 (no ``kind`` / ``prompt`` / ``context`` keys) still parses cleanly
+and is classified as a plain ``call``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
-import tempfile
-from datetime import datetime
-from itertools import count
+import time
+import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Recognised interaction kinds. ``call`` is the pre-existing pending MCP
-# call; the others are added by the unified-intake work.
-KIND_CALL = "call"
-KIND_INTERJECTION = "interjection"
-KIND_RETRY_DECISION = "retry_decision"
-KIND_CLI_CONFIRM = "cli_confirm"
+from ..daemon.protocol import (
+    CALL_KIND_CALL,
+    CALL_KIND_CLI_CONFIRM,
+    CALL_KIND_INTERJECTION,
+    CALL_KIND_RETRY_DECISION,
+    CALL_KINDS,
+)
 
-# Process-local sequence counter for collision-free filenames.
-_seq = count()
+__all__ = [
+    "CALL_KIND_CALL",
+    "CALL_KIND_CLI_CONFIRM",
+    "CALL_KIND_INTERJECTION",
+    "CALL_KIND_RETRY_DECISION",
+    "CALL_KINDS",
+    "calls_dir_for",
+    "classify_kind",
+    "write_call",
+    "read_call",
+    "read_response",
+    "write_response",
+    "response_path",
+    "write_interjection_request",
+    "drain_interjection_requests",
+    "write_retry_decision_call",
+    "write_interaction_call",
+    "read_interaction_response",
+    "make_cli_confirm_handler",
+]
 
 
-def write_interaction_call(
-    project_root: Path,
+def calls_dir_for(project_root: Any) -> Path:
+    """Return the ``se3/calls/`` directory for *project_root*."""
+    return Path(project_root) / "se3" / "calls"
+
+
+def classify_kind(data: Optional[Dict[str, Any]]) -> str:
+    """Resolve the interaction kind of a (possibly legacy) parsed call dict.
+
+    A call file written before the ``kind`` field existed — or one whose
+    ``kind`` is unrecognised — is classified as :data:`CALL_KIND_CALL`, so old
+    artifacts keep working without migration.
+    """
+    if not isinstance(data, dict):
+        return CALL_KIND_CALL
+    kind = data.get("kind")
+    return kind if kind in CALL_KINDS else CALL_KIND_CALL
+
+
+def write_call(
+    calls_dir: Any,
+    *,
     kind: str,
     prompt: str,
     context: Optional[Dict[str, Any]] = None,
-    options: Optional[Any] = None,
+    options: Optional[List[Any]] = None,
+    call_id: Optional[str] = None,
+    **extra: Any,
 ) -> Path:
-    """Write a ``kind``-tagged interaction call file to ``se3/calls/``.
+    """Write a call file of *kind* and return its path.
 
-    Args:
-        project_root: Project root directory.
-        kind: Interaction kind (``retry_decision``, ``cli_confirm``, …).
-        prompt: Human-readable text describing what is being asked.
-        context: Display metadata (error summary, step ids, …).
-        options: The allowed responses (e.g. a list of ``{value, label}``).
-
-    Returns:
-        Path to the written call file. A sibling ``<stem>.response`` file
-        written by a responder is later picked up by
-        :func:`read_call_response`.
+    The file is written atomically (temp + rename). *prompt* is the
+    human-facing question, *context* the structured metadata (flow / step
+    ids, error text, …) and *options* the discrete choices, if any.
     """
-    calls_dir = Path(project_root) / "se3" / "calls"
-    calls_dir.mkdir(parents=True, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
-    call_id = f"{kind}_{timestamp}_{os.getpid()}_{next(_seq)}"
-    call_file = calls_dir / f"{call_id}.json"
-
+    if kind not in CALL_KINDS:
+        raise ValueError(f"unknown call kind: {kind!r}")
+    directory = Path(calls_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    if not call_id:
+        call_id = f"{kind}_{int(time.time() * 1000)}_{uuid.uuid4().hex[:8]}"
     payload: Dict[str, Any] = {
-        "type": "interaction",
-        "kind": kind,
         "call_id": call_id,
+        "kind": kind,
         "prompt": prompt,
-        "context": context or {},
-        "options": options if options is not None else [],
-        "created_at": datetime.now().timestamp(),
+        "context": dict(context) if context else {},
+        "options": list(options) if options else [],
+        "created_at": time.time(),
     }
-
-    # Atomic write so the aggregator never observes a partial file.
-    fd, tmp_path = tempfile.mkstemp(dir=calls_dir, prefix=f".tmp_{call_id}_")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2, ensure_ascii=False)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp_path, call_file)
-    except Exception:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
-        raise
-
-    logger.info("Wrote %s interaction call file: %s", kind, call_file)
-    return call_file
+    payload.update(extra)
+    path = directory / f"{call_id}.json"
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+    return path
 
 
-def read_call_response(call_file: Path) -> Optional[Dict[str, Any]]:
-    """Return the structured response for ``call_file``, or ``None``.
+def read_call(call_path: Any) -> Optional[Dict[str, Any]]:
+    """Parse a call file; return ``None`` on any read/parse error.
 
-    Looks for a sibling ``<stem>.response.json`` (daemon-written envelope)
-    or ``<stem>.response`` answer file. A JSON object is returned as-is; a
-    bare JSON scalar/list is wrapped under a ``response`` key. Returns
-    ``None`` when no response file exists or it cannot be parsed.
+    The returned dict always has a ``kind`` key — defaulted via
+    :func:`classify_kind` for legacy files that lack one.
     """
-    call_file = Path(call_file)
-    for sibling in (
-        call_file.parent / f"{call_file.stem}.response.json",
-        call_file.parent / f"{call_file.stem}.response",
-    ):
-        if not sibling.exists():
-            continue
+    try:
+        data = json.loads(Path(call_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    data["kind"] = classify_kind(data)
+    return data
+
+
+def response_path(call_path: Any) -> Path:
+    """Return the canonical sibling ``.response`` path for *call_path*."""
+    call_path = Path(call_path)
+    return call_path.with_name(call_path.stem + ".response")
+
+
+def read_response(call_path: Any) -> Optional[Dict[str, Any]]:
+    """Return the parsed sibling answer file, or ``None`` if none exists.
+
+    Both ``<stem>.response`` (written by this module) and
+    ``<stem>.response.json`` (written by the daemon client) are recognised so
+    a response re-enters the flow regardless of which side answered.
+    """
+    call_path = Path(call_path)
+    for suffix in (".response", ".response.json"):
+        candidate = call_path.with_name(call_path.stem + suffix)
         try:
-            data = json.loads(sibling.read_text(encoding="utf-8"))
+            data = json.loads(candidate.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            logger.warning("Failed to parse interaction response file: %s", sibling)
             continue
         if isinstance(data, dict):
             return data
@@ -129,93 +168,238 @@ def read_call_response(call_file: Path) -> Optional[Dict[str, Any]]:
     return None
 
 
-def drain_interjection_requests(flow: Any, project_root: Path) -> int:
-    """Consume pending interjection request files into the flow.
+def write_response(call_path: Any, response: Any) -> Path:
+    """Write a sibling ``.response`` answer file and return its path."""
+    target = response_path(call_path)
+    body = response if isinstance(response, dict) else {"response": response}
+    tmp = target.with_name(target.name + ".tmp")
+    tmp.write_text(
+        json.dumps(body, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    tmp.replace(target)
+    return target
 
-    Interjection requests are JSON files dropped under
-    ``se3/interjections/`` (by the daemon, on a server ``MSG_INTERJECT_FLOW``
-    downlink). Each request's ``text`` is appended to
-    ``flow.state.context["user_interjections"]`` — the same list the Ctrl-C
-    interjection path uses, so it folds into the effective task description
-    via :func:`compose_task_description_with_interjections`.
 
-    Consumed request files are deleted so the same interjection is never
-    applied twice. Malformed files are also removed so they cannot wedge
-    the queue.
+def write_interjection_request(
+    calls_dir: Any,
+    text: str,
+    *,
+    flow_id: str = "",
+    call_id: Optional[str] = None,
+) -> Path:
+    """Daemon-side producer: queue a mid-flow interjection as a call file.
 
-    Returns:
-        The number of interjections folded into the flow.
+    Called when the daemon receives a :data:`~se3.daemon.protocol.MSG_INTERJECT_FLOW`
+    instruction. The running ``se3 run`` process consumes it via
+    :func:`drain_interjection_requests` at the next step boundary.
     """
-    requests_dir = Path(project_root) / "se3" / "interjections"
-    if not requests_dir.is_dir():
-        return 0
-
-    files = sorted(
-        (
-            p
-            for p in requests_dir.iterdir()
-            if p.is_file() and p.suffix == ".json" and not p.name.startswith(".")
-        ),
-        key=lambda p: (p.stat().st_mtime if p.exists() else 0.0, p.name),
-    )
-    if not files:
-        return 0
-
-    current_step = flow.state.get_current_step()
-    step_id = current_step.step_id if current_step else None
-    if current_step is not None:
-        step_type = (
-            current_step.step_type.value
-            if hasattr(current_step.step_type, "value")
-            else str(current_step.step_type)
-        )
-    else:
-        step_type = None
-
-    interjections: List[Dict[str, Any]] = flow.state.context.setdefault(
-        "user_interjections", []
+    return write_call(
+        calls_dir,
+        kind=CALL_KIND_INTERJECTION,
+        prompt=text,
+        context={"flow_id": flow_id},
+        call_id=call_id,
+        text=text,
     )
 
-    added = 0
-    for req_file in files:
-        try:
-            data = json.loads(req_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            logger.warning("Discarding malformed interjection request: %s", req_file)
-            _safe_unlink(req_file)
+
+def drain_interjection_requests(project_root: Any) -> List[Dict[str, Any]]:
+    """``se3 run`` step-boundary consumer for queued interjections.
+
+    Scans ``se3/calls/`` for unanswered :data:`CALL_KIND_INTERJECTION` call
+    files, returns their entries (oldest first, each a dict with ``text`` and
+    ``call_id``), and marks every consumed file by writing a sibling
+    ``.response`` so it is never drained twice. Empty-text requests are
+    consumed and skipped rather than returned.
+    """
+    directory = calls_dir_for(project_root)
+    if not directory.is_dir():
+        return []
+    drained: List[Dict[str, Any]] = []
+    for path in sorted(directory.glob("*.json")):
+        if path.name.endswith(".response.json"):
             continue
-
-        if isinstance(data, str):
-            text = data.strip()
-            req_step_id, req_ts = step_id, None
-        elif isinstance(data, dict):
-            text = str(data.get("text") or "").strip()
-            req_step_id = data.get("step_id") or step_id
-            req_ts = data.get("timestamp")
-        else:
-            text, req_step_id, req_ts = "", step_id, None
-
-        if text:
-            interjections.append(
-                {
-                    "text": text,
-                    "step_id": req_step_id,
-                    "step_type": step_type,
-                    "timestamp": req_ts or datetime.now().isoformat(),
-                }
-            )
-            added += 1
-        _safe_unlink(req_file)
-
-    if added:
-        logger.info("Drained %d interjection request(s) into flow", added)
-    return added
+        data = read_call(path)
+        if data is None or classify_kind(data) != CALL_KIND_INTERJECTION:
+            continue
+        if read_response(path) is not None:
+            continue  # already consumed
+        text = str(data.get("text") or data.get("prompt") or "").strip()
+        if not text:
+            write_response(path, {"consumed": True, "skipped": "empty"})
+            continue
+        drained.append(
+            {"text": text, "call_id": data.get("call_id") or path.stem}
+        )
+        write_response(path, {"consumed": True, "consumed_at": time.time()})
+    return drained
 
 
-def _safe_unlink(path: Path) -> None:
-    """Best-effort delete; never raises."""
+def write_retry_decision_call(
+    project_root: Any,
+    *,
+    flow_id: str,
+    step_id: str,
+    step_type: str,
+    error: str,
+    retry_count: int = 0,
+    options: Optional[List[str]] = None,
+) -> Path:
+    """Write a :data:`CALL_KIND_RETRY_DECISION` call file for a FAILED step.
+
+    Used on the no-TTY failure path of ``se3 run``: with no interactive
+    terminal to host the Retry/Skip/Abort prompt, the decision is externalised
+    as a call file that the web console (or any responder) can answer. The
+    ``call_id`` is derived from *step_id* so a resume reuses the same file
+    rather than piling up duplicates.
+    """
+    return write_call(
+        calls_dir_for(project_root),
+        kind=CALL_KIND_RETRY_DECISION,
+        call_id=f"retry_decision_{step_id}",
+        prompt=f"Step '{step_type}' failed: {error}",
+        context={
+            "flow_id": flow_id,
+            "step_id": step_id,
+            "step_type": step_type,
+            "retry_count": retry_count,
+            "error": error,
+        },
+        options=list(options) if options else ["retry", "skip", "abort"],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible convenience wrappers
+#
+# Older call sites (the CLI-confirmation handler in ``run.py`` and its test
+# suite) address the call queue by *project root* and expect the bare answer
+# value rather than the structured response envelope. These thin shims keep
+# that surface working on top of the canonical project-root-agnostic API.
+# ---------------------------------------------------------------------------
+
+
+def write_interaction_call(
+    project_root: Any,
+    kind: str,
+    prompt: str,
+    *,
+    options: Optional[List[Any]] = None,
+    context: Optional[Dict[str, Any]] = None,
+    **extra: Any,
+) -> Path:
+    """Write an interaction call file under ``<project_root>/se3/calls/``.
+
+    A project-root-addressed convenience wrapper around :func:`write_call`;
+    any extra keyword arguments (e.g. ``flow_id`` / ``step_id``) are folded
+    into the call-file payload.
+    """
+    return write_call(
+        calls_dir_for(project_root),
+        kind=kind,
+        prompt=prompt,
+        options=options,
+        context=context,
+        **extra,
+    )
+
+
+def read_interaction_response(call_path: Any) -> Any:
+    """Return the bare answer value for *call_path*, or ``None``.
+
+    Reads either a ``<stem>.response.json`` envelope or a plain
+    ``<stem>.response`` sibling. A ``{"response": ...}`` envelope is unwrapped
+    to its inner value; a plain non-JSON ``.response`` file yields its stripped
+    text. Returns ``None`` when no response file exists.
+    """
+    call_path = Path(call_path)
+    envelope = call_path.with_name(call_path.stem + ".response.json")
     try:
-        path.unlink()
+        data = json.loads(envelope.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    else:
+        if isinstance(data, dict) and "response" in data:
+            return data["response"]
+        return data
+
+    plain = call_path.with_name(call_path.stem + ".response")
+    try:
+        text = plain.read_text(encoding="utf-8").strip()
     except OSError:
-        pass
-```
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return text
+    if isinstance(parsed, dict) and "response" in parsed:
+        return parsed["response"]
+    return text
+
+
+def make_cli_confirm_handler(
+    project_root: Any,
+    flow_id: Optional[str] = None,
+    step_id: Optional[str] = None,
+    poll_interval: float = 0.5,
+) -> Callable[[str, List[str], Callable[[], bool]], Optional[str]]:
+    """Build an ``on_confirm`` callback for ``ClaudeCodeRunner.run_with_monitor``.
+
+    When the agent runner detects a CLI-subprocess confirmation prompt it
+    invokes the returned callback with ``(prompt_text, options, is_alive)``.
+    The callback writes a ``cli_confirm`` interaction call file (so the daemon
+    aggregator surfaces it and the web console can answer it), then polls for
+    the sibling ``.response`` file and returns its answer string for the
+    runner to write back to the subprocess stdin.
+
+    It returns ``None`` — a no-op for the runner — when the subprocess exits
+    before any response arrives, so a child that finishes early never hangs
+    the flow waiting on an answer that will not come.
+    """
+
+    def _on_confirm(
+        prompt: str,
+        options: List[str],
+        is_alive: Callable[[], bool],
+    ) -> Optional[str]:
+        call_file = write_interaction_call(
+            project_root,
+            kind=CALL_KIND_CLI_CONFIRM,
+            prompt=prompt,
+            options=options,
+            context={"awaiting": "cli_confirm"},
+            flow_id=flow_id,
+            step_id=step_id,
+        )
+        logger.info(
+            "CLI confirmation prompt captured; wrote call file %s", call_file
+        )
+        while is_alive():
+            response = read_interaction_response(call_file)
+            if response is not None:
+                return response
+            time.sleep(poll_interval)
+        # The subprocess exited before a response arrived — make one last
+        # check in case the answer landed during the final poll window,
+        # then give up so the runner does not block on a dead child.
+        response = read_interaction_response(call_file)
+        if response is not None:
+            return response
+        # No answer ever arrived and the child is gone. Mark the orphaned
+        # call file consumed (mirroring drain_interjection_requests' empty
+        # handling) so the aggregator stops enumerating it as a pending
+        # interaction — the environment that asked for it no longer exists.
+        if read_response(call_file) is None:
+            write_response(
+                call_file,
+                {"consumed": True, "skipped": "subprocess_exited"},
+            )
+            logger.info(
+                "CLI confirmation subprocess exited unanswered; "
+                "marked orphaned call file %s consumed",
+                call_file,
+            )
+        return None
+
+    return _on_confirm

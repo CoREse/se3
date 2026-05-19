@@ -191,13 +191,13 @@ def test_dispatch_interject_writes_request_file(tmp_path):
         )
 
     asyncio.run(scenario())
-    requests_dir = tmp_path / "se3" / "state" / "interjections"
-    files = list(requests_dir.glob("interject_flow-9_*.json"))
+    requests_dir = tmp_path / "se3" / "calls"
+    files = list(requests_dir.glob("interjection_*.json"))
     assert len(files) == 1
     payload = json.loads(files[0].read_text())
-    assert payload["flow_id"] == "flow-9"
+    assert payload["kind"] == "interjection"
     assert payload["text"] == "remember to add tests"
-    assert payload["source"] == "daemon-client"
+    assert payload["context"]["flow_id"] == "flow-9"
 
 
 def test_dispatch_interject_resolves_root_from_snapshot(tmp_path):
@@ -215,7 +215,7 @@ def test_dispatch_interject_resolves_root_from_snapshot(tmp_path):
         )
 
     asyncio.run(scenario())
-    files = list((tmp_path / "se3" / "state" / "interjections").glob("*.json"))
+    files = list((tmp_path / "se3" / "calls").glob("interjection_*.json"))
     assert len(files) == 1
 
 
@@ -241,7 +241,7 @@ def test_dispatch_interject_ignores_empty_text(tmp_path):
         )
 
     asyncio.run(scenario())
-    assert not (tmp_path / "se3" / "state" / "interjections").exists()
+    assert not list((tmp_path / "se3" / "calls").glob("interjection_*.json"))
 
 
 # --------------------------------------------------------------------------
@@ -281,7 +281,7 @@ def test_interject_endpoint_dispatches(server_client):
         resp = server_client.post(
             "/api/flows/f1/interject", json={"text": "also fix the typo"}
         )
-        assert resp.status_code == 202
+        assert resp.status_code == 200
         assert resp.json()["flow_id"] == "f1"
 
         msg = protocol.decode(ws.receive_text())
