@@ -840,11 +840,116 @@ function renderToolMarkers(text) {
   return nodes;
 }
 
+// --- long-content folding --------------------------------------------------
+
+// Records longer than this (characters) are folded by default — a `user` step
+// prompt can run to 130KB+, which would both bury the conversation structure
+// and bloat the DOM if rendered eagerly.
+const FOLD_THRESHOLD = 1600;
+// How much of the head is shown as the collapsed-state summary.
+const FOLD_SUMMARY_CHARS = 700;
+
+// Human-readable size for a character count.
+function formatSize(n) {
+  if (n < 1024) return n + " chars";
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + " KB";
+  return (n / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+// Wrap rendered content so long records fold by default. `renderFull` is a
+// zero-arg factory returning a Node/Fragment with the complete content; it is
+// invoked lazily — only on first expand — so a 130KB record never builds its
+// full DOM until the reader asks for it. Short records (≤ FOLD_THRESHOLD) are
+// returned rendered eagerly with no fold controls.
+function makeFoldable(renderFull, fullText) {
+  const text = String(fullText == null ? "" : fullText);
+  if (text.length <= FOLD_THRESHOLD) return renderFull();
+
+  const wrap = el("div", "foldable folded");
+  const summary = el("pre", "fold-summary");
+  summary.textContent = text.slice(0, FOLD_SUMMARY_CHARS).replace(/\s+$/, "") + " …";
+  const full = el("div", "fold-full");
+
+  const collapsedLabel = `▸ 展开全部 (${formatSize(text.length)})`;
+  const btn = el("button", "fold-toggle", collapsedLabel);
+  let expanded = false;
+  let built = false;
+  btn.addEventListener("click", () => {
+    expanded = !expanded;
+    if (expanded && !built) {
+      full.appendChild(renderFull());
+      built = true;
+    }
+    wrap.classList.toggle("folded", !expanded);
+    wrap.classList.toggle("expanded", expanded);
+    btn.textContent = expanded ? "▾ 收起" : collapsedLabel;
+  });
+
+  wrap.append(summary, full, btn);
+  return wrap;
+}
+
+// --- raw-data toggle -------------------------------------------------------
+
+// Pretty-print a raw payload: `raw_json` is `list[dict]`, `raw_ndjson` is a
+// string of NDJSON lines — format each line on its own when possible.
+function formatRaw(payload) {
+  if (typeof payload === "string") {
+    const lines = payload.split("\n").filter((l) => l.trim());
+    return lines
+      .map((l) => {
+        try { return JSON.stringify(JSON.parse(l), null, 2); }
+        catch (_) { return l; }
+      })
+      .join("\n");
+  }
+  try { return JSON.stringify(payload, null, 2); }
+  catch (_) { return String(payload); }
+}
+
+// Build a "view raw" control for one record: a small button plus a hidden
+// formatted-JSON block showing the pre-normalization raw_json / raw_ndjson.
+// Hidden by default — the default view stays human-readable. Returns null
+// when the record carries no raw payload.
+function makeRawToggle(norm) {
+  const raw = norm.raw || {};
+  let payload = null;
+  let kind = "";
+  if (raw.raw_json != null &&
+      !(Array.isArray(raw.raw_json) && raw.raw_json.length === 0)) {
+    payload = raw.raw_json;
+    kind = "raw_json";
+  } else if (raw.raw_ndjson != null && raw.raw_ndjson !== "") {
+    payload = raw.raw_ndjson;
+    kind = "raw_ndjson";
+  }
+  if (payload == null) return null;
+
+  const wrap = el("div", "raw-toggle-wrap");
+  const btn = el("button", "raw-toggle", "查看原始");
+  const pre = el("pre", "raw-json hidden");
+  let rendered = false;
+  let shown = false;
+  btn.addEventListener("click", () => {
+    shown = !shown;
+    if (shown && !rendered) {
+      pre.textContent = formatRaw(payload);
+      rendered = true;
+    }
+    pre.classList.toggle("hidden", !shown);
+    btn.classList.toggle("active", shown);
+    btn.textContent = shown ? `隐藏原始 (${kind})` : "查看原始";
+  });
+  wrap.append(btn, pre);
+  return wrap;
+}
+
 // --- record bubble ---------------------------------------------------------
 
 // Render a single normalized record as a role-tagged conversation bubble.
 // assistant bodies flow through tool-marker + Markdown rendering; user/system
-// bodies are shown as literal whitespace-preserving text.
+// bodies are shown as literal whitespace-preserving text. Long bodies fold by
+// default, and each record gets a "view raw" toggle.
 function renderConversationRecord(norm) {
   const known = ["user", "assistant", "system"].includes(norm.role);
   const role = known ? norm.role : "other";
@@ -868,13 +973,24 @@ function renderConversationRecord(norm) {
     bubble.appendChild(
       el("p", "md-p conv-empty", "(no readable content for this record)"));
   } else if (role === "assistant") {
-    for (const node of renderToolMarkers(content)) bubble.appendChild(node);
+    // assistant: tool-marker split + Markdown, rebuilt lazily on expand.
+    const buildFull = () => {
+      const frag = document.createDocumentFragment();
+      for (const node of renderToolMarkers(content)) frag.appendChild(node);
+      return frag;
+    };
+    bubble.appendChild(makeFoldable(buildFull, content));
   } else {
     // user / system: literal text — these are large structured prompts whose
     // exact whitespace matters; do not Markdown-mangle them.
-    bubble.appendChild(el("pre", "conv-plain", content));
+    const buildFull = () => el("pre", "conv-plain", content);
+    bubble.appendChild(makeFoldable(buildFull, content));
   }
   row.appendChild(bubble);
+
+  const rawToggle = makeRawToggle(norm);
+  if (rawToggle) row.appendChild(rawToggle);
+
   return row;
 }
 
