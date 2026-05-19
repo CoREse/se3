@@ -747,3 +747,50 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 
 .empty { color: var(--fg-dim); font-size: 13px; }
 .hidden { display: none !important; }
+
+/* -- toast notifications -------------------------------------------- */
+
+.toast-container {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 50;
+  pointer-events: none;
+}
+
+.toast {
+  min-width: 200px;
+  max-width: 360px;
+  padding: 9px 13px;
+  border-radius: 6px;
+  font-size: 13px;
+  background: var(--bg-card);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--grey);
+  box-shadow: 0 4px 16px rgba(0,0,0,.45);
+  opacity: 0;
+  transform: translateX(20px);
+  transition: opacity .25s ease, transform .25s ease;
+  word-break: break-word;
+}
+.toast.toast-show { opacity: 1; transform: translateX(0); }
+
+.toast-success { border-left-color: var(--green); }
+.toast-error   { border-left-color: var(--red); }
+.toast-info    { border-left-color: var(--accent); }
+
+/* -- stale-connection banner ---------------------------------------- */
+
+.stale-banner {
+  padding: 7px 14px;
+  background: rgba(214,162,58,.16);
+  color: var(--yellow);
+  border-bottom: 1px solid var(--yellow);
+  font-size: 12px;
+  text-align: center;
+  flex-shrink: 0;
+}

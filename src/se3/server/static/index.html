@@ -38,6 +38,9 @@
       <h3>History</h3>
       <button id="history-close" type="button" class="icon-btn">&times;</button>
     </div>
+    <div id="history-stale" class="stale-banner hidden">
+      &#9888; 连接断开，数据可能陈旧
+    </div>
     <div class="history-body">
       <aside class="history-list-pane">
         <h4>Sessions</h4>
@@ -59,6 +62,9 @@
     <div class="drawer-head">
       <h3 id="detail-title">Flow</h3>
       <button id="detail-close" type="button" class="icon-btn">&times;</button>
+    </div>
+    <div id="drawer-stale" class="stale-banner hidden">
+      &#9888; 连接断开，数据可能陈旧
     </div>
     <div id="detail-body" class="drawer-body"></div>
     <div class="drawer-conversation">
@@ -125,6 +131,9 @@
       </form>
     </div>
   </div>
+
+  <!-- Toast notifications -->
+  <div id="toast-container" class="toast-container"></div>
 
   <script src="app.js"></script>
 </body>
