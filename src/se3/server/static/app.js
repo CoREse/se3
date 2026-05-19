@@ -18,6 +18,7 @@ const state = {
   historySessions: [],    // [{flow_id, task_description, status, updated_at, ...}]
   selectedHistoryId: null,// flow whose records are shown in the history detail
   historyRecords: [],     // records currently rendered in the history detail
+  drawerConversationRecords: [], // conversation records shown in the flow drawer
 };
 
 let ws = null;
@@ -253,8 +254,11 @@ const STEP_ICONS = {
 
 function openDrawer(flowId) {
   state.selectedFlowId = flowId;
+  state.drawerConversationRecords = [];
   $("flow-detail").classList.remove("hidden");
   refreshFlowDetail();
+  // Fetch the flow's conversation snapshot; WS history_data deltas append live.
+  loadDrawerConversation(flowId);
   // Poll the REST endpoint while the drawer is open (WS updates also refresh).
   if (detailPollTimer) clearInterval(detailPollTimer);
   detailPollTimer = setInterval(refreshFlowDetail, 3000);
@@ -262,11 +266,47 @@ function openDrawer(flowId) {
 
 function closeDrawer() {
   state.selectedFlowId = null;
+  state.drawerConversationRecords = [];
   $("flow-detail").classList.add("hidden");
   if (detailPollTimer) {
     clearInterval(detailPollTimer);
     detailPollTimer = null;
   }
+}
+
+// Fetch the initial conversation snapshot for a flow drawer. Mirrors the
+// history view: a one-shot `/api/history/{flow_id}` pull, after which the WS
+// `history_data` push keeps an active flow's conversation up to date.
+async function loadDrawerConversation(flowId) {
+  const container = $("detail-conversation");
+  container.innerHTML = "";
+  container.appendChild(el("p", "empty", "Loading conversation…"));
+  try {
+    const resp = await fetch(`/api/history/${encodeURIComponent(flowId)}`);
+    // The user may have opened another flow while this was in flight.
+    if (state.selectedFlowId !== flowId) return;
+    if (!resp.ok) {
+      container.innerHTML = "";
+      container.appendChild(el("p", "empty",
+        `Could not load conversation for this flow (${resp.status}).`));
+      return;
+    }
+    const data = await resp.json();
+    if (state.selectedFlowId !== flowId) return;
+    state.drawerConversationRecords = Array.isArray(data.records)
+      ? data.records : [];
+    renderConversation(container, state.drawerConversationRecords);
+    scrollDrawerConversationToBottom();
+  } catch (_) {
+    if (state.selectedFlowId !== flowId) return;
+    container.innerHTML = "";
+    container.appendChild(el("p", "empty", "Network error loading conversation."));
+  }
+}
+
+function scrollDrawerConversationToBottom() {
+  const c = $("detail-conversation");
+  c.scrollTop = c.scrollHeight;
 }
 
 async function refreshFlowDetail() {
@@ -351,15 +391,10 @@ function renderFlowDetail(flow, machineId) {
   }
   body.appendChild(stepSec);
 
-  // -- latest output / summary --
-  const outSec = el("div", "detail-section");
-  outSec.appendChild(el("h4", null, "Latest output"));
-  const logBox = el("div", "log-box",
-    flow.summary || "(no summary or output reported yet)");
-  outSec.appendChild(logBox);
-  body.appendChild(outSec);
-  // Scroll the log box to the bottom so the freshest line is visible.
-  logBox.scrollTop = logBox.scrollHeight;
+  // The flow's turn-by-turn conversation is rendered into the dedicated
+  // `#detail-conversation` region (a sibling of `#detail-body`), not here —
+  // that region survives the 3s detail poll and is fed by loadDrawerConversation
+  // plus live `history_data` WS deltas, replacing the old single summary box.
 }
 
 // ---------------------------------------------------------------------------
@@ -408,17 +443,30 @@ function applyHistoryIndex(sessions) {
   if (isHistoryOpen()) renderHistoryList();
 }
 
-// Push handler: incremental (or full) records for one flow.
+// Push handler: incremental (or full) records for one flow. The same flow may
+// be open in both the history view and the drawer; each keeps its own record
+// array so they update independently without double-appending each other.
 function applyHistoryData(msg) {
-  if (!isHistoryOpen() || state.selectedHistoryId !== msg.flow_id) return;
   const records = Array.isArray(msg.records) ? msg.records : [];
-  if (msg.mode === "append") {
-    state.historyRecords = state.historyRecords.concat(records);
-  } else {
-    state.historyRecords = records;
+  const append = msg.mode === "append";
+
+  // -- history view consumer --
+  if (isHistoryOpen() && state.selectedHistoryId === msg.flow_id) {
+    state.historyRecords = append
+      ? state.historyRecords.concat(records)
+      : records;
+    renderHistoryRecords(msg.flow_id, state.historyRecords);
+    scrollHistoryToBottom();
   }
-  renderHistoryRecords(msg.flow_id, state.historyRecords);
-  scrollHistoryToBottom();
+
+  // -- running-flow drawer consumer --
+  if (state.selectedFlowId === msg.flow_id) {
+    state.drawerConversationRecords = append
+      ? state.drawerConversationRecords.concat(records)
+      : records;
+    renderConversation($("detail-conversation"), state.drawerConversationRecords);
+    scrollDrawerConversationToBottom();
+  }
 }
 
 function formatTime(ts) {
@@ -599,11 +647,14 @@ function stepKey(norm) {
   return String(norm.stepId || norm.stepType || "step");
 }
 
-function renderHistoryRecords(flowId, records) {
-  const detail = $("history-detail");
-  detail.innerHTML = "";
+// Render a flat list of raw records into `container` as a CLI-style, step-
+// grouped conversation. Shared verbatim by the history view and the running-
+// flow drawer so both present identical grouping / bubbles / folding.
+function renderConversation(container, records) {
+  container.innerHTML = "";
   if (!records.length) {
-    detail.appendChild(el("p", "empty", "No conversation records for this session."));
+    container.appendChild(
+      el("p", "empty", "No conversation records for this session."));
     return;
   }
   const order = [];
@@ -624,8 +675,12 @@ function renderHistoryRecords(flowId, records) {
       const d = tsValue(a.norm.timestamp) - tsValue(b.norm.timestamp);
       return d !== 0 ? d : a.index - b.index;
     });
-    detail.appendChild(renderStepGroup(group));
+    container.appendChild(renderStepGroup(group));
   }
+}
+
+function renderHistoryRecords(flowId, records) {
+  renderConversation($("history-detail"), records);
 }
 
 function renderStepGroup(group) {
