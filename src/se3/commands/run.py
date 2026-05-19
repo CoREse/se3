@@ -19,9 +19,10 @@ import logging
 import signal
 import subprocess
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import typer
 from rich.rule import Rule
@@ -773,6 +774,60 @@ def _handle_discovery_pause_noninteractive(
     persistence.save_flow(flow)
     logger.info("Discovery paused for web response: wrote call file %s", call_file)
     return _DISCOVERY_AWAITING
+
+
+def make_cli_confirm_handler(
+    project_root: Path,
+    flow_id: Optional[str] = None,
+    step_id: Optional[str] = None,
+    poll_interval: float = 0.5,
+) -> Callable[[str, List[str], Callable[[], bool]], Optional[str]]:
+    """Build an ``on_confirm`` callback for :meth:`ClaudeCodeRunner.run_with_monitor`.
+
+    When the agent runner detects a CLI-subprocess confirmation prompt it
+    invokes the returned callback with ``(prompt_text, options, is_alive)``.
+    The callback writes a ``cli_confirm`` interaction call file (so the daemon
+    aggregator surfaces it and the web console can answer it), then polls for
+    the sibling ``.response`` file and returns its answer string for the
+    runner to write back to the subprocess stdin.
+
+    It returns ``None`` — a no-op for the runner — when the subprocess exits
+    before any response arrives, so a child that finishes early never hangs
+    the flow waiting on an answer that will not come.
+    """
+    from ..engine.interaction_calls import (
+        read_interaction_response,
+        write_interaction_call,
+    )
+
+    def _on_confirm(
+        prompt: str,
+        options: List[str],
+        is_alive: Callable[[], bool],
+    ) -> Optional[str]:
+        call_file = write_interaction_call(
+            project_root,
+            kind="cli_confirm",
+            prompt=prompt,
+            options=options,
+            context={"awaiting": "cli_confirm"},
+            flow_id=flow_id,
+            step_id=step_id,
+        )
+        logger.info(
+            "CLI confirmation prompt captured; wrote call file %s", call_file
+        )
+        while is_alive():
+            response = read_interaction_response(call_file)
+            if response is not None:
+                return response
+            time.sleep(poll_interval)
+        # The subprocess exited before a response arrived — make one last
+        # check in case the answer landed during the final poll window,
+        # then give up so the runner does not block on a dead child.
+        return read_interaction_response(call_file)
+
+    return _on_confirm
 
 
 def _should_show_type(current_step_type: str, flow: FlowInstance) -> bool:
