@@ -503,10 +503,100 @@ async function openHistorySession(flowId) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Record normalization
+// ---------------------------------------------------------------------------
+//
+// Both `/api/history/{flow_id}` and the WS `history_data` push wrap every
+// record as `{step_id, message: {role, content, raw_json, timestamp,
+// step_type, attempt}}`. Reading `rec.role` / `rec.content` straight off the
+// outer object yields `undefined` — the historical root cause of every role
+// being misclassified and the body falling back to a raw-JSON dump.
+//
+// `normalizeRecord` is the single entry point all render paths go through: it
+// unwraps the `message` envelope (tolerating a flat record with no envelope),
+// and — when the textual `content` is missing — recovers a readable body from
+// the assistant's final text block in `raw_json`.
+
+// Pull the last assistant message's last text block out of a parsed NDJSON
+// stream (`raw_json` is `list[dict]`, one dict per NDJSON line).
+function extractAssistantText(rawJson) {
+  if (!Array.isArray(rawJson)) return "";
+  let text = "";
+  for (const line of rawJson) {
+    if (!line || typeof line !== "object" || line.type !== "assistant") continue;
+    const content = line.message && Array.isArray(line.message.content)
+      ? line.message.content
+      : null;
+    if (!content) continue;
+    for (const block of content) {
+      if (block && block.type === "text" && typeof block.text === "string") {
+        text = block.text;
+      }
+    }
+  }
+  return text;
+}
+
+// Unwrap `{step_id, message:{...}}` into a flat, render-ready object. Falls
+// back to the flat shape when no `message` envelope is present.
+function normalizeRecord(rec) {
+  if (!rec || typeof rec !== "object") {
+    return {
+      role: "log", content: rec == null ? "" : String(rec),
+      timestamp: null, stepType: "", stepId: "", raw: null, attempt: null,
+    };
+  }
+  const msg = (rec.message && typeof rec.message === "object") ? rec.message : rec;
+  const pick = (key) => (msg[key] != null ? msg[key] : rec[key]);
+
+  let role = String(pick("role") || msg.type || "log").toLowerCase();
+  if (!["user", "assistant", "system"].includes(role)) {
+    role = role === "human" ? "user" : (role || "log");
+  }
+
+  const rawJson = pick("raw_json");
+  const rawNdjson = pick("raw_ndjson");
+
+  let content = pick("content");
+  if (typeof content !== "string" || content === "") {
+    const recovered = extractAssistantText(rawJson);
+    if (recovered) {
+      content = recovered;
+    } else if (content != null && typeof content !== "string") {
+      try { content = JSON.stringify(content, null, 2); } catch (_) { content = String(content); }
+    } else if (content == null) {
+      content = typeof pick("text") === "string" ? pick("text") : "";
+    }
+  }
+
+  return {
+    role: role,
+    content: content,
+    timestamp: pick("timestamp") != null ? pick("timestamp") : pick("time"),
+    stepType: pick("step_type") || "",
+    stepId: pick("step_id") || "",
+    raw: { raw_json: rawJson, raw_ndjson: rawNdjson },
+    attempt: pick("attempt"),
+  };
+}
+
+// Comparable epoch-ms value for a timestamp of unknown shape, for sorting.
+function tsValue(ts) {
+  if (ts == null || ts === "") return 0;
+  if (typeof ts === "number") return ts < 1e12 ? ts * 1000 : ts;
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
+// ---------------------------------------------------------------------------
+// History records rendering
+// ---------------------------------------------------------------------------
+//
 // Records carry a step identifier; group them so each step's conversation is
-// shown under its own heading.
-function stepKey(rec) {
-  return String(rec.step_id || rec.step_type || "step");
+// shown under its own heading, ordered within the group by timestamp.
+function stepKey(norm) {
+  return String(norm.stepId || norm.stepType || "step");
 }
 
 function renderHistoryRecords(flowId, records) {
@@ -518,50 +608,53 @@ function renderHistoryRecords(flowId, records) {
   }
   const order = [];
   const byStep = new Map();
-  for (const rec of records) {
-    const key = stepKey(rec);
+  records.forEach((rec, index) => {
+    const norm = normalizeRecord(rec);
+    const key = stepKey(norm);
     if (!byStep.has(key)) {
-      byStep.set(key, { label: rec.step_type || rec.step_id || "step", records: [] });
+      byStep.set(key, { label: norm.stepType || norm.stepId || "step", records: [] });
       order.push(key);
     }
-    byStep.get(key).records.push(rec);
-  }
+    // `index` is the stable tiebreaker so equal timestamps keep arrival order.
+    byStep.get(key).records.push({ norm, index });
+  });
   for (const key of order) {
-    detail.appendChild(renderStepGroup(byStep.get(key)));
+    const group = byStep.get(key);
+    group.records.sort((a, b) => {
+      const d = tsValue(a.norm.timestamp) - tsValue(b.norm.timestamp);
+      return d !== 0 ? d : a.index - b.index;
+    });
+    detail.appendChild(renderStepGroup(group));
   }
 }
 
 function renderStepGroup(group) {
   const sec = el("div", "history-step");
   sec.appendChild(el("h5", "history-step-title", group.label));
-  for (const rec of group.records) {
-    sec.appendChild(renderRecord(rec));
+  for (const item of group.records) {
+    sec.appendChild(renderRecord(item.norm));
   }
   return sec;
 }
 
-function renderRecord(rec) {
-  const role = String(rec.role || rec.type || "log").toLowerCase();
-  const known = ["user", "assistant", "system"].includes(role);
-  const row = el("div", "history-record role-" + (known ? role : "other"));
+function renderRecord(norm) {
+  const known = ["user", "assistant", "system"].includes(norm.role);
+  const row = el("div", "history-record role-" + (known ? norm.role : "other"));
 
   const head = el("div", "history-record-head");
-  head.appendChild(el("span", "record-role", role));
-  const ts = rec.timestamp != null ? rec.timestamp : rec.time;
-  if (ts != null) head.appendChild(el("span", "record-time", formatTime(ts)));
+  head.appendChild(el("span", "record-role", norm.role));
+  if (norm.timestamp != null) {
+    head.appendChild(el("span", "record-time", formatTime(norm.timestamp)));
+  }
   row.appendChild(head);
 
-  row.appendChild(el("pre", "record-body", recordText(rec)));
+  row.appendChild(el("pre", "record-body", recordText(norm)));
   return row;
 }
 
-function recordText(rec) {
-  if (typeof rec.content === "string") return rec.content;
-  if (rec.content != null) {
-    try { return JSON.stringify(rec.content, null, 2); } catch (_) { /* fall through */ }
-  }
-  if (rec.text != null) return String(rec.text);
-  try { return JSON.stringify(rec, null, 2); } catch (_) { return String(rec); }
+function recordText(norm) {
+  if (typeof norm.content === "string" && norm.content !== "") return norm.content;
+  return "(no readable content for this record)";
 }
 
 function scrollHistoryToBottom() {
