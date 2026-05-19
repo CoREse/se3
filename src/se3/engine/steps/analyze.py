@@ -26,7 +26,7 @@ from ..project_context import ProjectContextCollector, list_spec_names
 from ..spec_index import load_or_build
 from ..spec_loader import load_for_step
 from ..utils.json_parser import parse_json_response
-from ...config import insert_confirmation_steps
+from ...config import apply_step_config, insert_confirmation_steps
 
 logger = logging.getLogger(__name__)
 
@@ -496,10 +496,19 @@ def _update_flow_steps(
     """
     # Get default sequence for task type (fixed sequences per spec)
     selected_steps = get_default_step_sequence(task_type)
-    
+
+    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
+
+    # Append optional steps from se3.yaml (e.g. summarize).
+    # _update_flow_steps rebuilds from the default sequence every time, so
+    # applying the config once here mirrors state_machine.create_flow's
+    # (default -> apply_step_config -> insert_confirmation_steps) order and
+    # keeps configured steps from being dropped by the rebuild. apply_step_config
+    # dedups by step value, so this never appends duplicates.
+    selected_steps = apply_step_config(selected_steps, project_root)
+
     # Insert confirmation steps based on config
     # This ensures CONFIRM steps are added after plan as configured
-    project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     flow.state.selected_steps = insert_confirmation_steps(selected_steps, project_root)
     
     logger.info(f"Using step sequence for {task_type}: {[s.value for s in flow.state.selected_steps]}")
