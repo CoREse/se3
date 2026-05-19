@@ -19,6 +19,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
+from se3.daemon import protocol
+
 
 @dataclass
 class FlowSnapshot:
@@ -113,6 +115,13 @@ class ServerState:
 
     def __init__(self) -> None:
         self._machines: Dict[str, MachineRecord] = {}
+        # History relay caches. The server is a pure in-memory relay for
+        # history data — neither of these is ever written to disk.
+        #: machine_id -> list of history session-meta dicts (the daemon's
+        #: ``se3 history`` index).
+        self._history_index: Dict[str, List[Dict[str, Any]]] = {}
+        #: flow_id -> cached history bundle (records + cursor + owner).
+        self._history_data: Dict[str, Dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
     # -- machine lifecycle -------------------------------------------------
@@ -242,3 +251,108 @@ class ServerState:
         """Return the machine id owning *flow_id*, or ``None``."""
         result = await self.get_flow(flow_id)
         return result[0] if result is not None else None
+
+    # -- history relay (in-memory only, never persisted) -------------------
+
+    async def update_history_index(
+        self, machine_id: str, sessions: List[Dict[str, Any]]
+    ) -> None:
+        """Replace the history-session index reported by *machine_id*.
+
+        *sessions* is the daemon's ``MSG_HISTORY_INDEX`` list of session-meta
+        dicts (flow id, task description, status, timestamps, active flag).
+        It fully replaces the machine's previously known index — the daemon
+        always reports the complete index, not a delta. Kept purely in memory.
+        """
+        async with self._lock:
+            cleaned = [dict(s) for s in (sessions or []) if isinstance(s, dict)]
+            self._history_index[machine_id] = cleaned
+
+    async def get_history_index(self) -> List[Dict[str, Any]]:
+        """Return the history index aggregated across every machine.
+
+        Each entry is annotated with the ``machine_id`` that reported it and
+        the list is sorted by ``updated_at`` descending (entries lacking the
+        field sort last).
+        """
+        async with self._lock:
+            entries: List[Dict[str, Any]] = []
+            for machine_id, sessions in self._history_index.items():
+                for session in sessions:
+                    entry = dict(session)
+                    entry.setdefault("machine_id", machine_id)
+                    entries.append(entry)
+        entries.sort(key=lambda e: str(e.get("updated_at") or ""), reverse=True)
+        return entries
+
+    async def append_history(
+        self,
+        flow_id: str,
+        mode: str,
+        records: List[Dict[str, Any]],
+        *,
+        cursor: Optional[Dict[str, Any]] = None,
+        machine_id: str = "",
+    ) -> None:
+        """Cache history *records* for *flow_id*.
+
+        ``mode == "full"`` (or a first sighting) replaces any cached records;
+        ``mode == "append"`` extends them, so an active flow's incremental
+        jsonl deltas accumulate into one growing list. *cursor* is stored
+        verbatim for the next incremental pull. Purely in-memory.
+        """
+        new_records = list(records or [])
+        async with self._lock:
+            existing = self._history_data.get(flow_id)
+            if mode == protocol.HISTORY_MODE_APPEND and existing is not None:
+                existing["records"].extend(new_records)
+                existing["mode"] = mode
+                if cursor:
+                    existing["cursor"] = dict(cursor)
+                if machine_id:
+                    existing["machine_id"] = machine_id
+                existing["updated_at"] = time.time()
+            else:
+                self._history_data[flow_id] = {
+                    "flow_id": flow_id,
+                    "machine_id": machine_id,
+                    "mode": mode,
+                    "records": new_records,
+                    "cursor": dict(cursor) if cursor else {},
+                    "updated_at": time.time(),
+                }
+
+    async def get_history(self, flow_id: str) -> Optional[Dict[str, Any]]:
+        """Return a copy of cached history for *flow_id*, or ``None`` on miss."""
+        async with self._lock:
+            cached = self._history_data.get(flow_id)
+            if cached is None:
+                return None
+            return {
+                "flow_id": cached["flow_id"],
+                "machine_id": cached.get("machine_id", ""),
+                "mode": cached.get("mode", ""),
+                "records": list(cached["records"]),
+                "cursor": dict(cached.get("cursor") or {}),
+                "updated_at": cached.get("updated_at"),
+            }
+
+    async def find_machine_for_history_flow(self, flow_id: str) -> Optional[str]:
+        """Resolve which machine owns *flow_id* for an on-demand history pull.
+
+        Checks the reported history index first, then any cached history
+        bundle's owner, then the live flow set — so a flow can be pulled
+        whether it is historical or still active.
+        """
+        async with self._lock:
+            for machine_id, sessions in self._history_index.items():
+                for session in sessions:
+                    if str(session.get("flow_id") or "") == flow_id:
+                        return machine_id
+            cached = self._history_data.get(flow_id)
+            if cached is not None and cached.get("machine_id"):
+                return str(cached["machine_id"])
+            for machine_id, record in self._machines.items():
+                if flow_id in record.flows:
+                    return machine_id
+        return None

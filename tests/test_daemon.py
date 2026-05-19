@@ -163,6 +163,22 @@ class TestSpawner:
         spawner.wait(spawned.pid, timeout=10)
         spawner.reap()
 
+    def test_spawn_appends_discover_flag(self, fake_se3, tmp_path):
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn(
+            "explore something", project_root=str(tmp_path), discover=True
+        )
+        assert "--discover" in spawned.args
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
+    def test_spawn_omits_discover_flag_by_default(self, fake_se3, tmp_path):
+        spawner = DaemonSpawner()
+        spawned = spawner.spawn("plain task", project_root=str(tmp_path))
+        assert "--discover" not in spawned.args
+        spawner.wait(spawned.pid, timeout=10)
+        spawner.reap()
+
     def test_iter_events_parses_ndjson(self, fake_se3, tmp_path):
         spawner = DaemonSpawner()
         spawned = spawner.spawn("task", project_root=str(tmp_path))

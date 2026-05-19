@@ -11,6 +11,7 @@
     <h1>SE3&nbsp;Control&nbsp;Plane</h1>
     <div class="topbar-right">
       <span id="conn-status" class="conn conn-connecting">connecting&hellip;</span>
+      <button id="history-btn" type="button" class="ghost-btn">History</button>
       <button id="new-task-btn" type="button">+ New Task</button>
     </div>
   </header>
@@ -30,6 +31,28 @@
       </div>
     </section>
   </main>
+
+  <!-- History view (session list + session detail) -->
+  <div id="history-view" class="history-view hidden">
+    <div class="history-head">
+      <h3>History</h3>
+      <button id="history-close" type="button" class="icon-btn">&times;</button>
+    </div>
+    <div class="history-body">
+      <aside class="history-list-pane">
+        <h4>Sessions</h4>
+        <div id="history-list" class="history-list">
+          <p class="empty">Loading history&hellip;</p>
+        </div>
+      </aside>
+      <section class="history-detail-pane">
+        <h4 id="history-detail-title">Session</h4>
+        <div id="history-detail" class="history-detail">
+          <p class="empty">Select a session to view its step records.</p>
+        </div>
+      </section>
+    </div>
+  </div>
 
   <!-- Flow detail drawer -->
   <div id="flow-detail" class="drawer hidden">
@@ -63,6 +86,11 @@
         <label for="nt-task">Task description</label>
         <textarea id="nt-task" rows="5" required
                   placeholder="Describe the task to run&hellip;"></textarea>
+
+        <label class="checkbox-label" for="nt-discover">
+          <input type="checkbox" id="nt-discover">
+          Start from discovery step (multi-turn requirement clarification)
+        </label>
 
         <p id="nt-error" class="form-error hidden"></p>
         <div class="modal-actions">

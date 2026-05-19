@@ -56,6 +56,7 @@ def test_typed_constructors():
         "task_description": "do it",
         "project_root": "/p",
         "task_type": "bugfix",
+        "discover": False,
     }
 
     respond = protocol.make_respond_call("c1", {"ans": True}, project_root="/p")
@@ -257,6 +258,23 @@ def test_publish_flow_dispatches_spawn(client_and_app):
         spawn = protocol.decode(ws.receive_text())
         assert spawn.type == protocol.MSG_SPAWN_FLOW
         assert spawn.payload["task_description"] == "Build X"
+        assert spawn.payload["discover"] is False
+
+
+def test_publish_flow_threads_discover_flag(client_and_app):
+    client, _ = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+        protocol.decode(ws.receive_text())  # WELCOME
+
+        resp = client.post(
+            "/api/flows",
+            json={"machine_id": "m1", "task": "Explore Y", "discover": True},
+        )
+        assert resp.status_code == 202
+        spawn = protocol.decode(ws.receive_text())
+        assert spawn.type == protocol.MSG_SPAWN_FLOW
+        assert spawn.payload["discover"] is True
 
 
 def test_publish_flow_unknown_machine_404(client_and_app):

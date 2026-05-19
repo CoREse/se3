@@ -113,7 +113,9 @@ def test_dispatch_ping_replies_pong():
 
 def test_dispatch_spawn_flow_routes_to_handler():
     received = []
-    client = _make_client(spawn_handler=lambda t, p, ty: received.append((t, p, ty)))
+    client = _make_client(
+        spawn_handler=lambda t, p, ty, d: received.append((t, p, ty, d))
+    )
 
     async def scenario():
         await client._dispatch(
@@ -122,7 +124,23 @@ def test_dispatch_spawn_flow_routes_to_handler():
         )
 
     asyncio.run(scenario())
-    assert received == [("Implement Y", "/p", "bugfix")]
+    assert received == [("Implement Y", "/p", "bugfix", False)]
+
+
+def test_dispatch_spawn_flow_threads_discover_flag():
+    received = []
+    client = _make_client(
+        spawn_handler=lambda t, p, ty, d: received.append((t, p, ty, d))
+    )
+
+    async def scenario():
+        await client._dispatch(
+            _FakeWS(),
+            protocol.make_spawn_flow("Explore Z", discover=True),
+        )
+
+    asyncio.run(scenario())
+    assert received == [("Explore Z", "", "feature", True)]
 
 
 def test_dispatch_spawn_flow_ignores_empty_task():
@@ -236,7 +254,7 @@ def test_client_connects_reports_and_receives():
         hostname="e2e-host",
         se3_version="6.4.0",
         snapshot_provider=lambda: snapshot,
-        spawn_handler=lambda t, p, ty: spawned.append((t, p, ty)),
+        spawn_handler=lambda t, p, ty, d: spawned.append((t, p, ty, d)),
         status_interval=0.2,
     )
     base = f"http://127.0.0.1:{port}"
@@ -268,7 +286,7 @@ def test_client_connects_reports_and_receives():
             if spawned:
                 break
             await asyncio.sleep(0.05)
-        assert spawned == [("e2e task", "", "bugfix")]
+        assert spawned == [("e2e task", "", "bugfix", False)]
 
         stop.set()
         await asyncio.wait_for(task, timeout=8)

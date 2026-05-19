@@ -616,6 +616,165 @@ def _handle_discovery_programmatic_confirm(
         return user_input
 
 
+# Sentinel returned by the non-interactive discovery pause handler when a call
+# file has been written (or is still awaiting a response): the run loop must
+# persist the flow and exit so the web "Respond to Flow" interaction can answer.
+_DISCOVERY_AWAITING = object()
+
+
+def _discovery_call_question(current_step: Any) -> str:
+    """Build the human-readable question text for a discovery call file."""
+    outputs = current_step.outputs
+    if outputs.get("awaiting_programmatic_confirm"):
+        refined = (
+            outputs.get("refined_description")
+            or outputs.get("proposed_description")
+            or ""
+        )
+        parts = [
+            "Discovery has produced a refined task description. Reply with "
+            "exactly '1' to confirm and proceed, or reply with any other text "
+            "to keep refining the requirements.",
+        ]
+        if refined:
+            parts.extend(["", "Proposed task description:", str(refined)])
+        return "\n".join(parts)
+    # Question mode: surface the LLM's clarifying message and its questions.
+    parts: List[str] = []
+    message = outputs.get("message")
+    if message:
+        parts.append(str(message))
+    questions = outputs.get("questions")
+    if isinstance(questions, list) and questions:
+        if parts:
+            parts.append("")
+        for i, question in enumerate(questions, 1):
+            parts.append(f"{i}. {question}")
+    if not parts:
+        parts.append(
+            "Discovery is exploring your requirements. Reply with details to "
+            "help clarify what you want to build."
+        )
+    return "\n".join(parts)
+
+
+def _write_discovery_call(
+    flow: FlowInstance, current_step: Any, project_root: Path
+) -> Path:
+    """Write a ``se3/calls/`` call file for a non-interactive discovery pause.
+
+    The call file joins the existing human-call queue, so the web UI surfaces
+    it through the standard "Respond to Flow" interaction. The user's reply is
+    consumed on the next resume.
+    """
+    calls_dir = project_root / "se3" / "calls"
+    calls_dir.mkdir(parents=True, exist_ok=True)
+    is_confirmation = bool(current_step.outputs.get("awaiting_programmatic_confirm"))
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    call_id = f"discovery_{current_step.step_id}_{timestamp}"
+    call_file = calls_dir / f"{call_id}.json"
+    payload = {
+        "type": "discovery",
+        "call_type": "discovery_confirm" if is_confirmation else "discovery_question",
+        "step": current_step.step_id,
+        "step_id": current_step.step_id,
+        "flow_id": flow.flow_id,
+        "question": _discovery_call_question(current_step),
+        "created_at": datetime.now().timestamp(),
+    }
+    call_file.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return call_file
+
+
+def _read_discovery_response(call_file: Path) -> Optional[str]:
+    """Return the response text for a discovery call file, or ``None``.
+
+    Supports both the daemon-written ``<stem>.response.json`` envelope (the
+    answer nested under a ``response`` key) and a plain ``<stem>.response``
+    sibling, mirroring the confirm-call response protocol.
+    """
+    for sibling in (
+        call_file.parent / f"{call_file.stem}.response.json",
+        call_file.parent / f"{call_file.stem}.response",
+    ):
+        if not sibling.exists():
+            continue
+        try:
+            data = json.loads(sibling.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.warning("Failed to parse discovery response file: %s", sibling)
+            continue
+        if isinstance(data, str):
+            return data
+        if isinstance(data, dict):
+            for key in ("response", "answer", "feedback", "text"):
+                value = data.get(key)
+                if isinstance(value, str):
+                    return value
+            if "response" in data:
+                return str(data["response"])
+        return str(data)
+    return None
+
+
+def _handle_discovery_pause_noninteractive(
+    flow: FlowInstance,
+    current_step: Any,
+    persistence: PersistenceManager,
+    project_root: Path,
+) -> Any:
+    """Handle a discovery pause without a terminal (daemon ``--output-format json``).
+
+    Rather than blocking on a terminal read, the clarifying question is written
+    to a ``se3/calls/`` call file and the flow pauses; the web answers via the
+    existing call/response mechanism. On resume the response is consumed and
+    fed back into discovery as the next user turn.
+
+    Returns the user-response string, the :data:`_PROGRAMMATIC_CONFIRM`
+    sentinel, or :data:`_DISCOVERY_AWAITING` when the flow must pause to wait
+    for a web response.
+    """
+    call_path = current_step.outputs.get("discovery_call_file")
+    if call_path:
+        call_file = Path(call_path)
+        response = (
+            _read_discovery_response(call_file) if call_file.exists() else None
+        )
+        if response is None:
+            # The outstanding call has not been answered yet — keep waiting.
+            return _DISCOVERY_AWAITING
+        # Consume the answered call: drop the pointer and remove the call +
+        # response files so the next round starts a fresh call.
+        is_confirmation = bool(
+            current_step.outputs.get("awaiting_programmatic_confirm")
+        )
+        current_step.outputs.pop("discovery_call_file", None)
+        for path in (
+            call_file,
+            call_file.parent / f"{call_file.stem}.response.json",
+            call_file.parent / f"{call_file.stem}.response",
+        ):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        if is_confirmation:
+            if response.rstrip("\n\r") == "1":
+                current_step.inputs["programmatic_confirmed"] = True
+                return _PROGRAMMATIC_CONFIRM
+            # Any other answer keeps refining the requirements.
+            current_step.outputs.pop("awaiting_programmatic_confirm", None)
+        return response
+    # No outstanding call — write one and pause for a web response.
+    call_file = _write_discovery_call(flow, current_step, project_root)
+    current_step.outputs["discovery_call_file"] = str(call_file)
+    persistence.save_flow(flow)
+    logger.info("Discovery paused for web response: wrote call file %s", call_file)
+    return _DISCOVERY_AWAITING
+
+
 def _should_show_type(current_step_type: str, flow: FlowInstance) -> bool:
     """Check if task type should be displayed for the current step.
 
@@ -925,7 +1084,10 @@ def _run_flow_impl(
         # Special handling for DISCOVERY steps on resume - restore last AI message without
         # re-calling the LLM (the question was already asked; just wait for user input again)
         elif current_step.step_type == StepType.DISCOVERY and current_step.status == StepStatus.PAUSED:
-            _restore_discovery_display(current_step)
+            # Skip the Rich re-display for non-interactive (daemon) runs — the
+            # NDJSON event stream is the only output channel there.
+            if output_format != "json":
+                _restore_discovery_display(current_step)
             result = StepStatus.PAUSED
 
         else:
@@ -987,16 +1149,32 @@ def _run_flow_impl(
 
         # Handle discovery step PAUSED state - need user input to continue
         if current_step.step_type == StepType.DISCOVERY and result == StepStatus.PAUSED:
-            # Discovery is waiting for user response
-            user_response = _handle_discovery_pause(flow, current_step, persistence, prompt_history)
+            if output_format == "json":
+                # Non-interactive (daemon spawn): write the clarifying question
+                # as a se3/calls/ call file and let the web answer it through
+                # the existing "Respond to Flow" mechanism.
+                user_response = _handle_discovery_pause_noninteractive(
+                    flow, current_step, persistence, project_root
+                )
+                if user_response is _DISCOVERY_AWAITING:
+                    # Call file written / still unanswered — pause and exit so
+                    # the flow can be resumed once a web response arrives.
+                    emitter.emit(new_event(
+                        EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                        step_id=current_step.step_id, step_type=step_type_value,
+                    ))
+                    return 0
+            else:
+                # Discovery is waiting for an interactive user response.
+                user_response = _handle_discovery_pause(flow, current_step, persistence, prompt_history)
 
-            if user_response is None:
-                # User chose to exit
-                emitter.emit(new_event(
-                    EventType.FLOW_PAUSED, flow_id=flow.flow_id,
-                    step_id=current_step.step_id, step_type=step_type_value,
-                ))
-                return 130
+                if user_response is None:
+                    # User chose to exit
+                    emitter.emit(new_event(
+                        EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                        step_id=current_step.step_id, step_type=step_type_value,
+                    ))
+                    return 130
 
             # Store user response and re-run discovery step.
             # Advancing to the next discovery round is a NEW LLM call with a
