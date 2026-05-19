@@ -74,6 +74,12 @@ class RespondRequest(BaseModel):
     call_id: str = ""
 
 
+class InterjectRequest(BaseModel):
+    """Body of ``POST /api/flows/{id}/interject`` — inject a mid-flow instruction."""
+
+    text: str
+
+
 def create_app() -> FastAPI:
     """Build and return the SE3 central-server FastAPI application."""
     app = FastAPI(title="SE3 Central Server", version=protocol.PROTOCOL_VERSION)
@@ -189,6 +195,38 @@ def create_app() -> FastAPI:
                 detail=f"failed to deliver RESPOND_CALL to '{machine_id}'",
             )
         return {"status": "dispatched", "machine_id": machine_id, "call_id": call_id}
+
+    @app.post("/api/flows/{flow_id}/interject")
+    async def interject_flow(flow_id: str, req: InterjectRequest) -> dict:
+        """Deliver a mid-flow user interjection to a running flow.
+
+        Unlike ``/respond`` (which answers an *existing* pending call), this
+        endpoint pushes a fresh instruction into a flow that has no pending
+        call: the owning daemon turns it into an ``interjection``-kind call
+        file that ``se3 run`` drains at the next step boundary.
+        """
+        text = req.text.strip()
+        if not text:
+            raise HTTPException(status_code=422, detail="'text' must not be empty")
+        result = await state.get_flow(flow_id)
+        if result is None:
+            raise HTTPException(status_code=404, detail=f"flow '{flow_id}' not found")
+        machine_id, flow = result
+        if not manager.is_connected(machine_id):
+            raise HTTPException(
+                status_code=503,
+                detail=f"machine '{machine_id}' owning flow '{flow_id}' is not connected",
+            )
+        message = protocol.make_interject_flow(
+            flow_id, text, project_root=flow.get("project_root", "")
+        )
+        ok = await manager.send_to(machine_id, message)
+        if not ok:
+            raise HTTPException(
+                status_code=503,
+                detail=f"failed to deliver INTERJECT_FLOW to '{machine_id}'",
+            )
+        return {"status": "dispatched", "machine_id": machine_id, "flow_id": flow_id}
 
     # -- history API -------------------------------------------------------
     # The server is a pure in-memory relay: ``/api/history`` serves the

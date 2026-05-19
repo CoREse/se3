@@ -289,6 +289,129 @@ def prompt_user_choice(message: str, options: List[str]) -> int:
             return len(options) - 1
 
 
+def _stdin_is_interactive() -> bool:
+    """Return whether the process has an interactive (TTY) stdin.
+
+    Off a terminal (a daemon-spawned ``se3 run --output-format json``, CI, a
+    pipe), there is no operator to host an interactive prompt — the failure
+    decision must instead be externalised as a call file.
+    """
+    try:
+        return bool(sys.stdin and sys.stdin.isatty())
+    except (ValueError, AttributeError):
+        return False
+
+
+def _resolve_step_failure_action(
+    project_root: Path,
+    flow: FlowInstance,
+    current_step: Any,
+    error_msg: str,
+    *,
+    interactive: bool,
+) -> Tuple[str, Any]:
+    """Decide how a FAILED step should be handled, branching on a TTY.
+
+    On an interactive terminal this returns ``("prompt", None)`` and the
+    caller runs the Retry/Skip/Abort prompt unchanged. Off a terminal there is
+    no operator, so a :data:`~se3.engine.interaction_calls.CALL_KIND_RETRY_DECISION`
+    call file is written under ``se3/calls/`` and:
+
+    * ``("pause", call_path)`` is returned when no response exists yet — the
+      caller pauses the flow so the decision can be made out-of-band; or
+    * ``("decision", "retry"|"skip"|"abort")`` is returned when a sibling
+      response file is already present (a resume / out-of-band answer).
+    """
+    if interactive:
+        return ("prompt", None)
+
+    from ..engine import interaction_calls
+
+    call_path = interaction_calls.write_retry_decision_call(
+        project_root,
+        flow_id=flow.flow_id,
+        step_id=current_step.step_id,
+        step_type=current_step.step_type.value,
+        error=error_msg,
+        retry_count=current_step.retry_count,
+    )
+    response = interaction_calls.read_response(call_path)
+    if response is None:
+        return ("pause", call_path)
+    decision = str(
+        response.get("decision") or response.get("response") or "abort"
+    ).strip().lower()
+    if decision not in ("retry", "skip", "abort"):
+        decision = "abort"
+    return ("decision", decision)
+
+
+def _drain_pending_interjections(
+    flow: FlowInstance,
+    project_root: Path,
+    persistence: PersistenceManager,
+) -> None:
+    """Consume daemon-queued interjection call files at a step boundary.
+
+    The web console pushes mid-flow instructions through the server as
+    ``MSG_INTERJECT_FLOW``; the daemon turns each into an ``interjection``-kind
+    call file under ``se3/calls/``. Here, at the top of the run loop, those
+    files are drained and folded into ``flow.state.context["user_interjections"]``
+    using the same entry shape as a Ctrl-C interjection, then the current
+    step's ``task_description`` is recomposed so the instruction takes effect.
+    """
+    from ..engine import interaction_calls
+
+    try:
+        drained = interaction_calls.drain_interjection_requests(project_root)
+    except Exception:  # pragma: no cover - defensive; never break the flow
+        logger.exception("Failed to drain pending interjection requests")
+        return
+    if not drained:
+        return
+
+    from datetime import datetime
+
+    from ..engine.state_machine import _effective_task_description_base
+    from ..engine.task_description import compose_task_description_with_interjections
+
+    interjections = flow.state.context.setdefault("user_interjections", [])
+    current_step = flow.state.get_current_step()
+    step_id = ""
+    step_type_value = ""
+    if current_step is not None:
+        step_id = current_step.step_id
+        step_type_value = (
+            current_step.step_type.value
+            if hasattr(current_step.step_type, "value")
+            else str(current_step.step_type)
+        )
+
+    for item in drained:
+        interjections.append(
+            {
+                "text": item["text"],
+                "step_id": step_id,
+                "step_type": step_type_value,
+                "timestamp": datetime.now().isoformat(),
+                "source": "web-console",
+            }
+        )
+        get_console().print(
+            f"[dim]Interjection received from web console: "
+            f"{item['text'][:80]}[/dim]"
+        )
+
+    if current_step is not None:
+        current_step.inputs["task_description"] = (
+            compose_task_description_with_interjections(
+                base=_effective_task_description_base(flow),
+                interjections=interjections,
+            )
+        )
+    persistence.save_flow(flow)
+
+
 def handle_resume_interactive(project_root: Path) -> Optional[str]:
     """Handle interactive resume flow.
 
@@ -1011,6 +1134,12 @@ def _run_flow_impl(
 
     # Execute flow
     while flow.status not in (FlowStatus.COMPLETED, FlowStatus.FAILED):
+        # Step boundary: consume any interjection requests the daemon queued
+        # (delivered via MSG_INTERJECT_FLOW from the web console) and fold
+        # them into the flow's user_interjections so every subsequently-built
+        # step's task_description picks them up.
+        _drain_pending_interjections(flow, project_root, persistence)
+
         current_step = flow.state.get_current_step()
         if not current_step:
             get_console().print("[dim]No current step — marking flow complete[/dim]")
@@ -1221,9 +1350,30 @@ def _run_flow_impl(
                 persistence.save_flow(flow)
                 return 1
 
-            # Ask user whether to retry, skip, or abort
-            options = ["Retry this step", "Skip to next step", "Abort flow"]
-            choice = prompt_user_choice("What would you like to do?", options)
+            # Branch on whether there is an interactive terminal. With a TTY
+            # the operator answers a Retry/Skip/Abort prompt directly; without
+            # one, the decision is externalised as a retry_decision call file
+            # so the web console (or any responder) can answer it out-of-band.
+            action, info = _resolve_step_failure_action(
+                project_root, flow, current_step, error_msg,
+                interactive=_stdin_is_interactive(),
+            )
+            if action == "pause":
+                get_console().print(
+                    "[yellow]Step failed with no interactive terminal — wrote "
+                    f"a retry_decision call ({Path(info).name}). Pausing the "
+                    "flow; respond via the web console or `se3 run --resume`."
+                    "[/yellow]"
+                )
+                flow.status = FlowStatus.PAUSED
+                persistence.save_flow(flow)
+                return 0
+            if action == "decision":
+                choice = {"retry": 0, "skip": 1, "abort": 2}[info]
+            else:
+                # Interactive terminal — ask the operator to retry/skip/abort.
+                options = ["Retry this step", "Skip to next step", "Abort flow"]
+                choice = prompt_user_choice("What would you like to do?", options)
 
             if choice == 0:
                 # Reset step status and retry from where it left off

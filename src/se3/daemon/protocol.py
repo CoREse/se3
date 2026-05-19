@@ -68,11 +68,36 @@ MSG_SPAWN_FLOW = "spawn_flow"
 MSG_RESPOND_CALL = "respond_call"
 MSG_PING = "ping"
 MSG_HISTORY_REQUEST = "history_request"
+#: server → daemon: deliver a mid-flow user interjection to a running flow.
+#: The daemon turns it into an ``interjection``-kind call file under
+#: ``se3/calls/`` which ``se3 run`` drains at the next step boundary.
+MSG_INTERJECT_FLOW = "interject_flow"
 
 #: Valid values for the ``mode`` field of a :data:`MSG_HISTORY_DATA` payload.
 HISTORY_MODE_FULL = "full"
 HISTORY_MODE_APPEND = "append"
 HISTORY_MODES: FrozenSet[str] = frozenset({HISTORY_MODE_FULL, HISTORY_MODE_APPEND})
+
+# -- interaction-call kinds -----------------------------------------------
+# Every human-in-the-loop interaction inside a running flow is carried by a
+# single artifact: a JSON call file under ``<project>/se3/calls/``. Its
+# ``kind`` field is one of the constants below, so the daemon aggregator and
+# the web console can render and route each interaction without guessing.
+# Legacy call files written before this field existed have no ``kind`` key
+# and MUST be treated as :data:`CALL_KIND_CALL` for backward compatibility.
+CALL_KIND_CALL = "call"
+CALL_KIND_INTERJECTION = "interjection"
+CALL_KIND_RETRY_DECISION = "retry_decision"
+CALL_KIND_CLI_CONFIRM = "cli_confirm"
+#: Every recognised interaction-call kind.
+CALL_KINDS: FrozenSet[str] = frozenset(
+    {
+        CALL_KIND_CALL,
+        CALL_KIND_INTERJECTION,
+        CALL_KIND_RETRY_DECISION,
+        CALL_KIND_CLI_CONFIRM,
+    }
+)
 
 #: Messages a daemon is allowed to send to the server.
 DAEMON_TO_SERVER: FrozenSet[str] = frozenset(
@@ -87,7 +112,14 @@ DAEMON_TO_SERVER: FrozenSet[str] = frozenset(
 )
 #: Messages a server is allowed to send to a daemon.
 SERVER_TO_DAEMON: FrozenSet[str] = frozenset(
-    {MSG_WELCOME, MSG_SPAWN_FLOW, MSG_RESPOND_CALL, MSG_PING, MSG_HISTORY_REQUEST}
+    {
+        MSG_WELCOME,
+        MSG_SPAWN_FLOW,
+        MSG_RESPOND_CALL,
+        MSG_PING,
+        MSG_HISTORY_REQUEST,
+        MSG_INTERJECT_FLOW,
+    }
 )
 #: Every known message type.
 ALL_MESSAGE_TYPES: FrozenSet[str] = DAEMON_TO_SERVER | SERVER_TO_DAEMON
@@ -256,6 +288,28 @@ def make_respond_call(
             "call_id": call_id,
             "project_root": project_root,
             "response": response,
+        },
+    )
+
+
+def make_interject_flow(
+    flow_id: str,
+    text: str,
+    *,
+    project_root: str = "",
+) -> Message:
+    """server → daemon: deliver a mid-flow user interjection.
+
+    The daemon writes *text* as an ``interjection``-kind call file under the
+    flow's ``se3/calls/`` directory; the running ``se3 run`` process drains it
+    at the next step boundary and folds it into ``user_interjections``.
+    """
+    return Message(
+        type=MSG_INTERJECT_FLOW,
+        payload={
+            "flow_id": flow_id,
+            "text": text,
+            "project_root": project_root,
         },
     )
 

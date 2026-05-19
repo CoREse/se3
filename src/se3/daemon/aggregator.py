@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
+from .protocol import CALL_KINDS
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL = 2.0
@@ -30,16 +32,23 @@ DEFAULT_POLL_INTERVAL = 2.0
 
 @dataclass
 class PendingCall:
-    """A queued human call awaiting a response.
+    """A queued human-in-the-loop interaction awaiting a response.
 
-    Mirrors a file under a project's ``se3/calls/`` directory (the interjection
-    / human-call queue mechanism).
+    Mirrors a file under a project's ``se3/calls/`` directory — the unified
+    interaction-call queue. The ``kind`` discriminates the four interaction
+    types (``call`` / ``interjection`` / ``retry_decision`` / ``cli_confirm``);
+    legacy call files without a ``kind`` field are reported as ``call``. The
+    ``prompt`` / ``context`` / ``options`` fields are the display metadata the
+    web console renders the interaction item from.
     """
 
     call_id: str
     path: str
     project_root: str
     kind: str = "call"
+    prompt: str = ""
+    context: Dict[str, object] = field(default_factory=dict)
+    options: List[object] = field(default_factory=list)
     created_at: float = 0.0
 
     def to_dict(self) -> Dict[str, object]:
@@ -48,6 +57,9 @@ class PendingCall:
             "path": self.path,
             "project_root": self.project_root,
             "kind": self.kind,
+            "prompt": self.prompt,
+            "context": self.context,
+            "options": self.options,
             "created_at": self.created_at,
         }
 
@@ -276,12 +288,16 @@ class DaemonAggregator:
             # Skip calls that already have a sibling response file.
             if entry.stem in answered:
                 continue
+            kind, prompt, context, options = _call_metadata(entry)
             calls.append(
                 PendingCall(
                     call_id=entry.stem,
                     path=str(entry),
                     project_root=str(root),
-                    kind="call",
+                    kind=kind,
+                    prompt=prompt,
+                    context=context,
+                    options=options,
                     created_at=_safe_mtime(entry) or 0.0,
                 )
             )
@@ -324,6 +340,30 @@ def _read_json(path: Path) -> Optional[dict]:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+
+
+def _call_metadata(path: Path) -> tuple:
+    """Resolve ``(kind, prompt, context, options)`` for a call file.
+
+    A call file written before the ``kind`` field existed — or one that is
+    unreadable / not a JSON object / carries an unrecognised ``kind`` — is
+    classified as the plain ``call`` kind, so legacy artifacts keep working
+    without any migration step.
+    """
+    data = _read_json(path)
+    if not isinstance(data, dict):
+        return ("call", "", {}, [])
+    kind = data.get("kind")
+    if kind not in CALL_KINDS:
+        kind = "call"
+    prompt = str(data.get("prompt") or "")
+    context = data.get("context")
+    if not isinstance(context, dict):
+        context = {}
+    options = data.get("options")
+    if not isinstance(options, list):
+        options = []
+    return (str(kind), prompt, context, options)
 
 
 def _current_step(state: dict) -> Optional[str]:

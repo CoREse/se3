@@ -135,6 +135,7 @@ class DaemonClient:
         self._snapshot_provider = snapshot_provider
         self._spawn_handler = spawn_handler
         self._respond_handler = respond_handler or _default_respond_handler
+        self._interject_handler = _default_interject_handler
         self._history_provider = history_provider
         self.status_interval = max(0.5, float(status_interval))
 
@@ -279,6 +280,8 @@ class DaemonClient:
             self._handle_spawn(message.payload)
         elif message.type == protocol.MSG_RESPOND_CALL:
             self._handle_respond(message.payload)
+        elif message.type == protocol.MSG_INTERJECT_FLOW:
+            self._handle_interject(message.payload)
         elif message.type == protocol.MSG_HISTORY_REQUEST:
             await self._handle_history_request(ws, message.payload)
         else:  # pragma: no cover - defensive; decode() already validates
@@ -315,6 +318,20 @@ class DaemonClient:
             logger.info("RESPOND_CALL handled for call %s", call_id)
         except Exception:
             logger.exception("RESPOND_CALL handler failed")
+
+    def _handle_interject(self, payload: Dict[str, Any]) -> None:
+        """Route an INTERJECT_FLOW instruction to the interjection-file writer."""
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            logger.warning("Ignoring INTERJECT_FLOW with empty text")
+            return
+        flow_id = str(payload.get("flow_id") or "")
+        project_root = str(payload.get("project_root") or "")
+        try:
+            self._interject_handler(flow_id, project_root, text)
+            logger.info("INTERJECT_FLOW handled for flow %s", flow_id)
+        except Exception:
+            logger.exception("INTERJECT_FLOW handler failed")
 
     async def _handle_history_request(self, ws: Any, payload: Dict[str, Any]) -> None:
         """Answer a server HISTORY_REQUEST with a HISTORY_DATA reply.
@@ -454,3 +471,16 @@ def _default_respond_handler(call_id: str, project_root: str, response: Any) -> 
         encoding="utf-8",
     )
     tmp.replace(target)
+
+
+def _default_interject_handler(flow_id: str, project_root: str, text: str) -> None:
+    """Write a mid-flow interjection request file under ``se3/calls/``.
+
+    A server-delivered :data:`~se3.daemon.protocol.MSG_INTERJECT_FLOW` becomes
+    an ``interjection``-kind call file; the running ``se3 run`` process drains
+    it at the next step boundary and folds it into ``user_interjections``.
+    """
+    from ..engine.interaction_calls import calls_dir_for, write_interjection_request
+
+    root = Path(project_root).resolve() if project_root else Path.cwd()
+    write_interjection_request(calls_dir_for(root), text, flow_id=flow_id)
