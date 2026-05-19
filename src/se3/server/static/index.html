@@ -57,7 +57,9 @@
     </div>
   </div>
 
-  <!-- Running-flow full-screen chat view -->
+  <!-- Running-flow chat view — a full-screen, history-parity layout: a
+       sidebar for Overview/Steps/Machine, a scrollable conversation as the
+       main body, prominent intervention items, and a docked reply box. -->
   <div id="flow-view" class="flow-view hidden">
     <div class="flow-view-head">
       <h3 id="flow-view-title">Flow</h3>
@@ -68,22 +70,24 @@
     </div>
     <div class="flow-view-body">
       <aside class="flow-sidebar">
-        <div id="flow-sidebar" class="flow-sidebar-content">
-          <p class="empty">Select a flow to view its details.</p>
+        <div id="flow-sidebar-body" class="flow-sidebar-body">
+          <p class="empty">Loading flow details&hellip;</p>
         </div>
       </aside>
       <section class="flow-main">
-        <div id="flow-conversation" class="flow-conversation history-detail">
+        <div id="flow-conversation" class="history-detail flow-conversation">
           <p class="empty">Select a flow to view its conversation.</p>
         </div>
-        <form id="reply-bar" class="reply-bar">
-          <p id="reply-context" class="reply-context">No pending interaction.</p>
-          <div class="reply-input-row">
-            <textarea id="reply-input" rows="2" disabled
-                      placeholder="No pending interaction to respond to&hellip;"></textarea>
-            <button type="submit" id="reply-submit" disabled>Send</button>
+        <div id="flow-interventions" class="flow-interventions"></div>
+        <form id="flow-reply-form" class="flow-reply">
+          <div id="flow-reply-context" class="flow-reply-context">
+            No pending interaction right now.
           </div>
-          <p id="reply-error" class="form-error hidden"></p>
+          <div class="flow-reply-row">
+            <textarea id="flow-reply-input" rows="2" disabled
+                      placeholder="No pending interaction&hellip;"></textarea>
+            <button type="submit" id="flow-reply-submit" disabled>Send</button>
+          </div>
         </form>
       </section>
     </div>
