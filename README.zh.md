@@ -136,6 +136,27 @@ se3 guardrails se3/specs/auth/spec.md
 se3 history
 ```
 
+### Daemon 与中心服务器
+
+SE3 带有一个可选的、常驻的控制面。**daemon**(`se3 daemon`)常驻在一台机器上,
+监管该机的 `se3 run` 流程并聚合它们的状态;它可以拨入一个**中心服务器**
+(`se3-server`),后者把多台机器合并为单一的多流程视图,并提供一个网页前端,
+用于观察进度和远程发布任务。
+
+```bash
+# 安装可选的 server extra(FastAPI/uvicorn/websockets)
+pip install 'se3[server]'
+
+# 启动常驻 daemon(脱离终端的后台进程)
+se3 daemon start
+
+# 启动中心服务器(默认 127.0.0.1:8080)
+se3-server
+```
+
+安装、部署、架构与网页前端的完整说明见
+[docs/daemon-and-server.zh.md](docs/daemon-and-server.zh.md)。
+
 ## 工作流类型
 
 SE3 根据工作类型调整流程。每种工作流类型从 11 步引擎中选择不同的步骤子集：

@@ -136,6 +136,28 @@ se3 guardrails se3/specs/auth/spec.md
 se3 history
 ```
 
+### Daemon & Central Server
+
+SE3 has an optional always-on control plane. The **daemon** (`se3 daemon`)
+runs resident on a machine, supervising its `se3 run` flows and aggregating
+their state; it can dial out to a **central server** (`se3-server`) that merges
+many machines into one multi-flow view and serves a web frontend for watching
+progress and publishing tasks remotely.
+
+```bash
+# Install the optional server extra (FastAPI/uvicorn/websockets)
+pip install 'se3[server]'
+
+# Start the resident daemon (detached background process)
+se3 daemon start
+
+# Start the central server (defaults to 127.0.0.1:8080)
+se3-server
+```
+
+See [docs/daemon-and-server.md](docs/daemon-and-server.md) for installation,
+deployment, architecture, and the web frontend.
+
 ## Workflow Types
 
 SE3 adapts its process to the type of work. Each workflow type selects a different subset of the 11-step engine:
