@@ -118,6 +118,45 @@ check("explicit interjection call suppresses the synthetic one", () => {
   assert.equal(entries[0].synthetic, false);
 });
 
+// -- pendingCalls: flow_id fallback filter ---------------------------------
+// The backend daemon aggregator filters pending_calls by the open flow's
+// flow_id; pendingCalls() in app.js mirrors that as a defensive fallback in
+// case an older daemon hasn't filtered. A call whose context.flow_id matches
+// the open flow is kept; a mismatching call is dropped; an unannotated call
+// (no flow_id at all) is kept as belonging to the current flow.
+check("pendingCalls keeps calls matching flow_id", () => {
+  const flow = {
+    flow_id: "F1",
+    pending_calls: [
+      { call_id: "c1", context: { flow_id: "F1" } },
+    ],
+  };
+  assert.equal(app.pendingCalls(flow).length, 1);
+});
+check("pendingCalls drops calls from a different flow", () => {
+  const flow = {
+    flow_id: "F1",
+    pending_calls: [
+      { call_id: "c1", context: { flow_id: "F1" } },
+      { call_id: "c2", context: { flow_id: "F2" } },
+    ],
+  };
+  const kept = app.pendingCalls(flow);
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].call_id, "c1");
+});
+check("pendingCalls keeps calls with no flow_id annotation", () => {
+  const flow = {
+    flow_id: "F1",
+    pending_calls: [
+      { call_id: "c1" },
+      { call_id: "c2", context: {} },
+      { call_id: "c3", context: null },
+    ],
+  };
+  assert.equal(app.pendingCalls(flow).length, 3);
+});
+
 // -- isActiveFlow -----------------------------------------------------------
 check("isActiveFlow true for running/paused, false for terminal", () => {
   assert.equal(app.isActiveFlow({ status: "running" }), true);

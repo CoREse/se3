@@ -270,8 +270,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 /* -- intervention chip-bar ------------------------------------------ */
 /*
  * Pending interventions appear inside the docked reply form as a horizontal,
- * wrap-friendly bar of clickable chips. Selecting a chip surfaces the full
- * prompt/context/options in the reply-context panel above the input row.
+ * wrap-friendly bar of compact chips (kind icon + label + optional short call
+ * id). Clicking a chip selects it; the full prompt / context / options for the
+ * selected chip materialize in the reply-context panel below the bar.
  */
 
 .flow-interventions {
@@ -282,98 +283,51 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .flow-interventions:empty { display: none; }
 
-.intervention {
+.intervention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
   border: 1px solid var(--yellow);
-  border-left-width: 4px;
-  border-radius: 7px;
-  background: rgba(214, 162, 58, 0.10);
-  padding: 9px 12px;
+  border-radius: 14px;
+  background: rgba(214, 162, 58, 0.12);
+  color: var(--fg);
+  font: inherit;
+  font-size: 11.5px;
   cursor: pointer;
 }
-.intervention:hover { filter: brightness(1.08); }
-.intervention.selected {
-  box-shadow: 0 0 0 2px rgba(214, 162, 58, 0.5);
+.intervention-chip:hover:not(:disabled) { filter: brightness(1.12); }
+.intervention-chip.selected {
+  box-shadow: 0 0 0 2px rgba(214, 162, 58, 0.55);
 }
-.intervention.kind-interjection {
+.intervention-chip.kind-interjection {
   border-color: var(--accent);
-  background: rgba(76, 141, 255, 0.10);
+  background: rgba(76, 141, 255, 0.12);
 }
-.intervention.kind-interjection.selected {
-  box-shadow: 0 0 0 2px rgba(76, 141, 255, 0.5);
+.intervention-chip.kind-interjection.selected {
+  box-shadow: 0 0 0 2px rgba(76, 141, 255, 0.55);
 }
-.intervention.kind-retry_decision {
+.intervention-chip.kind-retry_decision {
   border-color: var(--red);
-  background: rgba(224, 86, 75, 0.10);
+  background: rgba(224, 86, 75, 0.12);
 }
-.intervention.kind-retry_decision.selected {
-  box-shadow: 0 0 0 2px rgba(224, 86, 75, 0.5);
+.intervention-chip.kind-retry_decision.selected {
+  box-shadow: 0 0 0 2px rgba(224, 86, 75, 0.55);
 }
-
-.intervention-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-bottom: 5px;
-}
-.intervention-icon { font-size: 14px; }
-.intervention-kind {
-  font-size: 11px;
+.intervention-chip-icon { font-size: 13px; }
+.intervention-chip-label {
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--fg);
-}
-.intervention-callid {
-  margin-left: auto;
+  letter-spacing: 0.04em;
   font-size: 10.5px;
+}
+.intervention-chip-callid {
   color: var(--fg-dim);
+  font-size: 10.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 50%;
-}
-.intervention-prompt { font-size: 12.5px; line-height: 1.5; }
-.intervention-prompt .md-p:first-child { margin-top: 0; }
-.intervention-prompt .md-p:last-child { margin-bottom: 0; }
-.intervention-hint { font-size: 12px; color: var(--fg-dim); }
-
-.intervention-context { margin-top: 7px; }
-.intervention-context-label {
-  font-size: 10.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--fg-dim);
-}
-.intervention-context-body {
-  margin: 3px 0 0;
-  padding: 6px 8px;
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: inherit;
-  font-size: 11.5px;
-  color: var(--fg-dim);
-}
-
-.intervention-options {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  margin-top: 8px;
-}
-.intervention-option {
-  padding: 3px 11px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--accent);
-  font-size: 11.5px;
-}
-.intervention-option:hover:not(:disabled) {
-  border-color: var(--accent);
-  background: var(--bg-card);
+  max-width: 12ch;
 }
 
 /* -- docked reply box ----------------------------------------------- */
@@ -388,25 +342,97 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border-top: 1px solid var(--border);
 }
 .flow-reply-context {
-  font-size: 11.5px;
+  font-size: 12px;
   color: var(--fg-dim);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 .flow-reply-context.active { color: var(--fg); }
+
+.flow-reply-empty,
+.flow-reply-hint {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  font-style: italic;
+}
+
+.flow-reply-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .flow-reply-to {
   text-transform: uppercase;
   letter-spacing: 0.04em;
   font-size: 10.5px;
   color: var(--fg-dim);
-  margin-right: 6px;
 }
 .flow-reply-kind {
   font-weight: 600;
   color: var(--yellow);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 11px;
 }
 .flow-reply-kind.kind-interjection { color: var(--accent); }
 .flow-reply-kind.kind-retry_decision { color: var(--red); }
-.flow-reply-where { color: var(--fg-dim); }
-.flow-reply-preview { color: var(--fg-dim); }
+.flow-reply-callid {
+  color: var(--fg-dim);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.flow-reply-prompt {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--fg);
+}
+.flow-reply-prompt .md-p { margin: 4px 0; }
+.flow-reply-prompt .md-p:first-child { margin-top: 0; }
+.flow-reply-prompt .md-p:last-child { margin-bottom: 0; }
+
+.flow-reply-context-block { display: flex; flex-direction: column; gap: 3px; }
+.flow-reply-context-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--fg-dim);
+}
+.flow-reply-context-body {
+  margin: 0;
+  padding: 7px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+
+.flow-reply-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+.flow-reply-option {
+  padding: 3px 11px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--accent);
+  font-size: 11.5px;
+}
+.flow-reply-option:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--bg-card);
+}
 
 .flow-reply-row {
   display: flex;

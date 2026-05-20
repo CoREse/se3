@@ -74,8 +74,21 @@ function findFlow(flowId) {
   return null;
 }
 
+// Pending calls for the open flow. Backend daemon aggregator filters by
+// flow_id when constructing snapshots (see DaemonAggregator), but a legacy /
+// older daemon may not — so re-filter here as a defensive fallback: keep a
+// call when its embedded context.flow_id matches the current flow, OR when
+// the context carries no flow_id at all (treated as belonging to the active
+// flow rather than dropped).
 function pendingCalls(flow) {
-  return flow && Array.isArray(flow.pending_calls) ? flow.pending_calls : [];
+  if (!flow || !Array.isArray(flow.pending_calls)) return [];
+  const currentFlowId = flow.flow_id || "";
+  return flow.pending_calls.filter((c) => {
+    const ctx = c && c.context;
+    const cfid = (ctx && typeof ctx === "object" && ctx.flow_id) || "";
+    if (!cfid) return true; // unannotated → assume current flow
+    return !currentFlowId || cfid === currentFlowId;
+  });
 }
 
 function hasPendingCall(flow) {
@@ -599,9 +612,12 @@ function computeInterventions(flow) {
   return entries;
 }
 
-// Rebuild the intervention region and re-sync the reply box. Called from the
-// 3s detail poll; selection (`flowReplyTargetId`) and the typed-but-unsent
-// reply text are deliberately preserved across rebuilds.
+// Rebuild the intervention chip-bar (sits inside the docked reply form, above
+// the reply-context panel) and re-sync the reply box. Called from the 3s
+// detail poll; selection (`flowReplyTargetId`) and the typed-but-unsent reply
+// text are deliberately preserved across rebuilds. Chips do NOT render the
+// intervention's prompt/context/options — that lives in `updateReplyBox`'s
+// reply-context panel for the currently selected chip only.
 function renderInterventions(flow) {
   const region = $("flow-interventions");
   region.innerHTML = "";
@@ -617,77 +633,44 @@ function renderInterventions(flow) {
   }
 
   for (const entry of entries) {
-    region.appendChild(renderInterventionItem(entry));
+    region.appendChild(renderInterventionChip(entry));
   }
   updateReplyBox(flow);
 }
 
-// Render one intervention entry as a prominent, default-expanded card. The
-// card body shows the kind, prompt, optional context, and any options. The
-// whole card is a click target that selects it as the reply box's target.
-function renderInterventionItem(entry) {
+// Render one intervention entry as a compact chip — kind icon + label +
+// optional short call_id. Clicking the chip selects it as the reply box's
+// target (the full prompt / context / options then materialize in the
+// reply-context panel above the textarea). The chip itself never expands.
+function renderInterventionChip(entry) {
   const meta = KIND_META[entry.kind] || KIND_META.call;
-  const card = el("div", "intervention kind-" + entry.kind);
-  if (entry.id === state.flowReplyTargetId) card.classList.add("selected");
+  const chip = el("button", "intervention-chip kind-" + entry.kind);
+  chip.type = "button";
+  if (entry.id === state.flowReplyTargetId) chip.classList.add("selected");
 
-  const head = el("div", "intervention-head");
-  head.append(
-    el("span", "intervention-icon", meta.icon),
-    el("span", "intervention-kind", meta.label),
+  chip.append(
+    el("span", "intervention-chip-icon", meta.icon),
+    el("span", "intervention-chip-label", meta.label),
   );
   if (entry.callId) {
-    const cid = el("span", "intervention-callid", entry.callId);
+    // Short tail of the call id — full value is on the title for hover.
+    const short = entry.callId.length > 10
+      ? "…" + entry.callId.slice(-8)
+      : entry.callId;
+    const cid = el("span", "intervention-chip-callid", short);
     cid.title = "call id: " + entry.callId;
-    head.appendChild(cid);
-  }
-  card.appendChild(head);
-
-  if (entry.prompt) {
-    const prompt = el("div", "intervention-prompt");
-    prompt.appendChild(renderMarkdown(entry.prompt));
-    card.appendChild(prompt);
-  } else {
-    card.appendChild(el("div", "intervention-hint", meta.hint));
+    chip.appendChild(cid);
   }
 
-  if (entry.context != null && entry.context !== "") {
-    const ctx = el("div", "intervention-context");
-    ctx.append(
-      el("span", "intervention-context-label", "context"),
-      el("pre", "intervention-context-body",
-        typeof entry.context === "string"
-          ? entry.context
-          : safeStringify(entry.context)),
-    );
-    card.appendChild(ctx);
-  }
-
-  if (entry.options.length) {
-    const opts = el("div", "intervention-options");
-    for (const opt of entry.options) {
-      const optText = optionText(opt);
-      const btn = el("button", "intervention-option", optionLabel(opt));
-      btn.type = "button";
-      btn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        // An option is a one-click reply: select this entry and send it.
-        state.flowReplyTargetId = entry.id;
-        sendReply(state.selectedFlowId, entry, optText);
-      });
-      opts.appendChild(btn);
-    }
-    card.appendChild(opts);
-  }
-
-  // Clicking anywhere on the card (outside an option button) targets it.
-  card.addEventListener("click", () => {
+  chip.addEventListener("click", (e) => {
+    e.preventDefault();
     if (state.flowReplyTargetId === entry.id) return;
     state.flowReplyTargetId = entry.id;
     if (state.flowDetail) renderInterventions(state.flowDetail);
     $("flow-reply-input").focus();
   });
 
-  return card;
+  return chip;
 }
 
 // An option may be a plain string or `{label, value}`; resolve both shapes.
@@ -709,9 +692,12 @@ function safeStringify(value) {
   catch (_) { return String(value); }
 }
 
-// Sync the docked reply box to the current intervention selection: enable it
-// and label its target when there is a pending interaction, disable it with an
-// explanatory line when there is none.
+// Sync the docked reply box to the current intervention selection. When at
+// least one chip exists, the textarea + submit are enabled and the reply-
+// context panel above them materializes the selected chip's full content:
+// kind header, prompt (Markdown, NOT truncated), optional context (`<pre>`,
+// not capped) and any options buttons (one-click reply). When no chip exists,
+// the textarea + submit are disabled and the panel shows a hint line.
 function updateReplyBox(flow) {
   const entries = state.flowInterventions || [];
   const input = $("flow-reply-input");
@@ -722,10 +708,12 @@ function updateReplyBox(flow) {
     input.disabled = true;
     submit.disabled = true;
     input.placeholder = "No pending interaction…";
-    ctx.textContent = isActiveFlow(flow)
-      ? "No pending interaction right now — nothing to respond to."
-      : "This flow has ended — no further interaction is possible.";
     ctx.className = "flow-reply-context";
+    ctx.innerHTML = "";
+    ctx.appendChild(el("p", "flow-reply-empty",
+      isActiveFlow(flow)
+        ? "No pending interaction right now — nothing to respond to."
+        : "This flow has ended — no further interaction is possible."));
     return;
   }
 
@@ -742,19 +730,62 @@ function updateReplyBox(flow) {
     ? "Type an instruction to interject into this running flow…"
     : "Type your response to this call…";
 
-  ctx.className = "flow-reply-context active";
+  ctx.className = "flow-reply-context active kind-" + target.kind;
   ctx.innerHTML = "";
-  ctx.append(
+
+  // Header row: "Replying to <kind label>" + optional call_id locator.
+  const head = el("div", "flow-reply-head");
+  head.append(
     el("span", "flow-reply-to", "Replying to"),
     el("span", "flow-reply-kind kind-" + target.kind, meta.label),
   );
-  const where = target.callId
-    ? ` · call ${target.callId}`
-    : (target.kind === "interjection" ? " · running flow" : "");
-  if (where) ctx.appendChild(el("span", "flow-reply-where", where));
+  if (target.callId) {
+    const cid = el("span", "flow-reply-callid", "call " + target.callId);
+    cid.title = "call id: " + target.callId;
+    head.appendChild(cid);
+  } else if (target.kind === "interjection") {
+    head.appendChild(el("span", "flow-reply-callid", "running flow"));
+  }
+  ctx.appendChild(head);
+
+  // Full prompt — rendered as Markdown, never truncated.
   if (target.prompt) {
-    ctx.appendChild(el("span", "flow-reply-preview",
-      " — " + truncate(target.prompt, 120)));
+    const prompt = el("div", "flow-reply-prompt");
+    prompt.appendChild(renderMarkdown(target.prompt));
+    ctx.appendChild(prompt);
+  } else {
+    ctx.appendChild(el("p", "flow-reply-hint", meta.hint));
+  }
+
+  // Optional context payload — preformatted, no max-height cap.
+  if (target.context != null && target.context !== "") {
+    const ctxBlock = el("div", "flow-reply-context-block");
+    ctxBlock.append(
+      el("span", "flow-reply-context-label", "context"),
+      el("pre", "flow-reply-context-body",
+        typeof target.context === "string"
+          ? target.context
+          : safeStringify(target.context)),
+    );
+    ctx.appendChild(ctxBlock);
+  }
+
+  // Optional options — render as one-click reply buttons. Clicking sends the
+  // option text directly via sendReply, same path the inline option click on
+  // the previous card layout used.
+  if (target.options && target.options.length) {
+    const opts = el("div", "flow-reply-options");
+    for (const opt of target.options) {
+      const optText = optionText(opt);
+      const btn = el("button", "flow-reply-option", optionLabel(opt));
+      btn.type = "button";
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        sendReply(state.selectedFlowId, target, optText);
+      });
+      opts.appendChild(btn);
+    }
+    ctx.appendChild(opts);
   }
 }
 
@@ -765,7 +796,9 @@ function resetReplyBox() {
   $("flow-reply-submit").disabled = true;
   const ctx = $("flow-reply-context");
   ctx.className = "flow-reply-context";
-  ctx.textContent = "No pending interaction right now.";
+  ctx.innerHTML = "";
+  ctx.appendChild(el("p", "flow-reply-empty",
+    "No pending interaction right now."));
 }
 
 function truncate(text, max) {
@@ -1798,5 +1831,6 @@ if (typeof module !== "undefined" && module.exports) {
     truncate,
     optionLabel,
     optionText,
+    pendingCalls,
   };
 }
