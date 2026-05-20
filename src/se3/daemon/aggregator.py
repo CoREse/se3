@@ -190,7 +190,14 @@ class DaemonAggregator:
     # -- snapshot ----------------------------------------------------------
 
     def get_snapshot(self) -> MachineStatus:
-        """Build and return the current :class:`MachineStatus` snapshot."""
+        """Build and return the current :class:`MachineStatus` snapshot.
+
+        ``FlowSnapshot.pending_calls`` is scoped to its own flow (via
+        :meth:`_filter_calls_for_flow`) to prevent cross-session leakage in
+        the per-flow web view, but the machine-wide ``pending_calls`` field
+        aggregates *all* call files under each project root unfiltered, so the
+        machine-level surface keeps showing every queued interaction.
+        """
         flows: List[FlowSnapshot] = []
         all_calls: List[PendingCall] = []
         for root in sorted(self._project_roots):
@@ -198,7 +205,7 @@ class DaemonAggregator:
             if snapshot is None:
                 continue
             flows.append(snapshot)
-            all_calls.extend(snapshot.pending_calls)
+            all_calls.extend(self._enumerate_calls(root))
         return MachineStatus(
             machine_id=self.machine_id,
             hostname=self.hostname,
@@ -223,11 +230,15 @@ class DaemonAggregator:
         issue_count = _count_issues(root / "se3" / "issues")
 
         if data is None:
-            if not pending_calls and log_count == 0 and issue_count == 0:
+            # No engine.json: no current flow_id to filter by, but historical
+            # call files may still be lingering. Pass ``None`` to keep the
+            # retro-compatible behavior (no filtering when flow_id unknown).
+            flow_scoped_calls = self._filter_calls_for_flow(pending_calls, None)
+            if not flow_scoped_calls and log_count == 0 and issue_count == 0:
                 return None
             return FlowSnapshot(
                 project_root=str(root),
-                pending_calls=pending_calls,
+                pending_calls=flow_scoped_calls,
                 log_count=log_count,
                 issue_count=issue_count,
             )
@@ -239,9 +250,10 @@ class DaemonAggregator:
         progress = (index / total) if total else 0.0
 
         flow_id = data.get("flow_id")
+        flow_id_str = str(flow_id) if flow_id else None
         return FlowSnapshot(
             project_root=str(root),
-            flow_id=str(flow_id) if flow_id else None,
+            flow_id=flow_id_str,
             task_description=str(data.get("task_description") or ""),
             task_type=str(data.get("task_type") or ""),
             status=str(data.get("status") or "unknown"),
@@ -250,10 +262,10 @@ class DaemonAggregator:
             total_steps=total,
             progress=round(progress, 4),
             updated_at=data.get("updated_at"),
-            pending_calls=pending_calls,
+            pending_calls=self._filter_calls_for_flow(pending_calls, flow_id_str),
             log_count=log_count,
             issue_count=issue_count,
-            summary=self._read_summary(state_dir, str(flow_id) if flow_id else None),
+            summary=self._read_summary(state_dir, flow_id_str),
         )
 
     def _enumerate_calls(self, root: Path) -> List[PendingCall]:
@@ -297,6 +309,32 @@ class DaemonAggregator:
                 continue
             calls.append(self._parse_call_file(entry, root))
         return calls
+
+    @staticmethod
+    def _filter_calls_for_flow(
+        calls: List[PendingCall], flow_id: Optional[str]
+    ) -> List[PendingCall]:
+        """Filter ``calls`` to those belonging to *flow_id*.
+
+        A call belongs to *flow_id* when its ``context.flow_id`` matches
+        exactly, or is missing / empty (an unattributed call is treated as
+        belonging to the current flow so legacy or pre-tagged call files keep
+        working). When ``flow_id`` itself is ``None`` or empty, no filtering
+        is applied — there is no current flow to scope against, and callers
+        should see the unfiltered list.
+        """
+        if not flow_id:
+            return list(calls)
+        result: List[PendingCall] = []
+        for call in calls:
+            ctx = call.context if isinstance(call.context, dict) else {}
+            call_flow_id = ctx.get("flow_id")
+            if call_flow_id is None or call_flow_id == "":
+                result.append(call)
+                continue
+            if str(call_flow_id) == flow_id:
+                result.append(call)
+        return result
 
     @staticmethod
     def _parse_call_file(entry: Path, root: Path) -> PendingCall:
