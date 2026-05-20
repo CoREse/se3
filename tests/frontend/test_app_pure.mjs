@@ -302,13 +302,29 @@ check("isValidAbsolutePath: accepts absolute paths only", () => {
 });
 
 // -- splitUserPromptByMarker -----------------------------------------------
-// The frontend splits a user-role prompt at the sentinel markers the engine
-// injects (TEMPLATE_PREFIX_END / USER_CONTENT_BEGIN) so the boilerplate
-// prefix renders as a default-collapsed chip and the actual user content
-// renders as a default-expanded bubble. Absent markers (legacy / non-step
-// prompts) fall back to the whole-message chip path — the helper returns
-// null so the caller can.
-check("splitUserPromptByMarker splits when both markers present", () => {
+// The frontend splits a user-role prompt at the three-segment sentinel
+// markers the engine injects (TEMPLATE_PREFIX_END / USER_CONTENT_BEGIN /
+// USER_CONTENT_END). Three-segment input returns `{prefix, content, suffix}`
+// so the framework tail (Available Specs / runtime env / READ-ONLY / language
+// directive) joins the system-prompt chip rather than leaking into the user
+// content bubble. Two-segment legacy input returns `suffix: ""`. Missing or
+// malformed markers return null so the caller can fall back to the whole-
+// message chip path.
+check("splitUserPromptByMarker three-segment input returns prefix/content/suffix", () => {
+  const TPE = app.TEMPLATE_PREFIX_END;
+  const UCB = app.USER_CONTENT_BEGIN;
+  const UCE = app.USER_CONTENT_END;
+  const sample =
+    "You are an expert engineer.\n" + TPE + "\n" +
+    UCB + "\nDo X.\n" + UCE + "\n" +
+    "## Available Specs\nspec list";
+  const split = app.splitUserPromptByMarker(sample);
+  assert.ok(split, "split returned null but should have");
+  assert.equal(split.prefix.startsWith("You are an expert engineer."), true);
+  assert.equal(split.content, "Do X.");
+  assert.equal(split.suffix.startsWith("## Available Specs"), true);
+});
+check("splitUserPromptByMarker two-segment input has empty suffix", () => {
   const TPE = app.TEMPLATE_PREFIX_END;
   const UCB = app.USER_CONTENT_BEGIN;
   const sample = "You are an expert engineer.\n" + TPE + "\n" + UCB + "\n## Task\nDo it";
@@ -316,6 +332,7 @@ check("splitUserPromptByMarker splits when both markers present", () => {
   assert.ok(split, "split returned null but should have");
   assert.equal(split.prefix.startsWith("You are an expert engineer."), true);
   assert.equal(split.content.startsWith("## Task"), true);
+  assert.equal(split.suffix, "");
 });
 check("splitUserPromptByMarker returns null without markers (legacy)", () => {
   assert.equal(app.splitUserPromptByMarker("plain user message"), null);
@@ -325,13 +342,74 @@ check("splitUserPromptByMarker handles empty / non-string input", () => {
   assert.equal(app.splitUserPromptByMarker(null), null);
   assert.equal(app.splitUserPromptByMarker(undefined), null);
 });
-check("splitUserPromptByMarker tolerates missing USER_CONTENT_BEGIN", () => {
+check("splitUserPromptByMarker returns null when USER_CONTENT_BEGIN is missing", () => {
   const TPE = app.TEMPLATE_PREFIX_END;
+  // Only TEMPLATE_PREFIX_END is present — the three-segment contract
+  // requires at least the first two markers so we treat this as malformed
+  // and let the caller fall back to the whole-message chip.
   const sample = "prefix only\n" + TPE + "\nuser content here";
+  assert.equal(app.splitUserPromptByMarker(sample), null);
+});
+check("splitUserPromptByMarker returns null when USER_CONTENT_END precedes USER_CONTENT_BEGIN", () => {
+  const TPE = app.TEMPLATE_PREFIX_END;
+  const UCB = app.USER_CONTENT_BEGIN;
+  const UCE = app.USER_CONTENT_END;
+  // END appears in the prefix before BEGIN — order is invalid.
+  const sample = "prefix " + UCE + " stuff\n" + TPE + "\n" + UCB + "\ncontent";
   const split = app.splitUserPromptByMarker(sample);
+  // We don't require null here strictly (an END before BEGIN is ignored as
+  // a stray, and we fall through to two-segment), but the split must NOT
+  // pick the bogus end up as the content terminator.
   assert.ok(split);
-  assert.equal(split.prefix, "prefix only\n");
-  assert.equal(split.content, "user content here");
+  assert.equal(split.suffix, "");
+});
+
+// -- STEP_ASSISTANT_RENDERERS registry --------------------------------------
+check("STEP_ASSISTANT_RENDERERS exposes the discovery renderer", () => {
+  assert.equal(typeof app.STEP_ASSISTANT_RENDERERS.discovery, "function");
+});
+check("registerAssistantRenderer adds a renderer to the registry", () => {
+  const fakeStep = "__test_step_" + Math.random().toString(36).slice(2);
+  const renderer = () => null;
+  app.registerAssistantRenderer(fakeStep, renderer);
+  assert.equal(app.STEP_ASSISTANT_RENDERERS[fakeStep], renderer);
+  delete app.STEP_ASSISTANT_RENDERERS[fakeStep];
+});
+check("registerAssistantRenderer rejects non-function values", () => {
+  const before = Object.keys(app.STEP_ASSISTANT_RENDERERS).length;
+  app.registerAssistantRenderer("bogus", "not a function");
+  app.registerAssistantRenderer("", () => null);
+  assert.equal(Object.keys(app.STEP_ASSISTANT_RENDERERS).length, before);
+});
+
+// -- extractStructuredJson --------------------------------------------------
+// Mirror of backend `parse_json_response`: pulls JSON out of fenced
+// ```json…``` or a trailing bare object/array, returning the parsed value
+// plus the surrounding narrative (text minus the JSON region).
+check("extractStructuredJson handles a fenced ```json``` block", () => {
+  const text = "Some narrative.\n```json\n{\"a\": 1}\n```\ntrailing words";
+  const got = app.extractStructuredJson(text);
+  assert.ok(got);
+  assert.deepEqual(got.value, { a: 1 });
+  assert.equal(got.narrative.includes("Some narrative."), true);
+  assert.equal(got.narrative.includes("trailing words"), true);
+  assert.equal(got.narrative.includes("```"), false);
+});
+check("extractStructuredJson handles a trailing bare JSON object", () => {
+  const text = "Reading file...\nHere is the result:\n{\"content\": \"hi\"}";
+  const got = app.extractStructuredJson(text);
+  assert.ok(got);
+  assert.deepEqual(got.value, { content: "hi" });
+  assert.equal(got.narrative.includes("Reading file..."), true);
+});
+check("extractStructuredJson returns null when no JSON is found", () => {
+  assert.equal(app.extractStructuredJson("plain narrative only"), null);
+});
+check("extractStructuredJson tolerates trailing commas", () => {
+  const text = "```json\n{\"a\": 1, \"b\": 2,}\n```";
+  const got = app.extractStructuredJson(text);
+  assert.ok(got);
+  assert.deepEqual(got.value, { a: 1, b: 2 });
 });
 
 // -- normalizeRecord: step_completed event ---------------------------------
