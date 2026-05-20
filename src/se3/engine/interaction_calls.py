@@ -329,6 +329,12 @@ def read_interaction_response(call_path: Any) -> Any:
         text = plain.read_text(encoding="utf-8").strip()
     except OSError:
         return None
+    if not text:
+        # The file exists but is empty — most likely the writer truncated via
+        # ``open('w')`` and has not yet written its payload. Treat as
+        # "no response yet" so the poller retries instead of returning the
+        # empty string as a valid answer.
+        return None
     try:
         parsed = json.loads(text)
     except ValueError:

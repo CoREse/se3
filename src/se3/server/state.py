@@ -94,6 +94,7 @@ class MachineRecord:
     last_seen: float = field(default_factory=time.time)
     online: bool = True
     flows: Dict[str, FlowSnapshot] = field(default_factory=dict)
+    project_roots: List[str] = field(default_factory=list)
 
     def to_dict(self, *, include_flows: bool = True) -> Dict[str, Any]:
         data: Dict[str, Any] = {
@@ -104,6 +105,7 @@ class MachineRecord:
             "last_seen": self.last_seen,
             "online": self.online,
             "flow_count": len(self.flows),
+            "project_roots": list(self.project_roots),
         }
         if include_flows:
             data["flows"] = [f.to_dict() for f in self.flows.values()]
@@ -191,6 +193,11 @@ class ServerState:
             hostname = snapshot.get("hostname")
             if hostname:
                 record.hostname = str(hostname)
+            raw_roots = snapshot.get("project_roots")
+            if isinstance(raw_roots, list):
+                record.project_roots = [str(p) for p in raw_roots if p]
+            else:
+                record.project_roots = []
             flows: Dict[str, FlowSnapshot] = {}
             for raw in snapshot.get("flows") or []:
                 if not isinstance(raw, dict):

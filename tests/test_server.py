@@ -137,6 +137,36 @@ def test_state_get_flow_across_machines():
     asyncio.run(scenario())
 
 
+def test_state_update_status_records_project_roots():
+    """ServerState surfaces the daemon's project_roots in /api/machines responses.
+
+    The frontend's New Task modal reads `state.machines[*].project_roots` to
+    populate the Project select; the field must round-trip through update_status
+    and survive the no-flows summary view of MachineRecord.to_dict.
+    """
+    state = ServerState()
+
+    async def scenario():
+        # No project_roots in payload → defaults to [].
+        await state.update_status("m1", _snapshot())
+        machines = await state.get_machines()
+        assert machines[0]["project_roots"] == []
+
+        # Now report two project roots.
+        snap = _snapshot()
+        snap["project_roots"] = ["/proj/a", "/proj/b"]
+        await state.update_status("m1", snap)
+        machines = await state.get_machines()
+        assert machines[0]["project_roots"] == ["/proj/a", "/proj/b"]
+
+        # A subsequent update with no roots clears them.
+        await state.update_status("m1", _snapshot())
+        machines = await state.get_machines()
+        assert machines[0]["project_roots"] == []
+
+    asyncio.run(scenario())
+
+
 def test_state_mark_offline():
     state = ServerState()
 

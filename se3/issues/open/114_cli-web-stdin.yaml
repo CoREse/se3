@@ -1,0 +1,13 @@
+id: '114'
+title: CLI 端缺少与 web 端对齐的 stdin 等待提示
+description: 本次只在 web 端实现了『无 pending 时输入框 disabled』的体感, CLI 端仍然始终可输入, 与 web 端不再完全对称。若以
+  CLI 行为为基准, 建议在无 pending 时给出明确提示或拒绝输入。
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T10:40:23.425423'
+updated_at: '2026-05-20T10:40:23.425423'

@@ -117,6 +117,7 @@ class MachineStatus:
     hostname: str
     flows: List[FlowSnapshot] = field(default_factory=list)
     pending_calls: List[PendingCall] = field(default_factory=list)
+    project_roots: List[str] = field(default_factory=list)
     generated_at: float = field(default_factory=time.time)
 
     def to_dict(self) -> Dict[str, object]:
@@ -125,6 +126,7 @@ class MachineStatus:
             "hostname": self.hostname,
             "flows": [f.to_dict() for f in self.flows],
             "pending_calls": [c.to_dict() for c in self.pending_calls],
+            "project_roots": list(self.project_roots),
             "generated_at": self.generated_at,
         }
 
@@ -211,6 +213,7 @@ class DaemonAggregator:
             hostname=self.hostname,
             flows=flows,
             pending_calls=all_calls,
+            project_roots=[str(p) for p in sorted(self._project_roots)],
         )
 
     # -- internals ---------------------------------------------------------

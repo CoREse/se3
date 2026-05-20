@@ -657,34 +657,55 @@ function renderInterventions(flow) {
     region.appendChild(renderInterventionChip(entry));
   }
 
-  // For an active flow with no real pending interjection, offer an explicit
-  // opt-in Interject button. Clicking it sets `flowInterjectRequested`, which
-  // causes `computeInterventions` to append a synthetic interjection chip on
-  // the next rebuild; until then, the reply box stays disabled — preserving
-  // CLI parity (no input field active unless something is genuinely waiting).
+  syncInterjectButton(flow);
+  updateReplyBox(flow);
+}
+
+// Click handler for the inline Interject icon button. Toggles the opt-in
+// flag and selects (or unselects) the synthetic interjection chip so the
+// reply box's Send target updates without any other interaction.
+function onInterjectButtonClick(e) {
+  e.preventDefault();
+  const flow = state.flowDetail;
+  if (!isActiveFlow(flow)) return;
+  if (state.flowInterjectRequested) {
+    // Exit interject mode: drop opt-in and clear target (real call selection
+    // takes priority on the next rebuild via the firstCall preference).
+    state.flowInterjectRequested = false;
+    if (state.flowReplyTargetId === "interjection:new") {
+      state.flowReplyTargetId = null;
+    }
+  } else {
+    state.flowInterjectRequested = true;
+    state.flowInterjectFlowId = flow && flow.flow_id ? flow.flow_id : null;
+    state.flowReplyTargetId = "interjection:new";
+  }
+  renderInterventions(flow);
+  if (state.flowInterjectRequested) $("flow-reply-input").focus();
+}
+
+// Show / hide / toggle the active state of the inline Interject icon button
+// next to the textarea. The button materializes the synthetic interjection
+// chip (opt-in) without taking a chip-bar row of its own.
+function syncInterjectButton(flow) {
+  const btn = $("flow-interject-btn");
+  if (!btn) return;
+  const entries = state.flowInterventions || [];
   const hasRealInterjection = entries.some(
     (e) => e.kind === "interjection" && !e.synthetic,
   );
-  if (
-    isActiveFlow(flow) &&
-    !hasRealInterjection &&
-    !state.flowInterjectRequested
-  ) {
-    const btn = el("button", "intervention-interject", "✎ Interject…");
-    btn.type = "button";
-    btn.title = "Send an additional instruction into the running flow.";
-    btn.addEventListener("click", (e) => {
-      e.preventDefault();
-      state.flowInterjectRequested = true;
-      state.flowInterjectFlowId = flow && flow.flow_id ? flow.flow_id : null;
-      state.flowReplyTargetId = "interjection:new";
-      renderInterventions(flow);
-      $("flow-reply-input").focus();
-    });
-    region.appendChild(btn);
+  if (!isActiveFlow(flow) || hasRealInterjection) {
+    btn.classList.add("hidden");
+    btn.classList.remove("active");
+    return;
   }
-
-  updateReplyBox(flow);
+  btn.classList.remove("hidden");
+  const active = !!state.flowInterjectRequested;
+  btn.classList.toggle("active", active);
+  btn.title = active
+    ? "Cancel interjection"
+    : "Send an additional instruction into the running flow.";
+  btn.textContent = active ? "✕" : "✎";
 }
 
 // Render one intervention entry as a compact chip — kind icon + label +
@@ -754,9 +775,13 @@ function updateReplyBox(flow) {
   const ctx = $("flow-reply-context");
 
   if (!entries.length) {
-    input.disabled = true;
+    // Textarea stays enabled so the user can always draft text — Send is the
+    // gate. The placeholder reminds them they need a target to send.
+    input.disabled = false;
     submit.disabled = true;
-    input.placeholder = "No pending interaction…";
+    input.placeholder = isActiveFlow(flow)
+      ? "No pending interaction — draft a reply or click ✎ to interject…"
+      : "No pending interaction…";
     ctx.className = "flow-reply-context";
     ctx.innerHTML = "";
     ctx.appendChild(el("p", "flow-reply-empty",
@@ -841,8 +866,15 @@ function updateReplyBox(flow) {
 function resetReplyBox() {
   const input = $("flow-reply-input");
   input.value = "";
-  input.disabled = true;
+  // Textarea stays enabled so the user can begin drafting immediately;
+  // Send remains disabled until a target chip is available.
+  input.disabled = false;
   $("flow-reply-submit").disabled = true;
+  const btn = $("flow-interject-btn");
+  if (btn) {
+    btn.classList.add("hidden");
+    btn.classList.remove("active");
+  }
   const ctx = $("flow-reply-context");
   ctx.className = "flow-reply-context";
   ctx.innerHTML = "";
@@ -884,7 +916,11 @@ function submitReply(event) {
 async function sendReply(flowId, target, text) {
   if (!flowId || !target || !text) return;
   const submit = $("flow-reply-submit");
+  const input = $("flow-reply-input");
   submit.disabled = true;
+  // Lock the textarea while the request is in flight so the user does not
+  // edit a draft that is mid-send. Restored in the finally block.
+  input.disabled = true;
   try {
     let resp;
     if (target.kind === "interjection") {
@@ -921,12 +957,17 @@ async function sendReply(flowId, target, text) {
   } catch (_) {
     showToast("error", "Could not send — network error reaching the server.");
   } finally {
-    // Re-enable per the live intervention state — the box may now have no
-    // pending target (e.g. the call was answered) and should stay disabled.
+    // Re-sync the reply box: textarea returns to enabled (drafts always allowed),
+    // submit reflects whether a target still exists, and the inline Interject
+    // button refreshes its visibility/active state.
     if (state.selectedFlowId === flowId && state.flowDetail) {
-      updateReplyBox(state.flowDetail);
+      renderInterventions(state.flowDetail);
     } else {
-      submit.disabled = false;
+      // No flow detail to re-derive a target from (different flow selected, or
+      // detail not yet loaded). Drafts are always allowed, but Send must stay
+      // disabled because we cannot prove a sendable target exists.
+      input.disabled = false;
+      submit.disabled = true;
     }
   }
 }
@@ -1597,6 +1638,9 @@ function makeFoldable(renderFull, fullText) {
     wrap.classList.toggle("folded", !expanded);
     wrap.classList.toggle("expanded", expanded);
     btn.textContent = expanded ? "▾ 收起" : collapsedLabel;
+    if (expanded) {
+      requestAnimationFrame(() => full.scrollIntoView({ block: "nearest" }));
+    }
   });
 
   wrap.append(summary, full, btn);
@@ -1653,6 +1697,9 @@ function makeRawToggle(norm) {
     pre.classList.toggle("hidden", !shown);
     btn.classList.toggle("active", shown);
     btn.textContent = shown ? `隐藏原始 (${kind})` : "查看原始";
+    if (shown) {
+      requestAnimationFrame(() => pre.scrollIntoView({ block: "nearest" }));
+    }
   });
   wrap.append(btn, pre);
   return wrap;
@@ -1722,6 +1769,9 @@ function renderConversationRecord(norm) {
       }
       wrap.classList.toggle("collapsed", !expanded);
       chip.textContent = (expanded ? "▾ " : "▸ ") + label;
+      if (expanded) {
+        requestAnimationFrame(() => detail.scrollIntoView({ block: "nearest" }));
+      }
     });
     wrap.append(chip, detail);
     row.appendChild(wrap);
@@ -1786,6 +1836,66 @@ function openNewTask() {
   $("nt-error").classList.add("hidden");
   $("nt-submit").disabled = false;
   $("new-task-modal").classList.remove("hidden");
+  refreshProjectOptions();
+}
+
+// Look up the project_roots reported by a machine snapshot (the daemon
+// includes them in STATUS_UPDATE; older daemons emit an empty list).
+function machineProjectRoots(machineId) {
+  if (!machineId) return [];
+  const m = state.machines.find((x) => x.machine_id === machineId);
+  const roots = m && Array.isArray(m.project_roots) ? m.project_roots : [];
+  return roots.filter((r) => typeof r === "string" && r);
+}
+
+// Rebuild the Project select to reflect the currently chosen machine.
+// Wired to the machine select's change event and called once when the modal
+// opens. Disables the submit button when there is nothing the user could pick.
+function refreshProjectOptions() {
+  const machineId = $("nt-machine").value.trim();
+  populateProjectSelect($("nt-project"), machineProjectRoots(machineId), {
+    emptyHint: $("nt-project-empty"),
+    submit: $("nt-submit"),
+  });
+}
+
+// Pure DOM helper: rebuild `select` from a project_roots list. Empties the
+// select, hides/shows the optional empty-hint, and toggles `submit.disabled`
+// when there is nothing to publish against.
+//
+// * 0 roots → disables select + submit, shows the hint, returns null.
+// * 1 root  → auto-selects it.
+// * 2+ roots → renders each as an option with a leading "(select…)" placeholder
+//   so `required` forces an explicit choice from the user.
+function populateProjectSelect(select, roots, opts) {
+  opts = opts || {};
+  const hint = opts.emptyHint || null;
+  const submit = opts.submit || null;
+  select.innerHTML = "";
+  const list = Array.isArray(roots) ? roots.filter((r) => r) : [];
+  if (!list.length) {
+    select.appendChild(new Option("(no project roots registered)", ""));
+    select.disabled = true;
+    if (hint) hint.classList.remove("hidden");
+    if (submit) submit.disabled = true;
+    return null;
+  }
+  select.disabled = false;
+  if (hint) hint.classList.add("hidden");
+  if (submit) submit.disabled = false;
+  if (list.length === 1) {
+    select.appendChild(new Option(list[0], list[0]));
+    select.value = list[0];
+    return list[0];
+  }
+  const placeholder = new Option("(select a project…)", "");
+  placeholder.disabled = true;
+  placeholder.selected = true;
+  select.appendChild(placeholder);
+  for (const root of list) {
+    select.appendChild(new Option(root, root));
+  }
+  return null;
 }
 
 function closeNewTask() {
@@ -1801,9 +1911,19 @@ async function submitNewTask(event) {
   const task = $("nt-task").value.trim();
   const taskType = $("nt-type").value;
   const discover = $("nt-discover").checked;
+  const projectRoot = $("nt-project").value.trim();
 
   if (!machineId) return showFormError(errBox, "Select a target machine.");
   if (!task) return showFormError(errBox, "Task description must not be empty.");
+  if (!projectRoot) {
+    const roots = machineProjectRoots(machineId);
+    return showFormError(
+      errBox,
+      roots.length
+        ? "Select a project root for this task."
+        : "This machine has no registered project roots — start a daemon with one first.",
+    );
+  }
 
   const submit = $("nt-submit");
   submit.disabled = true;
@@ -1816,6 +1936,7 @@ async function submitNewTask(event) {
         task: task,
         task_type: taskType,
         discover: discover,
+        project_root: projectRoot,
       }),
     });
     if (resp.status === 202) {
@@ -1848,6 +1969,7 @@ function init() {
   $("new-task-btn").addEventListener("click", openNewTask);
   $("new-task-close").addEventListener("click", closeNewTask);
   $("new-task-form").addEventListener("submit", submitNewTask);
+  $("nt-machine").addEventListener("change", refreshProjectOptions);
 
   $("flow-view-close").addEventListener("click", closeFlowView);
 
@@ -1855,6 +1977,7 @@ function init() {
   $("history-close").addEventListener("click", closeHistory);
 
   $("flow-reply-form").addEventListener("submit", submitReply);
+  $("flow-interject-btn").addEventListener("click", onInterjectButtonClick);
   // Ctrl/Cmd+Enter submits the reply box without leaving the textarea.
   $("flow-reply-input").addEventListener("keydown", (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
@@ -1888,5 +2011,6 @@ if (typeof module !== "undefined" && module.exports) {
     optionLabel,
     optionText,
     pendingCalls,
+    populateProjectSelect,
   };
 }

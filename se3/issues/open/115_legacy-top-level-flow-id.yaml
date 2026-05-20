@@ -1,0 +1,13 @@
+id: '115'
+title: legacy top-level flow_id 兼容路径长期保留风险
+description: _parse_call_file 会把旧 call 文件 (例如 discovery / confirm) 的 top-level flow_id
+  折叠进 context.flow_id。该兼容路径没有 deprecation 标记, 后续容易被当作正式契约固化下来。
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T10:40:23.426357'
+updated_at: '2026-05-20T10:40:23.426357'

@@ -84,7 +84,10 @@
             No pending interaction right now.
           </div>
           <div class="flow-reply-row">
-            <textarea id="flow-reply-input" rows="2" disabled
+            <button type="button" id="flow-interject-btn"
+                    class="reply-icon-btn interject hidden"
+                    title="Interject into this running flow">&#9998;</button>
+            <textarea id="flow-reply-input" rows="2"
                       placeholder="No pending interaction&hellip;"></textarea>
             <button type="submit" id="flow-reply-submit" disabled>Send</button>
           </div>
@@ -103,6 +106,12 @@
       <form id="new-task-form" class="modal-body">
         <label for="nt-machine">Target machine</label>
         <select id="nt-machine" required></select>
+
+        <label for="nt-project">Project</label>
+        <select id="nt-project" required></select>
+        <p id="nt-project-empty" class="form-hint hidden">
+          This daemon has no registered project roots.
+        </p>
 
         <label for="nt-type">Task type</label>
         <select id="nt-type">

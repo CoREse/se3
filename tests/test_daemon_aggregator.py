@@ -236,6 +236,34 @@ def test_snapshot_no_engine_json_passthrough(tmp_path: Path) -> None:
     assert {c.call_id for c in snapshot.pending_calls} == {"alpha", "beta"}
 
 
+def test_machine_status_project_roots(tmp_path: Path) -> None:
+    """Aggregator surfaces its registered project roots in MachineStatus.
+
+    Older daemons did not include this list; the new frontend's New Task modal
+    relies on it to populate the Project select, so the field MUST be present
+    and stable. With no registered roots it serializes as an empty list.
+    """
+    agg_empty = DaemonAggregator()
+    status_empty = agg_empty.get_snapshot()
+    assert status_empty.project_roots == []
+    assert status_empty.to_dict()["project_roots"] == []
+
+    proj_a = tmp_path / "proj-a"
+    proj_b = tmp_path / "proj-b"
+    proj_a.mkdir()
+    proj_b.mkdir()
+    agg = DaemonAggregator()
+    agg.add_project_root(proj_a)
+    agg.add_project_root(proj_b)
+    status = agg.get_snapshot()
+    assert sorted(status.project_roots) == sorted(
+        [str(proj_a.resolve()), str(proj_b.resolve())]
+    )
+    payload = status.to_dict()
+    assert "project_roots" in payload
+    assert sorted(payload["project_roots"]) == sorted(status.project_roots)
+
+
 def test_machine_status_pending_calls_unfiltered(tmp_path: Path) -> None:
     """MachineStatus.pending_calls aggregates *all* calls regardless of flow."""
     root = _make_root(

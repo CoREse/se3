@@ -186,4 +186,97 @@ check("optionLabel/optionText resolve string and object forms", () => {
   assert.equal(app.optionText({ label: "Retry", value: "1" }), "1");
 });
 
+// -- populateProjectSelect --------------------------------------------------
+// The function is a pure DOM helper but works against a tiny stub: it only
+// touches `innerHTML`, `appendChild`, `disabled`, `value`, and the `Option`
+// constructor. The stub below records the options it receives so the test
+// can assert what got rendered.
+
+class FakeSelect {
+  constructor() {
+    this.options = [];
+    this.disabled = false;
+    this.value = "";
+    this._explicit = false;
+  }
+  set innerHTML(_) { this.options = []; this.value = ""; this._explicit = false; }
+  appendChild(opt) {
+    this.options.push(opt);
+    // Replicate <select> behavior: an explicit `selected=true` wins; an
+    // ambient first-enabled option becomes the value only when nothing
+    // explicit has been chosen.
+    if (opt.selected) {
+      this.value = opt.value;
+      this._explicit = true;
+    } else if (!this._explicit && this.value === "" && !opt.disabled) {
+      this.value = opt.value;
+    }
+    return opt;
+  }
+}
+
+class FakeHint {
+  constructor() { this.classes = new Set(["hidden"]); }
+  classList = {
+    add: (c) => this.classes.add(c),
+    remove: (c) => this.classes.delete(c),
+    contains: (c) => this.classes.has(c),
+  };
+  get hidden() { return this.classes.has("hidden"); }
+}
+
+// `populateProjectSelect` constructs options via `new Option(label, value)`;
+// expose a minimal global so the Node test can stand in for the browser one.
+globalThis.Option = class {
+  constructor(label, value) {
+    this.label = label;
+    this.text = label;
+    this.value = value;
+    this.disabled = false;
+    this.selected = false;
+  }
+};
+
+check("populateProjectSelect: zero roots disables submit and shows hint", () => {
+  const sel = new FakeSelect();
+  const hint = new FakeHint();
+  const submit = { disabled: false };
+  const result = app.populateProjectSelect(sel, [], { emptyHint: hint, submit });
+  assert.equal(result, null);
+  assert.equal(sel.disabled, true);
+  assert.equal(submit.disabled, true);
+  assert.equal(hint.hidden, false);
+});
+
+check("populateProjectSelect: one root auto-selects", () => {
+  const sel = new FakeSelect();
+  const hint = new FakeHint();
+  const submit = { disabled: true };
+  const result = app.populateProjectSelect(sel, ["/proj/a"], {
+    emptyHint: hint, submit,
+  });
+  assert.equal(result, "/proj/a");
+  assert.equal(sel.disabled, false);
+  assert.equal(sel.value, "/proj/a");
+  assert.equal(submit.disabled, false);
+  assert.equal(hint.hidden, true);
+});
+
+check("populateProjectSelect: multiple roots leaves placeholder selected", () => {
+  const sel = new FakeSelect();
+  const submit = { disabled: true };
+  const result = app.populateProjectSelect(sel, ["/proj/a", "/proj/b"], { submit });
+  assert.equal(result, null);
+  assert.equal(sel.disabled, false);
+  // Submit is enabled (something exists to pick) but no concrete root is the
+  // value yet — `required` on the <select> forces the user to choose.
+  assert.equal(submit.disabled, false);
+  assert.equal(sel.value, "");
+  // First option is the disabled "(select…)" placeholder, followed by roots.
+  assert.equal(sel.options.length, 3);
+  assert.equal(sel.options[0].disabled, true);
+  assert.equal(sel.options[1].value, "/proj/a");
+  assert.equal(sel.options[2].value, "/proj/b");
+});
+
 console.log(`\n${passed} checks passed.`);

@@ -1,0 +1,14 @@
+id: '113'
+title: verify 阶段 passed=False 与 summary 实质判定不一致
+description: 本次 Verification Summary 中三条目标 (布局 / chip 模型 / flow 过滤) 都被明确判定为达成, 且测试通过,
+  但 Verification passed 仍为 False。疑似 verify 脚本的最终聚合逻辑与各子项判定脱节, 会导致后续 task 拿到不可信的 verify
+  信号。
+status: open
+priority: high
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T10:40:23.424167'
+updated_at: '2026-05-20T10:40:23.424167'

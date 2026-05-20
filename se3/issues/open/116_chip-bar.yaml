@@ -1,0 +1,13 @@
+id: '116'
+title: chip bar 缺少长流程下的折叠/分组
+description: '当前 pending interventions 在 #flow-interventions 上简单平铺为 chip, 长流程或多 step
+  堆积时可能出现横向溢出或视觉噪声, 没有按 kind / step 分组或折叠机制。'
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T10:40:23.427292'
+updated_at: '2026-05-20T10:40:23.427292'

@@ -81,6 +81,18 @@ squeeze the entire flow into one viewport.
 - **AND** when the total content exceeds one viewport, the conversation
   scrolls vertically as one continuous chat-stream
 
+#### Scenario: Expanding a folded block scrolls the new content into view
+- **GIVEN** the conversation contains a foldable block (e.g. a collapsed
+  `user` / `system` prompt chip, a raw-payload `view raw` toggle, or any
+  other `makeFoldable` / `makeRawToggle` consumer) whose tail currently sits
+  below the visible viewport
+- **WHEN** the user expands the block
+- **THEN** after the expand transition completes the consumer calls
+  `Element.scrollIntoView({block: "nearest"})` on the freshly shown block so
+  the newly revealed tail scrolls into the visible area
+- **AND** collapsing the same block does NOT scroll — the reader's current
+  position is left untouched
+
 ### Requirement: Docked Persistent Reply Box
 
 The bottom of `#flow-view`'s main column MUST host a persistently docked
@@ -90,22 +102,27 @@ stacked parts, all sitting below the conversation:
 
 1. **Pending intervention chip bar** — a row of status-style buttons, one
    per pending intervention (pending MCP call, retry decision, CLI confirm,
-   etc.). For an active flow that is not already waiting on a real
-   interjection, an opt-in "Interject" button is also rendered alongside the
-   chips; clicking it materializes a synthetic `interjection` chip and
-   selects it. Each chip shows the intervention kind and a short identifier.
+   etc.). Each chip shows the intervention kind and a short identifier.
 2. **Reply context panel** — when a chip is selected, the panel above the
    textarea expands the selected intervention's full prompt (Markdown
    rendered), optional context block (no `max-height` truncation), and any
    `options` action buttons. When no chip is selected the panel is empty or
    shows a brief "no pending interaction" hint.
-3. **Reply textarea + send button** — the single input row, reused for every
-   intervention kind.
+3. **Reply input row** — a single horizontal row carrying three elements,
+   left-to-right: an inline **Interject icon button**, the **reply
+   textarea**, and the **send button**. The Interject button is a compact
+   icon control symmetric to Send; for an active flow that is not already
+   waiting on a real interjection, clicking it materializes a synthetic
+   `interjection` chip in the chip bar and selects it. The same textarea is
+   reused for every intervention kind.
 
-The textarea and send button are **disabled by default** and are **enabled
-only while there is a pending interaction the user has targeted**. This
-mirrors the CLI's behavior where the user can only type when stdin is being
-read.
+The reply **textarea is always enabled** so the user can draft text at any
+time — like an ordinary chat application. The **send button** is the gate:
+it is disabled while no target chip is selected (the draft has no
+destination) and enabled the instant any chip (real or synthetic) becomes
+the selected target. While a submission is in flight both controls are
+disabled to prevent edit-during-send, then re-synced when the request
+settles.
 
 #### Scenario: Reply box is always present
 - **WHEN** `#flow-view` is shown for any running flow
@@ -113,23 +130,29 @@ read.
   button) is visible at the bottom of the main column
 - **AND** it is visible without the user clicking a button or opening a popup
 
-#### Scenario: Reply box disabled with no pending interaction
+#### Scenario: Textarea stays enabled even with no pending interaction
 - **WHEN** the running flow has no pending interaction and the user has not
   opted into interjection (chip bar is empty)
-- **THEN** the reply textarea and submit control are disabled
-- **AND** the box shows an explanatory placeholder (e.g. "No pending
-  interaction…")
-- **AND** for an active flow, an "Interject" button is offered alongside the
-  empty chip bar so the user can opt into interjection mode
+- **THEN** the reply textarea is **enabled** and accepts keystrokes
+- **AND** the send button is **disabled** because there is no target to send to
+- **AND** the placeholder advises that there is no target yet (e.g. "No
+  pending interaction — draft a reply or click ✎ to interject…")
+
+#### Scenario: Interject button is inline on the reply row
+- **GIVEN** an active flow with no real pending interjection
+- **WHEN** the docked reply box is rendered
+- **THEN** the Interject button appears as an inline icon button at the left
+  end of the reply input row, symmetric to Send
+- **AND** it is NOT rendered as a separate full-width button on its own row
 
 #### Scenario: Interject button opts the user into interjection mode
 - **GIVEN** an active flow with no real pending interjection
-- **WHEN** the user clicks the "Interject" button next to the chip bar
+- **WHEN** the user clicks the inline Interject icon button
 - **THEN** a synthetic `interjection` chip appears in the chip bar and is
   selected
-- **AND** the reply textarea + send button become enabled
+- **AND** the send button becomes enabled (the textarea was already enabled)
 - **AND** sending the interjection consumes the opt-in (the synthetic chip
-  disappears until the user clicks "Interject" again)
+  disappears until the user clicks Interject again)
 
 #### Scenario: Reply box activated by selecting a chip
 - **WHEN** the running flow has at least one pending intervention and the
@@ -170,14 +193,22 @@ whose `kind` field identifies the interaction; an unrecognized `kind`
 degrades to a plain `call` chip.
 
 A synthetic `interjection` chip is **opt-in**, not always-on: an active flow
-that is not already waiting on a real interjection MUST render an "Interject"
-button alongside the chip bar; clicking the button materializes a synthetic
-`interjection` chip and selects it. This preserves CLI parity — the reply
-textarea and Send button stay disabled while the flow is running normally and
-only become enabled when the user has explicitly opted into interjection or
-when a real pending call/interjection is waiting. A successful interjection
-send consumes the opt-in (the synthetic chip and the Interject button
-re-appear only when the user clicks Interject again).
+that is not already waiting on a real interjection MUST render an inline
+Interject icon button at the left end of the reply input row (symmetric to
+Send); clicking the button materializes a synthetic `interjection` chip and
+selects it. The reply textarea itself stays enabled at all times so the user
+can draft text freely — only the Send button is gated, and it is enabled
+when (a) the user has opted into interjection or (b) a real pending
+call/interjection is waiting. A successful interjection send consumes the
+opt-in (the synthetic chip disappears and the inline Interject button
+returns to its inactive state until the user clicks it again).
+
+Expanding a folded long record or showing a raw-payload toggle MUST keep the
+newly-revealed content visible: after the expand transition the consumer
+SHOULD call `Element.scrollIntoView({block: "nearest"})` on the freshly
+shown block so content past the viewport edge scrolls into view. Collapse
+does **not** scroll — collapsing should leave the reader's current position
+untouched.
 
 #### Scenario: Each intervention kind is rendered as a chip on the reply bar
 - **WHEN** a running flow has a pending interaction of kind `call`,
