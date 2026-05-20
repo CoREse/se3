@@ -52,6 +52,11 @@ SnapshotProvider = Callable[[], Dict[str, Any]]
 #: Type of the spawn handler — called with
 #: (task_description, project_root, task_type, discover).
 SpawnHandler = Callable[[str, str, str, bool], Any]
+#: Type of the project-init handler — called with ``project_root`` before
+#: SPAWN_FLOW is routed to the spawn handler. Returns an object whose
+#: truthy ``.error`` attribute aborts the spawn; ``None`` means "skip the
+#: pre-spawn check".
+EnsureHandler = Callable[[str], Any]
 #: Type of the respond handler — called with (call_id, project_root, response).
 RespondHandler = Callable[[str, str, Any], Any]
 #: Type of the history provider — a :class:`~se3.daemon.history.DaemonHistoryReader`
@@ -106,6 +111,7 @@ class DaemonClient:
         se3_version: str,
         snapshot_provider: SnapshotProvider,
         spawn_handler: Optional[SpawnHandler] = None,
+        ensure_handler: Optional[EnsureHandler] = None,
         respond_handler: Optional[RespondHandler] = None,
         history_provider: Optional[HistoryProvider] = None,
         status_interval: float = _STATUS_INTERVAL,
@@ -120,6 +126,12 @@ class DaemonClient:
             snapshot_provider: Zero-arg callable returning the current machine
                 snapshot dict (typically ``aggregator.get_snapshot().to_dict()``).
             spawn_handler: Callable invoked for an incoming SPAWN_FLOW.
+            ensure_handler: Optional pre-spawn hook called with the resolved
+                ``project_root`` *before* the spawn handler. Used by the
+                daemon to auto-run ``se3 init`` on a brand-new target
+                directory (and to register the root with the aggregator).
+                When the returned object has a truthy ``.error`` attribute,
+                the SPAWN_FLOW is aborted with that error logged.
             respond_handler: Callable invoked for an incoming RESPOND_CALL;
                 when ``None`` the client writes the response file itself.
             history_provider: A :class:`~se3.daemon.history.DaemonHistoryReader`
@@ -134,6 +146,7 @@ class DaemonClient:
         self.se3_version = se3_version
         self._snapshot_provider = snapshot_provider
         self._spawn_handler = spawn_handler
+        self._ensure_handler = ensure_handler
         self._respond_handler = respond_handler or _default_respond_handler
         self._interject_handler = _default_interject_handler
         self._history_provider = history_provider
@@ -284,13 +297,19 @@ class DaemonClient:
             self._handle_interject(message.payload)
         elif message.type == protocol.MSG_HISTORY_REQUEST:
             await self._handle_history_request(ws, message.payload)
-        elif message.type == protocol.MSG_INTERJECT_FLOW:
-            self._handle_interject(message.payload)
         else:  # pragma: no cover - defensive; decode() already validates
             logger.debug("Ignoring unexpected server message type %s", message.type)
 
     def _handle_spawn(self, payload: Dict[str, Any]) -> None:
-        """Route a SPAWN_FLOW instruction to the daemon's spawner."""
+        """Route a SPAWN_FLOW instruction to the daemon's spawner.
+
+        When an ``ensure_handler`` is configured, it runs first against the
+        target ``project_root`` — that is what lets the web *New Task* form
+        send a brand-new empty directory: the daemon auto-runs ``se3 init``
+        there and registers it before the spawn proceeds. A truthy
+        ``.error`` on the returned object aborts the spawn and is logged;
+        nothing half-initialized leaks downstream.
+        """
         task = str(payload.get("task_description") or "").strip()
         if not task:
             logger.warning("Ignoring SPAWN_FLOW with empty task_description")
@@ -301,6 +320,23 @@ class DaemonClient:
         if self._spawn_handler is None:
             logger.warning("Received SPAWN_FLOW but no spawn handler is configured")
             return
+        if self._ensure_handler is not None and project_root:
+            try:
+                ensure = self._ensure_handler(project_root)
+            except Exception:
+                logger.exception(
+                    "SPAWN_FLOW ensure-project handler failed for %s; aborting spawn",
+                    project_root,
+                )
+                return
+            error = getattr(ensure, "error", "") if ensure is not None else ""
+            if error:
+                logger.error(
+                    "SPAWN_FLOW aborted: cannot initialize %s: %s",
+                    project_root,
+                    error,
+                )
+                return
         try:
             self._spawn_handler(task, project_root, task_type, discover)
             logger.info("SPAWN_FLOW handled: %s", task[:80])

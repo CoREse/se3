@@ -237,18 +237,23 @@ globalThis.Option = class {
   }
 };
 
-check("populateProjectSelect: zero roots disables submit and shows hint", () => {
+check("populateProjectSelect: zero roots still offers the manual sentinel", () => {
   const sel = new FakeSelect();
   const hint = new FakeHint();
   const submit = { disabled: false };
   const result = app.populateProjectSelect(sel, [], { emptyHint: hint, submit });
-  assert.equal(result, null);
-  assert.equal(sel.disabled, true);
-  assert.equal(submit.disabled, true);
+  // The empty hint is shown, but the manual sentinel is appended so the
+  // user can still publish by typing an absolute path by hand.
+  assert.equal(result, app.PROJECT_MANUAL_SENTINEL);
+  assert.equal(sel.disabled, false);
+  assert.equal(submit.disabled, false);
   assert.equal(hint.hidden, false);
+  assert.equal(sel.options.length, 1);
+  assert.equal(sel.options[0].value, app.PROJECT_MANUAL_SENTINEL);
+  assert.equal(sel.value, app.PROJECT_MANUAL_SENTINEL);
 });
 
-check("populateProjectSelect: one root auto-selects", () => {
+check("populateProjectSelect: one root auto-selects and appends manual", () => {
   const sel = new FakeSelect();
   const hint = new FakeHint();
   const submit = { disabled: true };
@@ -260,9 +265,13 @@ check("populateProjectSelect: one root auto-selects", () => {
   assert.equal(sel.value, "/proj/a");
   assert.equal(submit.disabled, false);
   assert.equal(hint.hidden, true);
+  // The known root option, followed by the manual sentinel.
+  assert.equal(sel.options.length, 2);
+  assert.equal(sel.options[0].value, "/proj/a");
+  assert.equal(sel.options[1].value, app.PROJECT_MANUAL_SENTINEL);
 });
 
-check("populateProjectSelect: multiple roots leaves placeholder selected", () => {
+check("populateProjectSelect: multiple roots leaves placeholder + appends manual", () => {
   const sel = new FakeSelect();
   const submit = { disabled: true };
   const result = app.populateProjectSelect(sel, ["/proj/a", "/proj/b"], { submit });
@@ -272,11 +281,24 @@ check("populateProjectSelect: multiple roots leaves placeholder selected", () =>
   // value yet — `required` on the <select> forces the user to choose.
   assert.equal(submit.disabled, false);
   assert.equal(sel.value, "");
-  // First option is the disabled "(select…)" placeholder, followed by roots.
-  assert.equal(sel.options.length, 3);
+  // Placeholder, two roots, manual sentinel.
+  assert.equal(sel.options.length, 4);
   assert.equal(sel.options[0].disabled, true);
   assert.equal(sel.options[1].value, "/proj/a");
   assert.equal(sel.options[2].value, "/proj/b");
+  assert.equal(sel.options[3].value, app.PROJECT_MANUAL_SENTINEL);
+});
+
+// -- isValidAbsolutePath ----------------------------------------------------
+check("isValidAbsolutePath: accepts absolute paths only", () => {
+  assert.equal(app.isValidAbsolutePath("/abs/path"), true);
+  assert.equal(app.isValidAbsolutePath("/"), true);
+  assert.equal(app.isValidAbsolutePath("relative/path"), false);
+  assert.equal(app.isValidAbsolutePath("./relative"), false);
+  assert.equal(app.isValidAbsolutePath(""), false);
+  assert.equal(app.isValidAbsolutePath("   "), false);
+  assert.equal(app.isValidAbsolutePath(null), false);
+  assert.equal(app.isValidAbsolutePath(undefined), false);
 });
 
 console.log(`\n${passed} checks passed.`);

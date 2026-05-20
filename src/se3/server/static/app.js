@@ -1857,6 +1857,12 @@ function scrollHistoryToBottom() {
 // New task form
 // ---------------------------------------------------------------------------
 
+// Sentinel option value for the "Other path…" entry appended to the Project
+// dropdown. Selecting it reveals a free-form text input for an absolute
+// project path, so users can target directories the daemon has not yet
+// registered (e.g. a brand-new empty directory the daemon will auto-init).
+const PROJECT_MANUAL_SENTINEL = "__manual__";
+
 function openNewTask() {
   const select = $("nt-machine");
   select.innerHTML = "";
@@ -1872,6 +1878,8 @@ function openNewTask() {
   $("nt-discover").checked = false;
   $("nt-error").classList.add("hidden");
   $("nt-submit").disabled = false;
+  const manualInput = $("nt-project-manual");
+  if (manualInput) manualInput.value = "";
   $("new-task-modal").classList.remove("hidden");
   refreshProjectOptions();
 }
@@ -1894,34 +1902,47 @@ function refreshProjectOptions() {
     emptyHint: $("nt-project-empty"),
     submit: $("nt-submit"),
   });
+  updateManualPathVisibility();
 }
 
 // Pure DOM helper: rebuild `select` from a project_roots list. Empties the
 // select, hides/shows the optional empty-hint, and toggles `submit.disabled`
 // when there is nothing to publish against.
 //
-// * 0 roots → disables select + submit, shows the hint, returns null.
-// * 1 root  → auto-selects it.
-// * 2+ roots → renders each as an option with a leading "(select…)" placeholder
-//   so `required` forces an explicit choice from the user.
+// Every populated list also gets an "Other path…" sentinel entry appended
+// so a user can always target a directory the daemon has not yet
+// registered — the daemon will run `se3 init` there before spawning.
+//
+// * 0 known roots → still shows the manual sentinel; submit is re-enabled
+//   so the user can supply an absolute path by hand.
+// * 1 known root  → auto-selects it; manual sentinel still available.
+// * 2+ known roots → renders each as an option with a leading "(select…)"
+//   placeholder so `required` forces an explicit choice from the user.
 function populateProjectSelect(select, roots, opts) {
   opts = opts || {};
   const hint = opts.emptyHint || null;
   const submit = opts.submit || null;
   select.innerHTML = "";
   const list = Array.isArray(roots) ? roots.filter((r) => r) : [];
+  const manualOption = new Option("Other path…", PROJECT_MANUAL_SENTINEL);
+
   if (!list.length) {
-    select.appendChild(new Option("(no project roots registered)", ""));
-    select.disabled = true;
+    // No known roots — show the empty hint, but keep the manual entry
+    // available so users can still publish by typing an absolute path.
+    select.disabled = false;
     if (hint) hint.classList.remove("hidden");
-    if (submit) submit.disabled = true;
-    return null;
+    select.appendChild(manualOption);
+    select.value = PROJECT_MANUAL_SENTINEL;
+    if (submit) submit.disabled = false;
+    return PROJECT_MANUAL_SENTINEL;
   }
+
   select.disabled = false;
   if (hint) hint.classList.add("hidden");
   if (submit) submit.disabled = false;
   if (list.length === 1) {
     select.appendChild(new Option(list[0], list[0]));
+    select.appendChild(manualOption);
     select.value = list[0];
     return list[0];
   }
@@ -1932,7 +1953,32 @@ function populateProjectSelect(select, roots, opts) {
   for (const root of list) {
     select.appendChild(new Option(root, root));
   }
+  select.appendChild(manualOption);
   return null;
+}
+
+// Show or hide the manual absolute-path input based on the Project select's
+// current value. Visible only when the user chose the "Other path…" sentinel.
+function updateManualPathVisibility() {
+  const projectSelect = $("nt-project");
+  const manualInput = $("nt-project-manual");
+  const manualHint = $("nt-project-manual-hint");
+  if (!projectSelect || !manualInput) return;
+  const manual = projectSelect.value === PROJECT_MANUAL_SENTINEL;
+  manualInput.classList.toggle("hidden", !manual);
+  if (manualHint) manualHint.classList.toggle("hidden", !manual);
+  if (manual) {
+    manualInput.focus();
+  }
+}
+
+// Validate a user-supplied project_root string for the New Task form. Mirrors
+// the server's checks: non-empty and an absolute Unix-style path. Windows
+// drive-letter paths are intentionally not supported here.
+function isValidAbsolutePath(value) {
+  if (typeof value !== "string") return false;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.startsWith("/");
 }
 
 function closeNewTask() {
@@ -1948,18 +1994,28 @@ async function submitNewTask(event) {
   const task = $("nt-task").value.trim();
   const taskType = $("nt-type").value;
   const discover = $("nt-discover").checked;
-  const projectRoot = $("nt-project").value.trim();
+  const projectSelectValue = $("nt-project").value.trim();
 
   if (!machineId) return showFormError(errBox, "Select a target machine.");
   if (!task) return showFormError(errBox, "Task description must not be empty.");
-  if (!projectRoot) {
-    const roots = machineProjectRoots(machineId);
-    return showFormError(
-      errBox,
-      roots.length
-        ? "Select a project root for this task."
-        : "This machine has no registered project roots — start a daemon with one first.",
-    );
+  if (!projectSelectValue) {
+    return showFormError(errBox, "Select a project root for this task.");
+  }
+  let projectRoot;
+  if (projectSelectValue === PROJECT_MANUAL_SENTINEL) {
+    const manualInput = $("nt-project-manual");
+    projectRoot = (manualInput && manualInput.value.trim()) || "";
+    if (!projectRoot) {
+      return showFormError(errBox, "Enter an absolute path for the project.");
+    }
+    if (!isValidAbsolutePath(projectRoot)) {
+      return showFormError(
+        errBox,
+        "Project path must be absolute (start with '/').",
+      );
+    }
+  } else {
+    projectRoot = projectSelectValue;
   }
 
   const submit = $("nt-submit");
@@ -2007,6 +2063,7 @@ function init() {
   $("new-task-close").addEventListener("click", closeNewTask);
   $("new-task-form").addEventListener("submit", submitNewTask);
   $("nt-machine").addEventListener("change", refreshProjectOptions);
+  $("nt-project").addEventListener("change", updateManualPathVisibility);
 
   $("flow-view-close").addEventListener("click", closeFlowView);
 
@@ -2069,5 +2126,7 @@ if (typeof module !== "undefined" && module.exports) {
     optionText,
     pendingCalls,
     populateProjectSelect,
+    isValidAbsolutePath,
+    PROJECT_MANUAL_SENTINEL,
   };
 }

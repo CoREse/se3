@@ -267,6 +267,101 @@ class TestSpawner:
 
 
 # --------------------------------------------------------------------------
+# DaemonSpawner.ensure_se3_project
+# --------------------------------------------------------------------------
+
+
+class TestEnsureSe3Project:
+    """Pre-spawn auto-init hook used by the web `New Task` form."""
+
+    def test_skips_init_when_already_se3_project(self, tmp_path, monkeypatch):
+        """Directory containing se3/specs/base/spec.md must not re-run init."""
+        spec = tmp_path / "se3" / "specs" / "base" / "spec.md"
+        spec.parent.mkdir(parents=True)
+        spec.write_text("# existing\n", encoding="utf-8")
+
+        called = []
+
+        def fake_run(*args, **kwargs):
+            called.append((args, kwargs))
+            raise AssertionError("subprocess.run should not be invoked")
+
+        monkeypatch.setattr(spawner_mod.subprocess, "run", fake_run)
+        spawner = DaemonSpawner()
+        result = spawner.ensure_se3_project(str(tmp_path))
+        assert result.initialized is False
+        assert result.error == ""
+        assert called == []
+
+    def test_runs_init_on_empty_directory(self, tmp_path, monkeypatch):
+        """Empty directory triggers `se3 init -p <root>` subprocess."""
+        captured = {}
+
+        class _FakeCompleted:
+            returncode = 0
+            stdout = b"initialized\n"
+            stderr = b""
+
+        def fake_run(args, **kwargs):
+            captured["args"] = args
+            captured["cwd"] = kwargs.get("cwd")
+            # Simulate init writing the marker file.
+            spec = tmp_path / "se3" / "specs" / "base" / "spec.md"
+            spec.parent.mkdir(parents=True, exist_ok=True)
+            spec.write_text("# initialized\n", encoding="utf-8")
+            return _FakeCompleted()
+
+        monkeypatch.setattr(spawner_mod.subprocess, "run", fake_run)
+        spawner = DaemonSpawner()
+        result = spawner.ensure_se3_project(str(tmp_path))
+        assert result.initialized is True
+        assert result.error == ""
+        assert "init" in captured["args"]
+        assert "-p" in captured["args"]
+        assert str(tmp_path.resolve()) in captured["args"]
+
+    def test_returns_error_on_nonzero_exit(self, tmp_path, monkeypatch):
+        """A non-zero return code surfaces as EnsureResult.error and no raise."""
+
+        class _FakeCompleted:
+            returncode = 2
+            stdout = b""
+            stderr = b"boom\n"
+
+        monkeypatch.setattr(
+            spawner_mod.subprocess, "run", lambda *a, **k: _FakeCompleted()
+        )
+        spawner = DaemonSpawner()
+        result = spawner.ensure_se3_project(str(tmp_path))
+        assert result.initialized is False
+        assert "exit code 2" in result.error
+        assert "boom" in result.error
+
+    def test_returns_error_when_marker_missing_after_init(
+        self, tmp_path, monkeypatch
+    ):
+        """`se3 init` exit 0 but missing marker is treated as a failure."""
+
+        class _FakeCompleted:
+            returncode = 0
+            stdout = b""
+            stderr = b""
+
+        monkeypatch.setattr(
+            spawner_mod.subprocess, "run", lambda *a, **k: _FakeCompleted()
+        )
+        spawner = DaemonSpawner()
+        result = spawner.ensure_se3_project(str(tmp_path))
+        assert "marker" in result.error
+
+    def test_empty_project_root_returns_error(self):
+        spawner = DaemonSpawner()
+        result = spawner.ensure_se3_project("")
+        assert result.error
+        assert result.initialized is False
+
+
+# --------------------------------------------------------------------------
 # DaemonAggregator
 # --------------------------------------------------------------------------
 

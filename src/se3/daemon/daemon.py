@@ -31,7 +31,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .aggregator import DaemonAggregator, MachineStatus
 from .history import DaemonHistoryReader
@@ -238,6 +238,7 @@ class Daemon:
             se3_version=_se3_version(),
             snapshot_provider=lambda: self.aggregator.get_snapshot().to_dict(),
             spawn_handler=self._handle_spawn_request,
+            ensure_handler=self._handle_ensure_request,
             respond_handler=self._handle_respond_request,
             history_provider=self.history_reader,
         )
@@ -259,6 +260,27 @@ class Daemon:
             task_type=task_type or "feature",
             discover=discover,
         )
+
+    def _handle_ensure_request(self, project_root: str) -> Any:
+        """Pre-spawn hook: run ``se3 init`` in *project_root* if needed.
+
+        Lets the web *New Task* form target a directory that is not yet an
+        SE3 project (the user may have just typed a fresh absolute path into
+        the "Other path…" input). The daemon auto-initializes the directory,
+        then registers it with the aggregator so the freshly-created root
+        appears in subsequent ``project_roots`` snapshots. Returns the
+        :class:`~se3.daemon.spawner.EnsureResult` so the caller can short-
+        circuit on a non-empty ``error``.
+        """
+        result = self.spawner.ensure_se3_project(project_root)
+        if not result.error:
+            try:
+                self.aggregator.add_project_root(project_root)
+            except Exception:  # pragma: no cover - defensive
+                logger.exception(
+                    "Failed to register %s with aggregator after init", project_root
+                )
+        return result
 
     def _handle_respond_request(
         self, call_id: str, project_root: str, response: object

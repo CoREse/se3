@@ -111,7 +111,17 @@
         <label for="nt-project">Project</label>
         <select id="nt-project" required></select>
         <p id="nt-project-empty" class="form-hint hidden">
-          This daemon has no registered project roots.
+          This daemon has no registered project roots — pick &ldquo;Other path&hellip;&rdquo;
+          to enter one manually.
+        </p>
+        <input type="text" id="nt-project-manual"
+               class="hidden"
+               placeholder="/absolute/path/to/project"
+               autocomplete="off"
+               spellcheck="false" />
+        <p id="nt-project-manual-hint" class="form-hint hidden">
+          Enter an absolute path. The daemon will run <code>se3 init</code>
+          there first if the directory is not yet an SE3 project.
         </p>
 
         <label for="nt-type">Task type</label>

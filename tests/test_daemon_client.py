@@ -143,6 +143,69 @@ def test_dispatch_spawn_flow_threads_discover_flag():
     assert received == [("Explore Z", "", "feature", True)]
 
 
+def test_dispatch_spawn_flow_runs_ensure_handler_first():
+    """ensure_handler is called before the spawn_handler with project_root."""
+    ensure_calls = []
+    spawn_calls = []
+
+    class _Ensure:
+        error = ""
+
+    client = _make_client(
+        ensure_handler=lambda root: (ensure_calls.append(root) or _Ensure()),
+        spawn_handler=lambda t, p, ty, d: spawn_calls.append((t, p, ty, d)),
+    )
+
+    async def scenario():
+        await client._dispatch(
+            _FakeWS(),
+            protocol.make_spawn_flow("T", project_root="/some/path"),
+        )
+
+    asyncio.run(scenario())
+    assert ensure_calls == ["/some/path"]
+    assert spawn_calls == [("T", "/some/path", "feature", False)]
+
+
+def test_dispatch_spawn_flow_aborts_when_ensure_returns_error():
+    """A truthy ensure.error short-circuits — spawn_handler is not called."""
+    spawn_calls = []
+
+    class _Ensure:
+        error = "se3 init exited non-zero"
+
+    client = _make_client(
+        ensure_handler=lambda root: _Ensure(),
+        spawn_handler=lambda *a: spawn_calls.append(a),
+    )
+
+    async def scenario():
+        await client._dispatch(
+            _FakeWS(),
+            protocol.make_spawn_flow("T", project_root="/bad/path"),
+        )
+
+    asyncio.run(scenario())
+    assert spawn_calls == []
+
+
+def test_dispatch_spawn_flow_skips_ensure_when_no_project_root():
+    """No project_root in payload means no ensure call — spawn still runs."""
+    ensure_calls = []
+    spawn_calls = []
+    client = _make_client(
+        ensure_handler=lambda root: ensure_calls.append(root),
+        spawn_handler=lambda *a: spawn_calls.append(a),
+    )
+
+    async def scenario():
+        await client._dispatch(_FakeWS(), protocol.make_spawn_flow("T"))
+
+    asyncio.run(scenario())
+    assert ensure_calls == []
+    assert spawn_calls == [("T", "", "feature", False)]
+
+
 def test_dispatch_spawn_flow_ignores_empty_task():
     received = []
     client = _make_client(spawn_handler=lambda *a: received.append(a))
@@ -278,7 +341,12 @@ def test_client_connects_reports_and_receives():
             # Downlink: publish a task -> server -> daemon SPAWN_FLOW.
             pub = await http.post(
                 "/api/flows",
-                json={"machine_id": "m-e2e", "task": "e2e task", "task_type": "bugfix"},
+                json={
+                    "machine_id": "m-e2e",
+                    "task": "e2e task",
+                    "task_type": "bugfix",
+                    "project_root": "/p-e2e",
+                },
             )
             assert pub.status_code == 202
 
@@ -286,7 +354,7 @@ def test_client_connects_reports_and_receives():
             if spawned:
                 break
             await asyncio.sleep(0.05)
-        assert spawned == [("e2e task", "", "bugfix", False)]
+        assert spawned == [("e2e task", "/p-e2e", "bugfix", False)]
 
         stop.set()
         await asyncio.wait_for(task, timeout=8)

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -147,6 +148,19 @@ def create_app() -> FastAPI:
         machine_id = req.machine_id.strip()
         if not machine_id:
             raise HTTPException(status_code=422, detail="'machine_id' must not be empty")
+        project_root = req.project_root.strip()
+        if not project_root:
+            raise HTTPException(
+                status_code=422, detail="'project_root' must not be empty"
+            )
+        # Only enforce absolute-path shape — the target need not be a known
+        # machine.project_roots entry. The owning daemon auto-runs `se3 init`
+        # on first use, so a freshly typed brand-new directory is valid input.
+        if not os.path.isabs(project_root):
+            raise HTTPException(
+                status_code=422,
+                detail=f"'project_root' must be an absolute path, got {project_root!r}",
+            )
         if not manager.is_connected(machine_id):
             raise HTTPException(
                 status_code=404,
@@ -154,7 +168,7 @@ def create_app() -> FastAPI:
             )
         message = protocol.make_spawn_flow(
             task,
-            project_root=req.project_root,
+            project_root=project_root,
             task_type=req.task_type,
             discover=req.discover,
         )

@@ -100,6 +100,39 @@ def _resolve_se3_command() -> List[str]:
     return [sys.executable, "-m", "se3"]
 
 
+@dataclass
+class EnsureResult:
+    """Outcome of :meth:`DaemonSpawner.ensure_se3_project`.
+
+    Attributes:
+        initialized: ``True`` when ``se3 init`` was actually invoked because
+            the directory was not yet an SE3 project; ``False`` when an
+            existing SE3 project was detected and init was skipped.
+        error: An error description when the init invocation failed; empty
+            on success. Callers treat a non-empty ``error`` as a short-circuit
+            signal — do not proceed with ``spawn_flow``.
+        stdout: Captured stdout from the ``se3 init`` child (empty on the
+            skip path).
+        stderr: Captured stderr from the ``se3 init`` child (empty on the
+            skip path).
+    """
+
+    initialized: bool = False
+    error: str = ""
+    stdout: str = ""
+    stderr: str = ""
+
+
+def _is_se3_project(project_root: Path) -> bool:
+    """Return whether *project_root* is already an SE3-initialized project.
+
+    The presence of ``<root>/se3/specs/base/spec.md`` is the durable marker
+    that ``se3 init`` ran successfully in this directory; ``se3 init``
+    creates that file unconditionally on success.
+    """
+    return (project_root / "se3" / "specs" / "base" / "spec.md").is_file()
+
+
 class DaemonSpawner:
     """Starts and manages ``se3 run`` child processes."""
 
@@ -124,6 +157,80 @@ class DaemonSpawner:
         self._on_exit = on_exit
         self._processes: Dict[int, SpawnedProcess] = {}
         self._spawn_counter = 0
+
+    # -- pre-spawn initialization -----------------------------------------
+
+    def ensure_se3_project(
+        self,
+        project_root: str,
+        *,
+        timeout: float = 120.0,
+    ) -> EnsureResult:
+        """Make sure *project_root* is an SE3-initialized project.
+
+        When *project_root* already contains the ``se3/specs/base/spec.md``
+        marker file, the directory is treated as an existing SE3 project and
+        the call is a no-op (``EnsureResult(initialized=False)``).
+
+        Otherwise the directory (which may be a brand-new empty path the user
+        just typed into the web *New Task* form) is initialized in-place by
+        spawning ``se3 init -p <root>`` as a subprocess; the daemon owns the
+        local filesystem, so it is the right place to run init from. A
+        non-zero exit code or any other launch failure surfaces as
+        ``EnsureResult(error=...)``; callers MUST treat that as a
+        short-circuit and not proceed with the spawn.
+        """
+        if not project_root:
+            return EnsureResult(error="ensure_se3_project: empty project_root")
+        root = Path(project_root)
+        try:
+            root = root.resolve()
+        except OSError as exc:  # pragma: no cover - defensive
+            return EnsureResult(error=f"cannot resolve {project_root!r}: {exc}")
+        if _is_se3_project(root):
+            return EnsureResult(initialized=False)
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return EnsureResult(error=f"cannot create {root}: {exc}")
+        args = _resolve_se3_command() + ["init", "-p", str(root)]
+        logger.info("Auto-initializing SE3 project at %s via `se3 init`", root)
+        try:
+            result = subprocess.run(
+                args,
+                cwd=str(root),
+                env=os.environ.copy(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                timeout=timeout,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return EnsureResult(error=f"`se3 init` failed to launch: {exc}")
+        stdout = (result.stdout or b"").decode("utf-8", errors="replace")
+        stderr = (result.stderr or b"").decode("utf-8", errors="replace")
+        if result.returncode != 0:
+            return EnsureResult(
+                initialized=False,
+                error=(
+                    f"`se3 init` returned exit code {result.returncode}: "
+                    f"{stderr.strip() or stdout.strip() or 'no output'}"
+                ),
+                stdout=stdout,
+                stderr=stderr,
+            )
+        if not _is_se3_project(root):
+            return EnsureResult(
+                initialized=False,
+                error=(
+                    "`se3 init` reported success but the SE3 project marker "
+                    f"{root / 'se3' / 'specs' / 'base' / 'spec.md'} is still missing"
+                ),
+                stdout=stdout,
+                stderr=stderr,
+            )
+        return EnsureResult(initialized=True, stdout=stdout, stderr=stderr)
 
     # -- spawning ----------------------------------------------------------
 

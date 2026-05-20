@@ -282,7 +282,12 @@ def test_publish_flow_dispatches_spawn(client_and_app):
 
         resp = client.post(
             "/api/flows",
-            json={"machine_id": "m1", "task": "Build X", "task_type": "feature"},
+            json={
+                "machine_id": "m1",
+                "task": "Build X",
+                "task_type": "feature",
+                "project_root": "/p",
+            },
         )
         assert resp.status_code == 202
         spawn = protocol.decode(ws.receive_text())
@@ -299,7 +304,12 @@ def test_publish_flow_threads_discover_flag(client_and_app):
 
         resp = client.post(
             "/api/flows",
-            json={"machine_id": "m1", "task": "Explore Y", "discover": True},
+            json={
+                "machine_id": "m1",
+                "task": "Explore Y",
+                "discover": True,
+                "project_root": "/p",
+            },
         )
         assert resp.status_code == 202
         spawn = protocol.decode(ws.receive_text())
@@ -309,7 +319,10 @@ def test_publish_flow_threads_discover_flag(client_and_app):
 
 def test_publish_flow_unknown_machine_404(client_and_app):
     client, _ = client_and_app
-    resp = client.post("/api/flows", json={"machine_id": "ghost", "task": "X"})
+    resp = client.post(
+        "/api/flows",
+        json={"machine_id": "ghost", "task": "X", "project_root": "/p"},
+    )
     assert resp.status_code == 404
 
 
@@ -318,7 +331,63 @@ def test_publish_flow_rejects_empty_task(client_and_app):
     with client.websocket_connect("/ws") as ws:
         ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
         protocol.decode(ws.receive_text())
-        resp = client.post("/api/flows", json={"machine_id": "m1", "task": "  "})
+        resp = client.post(
+            "/api/flows",
+            json={"machine_id": "m1", "task": "  ", "project_root": "/p"},
+        )
+        assert resp.status_code == 422
+
+
+def test_publish_flow_accepts_unknown_absolute_project_root(client_and_app):
+    """A brand-new absolute path (not in machine.project_roots) is allowed.
+
+    The owning daemon auto-runs `se3 init` on first use, so users can target
+    a freshly typed directory directly from the web New Task form.
+    """
+    client, _ = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+        protocol.decode(ws.receive_text())  # WELCOME
+
+        # Note: '/never/registered/path' is not in any STATUS_UPDATE.
+        resp = client.post(
+            "/api/flows",
+            json={
+                "machine_id": "m1",
+                "task": "Bootstrap a fresh project",
+                "project_root": "/never/registered/path",
+            },
+        )
+        assert resp.status_code == 202
+        spawn = protocol.decode(ws.receive_text())
+        assert spawn.payload["project_root"] == "/never/registered/path"
+
+
+def test_publish_flow_rejects_non_absolute_project_root(client_and_app):
+    client, _ = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+        protocol.decode(ws.receive_text())
+        resp = client.post(
+            "/api/flows",
+            json={
+                "machine_id": "m1",
+                "task": "X",
+                "project_root": "relative/path",
+            },
+        )
+        assert resp.status_code == 422
+
+
+def test_publish_flow_rejects_empty_project_root(client_and_app):
+    client, _ = client_and_app
+    with client.websocket_connect("/ws") as ws:
+        ws.send_text(protocol.make_hello("m1", "host-1", "6.4.0").to_json())
+        protocol.decode(ws.receive_text())
+        resp = client.post(
+            "/api/flows",
+            json={"machine_id": "m1", "task": "X"},
+        )
         assert resp.status_code == 422
 
 

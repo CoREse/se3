@@ -628,6 +628,9 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   margin: 4px 0 0;
 }
 
+#nt-project-manual { margin-top: 6px; font-family: ui-monospace, monospace; }
+#nt-project-manual.hidden { display: none; }
+
 .modal-body label.checkbox-label {
   display: flex;
   flex-direction: row;
