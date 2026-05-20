@@ -264,6 +264,62 @@ def test_machine_status_project_roots(tmp_path: Path) -> None:
     assert sorted(payload["project_roots"]) == sorted(status.project_roots)
 
 
+def test_machine_status_project_roots_includes_historical(tmp_path: Path) -> None:
+    """project_roots merges active registrations with historical project roots.
+
+    A root that contains SE3 history artifacts (an archive or a history/
+    directory) is surfaced even when it was not added through the normal
+    supervisor / spawner path, so the New Task dropdown can list projects
+    that ran before the daemon was restarted.
+    """
+    active_root = tmp_path / "active-proj"
+    active_root.mkdir()
+
+    history_root = tmp_path / "history-proj"
+    archive_dir = history_root / "se3" / "state" / "archive"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "engine_20260101_000000.json").write_text(
+        json.dumps({"flow_id": "f1", "status": "completed"}), encoding="utf-8"
+    )
+
+    aggregator = DaemonAggregator()
+    aggregator.add_project_root(active_root)
+    # The historical root is registered too — the daemon would typically
+    # learn about it via `config.project_roots` or a prior spawn — but it
+    # is not currently spawning a flow.
+    aggregator.add_project_root(history_root)
+
+    status = aggregator.get_snapshot()
+    assert str(active_root.resolve()) in status.project_roots
+    assert str(history_root.resolve()) in status.project_roots
+    # No duplicates after a spawn re-registers a historical root.
+    aggregator.add_project_root(history_root)
+    status2 = aggregator.get_snapshot()
+    assert status2.project_roots.count(str(history_root.resolve())) == 1
+
+
+def test_machine_status_project_roots_sorted_and_unique(tmp_path: Path) -> None:
+    """Merged project_roots is sorted and contains no duplicates."""
+    proj_a = tmp_path / "a-proj"
+    proj_b = tmp_path / "b-proj"
+    proj_a.mkdir()
+    proj_b.mkdir()
+    # Give proj_a some history so it would also be picked up via the
+    # historical enumeration path, exercising the dedupe.
+    (proj_a / "se3" / "state" / "archive").mkdir(parents=True)
+    (proj_a / "se3" / "state" / "archive" / "engine_x.json").write_text(
+        json.dumps({"flow_id": "f1"}), encoding="utf-8"
+    )
+
+    aggregator = DaemonAggregator()
+    aggregator.add_project_root(proj_a)
+    aggregator.add_project_root(proj_b)
+    status = aggregator.get_snapshot()
+
+    assert status.project_roots == sorted(set(status.project_roots))
+    assert status.project_roots.count(str(proj_a.resolve())) == 1
+
+
 def test_machine_status_pending_calls_unfiltered(tmp_path: Path) -> None:
     """MachineStatus.pending_calls aggregates *all* calls regardless of flow."""
     root = _make_root(

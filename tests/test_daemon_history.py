@@ -7,7 +7,11 @@ import json
 import pytest
 
 from se3.daemon import history as history_mod
-from se3.daemon.history import DaemonHistoryReader, SessionMeta
+from se3.daemon.history import (
+    DaemonHistoryReader,
+    SessionMeta,
+    enumerate_historical_project_roots,
+)
 from se3.daemon.protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
 
@@ -294,3 +298,136 @@ def test_read_active_flows_only_returns_active(tmp_path):
     again = reader.read_active_flows(cursors)
     assert again[0].mode == HISTORY_MODE_APPEND
     assert again[0].records == []
+
+
+# --------------------------------------------------------------------------
+# enumerate_historical_project_roots
+# --------------------------------------------------------------------------
+
+
+def test_enumerate_returns_root_with_archive(tmp_path):
+    """A project root containing an engine_*.json archive is included."""
+    archive_dir = tmp_path / "se3" / "state" / "archive"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "engine_20260101_000000.json").write_text(
+        json.dumps({"flow_id": "f1", "status": "completed"}),
+        encoding="utf-8",
+    )
+
+    roots = enumerate_historical_project_roots([tmp_path])
+    assert roots == [str(tmp_path.resolve())]
+
+
+def test_enumerate_returns_root_with_history(tmp_path):
+    """A project root containing se3/history/<flow>/ is included."""
+    hist_dir = tmp_path / "se3" / "history" / "f1"
+    hist_dir.mkdir(parents=True)
+    (hist_dir / "01_analyze.jsonl").write_text("", encoding="utf-8")
+
+    roots = enumerate_historical_project_roots([tmp_path])
+    assert roots == [str(tmp_path.resolve())]
+
+
+def test_enumerate_skips_root_without_artifacts(tmp_path):
+    """A bare directory with no SE3 history is not reported."""
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    assert enumerate_historical_project_roots([bare]) == []
+
+
+def test_enumerate_extracts_project_root_field_from_archive(tmp_path):
+    """When an archive carries a project_root field, that path is included too."""
+    other_root = tmp_path / "other-project"
+    other_root.mkdir()
+
+    archive_dir = tmp_path / "scanned" / "se3" / "state" / "archive"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "engine_20260101_000000.json").write_text(
+        json.dumps(
+            {
+                "flow_id": "f1",
+                "status": "completed",
+                "project_root": str(other_root),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    roots = enumerate_historical_project_roots([tmp_path / "scanned"])
+    assert str(other_root.resolve()) in roots
+    assert str((tmp_path / "scanned").resolve()) in roots
+
+
+def test_enumerate_extracts_project_root_field_from_history_meta(tmp_path):
+    """A history flow's _meta.json project_root field is included."""
+    other_root = tmp_path / "another"
+    other_root.mkdir()
+
+    hist_dir = tmp_path / "scanned" / "se3" / "history" / "f1"
+    hist_dir.mkdir(parents=True)
+    (hist_dir / "_meta.json").write_text(
+        json.dumps({"project_root": str(other_root)}), encoding="utf-8"
+    )
+
+    roots = enumerate_historical_project_roots([tmp_path / "scanned"])
+    assert str(other_root.resolve()) in roots
+
+
+def test_enumerate_skips_stale_project_root_directories(tmp_path):
+    """A project_root field pointing to a non-existent directory is dropped."""
+    archive_dir = tmp_path / "se3" / "state" / "archive"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "engine_20260101_000000.json").write_text(
+        json.dumps(
+            {
+                "flow_id": "f1",
+                "project_root": "/nonexistent/path/does/not/exist",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    roots = enumerate_historical_project_roots([tmp_path])
+    assert "/nonexistent/path/does/not/exist" not in roots
+    # The scanned root itself (which has an archive) is still included.
+    assert str(tmp_path.resolve()) in roots
+
+
+def test_enumerate_tolerates_corrupt_json(tmp_path, caplog):
+    """A corrupt JSON file logs a warning but does not abort enumeration."""
+    archive_dir = tmp_path / "se3" / "state" / "archive"
+    archive_dir.mkdir(parents=True)
+    (archive_dir / "engine_corrupt.json").write_text(
+        "{not valid json", encoding="utf-8"
+    )
+    # A well-formed sibling archive so the scanned root still surfaces.
+    (archive_dir / "engine_ok.json").write_text(
+        json.dumps({"flow_id": "f1"}), encoding="utf-8"
+    )
+
+    with caplog.at_level("WARNING", logger="se3.daemon.history"):
+        roots = enumerate_historical_project_roots([tmp_path])
+
+    assert str(tmp_path.resolve()) in roots
+    assert any("engine_corrupt.json" in rec.message for rec in caplog.records)
+
+
+def test_enumerate_dedups_and_sorts(tmp_path):
+    """Repeated search inputs and overlapping project_root fields are deduped."""
+    a = tmp_path / "a"
+    b = tmp_path / "b"
+    for p in (a, b):
+        archive_dir = p / "se3" / "state" / "archive"
+        archive_dir.mkdir(parents=True)
+        (archive_dir / "engine_x.json").write_text(
+            json.dumps({"flow_id": "f", "project_root": str(a)}),
+            encoding="utf-8",
+        )
+
+    roots = enumerate_historical_project_roots([a, b, a])
+    assert roots == sorted([str(a.resolve()), str(b.resolve())])
+
+
+def test_enumerate_handles_empty_input():
+    assert enumerate_historical_project_roots() == []
+    assert enumerate_historical_project_roots([]) == []

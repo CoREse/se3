@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 from . import protocol
+from .history import enumerate_historical_project_roots
 
 
 logger = logging.getLogger(__name__)
@@ -213,8 +214,40 @@ class DaemonAggregator:
             hostname=self.hostname,
             flows=flows,
             pending_calls=all_calls,
-            project_roots=[str(p) for p in sorted(self._project_roots)],
+            project_roots=self._merge_project_roots(),
         )
+
+    def _merge_project_roots(self) -> List[str]:
+        """Merge active and historical project roots into one sorted list.
+
+        Three sources feed the reported list, all deduplicated by their
+        resolved absolute path:
+
+        * the currently registered active roots (``self._project_roots`` —
+          supervisor / spawner / config-seeded entries);
+        * roots that contain SE3 history artifacts, discovered from those
+          same active roots via
+          :func:`~se3.daemon.history.enumerate_historical_project_roots`;
+        * the existing in-process registry once more, so a root that is
+          live but has no on-disk history yet (e.g. a freshly spawned flow
+          before its first persistence write) still appears.
+
+        ``self._project_roots`` itself remains a mutable :class:`set` —
+        spawn paths continue to ``add()`` directly into it; this helper is
+        a pure read of the merged view.
+        """
+        merged: Set[str] = set()
+        for path in self._project_roots:
+            try:
+                merged.add(os.path.realpath(str(path)))
+            except OSError:  # pragma: no cover - defensive
+                merged.add(str(path))
+        try:
+            for path in enumerate_historical_project_roots(self._project_roots):
+                merged.add(path)
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("aggregator: enumerate_historical_project_roots failed")
+        return sorted(merged)
 
     # -- internals ---------------------------------------------------------
 

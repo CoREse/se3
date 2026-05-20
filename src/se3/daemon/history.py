@@ -38,11 +38,12 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 from .protocol import HISTORY_MODE_APPEND, HISTORY_MODE_FULL
 
@@ -423,6 +424,96 @@ def _clip(text: str) -> str:
     if len(text) > _DESC_CLIP:
         return text[:_DESC_CLIP] + "..."
     return text
+
+
+def enumerate_historical_project_roots(
+    search_roots: Iterable[Any] = (),
+) -> List[str]:
+    """Enumerate project roots that contain SE3 history artifacts.
+
+    Walks each ``search_root`` looking at:
+
+    * ``<root>/se3/state/archive/engine_*.json`` — archived flow state; when
+      the file carries a ``project_root`` field that path is included.
+    * ``<root>/se3/history/<flow_id>/_meta.json`` — per-flow history meta;
+      when the file carries a ``project_root`` field that path is included.
+
+    The ``search_root`` itself is also included whenever any of the above
+    artifacts are present, since the parent of ``se3/history/`` /
+    ``se3/state/archive/`` is by construction a historical project root —
+    even if the on-disk artifact does not (yet) record a ``project_root``
+    field.
+
+    Every candidate path is normalised via :func:`os.path.realpath`,
+    deduplicated, and a stale candidate (a path that no longer exists or is
+    not a directory) is dropped. Corrupt or unreadable JSON files are logged
+    at warning level and skipped — they do not abort the enumeration.
+
+    Args:
+        search_roots: Iterable of base directories to scan. Anything that
+            cannot be turned into a real path is silently skipped.
+
+    Returns:
+        Sorted, deduplicated absolute paths of historical project roots.
+    """
+    candidates: Set[str] = set()
+    for entry in search_roots:
+        try:
+            root = Path(entry).resolve()
+        except (TypeError, ValueError):  # pragma: no cover - defensive
+            continue
+        if not root.is_dir():
+            continue
+
+        has_artifacts = False
+
+        archive_dir = root / "se3" / "state" / "archive"
+        if archive_dir.is_dir():
+            for archive_file in sorted(archive_dir.glob("engine_*.json")):
+                has_artifacts = True
+                data = _read_json(archive_file)
+                if data is None:
+                    logger.warning(
+                        "history: skipping unreadable archive file %s",
+                        archive_file,
+                    )
+                    continue
+                _maybe_add_root(candidates, data.get("project_root"))
+
+        history_root = root / "se3" / "history"
+        if history_root.is_dir():
+            for flow_dir in sorted(history_root.iterdir()):
+                if not flow_dir.is_dir():
+                    continue
+                has_artifacts = True
+                meta_path = flow_dir / "_meta.json"
+                if not meta_path.is_file():
+                    continue
+                data = _read_json(meta_path)
+                if data is None:
+                    logger.warning(
+                        "history: skipping unreadable meta file %s", meta_path
+                    )
+                    continue
+                _maybe_add_root(candidates, data.get("project_root"))
+
+        if has_artifacts:
+            _maybe_add_root(candidates, str(root))
+
+    return sorted(candidates)
+
+
+def _maybe_add_root(candidates: Set[str], value: Any) -> None:
+    """Normalise *value* and add it to *candidates* when it names a real dir."""
+    if not isinstance(value, str) or not value:
+        return
+    try:
+        resolved = os.path.realpath(value)
+    except OSError:  # pragma: no cover - defensive
+        return
+    if not Path(resolved).is_dir():
+        return
+    candidates.add(resolved)
 
 
 def _extract_history_summary(flow_dir: Path) -> str:
