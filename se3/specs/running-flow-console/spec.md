@@ -454,28 +454,61 @@ message text. Content is never deleted, only collapsed by default.
 "system prompt · discovery mode"); clicking the chip expands the original
 content unchanged.
 
-**`user` role** messages are split at the backend-provided sentinel marker
-pair defined in `src/se3/engine/prompt_markers.py` (`TEMPLATE_PREFIX_END` /
-`USER_CONTENT_BEGIN`). When a `user` message contains the marker pair, the
-prefix segment (template/system-instructions boilerplate, e.g. the
-`You are an expert software engineer...` opener plus the Agent Safety / Process
-Cleanup boilerplate that every step shares) MUST render as a default-collapsed
-clickable chip, and the suffix segment (the task/spec/context — the user's
-real input as the backend assembled it) MUST render as a normal default-
-expanded bubble. The chip and bubble MUST coexist within the same logical
-record so collapse never hides the user's real input. A `user` message that
-lacks the marker pair (legacy history written before the marker protocol) MUST
-fall back to the previous behavior of rendering the entire record as a single
-collapsed chip.
+**`user` role** messages are split at the backend-provided three-segment
+sentinel marker protocol defined in `src/se3/engine/prompt_markers.py`
+(`TEMPLATE_PREFIX_END` / `USER_CONTENT_BEGIN` / `USER_CONTENT_END`). When a
+`user` message contains the full three-marker sequence in order, the message
+is split into three segments — a **prefix** (the template/system-instructions
+boilerplate, e.g. the `You are an expert software engineer...` opener plus the
+Agent Safety / Process Cleanup boilerplate that every step shares, project
+context, embedded specs, JSON-format scaffolding, Discovery Context wrapper,
+etc.), a **user-content section** (the user's literal input), and a **suffix**
+(framework text appended after the user input, such as Available Specs /
+Guidelines / language instructions / Runtime Environment / READ-ONLY
+CONSTRAINT). The **user-content section** MUST be rendered as a normal
+default-expanded `user` bubble; the **prefix** and **suffix** MUST be merged
+into a single default-collapsed clickable chip (e.g. labeled "system prompt ·
+{step}") so collapse never hides the user's real input. When the chip is
+expanded, the prefix and suffix MAY be presented as two clearly labeled
+sub-sections inside the chip (e.g. "模板前缀" / "框架后缀") so a developer can
+distinguish what came before vs. after the user's literal input.
+
+**Normative constraint on user-content scope:** the user-content section MUST
+contain only text the user literally contributed at that step boundary —
+e.g. the discovery initial_description, the user's reply in a discovery
+continue turn, or the body of a mid-flow interjection. All framework-injected
+strings — Project Context, Available Specs, embedded base spec text, the
+Discovery Context wrapper, JSON-format scaffolding, Guidelines, Handling
+Evaluative sections, language directives, Runtime Environment injections,
+READ-ONLY CONSTRAINT, and any other prompt prose the engine itself writes —
+MUST live in the prefix or suffix, NOT in the user-content section. This
+keeps the default-expanded `user` bubble visually quiet: it always shows
+exactly what the human typed, never the surrounding scaffolding.
+
+When a `user` message contains only the two-marker pair (`TEMPLATE_PREFIX_END`
++ `USER_CONTENT_BEGIN`) without `USER_CONTENT_END` — the legacy two-segment
+form produced by the older `inject_boundary` / `wrap_user_content` helpers —
+the frontend MUST degrade gracefully to two-segment semantics: everything
+before `TEMPLATE_PREFIX_END` is treated as the prefix chip, and everything
+after `USER_CONTENT_BEGIN` is treated as the suffix (with an empty
+user-content section, so no user bubble is rendered). A `user` message that
+lacks the marker protocol entirely (legacy history written before any marker
+was introduced) MUST fall back to the original behavior of rendering the
+entire record as a single collapsed chip.
 
 Step-prompt modules under `src/se3/engine/steps/` MUST inject the boundary
-markers via `prompt_markers.inject_boundary` (or `wrap_user_content`) at the
-point where the boilerplate prefix ends and the user/task-specific content
-begins. This applies to all step prompt templates that assemble both halves —
-analyze, plan, plan_tasks, implement (`IMPLEMENT_PROMPT`,
-`IMPLEMENT_GROUP_PROMPT`, `FIX_PROMPT`), discovery (initial + continue),
-self_check, verify_spec, update_spec, summarize, and version_analyze — so the
-frontend has a reliable, text-pattern-free split signal.
+markers via the helpers in `prompt_markers.py`. Step prompts whose template
+assembles a real user-literal field (e.g. discovery's `initial_description` /
+`user_response`) MUST use `wrap_user_section(prefix, user_content, suffix)` to
+emit the full three-marker sequence around the user-literal field, so the
+frontend can render a proper user bubble. Step prompts with no user-literal
+field MAY continue to use the legacy `inject_boundary` / `wrap_user_content`
+helpers (two-marker form) and rely on the frontend's two-segment fallback.
+This applies to all step prompt templates — analyze, plan, plan_tasks,
+implement (`IMPLEMENT_PROMPT`, `IMPLEMENT_GROUP_PROMPT`, `FIX_PROMPT`),
+discovery (initial + continue), self_check, verify_spec, update_spec,
+summarize, and version_analyze — so the frontend has a reliable,
+text-pattern-free split signal.
 
 #### Scenario: Assistant output defaults to expanded
 - **WHEN** a conversation record has the `assistant` role
@@ -486,20 +519,50 @@ frontend has a reliable, text-pattern-free split signal.
 - **THEN** it is rendered as a single collapsed, clickable chip
 - **AND** clicking the chip expands the original content unchanged
 
-#### Scenario: User message with sentinel markers splits prefix and content
-- **GIVEN** a `user` role record whose body contains the
-  `TEMPLATE_PREFIX_END` / `USER_CONTENT_BEGIN` marker pair injected by a step
-  prompt module
+#### Scenario: User message with three-segment markers splits prefix, content, and suffix
+- **GIVEN** a `user` role record whose body contains the full three-marker
+  sequence (`TEMPLATE_PREFIX_END`, then `USER_CONTENT_BEGIN`, then
+  `USER_CONTENT_END`, in that order) injected by a step prompt module via
+  `wrap_user_section`
 - **WHEN** the record is rendered in the running-flow conversation
-- **THEN** the segment before `TEMPLATE_PREFIX_END` is rendered as a default-
-  collapsed clickable chip labeled as a system-prompt prefix
-- **AND** the segment after `USER_CONTENT_BEGIN` is rendered as a normal
-  default-expanded `user` bubble
+- **THEN** the segment before `TEMPLATE_PREFIX_END` (prefix) and the segment
+  after `USER_CONTENT_END` (suffix) are merged into a single default-collapsed
+  clickable chip labeled as a system-prompt chip for that step
+- **AND** the segment between `USER_CONTENT_BEGIN` and `USER_CONTENT_END` is
+  rendered as a normal default-expanded `user` bubble
 - **AND** the user's real input is visible without any click
 
-#### Scenario: User message without markers falls back to whole-chip
-- **GIVEN** a `user` role record from legacy history that does NOT contain the
-  marker pair
+#### Scenario: User-content section contains no framework-injected text
+- **GIVEN** a `user` role record produced by the discovery step where the
+  initial_description is the only user-literal text and the template otherwise
+  contains Project Context, embedded specs, Discovery Context wrapper, the
+  JSON-format scaffolding, Guidelines, language instructions, Runtime
+  Environment injection, and the READ-ONLY CONSTRAINT
+- **WHEN** the record is rendered in the running-flow conversation
+- **THEN** the default-expanded `user` bubble contains ONLY the
+  initial_description (exactly what the user typed at the discovery boundary)
+- **AND** the bubble does NOT contain any framework-injected substrings such
+  as "Project Context", "Available Specs", "Discovery Context", "Respond in
+  JSON format", "Guidelines", "READ-ONLY", language directives, or the
+  Runtime Environment heading
+- **AND** the framework-injected prefix and suffix are placed in the
+  collapsed system-prompt chip instead
+
+#### Scenario: Legacy two-marker user message degrades gracefully
+- **GIVEN** a `user` role record that contains only the older two-marker pair
+  (`TEMPLATE_PREFIX_END` + `USER_CONTENT_BEGIN`) emitted by `inject_boundary`
+  or `wrap_user_content`, without a `USER_CONTENT_END` marker
+- **WHEN** the record is rendered in the running-flow conversation
+- **THEN** `splitUserPromptByMarker` returns a result whose user-content
+  section is empty and whose suffix carries everything after
+  `USER_CONTENT_BEGIN`
+- **AND** the record is rendered as a single collapsed system-prompt chip
+  (combining the prefix and the suffix) with no separate user bubble
+- **AND** no exception is raised and the rendering does not regress
+
+#### Scenario: User message without any markers falls back to whole-chip
+- **GIVEN** a `user` role record from legacy history that does NOT contain any
+  of the three sentinel markers
 - **WHEN** the record is rendered
 - **THEN** the entire body is rendered as a single collapsed clickable chip,
   matching the prior whole-message behavior
@@ -507,14 +570,101 @@ frontend has a reliable, text-pattern-free split signal.
 #### Scenario: human role folded into user
 - **WHEN** a record's `role` field is `human`
 - **THEN** it is classified as `user` and follows the same marker-aware
-  rendering rules (split when marker present, fall back to whole-chip
-  otherwise)
+  rendering rules (three-segment split when the full marker sequence is
+  present, two-segment degradation when only the legacy pair is present,
+  whole-chip fallback otherwise)
 
 #### Scenario: Classification is role-based, not text-based
 - **WHEN** deciding how to collapse a record
 - **THEN** the role decision is made only from the structured `role` field
-- **AND** the prefix/content split is made only from the structured sentinel
-  marker pair, never from pattern-matching the message prose
+- **AND** the prefix / user-content / suffix split is made only from the
+  structured sentinel marker sequence, never from pattern-matching the
+  message prose
+
+### Requirement: Structured-JSON Assistant Rendering
+
+For step types whose `assistant` messages are structured-JSON responses (the
+LLM emits a JSON object — optionally wrapped in a ```` ```json ... ``` ````
+fenced block and/or preceded by free-form narrative — rather than free
+markdown), the running-flow conversation MUST parse the JSON and render its
+fields as structured UI elements. The raw JSON literal MUST NOT be the
+primary visible surface of an assistant message: dumping the JSON blob as a
+markdown code block under the assistant bubble — as the previous renderer
+did — is forbidden, because field values such as `content`,
+`refined_description`, and `questions` get buried inside JSON syntax and the
+user has to mentally parse the structure.
+
+The frontend MUST maintain a small registry (e.g. `STEP_ASSISTANT_RENDERERS`)
+that maps a `step_type` to a structured renderer function, mirroring the
+existing per-step report-card renderer pattern. `renderConversationRecord`
+dispatches assistant records to `STEP_ASSISTANT_RENDERERS[step_type]` when
+one is registered; when no entry matches, or when the registered renderer
+fails to parse the message body, the renderer MUST fall back gracefully to
+the existing `renderToolMarkers` + markdown / foldable path, so no assistant
+message is ever lost.
+
+This task lands a single concrete renderer for `step_type === "discovery"`,
+mirroring the CLI's
+`steps/discovery.py::_display_discovery_message` /
+`_extract_narrative_from_raw` behavior so web and CLI users see the same
+report:
+
+1. Extract any narrative text outside JSON — both fenced ```` ```json ... ````
+   blocks and any trailing bare JSON object after the last narrative line are
+   stripped (matching the backend's `parse_json_response` lenient repair
+   chain). Tool-use markers (e.g. `[Read: ...]`) embedded in the narrative
+   stay intact and are rendered via the same `renderToolMarkers` helper used
+   elsewhere; the resulting narrative text is rendered as markdown at the top
+   of the bubble.
+2. Parse the JSON object. If parsing succeeds, render the fields in this
+   order, skipping any that are absent or empty:
+   - `content` — rendered as a markdown block.
+   - `refined_description` — rendered as an independently styled
+     **Proposed Task Description** card (mirroring the CLI's cyan reverse
+     block; on the web side this MAY reuse the existing step-report card
+     style or use a distinct accent color, as long as it is visually
+     separated from the `content` markdown).
+   - `questions` — rendered as an ordered list.
+3. Always preserve the **view raw** affordance: the original assistant body
+   (including the JSON literal and NDJSON envelope) MUST remain reachable via
+   the same per-record raw toggle used by other records, so a developer can
+   still inspect the unrendered string when debugging.
+
+The registry MUST be open for further step types (analyze, plan, plan_tasks,
+etc.) without re-architecting the dispatch path, but this task lands only
+the discovery entry.
+
+#### Scenario: Discovery assistant message renders structured fields
+- **GIVEN** an assistant record with `step_type = "discovery"` whose body
+  contains optional narrative text followed by a fenced ```` ```json ... ````
+  block carrying `{"content": "<markdown>", "refined_description": "<task>",
+  "questions": ["q1", "q2"]}`
+- **WHEN** the record is rendered in the running-flow conversation
+- **THEN** the bubble renders, in order:
+  (1) the narrative text as markdown (with tool-use markers preserved),
+  (2) the `content` field as a markdown block,
+  (3) a Proposed Task Description card carrying the `refined_description`
+      value rendered as markdown,
+  (4) an ordered list of the `questions` strings
+- **AND** the raw JSON literal does NOT appear as a primary markdown code
+  block under the bubble
+
+#### Scenario: JSON parse failure falls back to existing renderer
+- **GIVEN** an assistant record with `step_type = "discovery"` whose body
+  cannot be parsed as a JSON object even after the lenient repair chain
+  (e.g. completely free-form prose, or a malformed JSON fragment)
+- **WHEN** the record is rendered
+- **THEN** the discovery structured renderer catches the parse failure and
+  falls back to the existing `renderToolMarkers` + markdown / foldable
+  rendering path
+- **AND** the assistant text is still visible in the bubble; no exception
+  surfaces to the user
+
+#### Scenario: Raw assistant body remains accessible via view-raw toggle
+- **GIVEN** any assistant record rendered through a structured-JSON renderer
+- **WHEN** the user opens the per-record `view raw` toggle
+- **THEN** the original unrendered assistant body (including the JSON
+  literal and the underlying NDJSON envelope) is shown unchanged
 
 ### Requirement: Per-Step Report Cards
 
