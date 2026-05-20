@@ -1250,6 +1250,46 @@ function normalizeRecord(rec) {
   const msg = (rec.message && typeof rec.message === "object") ? rec.message : rec;
   const pick = (key) => (msg[key] != null ? msg[key] : rec[key]);
 
+  // Step-completion events from the engine's structured event stream. They
+  // ride the same conversation channel as chat history but carry the step's
+  // structured outputs rather than turn text. We surface them as a non-chat
+  // record so renderConversationRecord can produce the raw event chip plus a
+  // default-expanded report card driven from `stepReport`.
+  const eventType = String(pick("type") || "").toLowerCase();
+  if (eventType === "step_completed" || eventType === "step_failed") {
+    const data = pick("data") && typeof pick("data") === "object" ? pick("data") : {};
+    const innerStep = (data.step && typeof data.step === "object")
+      ? data.step
+      : (msg.step && typeof msg.step === "object") ? msg.step : null;
+    const stepReport = {
+      step_type: pick("step_type") || (innerStep && innerStep.step_type) || "",
+      step_id: pick("step_id") || (innerStep && innerStep.step_id) || "",
+      status: (innerStep && innerStep.status)
+        || data.status
+        || pick("status")
+        || (eventType === "step_failed" ? "failed" : "completed"),
+      outputs: (innerStep && innerStep.outputs)
+        || data.outputs
+        || pick("outputs")
+        || {},
+      error_message: (innerStep && innerStep.error_message)
+        || data.error_message
+        || pick("error_message")
+        || "",
+    };
+    return {
+      role: "step-event",
+      kind: eventType,
+      content: "",
+      timestamp: pick("timestamp") != null ? pick("timestamp") : pick("time"),
+      stepType: stepReport.step_type,
+      stepId: stepReport.step_id || pick("step_id") || "",
+      stepReport: stepReport,
+      raw: { raw_json: [msg], raw_ndjson: null },
+      attempt: null,
+    };
+  }
+
   let role = String(pick("role") || msg.type || "log").toLowerCase();
   if (!["user", "assistant", "system"].includes(role)) {
     role = role === "human" ? "user" : (role || "log");
@@ -1335,6 +1375,39 @@ function chipLabel(norm) {
   const role = String((norm && norm.role) || "message");
   const ctx = (norm && (norm.stepType || norm.stepId)) || "";
   return ctx ? `${role} prompt · ${ctx}` : `${role} prompt`;
+}
+
+// ---------------------------------------------------------------------------
+// User prompt marker split
+// ---------------------------------------------------------------------------
+//
+// Step prompts wrap their template prefix (role definition, agent-safety
+// boilerplate, generic step instructions) with a sentinel marker pair that
+// the engine injects at prompt-build time
+// (see src/se3/engine/prompt_markers.py). The frontend looks for these
+// literals — never pattern-guesses prompt text — and splits the user
+// message into a default-collapsed chip (the boilerplate) and a default-
+// expanded bubble (the actual task / context). Records that lack the
+// markers (legacy / non-step prompts) fall back to the whole-chip path.
+
+const TEMPLATE_PREFIX_END = "<!--SE3:TEMPLATE_END-->";
+const USER_CONTENT_BEGIN = "<!--SE3:USER_CONTENT-->";
+
+// Split a user-role message body at its template / user-content boundary.
+// Returns `{prefix, content}` when the boundary marker is present, or null
+// when it is absent so the caller can fall back to the whole-message chip.
+function splitUserPromptByMarker(content) {
+  if (typeof content !== "string" || !content) return null;
+  const idx = content.indexOf(TEMPLATE_PREFIX_END);
+  if (idx < 0) return null;
+  const prefix = content.slice(0, idx);
+  let rest = content.slice(idx + TEMPLATE_PREFIX_END.length);
+  const bi = rest.indexOf(USER_CONTENT_BEGIN);
+  if (bi >= 0) rest = rest.slice(bi + USER_CONTENT_BEGIN.length);
+  // wrap_user_content joins with a leading newline after each marker; strip
+  // both so the user content starts on its first real character.
+  while (rest.startsWith("\n") || rest.startsWith("\r")) rest = rest.slice(1);
+  return { prefix: prefix, content: rest };
 }
 
 // ---------------------------------------------------------------------------
@@ -1753,11 +1826,26 @@ function makeRawToggle(norm) {
 // tool-marker + Markdown rendering; user/system bodies stay literal,
 // whitespace-preserving text. Long bodies still fold by default.
 function renderConversationRecord(norm) {
+  // Engine step events — render the raw event chip + the default-expanded
+  // step report card. Not a chat turn; bypasses the role-based bubble path.
+  if (norm.kind === "step_completed" || norm.kind === "step_failed") {
+    return renderStepEventRecord(norm);
+  }
+
   const known = ["user", "assistant", "system"].includes(norm.role);
   const role = known ? norm.role : "other";
-  const row = el("div", "history-record conv-record role-" + role);
-
   const content = typeof norm.content === "string" ? norm.content : "";
+
+  // user role with a template/user-content marker: a default-collapsed chip
+  // for the boilerplate prefix + a default-expanded bubble for the actual
+  // task content. Falls through to the legacy whole-chip path when there is
+  // no marker (older / non-step prompts).
+  if (norm.role === "user" && content) {
+    const split = splitUserPromptByMarker(content);
+    if (split) return renderUserMarkerRecord(norm, split);
+  }
+
+  const row = el("div", "history-record conv-record role-" + role);
 
   // Build the inner bubble lazily so a collapsed chip pays nothing until the
   // reader expands it.
@@ -1822,6 +1910,783 @@ function renderConversationRecord(norm) {
   if (rawToggle) row.appendChild(rawToggle);
   return row;
 }
+
+// ---------------------------------------------------------------------------
+// Step event records (step_completed / step_failed)
+// ---------------------------------------------------------------------------
+
+// Build the conversation-row form of a step_completed / step_failed event:
+// the raw event surfaces as a default-collapsed chip (preserving the original
+// raw payload for inspection), and the default-expanded step-report card sits
+// right below it. Both live under the same `.history-step` container as the
+// step's chat messages, so they group naturally with that step's discussion.
+function renderStepEventRecord(norm) {
+  const isFailed = norm.kind === "step_failed";
+  const row = el(
+    "div",
+    "history-record conv-record role-step-event kind-" + norm.kind,
+  );
+
+  const verb = isFailed ? "Step failed" : "Step completed";
+  const icon = isFailed ? "✗" : "✓";
+  const stepLabel = norm.stepType
+    ? (STEP_REPORT_TITLES[String(norm.stepType).toLowerCase()] || norm.stepType)
+    : "step";
+  const label = `${icon} ${verb} · ${stepLabel}`;
+
+  // Raw event chip — collapsed by default; expand to inspect the source JSON.
+  const chipWrap = el("div", "msg-chip-wrap collapsed step-event-chip kind-" + norm.kind);
+  const chip = el("button", "msg-chip step-event-chip-button", "▸ " + label);
+  chip.type = "button";
+  const detail = el("div", "msg-chip-detail");
+  let chipBuilt = false;
+  let chipExpanded = false;
+  chip.addEventListener("click", () => {
+    chipExpanded = !chipExpanded;
+    if (chipExpanded && !chipBuilt) {
+      detail.appendChild(
+        el("pre", "raw-json", formatRaw(norm.raw && norm.raw.raw_json)),
+      );
+      chipBuilt = true;
+    }
+    chipWrap.classList.toggle("collapsed", !chipExpanded);
+    chip.textContent = (chipExpanded ? "▾ " : "▸ ") + label;
+    if (chipExpanded) {
+      requestAnimationFrame(() => detail.scrollIntoView({ block: "nearest" }));
+    }
+  });
+  chipWrap.append(chip, detail);
+  row.appendChild(chipWrap);
+
+  // Default-expanded report card (still collapsible by the reader).
+  const card = norm.stepReport ? renderStepReport({
+    step_type: norm.stepReport.step_type,
+    step_id: norm.stepReport.step_id,
+    status: norm.stepReport.status,
+    outputs: norm.stepReport.outputs || {},
+    error_message: norm.stepReport.error_message || "",
+  }) : null;
+  if (card) row.appendChild(card);
+
+  return row;
+}
+
+// ---------------------------------------------------------------------------
+// User-prompt marker record (template prefix chip + actual content bubble)
+// ---------------------------------------------------------------------------
+
+// Build the row for a `user` message whose body has a TEMPLATE_PREFIX_END
+// marker. The prefix (system-instructions boilerplate) goes into a default-
+// collapsed chip; the user's actual task content goes into a default-expanded
+// bubble below the chip. The raw payload toggle stays available for both.
+function renderUserMarkerRecord(norm, split) {
+  const row = el("div", "history-record conv-record role-user user-prompt-marker");
+
+  const ctx = norm.stepType || norm.stepId || "step";
+  const label = `system prompt · ${ctx}`;
+  const chipWrap = el("div", "msg-chip-wrap collapsed user-prompt-chip");
+  const chip = el("button", "msg-chip", "▸ " + label);
+  chip.type = "button";
+  const chipDetail = el("div", "msg-chip-detail");
+  let chipBuilt = false;
+  let chipExpanded = false;
+  chip.addEventListener("click", () => {
+    chipExpanded = !chipExpanded;
+    if (chipExpanded && !chipBuilt) {
+      chipDetail.appendChild(el("pre", "conv-plain", split.prefix));
+      chipBuilt = true;
+    }
+    chipWrap.classList.toggle("collapsed", !chipExpanded);
+    chip.textContent = (chipExpanded ? "▾ " : "▸ ") + label;
+    if (chipExpanded) {
+      requestAnimationFrame(() => chipDetail.scrollIntoView({ block: "nearest" }));
+    }
+  });
+  chipWrap.append(chip, chipDetail);
+  row.appendChild(chipWrap);
+
+  // Default-expanded bubble carrying the user's real task content. Literal
+  // text is preserved so the exact prompt body the LLM saw is reproduced.
+  const bubble = el("div", "conv-bubble user-content-bubble");
+  bubble.appendChild(el("pre", "conv-plain", split.content));
+  row.appendChild(bubble);
+
+  const rawToggle = makeRawToggle(norm);
+  if (rawToggle) row.appendChild(rawToggle);
+
+  return row;
+}
+
+// ---------------------------------------------------------------------------
+// Step report cards
+// ---------------------------------------------------------------------------
+//
+// Each completed step emits a `step_completed` event whose data carries a
+// snapshot of the step's structured outputs. We mirror the CLI-side
+// `src/se3/engine/step_renderers.py` registry with a per-step renderer that
+// turns those outputs into a human-readable HTML card. Cards are default-
+// expanded (but still collapsible) and always sit alongside the raw event
+// chip — never replace it.
+
+const STEP_REPORT_TITLES = {
+  discovery: "Discovery",
+  analyze: "Analysis",
+  project_summary: "Project Summary",
+  propose: "Proposal",
+  design: "Design",
+  plan: "Planning",
+  plan_tasks: "Task Planning",
+  confirm: "Confirmation",
+  implement: "Implementation",
+  test: "Testing",
+  self_check: "Self Check",
+  verify_spec: "Spec Verification",
+  update_spec: "Spec Update",
+  version_analyze: "Version Analysis",
+  commit: "Commit",
+  summarize: "Work Summary",
+};
+
+// Build a default-open collapsible report card. `buildBody()` is invoked
+// immediately so the body is rendered out of the gate; on a later toggle
+// it is preserved (not rebuilt) so the reader's expand-state on inner
+// foldables is not lost.
+function makeReportCard(stepType, titleText, buildBody) {
+  const card = el("div", "step-report kind-" + stepType);
+  const head = el("div", "step-report__head");
+  const toggle = el("button", "step-report__toggle", "▾");
+  toggle.type = "button";
+  head.append(toggle, el("span", "step-report__title", titleText));
+  card.appendChild(head);
+
+  const body = el("div", "step-report__body");
+  body.appendChild(buildBody());
+  card.appendChild(body);
+
+  let open = true;
+  toggle.addEventListener("click", () => {
+    open = !open;
+    body.classList.toggle("hidden", !open);
+    toggle.textContent = open ? "▾" : "▸";
+    if (open) {
+      requestAnimationFrame(() => body.scrollIntoView({ block: "nearest" }));
+    }
+  });
+  // Header text is also clickable for a wider hit target.
+  head.addEventListener("click", (e) => {
+    if (e.target === toggle) return;
+    toggle.click();
+  });
+  return card;
+}
+
+// Public dispatch entry point: returns a default-expanded report card for the
+// step, dispatching by `step_type` and falling back to a generic renderer for
+// unregistered types (parity with `step_renderers.py:_default_render`).
+function renderStepReport(step) {
+  if (!step || typeof step !== "object") return null;
+  const stepType = String(step.step_type || "").toLowerCase();
+  const renderer = STEP_REPORT_RENDERERS[stepType] || renderDefaultReport;
+  const title =
+    "Report — " + (STEP_REPORT_TITLES[stepType] || stepType || "Step");
+  return makeReportCard(stepType || "unknown", title, () => {
+    const body = renderer(step, step.outputs || {});
+    const frag = document.createDocumentFragment();
+    if (body instanceof Node) frag.appendChild(body);
+    if (step.error_message) {
+      frag.appendChild(el("div", "step-report__error",
+        "Error: " + String(step.error_message)));
+    }
+    return frag;
+  });
+}
+
+// -- shared report-card building blocks --
+
+function reportEmpty(text) {
+  return el("p", "step-report__empty", text || "(no report fields)");
+}
+
+function reportStatusBar(parts) {
+  const bar = el("div", "step-report__status-bar");
+  parts.forEach((p, idx) => {
+    if (idx > 0) bar.appendChild(el("span", "step-report__sep", "│"));
+    if (p instanceof Node) bar.appendChild(p);
+    else bar.appendChild(el("span", "step-report__stat", String(p)));
+  });
+  return bar;
+}
+
+function reportSection(title, body) {
+  const sec = el("div", "step-report__section");
+  if (title) sec.appendChild(el("h6", "step-report__section-title", title));
+  if (body instanceof Node) sec.appendChild(body);
+  else if (typeof body === "string") sec.appendChild(
+    el("p", "step-report__text", body));
+  return sec;
+}
+
+function reportList(items, formatItem) {
+  const ul = el("ul", "step-report__list");
+  for (const item of items) {
+    const li = el("li");
+    const out = formatItem ? formatItem(item) : null;
+    if (out instanceof Node) li.appendChild(out);
+    else if (typeof out === "string") li.textContent = out;
+    else if (typeof item === "string") li.textContent = item;
+    else li.textContent = safeStringify(item);
+    ul.appendChild(li);
+  }
+  return ul;
+}
+
+// -- default fallback (parity with step_renderers.py:_default_render) -------
+
+function renderDefaultReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const entries = outputs && typeof outputs === "object"
+    ? Object.entries(outputs) : [];
+  if (!entries.length) {
+    frag.appendChild(reportEmpty("(step produced no outputs)"));
+  } else {
+    const kv = el("div", "step-report__kv");
+    for (const [k, v] of entries) {
+      const r = el("div", "step-report__kv-row");
+      r.append(el("span", "step-report__kv-k", k));
+      const valEl = el("span", "step-report__kv-v");
+      if (typeof v === "string" && v.length > 300) {
+        valEl.textContent = v.slice(0, 200).replace(/\n/g, " ") + "…";
+        valEl.title = `${v.length} chars`;
+      } else if (typeof v === "string") {
+        valEl.textContent = v;
+      } else {
+        valEl.textContent = safeStringify(v);
+      }
+      r.appendChild(valEl);
+      kv.appendChild(r);
+    }
+    frag.appendChild(kv);
+  }
+  const status = step.status && String(step.status).toLowerCase();
+  if (status && status !== "completed" && status !== "running") {
+    frag.appendChild(el("div", "step-report__muted", "Status: " + status));
+  }
+  return frag;
+}
+
+// -- analyze (parity with step_renderers.py:_render_analyze) ----------------
+
+function renderAnalyzeReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  frag.appendChild(reportStatusBar([
+    `task: ${outputs.task_type || "N/A"}`,
+    `complexity: ${outputs.complexity || "N/A"}`,
+    `scope: ${outputs.scope || "N/A"}`,
+  ]));
+  if (outputs.reasoning) {
+    frag.appendChild(reportSection("Reasoning", String(outputs.reasoning)));
+  }
+  const items = (Array.isArray(outputs.selected_items) && outputs.selected_items.length)
+    ? outputs.selected_items
+    : (Array.isArray(outputs.relevant_specs) ? outputs.relevant_specs : []);
+  if (items.length) {
+    frag.appendChild(reportSection(`Relevant Spec Items (${items.length})`,
+      reportList(items, (it) => {
+        if (it && typeof it === "object") {
+          const spec = it.spec || it.spec_name || "";
+          const name = it.requirement_name || it.name || "";
+          const label = (spec && name)
+            ? `${spec}:${name}`
+            : (spec || name || safeStringify(it));
+          return document.createTextNode(label);
+        }
+        return document.createTextNode(String(it));
+      })));
+  }
+  return frag;
+}
+
+// -- plan (parity with step_renderers.py:_render_plan) ----------------------
+
+function renderPlanReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const plan = outputs.plan && typeof outputs.plan === "object"
+    ? outputs.plan : {};
+  const proposal = plan.proposal;
+  const design = plan.design;
+  const groups = Array.isArray(outputs.task_groups) ? outputs.task_groups : [];
+
+  if (proposal && typeof proposal === "object") {
+    frag.appendChild(reportSection("Proposal", renderStructured(proposal)));
+  } else if (typeof proposal === "string" && proposal) {
+    frag.appendChild(reportSection("Proposal", proposal));
+  }
+  if (design && typeof design === "object") {
+    frag.appendChild(reportSection("Design", renderStructured(design)));
+  } else if (typeof design === "string" && design) {
+    frag.appendChild(reportSection("Design", design));
+  }
+  if (groups.length) {
+    frag.appendChild(reportSection(`Task Groups (${groups.length})`,
+      reportList(groups, (g) => {
+        const tasks = Array.isArray(g && g.tasks) ? g.tasks : [];
+        const totalLoc = tasks.reduce(
+          (s, t) => s + (Number(t && t.estimated_loc) || 0), 0);
+        const deps = Array.isArray(g && g.depends_on) && g.depends_on.length
+          ? g.depends_on.join(", ") : "none";
+        const row = el("span", "step-report__group-row");
+        row.append(
+          el("span", "step-report__group-id", String(g.group_id || "?")),
+          el("span", "step-report__group-name", " " + String(g.name || "")),
+          el("span", "step-report__muted",
+            `  · ${tasks.length} tasks · ~${totalLoc} LOC · depends: ${deps}`),
+        );
+        return row;
+      })));
+  }
+  if (!frag.childNodes.length) {
+    return renderDefaultReport(step, outputs);
+  }
+  return frag;
+}
+
+// Render arbitrary nested data as a pre-formatted JSON block (no height cap).
+function renderStructured(data) {
+  const pre = el("pre", "step-report__json");
+  pre.textContent = safeStringify(data);
+  return pre;
+}
+
+// -- implement (parity with step_renderers.py:_render_implement) ------------
+
+function renderImplementReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const status = String(outputs.completion_status || "unknown");
+  const filesChanged = Array.isArray(outputs.files_changed) ? outputs.files_changed : [];
+  const testsAdded = Array.isArray(outputs.tests_added) ? outputs.tests_added : [];
+  const implGroups = Array.isArray(outputs.implemented_groups) ? outputs.implemented_groups : [];
+  const summary = outputs.summary || "";
+  const incomplete = Array.isArray(outputs.incomplete_tasks) ? outputs.incomplete_tasks : [];
+  const restrictedApplied = Array.isArray(outputs.restricted_edits_applied) ? outputs.restricted_edits_applied : [];
+  const restrictedFailed = Array.isArray(outputs.restricted_edits_failed) ? outputs.restricted_edits_failed : [];
+
+  const icons = { complete: "✓", partial: "◐", failed: "✗" };
+  const classes = { complete: "ok", partial: "warn", failed: "fail" };
+  const cls = classes[status] || "muted";
+
+  const bar = el("div", "step-report__status-bar");
+  bar.append(
+    el("span", "step-report__icon " + cls, icons[status] || "●"),
+    el("span", "step-report__label " + cls, status),
+  );
+  if (implGroups.length) {
+    bar.append(el("span", "step-report__sep", "│"),
+      el("span", null, `${implGroups.length} groups`));
+  }
+  bar.append(
+    el("span", "step-report__sep", "│"),
+    el("span", null, `${filesChanged.length} files`),
+  );
+  if (testsAdded.length) {
+    bar.append(el("span", "step-report__sep", "│"),
+      el("span", null, `${testsAdded.length} tests`));
+  }
+  frag.appendChild(bar);
+
+  if (summary) {
+    const parts = String(summary).split(";").map((s) => s.trim()).filter(Boolean);
+    if (parts.length <= 1) {
+      frag.appendChild(reportSection("Summary", parts[0] || String(summary)));
+    } else {
+      frag.appendChild(reportSection("Summary",
+        reportList(parts, (p, i) => {
+          const span = el("span");
+          span.appendChild(el("span", "step-report__group-id",
+            (implGroups.length ? `G${i + 1}` : String(i + 1)) + "."));
+          span.appendChild(document.createTextNode(" " + p));
+          return span;
+        })));
+    }
+  }
+
+  if (filesChanged.length) {
+    const grouped = {};
+    for (const fp of filesChanged) {
+      const norm = String(fp).replace(/\\/g, "/");
+      const parts = norm.split("/");
+      const dir = parts.length > 1 ? parts[0] + "/" : "./";
+      (grouped[dir] = grouped[dir] || []).push(norm);
+    }
+    const sortedDirs = Object.keys(grouped).sort((a, b) => {
+      if (a === b) return 0;
+      if (a === "./") return 1;
+      if (b === "./") return -1;
+      return a.localeCompare(b);
+    });
+    const wrap = el("div", "step-report__files");
+    for (const dir of sortedDirs) {
+      const list = grouped[dir].slice().sort();
+      const dirEl = el("div", "step-report__file-group");
+      dirEl.appendChild(el("div", "step-report__file-dir",
+        `${dir} (${list.length})`));
+      for (const f of list) {
+        dirEl.appendChild(el("div", "step-report__file-row", f));
+      }
+      wrap.appendChild(dirEl);
+    }
+    frag.appendChild(reportSection(
+      `Files Changed (${filesChanged.length})`, wrap));
+  }
+
+  if (testsAdded.length) {
+    frag.appendChild(reportSection(`Tests Added (${testsAdded.length})`,
+      reportList(testsAdded, (t) => document.createTextNode("+ " + String(t)))));
+  }
+
+  if (incomplete.length) {
+    frag.appendChild(reportSection(`Incomplete Tasks (${incomplete.length})`,
+      reportList(incomplete, (t) => {
+        if (t && typeof t === "object") {
+          const tid = t.task_id || t.id || "?";
+          const reason = t.reason || t.error || "";
+          const row = el("span");
+          row.appendChild(el("span", "step-report__group-id", String(tid)));
+          if (reason) row.appendChild(document.createTextNode(": " + reason));
+          return row;
+        }
+        return document.createTextNode(String(t));
+      })));
+  }
+
+  if (restrictedApplied.length || restrictedFailed.length) {
+    const body = el("div");
+    if (restrictedApplied.length) {
+      body.appendChild(el("div", "step-report__muted",
+        `Restricted edits applied: ${restrictedApplied.length}`));
+    }
+    if (restrictedFailed.length) {
+      body.appendChild(el("div", "step-report__warn",
+        `Restricted edits failed: ${restrictedFailed.length}`));
+      body.appendChild(reportList(restrictedFailed, (e) => {
+        if (e && typeof e === "object") {
+          return document.createTextNode(String(
+            e.file || e.file_path || e.path || safeStringify(e)));
+        }
+        return document.createTextNode(String(e));
+      }));
+    }
+    frag.appendChild(reportSection("Restricted Edits", body));
+  }
+  return frag;
+}
+
+// -- test (parity with step_renderers.py:_render_test) ----------------------
+
+function renderTestReport(step, outputs) {
+  const results = outputs.test_results;
+  if (!results || typeof results !== "object") {
+    return renderDefaultReport(step, outputs);
+  }
+  const frag = document.createDocumentFragment();
+  const overall = results.overall_passed != null
+    ? results.overall_passed : results.passed;
+
+  const bar = el("div", "step-report__status-bar");
+  bar.appendChild(el("span", "step-report__label " + (overall ? "ok" : "fail"),
+    overall ? "PASSED" : "FAILED"));
+  const phases = Array.isArray(results.phases) ? results.phases : [];
+  if (phases.length) {
+    const passed = phases.filter((p) => p && p.passed).length;
+    bar.append(el("span", "step-report__sep", "│"),
+      el("span", null, `${passed} / ${phases.length} phases`));
+  }
+  frag.appendChild(bar);
+
+  if (phases.length) {
+    frag.appendChild(reportSection("Phases", reportList(phases, (p) => {
+      const ok = !!(p && p.passed);
+      const row = el("span");
+      row.appendChild(el("span", "step-report__icon " + (ok ? "ok" : "fail"),
+        ok ? "✓" : "✗"));
+      row.appendChild(document.createTextNode(" " + (p && p.name || "?")));
+      return row;
+    })));
+  }
+  if (results.command) {
+    frag.appendChild(reportSection("Command", String(results.command)));
+  }
+  return frag;
+}
+
+// -- self_check (parity with step_renderers.py:_render_self_check) ----------
+
+function renderSelfCheckReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const actionable = outputs.actionable_count != null
+    ? Number(outputs.actionable_count) : 0;
+  const issues = Array.isArray(outputs.issues) ? outputs.issues : [];
+  const status = String(step.status || "").toLowerCase();
+
+  const bar = el("div", "step-report__status-bar");
+  if (status === "failed") {
+    bar.appendChild(el("span", "step-report__label fail", "✗ FAILED"));
+  } else if (actionable === 0) {
+    bar.appendChild(el("span", "step-report__label ok", "✓ PASSED"));
+  } else {
+    bar.appendChild(el("span", "step-report__label fail",
+      `✗ ${actionable} actionable issue(s)`));
+  }
+  frag.appendChild(bar);
+
+  const result = outputs.self_check_result;
+  const summary = result && typeof result === "object" ? result.summary : "";
+  if (summary) frag.appendChild(reportSection("Summary", String(summary)));
+
+  if (issues.length) {
+    const bySev = { critical: [], high: [], medium: [], low: [] };
+    for (const i of issues) {
+      if (!i || typeof i !== "object") continue;
+      const sev = String(i.severity || "medium").toLowerCase();
+      (bySev[sev] || bySev.medium).push(i);
+    }
+    for (const sev of ["critical", "high", "medium", "low"]) {
+      const grp = bySev[sev];
+      if (!grp || !grp.length) continue;
+      frag.appendChild(reportSection(`${sev} (${grp.length})`,
+        reportList(grp, (i) => {
+          const desc = i.description || i.message || safeStringify(i);
+          const loc = i.location || "";
+          const row = el("span");
+          row.appendChild(document.createTextNode(String(desc)));
+          if (loc) row.appendChild(
+            el("span", "step-report__muted", " @ " + loc));
+          return row;
+        })));
+    }
+  }
+  if (outputs.warning) {
+    frag.appendChild(el("div", "step-report__warn", "⚠ " + outputs.warning));
+  }
+  return frag;
+}
+
+// -- verify_spec (parity with step_renderers.py:_render_verify_spec) --------
+
+function renderVerifySpecReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const verified = outputs.verified != null
+    ? !!outputs.verified
+    : (outputs.fix_needed != null ? !outputs.fix_needed : null);
+
+  const bar = el("div", "step-report__status-bar");
+  if (verified === true) {
+    bar.appendChild(el("span", "step-report__label ok", "✓ PASSED"));
+  } else if (verified === false) {
+    bar.appendChild(el("span", "step-report__label fail", "✗ FAILED"));
+  } else {
+    bar.appendChild(el("span", "step-report__label muted", "?"));
+  }
+  frag.appendChild(bar);
+
+  const vRes = outputs.verification_result;
+  const summary = outputs.summary
+    || (vRes && typeof vRes === "object" ? vRes.summary : "");
+  if (summary) frag.appendChild(reportSection("Summary", String(summary)));
+
+  const issues = Array.isArray(outputs.issues) ? outputs.issues : [];
+  if (issues.length) {
+    const byScope = { in_scope: [], out_of_scope: [] };
+    for (const i of issues) {
+      if (!i || typeof i !== "object") {
+        byScope.in_scope.push({ message: String(i), priority: "medium" });
+        continue;
+      }
+      const sc = String(i.scope || "in_scope");
+      (byScope[sc] = byScope[sc] || []).push(i);
+    }
+    const scopes = [
+      ["In-scope", "in_scope"],
+      ["Out-of-scope", "out_of_scope"],
+    ];
+    for (const [label, key] of scopes) {
+      const grp = byScope[key];
+      if (!grp || !grp.length) continue;
+      frag.appendChild(reportSection(`${label} (${grp.length})`,
+        reportList(grp, (i) => {
+          const msg = i.message || safeStringify(i);
+          const prio = String(i.priority || "medium").toLowerCase();
+          const row = el("span");
+          row.appendChild(el("span", "step-report__prio " + prio,
+            "[" + prio + "]"));
+          row.appendChild(document.createTextNode(" " + msg));
+          if (i.suggestion) {
+            row.appendChild(el("div", "step-report__muted",
+              "→ " + i.suggestion));
+          }
+          return row;
+        })));
+    }
+  }
+
+  const recs = (Array.isArray(outputs.recommendations) && outputs.recommendations.length)
+    ? outputs.recommendations
+    : (vRes && typeof vRes === "object" && Array.isArray(vRes.recommendations)
+      ? vRes.recommendations : []);
+  if (recs.length) {
+    frag.appendChild(reportSection("Recommendations",
+      reportList(recs, (r) => document.createTextNode(String(r)))));
+  }
+  return frag;
+}
+
+// -- update_spec (parity with step_renderers.py:_render_update_spec) --------
+
+function renderUpdateSpecReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const specs = outputs.updated_specs || outputs.specs_updated || [];
+  const caps = outputs.new_capabilities || [];
+  if (!Array.isArray(specs)) {
+    return renderDefaultReport(step, outputs);
+  }
+  if (!specs.length && !(Array.isArray(caps) && caps.length)) {
+    frag.appendChild(reportEmpty("No spec updates needed"));
+    return frag;
+  }
+  if (specs.length) {
+    frag.appendChild(reportSection(`Updated Specs (${specs.length})`,
+      reportList(specs, (s) => {
+        if (s && typeof s === "object") {
+          const name = s.spec_name || s.name || "unknown";
+          const desc = s.change_description || s.description || "";
+          const row = el("span");
+          row.appendChild(el("span", "step-report__icon ok", "✓ "));
+          row.appendChild(el("strong", null, String(name)));
+          if (desc) row.appendChild(document.createTextNode(": " + desc));
+          return row;
+        }
+        return document.createTextNode("✓ " + String(s));
+      })));
+  }
+  if (Array.isArray(caps) && caps.length) {
+    frag.appendChild(reportSection("New Capabilities",
+      reportList(caps, (c) => document.createTextNode(String(c)))));
+  }
+  return frag;
+}
+
+// -- commit (parity with step_renderers.py:_render_commit) ------------------
+
+function renderCommitReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  if (!outputs.committed) {
+    frag.appendChild(reportEmpty("No changes to commit"));
+    return frag;
+  }
+  const hash = String(outputs.commit_hash || "");
+  const shortHash = hash.length > 7 ? hash.slice(0, 7) : (hash || "N/A");
+  const bar = el("div", "step-report__status-bar");
+  bar.appendChild(el("span", "step-report__label ok", shortHash));
+  if (outputs.version_bumped && outputs.version) {
+    bar.append(
+      el("span", "step-report__sep", "│"),
+      el("span", "step-report__label highlight", "v" + outputs.version),
+    );
+  }
+  frag.appendChild(bar);
+  if (outputs.commit_message) {
+    frag.appendChild(reportSection("Commit Message",
+      String(outputs.commit_message)));
+  }
+  return frag;
+}
+
+// -- version_analyze (parity with step_renderers.py:_render_version_analyze)
+
+function renderVersionAnalyzeReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const bar = el("div", "step-report__status-bar");
+  bar.append(
+    el("span", null, String(outputs.current_version || "N/A")),
+    el("span", "step-report__sep", "→"),
+    el("span", "step-report__label highlight",
+      String(outputs.suggested_version || "N/A")),
+  );
+  frag.appendChild(bar);
+  frag.appendChild(el("div", "step-report__muted",
+    `${outputs.bump_type || "?"} bump  │  confidence: ${outputs.confidence || "?"}`));
+  if (outputs.reasoning) {
+    frag.appendChild(reportSection("Reasoning", String(outputs.reasoning)));
+  }
+  return frag;
+}
+
+// -- summarize (parity with step_renderers.py:_render_summarize) ------------
+
+function renderSummarizeReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  const summary = outputs.summary || "";
+  if (summary) {
+    const wrap = el("div", "step-report__markdown");
+    wrap.appendChild(renderMarkdown(String(summary)));
+    frag.appendChild(wrap);
+  } else {
+    frag.appendChild(reportEmpty("(no summary)"));
+  }
+  return frag;
+}
+
+// -- discovery (parity with CLI default; outputs vary by mode) --------------
+
+function renderDiscoveryReport(step, outputs) {
+  const frag = document.createDocumentFragment();
+  if (outputs.refined_description) {
+    frag.appendChild(reportSection("Refined Description",
+      String(outputs.refined_description)));
+  }
+  const dState = outputs.discovery_state;
+  const mode = (dState && typeof dState === "object" && dState.mode)
+    || outputs.mode;
+  if (mode) frag.appendChild(reportSection("Mode", String(mode)));
+  const round = (dState && typeof dState === "object" && dState.round != null)
+    ? dState.round : null;
+  if (round != null) {
+    frag.appendChild(el("div", "step-report__muted",
+      "Round: " + String(round)));
+  }
+  const conv = outputs.conversation_history;
+  if (Array.isArray(conv) && conv.length) {
+    frag.appendChild(reportSection(`Conversation (${conv.length} turns)`,
+      reportList(conv, (turn) => {
+        if (turn && typeof turn === "object") {
+          const role = turn.role || "?";
+          const text = turn.content || turn.text || safeStringify(turn);
+          const row = el("div", "step-report__conv-turn");
+          row.appendChild(el("span", "step-report__kv-k", role + ":"));
+          row.appendChild(document.createTextNode(" " + text));
+          return row;
+        }
+        return document.createTextNode(String(turn));
+      })));
+  }
+  if (!frag.childNodes.length) {
+    return renderDefaultReport(step, outputs);
+  }
+  return frag;
+}
+
+const STEP_REPORT_RENDERERS = {
+  analyze: renderAnalyzeReport,
+  plan: renderPlanReport,
+  implement: renderImplementReport,
+  test: renderTestReport,
+  self_check: renderSelfCheckReport,
+  verify_spec: renderVerifySpecReport,
+  update_spec: renderUpdateSpecReport,
+  commit: renderCommitReport,
+  version_analyze: renderVersionAnalyzeReport,
+  summarize: renderSummarizeReport,
+  discovery: renderDiscoveryReport,
+};
 
 // Build the role / attempt / timestamp header line for one record.
 function renderRecordHead(norm) {
@@ -2069,5 +2934,10 @@ if (typeof module !== "undefined" && module.exports) {
     optionText,
     pendingCalls,
     populateProjectSelect,
+    splitUserPromptByMarker,
+    STEP_REPORT_TITLES,
+    STEP_REPORT_RENDERERS,
+    TEMPLATE_PREFIX_END,
+    USER_CONTENT_BEGIN,
   };
 }

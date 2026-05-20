@@ -279,4 +279,103 @@ check("populateProjectSelect: multiple roots leaves placeholder selected", () =>
   assert.equal(sel.options[2].value, "/proj/b");
 });
 
+// -- splitUserPromptByMarker -----------------------------------------------
+// The frontend splits a user-role prompt at the sentinel markers the engine
+// injects (TEMPLATE_PREFIX_END / USER_CONTENT_BEGIN) so the boilerplate
+// prefix renders as a default-collapsed chip and the actual user content
+// renders as a default-expanded bubble. Absent markers (legacy / non-step
+// prompts) fall back to the whole-message chip path — the helper returns
+// null so the caller can.
+check("splitUserPromptByMarker splits when both markers present", () => {
+  const TPE = app.TEMPLATE_PREFIX_END;
+  const UCB = app.USER_CONTENT_BEGIN;
+  const sample = "You are an expert engineer.\n" + TPE + "\n" + UCB + "\n## Task\nDo it";
+  const split = app.splitUserPromptByMarker(sample);
+  assert.ok(split, "split returned null but should have");
+  assert.equal(split.prefix.startsWith("You are an expert engineer."), true);
+  assert.equal(split.content.startsWith("## Task"), true);
+});
+check("splitUserPromptByMarker returns null without markers (legacy)", () => {
+  assert.equal(app.splitUserPromptByMarker("plain user message"), null);
+});
+check("splitUserPromptByMarker handles empty / non-string input", () => {
+  assert.equal(app.splitUserPromptByMarker(""), null);
+  assert.equal(app.splitUserPromptByMarker(null), null);
+  assert.equal(app.splitUserPromptByMarker(undefined), null);
+});
+check("splitUserPromptByMarker tolerates missing USER_CONTENT_BEGIN", () => {
+  const TPE = app.TEMPLATE_PREFIX_END;
+  const sample = "prefix only\n" + TPE + "\nuser content here";
+  const split = app.splitUserPromptByMarker(sample);
+  assert.ok(split);
+  assert.equal(split.prefix, "prefix only\n");
+  assert.equal(split.content, "user content here");
+});
+
+// -- normalizeRecord: step_completed event ---------------------------------
+// A step_completed (or step_failed) event riding the conversation channel
+// carries `type` + structured `data.step` instead of a chat-style role; the
+// normalized form exposes `kind` and `stepReport` so the renderer can build
+// both the raw event chip and the default-expanded report card.
+check("normalizeRecord recognises step_completed event", () => {
+  const norm = app.normalizeRecord({
+    step_id: "07_test",
+    message: {
+      type: "step_completed",
+      step_id: "07_test",
+      step_type: "test",
+      timestamp: 1234,
+      data: {
+        step: {
+          step_id: "07_test",
+          step_type: "test",
+          status: "completed",
+          outputs: { test_results: { overall_passed: true } },
+        },
+      },
+    },
+  });
+  assert.equal(norm.kind, "step_completed");
+  assert.equal(norm.role, "step-event");
+  assert.equal(norm.stepType, "test");
+  assert.ok(norm.stepReport);
+  assert.equal(norm.stepReport.outputs.test_results.overall_passed, true);
+});
+check("normalizeRecord recognises step_failed event", () => {
+  const norm = app.normalizeRecord({
+    message: {
+      type: "step_failed",
+      step_type: "implement",
+      data: { step: { step_type: "implement", status: "failed", outputs: {} } },
+    },
+  });
+  assert.equal(norm.kind, "step_failed");
+  assert.equal(norm.stepReport.status, "failed");
+});
+
+// -- step report renderer registry -----------------------------------------
+check("STEP_REPORT_RENDERERS covers the 11 named step types", () => {
+  const expected = [
+    "analyze", "plan", "implement", "test", "self_check", "verify_spec",
+    "update_spec", "commit", "version_analyze", "summarize", "discovery",
+  ];
+  for (const t of expected) {
+    assert.equal(
+      typeof app.STEP_REPORT_RENDERERS[t], "function",
+      "missing renderer for " + t,
+    );
+  }
+  // Exactly 11 — the CLI registry has 11 custom renderers (PROPOSE/DESIGN are
+  // deprecated and intentionally excluded; DISCOVERY adds a frontend renderer).
+  assert.equal(Object.keys(app.STEP_REPORT_RENDERERS).length, expected.length);
+});
+check("STEP_REPORT_TITLES covers every step type from models.StepType", () => {
+  const expected = [
+    "discovery", "analyze", "project_summary", "propose", "design", "plan",
+    "plan_tasks", "confirm", "implement", "test", "self_check", "verify_spec",
+    "update_spec", "version_analyze", "commit", "summarize",
+  ];
+  for (const t of expected) assert.ok(app.STEP_REPORT_TITLES[t], "missing title " + t);
+});
+
 console.log(`\n${passed} checks passed.`);
