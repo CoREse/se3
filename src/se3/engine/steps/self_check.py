@@ -370,6 +370,11 @@ Respond in JSON format:
 If the implementation is solid with no issues found, return an empty issues array (and an empty previous_issue_resolutions array if there were no prev_issues).
 """
 
+# Two-segment marker only: USER_CONTENT region is empty.
+# self_check consumes upstream artifacts (changes_made / test_results /
+# task_groups / spec_content); no user-literal field is appended here. The
+# web console renders the whole post-BEGIN tail inside the collapsed
+# system-prompt chip.
 SELF_CHECK_PROMPT = inject_boundary(SELF_CHECK_PROMPT, "## Task Description\n")
 
 

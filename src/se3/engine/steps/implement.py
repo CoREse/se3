@@ -300,10 +300,11 @@ IMPLEMENT_PROMPT = IMPLEMENT_PROMPT + "\n" + VERSION_FILE_GUARDRAIL
 IMPLEMENT_GROUP_PROMPT = IMPLEMENT_GROUP_PROMPT + "\n" + VERSION_FILE_GUARDRAIL
 FIX_PROMPT = FIX_PROMPT + "\n" + VERSION_FILE_GUARDRAIL + FIX_VERSION_FILE_GUARDRAIL
 
-# Splice sentinel markers between the boilerplate system-instructions prefix
-# (role + Agent Safety section) and the task-/project-specific user content
-# section. The running-flow console uses these markers to render the prefix
-# as a collapsed chip and the user content as a default-expanded bubble.
+# Two-segment marker only: USER_CONTENT region is empty.
+# implement consumes upstream LLM artifacts (design / task_groups /
+# changes_made / test_results) and framework-derived task_description;
+# nothing at this assembly point is a user-literal field. The web console
+# renders the whole post-BEGIN tail inside the collapsed system-prompt chip.
 IMPLEMENT_PROMPT = inject_boundary(IMPLEMENT_PROMPT, "## Task Description\n")
 IMPLEMENT_GROUP_PROMPT = inject_boundary(
     IMPLEMENT_GROUP_PROMPT, "## Task Description\n",

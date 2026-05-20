@@ -94,6 +94,11 @@ When you are done, output a JSON summary:
 - If no spec updates are needed at all, return empty arrays for both `specs_updated` and `spec_decisions`.
 """
 
+# Two-segment marker only: USER_CONTENT region is empty.
+# update_spec consumes upstream artifacts (changes_made / verification_result /
+# spec_changes / design_doc / spec_content); no user-literal field is
+# appended here. The web console renders the whole post-BEGIN tail inside
+# the collapsed system-prompt chip.
 UPDATE_SPEC_PROMPT = inject_boundary(UPDATE_SPEC_PROMPT, "## Task Description\n")
 
 

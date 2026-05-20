@@ -44,8 +44,12 @@ PLAN_PROMPT_HEADER = """You are an expert software engineering assistant. Create
 {revision_section}
 """
 
-# Splice marker between the boilerplate prefix ("You are...") and the
-# project/task-specific content block beginning at "## Project Context".
+# Two-segment marker only: USER_CONTENT region is empty.
+# The plan step has no user-literal field at the prompt-assembly point —
+# every template field (task_description, proposal, design, project_context,
+# spec_content) is either upstream LLM output or framework-derived. The
+# web console therefore falls back to rendering the whole post-BEGIN tail
+# inside the collapsed system-prompt chip.
 PLAN_PROMPT_HEADER = inject_boundary(PLAN_PROMPT_HEADER, "## Project Context\n")
 
 PROPOSAL_SECTION = """## Part 1: Proposal

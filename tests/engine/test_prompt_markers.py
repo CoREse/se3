@@ -239,8 +239,13 @@ def test_user_content_anchor_is_in_suffix_segment():
         "IMPLEMENT_GROUP_PROMPT": "## Task Description\n",
         "FIX_PROMPT": "## Task Description\n",
         "ANALYZE_PROMPT": "Task description:\n",
-        "INITIAL_DISCOVERY_PROMPT": "## Project Context\n",
-        "CONTINUE_DISCOVERY_PROMPT": "## Project Context\n",
+        # Discovery prompts now use the three-segment marker protocol:
+        # the USER_CONTENT region wraps only the user's literal field
+        # ({initial_description} for the initial prompt, {user_response}
+        # for the continue prompt). Project Context / Available Specs /
+        # JSON schema / Guidelines all live in PREFIX or SUFFIX.
+        "INITIAL_DISCOVERY_PROMPT": "{initial_description}",
+        "CONTINUE_DISCOVERY_PROMPT": "{user_response}",
         "PLAN_PROMPT_HEADER": "## Project Context\n",
         "PLAN_TASKS_PROMPT": "## Task Description\n",
         "VERIFY_PROMPT": "## Task Description\n",

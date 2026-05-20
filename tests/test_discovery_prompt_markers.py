@@ -1,0 +1,187 @@
+"""Integration tests for the three-segment marker protocol in discovery prompts.
+
+These tests assert the contract that motivated the three-segment marker
+extension: after the discovery prompt templates are formatted with concrete
+runtime values, the substring strictly bounded by ``USER_CONTENT_BEGIN`` and
+``USER_CONTENT_END`` MUST equal the user's literal field
+(``initial_description`` for the initial prompt, ``user_response`` for the
+continue prompt), with no framework-injected text (Project Context,
+Available Specs, JSON schema, Guidelines, …) leaking into the user-content
+region.
+"""
+
+from __future__ import annotations
+
+from se3.engine.prompt_markers import (
+    TEMPLATE_PREFIX_END,
+    USER_CONTENT_BEGIN,
+    USER_CONTENT_END,
+)
+from se3.engine.steps.discovery import (
+    CONTINUE_DISCOVERY_PROMPT,
+    INITIAL_DISCOVERY_PROMPT,
+)
+
+
+# A representative, user-typed initial description that exercises the
+# evaluative/inquisitive code path from the discovery spec (Chinese prose
+# plus an embedded session reference), so we know unusual characters do not
+# break the marker boundary.
+_FIXED_INITIAL_DESCRIPTION = (
+    "你看一下这个session：se3/history/20260520-142159_30166ecb。"
+    "youtube下载问题依旧，你是不是没有进行e2e测试？"
+)
+_FIXED_USER_RESPONSE = (
+    "我想要的是把所有下载场景都跑一遍 e2e，而不是改 unit test。"
+)
+
+
+def _extract_user_segment(prompt: str) -> str:
+    """Return the substring strictly between USER_CONTENT_BEGIN and USER_CONTENT_END.
+
+    Asserts both markers exist exactly once and are in the canonical order.
+    """
+    assert prompt.count(TEMPLATE_PREFIX_END) == 1
+    assert prompt.count(USER_CONTENT_BEGIN) == 1
+    assert prompt.count(USER_CONTENT_END) == 1
+    i = prompt.index(TEMPLATE_PREFIX_END)
+    j = prompt.index(USER_CONTENT_BEGIN)
+    k = prompt.index(USER_CONTENT_END)
+    assert i < j < k, (
+        "marker order must be TEMPLATE_PREFIX_END < USER_CONTENT_BEGIN < "
+        f"USER_CONTENT_END; got positions {i}, {j}, {k}"
+    )
+    begin = j + len(USER_CONTENT_BEGIN)
+    return prompt[begin:k]
+
+
+def _render_initial(initial_description: str = _FIXED_INITIAL_DESCRIPTION) -> str:
+    return INITIAL_DISCOVERY_PROMPT.format(
+        initial_description=initial_description,
+        round_number=0,
+        conversation_history="(No conversation yet)",
+        project_context="Project Type: Python (pyproject.toml found)",
+        specs_info="Available Specs: base, flow-engine",
+        base_spec_content="Base specification content placeholder",
+    )
+
+
+def _render_continue(
+    user_response: str = _FIXED_USER_RESPONSE,
+    initial_description: str = _FIXED_INITIAL_DESCRIPTION,
+) -> str:
+    return CONTINUE_DISCOVERY_PROMPT.format(
+        initial_description=initial_description,
+        round_number=1,
+        conversation_history="ASSISTANT: some prior question",
+        user_response=user_response,
+        project_context="Project Type: Python (pyproject.toml found)",
+        specs_info="Available Specs: base, flow-engine",
+    )
+
+
+def test_initial_user_segment_equals_initial_description_stripped():
+    prompt = _render_initial()
+    user_seg = _extract_user_segment(prompt)
+    assert user_seg.strip() == _FIXED_INITIAL_DESCRIPTION.strip()
+
+
+def test_initial_user_segment_excludes_framework_text():
+    prompt = _render_initial()
+    user_seg = _extract_user_segment(prompt)
+    # Framework boilerplate MUST NOT leak into the user-content region.
+    for forbidden in (
+        "## Project Context",
+        "## Available Specifications",
+        "## Base Specification",
+        "## Discovery Context",
+        "Respond in JSON format",
+        "Handling Evaluative/Inquisitive",
+        "Guidelines:",
+        "You are an expert software engineering assistant",
+        "READ-ONLY",
+    ):
+        assert forbidden not in user_seg, (
+            f"forbidden framework substring {forbidden!r} leaked into "
+            f"INITIAL user-content region: {user_seg!r}"
+        )
+
+
+def test_continue_user_segment_equals_user_response_stripped():
+    prompt = _render_continue()
+    user_seg = _extract_user_segment(prompt)
+    assert user_seg.strip() == _FIXED_USER_RESPONSE.strip()
+
+
+def test_continue_user_segment_excludes_framework_text():
+    prompt = _render_continue()
+    user_seg = _extract_user_segment(prompt)
+    for forbidden in (
+        "## Project Context",
+        "## Available Specifications",
+        "## Discovery Context",
+        # initial_description echoed back as historical context belongs to
+        # PREFIX, NOT to the user-content region.
+        _FIXED_INITIAL_DESCRIPTION,
+        "Respond in JSON format",
+        "Handling Evaluative/Inquisitive",
+        "Guidelines:",
+        "You are an expert software engineering assistant",
+    ):
+        assert forbidden not in user_seg, (
+            f"forbidden framework substring {forbidden!r} leaked into "
+            f"CONTINUE user-content region"
+        )
+
+
+def test_initial_framework_text_lives_in_prefix_or_suffix():
+    prompt = _render_initial()
+    user_begin = prompt.index(USER_CONTENT_BEGIN)
+    user_end = prompt.index(USER_CONTENT_END)
+    # Project Context lives in PREFIX.
+    assert prompt.index("## Project Context") < user_begin
+    # JSON schema / Handling Evaluative / Guidelines live in SUFFIX.
+    assert prompt.index("Respond in JSON format") > user_end
+    assert prompt.index("Handling Evaluative/Inquisitive") > user_end
+    assert prompt.index("Guidelines:") > user_end
+
+
+def test_continue_framework_text_lives_in_prefix_or_suffix():
+    prompt = _render_continue()
+    user_begin = prompt.index(USER_CONTENT_BEGIN)
+    user_end = prompt.index(USER_CONTENT_END)
+    assert prompt.index("## Project Context") < user_begin
+    # The initial description echo is part of the prior-context PREFIX.
+    assert prompt.index(_FIXED_INITIAL_DESCRIPTION) < user_begin
+    assert prompt.index("Respond in JSON format") > user_end
+    assert prompt.index("Handling Evaluative/Inquisitive") > user_end
+    assert prompt.index("Guidelines:") > user_end
+
+
+def test_initial_user_segment_with_multiline_description():
+    multiline = "line one\n\nline two with `code`\n  indented line"
+    prompt = _render_initial(initial_description=multiline)
+    user_seg = _extract_user_segment(prompt)
+    assert user_seg.strip() == multiline.strip()
+
+
+def test_continue_user_segment_with_multiline_response():
+    multiline = "答复:\n  - 第一点\n  - 第二点"
+    prompt = _render_continue(user_response=multiline)
+    user_seg = _extract_user_segment(prompt)
+    assert user_seg.strip() == multiline.strip()
+
+
+def test_continue_initial_description_appears_only_in_prefix():
+    # When the same string is used for both initial_description (echoed in
+    # PREFIX) and user_response (the user-content region), the substring
+    # ought to appear in BOTH prefix and content. This test guards the
+    # "echo lives in prefix" invariant by checking the first occurrence
+    # comes before USER_CONTENT_BEGIN.
+    same = "this is repeated text"
+    prompt = _render_continue(
+        user_response=same, initial_description=same,
+    )
+    first = prompt.find(same)
+    user_begin = prompt.index(USER_CONTENT_BEGIN)
+    assert first < user_begin

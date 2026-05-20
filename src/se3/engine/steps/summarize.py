@@ -52,6 +52,10 @@ Generate a comprehensive summary in Markdown format. Include:
 Format your response as clean Markdown with clear headings and bullet points.
 """
 
+# Two-segment marker only: USER_CONTENT region is empty.
+# summarize consumes all upstream step outputs; no user-literal field is
+# appended here. The web console renders the whole post-BEGIN tail inside
+# the collapsed system-prompt chip.
 SUMMARIZE_PROMPT = inject_boundary(SUMMARIZE_PROMPT, "## Task Description\n")
 
 

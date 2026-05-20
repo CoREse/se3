@@ -78,9 +78,16 @@ Project context:
 {project_context}
 """
 
-# Splice sentinel markers between the boilerplate system-instructions prefix
-# and the task-/project-specific user content. The boundary sits right before
-# the ``Task description:`` block — the most directly user-input portion.
+# Splice the two-segment sentinel markers (TEMPLATE_PREFIX_END /
+# USER_CONTENT_BEGIN) right before the ``Task description:`` block.
+#
+# The ``analyze`` step has no user-literal field at the prompt-assembly point:
+# ``task_description`` carries either the upstream ``refined_description``
+# (when discovery preceded) or composed framework text (base + recorded
+# interjections). Per the three-segment marker protocol the USER_CONTENT
+# section is therefore empty; we intentionally stick with the legacy
+# two-segment ``inject_boundary`` call so the web console falls back to
+# rendering the whole post-BEGIN tail inside the collapsed system-prompt chip.
 ANALYZE_PROMPT = inject_boundary(ANALYZE_PROMPT, "Task description:\n")
 
 

@@ -102,6 +102,11 @@ Important:
 - Groups should not assume knowledge of other groups' implementation details
 """
 
+# Two-segment marker only: USER_CONTENT region is empty.
+# plan_tasks consumes upstream LLM artifacts (proposal / design / task lists)
+# and framework-derived task_description; no user-literal field is appended
+# at this assembly point. The web console renders the whole post-BEGIN tail
+# inside the collapsed system-prompt chip.
 PLAN_TASKS_PROMPT = inject_boundary(PLAN_TASKS_PROMPT, "## Task Description\n")
 
 REVISION_SECTION = """

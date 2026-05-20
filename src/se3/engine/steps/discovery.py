@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 from ..context_builder import ContextBuilder
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus, StepType
-from ..prompt_markers import inject_boundary
+from ..prompt_markers import wrap_user_section
 from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
@@ -28,8 +28,16 @@ logger = logging.getLogger(__name__)
 # via the programmatic confirmation gate. This must NEVER reach the LLM.
 PROGRAMMATIC_CONFIRM_SENTINEL = "__PROGRAMMATIC_CONFIRM__"
 
-# Prompt for initial discovery analysis
-INITIAL_DISCOVERY_PROMPT = """You are an expert software engineering assistant in DISCOVERY mode.
+# Discovery prompts are assembled with the three-segment marker protocol:
+# the framework boilerplate / project context / discovery context labels live
+# in PREFIX, the user's literal field (initial_description / user_response)
+# is wrapped as the USER_CONTENT region, and the JSON schema + Handling
+# Evaluative + Guidelines instructions live in SUFFIX. This keeps the web
+# running-flow console's user-content bubble narrowly scoped to the user's
+# actual input — Project Context, Available Specs, Base Spec, JSON template,
+# and Guidelines all collapse into the system-prompt chip instead.
+
+_INITIAL_DISCOVERY_PROMPT_PREFIX = """You are an expert software engineering assistant in DISCOVERY mode.
 
 ## Your Sole Responsibility
 
@@ -56,9 +64,12 @@ You MAY read spec files under `se3/specs/` and source code to ask better, more i
 {base_spec_content}
 
 ## Discovery Context
-- Initial description: {initial_description}
 - Discovery round: {round_number}
 - Conversation history: {conversation_history}
+- Initial description:
+"""
+
+_INITIAL_DISCOVERY_PROMPT_SUFFIX = """
 
 Respond in JSON format:
 {{
@@ -110,14 +121,16 @@ Guidelines:
 - Remember: your only output is the Proposed Task Description — do not produce anything else
 """
 
-# Splice marker between the boilerplate system-instructions prefix and the
-# task-/project-specific content sections.
-INITIAL_DISCOVERY_PROMPT = inject_boundary(
-    INITIAL_DISCOVERY_PROMPT, "## Project Context\n",
+# Wrap only the user's literal field ({initial_description}) as the
+# USER_CONTENT region. The placeholder is preserved verbatim so runtime
+# .format() substitution lands strictly inside the marker boundary.
+INITIAL_DISCOVERY_PROMPT = wrap_user_section(
+    _INITIAL_DISCOVERY_PROMPT_PREFIX,
+    "{initial_description}",
+    _INITIAL_DISCOVERY_PROMPT_SUFFIX,
 )
 
-# Prompt for continuing discovery after user response
-CONTINUE_DISCOVERY_PROMPT = """You are an expert software engineering assistant in DISCOVERY mode.
+_CONTINUE_DISCOVERY_PROMPT_PREFIX = """You are an expert software engineering assistant in DISCOVERY mode.
 
 Continue the discovery conversation based on the user's latest response.
 
@@ -145,7 +158,10 @@ You MAY read spec files under `se3/specs/` and source code to ask better, more i
 - Initial description: {initial_description}
 - Discovery round: {round_number}
 - Conversation history: {conversation_history}
-- User's latest response: {user_response}
+- User's latest response:
+"""
+
+_CONTINUE_DISCOVERY_PROMPT_SUFFIX = """
 
 Respond in JSON format:
 {{
@@ -180,8 +196,13 @@ Guidelines:
 - Remember: your only output is the Proposed Task Description — do not produce anything else
 """
 
-CONTINUE_DISCOVERY_PROMPT = inject_boundary(
-    CONTINUE_DISCOVERY_PROMPT, "## Project Context\n",
+# The continue prompt wraps only the {user_response} field — the latest
+# user-typed message. {initial_description} from round 0 is now historical
+# context and lives in PREFIX.
+CONTINUE_DISCOVERY_PROMPT = wrap_user_section(
+    _CONTINUE_DISCOVERY_PROMPT_PREFIX,
+    "{user_response}",
+    _CONTINUE_DISCOVERY_PROMPT_SUFFIX,
 )
 
 

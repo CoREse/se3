@@ -109,6 +109,11 @@ Respond in JSON format:
 The "fix_instructions" field is REQUIRED when tests failed or when in_scope issues exist. Provide clear, actionable instructions that the implement step can use to fix the issues.
 """
 
+# Two-segment marker only: USER_CONTENT region is empty.
+# verify_spec consumes upstream artifacts (changes_made / test_results /
+# spec_content / spec_changes / relevant_specs); no user-literal field is
+# appended here. The web console renders the whole post-BEGIN tail inside
+# the collapsed system-prompt chip.
 VERIFY_PROMPT = inject_boundary(VERIFY_PROMPT, "## Task Description\n")
 
 

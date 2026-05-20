@@ -122,6 +122,11 @@ IMPORTANT:
 - If unsure between minor and patch under default rules, be conservative and choose patch.
 """
 
+# Two-segment marker only: USER_CONTENT region is empty.
+# version_analyze consumes upstream artifacts (changes_made / summary /
+# verification_result / task_type); no user-literal field is appended here.
+# The web console renders the whole post-BEGIN tail inside the collapsed
+# system-prompt chip.
 VERSION_ANALYZE_PROMPT = inject_boundary(
     VERSION_ANALYZE_PROMPT, "## Task Information\n",
 )
