@@ -1477,22 +1477,65 @@ function chipLabel(norm) {
 
 const TEMPLATE_PREFIX_END = "<!--SE3:TEMPLATE_END-->";
 const USER_CONTENT_BEGIN = "<!--SE3:USER_CONTENT-->";
+const USER_CONTENT_END = "<!--SE3:USER_CONTENT_END-->";
 
-// Split a user-role message body at its template / user-content boundary.
-// Returns `{prefix, content}` when the boundary marker is present, or null
-// when it is absent so the caller can fall back to the whole-message chip.
+// Strip leading CR/LF from a marker-bounded segment so the segment text
+// starts on its first real character. The engine joins markers with `\n`
+// on both sides, and the frontend should not display that join glue.
+function stripLeadingNewlines(s) {
+  let i = 0;
+  while (i < s.length && (s[i] === "\n" || s[i] === "\r")) i++;
+  return s.slice(i);
+}
+function stripTrailingNewlines(s) {
+  let i = s.length;
+  while (i > 0 && (s[i - 1] === "\n" || s[i - 1] === "\r")) i--;
+  return s.slice(0, i);
+}
+
+// Split a user-role message body at its template / user-content / suffix
+// boundaries. Returns one of three shapes:
+//
+//   - Three-segment (engine emitted TEMPLATE_PREFIX_END, USER_CONTENT_BEGIN,
+//     USER_CONTENT_END in order):
+//       `{prefix, content, suffix}` — `prefix` is the system-template
+//       boilerplate before TEMPLATE_PREFIX_END, `content` is the user's
+//       literal input between USER_CONTENT_BEGIN and USER_CONTENT_END, and
+//       `suffix` is the framework-injected tail (Available Specs, runtime
+//       env, READ-ONLY constraint, language directive, …).
+//   - Two-segment (engine emitted only TEMPLATE_PREFIX_END +
+//     USER_CONTENT_BEGIN, no USER_CONTENT_END): `{prefix, content, suffix:""}`
+//     with `content` = everything after USER_CONTENT_BEGIN. This is the
+//     legacy two-marker layout — preserved for compatibility with old
+//     history files and step prompt modules that have not migrated to
+//     `wrap_user_section`.
+//   - `null`: the markers are missing, malformed, or out of order — the
+//     caller should fall back to the whole-message chip behavior.
 function splitUserPromptByMarker(content) {
   if (typeof content !== "string" || !content) return null;
-  const idx = content.indexOf(TEMPLATE_PREFIX_END);
-  if (idx < 0) return null;
-  const prefix = content.slice(0, idx);
-  let rest = content.slice(idx + TEMPLATE_PREFIX_END.length);
-  const bi = rest.indexOf(USER_CONTENT_BEGIN);
-  if (bi >= 0) rest = rest.slice(bi + USER_CONTENT_BEGIN.length);
-  // wrap_user_content joins with a leading newline after each marker; strip
-  // both so the user content starts on its first real character.
-  while (rest.startsWith("\n") || rest.startsWith("\r")) rest = rest.slice(1);
-  return { prefix: prefix, content: rest };
+  const tpe = content.indexOf(TEMPLATE_PREFIX_END);
+  if (tpe < 0) return null;
+  const ucb = content.indexOf(USER_CONTENT_BEGIN, tpe + TEMPLATE_PREFIX_END.length);
+  if (ucb < 0) return null;
+  // Three-segment: USER_CONTENT_END must come after USER_CONTENT_BEGIN.
+  const uce = content.indexOf(USER_CONTENT_END, ucb + USER_CONTENT_BEGIN.length);
+  const prefix = content.slice(0, tpe);
+  if (uce >= 0) {
+    const middle = content.slice(ucb + USER_CONTENT_BEGIN.length, uce);
+    const tail = content.slice(uce + USER_CONTENT_END.length);
+    return {
+      prefix: prefix,
+      content: stripTrailingNewlines(stripLeadingNewlines(middle)),
+      suffix: stripLeadingNewlines(tail),
+    };
+  }
+  // Two-segment legacy: BEGIN with no END — entire remainder is the bubble.
+  const rest = content.slice(ucb + USER_CONTENT_BEGIN.length);
+  return {
+    prefix: prefix,
+    content: stripLeadingNewlines(rest),
+    suffix: "",
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1819,6 +1862,217 @@ function renderToolMarkers(text) {
   return nodes;
 }
 
+// --- per-step assistant renderers ------------------------------------------
+//
+// Some step types (DISCOVERY today; ANALYZE / PLAN / PLAN_TASKS in the future)
+// emit assistant messages that are essentially a structured JSON document
+// embedded in narrative text — the CLI sink parses them with
+// `parse_json_response` and renders each field individually (e.g. the
+// DISCOVERY Panel renders `content` as markdown, `refined_description` as a
+// nested cyan block, and `questions` as a numbered list). Mirroring that
+// behavior on the web lets a human read a discovery turn at a glance instead
+// of staring at a raw ```json``` fence.
+//
+// The registry is a simple `{stepType: renderer}` lookup. A renderer takes
+// `(content: string, norm: object)` and returns a Node, Fragment, or null.
+// Returning null (or throwing) makes the caller fall back to the default
+// `renderToolMarkers` + Markdown path — failure must never break the wider
+// conversation view.
+const STEP_ASSISTANT_RENDERERS = {};
+function registerAssistantRenderer(stepType, renderer) {
+  if (!stepType || typeof renderer !== "function") return;
+  STEP_ASSISTANT_RENDERERS[String(stepType).toLowerCase()] = renderer;
+}
+
+// --- structured JSON extraction (frontend mirror of parse_json_response) ---
+//
+// The backend `parse_json_response` accepts JSON in two shapes:
+//   1. inside a fenced ```json … ``` (or unlabeled ``` … ```) block, and
+//   2. as a trailing bare object — `{ … }` that runs to the end of the text,
+//      possibly preceded by narrative.
+// It also recovers from common LLM quirks: trailing commas, code-fenced
+// blocks accidentally embedded inside string values, unescaped ASCII double
+// quotes. We approximate that lenient behavior in JS with two passes:
+//   (a) try strict JSON.parse,
+//   (b) on failure, retry after stripping trailing commas before `}` / `]`.
+// If both fail the helper returns null and the caller falls back to the
+// generic renderer — keeping the raw text visible to the reader rather than
+// silently mangling it.
+
+// Try parsing `text` as JSON, returning the parsed value or `undefined` on
+// failure. A small repair pass strips a single trailing comma before `}` /
+// `]` which is the most common LLM quirk that strict `JSON.parse` rejects.
+function tryParseJsonLenient(text) {
+  if (typeof text !== "string") return undefined;
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  try { return JSON.parse(trimmed); } catch (_) { /* fall through */ }
+  try {
+    const repaired = trimmed.replace(/,(\s*[}\]])/g, "$1");
+    return JSON.parse(repaired);
+  } catch (_) { /* fall through */ }
+  return undefined;
+}
+
+// Extract the first fenced ```json … ``` (or bare ``` … ```) block whose
+// body parses as JSON. Returns `{value, startIndex, endIndex}` (slice
+// indices into the original text, INCLUSIVE of the fences so the caller can
+// remove them when computing the narrative prefix) or null.
+function extractFencedJson(text) {
+  const re = /```(?:json)?\s*\n?([\s\S]*?)\n?```/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const body = m[1];
+    const value = tryParseJsonLenient(body);
+    if (value !== undefined) {
+      return { value: value, startIndex: m.index, endIndex: m.index + m[0].length };
+    }
+  }
+  return null;
+}
+
+// Extract a trailing bare JSON object that runs to the end of the text.
+// Walks back from the last `}` / `]` looking for a matching `{` / `[` whose
+// enclosed body parses as JSON. Returns `{value, startIndex}` (slice index
+// into the original text where the JSON begins; the body runs to the end)
+// or null.
+function extractTrailingBareJson(text) {
+  if (typeof text !== "string") return null;
+  const trimmedEnd = text.replace(/\s+$/, "");
+  if (!trimmedEnd) return null;
+  const last = trimmedEnd[trimmedEnd.length - 1];
+  if (last !== "}" && last !== "]") return null;
+  const open = last === "}" ? "{" : "[";
+  for (let i = 0; i < trimmedEnd.length; i++) {
+    if (trimmedEnd[i] !== open) continue;
+    const candidate = trimmedEnd.slice(i);
+    const value = tryParseJsonLenient(candidate);
+    if (value !== undefined) {
+      return { value: value, startIndex: i };
+    }
+  }
+  return null;
+}
+
+// Pull the first parseable JSON value out of `text`, preferring a fenced
+// block, then a trailing bare object/array. Returns `{value, narrative}`
+// where `narrative` is `text` with the JSON region removed (trimmed); or
+// null if no JSON was recovered.
+function extractStructuredJson(text) {
+  if (typeof text !== "string" || !text) return null;
+  const fenced = extractFencedJson(text);
+  if (fenced) {
+    const narrative = (text.slice(0, fenced.startIndex) +
+                       text.slice(fenced.endIndex)).trim();
+    return { value: fenced.value, narrative: narrative };
+  }
+  const bare = extractTrailingBareJson(text);
+  if (bare) {
+    const narrative = text.slice(0, bare.startIndex).trim();
+    return { value: bare.value, narrative: narrative };
+  }
+  return null;
+}
+
+// --- discovery assistant renderer ------------------------------------------
+//
+// Mirror of the CLI `_display_discovery_message` /
+// `_extract_narrative_from_raw` pipeline:
+//   1. Pull the structured JSON out of the raw text. On failure return null
+//      and let the caller fall back to the generic renderer.
+//   2. Render any narrative (text outside the JSON region) at the top via
+//      `renderToolMarkers`, so inline `[Read: …]` and friends still surface
+//      as standalone blocks.
+//   3. Render the JSON's `content` field as markdown.
+//   4. Render `refined_description` (when present) inside a dedicated
+//      "Proposed Task Description" card so the human can see the proposed
+//      task description at a glance — the visual counterpart of the CLI
+//      cyan reverse-color block.
+//   5. Render `questions` as an ordered list.
+// Returns a DocumentFragment ready to append into the assistant bubble, or
+// null when no JSON was found (caller falls back to the default path).
+function renderDiscoveryAssistant(content, _norm) {
+  const extracted = extractStructuredJson(content);
+  if (!extracted) return null;
+  const value = extracted.value;
+  // Defensive: parse_json_response is dict-only on the backend; arrays /
+  // scalars at the top level mean this is not a discovery JSON record —
+  // bail to the generic renderer.
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const frag = document.createDocumentFragment();
+  let rendered = false;
+
+  // 2. narrative prefix
+  if (extracted.narrative) {
+    const narWrap = el("div", "assistant-narrative");
+    for (const node of renderToolMarkers(extracted.narrative)) {
+      narWrap.appendChild(node);
+    }
+    if (narWrap.childNodes.length) {
+      frag.appendChild(narWrap);
+      rendered = true;
+    }
+  }
+
+  // 3. content as markdown
+  const jsonContent = value.content;
+  if (typeof jsonContent === "string" && jsonContent.trim()) {
+    const contentWrap = el("div", "discovery-content");
+    contentWrap.appendChild(renderMarkdown(jsonContent));
+    frag.appendChild(contentWrap);
+    rendered = true;
+  }
+
+  // 4. refined_description as a Proposed Task Description card
+  const refined = value.refined_description;
+  if (typeof refined === "string" && refined.trim()) {
+    const card = el(
+      "div",
+      "step-report step-report--proposed-task kind-discovery-refined",
+    );
+    const head = el("div", "step-report__head");
+    head.appendChild(
+      el("span", "step-report__title", "Proposed Task Description"),
+    );
+    card.appendChild(head);
+    const body = el("div", "step-report__body");
+    const md = el("div", "step-report__markdown");
+    md.appendChild(renderMarkdown(refined));
+    body.appendChild(md);
+    card.appendChild(body);
+    frag.appendChild(card);
+    rendered = true;
+  }
+
+  // 5. questions as a numbered list
+  const questions = value.questions;
+  if (Array.isArray(questions) && questions.length) {
+    const qWrap = el("div", "discovery-questions");
+    qWrap.appendChild(el("h6", "discovery-questions__title", "Questions"));
+    const ol = el("ol", "discovery-questions__list");
+    for (const q of questions) {
+      const li = el("li");
+      if (q && typeof q === "object") {
+        // CLI sometimes nests `{question: "...", options: [...]}` etc.;
+        // fall back to JSON.stringify so nothing is silently lost.
+        const qText = typeof q.question === "string" ? q.question : safeStringify(q);
+        li.textContent = qText;
+      } else {
+        li.textContent = String(q);
+      }
+      ol.appendChild(li);
+    }
+    qWrap.appendChild(ol);
+    frag.appendChild(qWrap);
+    rendered = true;
+  }
+
+  if (!rendered) return null;
+  return frag;
+}
+registerAssistantRenderer("discovery", renderDiscoveryAssistant);
+
 // --- long-content folding --------------------------------------------------
 
 // Records longer than this (characters) are folded by default — a `user` step
@@ -1969,8 +2223,25 @@ function renderConversationRecord(norm) {
       bubble.appendChild(
         el("p", "md-p conv-empty", "(no readable content for this record)"));
     } else if (role === "assistant") {
-      // assistant: tool-marker split + Markdown, rebuilt lazily on expand.
+      // assistant: dispatch through STEP_ASSISTANT_RENDERERS first so step
+      // types that emit structured JSON (e.g. discovery) get a purpose-built
+      // renderer instead of dumping `\`\`\`json…\`\`\`` as a code block. The
+      // registry lookup falls back to the generic tool-marker + Markdown
+      // path when no renderer is registered or when one throws.
       const buildFull = () => {
+        const stepType = String(norm.stepType || "").toLowerCase();
+        const renderer = stepType && STEP_ASSISTANT_RENDERERS[stepType];
+        if (renderer) {
+          try {
+            const node = renderer(content, norm);
+            if (node) return node;
+          } catch (err) {
+            // Registry renderers must never break the wider conversation —
+            // log once and fall back to the default Markdown path.
+            try { console.warn("assistant renderer failed", stepType, err); }
+            catch (_) { /* console may be absent */ }
+          }
+        }
         const frag = document.createDocumentFragment();
         for (const node of renderToolMarkers(content)) frag.appendChild(node);
         return frag;
@@ -2090,9 +2361,14 @@ function renderStepEventRecord(norm) {
 // ---------------------------------------------------------------------------
 
 // Build the row for a `user` message whose body has a TEMPLATE_PREFIX_END
-// marker. The prefix (system-instructions boilerplate) goes into a default-
-// collapsed chip; the user's actual task content goes into a default-expanded
-// bubble below the chip. The raw payload toggle stays available for both.
+// marker. The system-instructions boilerplate (prefix) and the framework-
+// injected tail (suffix — Available Specs / runtime env / READ-ONLY /
+// language directive) both go into a single default-collapsed system-
+// prompt chip; the user's actual literal input (middle USER_CONTENT
+// section) goes into a default-expanded bubble below the chip. When the
+// content section is empty (e.g. a step that injected only a prefix +
+// suffix sandwich), the bubble is omitted and only the chip is shown.
+// The raw payload toggle stays available regardless.
 function renderUserMarkerRecord(norm, split) {
   const row = el("div", "history-record conv-record role-user user-prompt-marker");
 
@@ -2104,10 +2380,27 @@ function renderUserMarkerRecord(norm, split) {
   const chipDetail = el("div", "msg-chip-detail");
   let chipBuilt = false;
   let chipExpanded = false;
+  const hasSuffix = typeof split.suffix === "string" && split.suffix.length > 0;
   chip.addEventListener("click", () => {
     chipExpanded = !chipExpanded;
     if (chipExpanded && !chipBuilt) {
-      chipDetail.appendChild(el("pre", "conv-plain", split.prefix));
+      // Two subsections inside the chip: "模板前缀" (template prefix) and
+      // "框架后缀" (framework suffix appended after the user input). The
+      // suffix subsection is only rendered when a USER_CONTENT_END marker
+      // was found and there is something after it — legacy two-segment
+      // history records have an empty suffix and render only the prefix.
+      const prefixSec = el("div", "user-prompt-chip__section");
+      prefixSec.appendChild(
+        el("h6", "user-prompt-chip__section-title", "模板前缀"));
+      prefixSec.appendChild(el("pre", "conv-plain", split.prefix));
+      chipDetail.appendChild(prefixSec);
+      if (hasSuffix) {
+        const suffixSec = el("div", "user-prompt-chip__section");
+        suffixSec.appendChild(
+          el("h6", "user-prompt-chip__section-title", "框架后缀"));
+        suffixSec.appendChild(el("pre", "conv-plain", split.suffix));
+        chipDetail.appendChild(suffixSec);
+      }
       chipBuilt = true;
     }
     chipWrap.classList.toggle("collapsed", !chipExpanded);
@@ -2121,9 +2414,15 @@ function renderUserMarkerRecord(norm, split) {
 
   // Default-expanded bubble carrying the user's real task content. Literal
   // text is preserved so the exact prompt body the LLM saw is reproduced.
-  const bubble = el("div", "conv-bubble user-content-bubble");
-  bubble.appendChild(el("pre", "conv-plain", split.content));
-  row.appendChild(bubble);
+  // Empty content (three-segment record with no literal user input — e.g.
+  // a step whose template wrapped an empty user_content) skips the bubble
+  // entirely so only the chip is shown.
+  const hasContent = typeof split.content === "string" && split.content.length > 0;
+  if (hasContent) {
+    const bubble = el("div", "conv-bubble user-content-bubble");
+    bubble.appendChild(el("pre", "conv-plain", split.content));
+    row.appendChild(bubble);
+  }
 
   const rawToggle = makeRawToggle(norm);
   if (rawToggle) row.appendChild(rawToggle);
@@ -3110,8 +3409,13 @@ if (typeof module !== "undefined" && module.exports) {
     splitUserPromptByMarker,
     STEP_REPORT_TITLES,
     STEP_REPORT_RENDERERS,
+    STEP_ASSISTANT_RENDERERS,
+    registerAssistantRenderer,
+    renderDiscoveryAssistant,
+    extractStructuredJson,
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,
+    USER_CONTENT_END,
     KIND_META,
     extractAssistantText,
   };
