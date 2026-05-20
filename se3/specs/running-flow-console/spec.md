@@ -125,8 +125,14 @@ clicking a button or opening a popup. The reply area is composed of three
 stacked parts, all sitting below the conversation:
 
 1. **Pending intervention chip bar** — a row of status-style buttons, one
-   per pending intervention (pending MCP call, retry decision, CLI confirm,
-   etc.). Each chip shows the intervention kind and a short identifier.
+   per pending intervention (e.g. a generic pending reply, a retry
+   decision, a CLI subprocess confirmation). Each chip shows the
+   intervention kind via a **user-facing neutral label** (e.g. "待回复" /
+   "需要决策" / "需要确认") and MUST NOT expose the internal transport
+   vocabulary — strings such as `MCP`, `call_id`, or `call <id>` MUST NOT
+   appear as visible chip text. The underlying call identifier MAY be
+   preserved on a hidden `data-call-id` attribute and inside the chip's
+   `title` hover tooltip for developer debugging only.
 2. **Reply context panel** — when a chip is selected, the panel above the
    textarea expands the selected intervention's full prompt (Markdown
    rendered), optional context block (no `max-height` truncation), and any
@@ -198,16 +204,35 @@ settles.
 - **WHEN** the user submits a reply for a pending interaction
 - **THEN** the reply is folded into the conversation flow in place
 
+#### Scenario: Chip and reply header use neutral, user-facing labels
+- **GIVEN** a running flow has one or more pending interventions of any
+  recognized kind
+- **WHEN** the docked reply chip bar and the reply context panel header
+  are rendered
+- **THEN** the chip label is a user-facing neutral phrase tied to the
+  intervention's kind (e.g. "待回复" / "插话" / "需要决策" / "需要确认")
+- **AND** neither the chip label, the chip's visible secondary text, nor
+  the reply context panel header contain the literal substrings `MCP`,
+  `call_id`, or the pattern `call <id>` as visible text
+- **AND** the underlying call identifier, if preserved, appears only on
+  hidden DOM attributes (e.g. `data-call-id`) or hover `title` tooltips —
+  never in the rendered text content
+
 ### Requirement: Unified Intervention Items
 
 All human-in-the-loop interactions inside a running flow MUST be presented as
 **chips on the docked reply bar**, never as inline cards mixed into the
 conversation chat-stream. Each chip carries the intervention's kind icon and
-a short label (and, for MCP calls, a truncated call_id); selecting a chip
-expands that intervention's full `prompt` (Markdown rendered), optional
-`context` block (no truncation), and any `options` action buttons inside the
-reply context panel above the shared reply textarea. The same reply textarea
-is the single input surface for every intervention kind.
+a short, **user-facing neutral label** describing the interaction kind —
+implementation-detail vocabulary such as `MCP`, `call_id`, or the
+literal pattern `call <id>` MUST NOT appear in the chip's visible text. The
+underlying call identifier, when retained for debugging, lives only on hidden
+DOM attributes (e.g. `data-call-id`) and `title` hover tooltips, not in any
+text node a screen reader or sighted user can read. Selecting a chip expands
+that intervention's full `prompt` (Markdown rendered), optional `context`
+block (no truncation), and any `options` action buttons inside the reply
+context panel above the shared reply textarea. The same reply textarea is
+the single input surface for every intervention kind.
 
 The recognized intervention kinds are at least: (1) a pending MCP call
 (`call`); (2) a post-Ctrl-C mid-flow interjection (`interjection`); (3) a
@@ -260,6 +285,100 @@ untouched.
 - **THEN** at most one chip is selected at any time
 - **AND** the reply context panel + reply textarea target exactly the
   selected intervention
+
+#### Scenario: No implementation vocabulary in visible chip text
+- **GIVEN** the chip bar renders chips for every recognized intervention
+  kind (`call`, `interjection`, `retry_decision`, `cli_confirm`)
+- **WHEN** the rendered chip DOM is inspected
+- **THEN** the visible text content of every chip MUST NOT contain the
+  substrings `MCP`, `call_id`, or the pattern `call <hex-id>`
+- **AND** any preserved call identifier appears only on the chip's
+  `data-call-id` attribute or `title` tooltip, never in visible text
+
+### Requirement: Conversation Strict Chronological Order
+
+All records that ride a running flow's conversation channel — `user`,
+`assistant`, `system`, the `step_completed` / `step_failed` events surfaced
+as report cards, and any other in-stream record — MUST be rendered in a
+**single strict chronological order keyed by record timestamp**, across all
+roles AND across all step boundaries. Step grouping is allowed only as a
+*visual* affordance (e.g. a lightweight `.history-step-header` separator row
+inserted between adjacent records whose step changes); it MUST NOT shuffle
+records out of timestamp order. Concretely: a `user` reply produced between
+two `assistant` outputs of a `discovery` step MUST appear between them in
+the rendered timeline, even if the `user` reply's `step_id` momentarily
+classifies it under a different step section.
+
+The ordering key is `(timestamp, original-index)`: records with equal
+timestamps preserve the input order they arrived in (stable sort by NDJSON
+position). Records that arrive late (e.g. via incremental append) MUST be
+inserted into their correct global slot, not unconditionally appended at the
+tail. Stateful UI affordances of already-rendered records — fold state, raw
+toggles, chip selections — MUST NOT be disturbed by an out-of-order
+insertion or by a step-header rebuild that follows it.
+
+#### Scenario: Records sort by timestamp across role and step boundaries
+- **GIVEN** a conversation NDJSON containing, in this timestamp order:
+  `assistant A1` (step=discovery, ts=1), `user U1` (step=discovery_continue,
+  ts=2), `assistant A2` (step=discovery, ts=3)
+- **WHEN** the conversation is rendered in `#flow-view`
+- **THEN** the visible order is `A1` → `U1` → `A2`
+- **AND** the rendered order matches the records' timestamp order even
+  though `U1` and the two assistant outputs map to different step keys
+
+#### Scenario: Step headers are visual separators, not reorderers
+- **GIVEN** the conversation contains records that interleave two step keys
+  in their natural timestamp order
+- **WHEN** the renderer rebuilds the `.history-step-header` separator rows
+- **THEN** headers are inserted only between adjacent records whose step
+  key changes
+- **AND** no record is moved out of its timestamp-ordered slot to make a
+  step section "contiguous"
+
+#### Scenario: Late-arriving record is inserted in its timestamp slot
+- **GIVEN** the conversation already shows records with timestamps
+  `t=1, t=3, t=5`
+- **WHEN** an incremental append delivers a new record with timestamp `t=2`
+- **THEN** the new record is inserted between `t=1` and `t=3`, not appended
+  at the tail
+- **AND** existing records' fold state, raw toggles, and chip selections
+  are preserved across the rebuild
+
+### Requirement: Long-Content Wrapping
+
+All long-line text content rendered inside the running-flow conversation —
+including assistant Markdown code blocks (`.conv-bubble .md-code`), inline
+raw JSON / NDJSON viewers (`.raw-json`), step report markdown code blocks
+(`.step-report__markdown .md-code`), and any equivalent `<pre>` /
+code-style block reachable from a chat bubble — MUST wrap to the
+container's width. The CSS rules for these selectors MUST set
+`white-space: pre-wrap` together with a per-character break rule
+(`overflow-wrap: anywhere` and/or `word-break: break-word`) so that a long
+single-line payload (e.g. a 200+ character JSON string with no spaces) is
+laid out across multiple visual lines. An inline horizontal scrollbar
+(`overflow-x: auto`) MUST NOT appear inside the conversation; horizontal
+overflow MUST be `hidden` or removed for these selectors. The
+`.raw-json` viewer MAY keep a vertical scrollbar via a `max-height` +
+`overflow-y: auto` to bound its visual footprint, but horizontal scroll is
+still forbidden.
+
+#### Scenario: Long single-line JSON wraps inside a code block
+- **GIVEN** an assistant bubble renders a Markdown code block whose body
+  is a single 200+ character JSON string with no whitespace
+- **WHEN** the bubble is rendered in the running-flow conversation
+- **THEN** the code block wraps the long line across multiple visual lines
+  using `white-space: pre-wrap` + `overflow-wrap: anywhere` (or
+  `word-break: break-word`)
+- **AND** the code block does NOT show an internal horizontal scrollbar
+
+#### Scenario: Raw JSON viewer wraps but allows vertical scroll
+- **GIVEN** the `view raw` toggle for a record produces a `.raw-json`
+  block whose serialized body contains a very long single line
+- **WHEN** the viewer is rendered
+- **THEN** the long line wraps to the container width with no horizontal
+  scrollbar appearing inside the viewer
+- **AND** the viewer MAY still cap its height and scroll vertically via
+  `overflow-y: auto`
 
 ### Requirement: Flow-Scoped Pending Interventions
 

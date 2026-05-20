@@ -400,4 +400,131 @@ check("STEP_REPORT_TITLES covers every step type from models.StepType", () => {
   for (const t of expected) assert.ok(app.STEP_REPORT_TITLES[t], "missing title " + t);
 });
 
+// -- KIND_META: user-facing wording, no implementation vocabulary ----------
+// The chip labels (and any other visible string in KIND_META) must use
+// user-facing neutral phrases. They must NOT leak the internal transport
+// vocabulary — `MCP`, `call_id`, or a literal `call ` followed by a hex id —
+// into anything the user reads. (call_id remains only on hidden DOM
+// attributes / hover tooltips.)
+check("KIND_META covers the four recognized kinds", () => {
+  for (const k of ["call", "interjection", "retry_decision", "cli_confirm"]) {
+    assert.ok(app.KIND_META[k], "missing KIND_META entry for " + k);
+    assert.equal(typeof app.KIND_META[k].label, "string");
+  }
+});
+check("KIND_META visible strings contain no MCP / call_id", () => {
+  const FORBIDDEN_RE = /\bMCP\b|call_id|\bcall\s+[0-9a-f]+\b/i;
+  for (const [kind, meta] of Object.entries(app.KIND_META)) {
+    for (const field of ["label", "hint"]) {
+      const v = meta[field];
+      if (typeof v !== "string") continue;
+      assert.equal(
+        FORBIDDEN_RE.test(v), false,
+        `KIND_META[${kind}].${field} leaks implementation vocabulary: ${v}`,
+      );
+    }
+  }
+});
+
+// -- extractAssistantText: multi-shape NDJSON best-effort recovery ---------
+// extractAssistantText is the recovery path the renderer takes when a
+// record's `content` field is missing. It MUST cope with the several
+// NDJSON shapes the engine emits, so the assistant bubble never falls
+// back to dumping the raw NDJSON as a `<pre>` block. We exercise each
+// recognized shape and one "best-effort summary" fallback.
+
+check("extractAssistantText handles `{type:assistant, message:{...}}`", () => {
+  const out = app.extractAssistantText([
+    { type: "assistant", message: { content: [{ type: "text", text: "hello" }] } },
+  ]);
+  assert.equal(out, "hello");
+});
+
+check("extractAssistantText handles bare `{role:assistant, content:[...]}`", () => {
+  const out = app.extractAssistantText([
+    { role: "assistant", content: [{ type: "text", text: "bare" }] },
+  ]);
+  assert.equal(out, "bare");
+});
+
+check("extractAssistantText handles `{content:string}` envelopes", () => {
+  const out = app.extractAssistantText([{ content: "plain text" }]);
+  assert.equal(out, "plain text");
+});
+
+check("extractAssistantText handles `content_block_delta` deltas", () => {
+  const out = app.extractAssistantText([
+    { type: "content_block_delta", delta: { text: "Hello" } },
+    { type: "content_block_delta", delta: { text: ", world" } },
+  ]);
+  assert.equal(out, "Hello, world");
+});
+
+check("extractAssistantText handles `message_delta` deltas", () => {
+  const out = app.extractAssistantText([
+    { type: "message_delta", delta: { text: "abc" } },
+  ]);
+  assert.equal(out, "abc");
+});
+
+check("extractAssistantText handles `content_block_start` with tool_use", () => {
+  const out = app.extractAssistantText([
+    { type: "content_block_start",
+      content_block: { type: "tool_use", name: "Bash", input: { cmd: "ls" } } },
+  ]);
+  // tool_use rendered as inline `[Name: {…}]` marker so the tool-marker
+  // layer can split it into its own block.
+  assert.ok(out.includes("[Bash:"), `expected [Bash: marker, got ${out}`);
+  assert.ok(out.includes("ls"));
+});
+
+check("extractAssistantText handles bare string lines", () => {
+  const out = app.extractAssistantText(["raw text\n"]);
+  assert.equal(out, "raw text\n");
+});
+
+check("extractAssistantText recovers tool_use blocks inside assistant message", () => {
+  const out = app.extractAssistantText([
+    {
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "Now running:" },
+          { type: "tool_use", name: "Read", input: { file_path: "/tmp/x" } },
+        ],
+      },
+    },
+  ]);
+  assert.ok(out.includes("Now running:"));
+  assert.ok(out.includes("[Read:"));
+});
+
+check("extractAssistantText keeps best-effort summary for unknown structured blocks", () => {
+  // An unknown `type` is summarized to JSON rather than dropped silently,
+  // so the bubble shows _something_ rather than degrading to raw NDJSON.
+  const out = app.extractAssistantText([
+    { type: "mystery_block", note: "x" },
+  ]);
+  assert.ok(out.length > 0, "expected non-empty best-effort summary");
+  assert.ok(out.includes("mystery_block"));
+});
+
+check("extractAssistantText returns empty string for empty / invalid input", () => {
+  assert.equal(app.extractAssistantText([]), "");
+  assert.equal(app.extractAssistantText(null), "");
+  assert.equal(app.extractAssistantText("not an array"), "");
+});
+
+check("extractAssistantText skips noise event types silently", () => {
+  // These shapes occur in the Anthropic event stream but carry no text
+  // payload; they should not generate noise in the bubble.
+  const out = app.extractAssistantText([
+    { type: "message_start" },
+    { type: "message_stop" },
+    { type: "content_block_stop" },
+    { type: "ping" },
+  ]);
+  assert.equal(out, "");
+});
+
 console.log(`\n${passed} checks passed.`);

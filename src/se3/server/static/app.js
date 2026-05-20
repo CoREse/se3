@@ -3112,5 +3112,7 @@ if (typeof module !== "undefined" && module.exports) {
     STEP_REPORT_RENDERERS,
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,
+    KIND_META,
+    extractAssistantText,
   };
 }
