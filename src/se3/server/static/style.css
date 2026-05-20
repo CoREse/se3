@@ -267,21 +267,20 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   }
 }
 
-/* -- intervention items --------------------------------------------- */
+/* -- intervention chip-bar ------------------------------------------ */
+/*
+ * Pending interventions appear inside the docked reply form as a horizontal,
+ * wrap-friendly bar of clickable chips. Selecting a chip surfaces the full
+ * prompt/context/options in the reply-context panel above the input row.
+ */
 
 .flow-interventions {
-  flex: 0 0 auto;
-  max-height: 42%;
-  overflow-y: auto;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 0 16px;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
 }
-.flow-interventions:not(:empty) {
-  padding: 10px 16px;
-  border-top: 1px solid var(--border);
-}
+.flow-interventions:empty { display: none; }
 
 .intervention {
   border: 1px solid var(--yellow);
@@ -348,8 +347,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .intervention-context-body {
   margin: 3px 0 0;
   padding: 6px 8px;
-  max-height: 140px;
-  overflow: auto;
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: 5px;
@@ -414,10 +411,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .flow-reply-row {
   display: flex;
   align-items: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
 }
 .flow-reply-row textarea {
-  flex: 1;
+  flex: 1 1 220px;
+  min-width: 0;
   resize: vertical;
   min-height: 38px;
 }
@@ -426,6 +425,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   cursor: not-allowed;
 }
 #flow-reply-submit { flex-shrink: 0; }
+
+@media (max-width: 480px) {
+  .flow-reply-row textarea { flex-basis: 100%; }
+  #flow-reply-submit { align-self: flex-end; }
+}
 
 /* -- collapsed prompt chips ----------------------------------------- */
 /*
