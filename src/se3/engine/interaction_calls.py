@@ -363,14 +363,22 @@ def make_cli_confirm_handler(
         options: List[str],
         is_alive: Callable[[], bool],
     ) -> Optional[str]:
+        # ``flow_id`` / ``step_id`` MUST live inside ``context`` so the daemon
+        # aggregator's per-flow filter (which inspects ``call.context.flow_id``)
+        # can scope a ``cli_confirm`` call to the flow that produced it. Folding
+        # them in as top-level extras would leave the call unattributed and
+        # surface it in every concurrent flow's reply chip-bar.
+        confirm_context: Dict[str, Any] = {"awaiting": "cli_confirm"}
+        if flow_id:
+            confirm_context["flow_id"] = flow_id
+        if step_id:
+            confirm_context["step_id"] = step_id
         call_file = write_interaction_call(
             project_root,
             kind=CALL_KIND_CLI_CONFIRM,
             prompt=prompt,
             options=options,
-            context={"awaiting": "cli_confirm"},
-            flow_id=flow_id,
-            step_id=step_id,
+            context=confirm_context,
         )
         logger.info(
             "CLI confirmation prompt captured; wrote call file %s", call_file

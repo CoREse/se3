@@ -97,6 +97,53 @@ class TestInteractionCalls:
         assert data["options"] == ["1", "2"]
         assert data["flow_id"] == "flow-x"
 
+    def test_handler_writes_flow_id_in_context(self, tmp_path):
+        """``make_cli_confirm_handler`` must store ``flow_id`` inside
+        ``context`` (not as a top-level extra) so the daemon aggregator's
+        per-flow filter — which inspects ``call.context.flow_id`` — can scope
+        ``cli_confirm`` calls to the flow that produced them.
+        """
+        import json
+
+        handler = make_cli_confirm_handler(
+            tmp_path, flow_id="flow-A", step_id="step-1", poll_interval=0.01
+        )
+
+        # The handler polls for a response; spawn a brief async responder so
+        # the call returns promptly with the call file already written.
+        alive_box = {"alive": True}
+
+        def is_alive():
+            return alive_box["alive"]
+
+        def responder():
+            calls_dir = tmp_path / "se3" / "calls"
+            for _ in range(200):
+                if calls_dir.is_dir():
+                    files = list(calls_dir.glob("cli_confirm_*.json"))
+                    if files:
+                        cf = files[0]
+                        (cf.parent / f"{cf.stem}.response").write_text("ok")
+                        return
+                time.sleep(0.01)
+
+        t = threading.Thread(target=responder, daemon=True)
+        t.start()
+        result = handler("Press 1", ["1"], is_alive)
+        t.join(timeout=5)
+        alive_box["alive"] = False
+
+        assert result == "ok"
+        call_files = list((tmp_path / "se3" / "calls").glob("cli_confirm_*.json"))
+        assert len(call_files) == 1
+        data = json.loads(call_files[0].read_text(encoding="utf-8"))
+        # The fix: flow_id and step_id must live in context, not as a
+        # top-level extra key.
+        assert data["context"].get("flow_id") == "flow-A"
+        assert data["context"].get("step_id") == "step-1"
+        assert data["context"].get("awaiting") == "cli_confirm"
+        assert "flow_id" not in data or data["context"]["flow_id"] == "flow-A"
+
     def test_response_unanswered_returns_none(self, tmp_path):
         call_file = write_interaction_call(tmp_path, "cli_confirm", "prompt")
         assert read_interaction_response(call_file) is None

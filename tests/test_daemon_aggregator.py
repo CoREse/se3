@@ -52,8 +52,14 @@ def test_filter_drops_non_matching_flow_id() -> None:
     assert {c.call_id for c in result} == {"a", "c"}
 
 
-def test_filter_keeps_missing_flow_id() -> None:
-    """Unattributed calls (no context.flow_id) belong to the current flow."""
+def test_filter_drops_unattributed_calls_when_flow_id_known() -> None:
+    """Unattributed calls (no/empty context.flow_id) are NOT current-flow-scoped.
+
+    Legacy / cross-scenario artifacts like ``merge_<branch>_*`` and
+    ``sync_conflicts_*`` write call files without a ``context.flow_id``; the
+    filter must drop them so they do not bleed into an unrelated flow's
+    pending-intervention list.
+    """
     calls = [
         _call("a"),  # no flow_id field at all
         _call("b", flow_id=""),  # empty string
@@ -61,7 +67,7 @@ def test_filter_keeps_missing_flow_id() -> None:
         _call("d", flow_id="other"),
     ]
     result = DaemonAggregator._filter_calls_for_flow(calls, "flow-1")
-    assert {c.call_id for c in result} == {"a", "b", "c"}
+    assert {c.call_id for c in result} == {"c"}
 
 
 def test_filter_passthrough_when_flow_id_unknown() -> None:
@@ -88,12 +94,19 @@ def _make_root(
     *,
     engine_flow_id: str,
     call_specs: list[tuple[str, dict | None]],
+    extra_call_payloads: dict[str, dict] | None = None,
 ) -> Path:
     """Create a project root with ``engine.json`` and a set of call files.
 
     ``call_specs`` is a list of ``(call_id, context)`` pairs; pass ``None`` for
     ``context`` to write a call file with no ``context`` field at all (legacy
     untagged call).
+
+    ``extra_call_payloads`` is an optional mapping of ``call_id -> payload``
+    used to write call files whose on-disk shape doesn't fit the
+    ``(call_id, context)`` shorthand — e.g. legacy producers that record
+    ``flow_id`` at the top level of the payload (mirroring
+    ``_write_discovery_call`` in ``src/se3/commands/run.py``).
     """
     _write(
         tmp_path / "se3" / "state" / "engine.json",
@@ -117,6 +130,10 @@ def _make_root(
             body["context"] = context
         _write(tmp_path / "se3" / "calls" / f"{call_id}.json", body)
 
+    if extra_call_payloads:
+        for call_id, payload in extra_call_payloads.items():
+            _write(tmp_path / "se3" / "calls" / f"{call_id}.json", payload)
+
     return tmp_path
 
 
@@ -137,11 +154,67 @@ def test_snapshot_filters_pending_calls_by_flow_id(tmp_path: Path) -> None:
     snapshot = aggregator._snapshot_for_root(root)
     assert snapshot is not None
     assert snapshot.flow_id == "flow-current"
+    # Strict scoping: only calls whose context.flow_id matches the current
+    # engine.json flow_id are surfaced. Unattributed and legacy untagged
+    # call files (typical of ``merge_*`` and ``sync_conflicts_*`` artifacts
+    # left behind by other flows) are dropped.
+    assert {c.call_id for c in snapshot.pending_calls} == {"matching_01"}
+
+
+def test_snapshot_folds_legacy_top_level_flow_id(tmp_path: Path) -> None:
+    """Call files with top-level ``flow_id`` (no ``context``) are attributed.
+
+    Producers that predate the ``context.flow_id`` convention — notably
+    ``_write_discovery_call`` in ``src/se3/commands/run.py``, which writes
+    ``{"flow_id": flow.flow_id, "prompt": ..., ...}`` and never adds a
+    ``context`` field — must still be folded into ``context["flow_id"]`` by
+    :meth:`DaemonAggregator._parse_call_file` so the per-flow filter keeps
+    them visible. Without this fold-up, on-disk discovery call files would
+    silently become unattributed and disappear from
+    :class:`FlowSnapshot.pending_calls`.
+    """
+    root = _make_root(
+        tmp_path,
+        engine_flow_id="flow-current",
+        call_specs=[
+            ("ctx_match", {"flow_id": "flow-current"}),
+        ],
+        extra_call_payloads={
+            # Mirrors `_write_discovery_call` exactly: top-level flow_id,
+            # top-level prompt, NO context field.
+            "discovery_legacy": {
+                "flow_id": "flow-current",
+                "prompt": "Please clarify",
+                "step_id": "discovery-1",
+            },
+            # Same shape but for a different flow_id — must be filtered out
+            # for the current flow.
+            "discovery_other_flow": {
+                "flow_id": "flow-other",
+                "prompt": "Other flow",
+                "step_id": "discovery-2",
+            },
+        },
+    )
+    aggregator = DaemonAggregator()
+    aggregator.add_project_root(root)
+
+    snapshot = aggregator._snapshot_for_root(root)
+    assert snapshot is not None
+    assert snapshot.flow_id == "flow-current"
+    # Both the conventional `context.flow_id` call and the legacy
+    # top-level-`flow_id` discovery call must survive the per-flow filter;
+    # the other-flow legacy call must be dropped.
     assert {c.call_id for c in snapshot.pending_calls} == {
-        "matching_01",
-        "unattributed_03",
-        "legacy_04",
+        "ctx_match",
+        "discovery_legacy",
     }
+    # Verify the fold-up actually populated context.flow_id (not just that
+    # the call survived for some other reason).
+    legacy = next(
+        c for c in snapshot.pending_calls if c.call_id == "discovery_legacy"
+    )
+    assert legacy.context.get("flow_id") == "flow-current"
 
 
 def test_snapshot_no_engine_json_passthrough(tmp_path: Path) -> None:
@@ -179,10 +252,9 @@ def test_machine_status_pending_calls_unfiltered(tmp_path: Path) -> None:
 
     status = aggregator.get_snapshot()
     assert len(status.flows) == 1
-    # Flow-scoped: filtered to current flow + unattributed.
+    # Flow-scoped: strict — only calls whose context.flow_id matches.
     assert {c.call_id for c in status.flows[0].pending_calls} == {
         "matching_01",
-        "unattributed_03",
     }
     # Machine-wide: unfiltered aggregate, includes the other-flow call.
     assert {c.call_id for c in status.pending_calls} == {

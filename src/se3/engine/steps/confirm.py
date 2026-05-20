@@ -113,11 +113,19 @@ def _create_call_file(step: Step, flow: FlowInstance, project_root: Path) -> Pat
 
     call_data = {
         'step': step.step_id,
+        'step_id': step.step_id,
         'change_id': change_id,
+        'flow_id': flow.flow_id,
         'step_to_review_type': step_to_review_type,
         'step_to_review_id': step_to_review_id,
         'timestamp': timestamp,
-        'type': 'confirm'
+        'type': 'confirm',
+        'context': {
+            'flow_id': flow.flow_id,
+            'step_id': step.step_id,
+            'step_to_review_type': step_to_review_type,
+            'step_to_review_id': step_to_review_id,
+        },
     }
 
     with open(call_file, 'w') as f:

@@ -83,11 +83,13 @@ check("normalizeKind degrades unknown kind to call", () => {
 });
 
 // -- computeInterventions ---------------------------------------------------
-check("running flow with no calls gets a synthetic interjection entry", () => {
+// The synthetic interjection entry is opt-in: it is only appended when the
+// user has clicked the Interject button (state.flowInterjectRequested is
+// true). The module-private flag is false by default in the require-loaded
+// module, so without an opt-in toggle these tests exercise the default path.
+check("running flow with no calls and no opt-in has no synthetic entry", () => {
   const entries = app.computeInterventions({ status: "running", pending_calls: [] });
-  assert.equal(entries.length, 1);
-  assert.equal(entries[0].kind, "interjection");
-  assert.equal(entries[0].synthetic, true);
+  assert.equal(entries.length, 0);
 });
 check("completed flow with no calls has no intervention entries", () => {
   const entries = app.computeInterventions({ status: "completed", pending_calls: [] });
@@ -101,14 +103,13 @@ check("pending calls become entries keyed by kind and call_id", () => {
       { call_id: "c2", kind: "cli_confirm", prompt: "press 1", options: ["1", "2"] },
     ],
   });
-  // 2 calls + 1 synthetic interjection (no interjection kind present).
-  assert.equal(entries.length, 3);
+  // Two real calls; no synthetic interjection without explicit opt-in.
+  assert.equal(entries.length, 2);
   assert.equal(entries[0].callId, "c1");
   assert.equal(entries[1].kind, "cli_confirm");
   assert.deepEqual(entries[1].options, ["1", "2"]);
-  assert.equal(entries[2].kind, "interjection");
 });
-check("explicit interjection call suppresses the synthetic one", () => {
+check("explicit interjection call surfaces as a real entry", () => {
   const entries = app.computeInterventions({
     status: "running",
     pending_calls: [{ call_id: "i1", kind: "interjection", prompt: "ctrl-c" }],
@@ -120,10 +121,13 @@ check("explicit interjection call suppresses the synthetic one", () => {
 
 // -- pendingCalls: flow_id fallback filter ---------------------------------
 // The backend daemon aggregator filters pending_calls by the open flow's
-// flow_id; pendingCalls() in app.js mirrors that as a defensive fallback in
-// case an older daemon hasn't filtered. A call whose context.flow_id matches
-// the open flow is kept; a mismatching call is dropped; an unannotated call
-// (no flow_id at all) is kept as belonging to the current flow.
+// flow_id; pendingCalls() in app.js mirrors that strict semantics as a
+// defensive fallback in case an older daemon hasn't filtered. A call whose
+// context.flow_id matches the open flow is kept; a mismatching call is
+// dropped; an unannotated call (no flow_id at all) is also dropped — the
+// backend producers responsible for legitimate in-flow calls (confirm,
+// discovery, etc.) record a flow_id, so an unattributed call indicates a
+// cross-scenario artifact (merge_*, sync_conflicts_*).
 check("pendingCalls keeps calls matching flow_id", () => {
   const flow = {
     flow_id: "F1",
@@ -145,7 +149,7 @@ check("pendingCalls drops calls from a different flow", () => {
   assert.equal(kept.length, 1);
   assert.equal(kept[0].call_id, "c1");
 });
-check("pendingCalls keeps calls with no flow_id annotation", () => {
+check("pendingCalls drops unattributed calls when flow_id is known", () => {
   const flow = {
     flow_id: "F1",
     pending_calls: [
@@ -154,7 +158,16 @@ check("pendingCalls keeps calls with no flow_id annotation", () => {
       { call_id: "c3", context: null },
     ],
   };
-  assert.equal(app.pendingCalls(flow).length, 3);
+  assert.equal(app.pendingCalls(flow).length, 0);
+});
+check("pendingCalls passes everything through when flow has no flow_id", () => {
+  const flow = {
+    pending_calls: [
+      { call_id: "c1" },
+      { call_id: "c2", context: { flow_id: "F2" } },
+    ],
+  };
+  assert.equal(app.pendingCalls(flow).length, 2);
 });
 
 // -- isActiveFlow -----------------------------------------------------------

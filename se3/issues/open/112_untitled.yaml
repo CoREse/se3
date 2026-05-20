@@ -1,0 +1,14 @@
+id: '112'
+title: 验证状态字段与摘要文字不一致
+description: '验证结果中 ''Verification passed: False'',但摘要文字写明 ''Verification passed''
+  且 ''Issues found: 1 (0 errors)'' 无错误项。布尔状态与文字描述相互矛盾,可能导致 issue 108 (verification-passed-false)
+  被误判为未通过。建议核对验证步骤如何产出该布尔字段。'
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-19T19:15:02.190979'
+updated_at: '2026-05-19T19:15:02.190979'

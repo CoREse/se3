@@ -26,6 +26,8 @@ const state = {
   flowConversationRecords: [],   // conversation records shown in the flow view
   flowInterventions: [],  // intervention entries derived from pending_calls
   flowReplyTargetId: null,// id of the intervention the reply box targets
+  flowInterjectRequested: false, // user clicked Interject — synth chip on
+  flowInterjectFlowId: null, // flow id the interject opt-in belongs to
   historySessions: [],    // [{flow_id, task_description, status, updated_at, ...}]
   selectedHistoryId: null,// flow whose records are shown in the history detail
   historyRecords: [],     // records currently rendered in the history detail
@@ -83,11 +85,18 @@ function findFlow(flowId) {
 function pendingCalls(flow) {
   if (!flow || !Array.isArray(flow.pending_calls)) return [];
   const currentFlowId = flow.flow_id || "";
+  // Match the backend `_filter_calls_for_flow` strict semantics: when the
+  // flow has a known id, only keep calls whose `context.flow_id` matches.
+  // Unattributed calls (e.g. legacy `merge_*` / `sync_conflicts_*` artifacts
+  // left behind by other flows in the same project root) are dropped so
+  // they cannot leak into this flow's reply chip-bar.
+  if (!currentFlowId) {
+    return flow.pending_calls.slice();
+  }
   return flow.pending_calls.filter((c) => {
     const ctx = c && c.context;
     const cfid = (ctx && typeof ctx === "object" && ctx.flow_id) || "";
-    if (!cfid) return true; // unannotated → assume current flow
-    return !currentFlowId || cfid === currentFlowId;
+    return cfid && cfid === currentFlowId;
   });
 }
 
@@ -353,6 +362,8 @@ function openFlowView(flowId) {
   state.flowConversationRecords = [];
   state.flowInterventions = [];
   state.flowReplyTargetId = null;
+  state.flowInterjectRequested = false;
+  state.flowInterjectFlowId = flowId;
   state.detailLoaded = false;
   state.detailFetchFailures = 0;
 
@@ -377,6 +388,8 @@ function closeFlowView() {
   state.flowConversationRecords = [];
   state.flowInterventions = [];
   state.flowReplyTargetId = null;
+  state.flowInterjectRequested = false;
+  state.flowInterjectFlowId = null;
   $("flow-view").classList.add("hidden");
   if (detailPollTimer) {
     clearInterval(detailPollTimer);
@@ -581,9 +594,13 @@ function normalizeKind(kind) {
 }
 
 // Derive the ordered list of intervention entries for a flow. Each pending
-// call becomes one entry; for an active flow with no interjection already
-// pending, a synthetic interjection entry is always appended so the chat box
-// can be used to interject at any time. Pure: depends only on `flow`.
+// call becomes one entry. The reply box is enabled ONLY when an entry exists,
+// so during a normal step with nothing waiting on input the box stays
+// disabled — matching CLI parity. A synthetic "interject now" entry is
+// appended only when the user has explicitly opted in via the Interject
+// button (state.flowInterjectRequested) AND the flow is still active AND
+// there is no real interjection already pending. Pure: depends only on
+// `flow` and `state.flowInterjectRequested`.
 function computeInterventions(flow) {
   const entries = pendingCalls(flow).map((c, i) => {
     const kind = normalizeKind(c.kind);
@@ -598,7 +615,11 @@ function computeInterventions(flow) {
     };
   });
   const hasInterjection = entries.some((e) => e.kind === "interjection");
-  if (isActiveFlow(flow) && !hasInterjection) {
+  if (
+    state.flowInterjectRequested &&
+    isActiveFlow(flow) &&
+    !hasInterjection
+  ) {
     entries.push({
       id: "interjection:new",
       kind: "interjection",
@@ -635,6 +656,34 @@ function renderInterventions(flow) {
   for (const entry of entries) {
     region.appendChild(renderInterventionChip(entry));
   }
+
+  // For an active flow with no real pending interjection, offer an explicit
+  // opt-in Interject button. Clicking it sets `flowInterjectRequested`, which
+  // causes `computeInterventions` to append a synthetic interjection chip on
+  // the next rebuild; until then, the reply box stays disabled — preserving
+  // CLI parity (no input field active unless something is genuinely waiting).
+  const hasRealInterjection = entries.some(
+    (e) => e.kind === "interjection" && !e.synthetic,
+  );
+  if (
+    isActiveFlow(flow) &&
+    !hasRealInterjection &&
+    !state.flowInterjectRequested
+  ) {
+    const btn = el("button", "intervention-interject", "✎ Interject…");
+    btn.type = "button";
+    btn.title = "Send an additional instruction into the running flow.";
+    btn.addEventListener("click", (e) => {
+      e.preventDefault();
+      state.flowInterjectRequested = true;
+      state.flowInterjectFlowId = flow && flow.flow_id ? flow.flow_id : null;
+      state.flowReplyTargetId = "interjection:new";
+      renderInterventions(flow);
+      $("flow-reply-input").focus();
+    });
+    region.appendChild(btn);
+  }
+
   updateReplyBox(flow);
 }
 
@@ -853,6 +902,13 @@ async function sendReply(flowId, target, text) {
     }
     if (resp.ok) {
       if (state.selectedFlowId === flowId) $("flow-reply-input").value = "";
+      // The interject opt-in is consumed by a successful send; the reply box
+      // should disarm until the user opts in again (or a new pending call
+      // arrives), matching the CLI parity contract.
+      if (target.kind === "interjection" && target.synthetic) {
+        state.flowInterjectRequested = false;
+        state.flowReplyTargetId = null;
+      }
       appendLocalReply(flowId, target, text);
       showToast("success", target.kind === "interjection"
         ? "Interjection sent."

@@ -90,8 +90,10 @@ stacked parts, all sitting below the conversation:
 
 1. **Pending intervention chip bar** — a row of status-style buttons, one
    per pending intervention (pending MCP call, retry decision, CLI confirm,
-   etc.) plus an "Interject" chip for the active flow. Each chip shows the
-   intervention kind and a short identifier.
+   etc.). For an active flow that is not already waiting on a real
+   interjection, an opt-in "Interject" button is also rendered alongside the
+   chips; clicking it materializes a synthetic `interjection` chip and
+   selects it. Each chip shows the intervention kind and a short identifier.
 2. **Reply context panel** — when a chip is selected, the panel above the
    textarea expands the selected intervention's full prompt (Markdown
    rendered), optional context block (no `max-height` truncation), and any
@@ -112,10 +114,22 @@ read.
 - **AND** it is visible without the user clicking a button or opening a popup
 
 #### Scenario: Reply box disabled with no pending interaction
-- **WHEN** the running flow has no pending interaction (chip bar is empty)
+- **WHEN** the running flow has no pending interaction and the user has not
+  opted into interjection (chip bar is empty)
 - **THEN** the reply textarea and submit control are disabled
 - **AND** the box shows an explanatory placeholder (e.g. "No pending
   interaction…")
+- **AND** for an active flow, an "Interject" button is offered alongside the
+  empty chip bar so the user can opt into interjection mode
+
+#### Scenario: Interject button opts the user into interjection mode
+- **GIVEN** an active flow with no real pending interjection
+- **WHEN** the user clicks the "Interject" button next to the chip bar
+- **THEN** a synthetic `interjection` chip appears in the chip bar and is
+  selected
+- **AND** the reply textarea + send button become enabled
+- **AND** sending the interjection consumes the opt-in (the synthetic chip
+  disappears until the user clicks "Interject" again)
 
 #### Scenario: Reply box activated by selecting a chip
 - **WHEN** the running flow has at least one pending intervention and the
@@ -153,9 +167,17 @@ The recognized intervention kinds are at least: (1) a pending MCP call
 retry/failure decision (`retry_decision`); (4) a CLI subprocess confirmation
 prompt (`cli_confirm`). Each chip is derived from a `pending_calls` entry
 whose `kind` field identifies the interaction; an unrecognized `kind`
-degrades to a plain `call` chip. An active flow additionally surfaces a
-synthetic `interjection` chip so the user can always inject an instruction
-mid-flow.
+degrades to a plain `call` chip.
+
+A synthetic `interjection` chip is **opt-in**, not always-on: an active flow
+that is not already waiting on a real interjection MUST render an "Interject"
+button alongside the chip bar; clicking the button materializes a synthetic
+`interjection` chip and selects it. This preserves CLI parity — the reply
+textarea and Send button stay disabled while the flow is running normally and
+only become enabled when the user has explicitly opted into interjection or
+when a real pending call/interjection is waiting. A successful interjection
+send consumes the opt-in (the synthetic chip and the Interject button
+re-appear only when the user clicks Interject again).
 
 #### Scenario: Each intervention kind is rendered as a chip on the reply bar
 - **WHEN** a running flow has a pending interaction of kind `call`,
@@ -189,15 +211,29 @@ mid-flow.
 Pending interventions surfaced in a running flow's `#flow-view` MUST be scoped
 to that flow's own `flow_id`. The daemon aggregator (`DaemonAggregator`)
 filters `FlowSnapshot.pending_calls` by `context.flow_id`, keeping only calls
-whose `context.flow_id` equals the snapshot's `flow_id`. Pending calls with a
-**missing or empty** `context.flow_id` are treated as belonging to the current
-flow (legacy unattributed calls, default-attributed to the only flow on that
-root). The frontend `pendingCalls(flow)` helper applies the same filter as a
+whose `context.flow_id` equals the snapshot's `flow_id`.
+
+Pending calls whose `context.flow_id` is **missing or empty** are treated as
+**unattributed** and MUST be dropped from a flow-scoped snapshot. These
+unattributed artifacts are typically left behind by other flows or scenarios
+operating in the same project root (notably `merge_<branch>_<timestamp>.json`
+files written by `HumanCallWriter` in `engine/merge/human_call.py`, and
+`sync_conflicts_*.json` files from prior sync runs); they have no `context`
+section identifying their owning flow and would otherwise bleed into every
+flow's chip bar. Surfaces that need a non-scoped view (machine-wide pending
+calls) use `MachineStatus.pending_calls`, which is **not** filtered.
+
+To make the strict filter work end-to-end, every interaction-call writer that
+runs inside a flow MUST populate `context.flow_id` with the current flow's
+identifier. In particular, the CLI-subprocess confirmation handler
+(`make_cli_confirm_handler` in `engine/interaction_calls.py`) MUST write its
+`flow_id` and `step_id` inside the call file's `context` object, not as
+top-level extras, because the aggregator filter inspects `context.flow_id`
+and treats top-level fields as unattributed.
+
+The frontend `pendingCalls(flow)` helper applies the same strict filter as a
 defensive fallback against older daemon versions that have not yet been
 upgraded.
-
-Machine-wide aggregation (`MachineStatus.pending_calls`) is **not** filtered;
-the machine-level view still enumerates every pending call on the host.
 
 #### Scenario: Calls with matching flow_id are surfaced
 - **GIVEN** the current running flow has `flow_id = "F1"`
@@ -213,14 +249,23 @@ the machine-level view still enumerates every pending call on the host.
 - **THEN** that call MUST NOT appear in `F1`'s chip bar or anywhere in
   `F1`'s `#flow-view`
 
-#### Scenario: Calls without flow_id default to the current flow
+#### Scenario: Unattributed legacy calls are dropped
 - **GIVEN** the current running flow has `flow_id = "F1"`
-- **WHEN** a pending call's `context.flow_id` is missing, `null`, or an
-  empty string
-- **THEN** the call is treated as belonging to the current flow and appears
-  as a chip in `F1`'s chip bar
-- **AND** this preserves backward compatibility with call files written
-  before flow_id attribution was introduced
+- **WHEN** a pending call file (e.g. `merge_<branch>_<timestamp>.json` or
+  `sync_conflicts_*.json`) has no `context.flow_id`, or its `context.flow_id`
+  is `null` or an empty string
+- **THEN** the call MUST NOT appear in `F1`'s chip bar
+- **AND** machine-wide aggregation (`MachineStatus.pending_calls`) still
+  enumerates the call for host-level views
+
+#### Scenario: cli_confirm calls carry flow_id in context
+- **GIVEN** a flow with `flow_id = "F1"` triggers a CLI-subprocess
+  confirmation prompt that the agent runner captures
+- **WHEN** `make_cli_confirm_handler` writes the `cli_confirm` call file
+- **THEN** the file's `context` object contains `flow_id = "F1"` (and
+  `step_id` when known)
+- **AND** the aggregator's per-flow filter scopes the call to `F1` only, so a
+  concurrent flow `F2` does not see it in its chip bar
 
 ### Requirement: Role-Based Message Collapse
 

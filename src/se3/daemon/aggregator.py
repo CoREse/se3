@@ -317,11 +317,16 @@ class DaemonAggregator:
         """Filter ``calls`` to those belonging to *flow_id*.
 
         A call belongs to *flow_id* when its ``context.flow_id`` matches
-        exactly, or is missing / empty (an unattributed call is treated as
-        belonging to the current flow so legacy or pre-tagged call files keep
-        working). When ``flow_id`` itself is ``None`` or empty, no filtering
-        is applied — there is no current flow to scope against, and callers
-        should see the unfiltered list.
+        exactly. Calls whose ``context.flow_id`` is missing or empty are
+        treated as *unattributed* and are dropped — these are typically
+        artifacts of other flows / scenarios (``merge_<branch>_*.json``,
+        ``sync_conflicts_*.json``, …) that linger in ``se3/calls/`` and must
+        not bleed into the current flow's reply chip-bar.
+
+        When ``flow_id`` itself is ``None`` or empty, no filtering is applied
+        — there is no current flow to scope against, and callers see the
+        unfiltered list (used by the project-root snapshot when no
+        ``engine.json`` exists yet).
         """
         if not flow_id:
             return list(calls)
@@ -330,7 +335,7 @@ class DaemonAggregator:
             ctx = call.context if isinstance(call.context, dict) else {}
             call_flow_id = ctx.get("flow_id")
             if call_flow_id is None or call_flow_id == "":
-                result.append(call)
+                # Unattributed call — drop, do not leak into this flow.
                 continue
             if str(call_flow_id) == flow_id:
                 result.append(call)
@@ -368,6 +373,18 @@ class DaemonAggregator:
         context = data.get("context")
         if isinstance(context, dict):
             call.context = context
+
+        # Legacy compatibility: producers that predate the `context.flow_id`
+        # convention (e.g. confirm / discovery call files) record `flow_id` at
+        # the top level of the payload. Fold that into `context["flow_id"]`
+        # so the per-flow filter can attribute the call to its owning flow.
+        top_level_flow_id = data.get("flow_id")
+        if (
+            isinstance(top_level_flow_id, str)
+            and top_level_flow_id
+            and not call.context.get("flow_id")
+        ):
+            call.context = {**call.context, "flow_id": top_level_flow_id}
 
         options = data.get("options")
         if isinstance(options, list):
