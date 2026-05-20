@@ -1,0 +1,13 @@
+id: '129'
+title: call_id 在 tooltip 中仍对普通用户可见
+description: 为了排查方便,call_id 被保留在 chip 的 title tooltip 中。严格意义上这仍是「实现细节暴露」,只是从可见文本退到了
+  hover 提示。如果未来要做面向终端用户的发布版本,建议通过 dev flag 或环境变量门控。
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T16:46:20.170500'
+updated_at: '2026-05-20T16:46:20.170500'

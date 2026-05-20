@@ -1,0 +1,13 @@
+id: '127'
+title: Verification step reports passed=False while summary confirms all items implemented
+description: 本次任务 verification 流程的 summary 明确说明全部 5 项已正确实现且 4601+45 测试通过,但 verification_passed
+  字段仍为 False。这可能是 verification skill 自身的判定逻辑 bug(例如把 'verification' 字面量误判为失败信号),建议单独排查。
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T16:46:20.167781'
+updated_at: '2026-05-20T16:46:20.167781'

@@ -1,0 +1,13 @@
+id: '128'
+title: history view 渲染层与 running-flow view 共享,未做隔离评估
+description: 本次改动通过共享渲染函数顺带影响了 history view,但任务范围明确说明「不专门重做 history view」。若后续 history
+  view 出现不期望的行为(如严格时序破坏了 history 按 step 分组的阅读体验),需要重新评估渲染层是否应该按视图拆分。
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T16:46:20.169533'
+updated_at: '2026-05-20T16:46:20.169533'

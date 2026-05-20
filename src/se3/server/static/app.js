@@ -1504,11 +1504,19 @@ function stripTrailingNewlines(s) {
 //       `suffix` is the framework-injected tail (Available Specs, runtime
 //       env, READ-ONLY constraint, language directive, …).
 //   - Two-segment (engine emitted only TEMPLATE_PREFIX_END +
-//     USER_CONTENT_BEGIN, no USER_CONTENT_END): `{prefix, content, suffix:""}`
-//     with `content` = everything after USER_CONTENT_BEGIN. This is the
-//     legacy two-marker layout — preserved for compatibility with old
-//     history files and step prompt modules that have not migrated to
-//     `wrap_user_section`.
+//     USER_CONTENT_BEGIN, no USER_CONTENT_END): `{prefix, content:"", suffix}`
+//     with `suffix` = everything after USER_CONTENT_BEGIN. This is the legacy
+//     two-marker layout, used by every non-discovery step prompt module
+//     (analyze / plan / plan_tasks / implement / self_check / verify_spec /
+//     update_spec / summarize / version_analyze). The post-BEGIN tail there
+//     is framework-injected text (task-description heading, project context,
+//     spec_content, runtime-env, READ-ONLY constraint, language directive,
+//     …) — NOT a user literal — so we route it into the collapsed system-
+//     prompt chip as a `suffix` subsection and emit no expanded user-content
+//     bubble. This makes the two-segment layout degrade to the same on-
+//     screen behavior as a no-marker legacy message (a single collapsed
+//     chip), instead of regressing to displaying framework text in an
+//     expanded bubble.
 //   - `null`: the markers are missing, malformed, or out of order — the
 //     caller should fall back to the whole-message chip behavior.
 function splitUserPromptByMarker(content) {
@@ -1529,12 +1537,14 @@ function splitUserPromptByMarker(content) {
       suffix: stripLeadingNewlines(tail),
     };
   }
-  // Two-segment legacy: BEGIN with no END — entire remainder is the bubble.
+  // Two-segment legacy: BEGIN with no END. The remainder is framework-
+  // injected text, not a user literal, so we route it into the chip as the
+  // suffix subsection and emit no user-content bubble.
   const rest = content.slice(ucb + USER_CONTENT_BEGIN.length);
   return {
     prefix: prefix,
-    content: stripLeadingNewlines(rest),
-    suffix: "",
+    content: "",
+    suffix: stripLeadingNewlines(rest),
   };
 }
 

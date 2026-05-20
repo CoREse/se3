@@ -307,9 +307,13 @@ check("isValidAbsolutePath: accepts absolute paths only", () => {
 // USER_CONTENT_END). Three-segment input returns `{prefix, content, suffix}`
 // so the framework tail (Available Specs / runtime env / READ-ONLY / language
 // directive) joins the system-prompt chip rather than leaking into the user
-// content bubble. Two-segment legacy input returns `suffix: ""`. Missing or
-// malformed markers return null so the caller can fall back to the whole-
-// message chip path.
+// content bubble. Two-segment legacy input (TEMPLATE_PREFIX_END +
+// USER_CONTENT_BEGIN with no USER_CONTENT_END) returns `{prefix, content:"",
+// suffix: <rest>}` — the post-BEGIN tail is framework-injected text on every
+// non-discovery step prompt module, so it is collapsed into the chip's
+// suffix subsection and the user-content bubble is omitted, matching the
+// no-marker fallback behavior. Missing or malformed markers return null so
+// the caller can fall back to the whole-message chip path.
 check("splitUserPromptByMarker three-segment input returns prefix/content/suffix", () => {
   const TPE = app.TEMPLATE_PREFIX_END;
   const UCB = app.USER_CONTENT_BEGIN;
@@ -324,15 +328,19 @@ check("splitUserPromptByMarker three-segment input returns prefix/content/suffix
   assert.equal(split.content, "Do X.");
   assert.equal(split.suffix.startsWith("## Available Specs"), true);
 });
-check("splitUserPromptByMarker two-segment input has empty suffix", () => {
+check("splitUserPromptByMarker two-segment input routes tail into suffix", () => {
   const TPE = app.TEMPLATE_PREFIX_END;
   const UCB = app.USER_CONTENT_BEGIN;
   const sample = "You are an expert engineer.\n" + TPE + "\n" + UCB + "\n## Task\nDo it";
   const split = app.splitUserPromptByMarker(sample);
   assert.ok(split, "split returned null but should have");
   assert.equal(split.prefix.startsWith("You are an expert engineer."), true);
-  assert.equal(split.content.startsWith("## Task"), true);
-  assert.equal(split.suffix, "");
+  // Legacy two-marker layout: the post-BEGIN tail is framework-injected
+  // (task-description heading, project context, spec_content, runtime-env,
+  // READ-ONLY constraint, …) and MUST collapse into the chip's suffix
+  // subsection — not regress to an expanded user-content bubble.
+  assert.equal(split.content, "");
+  assert.equal(split.suffix.startsWith("## Task"), true);
 });
 check("splitUserPromptByMarker returns null without markers (legacy)", () => {
   assert.equal(app.splitUserPromptByMarker("plain user message"), null);
@@ -359,9 +367,12 @@ check("splitUserPromptByMarker returns null when USER_CONTENT_END precedes USER_
   const split = app.splitUserPromptByMarker(sample);
   // We don't require null here strictly (an END before BEGIN is ignored as
   // a stray, and we fall through to two-segment), but the split must NOT
-  // pick the bogus end up as the content terminator.
+  // pick the bogus end up as the content terminator. In the two-segment
+  // fallback the post-BEGIN tail is routed into `suffix` and `content` is
+  // empty so no bubble is rendered.
   assert.ok(split);
-  assert.equal(split.suffix, "");
+  assert.equal(split.content, "");
+  assert.equal(split.suffix.startsWith("content"), true);
 });
 
 // -- STEP_ASSISTANT_RENDERERS registry --------------------------------------
