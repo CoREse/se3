@@ -1,0 +1,27 @@
+id: '123'
+title: Frontend STEP_REPORT_RENDERERS registry does not include explicit renderers
+  for the deprecated PROPOSE / DESIGN step types that still exist in src/se3/engine/step_renderers.py.
+  They fall back to renderDefaultReport, which gives a reasonable best-effort view,
+  but is not byte-for-byte parity with the CLI's _render_propose / _render_design
+  (which delegate to render_proposal / render_design).
+description: 'Frontend STEP_REPORT_RENDERERS registry does not include explicit renderers
+  for the deprecated PROPOSE / DESIGN step types that still exist in src/se3/engine/step_renderers.py.
+  They fall back to renderDefaultReport, which gives a reasonable best-effort view,
+  but is not byte-for-byte parity with the CLI''s _render_propose / _render_design
+  (which delegate to render_proposal / render_design).
+
+
+  Suggestion: If future flows persist legacy PROPOSE/DESIGN steps and parity is desired,
+  add `propose: renderProposeReport` and `design: renderDesignReport` entries that
+  extract the `proposal` / `design` dict and render it similar to the CLI helpers.
+  Not blocking — PROPOSE/DESIGN are deprecated and absent from active 16-step sequences.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-20T14:26:31.396509'
+updated_at: '2026-05-20T14:26:31.396509'

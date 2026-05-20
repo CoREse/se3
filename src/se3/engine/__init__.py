@@ -31,6 +31,7 @@ from .event_stream import (
 from .sink import (
     Sink,
     CliSink,
+    HistorySink,
     JsonSink,
 )
 
@@ -71,5 +72,6 @@ __all__ = [
     "new_event",
     "Sink",
     "CliSink",
+    "HistorySink",
     "JsonSink",
 ]

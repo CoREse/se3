@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import sys
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import IO, Optional
 
 from .event_stream import Event, EventType
@@ -137,3 +138,47 @@ class JsonSink(Sink):
             self.file.flush()
         except (ValueError, OSError):  # pragma: no cover - closed/unflushable stream
             pass
+
+
+class HistorySink(Sink):
+    """Persist step-lifecycle events into the per-step chat history jsonl.
+
+    ``STEP_COMPLETED`` and ``STEP_FAILED`` events carry the step's full
+    structured output (the same data the CLI's ``step_renderers`` Panel
+    renders). Writing them into ``se3/history/<flow_id>/<step_id>.jsonl``
+    makes them flow naturally to the web console: the daemon's
+    ``DaemonHistoryReader`` already streams every line in those files to the
+    server via the ``history_data`` channel, and the frontend's
+    ``normalizeRecord`` is already wired to recognise ``type ==
+    "step_completed" / "step_failed"`` records and render them as default-
+    expanded report cards.
+
+    All other event types are a no-op here. The sink is safe to subscribe
+    alongside :class:`CliSink` and :class:`JsonSink`; failures are swallowed
+    so a flaky filesystem cannot break the running flow.
+    """
+
+    def __init__(self, project_root: Path) -> None:
+        self.project_root = Path(project_root)
+
+    def consume(self, event: Event) -> None:
+        if event.type not in (EventType.STEP_COMPLETED, EventType.STEP_FAILED):
+            return
+        step = event.data.get("step")
+        if step is None:
+            return
+        step_dict = step.to_dict() if hasattr(step, "to_dict") else step
+        if not isinstance(step_dict, dict):
+            return
+        # Lazy import: keeps the sink module free of heavier engine deps.
+        from .chat_history import record_step_event
+
+        record_step_event(
+            project_root=self.project_root,
+            flow_id=event.flow_id or "",
+            step_id=event.step_id or (step_dict.get("step_id") or ""),
+            step_type=event.step_type or (step_dict.get("step_type") or ""),
+            event_type=event.type.value,
+            step_dict=step_dict,
+            timestamp=event.timestamp,
+        )

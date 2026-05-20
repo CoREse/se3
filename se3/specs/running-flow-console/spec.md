@@ -325,29 +325,191 @@ upgraded.
 ### Requirement: Role-Based Message Collapse
 
 The conversation flow MUST default to highlighting the assistant's real output
-and the human-intervention items (both default-expanded), while template-style
-prompt messages (`user` / `system` roles) default to a single collapsed,
-clickable chip (e.g. "system prompt · discovery mode"). Clicking a chip expands
-the original content; content is never deleted, only collapsed by default.
-Classification MUST be deterministic, based solely on the record's structured
-`role` field — `user` / `assistant` / `system`, with `human` folded into
-`user` — and MUST NOT rely on guessing from message text.
+and the human-intervention items (both default-expanded). The collapse rule for
+template-style prompt roles (`user` / `system`) MUST be deterministic, based
+solely on the record's structured `role` field — `user` / `assistant` /
+`system`, with `human` folded into `user` — and MUST NOT rely on guessing from
+message text. Content is never deleted, only collapsed by default.
+
+**`system` role** messages collapse to a single chip in their entirety (e.g.
+"system prompt · discovery mode"); clicking the chip expands the original
+content unchanged.
+
+**`user` role** messages are split at the backend-provided sentinel marker
+pair defined in `src/se3/engine/prompt_markers.py` (`TEMPLATE_PREFIX_END` /
+`USER_CONTENT_BEGIN`). When a `user` message contains the marker pair, the
+prefix segment (template/system-instructions boilerplate, e.g. the
+`You are an expert software engineer...` opener plus the Agent Safety / Process
+Cleanup boilerplate that every step shares) MUST render as a default-collapsed
+clickable chip, and the suffix segment (the task/spec/context — the user's
+real input as the backend assembled it) MUST render as a normal default-
+expanded bubble. The chip and bubble MUST coexist within the same logical
+record so collapse never hides the user's real input. A `user` message that
+lacks the marker pair (legacy history written before the marker protocol) MUST
+fall back to the previous behavior of rendering the entire record as a single
+collapsed chip.
+
+Step-prompt modules under `src/se3/engine/steps/` MUST inject the boundary
+markers via `prompt_markers.inject_boundary` (or `wrap_user_content`) at the
+point where the boilerplate prefix ends and the user/task-specific content
+begins. This applies to all step prompt templates that assemble both halves —
+analyze, plan, plan_tasks, implement (`IMPLEMENT_PROMPT`,
+`IMPLEMENT_GROUP_PROMPT`, `FIX_PROMPT`), discovery (initial + continue),
+self_check, verify_spec, update_spec, summarize, and version_analyze — so the
+frontend has a reliable, text-pattern-free split signal.
 
 #### Scenario: Assistant output defaults to expanded
 - **WHEN** a conversation record has the `assistant` role
 - **THEN** it is rendered expanded, highlighting the assistant's real output
 
-#### Scenario: Template-style messages default to a collapsed chip
-- **WHEN** a conversation record has the `user` or `system` role
+#### Scenario: System role collapses to a single chip
+- **WHEN** a conversation record has the `system` role
 - **THEN** it is rendered as a single collapsed, clickable chip
 - **AND** clicking the chip expands the original content unchanged
 
+#### Scenario: User message with sentinel markers splits prefix and content
+- **GIVEN** a `user` role record whose body contains the
+  `TEMPLATE_PREFIX_END` / `USER_CONTENT_BEGIN` marker pair injected by a step
+  prompt module
+- **WHEN** the record is rendered in the running-flow conversation
+- **THEN** the segment before `TEMPLATE_PREFIX_END` is rendered as a default-
+  collapsed clickable chip labeled as a system-prompt prefix
+- **AND** the segment after `USER_CONTENT_BEGIN` is rendered as a normal
+  default-expanded `user` bubble
+- **AND** the user's real input is visible without any click
+
+#### Scenario: User message without markers falls back to whole-chip
+- **GIVEN** a `user` role record from legacy history that does NOT contain the
+  marker pair
+- **WHEN** the record is rendered
+- **THEN** the entire body is rendered as a single collapsed clickable chip,
+  matching the prior whole-message behavior
+
 #### Scenario: human role folded into user
 - **WHEN** a record's `role` field is `human`
-- **THEN** it is classified as `user` and collapses to a chip like any other
-  `user` message
+- **THEN** it is classified as `user` and follows the same marker-aware
+  rendering rules (split when marker present, fall back to whole-chip
+  otherwise)
 
 #### Scenario: Classification is role-based, not text-based
-- **WHEN** deciding whether a record collapses
-- **THEN** the decision is made only from the structured `role` field
-- **AND** never from pattern-matching the message text
+- **WHEN** deciding how to collapse a record
+- **THEN** the role decision is made only from the structured `role` field
+- **AND** the prefix/content split is made only from the structured sentinel
+  marker pair, never from pattern-matching the message prose
+
+### Requirement: Per-Step Report Cards
+
+For every `step_completed` event surfaced in a running flow's
+`#flow-view`, the web console MUST render an additional structured **report
+card** (e.g. a `.step-report` block) directly after the existing raw event
+chip / record for that step. The report card is the web counterpart of the
+Rich `Panel`-rendered end-of-step report produced by the CLI sink in
+`src/se3/engine/step_renderers.py` (Work Summary / Verification Result /
+Discovery Result / Plan / Analyze result / etc.).
+
+The report card MUST:
+
+- Be **default-expanded**, with NO `max-height` cap on its body — the user
+  reads the structured report at a glance, not after a click.
+- **Coexist with** the existing raw `step_completed` message rendering rather
+  than replace it: the raw record (foldable chip / NDJSON view) stays where it
+  is, and the report card is rendered alongside it.
+- Be routed by `step.step_type` to a dedicated small renderer that consumes
+  the same structured fields the CLI Panel reads from `step.outputs`. Field
+  parity with `step_renderers.py` is required: every step type that has a CLI
+  Panel renderer MUST have a corresponding web renderer (analyze, plan,
+  implement, test, self_check, verify_spec, update_spec, commit,
+  version_analyze, summarize, discovery — adding new step types adds a new
+  renderer).
+- Render structured output (markdown, tables, field lists) rather than
+  re-dumping the raw JSON blob.
+
+To make this work end-to-end, the engine sink layer MUST also persist
+`step_completed` events into the per-step jsonl files consumed by the daemon
+history reader (e.g. via an unconditionally-subscribed `HistorySink` in
+`src/se3/engine/sink.py` wired up from `src/se3/commands/run.py`), so that the
+report card has access to the same `outputs` dict that the CLI Panel sees —
+without breaking the CLI history viewer (`get_step_history` skips these
+records on the CLI side).
+
+#### Scenario: Each completed step renders a report card
+- **WHEN** the running flow emits a `step_completed` event of a known step
+  type (analyze, plan, implement, test, self_check, verify_spec, update_spec,
+  commit, version_analyze, summarize, discovery)
+- **THEN** the conversation gains a `.step-report` card for that step, in
+  addition to the raw `step_completed` record
+- **AND** the card is rendered default-expanded with no inner `max-height`
+  cropping its body
+
+#### Scenario: Report card mirrors CLI Panel fields
+- **WHEN** a step type's CLI renderer in `src/se3/engine/step_renderers.py`
+  displays a specific set of fields from `step.outputs`
+- **THEN** the corresponding web report renderer MUST surface the same field
+  set (mapped to markdown / tables / field lists), so the web and CLI users
+  see the same structured report content
+
+#### Scenario: Report card does NOT replace the raw event record
+- **GIVEN** a `step_completed` event for a step
+- **WHEN** the conversation is rendered
+- **THEN** both (a) the existing raw event record (foldable chip / NDJSON
+  view) and (b) the new `.step-report` card are present
+- **AND** the raw record is NOT hidden or removed by the introduction of the
+  report card
+
+### Requirement: New Task — Arbitrary Project Root
+
+The web console's "New Task" form MUST allow the user to start a flow against
+**any** project root on the selected machine, not only roots the daemon has
+already seen as live in its current process lifetime. To satisfy this the form
+provides two complementary entry points for the `project_root` field, both
+sourced from the selected machine's record:
+
+1. **Known-project dropdown** — populated from
+   `MachineRecord.project_roots` (the union of the daemon's live registered
+   roots and the historical roots enumerated from `se3/history/` and
+   `se3/state/archive/`; see the `aggregator.py` bullet in the `base` spec).
+2. **`Other path…` sentinel option** — always appended to the dropdown,
+   including when the machine has zero known roots. Selecting it reveals a
+   text input that accepts an absolute path; the entered path is sent as
+   `project_root` to `POST /api/flows`.
+
+The server endpoint `POST /api/flows` MUST validate only that the supplied
+`project_root` is an absolute path; it MUST NOT reject paths that are absent
+from the machine's known-roots list. Membership in `project_roots` is a hint
+for the dropdown, not a precondition for spawning.
+
+When the user-supplied target directory is not yet an SE3 project (no
+`se3/specs/base/spec.md` marker), the daemon MUST initialize it on the user's
+behalf before spawning the flow — see the `spawner.py` / `client.py` bullets
+in the `base` spec and the `se3-commands` `se3 init` requirement; the New
+Task form itself need not require the user to pre-initialize the directory.
+
+#### Scenario: Dropdown lists known projects and an Other-path entry
+- **GIVEN** the user opens the New Task form for a machine that reports
+  `project_roots = ["/path/A", "/path/B"]`
+- **WHEN** the project dropdown is rendered
+- **THEN** the dropdown lists `/path/A`, `/path/B`, and an `Other path…`
+  sentinel entry
+
+#### Scenario: Other-path entry available even with zero known roots
+- **GIVEN** the selected machine has an empty `project_roots` list
+- **WHEN** the New Task form is rendered
+- **THEN** the project dropdown still offers the `Other path…` entry so the
+  user can type an absolute path manually
+- **AND** the form can submit a flow against that path
+
+#### Scenario: Server accepts absolute path outside known roots
+- **GIVEN** the user submits a New Task with an absolute `project_root` that
+  is NOT listed in any machine's `project_roots`
+- **WHEN** `POST /api/flows` validates the request
+- **THEN** the endpoint accepts the request as long as the path is absolute
+- **AND** the request is dispatched to the selected machine's daemon for
+  spawning
+
+#### Scenario: Brand-new directory completes init+run from the web
+- **GIVEN** the user picks `Other path…` and types an absolute path to an
+  empty directory that has never been an SE3 project
+- **WHEN** the flow is submitted
+- **THEN** the daemon first initializes the directory as an SE3 project (per
+  the spawner/client bullets in the `base` spec), registers the new root, and
+  then continues with the normal spawn path

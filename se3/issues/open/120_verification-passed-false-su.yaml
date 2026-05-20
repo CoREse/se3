@@ -1,0 +1,13 @@
+id: '120'
+title: verification.passed=False 与 summary 实际通过结论矛盾
+description: 本次 verification 步骤报告 passed=False，但 summary 实际逐项确认三处修复均正确实现且无 scope 外改动。Verifier
+  的判定阈值或汇总逻辑可能存在 bug，建议核对 verification step 的 pass/fail 决策路径（可能与 issue 117 相关）。
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T12:47:39.501866'
+updated_at: '2026-05-20T12:47:39.501866'

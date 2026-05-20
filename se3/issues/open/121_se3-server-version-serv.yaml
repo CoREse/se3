@@ -1,0 +1,13 @@
+id: '121'
+title: se3-server --version 在缺少 [server] extras 时的回归风险
+description: 当前依赖 __init__.py 中在 fastapi 导入前处理 --version 的顺序。后续若有人重构启动流程，很容易把 fastapi
+  导入提前，导致裸装环境下 --version 再次失败。建议加一个不依赖 fastapi 的 smoke test。
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T12:47:39.503151'
+updated_at: '2026-05-20T12:47:39.503151'

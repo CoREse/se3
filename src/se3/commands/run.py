@@ -45,7 +45,7 @@ try:
         render_full,
     )
     from ..engine.event_stream import EventEmitter, EventType, new_event
-    from ..engine.sink import CliSink, JsonSink
+    from ..engine.sink import CliSink, HistorySink, JsonSink
     from ..cli import _read_multiline_input
 except ImportError:
     # Direct import for development
@@ -67,7 +67,7 @@ except ImportError:
         render_full,
     )
     from engine.event_stream import EventEmitter, EventType, new_event
-    from engine.sink import CliSink, JsonSink
+    from engine.sink import CliSink, HistorySink, JsonSink
     from cli import _read_multiline_input
 
 
@@ -1149,6 +1149,13 @@ def _run_flow_impl(
         emitter.subscribe(JsonSink())
     else:
         emitter.subscribe(CliSink())
+    # Persist step lifecycle events into the per-step chat history jsonl so
+    # the daemon's history reader forwards them to the web console — without
+    # this, step_completed / step_failed events only land in CliSink's
+    # terminal output or JsonSink's stdout (which the daemon spawner
+    # redirects to a per-flow log file), and the running-flow console never
+    # sees the structured outputs the frontend needs to render report cards.
+    emitter.subscribe(HistorySink(project_root))
 
     # Load or create flow
     try:

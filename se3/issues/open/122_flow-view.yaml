@@ -1,0 +1,13 @@
+id: '122'
+title: flow-view 缺少深链/刷新支持
+description: '进入 flow-view 后 URL 变为 #flow/<id>，但直接访问该 URL 或刷新页面时不会自动展开对应 flow。可在初始化时检查
+  location.hash 并复用 openFlowView。'
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T12:47:39.504118'
+updated_at: '2026-05-20T12:47:39.504118'

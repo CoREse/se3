@@ -154,6 +154,49 @@ def record_response(
     _append_message(project_root, flow_id, step_id, msg)
 
 
+def record_step_event(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    step_type: str,
+    event_type: str,
+    step_dict: Dict[str, Any],
+    timestamp: Optional[float] = None,
+) -> None:
+    """Record a step-lifecycle event (``step_completed`` / ``step_failed``).
+
+    Writes a single JSON line into ``se3/history/{flow_id}/{step_id}.jsonl``
+    alongside the LLM user/assistant messages. The line is intentionally NOT
+    a :class:`ChatMessage` — it carries the engine's structured step output
+    in the shape the web frontend's ``normalizeRecord`` expects, so the same
+    content the CLI's ``step_renderers`` Panel shows surfaces as a report
+    card in the running-flow console.
+
+    The daemon's history reader (``DaemonHistoryReader.read_flow``) reads any
+    JSON dict on each line and forwards it as-is to the server, so this line
+    rides the existing ``history_data`` push channel without protocol
+    changes. :func:`get_step_history` skips non-ChatMessage lines gracefully.
+    """
+    record = {
+        "type": event_type,
+        "step_id": step_id,
+        "step_type": step_type,
+        "timestamp": (
+            datetime.fromtimestamp(timestamp).isoformat()
+            if timestamp is not None
+            else datetime.now().isoformat()
+        ),
+        "data": {"step": step_dict},
+    }
+    path = _history_file(project_root, flow_id, step_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("Failed to record step event for %s: %s", step_id, exc)
+
+
 def get_step_history(
     project_root: Path, flow_id: str, step_id: str
 ) -> Optional[ChatSession]:
@@ -169,11 +212,19 @@ def get_step_history(
             continue
         try:
             data = json.loads(line)
+            # Step-lifecycle event records (written by HistorySink) live in the
+            # same jsonl but are not ChatMessages — skip them here so CLI
+            # history rendering only sees the user/assistant turns.
+            if isinstance(data, dict) and data.get("type") in (
+                "step_completed",
+                "step_failed",
+            ) and "role" not in data:
+                continue
             msg = ChatMessage.from_dict(data)
             messages.append(msg)
             if not step_type:
                 step_type = msg.step_type
-        except (json.JSONDecodeError, KeyError) as e:
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
             logger.warning(f"Skipping malformed history line: {e}")
             continue
 
