@@ -23,6 +23,7 @@ from ..context_builder import ContextBuilder
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus, StepType, get_default_step_sequence
 from ..project_context import ProjectContextCollector, list_spec_names
+from ..prompt_markers import inject_boundary
 from ..spec_index import load_or_build
 from ..spec_loader import load_for_step
 from ..utils.json_parser import parse_json_response
@@ -76,6 +77,11 @@ Task description:
 Project context:
 {project_context}
 """
+
+# Splice sentinel markers between the boilerplate system-instructions prefix
+# and the task-/project-specific user content. The boundary sits right before
+# the ``Task description:`` block — the most directly user-input portion.
+ANALYZE_PROMPT = inject_boundary(ANALYZE_PROMPT, "Task description:\n")
 
 
 def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:

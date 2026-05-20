@@ -23,6 +23,7 @@ from ..dag_scheduler import (
     _relay_plan_is_linear,
     classify_chains,
 )
+from ..prompt_markers import inject_boundary
 from ..transitive_reduction import transitive_reduce
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus
@@ -298,6 +299,16 @@ If the fix context indicates that tests previously timed out (timeout_reason is 
 IMPLEMENT_PROMPT = IMPLEMENT_PROMPT + "\n" + VERSION_FILE_GUARDRAIL
 IMPLEMENT_GROUP_PROMPT = IMPLEMENT_GROUP_PROMPT + "\n" + VERSION_FILE_GUARDRAIL
 FIX_PROMPT = FIX_PROMPT + "\n" + VERSION_FILE_GUARDRAIL + FIX_VERSION_FILE_GUARDRAIL
+
+# Splice sentinel markers between the boilerplate system-instructions prefix
+# (role + Agent Safety section) and the task-/project-specific user content
+# section. The running-flow console uses these markers to render the prefix
+# as a collapsed chip and the user content as a default-expanded bubble.
+IMPLEMENT_PROMPT = inject_boundary(IMPLEMENT_PROMPT, "## Task Description\n")
+IMPLEMENT_GROUP_PROMPT = inject_boundary(
+    IMPLEMENT_GROUP_PROMPT, "## Task Description\n",
+)
+FIX_PROMPT = inject_boundary(FIX_PROMPT, "## Task Description\n")
 
 
 def implement_handler(step: Step, flow: FlowInstance) -> StepStatus:

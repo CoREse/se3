@@ -15,6 +15,7 @@ from typing import Any
 
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ..prompt_markers import inject_boundary
 from ..truncation import (
     PHASE_STDERR_TAIL_CHARS,
     PHASE_STDOUT_TAIL_CHARS,
@@ -368,6 +369,8 @@ Respond in JSON format:
 
 If the implementation is solid with no issues found, return an empty issues array (and an empty previous_issue_resolutions array if there were no prev_issues).
 """
+
+SELF_CHECK_PROMPT = inject_boundary(SELF_CHECK_PROMPT, "## Task Description\n")
 
 
 _TASK_GROUPS_SECTION_INTRO = (

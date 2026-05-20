@@ -12,6 +12,7 @@ from typing import Any
 
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ..prompt_markers import inject_boundary
 from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,8 @@ When you are done, output a JSON summary:
 - `spec_decisions` is REQUIRED whenever you add a new Requirement. If you only modified existing Requirements, return an empty array.
 - If no spec updates are needed at all, return empty arrays for both `specs_updated` and `spec_decisions`.
 """
+
+UPDATE_SPEC_PROMPT = inject_boundary(UPDATE_SPEC_PROMPT, "## Task Description\n")
 
 
 def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:

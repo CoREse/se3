@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ..prompt_markers import inject_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,10 @@ IMPORTANT:
 - Project-specific rules (when given) override the default rules on conflict.
 - If unsure between minor and patch under default rules, be conservative and choose patch.
 """
+
+VERSION_ANALYZE_PROMPT = inject_boundary(
+    VERSION_ANALYZE_PROMPT, "## Task Information\n",
+)
 
 
 _NO_CUSTOM_RULES_PLACEHOLDER = (
