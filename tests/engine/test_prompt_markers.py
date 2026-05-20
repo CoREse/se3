@@ -5,8 +5,11 @@ from __future__ import annotations
 from se3.engine.prompt_markers import (
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,
+    USER_CONTENT_END,
+    _marker_pair_present,
     inject_boundary,
     wrap_user_content,
+    wrap_user_section,
 )
 from se3.engine.steps.analyze import ANALYZE_PROMPT
 from se3.engine.steps.discovery import (
@@ -47,6 +50,96 @@ def test_wrap_user_content_idempotent_on_marker_in_prefix():
     once = wrap_user_content("sys", "user")
     twice = wrap_user_content(once, "more")
     assert twice == once + "more"
+
+
+def test_wrap_user_section_three_segment_order():
+    out = wrap_user_section("PREFIX", "USER", "SUFFIX")
+    # All three markers present.
+    assert TEMPLATE_PREFIX_END in out
+    assert USER_CONTENT_BEGIN in out
+    assert USER_CONTENT_END in out
+    # Strict ordering: prefix < TEMPLATE_END < USER_BEGIN < user_content < USER_END < suffix.
+    pos_prefix = out.index("PREFIX")
+    pos_template_end = out.index(TEMPLATE_PREFIX_END)
+    pos_user_begin = out.index(USER_CONTENT_BEGIN)
+    pos_user = out.index("USER")
+    pos_user_end = out.index(USER_CONTENT_END)
+    pos_suffix = out.index("SUFFIX")
+    assert pos_prefix < pos_template_end < pos_user_begin < pos_user < pos_user_end < pos_suffix
+    # Exactly one of each marker.
+    assert out.count(TEMPLATE_PREFIX_END) == 1
+    assert out.count(USER_CONTENT_BEGIN) == 1
+    assert out.count(USER_CONTENT_END) == 1
+
+
+def test_wrap_user_section_idempotent_on_already_wrapped():
+    once = wrap_user_section("PREFIX", "USER", "SUFFIX")
+    # Re-wrapping by passing the already-wrapped string as prefix MUST NOT
+    # inject a second marker triple; the inputs are concatenated as-is.
+    twice = wrap_user_section(once, "MORE_USER", "MORE_SUFFIX")
+    assert twice == once + "MORE_USER" + "MORE_SUFFIX"
+    assert twice.count(TEMPLATE_PREFIX_END) == 1
+    assert twice.count(USER_CONTENT_BEGIN) == 1
+    assert twice.count(USER_CONTENT_END) == 1
+
+
+def test_wrap_user_section_idempotent_when_markers_in_user_content():
+    inner = wrap_user_section("p", "u", "s")
+    # The middle position carries the marker triple; passing it as
+    # user_content must still not double-wrap.
+    out = wrap_user_section("OUTER_PREFIX", inner, "OUTER_SUFFIX")
+    assert out == "OUTER_PREFIX" + inner + "OUTER_SUFFIX"
+    assert out.count(TEMPLATE_PREFIX_END) == 1
+    assert out.count(USER_CONTENT_END) == 1
+
+
+def test_wrap_user_section_empty_prefix_and_suffix():
+    out = wrap_user_section("", "USER", "")
+    # Still emits the three-segment markers so the frontend sees a complete record.
+    assert TEMPLATE_PREFIX_END in out
+    assert USER_CONTENT_BEGIN in out
+    assert USER_CONTENT_END in out
+    assert "USER" in out
+    # No stray prefix / suffix content.
+    assert out.startswith(TEMPLATE_PREFIX_END)
+    assert out.endswith(f"{USER_CONTENT_END}\n")
+
+
+def test_wrap_user_section_empty_user_content_still_wraps():
+    out = wrap_user_section("PRE", "", "SUF")
+    # Empty middle is still wrapped — the frontend distinguishes "marker present but
+    # bubble empty" from "no marker at all" (legacy whole-chip fallback).
+    assert TEMPLATE_PREFIX_END in out
+    assert USER_CONTENT_BEGIN in out
+    assert USER_CONTENT_END in out
+    assert out.index(USER_CONTENT_BEGIN) < out.index(USER_CONTENT_END)
+    assert "PRE" in out and "SUF" in out
+
+
+def test_marker_pair_present_helper():
+    assert not _marker_pair_present("")
+    assert not _marker_pair_present("no markers at all")
+    # Two-segment legacy text is NOT considered a full triple.
+    legacy = wrap_user_content("sys", "user")
+    assert not _marker_pair_present(legacy)
+    # Three-segment text is.
+    assert _marker_pair_present(wrap_user_section("p", "u", "s"))
+
+
+def test_wrap_user_section_does_not_affect_legacy_helpers():
+    """Old two-segment helpers must still produce their two-marker output
+    unchanged after the new three-segment helper was introduced.
+    """
+    out_wrap = wrap_user_content("sys", "user")
+    assert TEMPLATE_PREFIX_END in out_wrap
+    assert USER_CONTENT_BEGIN in out_wrap
+    # Crucially: the legacy helper MUST NOT emit USER_CONTENT_END.
+    assert USER_CONTENT_END not in out_wrap
+
+    out_inject = inject_boundary("sys\n## Anchor\nbody", "## Anchor\n")
+    assert TEMPLATE_PREFIX_END in out_inject
+    assert USER_CONTENT_BEGIN in out_inject
+    assert USER_CONTENT_END not in out_inject
 
 
 def test_inject_boundary_inserts_before_anchor():
