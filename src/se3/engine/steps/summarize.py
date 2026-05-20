@@ -13,6 +13,7 @@ from typing import Any
 
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ..prompt_markers import inject_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,8 @@ Generate a comprehensive summary in Markdown format. Include:
 
 Format your response as clean Markdown with clear headings and bullet points.
 """
+
+SUMMARIZE_PROMPT = inject_boundary(SUMMARIZE_PROMPT, "## Task Description\n")
 
 
 def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:

@@ -14,6 +14,7 @@ from ..display import get_console
 from ..formatters import TaskFormatter, format_task_groups
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ..prompt_markers import inject_boundary
 from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,8 @@ Important:
 - Each group will be implemented in a **separate LLM call with isolated context**
 - Groups should not assume knowledge of other groups' implementation details
 """
+
+PLAN_TASKS_PROMPT = inject_boundary(PLAN_TASKS_PROMPT, "## Task Description\n")
 
 REVISION_SECTION = """
 ## Previous Task Plan (to revise)

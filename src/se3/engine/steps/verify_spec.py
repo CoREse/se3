@@ -14,6 +14,7 @@ from typing import Any
 from ..issue_manager import IssueManager
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ..prompt_markers import inject_boundary
 from ..truncation import (
     FAILURES_SECTION_MAX_CHARS,
     FIX_STDERR_TAIL_CHARS,
@@ -107,6 +108,8 @@ Respond in JSON format:
 
 The "fix_instructions" field is REQUIRED when tests failed or when in_scope issues exist. Provide clear, actionable instructions that the implement step can use to fix the issues.
 """
+
+VERIFY_PROMPT = inject_boundary(VERIFY_PROMPT, "## Task Description\n")
 
 
 def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:

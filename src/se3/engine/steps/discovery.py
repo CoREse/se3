@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from ..context_builder import ContextBuilder
 from ..llm_caller import LLMCaller, LLMCallError
 from ..models import FlowInstance, Step, StepStatus, StepType
+from ..prompt_markers import inject_boundary
 from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,12 @@ Guidelines:
 - Remember: your only output is the Proposed Task Description — do not produce anything else
 """
 
+# Splice marker between the boilerplate system-instructions prefix and the
+# task-/project-specific content sections.
+INITIAL_DISCOVERY_PROMPT = inject_boundary(
+    INITIAL_DISCOVERY_PROMPT, "## Project Context\n",
+)
+
 # Prompt for continuing discovery after user response
 CONTINUE_DISCOVERY_PROMPT = """You are an expert software engineering assistant in DISCOVERY mode.
 
@@ -172,6 +179,10 @@ Guidelines:
 - Be ready to proceed only when the user explicitly confirms
 - Remember: your only output is the Proposed Task Description — do not produce anything else
 """
+
+CONTINUE_DISCOVERY_PROMPT = inject_boundary(
+    CONTINUE_DISCOVERY_PROMPT, "## Project Context\n",
+)
 
 
 def _gather_project_context(project_root: Path) -> str:

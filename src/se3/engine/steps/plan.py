@@ -16,6 +16,7 @@ from ..display import get_console
 from ..formatters import TaskFormatter
 from ..llm_caller import LLMCaller
 from ..models import FlowInstance, Step, StepStatus
+from ..prompt_markers import inject_boundary
 from ..utils.json_parser import parse_json_response
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,10 @@ PLAN_PROMPT_HEADER = """You are an expert software engineering assistant. Create
 
 {revision_section}
 """
+
+# Splice marker between the boilerplate prefix ("You are...") and the
+# project/task-specific content block beginning at "## Project Context".
+PLAN_PROMPT_HEADER = inject_boundary(PLAN_PROMPT_HEADER, "## Project Context\n")
 
 PROPOSAL_SECTION = """## Part 1: Proposal
 Create a change proposal that includes:
