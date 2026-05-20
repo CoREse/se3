@@ -143,6 +143,7 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         get_step_language_instruction,
         get_issue_discovery_injection,
         get_spec_names_injection,
+        get_runtime_environment_injection,
     )
     lang_instruction = get_step_language_instruction("update_spec", project_root)
     if lang_instruction:
@@ -159,6 +160,11 @@ def update_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
     if spec_names:
         prompt += spec_names
+
+    # Append runtime environment injection if applicable
+    runtime_env = get_runtime_environment_injection("update_spec", project_root)
+    if runtime_env:
+        prompt += runtime_env
 
     logger.info("Updating specs to reflect implementation...")
 

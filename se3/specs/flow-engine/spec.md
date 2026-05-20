@@ -757,6 +757,77 @@ Returns the injection prompt fragment, or an empty string when the step is not i
 - **THEN** `get_spec_names_injection(step_type, project_root, relevant_specs)` returns an empty string
 - **AND** even when `se3.yaml` explicitly lists the step in `spec_names_injection.steps`, the FORBIDDEN set takes precedence and the return remains empty
 
+### Requirement: Runtime Environment Capabilities Injection
+
+The flow engine SHALL inject a fixed `## se3 Runtime Environment` section into the LLM sub-process prompt of designated downstream steps, advertising the se3-tool-provided **read-only capabilities the LLM MAY proactively invoke** (history / issue inspection) and a **write-operation guardrail blacklist** of commands the LLM MUST NOT proactively invoke. This makes downstream LLM sub-processes aware of the se3 capabilities available in the host project so they can (a) inspect prior session history when the user references "the previous session / last run / history", (b) consult related issue context when the task touches an existing issue, and (c) refrain from accidentally invoking destructive write operations (`merge` / `salvage` / `sync` / etc.) merely because those commands exist.
+
+The injected text is owned by se3 itself, evolves with the se3 version, and is **NOT written into the downstream project's spec files**. Both new and existing projects receive the injection without any migration.
+
+**Helper API:**
+
+```python
+get_runtime_environment_injection(
+    step_type: str,
+    project_root: Path,
+) -> str
+```
+
+Returns the runtime-environment prompt fragment (with a leading `\n\n` consistent with sibling injections), or an empty string when the step is not in the whitelist or when the source markdown cannot be loaded. Handlers call the helper immediately after `get_spec_names_injection` / `get_issue_discovery_injection` at prompt-build time and append the return value to their prompt.
+
+**Source file:** The injected content is stored in `src/se3/engine/runtime_environment.md` as a standalone markdown file, shipped with the se3 wheel and read at runtime via the helper. The markdown content is process-cached after first read; a missing or unreadable file returns `""` and logs one warning, never raising.
+
+**Three-tier whitelist (mirrors `spec_names_injection` / `issue_discovery`):**
+
+1. `RUNTIME_ENV_INJECTION_FORBIDDEN_STEPS = {"commit", "version_analyze"}` — hard block; always returns empty even if `se3.yaml` lists the step.
+2. `RUNTIME_ENV_INJECTION_DEFAULT_STEPS = ["analyze", "plan", "plan_tasks", "implement", "verify_spec", "update_spec", "self_check", "discovery", "summarize"]` — default whitelist (9 steps) applied when `se3.yaml` has no override.
+3. `se3.yaml` override key `runtime_environment_injection.steps` — replaces the default list when present and shaped as a list. FORBIDDEN still takes precedence. Null / malformed / non-list override values are silently ignored in favor of the defaults.
+
+**Injection content structure (excerpt, not full markdown):**
+
+The injected markdown SHALL contain a top-level `## se3 Runtime Environment` heading followed by:
+
+- A **read-only whitelist** with two categories the LLM is encouraged to invoke in matching scenarios:
+  1. *History inspection (read-only)* — triggers: user mentions "last/previous session", "where did we leave off", "history", "earlier run", etc. Covered tools:
+     - `se3 history list` — list recent flow runs
+     - `se3 history show <flow_id>` — show structured details of one run
+     - `se3 history archived` — list archived engine states
+     - Free-text fallback: read/grep `se3/history/<flow_id>/<step>.jsonl` and `se3/state/archive/engine_*.json`
+     - Recommended workflow sentence: first `se3 history list` to locate `flow_id`, then `se3 history show <flow_id>`; for keyword search inside conversation content, `grep -r 'keyword' se3/history/<flow_id>/`.
+  2. *Issue context inspection (read-only)* — triggers: the task references a known issue or the user mentions an issue id / related requirement. Covered tools:
+     - `se3 issue list` — list issues
+     - `se3 issue show <id>` — show issue detail
+     - Free-text fallback: grep `se3/issues/open/*.yaml`, `se3/issues/closed/*.yaml`
+     - Recommended workflow sentence: first `se3 issue list` to scan the inventory; for keyword search inside issue bodies, `grep -r 'keyword' se3/issues/`.
+
+- A **write-operation blacklist** explicitly telling the LLM "do not proactively invoke unless the user explicitly asks in this session":
+  - `se3 history restore` — rolls back flow state
+  - `se3 issue create` / `se3 issue reset` — write operations; the LLM should not autonomously create issues
+  - `se3 salvage` — auto-commits / creates issues / archives sessions; rescue-only
+  - `se3 merge` / `se3 merge respond` — mutates git merge state
+  - `se3 sync` / `se3 sync respond` — modifies spec files; high impact
+  - `se3 init` — only for fresh-project initialization
+
+The markdown body is the single source of truth; it MAY be iterated independently of the Python helper without breaking the injection contract, as long as the heading and the white/blacklist commands above remain present.
+
+**Abuse prevention and compatibility:**
+
+- The whitelist is phrased as **"MAY when the user references the matching scenario"**, not "MUST", to discourage blanket invocation.
+- The blacklist is phrased as **"do not proactively invoke"** rather than "forbidden", leaving the user explicit-request override intact.
+- The injection is purely additive to the prompt suffix and does not change any existing handler input / output schema.
+- FORBIDDEN steps (`commit`, `version_analyze`) are mechanical / non-LLM-deliberative; they receive no injection so the prompt remains tight.
+- Errors loading `runtime_environment.md` (missing / IO failure) degrade gracefully to `""` plus a single warning log.
+
+#### Scenario: Default whitelist step receives runtime environment injection
+- **WHEN** a default whitelisted step (e.g., `analyze`, `plan`, `plan_tasks`, `implement`, `verify_spec`, `update_spec`, `self_check`, `discovery`, `summarize`) builds its LLM prompt
+- **AND** `se3.yaml` has no `runtime_environment_injection.steps` override
+- **THEN** `get_runtime_environment_injection(step_type, project_root)` returns a non-empty prompt fragment containing the heading `## se3 Runtime Environment`, the whitelist entries (`se3 history list`, `se3 history show`, `se3 history archived`, `se3 issue list`, `se3 issue show`), path references (`se3/history/<flow_id>`, `se3/issues/`), the two recommended-workflow sentences, and the blacklist entries (`se3 history restore`, `se3 issue create`, `se3 issue reset`, `se3 salvage`, `se3 merge`, `se3 sync`, `se3 init`)
+- **AND** the handler appends the fragment to its prompt suffix immediately after the `get_spec_names_injection` call site
+
+#### Scenario: FORBIDDEN step never receives runtime environment injection
+- **WHEN** the step type is `commit` or `version_analyze`
+- **THEN** `get_runtime_environment_injection(step_type, project_root)` returns an empty string
+- **AND** even when `se3.yaml` explicitly lists the step in `runtime_environment_injection.steps`, the FORBIDDEN set takes precedence and the return remains empty
+
 ### Requirement: JSON 提取模式
 
 流程引擎 SHALL 支持四种 JSON 提取模式，根据步骤特性选择最优策略：

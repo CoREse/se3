@@ -423,6 +423,7 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
         get_step_language_instruction,
         get_issue_discovery_injection,
         get_spec_names_injection,
+        get_runtime_environment_injection,
     )
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     # All three injections key off "plan": this handler is the unified planning
@@ -444,6 +445,11 @@ def plan_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
     if spec_names:
         prompt += spec_names
+
+    # Append runtime environment injection if applicable
+    runtime_env = get_runtime_environment_injection("plan", project_root)
+    if runtime_env:
+        prompt += runtime_env
 
     logger.info(f"Generating plan (depth={depth}) for: {task_description[:60]}...")
 

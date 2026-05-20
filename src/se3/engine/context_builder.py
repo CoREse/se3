@@ -85,6 +85,115 @@ SPEC_NAMES_INJECTION_DEFAULT_STEPS = [
     "self_check",
 ]
 
+# Steps explicitly forbidden from runtime environment injection.
+# These are mechanical steps where awareness of read-only se3 history/issue
+# commands adds no value (and just inflates the prompt).
+RUNTIME_ENV_INJECTION_FORBIDDEN_STEPS = frozenset({"commit", "version_analyze"})
+
+# Default steps that receive the runtime environment capability injection.
+# Covers all "LLM free-decision" steps where the model might benefit from
+# proactively consulting history or issues, while excluding purely mechanical
+# steps via the FORBIDDEN set above.
+RUNTIME_ENV_INJECTION_DEFAULT_STEPS = [
+    "analyze",
+    "plan",
+    "plan_tasks",
+    "implement",
+    "verify_spec",
+    "update_spec",
+    "self_check",
+    "discovery",
+    "summarize",
+]
+
+# Module-level cache slot for the runtime_environment.md contents. The file is
+# part of the wheel and never changes at runtime, so a single read per process
+# is plenty. Sentinel `object()` distinguishes "not loaded yet" from "loaded
+# but empty/missing" (which is cached as "").
+_RUNTIME_ENV_MARKDOWN_UNSET: Any = object()
+_runtime_env_markdown_cache: Any = _RUNTIME_ENV_MARKDOWN_UNSET
+_runtime_env_warning_logged: bool = False
+
+
+def _load_runtime_environment_markdown() -> str:
+    """Load runtime_environment.md once per process, caching the result.
+
+    Returns the file contents (without leading newlines — callers prepend the
+    \\n\\n separator themselves). On any read error, returns ``""`` and logs
+    a single warning so misconfigured installs don't spam the logs.
+    """
+    global _runtime_env_markdown_cache, _runtime_env_warning_logged
+    if _runtime_env_markdown_cache is not _RUNTIME_ENV_MARKDOWN_UNSET:
+        return _runtime_env_markdown_cache
+
+    md_path = Path(__file__).parent / "runtime_environment.md"
+    try:
+        _runtime_env_markdown_cache = md_path.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError) as e:
+        if not _runtime_env_warning_logged:
+            logger.warning(
+                "runtime_environment.md missing or unreadable at %s: %s; "
+                "runtime environment injection disabled",
+                md_path,
+                e,
+            )
+            _runtime_env_warning_logged = True
+        _runtime_env_markdown_cache = ""
+    return _runtime_env_markdown_cache
+
+
+def _reset_runtime_environment_cache() -> None:
+    """Test-only: reset the markdown cache so tests can exercise reload paths."""
+    global _runtime_env_markdown_cache, _runtime_env_warning_logged
+    _runtime_env_markdown_cache = _RUNTIME_ENV_MARKDOWN_UNSET
+    _runtime_env_warning_logged = False
+
+
+def get_runtime_environment_injection(step_type: str, project_root: Path) -> str:
+    """Get the se3 runtime environment prompt injection for a step.
+
+    Loads ``src/se3/engine/runtime_environment.md`` and returns its content
+    (prefixed with ``\\n\\n``) for whitelisted steps. The whitelist is the
+    union of:
+      * default list :data:`RUNTIME_ENV_INJECTION_DEFAULT_STEPS`, OR
+      * ``runtime_environment_injection.steps`` from ``se3.yaml`` when present
+        and a list,
+    minus :data:`RUNTIME_ENV_INJECTION_FORBIDDEN_STEPS` which always wins.
+
+    Args:
+        step_type: Current step type name (e.g., ``"plan"``).
+        project_root: Project root directory for loading config.
+
+    Returns:
+        The injection string to append to the prompt, or ``""`` when the step
+        is not whitelisted (or the markdown file cannot be read).
+    """
+    # FORBIDDEN always wins — short-circuit before any I/O so a misconfigured
+    # yaml cannot re-enable injection on mechanical steps.
+    if step_type in RUNTIME_ENV_INJECTION_FORBIDDEN_STEPS:
+        return ""
+
+    whitelist: list[str] = RUNTIME_ENV_INJECTION_DEFAULT_STEPS
+    from ..config import load_project_yaml
+
+    config, _src = load_project_yaml(project_root)
+    section = config.get("runtime_environment_injection") if isinstance(config, dict) else None
+    section = section or {}
+    if isinstance(section, dict):
+        configured_steps = section.get("steps")
+        # Accept only list overrides; ignore malformed values (bare strings,
+        # dicts) to avoid surprising substring/key-lookup semantics.
+        if isinstance(configured_steps, list):
+            whitelist = configured_steps
+
+    if step_type not in whitelist:
+        return ""
+
+    body = _load_runtime_environment_markdown()
+    if not body:
+        return ""
+    return "\n\n" + body
+
 
 def get_issue_discovery_injection(step_type: str, project_root: Path) -> str:
     """Get the issue discovery prompt injection for a step.

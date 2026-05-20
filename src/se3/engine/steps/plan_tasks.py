@@ -208,7 +208,11 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
 
     # Append issue discovery injection if applicable
-    from ..context_builder import get_issue_discovery_injection, get_spec_names_injection
+    from ..context_builder import (
+        get_issue_discovery_injection,
+        get_spec_names_injection,
+        get_runtime_environment_injection,
+    )
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     injection = get_issue_discovery_injection("plan_tasks", project_root)
     if injection:
@@ -218,6 +222,9 @@ def plan_tasks_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
     if spec_names_injection:
         prompt += spec_names_injection
+    runtime_env = get_runtime_environment_injection("plan_tasks", project_root)
+    if runtime_env:
+        prompt += runtime_env
 
     logger.info("Generating task list...")
 

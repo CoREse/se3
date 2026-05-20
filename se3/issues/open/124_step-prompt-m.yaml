@@ -1,0 +1,13 @@
+id: '124'
+title: 新增 step 模板时缺少自动校验是否注入 prompt markers
+description: 目前 SE3:TEMPLATE_END / SE3:USER_CONTENT 注入完全依赖手工；若未来新增 step 模板忘记调用 prompt_markers，前端会静默回落为整条
+  chip 行为，user 真实输入会再次被埋掉。建议加一条针对 src/se3/engine/steps/*.py 的静态/测试断言。
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T14:31:22.630659'
+updated_at: '2026-05-20T14:31:22.630659'

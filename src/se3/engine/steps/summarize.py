@@ -105,7 +105,11 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
 
     # Append language instruction if configured
-    from ..context_builder import get_step_language_instruction, get_issue_discovery_injection
+    from ..context_builder import (
+        get_step_language_instruction,
+        get_issue_discovery_injection,
+        get_runtime_environment_injection,
+    )
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     lang_instruction = get_step_language_instruction("summarize", project_root)
     if lang_instruction:
@@ -115,6 +119,11 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     injection = get_issue_discovery_injection("summarize", project_root)
     if injection:
         prompt += injection
+
+    # Append runtime environment injection if applicable
+    runtime_env = get_runtime_environment_injection("summarize", project_root)
+    if runtime_env:
+        prompt += runtime_env
 
     logger.info("Generating summary...")
 

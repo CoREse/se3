@@ -512,12 +512,17 @@ def self_check_handler(step: Step, flow: FlowInstance) -> StepStatus:
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
 
     # Append available-specs names injection if applicable
-    from ..context_builder import get_spec_names_injection
+    from ..context_builder import get_spec_names_injection, get_runtime_environment_injection
     spec_names = get_spec_names_injection(
         "self_check", project_root, step.inputs.get("relevant_specs"),
     )
     if spec_names:
         prompt += spec_names
+
+    # Append runtime environment injection if applicable
+    runtime_env = get_runtime_environment_injection("self_check", project_root)
+    if runtime_env:
+        prompt += runtime_env
 
     logger.info(
         f"Running self-check code review "

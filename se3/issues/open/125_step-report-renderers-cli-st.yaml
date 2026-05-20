@@ -1,0 +1,13 @@
+id: '125'
+title: STEP_REPORT_RENDERERS 与 CLI step_renderers.py 缺少一致性测试
+description: 前端报告卡片与 CLI Panel 当前一一对应，但没有自动校验。后续在 CLI 端新增 Panel 类型时，web 端可能漏挂渲染器而无人察觉。建议共享
+  step kind 枚举或加快照测试。
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T14:31:22.631742'
+updated_at: '2026-05-20T14:31:22.631742'

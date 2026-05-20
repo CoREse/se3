@@ -130,10 +130,13 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     )
 
     # Append issue discovery injection if applicable
-    from ..context_builder import get_issue_discovery_injection
+    from ..context_builder import get_issue_discovery_injection, get_runtime_environment_injection
     injection = get_issue_discovery_injection("analyze", project_root)
     if injection:
         prompt += injection
+    runtime_env = get_runtime_environment_injection("analyze", project_root)
+    if runtime_env:
+        prompt += runtime_env
 
     logger.info(f"Analyzing task: {task_description[:60]}...")
 

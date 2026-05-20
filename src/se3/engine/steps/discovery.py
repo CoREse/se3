@@ -523,7 +523,11 @@ def _run_discovery_round(
     )
 
     # Append language instruction if configured
-    from ..context_builder import get_step_language_instruction, get_issue_discovery_injection
+    from ..context_builder import (
+        get_step_language_instruction,
+        get_issue_discovery_injection,
+        get_runtime_environment_injection,
+    )
     lang_instruction = get_step_language_instruction("discovery", project_root)
     if lang_instruction:
         prompt += lang_instruction
@@ -532,6 +536,11 @@ def _run_discovery_round(
     injection = get_issue_discovery_injection("discovery", project_root)
     if injection:
         prompt += injection
+
+    # Append runtime environment injection if applicable
+    runtime_env = get_runtime_environment_injection("discovery", project_root)
+    if runtime_env:
+        prompt += runtime_env
 
     logger.info(f"Running discovery round {round_number}")
 

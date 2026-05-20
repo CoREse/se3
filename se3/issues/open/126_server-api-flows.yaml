@@ -1,0 +1,13 @@
+id: '126'
+title: server /api/flows 放宽为仅校验绝对路径后，越权防护完全下沉到 daemon
+description: POST /api/flows 现在不再校验路径属于已知 project_roots，依赖 daemon 层判断。如果 daemon 信任边界未来发生变化（例如远程接入），server
+  入参校验缺位可能成为风险点。建议补充一层显式的可写目录白名单或在文档中固化该信任模型。
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T14:31:22.632601'
+updated_at: '2026-05-20T14:31:22.632601'
