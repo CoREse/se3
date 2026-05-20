@@ -1,0 +1,14 @@
+id: '117'
+title: verify 步骤 passed=False 与 summary 文本结论矛盾
+description: 本次任务的 verification 输出 summary 为通篇成功描述（四项改进逐条核实通过、所有测试通过），但 passed 字段为
+  False。疑似 verify runner 在解析 LLM 输出或汇总测试结果时的判定 bug，导致下游 task 状态误报。建议补一条「summary 表达成功
+  ↔ passed=True」的一致性断言，或重新审视 passed 的取值来源。
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T11:39:43.666649'
+updated_at: '2026-05-20T11:39:43.666649'

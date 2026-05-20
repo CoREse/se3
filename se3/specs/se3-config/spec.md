@@ -1602,6 +1602,16 @@ of the daemon/server feature has a single registered home.
 - `server.port` — Bind port for the central server
   (default: `DEFAULT_SERVER_PORT`, `8080`). Supplied via
   `se3-server --port <port>`.
+- `--version` / `-v` — Print the server's version string and exit
+  with status `0`. The flag SHALL be intercepted in
+  `src/se3/server/__init__.py:main()` **before** attempting to import
+  the `[server]` optional extras (FastAPI / uvicorn), so a core-only
+  install (`pip install se3` without the `[server]` extra) can still
+  query the version without triggering the missing-extra hint. The
+  output line is `se3-server version {__version__}`, mirroring the
+  main `se3 version {__version__}` format produced by the core CLI;
+  the version value is read from the single
+  `se3.__version__` source (sourced from `pyproject.toml`).
 
 **Shared default port.** The default server port is defined once as the
 `DEFAULT_SERVER_PORT` constant (value `8080`) in
@@ -1630,3 +1640,14 @@ a magic number.
   to `DEFAULT_SERVER_PORT` (`8080`), matching the server's default
 - **AND** when the URL already carries an explicit port, that port is
   preserved unchanged
+
+#### Scenario: `se3-server --version` prints the version and exits
+- **WHEN** the user runs `se3-server --version` (or `se3-server -v`)
+- **THEN** the program prints a single line
+  `se3-server version {__version__}` to stdout and exits with status 0
+- **AND** the flag is honored even on a core-only install that has not
+  installed the `[server]` optional extras (FastAPI / uvicorn), because
+  `--version` is intercepted before any FastAPI / uvicorn import
+- **AND** the printed version string equals `se3.__version__`, which is
+  the single canonical version source (sourced from `pyproject.toml`)
+  and is the same value reported by the core `se3 version` command

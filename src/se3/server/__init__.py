@@ -37,6 +37,13 @@ def main(argv: Optional[list] = None) -> None:
     prints an install hint and exits non-zero — no traceback, and the core
     ``se3`` CLI is unaffected because it never calls this function.
     """
+    args = list(sys.argv[1:] if argv is None else argv)
+    if "--version" in args or "-v" in args:
+        from se3 import __version__
+
+        print(f"se3-server version {__version__}")
+        raise SystemExit(0)
+
     try:
         import fastapi  # noqa: F401
         import uvicorn  # noqa: F401

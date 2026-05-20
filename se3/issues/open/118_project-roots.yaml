@@ -1,0 +1,13 @@
+id: '118'
+title: project_roots 上报路径覆盖度待确认
+description: 本次仅在 aggregator 主路径与首次注册场景补齐了 project_roots 字段。若 daemon 存在其它状态推送路径（例如周期性
+  heartbeat、动态新增项目时的增量更新），可能仍未携带最新列表，前端会看到过期项目集合。建议梳理一次 daemon → server 的 status 上报全部路径并统一处理。
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T11:39:43.669043'
+updated_at: '2026-05-20T11:39:43.669043'

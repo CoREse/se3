@@ -34,6 +34,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from se3 import __version__
 from se3.daemon import protocol
 
 from .state import ServerState
@@ -113,6 +114,10 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     async def health() -> dict:
         return {"status": "ok", "protocol_version": protocol.PROTOCOL_VERSION}
+
+    @app.get("/api/version")
+    async def version() -> dict:
+        return {"version": __version__}
 
     @app.get("/api/machines")
     async def list_machines() -> dict:
@@ -302,6 +307,13 @@ def main(argv: Optional[list] = None) -> None:
 
     parser = argparse.ArgumentParser(
         prog="se3-server", description="SE3 central control-plane server"
+    )
+    parser.add_argument(
+        "--version",
+        "-v",
+        action="version",
+        version=f"se3-server version {__version__}",
+        help="Show version information",
     )
     parser.add_argument("--host", default="127.0.0.1", help="Bind host (default: 127.0.0.1)")
     parser.add_argument(

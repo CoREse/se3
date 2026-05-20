@@ -81,6 +81,30 @@ squeeze the entire flow into one viewport.
 - **AND** when the total content exceeds one viewport, the conversation
   scrolls vertically as one continuous chat-stream
 
+#### Scenario: Step blocks are not squeezed by flex layout
+- **GIVEN** the conversation has multiple step blocks (`.history-step`)
+  whose combined height exceeds the available column height
+- **WHEN** the layout resolves
+- **THEN** every direct step / record child of `#flow-conversation` is
+  rendered at its natural content height — i.e., `flex-shrink: 0` is
+  applied (or an equivalent rule) so the flex column does not squeeze
+  step contents into header-only stubs
+- **AND** the overflow is taken up by `#flow-conversation`'s
+  `overflow-y: auto` vertical scroll, never by clipping individual step
+  bodies
+
+#### Scenario: Browser back button closes the flow view
+- **GIVEN** the user has navigated into a running flow's `#flow-view`
+- **WHEN** the browser back button is pressed (or any other action that
+  triggers `popstate` away from the `#flow-view` history entry)
+- **THEN** the `#flow-view` is closed and the previous list-level view
+  (flow list / machine overview) is restored
+- **AND** the browser does NOT navigate away from the console site
+- **AND** clicking the ✕ button or pressing Escape inside `#flow-view`
+  funnels through the same single collapse path (via `history.back()`)
+  so back-button and explicit-close share one teardown sequence without
+  pushing redundant history entries
+
 #### Scenario: Expanding a folded block scrolls the new content into view
 - **GIVEN** the conversation contains a foldable block (e.g. a collapsed
   `user` / `system` prompt chip, a raw-payload `view raw` toggle, or any

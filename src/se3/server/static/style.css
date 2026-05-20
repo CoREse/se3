@@ -58,6 +58,14 @@ h1, h2, h3 { font-weight: 600; }
 .conn-connecting   { color: var(--yellow); border-color: var(--yellow); }
 .conn-disconnected { color: var(--red);    border-color: var(--red); }
 
+.se3-version {
+  font-size: 11px;
+  color: var(--fg-dim);
+  letter-spacing: 0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.se3-version:empty { display: none; }
+
 button {
   background: var(--accent);
   color: #fff;
@@ -258,6 +266,20 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   min-height: 0;
   overflow-y: auto;
   padding: 14px 16px;
+}
+/*
+ * .flow-conversation reuses .history-detail's flex-column layout. In a flex
+ * column children default to `flex-shrink: 1`, which compresses each step
+ * block to make the whole stack fit one viewport — combined with
+ * .history-step's `overflow: hidden` (kept for rounded corners), that
+ * silently crops every step's body to a thin strip. Pin children to their
+ * natural height so the .flow-conversation scroller is the one that grows.
+ */
+.flow-conversation > .history-step,
+.flow-conversation > .conv-record,
+.flow-conversation > p,
+.flow-conversation > div {
+  flex-shrink: 0;
 }
 
 @media (max-width: 720px) {

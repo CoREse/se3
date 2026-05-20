@@ -1,0 +1,13 @@
+id: '119'
+title: Interject 按钮新形态在 spec 中缺少视觉示意
+description: Interject 按钮从独占一行迁移到 textarea 左侧内联小图标，spec 文档已用文字描述，但没有截图/ASCII 示意。新成员阅读
+  spec 时需要结合 CSS/HTML 推断布局，建议补一张示意图或最小 HTML 片段。
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T11:39:43.670603'
+updated_at: '2026-05-20T11:39:43.670603'

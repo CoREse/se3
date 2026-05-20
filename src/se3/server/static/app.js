@@ -39,6 +39,12 @@ const state = {
 let ws = null;
 let reconnectAttempts = 0;
 let detailPollTimer = null;
+// Tracks whether the current `#flow-view` has a history entry on top of the
+// browser stack (pushed when the view was opened). When true, user-initiated
+// closes (✕ button, Escape) delegate to `history.back()` so the back button
+// and the close button share one collapse path. The popstate listener clears
+// this flag and runs the real cleanup, so we never push-back loop.
+let flowViewHistoryPushed = false;
 
 // ---------------------------------------------------------------------------
 // DOM helpers
@@ -367,6 +373,20 @@ function openFlowView(flowId) {
   state.detailLoaded = false;
   state.detailFetchFailures = 0;
 
+  // Push a history entry so the browser back button collapses the flow view
+  // instead of leaving the site. The popstate listener takes care of the
+  // real cleanup; the ✕ button just calls history.back() on top of this.
+  try {
+    history.pushState(
+      { se3FlowView: flowId },
+      "",
+      "#flow/" + encodeURIComponent(flowId)
+    );
+    flowViewHistoryPushed = true;
+  } catch (e) {
+    flowViewHistoryPushed = false;
+  }
+
   $("flow-view").classList.remove("hidden");
   $("flow-view-title").textContent = "Flow";
   renderSidebarPlaceholder("Loading flow details…");
@@ -381,7 +401,11 @@ function openFlowView(flowId) {
   detailPollTimer = setInterval(refreshFlowDetail, 3000);
 }
 
-function closeFlowView() {
+// Cleanup-only close: clears state and hides the view, but never touches
+// history. The single source of truth for closing a flow view is the
+// popstate handler — both the ✕ button and the browser back button funnel
+// through it, so there is no risk of push-back loops or double-pop drift.
+function doCloseFlowView() {
   state.selectedFlowId = null;
   state.flowDetail = null;
   state.flowMachineId = null;
@@ -395,6 +419,19 @@ function closeFlowView() {
     clearInterval(detailPollTimer);
     detailPollTimer = null;
   }
+}
+
+// User-initiated close (✕ button, Escape, etc). When we pushed a history
+// entry on open, defer to history.back() so the browser stack stays in sync
+// and the popstate listener performs the real cleanup. Otherwise (history
+// API unavailable or push failed), close directly.
+function closeFlowView() {
+  if (flowViewHistoryPushed) {
+    flowViewHistoryPushed = false;
+    history.back();
+    return;
+  }
+  doCloseFlowView();
 }
 
 // Fetch the initial conversation snapshot for the open flow. Mirrors the
@@ -1990,6 +2027,26 @@ function init() {
   $("new-task-modal").addEventListener("click", (e) => {
     if (e.target.id === "new-task-modal") closeNewTask();
   });
+
+  // Browser back collapses the flow view back to the flow list, instead of
+  // leaving the site. openFlowView pushed an entry on top of the stack; a
+  // popstate fired while the flow view is open means the user (or our own
+  // closeFlowView via history.back) popped it off.
+  window.addEventListener("popstate", () => {
+    if (isFlowViewOpen()) {
+      flowViewHistoryPushed = false;
+      doCloseFlowView();
+    }
+  });
+
+  // Topbar version label — sourced from the same `__version__` as the CLI.
+  fetch("/api/version")
+    .then((r) => r.json())
+    .then(({ version }) => {
+      const el = $("se3-version");
+      if (el && version) el.textContent = "v" + version;
+    })
+    .catch(() => {});
 
   connect();
 }
