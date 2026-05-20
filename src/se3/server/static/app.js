@@ -601,25 +601,29 @@ function renderFlowSidebar(flow, machineId) {
 // expanded intervention items that never blend into ordinary conversation
 // bubbles. The docked reply box targets exactly one of them at a time.
 
+// User-facing labels use neutral wording. Implementation details (MCP, call
+// ids, etc.) are intentionally absent from any string the user can see — they
+// only appear on the underlying `data-call-id` attribute and `title` tooltips
+// so operators can still cross-reference call files when debugging.
 const KIND_META = {
   call: {
-    label: "MCP call",
-    hint: "A pending MCP call is awaiting your response.",
+    label: "待回复",
+    hint: "运行流程正在等待你的回复。",
     icon: "⚙",
   },
   interjection: {
-    label: "Interjection",
-    hint: "Send an additional instruction into the running flow.",
+    label: "插话",
+    hint: "向正在运行的流程补一条额外指令。",
     icon: "✎",
   },
   retry_decision: {
-    label: "Retry decision",
-    hint: "A step failed — reply with how to proceed (e.g. retry / skip / abort).",
+    label: "需要决策",
+    hint: "某一步骤失败,请选择如何继续(例如 重试 / 跳过 / 终止)。",
     icon: "↻",
   },
   cli_confirm: {
-    label: "CLI confirmation",
-    hint: "The CLI subprocess is waiting for a confirmation.",
+    label: "需要确认",
+    hint: "子进程正在等待一次确认。",
     icon: "⌨",
   },
 };
@@ -740,8 +744,8 @@ function syncInterjectButton(flow) {
   const active = !!state.flowInterjectRequested;
   btn.classList.toggle("active", active);
   btn.title = active
-    ? "Cancel interjection"
-    : "Send an additional instruction into the running flow.";
+    ? "取消插话"
+    : "向运行中的流程补一条额外指令。";
   btn.textContent = active ? "✕" : "✎";
 }
 
@@ -760,13 +764,11 @@ function renderInterventionChip(entry) {
     el("span", "intervention-chip-label", meta.label),
   );
   if (entry.callId) {
-    // Short tail of the call id — full value is on the title for hover.
-    const short = entry.callId.length > 10
-      ? "…" + entry.callId.slice(-8)
-      : entry.callId;
-    const cid = el("span", "intervention-chip-callid", short);
-    cid.title = "call id: " + entry.callId;
-    chip.appendChild(cid);
+    // The internal call id stays on the chip for debugging — surfaced only
+    // through `data-call-id` and the hover tooltip — but never rendered as
+    // visible text so the user never sees implementation jargon.
+    chip.dataset.callId = entry.callId;
+    chip.title = entry.callId;
   }
 
   chip.addEventListener("click", (e) => {
@@ -817,14 +819,14 @@ function updateReplyBox(flow) {
     input.disabled = false;
     submit.disabled = true;
     input.placeholder = isActiveFlow(flow)
-      ? "No pending interaction — draft a reply or click ✎ to interject…"
-      : "No pending interaction…";
+      ? "暂无待处理项 — 你可以先草拟回复,或点击 ✎ 插话…"
+      : "暂无待处理项…";
     ctx.className = "flow-reply-context";
     ctx.innerHTML = "";
     ctx.appendChild(el("p", "flow-reply-empty",
       isActiveFlow(flow)
-        ? "No pending interaction right now — nothing to respond to."
-        : "This flow has ended — no further interaction is possible."));
+        ? "目前没有待处理的交互项 — 没有可以回复的对象。"
+        : "该流程已结束 — 无法再继续交互。"));
     return;
   }
 
@@ -838,24 +840,25 @@ function updateReplyBox(flow) {
   input.disabled = false;
   submit.disabled = false;
   input.placeholder = target.kind === "interjection"
-    ? "Type an instruction to interject into this running flow…"
-    : "Type your response to this call…";
+    ? "输入要插入运行流程的指令…"
+    : "输入你的回复…";
 
   ctx.className = "flow-reply-context active kind-" + target.kind;
   ctx.innerHTML = "";
 
-  // Header row: "Replying to <kind label>" + optional call_id locator.
+  // Header row: neutral "回复中 · <kind label>" wording. The internal call id
+  // is intentionally absent from any visible text — it remains on the head's
+  // `data-call-id` and `title` tooltip so operators can still cross-reference
+  // calls when debugging, but is never surfaced to the user as jargon.
   const head = el("div", "flow-reply-head");
   head.append(
-    el("span", "flow-reply-to", "Replying to"),
+    el("span", "flow-reply-to", "回复中"),
+    el("span", "flow-reply-sep", "·"),
     el("span", "flow-reply-kind kind-" + target.kind, meta.label),
   );
   if (target.callId) {
-    const cid = el("span", "flow-reply-callid", "call " + target.callId);
-    cid.title = "call id: " + target.callId;
-    head.appendChild(cid);
-  } else if (target.kind === "interjection") {
-    head.appendChild(el("span", "flow-reply-callid", "running flow"));
+    head.dataset.callId = target.callId;
+    head.title = target.callId;
   }
   ctx.appendChild(head);
 
@@ -1218,24 +1221,106 @@ async function openHistorySession(flowId) {
 // and — when the textual `content` is missing — recovers a readable body from
 // the assistant's final text block in `raw_json`.
 
-// Pull the last assistant message's last text block out of a parsed NDJSON
-// stream (`raw_json` is `list[dict]`, one dict per NDJSON line).
+// Best-effort assistant-text recovery from a parsed NDJSON stream
+// (`raw_json` is `list[dict]`, one dict per NDJSON line).
+//
+// The streaming layer emits several legal shapes — full assistant messages,
+// streaming `content_block_delta` / `message_delta` chunks, bare
+// `{role:"assistant", content:"..."}` envelopes, plus tool-use blocks that the
+// frontend re-renders via `renderToolMarkers`. We walk every line and collect
+// any text we can find, in stream order, so the assistant bubble ALWAYS has
+// something to feed the Markdown + tool-marker renderer rather than degrading
+// to a raw `<pre>` of the source NDJSON.
+//
+// Unparsable / unknown blocks fall back to a short JSON stringify so they
+// degrade gracefully into the rendered text instead of being silently dropped.
 function extractAssistantText(rawJson) {
-  if (!Array.isArray(rawJson)) return "";
-  let text = "";
-  for (const line of rawJson) {
-    if (!line || typeof line !== "object" || line.type !== "assistant") continue;
-    const content = line.message && Array.isArray(line.message.content)
-      ? line.message.content
-      : null;
-    if (!content) continue;
-    for (const block of content) {
-      if (block && block.type === "text" && typeof block.text === "string") {
-        text = block.text;
+  if (!Array.isArray(rawJson) || !rawJson.length) return "";
+  const parts = [];
+  const pushTool = (name, input) => {
+    let detail = "";
+    if (input != null) {
+      try { detail = JSON.stringify(input); } catch (_) { detail = String(input); }
+    }
+    parts.push("\n[" + (name || "Tool") + (detail ? ": " + detail : "") + "]\n");
+  };
+  const extractBlocks = (blocks) => {
+    if (!Array.isArray(blocks)) return;
+    for (const block of blocks) {
+      if (block == null) continue;
+      if (typeof block === "string") { parts.push(block); continue; }
+      if (typeof block !== "object") continue;
+      const bt = String(block.type || "").toLowerCase();
+      if (bt === "text" && typeof block.text === "string") {
+        parts.push(block.text);
+      } else if (bt === "tool_use") {
+        pushTool(block.name, block.input);
+      } else if (bt === "tool_result") {
+        // tool_result blocks are rendered by the tool-marker layer; skip body
+      } else if (typeof block.text === "string") {
+        parts.push(block.text);
       }
     }
+  };
+
+  for (const line of rawJson) {
+    if (line == null) continue;
+    if (typeof line === "string") { parts.push(line); continue; }
+    if (typeof line !== "object") { parts.push(String(line)); continue; }
+
+    const type = String(line.type || "").toLowerCase();
+
+    // Full assistant / message envelope: `{type:"assistant", message:{...}}`
+    // or a bare `{role:"assistant", content:[...]}` / `{content:"..."}`.
+    if (type === "assistant" || type === "message" ||
+        (line.message && typeof line.message === "object")) {
+      const msg = (line.message && typeof line.message === "object")
+        ? line.message : line;
+      if (Array.isArray(msg.content)) {
+        extractBlocks(msg.content);
+      } else if (typeof msg.content === "string") {
+        parts.push(msg.content);
+      }
+      continue;
+    }
+
+    // Streaming deltas (Anthropic-style event-stream shapes).
+    if (type === "content_block_delta" || type === "message_delta") {
+      const delta = (line.delta && typeof line.delta === "object")
+        ? line.delta : {};
+      if (typeof delta.text === "string") parts.push(delta.text);
+      else if (typeof delta.partial_json === "string") parts.push(delta.partial_json);
+      continue;
+    }
+    if (type === "content_block_start") {
+      const block = line.content_block;
+      if (block && typeof block === "object") extractBlocks([block]);
+      continue;
+    }
+    if (type === "tool_use") {
+      pushTool(line.name, line.input);
+      continue;
+    }
+
+    // Plain text envelopes — `{text:"..."}` / `{content:"..."}` / direct
+    // `role:"assistant"` bubble.
+    if (typeof line.text === "string") { parts.push(line.text); continue; }
+    if (typeof line.content === "string") { parts.push(line.content); continue; }
+    if (Array.isArray(line.content)) { extractBlocks(line.content); continue; }
+
+    // Structured but unrecognized — keep a best-effort short summary rather
+    // than dropping the line silently. This prevents the assistant bubble
+    // from falling back to a raw NDJSON dump when an unfamiliar block type
+    // shows up in the middle of an otherwise normal stream.
+    if (type && type !== "message_start" && type !== "message_stop" &&
+        type !== "content_block_stop" && type !== "ping") {
+      try {
+        const summary = JSON.stringify(line);
+        if (summary && summary.length <= 400) parts.push(summary);
+      } catch (_) { /* swallow */ }
+    }
   }
-  return text;
+  return parts.join("");
 }
 
 // Unwrap `{step_id, message:{...}}` into a flat, render-ready object. Falls
@@ -1420,33 +1505,43 @@ function stepKey(norm) {
   return String(norm.stepId || norm.stepType || "step");
 }
 
-// Render a flat list of raw records into `container` as a CLI-style, step-
-// grouped conversation. Shared verbatim by the history view and the running-
-// flow view so both present identical grouping / bubbles / folding.
+// Render a flat list of raw records into `container` as a CLI-style chat
+// stream. Shared verbatim by the history view and the running-flow view so
+// both present identical bubbles / folding.
 //
-// Incremental updates: an active flow streams `history_data` appends every LLM
-// turn. A full rebuild on each append would recreate every `makeFoldable` /
-// `makeRawToggle` / chip in its default collapsed state, collapsing a record
-// the reader had just expanded. So when `append` is set, only the new tail
-// records are built and inserted into the existing DOM — bubbles already on
-// screen (and any folds / chips / raw panels the reader opened) are untouched.
+// **Strict chronological order:** records are ordered globally by
+// `(__convTs, __convIdx)` across step boundaries — the same physical order
+// as the underlying jsonl files. A lightweight `.history-step-header` row is
+// inserted between two adjacent bubbles whenever they cross a step boundary,
+// so the user still sees per-step visual grouping; it is purely a separator
+// and never changes the physical order of bubbles. A discovery → user reply
+// → discovery sequence renders in jsonl-order rather than re-bucketed into
+// independent per-step sections.
+//
+// Incremental updates: an active flow streams `history_data` appends every
+// LLM turn. A full rebuild on each append would recreate every
+// `makeFoldable` / `makeRawToggle` / chip in its default collapsed state,
+// collapsing a record the reader had just expanded. So when `append` is set,
+// only the new tail records are built and inserted into the existing DOM —
+// bubbles already on screen (and any folds / chips / raw panels the reader
+// opened) are untouched. After each batch, step-header separators are
+// rebuilt from the now-correctly-ordered bubble list, which keeps the
+// stateful bubbles intact while the stateless headers re-shift to wherever
+// the latest insertion changed a step boundary.
 //
 // Per-container reconciliation state lives on `container.__convState`:
-//   { count: number of raw records already rendered,
-//     sections: Map<stepKey, sectionElement> }
+//   { count: number of raw records already rendered }
 function renderConversation(container, records, append) {
   const st = container.__convState;
   if (append && st && st.count > 0 && records.length >= st.count) {
-    // Incremental append: build only the records past what is on screen.
     if (records.length > st.count) {
       addConversationRecords(container, st, records, st.count);
       st.count = records.length;
     }
     return;
   }
-  // Full (re)build — initial open, snapshot replace, or a non-append push.
   container.innerHTML = "";
-  const fresh = { count: 0, sections: new Map() };
+  const fresh = { count: 0 };
   container.__convState = fresh;
   if (!records.length) {
     container.appendChild(
@@ -1458,35 +1553,30 @@ function renderConversation(container, records, append) {
 }
 
 // Build records `records[startIndex..]` and merge them into `container`,
-// grouping by step. New steps get a fresh section appended in arrival order;
-// records joining an existing step are inserted in timestamp order so a late
-// delta cannot land out of sequence. Existing DOM is never destroyed.
+// keeping the whole conversation strictly ordered by `(__convTs, __convIdx)`.
+// Each bubble carries its step key so a single linear sweep can rebuild the
+// `.history-step-header` separators after all bubbles for this batch have
+// been placed.
 function addConversationRecords(container, st, records, startIndex) {
   for (let i = startIndex; i < records.length; i++) {
     const norm = normalizeRecord(records[i]);
-    const key = stepKey(norm);
-    let section = st.sections.get(key);
-    if (!section) {
-      section = el("div", "history-step");
-      section.appendChild(el("h5", "history-step-title",
-        norm.stepType || norm.stepId || "step"));
-      st.sections.set(key, section);
-      container.appendChild(section);
-    }
     const bubble = renderConversationRecord(norm);
-    // `__convTs` / `__convIdx` order bubbles within a step; `__convIdx` (the
-    // record's absolute position) is the stable tiebreaker for equal timestamps.
     bubble.__convTs = tsValue(norm.timestamp);
     bubble.__convIdx = i;
-    insertBubbleSorted(section, bubble);
+    bubble.__convStepKey = stepKey(norm);
+    bubble.__convStepLabel = norm.stepType || norm.stepId || "step";
+    insertBubbleSorted(container, bubble);
   }
+  rebuildStepHeaders(container);
 }
 
-// Insert `bubble` into `section` keeping bubbles ordered by (__convTs,
-// __convIdx). The leading `h5` title has no `__convIdx` and is skipped.
-function insertBubbleSorted(section, bubble) {
+// Insert `bubble` into `container` keeping all bubbles ordered globally by
+// (__convTs, __convIdx). Existing `.history-step-header` rows are skipped
+// during the scan — they are stateless separators that get rebuilt by
+// `rebuildStepHeaders` after the new bubble has settled into its slot.
+function insertBubbleSorted(container, bubble) {
   let ref = null;
-  for (const child of section.children) {
+  for (const child of container.children) {
     if (child.__convIdx === undefined) continue;
     if (child.__convTs > bubble.__convTs ||
         (child.__convTs === bubble.__convTs &&
@@ -1495,7 +1585,31 @@ function insertBubbleSorted(section, bubble) {
       break;
     }
   }
-  section.insertBefore(bubble, ref);
+  container.insertBefore(bubble, ref);
+}
+
+// Recompute `.history-step-header` separator rows from the current bubble
+// order. Headers are stateless — they get fully removed and re-inserted so
+// boundaries move with any new in-between bubbles. Stateful bubbles (folds,
+// raw toggles, chips) are NEVER touched.
+function rebuildStepHeaders(container) {
+  const existing = Array.from(container.children).filter(
+    (c) => c.classList && c.classList.contains("history-step-header"),
+  );
+  for (const h of existing) container.removeChild(h);
+
+  let lastKey = null;
+  const children = Array.from(container.children);
+  for (const child of children) {
+    if (child.__convStepKey === undefined) continue;
+    if (child.__convStepKey !== lastKey) {
+      const header = el("div", "history-step-header");
+      header.appendChild(el("h5", "history-step-title",
+        child.__convStepLabel || child.__convStepKey || "step"));
+      container.insertBefore(header, child);
+      lastKey = child.__convStepKey;
+    }
+  }
 }
 
 function renderHistoryRecords(flowId, records, append) {
