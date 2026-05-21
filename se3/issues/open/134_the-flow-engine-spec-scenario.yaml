@@ -1,0 +1,32 @@
+id: '134'
+title: The flow-engine spec scenario 'CliSink renders step output via the existing
+  renderer' states that any STEP_COMPLETED/STEP_FAILED event carrying a 'step' object
+  is routed to render_step_output. The implementation now adds a skip for the CONFIRM/DISCOVERY/PLAN
+  step types (CliSink._CLI_SKIP_STEP_TYPES) so their newly-emitted terminal events
+  are not double-rendered on the CLI. The behavior is correct and preserves the spec's
+  overriding goal of byte-for-byte CLI parity, but the flow-engine spec text does
+  not yet document this skip nuance.
+description: 'The flow-engine spec scenario ''CliSink renders step output via the
+  existing renderer'' states that any STEP_COMPLETED/STEP_FAILED event carrying a
+  ''step'' object is routed to render_step_output. The implementation now adds a skip
+  for the CONFIRM/DISCOVERY/PLAN step types (CliSink._CLI_SKIP_STEP_TYPES) so their
+  newly-emitted terminal events are not double-rendered on the CLI. The behavior is
+  correct and preserves the spec''s overriding goal of byte-for-byte CLI parity, but
+  the flow-engine spec text does not yet document this skip nuance.
+
+
+  Suggestion: In a later update_spec step, extend the flow-engine ''Event Stream and
+  Sink Interface'' requirement / CliSink scenario to note that CONFIRM/DISCOVERY/PLAN
+  terminal events are intentionally a no-op in CliSink because their CLI output is
+  owned by the orchestrator''s interactive/special paths, while still reaching HistorySink
+  and JsonSink.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-21T11:16:27.513425'
+updated_at: '2026-05-21T11:16:27.513425'

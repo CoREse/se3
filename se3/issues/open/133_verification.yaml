@@ -1,0 +1,13 @@
+id: '133'
+title: verification 标记与其文本结论自相矛盾
+description: 本次任务的 Verification passed 字段为 False,但 verification summary 文本却明确描述实现完全匹配
+  spec、所有 78 个测试通过、所有显式排除项均正确保留。两者结论相反,疑为 verify 流程的判定逻辑误判而非真实实现缺陷。建议核查 verify 步骤如何产出该布尔标记,避免正确实现被错误标记为验证失败。
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-21T09:42:47.247541'
+updated_at: '2026-05-21T09:42:47.247541'

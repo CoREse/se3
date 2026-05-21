@@ -237,9 +237,24 @@ the single input surface for every intervention kind.
 The recognized intervention kinds are at least: (1) a pending MCP call
 (`call`); (2) a post-Ctrl-C mid-flow interjection (`interjection`); (3) a
 retry/failure decision (`retry_decision`); (4) a CLI subprocess confirmation
-prompt (`cli_confirm`). Each chip is derived from a `pending_calls` entry
+prompt (`cli_confirm`); (5) a non-interactive discovery confirmation gate
+(`discovery_confirm`). Each chip is derived from a `pending_calls` entry
 whose `kind` field identifies the interaction; an unrecognized `kind`
 degrades to a plain `call` chip.
+
+A `discovery_confirm` chip is produced when a daemon-spawned discovery flow
+pauses at the programmatic confirmation gate (see the `flow-engine`
+*Discovery Workflow* requirement). The chip carries the LLM's refined task
+description in its `prompt` and at least one `options` entry encoding the
+one-click confirm action whose **value is the literal `"1"`** — the exact
+token the gate's `== "1"` check expects. The reply context panel MUST render
+both affordances side by side: a GUI confirm button (clicking it sends `"1"`
+through the same call/response reply channel every other chip uses) **and**
+the `输入 1 确认` textual hint as a fallback, so a user who ignores the button
+can still type `1`. Because the confirm value is fixed by the gate, the
+frontend MUST guarantee the confirm button even when the backend call file
+omitted the `options` array — it synthesizes a single confirm option whose
+value is `"1"` so the button and the textual hint always coexist.
 
 A synthetic `interjection` chip is **opt-in**, not always-on: an active flow
 that is not already waiting on a real interjection MUST render an inline
@@ -265,6 +280,18 @@ untouched.
 - **THEN** it is rendered as a status-style chip button in the docked reply
   chip bar
 - **AND** the chip is not rendered as a message card inside the chat-stream
+
+#### Scenario: Discovery confirmation chip offers a confirm button and a textual fallback
+- **GIVEN** a daemon-spawned discovery flow has paused at the programmatic
+  confirmation gate, surfacing a `pending_calls` entry of kind
+  `discovery_confirm` whose `prompt` carries the refined task description
+- **WHEN** the user selects the chip
+- **THEN** the reply context panel renders a GUI confirm button whose click
+  sends the literal `"1"` through the shared call/response reply channel
+- **AND** the panel also shows the `输入 1 确认` textual hint so the user can
+  type `1` manually instead
+- **AND** when the backend call file omitted the `options` array, the frontend
+  still synthesizes the confirm button with value `"1"`
 
 #### Scenario: Selecting a chip expands its full context above the textarea
 - **WHEN** the user selects an intervention chip
@@ -510,6 +537,14 @@ discovery (initial + continue), self_check, verify_spec, update_spec,
 summarize, and version_analyze — so the frontend has a reliable,
 text-pattern-free split signal.
 
+Because the frontend splits **persisted** conversation records (not the live
+LLM prompt), the marker sequence MUST be present in the `user` record as
+written to the chat-history jsonl — not only in the prompt string handed to
+the LLM. The split is data-driven: a `user` record whose stored body lacks the
+markers cannot be split, so the engine MUST persist the marker-wrapped body so
+the frontend has the data to separate the user's literal input from the
+framework boilerplate.
+
 #### Scenario: Assistant output defaults to expanded
 - **WHEN** a conversation record has the `assistant` role
 - **THEN** it is rendered expanded, highlighting the assistant's real output
@@ -701,6 +736,26 @@ report card has access to the same `outputs` dict that the CLI Panel sees —
 without breaking the CLI history viewer (`get_step_history` skips these
 records on the CLI side).
 
+Crucially, the orchestrator MUST emit a terminal `step_completed` /
+`step_failed` event for **every** step type, including the interactive
+DISCOVERY and CONFIRM steps, PLAN, and `summarize` — step types whose CLI
+output is owned by the orchestrator's interactive/special paths and which
+previously emitted no terminal event at all. Without that event, a step that
+had already finished left the web console with no final card to render (the
+exact symptom this requirement closes: a completed step showing no
+default-expanded output card). The emit is gated on a **terminal result**:
+only `COMPLETED`, `PARTIAL`, and `FAILED` produce the event. A step that
+returns `PAUSED` (DISCOVERY awaiting user input, CONFIRM awaiting approval) or
+`REVISION_NEEDED` has not finished and its terminal event is deferred until a
+later re-run reaches a terminal status. To keep CLI output byte-identical
+despite these new events, `CliSink` skips rendering the terminal events of the
+interactive/special step types (CONFIRM, DISCOVERY, PLAN) — their CLI output
+is already presented by the orchestrator's interactive paths, so re-rendering
+them through `render_step_output` would double the CLI output. `HistorySink`
+and `JsonSink` still receive every terminal event, so the web report card
+(and the daemon NDJSON stream) appear for these steps even though the CLI does
+not re-render them.
+
 #### Scenario: Each completed step renders a report card
 - **WHEN** the running flow emits a `step_completed` event of a known step
   type (analyze, plan, implement, test, self_check, verify_spec, update_spec,
@@ -724,6 +779,26 @@ records on the CLI side).
   view) and (b) the new `.step-report` card are present
 - **AND** the raw record is NOT hidden or removed by the introduction of the
   report card
+
+#### Scenario: Interactive and summarize steps produce a report card once finished
+- **GIVEN** a flow whose DISCOVERY, PLAN, or `summarize` step has reached a
+  terminal status (`COMPLETED` / `PARTIAL` / `FAILED`)
+- **WHEN** the conversation is rendered in `#flow-view`
+- **THEN** the step's terminal event has been persisted to its per-step jsonl
+  (because the orchestrator now emits a terminal event for every step type),
+  and a default-expanded `.step-report` card is rendered for it
+- **AND** the card appears even though `CliSink` skipped re-rendering that step
+  on the CLI side, so a finished interactive step is no longer left without a
+  final output card on the web console
+
+#### Scenario: A paused or revision-pending step has no premature report card
+- **GIVEN** a DISCOVERY step that returned `PAUSED` awaiting user input, or a
+  CONFIRM step that returned `REVISION_NEEDED`
+- **WHEN** the conversation is rendered
+- **THEN** no terminal `step_completed` / `step_failed` event has been emitted
+  for that not-yet-finished step, so no `.step-report` card is rendered for it
+- **AND** a card appears only after a later re-run drives the step to a
+  terminal status
 
 ### Requirement: New Task — Arbitrary Project Root
 

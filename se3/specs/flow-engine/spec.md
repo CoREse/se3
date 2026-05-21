@@ -207,13 +207,30 @@ se3 run --discover "我想做一个用户管理功能"
 
 当 discovery 步骤运行在非交互模式（由 daemon 代为 spawn、`--output-format json`、无可用终端）时，没有可阻塞读取的输入框。此时 discovery 步骤 SHALL NOT 阻塞终端输入，而是将澄清提问写为 `se3/calls/` 目录下的 call 文件并返回 `PAUSED` 状态，复用既有的 call/response 机制让用户在网页通过「Respond to Flow」交互应答；用户的响应文件被消费后，流程通过 `se3 run --resume` 等价路径恢复并进入下一轮 discovery。不为网页起步的 discovery 任务新建专门的交互式对话界面 —— 多轮澄清问答统一复用既有 call/response 通道。
 
+非交互 discovery pause 的 call 文件 SHALL 通过共享的 `interaction_calls.write_call` 写入，区分两种暂停形态：
+
+- **澄清提问（question）暂停**：写为普通 `CALL_KIND_CALL`，`prompt` 携带 LLM 的澄清问题文本。
+- **程序化确认门控（confirmation）暂停**（`outputs["awaiting_programmatic_confirm"]` 为真）：写为专用的 `CALL_KIND_DISCOVERY_CONFIRM` kind。`prompt` 由 `steps/discovery.discovery_confirm_metadata(refined_description)` 生成，携带 `输入 1 确认` 文案兜底加上精炼后的任务描述；`options` 携带一个一键确认动作，其 `value` 为字面量 `"1"`（即门控 `== "1"` 判定所期望的确认 token），使网页控制台既能渲染 GUI 确认按钮（点击即经回复通道发送 `"1"`），又保留 `输入 1 确认` 文案。
+
+两种 call 都把 `flow_id` / `step_id` 写入 `context`（供 aggregator 的 per-flow 过滤按 flow 归属），并镜像为顶层字段以兼容旧 reader。GUI 确认按钮不引入新通道，提交的 `"1"` 与用户手动键入 `1` 经过同一条 call/response 回复通道，被同一个程序化确认门控消费。
+
 #### Scenario: 非交互模式 discovery 通过 call/response 提问
 - **GIVEN** discovery 任务由 daemon 代为 spawn（`se3 run --discover --output-format json`，无可用终端）
 - **WHEN** discovery 步骤需要向用户提出澄清问题
 - **THEN** 不阻塞终端输入，而是将提问写为 `se3/calls/` 下的 call 文件
+- **AND** call 的 `kind` 为 `CALL_KIND_CALL`，`prompt` 携带 LLM 的澄清问题
 - **AND** 步骤返回 `PAUSED` 状态
 - **AND** 用户在网页通过既有的「Respond to Flow」交互应答该 call
 - **AND** 响应文件被消费后流程恢复并进入下一轮 discovery 对话
+
+#### Scenario: 非交互模式 discovery 程序化确认门控写 discovery_confirm call
+- **GIVEN** discovery 任务由 daemon 代为 spawn（无可用终端）且步骤在程序化确认门控暂停（`outputs["awaiting_programmatic_confirm"]` 为真）
+- **WHEN** `_write_discovery_call` 写入 call 文件
+- **THEN** call 的 `kind` 为 `CALL_KIND_DISCOVERY_CONFIRM`
+- **AND** `prompt` 由 `discovery_confirm_metadata` 生成，包含 `输入 1 确认` 文案兜底与精炼后的任务描述
+- **AND** `options` 含一个一键确认动作，其 `value` 为字面量 `"1"`
+- **AND** `context` 携带 `flow_id` / `step_id` 以供 aggregator 按 flow 归属过滤
+- **AND** 用户经 GUI 确认按钮或手动键入 `1` 提交的响应都被同一个程序化确认门控消费，门控的严格 `== "1"` 语义不变
 
 #### Scenario: Discovery LLM JSON 提取失败时的友好错误提示
 - **GIVEN** discovery 步骤执行 LLM 调用使用 two-phase JSON 模式
@@ -2930,8 +2947,30 @@ The `Transition` dataclass (`se3/engine/models.py`) SHALL describe a single step
 **Sink interface (`se3/engine/sink.py`):**
 
 - `Sink` — an ABC declaring `consume(event: Event) -> None`.
-- `CliSink` — the CLI-mode tail. It delegates step-output rendering entirely to the pre-existing `step_renderers.render_step_output(step)` and adds no rendering logic of its own, keeping CLI output byte-for-byte identical to today's `se3 run`. Flow-level lifecycle events and raw `STEP_STARTED` / `STEP_OUTPUT` events are deliberately a no-op in `CliSink` because the `se3 run` orchestrator already renders those directly; having the sink render them too would double the CLI output.
+- `CliSink` — the CLI-mode tail. It delegates step-output rendering entirely to the pre-existing `step_renderers.render_step_output(step)` and adds no rendering logic of its own, keeping CLI output byte-for-byte identical to today's `se3 run`. Flow-level lifecycle events and raw `STEP_STARTED` / `STEP_OUTPUT` events are deliberately a no-op in `CliSink` because the `se3 run` orchestrator already renders those directly; having the sink render them too would double the CLI output. Additionally, `CliSink` skips the `STEP_COMPLETED` / `STEP_FAILED` events of the interactive/special step types in its `_CLI_SKIP_STEP_TYPES` set — `confirm`, `discovery`, and `plan` — because their CLI output is owned by the orchestrator's interactive/special paths (the discovery message panel, the confirm approval prompt, the plan presentation). Re-rendering those terminal events through `render_step_output` would double the CLI output, so `CliSink` is the layer that preserves byte-identical CLI behavior while still letting the other sinks observe the events.
 - `JsonSink` — the daemon-mode tail. It serializes each event via `Event.to_dict()` and writes one line of JSON (NDJSON) per event, using `default=str` so non-serializable payload values degrade gracefully. It supports a compact (default) and a `pretty` mode.
+
+**Terminal step-event emission for every step type:**
+
+The `se3 run` orchestrator (`_run_flow_impl`) SHALL emit a terminal
+`STEP_COMPLETED` / `STEP_FAILED` event for **every** step type, including the
+interactive `CONFIRM` and `DISCOVERY` steps and `PLAN` (and likewise
+`summarize`), which were previously excluded from emission. Emitting the
+terminal event is what lets `HistorySink` persist the step's structured
+`outputs` to the per-step jsonl history (consumed by the daemon history reader
+and the web console's per-step report cards) and lets `JsonSink` forward the
+event to the daemon; without it, a finished discovery / plan / confirm /
+summarize step left the web console with no final report card to render.
+
+The emit is gated on a **terminal result**: the orchestrator emits only when
+the step result is `COMPLETED`, `PARTIAL`, or `FAILED` (`STEP_FAILED` for
+`FAILED`, `STEP_COMPLETED` otherwise). A step that returned `PAUSED` (DISCOVERY
+awaiting user input, CONFIRM awaiting approval) or `REVISION_NEEDED` has not
+finished yet, so its terminal event is deferred until a later re-run reaches a
+terminal status. Because `CliSink` skips the interactive/special step types
+(see `_CLI_SKIP_STEP_TYPES` above), this universal emission does NOT
+double-render the interactive steps on the CLI; `HistorySink` and `JsonSink`
+still receive every terminal event.
 
 #### Scenario: EventEmitter fans out to all subscribed sinks
 - **WHEN** an `Event` is emitted on an `EventEmitter` with multiple subscribed sinks
@@ -2948,6 +2987,21 @@ The `Transition` dataclass (`se3/engine/models.py`) SHALL describe a single step
 - **WHEN** `CliSink` consumes a `STEP_COMPLETED` or `STEP_FAILED` event whose `data` carries a `"step"` object
 - **THEN** the event is routed to `step_renderers.render_step_output(step)` — the same entry point the current CLI uses
 - **AND** flow-level lifecycle events (`FLOW_STARTED` / `FLOW_COMPLETED` / `FLOW_PAUSED` / etc.) and raw `STEP_OUTPUT` / `STEP_STARTED` events are a no-op in `CliSink`
+
+#### Scenario: CliSink skips interactive/special step terminal events
+- **WHEN** `CliSink` consumes a `STEP_COMPLETED` / `STEP_FAILED` event whose step type is `confirm`, `discovery`, or `plan` (its `_CLI_SKIP_STEP_TYPES` set)
+- **THEN** `CliSink` does NOT route the event to `render_step_output`, leaving the CLI output byte-identical to the orchestrator's interactive/special-path rendering
+- **AND** the same event is still delivered to `HistorySink` (per-step jsonl) and `JsonSink` (daemon NDJSON)
+
+#### Scenario: Terminal event is emitted for interactive and summarize steps
+- **WHEN** an interactive `DISCOVERY` / `CONFIRM` step, a `PLAN` step, or a `summarize` step finishes with a terminal result (`COMPLETED` / `PARTIAL` / `FAILED`)
+- **THEN** the orchestrator emits the corresponding `STEP_COMPLETED` / `STEP_FAILED` event (it is no longer excluded by step type)
+- **AND** `HistorySink` persists the step's `outputs` to the per-step jsonl so the web console can render its report card
+
+#### Scenario: Terminal event is deferred for paused or revision-pending steps
+- **WHEN** a step returns `PAUSED` (e.g. DISCOVERY awaiting input, CONFIRM awaiting approval) or `REVISION_NEEDED`
+- **THEN** the orchestrator does NOT emit a terminal `STEP_COMPLETED` / `STEP_FAILED` event for that step
+- **AND** the terminal event is emitted only once a later re-run drives the step to a `COMPLETED` / `PARTIAL` / `FAILED` result
 
 #### Scenario: JsonSink emits one NDJSON line per event
 - **WHEN** `JsonSink` consumes an event
