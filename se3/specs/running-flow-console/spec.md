@@ -436,6 +436,21 @@ The frontend `pendingCalls(flow)` helper applies the same strict filter as a
 defensive fallback against older daemon versions that have not yet been
 upgraded.
 
+Beyond flow-id scoping, pending calls also have a **flow-progress-bound
+lifetime**: while a flow is running, the aggregator MUST stop surfacing a
+pending call once the flow has moved past the step that call belongs to. An
+interactive `call` / `cli_confirm` / `discovery_confirm` answered at the CLI
+terminal is typically consumed directly by the run loop without writing a
+`.response` / `.response.json` sibling file, so the existing
+already-answered-by-sibling-file check can never clear it and the stale "待回复"
+chip would otherwise persist for the entire run. To close this, the aggregator
+(`DaemonAggregator._enumerate_calls` / `_snapshot_for_root`) MUST treat a call
+as no longer pending when its owning `context.step_id` is no longer the flow's
+current step (or that step has already reached a COMPLETED / REVISION-handled
+status), and drop it from the flow's `pending_calls` even when no sibling
+response file exists. Calls whose step is still the current, unanswered step
+remain pending and continue to surface as chips.
+
 #### Scenario: Calls with matching flow_id are surfaced
 - **GIVEN** the current running flow has `flow_id = "F1"`
 - **WHEN** a pending call file under `se3/calls/` carries
@@ -467,6 +482,19 @@ upgraded.
   `step_id` when known)
 - **AND** the aggregator's per-flow filter scopes the call to `F1` only, so a
   concurrent flow `F2` does not see it in its chip bar
+
+#### Scenario: Pending call clears once the flow advances past its step
+- **GIVEN** a running flow `F1` surfaced a pending call (e.g. a `cli_confirm`
+  or `discovery_confirm`) whose `context.step_id` was the flow's current step
+- **WHEN** the CLI answers the call and the flow advances so that step is no
+  longer the current step (or it has reached a COMPLETED / REVISION-handled
+  status), even though no `.response` / `.response.json` sibling file was
+  written
+- **THEN** the aggregator stops reporting the call in `F1`'s `pending_calls`
+  and the stale "待回复" chip disappears from `F1`'s docked reply bar during the
+  run, not only after the flow archives
+- **AND** a call whose step is still the current, unanswered step remains
+  pending and continues to surface as a chip
 
 ### Requirement: Role-Based Message Collapse
 
@@ -616,6 +644,92 @@ framework boilerplate.
   structured sentinel marker sequence, never from pattern-matching the
   message prose
 
+### Requirement: Three-Tier Progressive Disclosure
+
+Every conversation turn in `#flow-view` — both the `user` side and the
+`assistant` side — MUST follow one unified **three-tier progressive
+disclosure** model so the default view is the clean, human-meaningful payload
+and the surrounding process is reachable but never in the way. This is the
+deliberate inversion of the prior behavior, where an assistant's thinking
+narrative + tool markers were the default surface, the real result was buried
+in a raw JSON blob, and an isolated "待回复" chip sat inline in the stream. The
+target is: **default shows only the rendered result; the full process is
+collected behind "展开全部"; the original NDJSON is behind "查看原始".**
+
+The conversation is grouped into per-phase sections
+(DISCOVERY / ANALYZE / PLAN / …) and, within each section, turns are presented
+in chronological order as User / Assistant pairs (subject to the strict
+chronological ordering of the *Conversation Strict Chronological Order*
+requirement). Each turn exposes the same three layers:
+
+**User turn**
+1. **Layer 1 (default)** — only the user's literal input (the user-content
+   section produced by the `prompt_markers.py` split; see *Role-Based Message
+   Collapse*). No framework boilerplate leaks into this default view.
+2. **Layer 2 ("展开全部")** — the complete prompt the LLM actually saw,
+   presented as the labeled 模板前缀 / 框架后缀 subsections (the template prefix
+   and the framework suffix). Folded by default.
+3. **Layer 3 ("查看原始")** — the original NDJSON record for the message, via
+   the shared row-level raw toggle.
+
+**Assistant turn**
+1. **Layer 1 (default)** — only this turn's rendered result: the structured
+   fields produced by the `STEP_ASSISTANT_RENDERERS` entry for the step type
+   (e.g. discovery's `content` / `refined_description` / `questions`). No raw
+   ```` ```json ```` blob and no isolated pending chip in the default view.
+2. **Layer 2 ("展开全部")** — this turn's full process: tool calls, intermediate
+   narrative, and the unrendered result JSON literal, rendered through
+   `renderToolMarkers` + markdown. Folded by default.
+3. **Layer 3 ("查看原始")** — the original NDJSON record, via the shared
+   row-level raw toggle.
+
+When a turn has no Layer-1 payload to surface — e.g. a legacy `user` record
+whose user-content section is empty, or an assistant turn whose body cannot be
+parsed into structured fields — the renderer MUST degrade gracefully: it falls
+back to the foldable / markdown path (the assistant fallback is the same
+`renderToolMarkers` + markdown path described in *Structured-JSON Assistant
+Rendering*) and never drops content. Expanding a Layer-2 / Layer-3 toggle
+follows the same `scrollIntoView({block: "nearest"})`-on-expand,
+no-scroll-on-collapse behavior used elsewhere in the view.
+
+#### Scenario: Assistant turn defaults to the clean rendered result
+- **GIVEN** an assistant turn whose body carries tool-call narrative plus a
+  structured-JSON result for its step type
+- **WHEN** the turn is rendered in `#flow-view`
+- **THEN** the default (Layer 1) view shows only the rendered structured
+  fields for that step type
+- **AND** the tool calls, intermediate narrative, and unrendered result JSON
+  literal are NOT in the default view — they are reachable only by expanding
+  the "展开全部" (Layer 2) toggle
+- **AND** the original NDJSON is reachable only via the "查看原始" (Layer 3)
+  toggle
+
+#### Scenario: User turn defaults to the literal input only
+- **GIVEN** a `user` turn whose stored body contains the three-segment marker
+  sequence wrapping the user's literal input
+- **WHEN** the turn is rendered
+- **THEN** the default (Layer 1) view shows only the user's literal input,
+  with no template prefix or framework suffix text
+- **AND** the full prompt the LLM saw is reachable as the 模板前缀 / 框架后缀
+  subsections behind the "展开全部" (Layer 2) toggle
+- **AND** the original NDJSON is reachable via the "查看原始" (Layer 3) toggle
+
+#### Scenario: No isolated pending chip embedded in the assistant default view
+- **WHEN** an assistant turn is rendered in its default Layer-1 form
+- **THEN** no inline "待回复" / pending-intervention chip is rendered inside the
+  turn's clean result view
+- **AND** pending interventions appear only on the docked reply bar, per the
+  *Unified Intervention Items* requirement
+
+#### Scenario: Turn with no Layer-1 payload degrades without losing content
+- **GIVEN** an assistant turn whose body cannot be parsed into structured
+  fields, or a legacy `user` turn with an empty user-content section
+- **WHEN** the turn is rendered
+- **THEN** the renderer falls back to the foldable / markdown path rather than
+  raising, and the full content remains reachable through the disclosure
+  layers
+- **AND** no message text is dropped
+
 ### Requirement: Structured-JSON Assistant Rendering
 
 For step types whose `assistant` messages are structured-JSON responses (the
@@ -638,11 +752,18 @@ fails to parse the message body, the renderer MUST fall back gracefully to
 the existing `renderToolMarkers` + markdown / foldable path, so no assistant
 message is ever lost.
 
-This task lands a single concrete renderer for `step_type === "discovery"`,
-mirroring the CLI's
+The registry MUST cover **every** step type whose `assistant` message is a
+structured-JSON response — `discovery`, `analyze`, `plan`, `plan_tasks`,
+`implement`, `test`, `self_check`, `verify_spec`, `update_spec`, `commit`,
+`version_analyze`, and `summarize` — not `discovery` alone. To keep web and
+CLI field parity without re-implementing each layout, every non-discovery
+renderer SHOULD reuse the field-rendering logic already provided by the
+matching `STEP_REPORT_RENDERERS` entry (see *Per-Step Report Cards*), so an
+assistant turn surfaces the same structured fields the report card and the CLI
+Panel show. `discovery` keeps a dedicated renderer mirroring the CLI's
 `steps/discovery.py::_display_discovery_message` /
 `_extract_narrative_from_raw` behavior so web and CLI users see the same
-report:
+report; it is the worked example below:
 
 1. Extract any narrative text outside JSON — both fenced ```` ```json ... ````
    blocks and any trailing bare JSON object after the last narrative line are
@@ -665,9 +786,13 @@ report:
    the same per-record raw toggle used by other records, so a developer can
    still inspect the unrendered string when debugging.
 
-The registry MUST be open for further step types (analyze, plan, plan_tasks,
-etc.) without re-architecting the dispatch path, but this task lands only
-the discovery entry.
+The registry MUST remain open for future step types without re-architecting
+the dispatch path. Every step type listed above MUST have a registered
+renderer so an assistant turn defaults to structured fields rather than a raw
+```` ```json ```` blob; a step type with no registered entry — or a registered
+renderer that cannot parse the body — degrades gracefully through the shared
+`renderToolMarkers` + markdown / foldable fallback path, and no assistant
+message is ever dropped.
 
 #### Scenario: Discovery assistant message renders structured fields
 - **GIVEN** an assistant record with `step_type = "discovery"` whose body
@@ -683,6 +808,19 @@ the discovery entry.
   (4) an ordered list of the `questions` strings
 - **AND** the raw JSON literal does NOT appear as a primary markdown code
   block under the bubble
+
+#### Scenario: Every structured step type has a registered assistant renderer
+- **GIVEN** the `STEP_ASSISTANT_RENDERERS` registry after the frontend module
+  loads
+- **WHEN** the registry is inspected for the structured step types
+  (`discovery`, `analyze`, `plan`, `plan_tasks`, `implement`, `test`,
+  `self_check`, `verify_spec`, `update_spec`, `commit`, `version_analyze`,
+  `summarize`)
+- **THEN** each of those step types maps to a renderer function, so an
+  assistant turn of any of them defaults to its structured fields rather than a
+  raw ```` ```json ```` blob
+- **AND** the non-discovery renderers surface the same field set as the
+  matching `STEP_REPORT_RENDERERS` entry, keeping web and CLI field parity
 
 #### Scenario: JSON parse failure falls back to existing renderer
 - **GIVEN** an assistant record with `step_type = "discovery"` whose body
