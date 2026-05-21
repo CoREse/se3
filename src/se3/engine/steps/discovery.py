@@ -28,6 +28,47 @@ logger = logging.getLogger(__name__)
 # via the programmatic confirmation gate. This must NEVER reach the LLM.
 PROGRAMMATIC_CONFIRM_SENTINEL = "__PROGRAMMATIC_CONFIRM__"
 
+# The literal response that confirms a discovery refined description and lets
+# the flow advance to ANALYZE (see the *Discovery Programmatic Confirmation
+# Gate* requirement). The web console's GUI confirm button submits exactly
+# this value through the existing call/response channel.
+DISCOVERY_CONFIRM_VALUE = "1"
+
+# Human-facing fallback hint shown alongside the GUI confirm button on the web
+# console, mirroring the CLI's "输入 1 确认" affordance. The wording is
+# non-normative (see the spec); only the ``1`` confirm key is normative.
+DISCOVERY_CONFIRM_HINT = "输入 1 确认并继续，或回复其它内容继续完善需求。"
+
+
+def discovery_confirm_metadata(refined_description: str) -> tuple[str, list]:
+    """Build the ``(prompt, options)`` display metadata for a confirm call.
+
+    Used when a non-interactive discovery step pauses at the programmatic
+    confirmation gate. The returned *prompt* is a human-readable instruction
+    carrying the ``输入 1 确认`` textual fallback plus the proposed refined
+    description; the single *option* encodes the GUI confirm action whose
+    response value is the literal :data:`DISCOVERY_CONFIRM_VALUE` (``"1"``)
+    that the gate's ``== "1"`` check expects. The web console renders the
+    prompt as Markdown and the option as a one-click confirm button, so both
+    affordances coexist.
+
+    Args:
+        refined_description: The proposed refined task description.
+
+    Returns:
+        A ``(prompt, options)`` tuple. ``options`` is a list with one
+        ``{"label", "value"}`` dict for the confirm action.
+    """
+    refined = (refined_description or "").strip()
+    parts = ["Discovery 已生成精炼后的任务描述。" + DISCOVERY_CONFIRM_HINT]
+    if refined:
+        parts.extend(["", "Proposed task description:", refined])
+    prompt = "\n".join(parts)
+    options = [
+        {"label": f"确认并继续 (输入 {DISCOVERY_CONFIRM_VALUE})", "value": DISCOVERY_CONFIRM_VALUE}
+    ]
+    return prompt, options
+
 # Discovery prompts are assembled with the three-segment marker protocol:
 # the framework boilerplate / project context / discovery context labels live
 # in PREFIX, the user's literal field (initial_description / user_response)

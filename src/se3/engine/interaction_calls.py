@@ -1,9 +1,10 @@
 """Unified interaction-call file channel (``se3/calls/``).
 
 Every point in a running flow that needs a human in the loop — a pending MCP
-call, a Ctrl-C mid-flow interjection, a retry/failure decision, or a CLI
-subprocess confirmation prompt — is represented by the *same* artifact: a JSON
-file under ``<project_root>/se3/calls/``. The file carries a ``kind`` field
+call, a Ctrl-C mid-flow interjection, a retry/failure decision, a CLI
+subprocess confirmation prompt, or a non-interactive discovery confirmation
+gate — is represented by the *same* artifact: a JSON file under
+``<project_root>/se3/calls/``. The file carries a ``kind`` field
 (one of the ``CALL_KIND_*`` constants defined in :mod:`se3.daemon.protocol`)
 plus display metadata (``prompt``, ``context``, ``options``) so the daemon
 aggregator and the web console can render and route the interaction without
@@ -40,6 +41,7 @@ logger = logging.getLogger(__name__)
 from ..daemon.protocol import (
     CALL_KIND_CALL,
     CALL_KIND_CLI_CONFIRM,
+    CALL_KIND_DISCOVERY_CONFIRM,
     CALL_KIND_INTERJECTION,
     CALL_KIND_RETRY_DECISION,
     CALL_KINDS,
@@ -48,6 +50,7 @@ from ..daemon.protocol import (
 __all__ = [
     "CALL_KIND_CALL",
     "CALL_KIND_CLI_CONFIRM",
+    "CALL_KIND_DISCOVERY_CONFIRM",
     "CALL_KIND_INTERJECTION",
     "CALL_KIND_RETRY_DECISION",
     "CALL_KINDS",

@@ -597,3 +597,176 @@ def test_step_completed_appended_to_existing_step_file_is_picked_up():
         # Not re-pushed afterwards.
         reads = reader.read_active_flows(cursors)
         assert reads[0].records == []
+
+
+# ---------------------------------------------------------------------------
+# Group G3: discovery confirmation entry point (prompt + GUI button).
+#
+# A non-interactive discovery pause at the programmatic confirmation gate must
+# write a structured call file carrying:
+#   * kind == discovery_confirm (consistent across engine/daemon/server),
+#   * a one-click confirm option whose value is the literal "1" the gate's
+#     ``== "1"`` check expects,
+#   * context.flow_id so the daemon's per-flow filter scopes it,
+#   * a prompt with the "输入 1 确认" textual fallback + refined description.
+# Submitting the confirm action ("1") must drive the gate to continue.
+# ---------------------------------------------------------------------------
+
+
+def _make_discovery_step(step_id="01_discovery_xyz", outputs=None, inputs=None):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        step_id=step_id,
+        outputs=dict(outputs or {}),
+        inputs=dict(inputs or {}),
+    )
+
+
+def _make_discovery_flow(flow_id="F-disc"):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(flow_id=flow_id)
+
+
+class _NullPersistence:
+    def save_flow(self, flow):  # noqa: D401 - test stub
+        pass
+
+
+def test_discovery_confirm_call_payload_kind_options_context():
+    """The confirm call carries kind/options/context.flow_id and the textual
+    "输入 1 确认" hint + refined description in its prompt."""
+    from se3.commands.run import _write_discovery_call
+    from se3.engine.interaction_calls import CALL_KIND_DISCOVERY_CONFIRM
+
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        flow = _make_discovery_flow("F-disc")
+        step = _make_discovery_step(
+            outputs={
+                "awaiting_programmatic_confirm": True,
+                "refined_description": "Add a /health endpoint",
+            }
+        )
+        call_file = _write_discovery_call(flow, step, project_root)
+        data = json.loads(call_file.read_text(encoding="utf-8"))
+
+        assert data["kind"] == CALL_KIND_DISCOVERY_CONFIRM
+        # context.flow_id is what the aggregator's per-flow filter inspects.
+        assert data["context"]["flow_id"] == "F-disc"
+        assert data["context"]["step_id"] == step.step_id
+        assert data["context"]["refined_description"] == "Add a /health endpoint"
+        # The textual fallback + refined description live in the prompt.
+        assert "输入 1 确认" in data["prompt"]
+        assert "Add a /health endpoint" in data["prompt"]
+        # Exactly one confirm option, whose value is the gate's literal "1".
+        assert len(data["options"]) == 1
+        assert data["options"][0]["value"] == "1"
+
+
+def test_discovery_confirm_call_surfaces_via_aggregator_scoped_with_options():
+    """The daemon aggregator parses the confirm call into a flow-scoped
+    PendingCall that keeps the kind and the confirm option."""
+    from se3.commands.run import _write_discovery_call
+    from se3.daemon.aggregator import DaemonAggregator
+    from se3.engine.interaction_calls import CALL_KIND_DISCOVERY_CONFIRM
+
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        # engine.json so the snapshot has a flow_id to scope against.
+        state_dir = project_root / "se3" / "state"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        (state_dir / "engine.json").write_text(
+            json.dumps(
+                {
+                    "flow_id": "F-disc",
+                    "task_description": "t",
+                    "task_type": "discovery",
+                    "status": "PAUSED",
+                    "state": {
+                        "current_step_id": "01_discovery_xyz",
+                        "selected_steps": ["discovery"],
+                        "current_step_index": 0,
+                        "steps": {"01_discovery_xyz": {"step_type": "discovery"}},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        flow = _make_discovery_flow("F-disc")
+        step = _make_discovery_step(
+            outputs={
+                "awaiting_programmatic_confirm": True,
+                "refined_description": "Refine the thing",
+            }
+        )
+        _write_discovery_call(flow, step, project_root)
+
+        aggregator = DaemonAggregator()
+        aggregator.add_project_root(project_root)
+        snapshot = aggregator._snapshot_for_root(project_root)
+
+        assert snapshot is not None
+        assert snapshot.flow_id == "F-disc"
+        # The confirm call survives the per-flow filter and keeps its metadata.
+        assert len(snapshot.pending_calls) == 1
+        call = snapshot.pending_calls[0]
+        assert call.kind == CALL_KIND_DISCOVERY_CONFIRM
+        assert call.context.get("flow_id") == "F-disc"
+        assert call.options and call.options[0]["value"] == "1"
+        assert "输入 1 确认" in call.prompt
+
+
+def test_discovery_confirm_submission_gates_on_one():
+    """Submitting the confirm action ("1") drives the gate to continue
+    (programmatic_confirmed + sentinel); any other reply keeps refining."""
+    from se3.commands.run import (
+        _PROGRAMMATIC_CONFIRM,
+        _handle_discovery_pause_noninteractive,
+    )
+
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        persistence = _NullPersistence()
+
+        # --- "1" confirms and advances ---
+        flow = _make_discovery_flow("F-disc")
+        step = _make_discovery_step(
+            outputs={
+                "awaiting_programmatic_confirm": True,
+                "refined_description": "Do X",
+            }
+        )
+        _handle_discovery_pause_noninteractive(flow, step, persistence, project_root)
+        call_file = Path(step.outputs["discovery_call_file"])
+        (call_file.parent / f"{call_file.stem}.response.json").write_text(
+            json.dumps({"response": "1"}), encoding="utf-8"
+        )
+        result = _handle_discovery_pause_noninteractive(
+            flow, step, persistence, project_root
+        )
+        assert result is _PROGRAMMATIC_CONFIRM
+        assert step.inputs.get("programmatic_confirmed") is True
+
+        # --- any other reply keeps refining (clears the confirm flag) ---
+        flow2 = _make_discovery_flow("F-disc")
+        step2 = _make_discovery_step(
+            outputs={
+                "awaiting_programmatic_confirm": True,
+                "refined_description": "Do X",
+            }
+        )
+        _handle_discovery_pause_noninteractive(
+            flow2, step2, persistence, project_root
+        )
+        call_file2 = Path(step2.outputs["discovery_call_file"])
+        (call_file2.parent / f"{call_file2.stem}.response.json").write_text(
+            json.dumps({"response": "also handle Y"}), encoding="utf-8"
+        )
+        result2 = _handle_discovery_pause_noninteractive(
+            flow2, step2, persistence, project_root
+        )
+        assert result2 == "also handle Y"
+        assert step2.inputs.get("programmatic_confirmed") is None
+        assert "awaiting_programmatic_confirm" not in step2.outputs

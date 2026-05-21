@@ -842,22 +842,8 @@ _DISCOVERY_AWAITING = object()
 
 
 def _discovery_call_question(current_step: Any) -> str:
-    """Build the human-readable question text for a discovery call file."""
+    """Build the human-readable prompt for a discovery *question* call file."""
     outputs = current_step.outputs
-    if outputs.get("awaiting_programmatic_confirm"):
-        refined = (
-            outputs.get("refined_description")
-            or outputs.get("proposed_description")
-            or ""
-        )
-        parts = [
-            "Discovery has produced a refined task description. Reply with "
-            "exactly '1' to confirm and proceed, or reply with any other text "
-            "to keep refining the requirements.",
-        ]
-        if refined:
-            parts.extend(["", "Proposed task description:", str(refined)])
-        return "\n".join(parts)
     # Question mode: surface the LLM's clarifying message and its questions.
     parts: List[str] = []
     message = outputs.get("message")
@@ -882,29 +868,61 @@ def _write_discovery_call(
 ) -> Path:
     """Write a ``se3/calls/`` call file for a non-interactive discovery pause.
 
-    The call file joins the existing human-call queue, so the web UI surfaces
-    it through the standard "Respond to Flow" interaction. The user's reply is
-    consumed on the next resume.
+    The call joins the unified human-call queue via the shared
+    :func:`~se3.engine.interaction_calls.write_call` helper, so the daemon
+    aggregator and web console render and route it like any other interaction.
+
+    * A *confirmation* pause carries the
+      :data:`~se3.engine.interaction_calls.CALL_KIND_DISCOVERY_CONFIRM` kind, a
+      prompt with the ``输入 1 确认`` textual fallback + refined description,
+      and a one-click confirm ``option`` (response ``"1"``) so the web console
+      shows both a GUI confirm button and the textual hint.
+    * A *question* pause is a plain ``call`` carrying the LLM's clarifying
+      prompt.
+
+    The owning ``flow_id`` / ``step_id`` are written into ``context`` so the
+    aggregator's per-flow filter scopes the call to its flow; they are also
+    mirrored as top-level fields for backward-compatible readers. The user's
+    reply is consumed on the next resume.
     """
-    calls_dir = project_root / "se3" / "calls"
-    calls_dir.mkdir(parents=True, exist_ok=True)
+    from ..engine import interaction_calls
+    from ..engine.steps.discovery import discovery_confirm_metadata
+
     is_confirmation = bool(current_step.outputs.get("awaiting_programmatic_confirm"))
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
     call_id = f"discovery_{current_step.step_id}_{timestamp}"
-    call_file = calls_dir / f"{call_id}.json"
-    payload = {
-        "type": "discovery",
-        "call_type": "discovery_confirm" if is_confirmation else "discovery_question",
-        "step": current_step.step_id,
-        "step_id": current_step.step_id,
+    context: Dict[str, Any] = {
         "flow_id": flow.flow_id,
-        "question": _discovery_call_question(current_step),
-        "created_at": datetime.now().timestamp(),
+        "step_id": current_step.step_id,
+        "step_type": "discovery",
     }
-    call_file.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+
+    if is_confirmation:
+        refined = (
+            current_step.outputs.get("refined_description")
+            or current_step.outputs.get("proposed_description")
+            or ""
+        )
+        prompt, options = discovery_confirm_metadata(str(refined))
+        if refined:
+            context["refined_description"] = str(refined)
+        kind = interaction_calls.CALL_KIND_DISCOVERY_CONFIRM
+    else:
+        prompt = _discovery_call_question(current_step)
+        options = []
+        kind = interaction_calls.CALL_KIND_CALL
+
+    return interaction_calls.write_call(
+        interaction_calls.calls_dir_for(project_root),
+        kind=kind,
+        prompt=prompt,
+        context=context,
+        options=options,
+        call_id=call_id,
+        # Backward-compatible top-level fields some readers/tests still expect.
+        step_id=current_step.step_id,
+        flow_id=flow.flow_id,
     )
-    return call_file
 
 
 def _read_discovery_response(call_file: Path) -> Optional[str]:

@@ -41,7 +41,8 @@ class PendingCall:
     runs. The file's ``kind`` field (one of
     :data:`~se3.daemon.protocol.CALL_KINDS`) tells the UI how to render it:
     a pending MCP call, a mid-flow interjection request, a retry / failure
-    decision, or a CLI subprocess confirmation prompt.
+    decision, a CLI subprocess confirmation prompt, or a discovery
+    confirmation gate (carrying ``options`` for a one-click confirm button).
 
     The display fields (``prompt`` / ``context`` / ``options`` / ``step_id``)
     are read straight from the call file's JSON body when present; a legacy
@@ -402,7 +403,10 @@ class DaemonAggregator:
         if isinstance(kind, str) and kind in protocol.CALL_KINDS:
             call.kind = kind
 
-        prompt = data.get("prompt") or data.get("message")
+        # ``prompt`` is the canonical display field; ``message`` and the legacy
+        # discovery-call ``question`` field are accepted as fallbacks so an
+        # older call file still surfaces a non-empty prompt in the chip panel.
+        prompt = data.get("prompt") or data.get("message") or data.get("question")
         if isinstance(prompt, str):
             call.prompt = prompt
 

@@ -20,6 +20,7 @@ from se3.daemon.client import DaemonClient
 from se3.daemon.protocol import (
     CALL_KIND_CALL,
     CALL_KIND_CLI_CONFIRM,
+    CALL_KIND_DISCOVERY_CONFIRM,
     CALL_KIND_INTERJECTION,
     CALL_KIND_RETRY_DECISION,
     CALL_KINDS,
@@ -39,6 +40,7 @@ def test_call_kinds_set():
         CALL_KIND_INTERJECTION,
         CALL_KIND_RETRY_DECISION,
         CALL_KIND_CLI_CONFIRM,
+        CALL_KIND_DISCOVERY_CONFIRM,
     }
 
 

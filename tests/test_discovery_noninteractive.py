@@ -49,12 +49,18 @@ def test_write_discovery_call_creates_question_call_file(tmp_path):
     assert call_file.exists()
     assert call_file.parent == tmp_path / "se3" / "calls"
     data = json.loads(call_file.read_text())
-    assert data["type"] == "discovery"
-    assert data["call_type"] == "discovery_question"
+    # Question pauses ride the unified call queue as a plain ``call`` kind.
+    assert data["kind"] == "call"
+    # Owning flow/step ids live in context (scopes the per-flow filter) and are
+    # mirrored top-level for backward-compatible readers.
+    assert data["context"]["flow_id"] == "flow-xyz"
+    assert data["context"]["step_id"] == "01_discovery"
     assert data["flow_id"] == "flow-xyz"
-    assert data["step"] == "01_discovery"
-    assert "What database?" in data["question"]
-    assert "SQL or NoSQL?" in data["question"]
+    assert data["step_id"] == "01_discovery"
+    assert "What database?" in data["prompt"]
+    assert "SQL or NoSQL?" in data["prompt"]
+    # Question pauses carry no confirm option.
+    assert data["options"] == []
 
 
 def test_write_discovery_call_marks_confirmation(tmp_path):
@@ -68,9 +74,17 @@ def test_write_discovery_call_marks_confirmation(tmp_path):
 
     call_file = _write_discovery_call(flow, step, tmp_path)
     data = json.loads(call_file.read_text())
-    assert data["call_type"] == "discovery_confirm"
-    assert "Build a CLI tool" in data["question"]
-    assert "'1'" in data["question"]
+    # Confirmation pauses carry the dedicated discovery_confirm kind so the web
+    # console renders a GUI confirm button + the textual "输入 1 确认" hint.
+    assert data["kind"] == "discovery_confirm"
+    assert "Build a CLI tool" in data["prompt"]
+    assert "输入 1 确认" in data["prompt"]
+    # The confirm option encodes the literal "1" the gate's == "1" check wants.
+    assert len(data["options"]) == 1
+    assert data["options"][0]["value"] == "1"
+    # Per-flow scoping + refined description preserved in context.
+    assert data["context"]["flow_id"] == "flow-xyz"
+    assert data["context"]["refined_description"] == "Build a CLI tool"
 
 
 def test_read_discovery_response_from_daemon_envelope(tmp_path):

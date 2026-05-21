@@ -336,6 +336,13 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .intervention-chip.kind-retry_decision.selected {
   box-shadow: 0 0 0 2px rgba(224, 86, 75, 0.55);
 }
+.intervention-chip.kind-discovery_confirm {
+  border-color: var(--green);
+  background: rgba(76, 175, 106, 0.12);
+}
+.intervention-chip.kind-discovery_confirm.selected {
+  box-shadow: 0 0 0 2px rgba(76, 175, 106, 0.55);
+}
 .intervention-chip-icon { font-size: 13px; }
 .intervention-chip-label {
   font-weight: 600;
@@ -401,6 +408,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .flow-reply-kind.kind-interjection { color: var(--accent); }
 .flow-reply-kind.kind-retry_decision { color: var(--red); }
+.flow-reply-kind.kind-discovery_confirm { color: var(--green); }
 .flow-reply-callid {
   color: var(--fg-dim);
   font-size: 11px;
@@ -454,6 +462,15 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .flow-reply-option:hover:not(:disabled) {
   border-color: var(--accent);
   background: var(--bg-card);
+}
+.flow-reply-option-primary {
+  border-color: var(--green);
+  color: var(--green);
+  font-weight: 600;
+}
+.flow-reply-option-primary:hover:not(:disabled) {
+  border-color: var(--green);
+  background: rgba(76, 175, 106, 0.12);
 }
 
 .flow-reply-row {

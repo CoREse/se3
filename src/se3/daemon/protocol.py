@@ -90,6 +90,13 @@ CALL_KIND_CALL = "call"
 CALL_KIND_INTERJECTION = "interjection"
 CALL_KIND_RETRY_DECISION = "retry_decision"
 CALL_KIND_CLI_CONFIRM = "cli_confirm"
+#: A non-interactive discovery confirmation gate: the flow has produced a
+#: refined task description and is waiting for the user to confirm (reply with
+#: the literal ``"1"``) before transitioning to ANALYZE. The call carries the
+#: refined description in its prompt and a one-click confirm ``option`` whose
+#: value is ``"1"`` so the web console can render both the ``输入 1 确认``
+#: textual fallback and a GUI confirm button.
+CALL_KIND_DISCOVERY_CONFIRM = "discovery_confirm"
 #: Every recognised interaction-call kind.
 CALL_KINDS: FrozenSet[str] = frozenset(
     {
@@ -97,6 +104,7 @@ CALL_KINDS: FrozenSet[str] = frozenset(
         CALL_KIND_INTERJECTION,
         CALL_KIND_RETRY_DECISION,
         CALL_KIND_CLI_CONFIRM,
+        CALL_KIND_DISCOVERY_CONFIRM,
     }
 )
 

@@ -73,7 +73,13 @@ check("chipLabel falls back to bare label without context", () => {
 
 // -- normalizeKind ----------------------------------------------------------
 check("normalizeKind keeps known kinds", () => {
-  for (const k of ["call", "interjection", "retry_decision", "cli_confirm"]) {
+  for (const k of [
+    "call",
+    "interjection",
+    "retry_decision",
+    "cli_confirm",
+    "discovery_confirm",
+  ]) {
     assert.equal(app.normalizeKind(k), k);
   }
 });
@@ -495,8 +501,14 @@ check("STEP_REPORT_TITLES covers every step type from models.StepType", () => {
 // vocabulary — `MCP`, `call_id`, or a literal `call ` followed by a hex id —
 // into anything the user reads. (call_id remains only on hidden DOM
 // attributes / hover tooltips.)
-check("KIND_META covers the four recognized kinds", () => {
-  for (const k of ["call", "interjection", "retry_decision", "cli_confirm"]) {
+check("KIND_META covers the recognized kinds", () => {
+  for (const k of [
+    "call",
+    "interjection",
+    "retry_decision",
+    "cli_confirm",
+    "discovery_confirm",
+  ]) {
     assert.ok(app.KIND_META[k], "missing KIND_META entry for " + k);
     assert.equal(typeof app.KIND_META[k].label, "string");
   }

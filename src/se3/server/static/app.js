@@ -626,6 +626,11 @@ const KIND_META = {
     hint: "子进程正在等待一次确认。",
     icon: "⌨",
   },
+  discovery_confirm: {
+    label: "确认任务描述",
+    hint: "Discovery 已生成精炼后的任务描述。输入 1 确认并继续,或回复其它内容继续完善需求。",
+    icon: "✓",
+  },
 };
 
 // Canonicalize a raw `kind` field; unknown kinds degrade to a plain "call".
@@ -887,11 +892,24 @@ function updateReplyBox(flow) {
   // Optional options — render as one-click reply buttons. Clicking sends the
   // option text directly via sendReply, same path the inline option click on
   // the previous card layout used.
-  if (target.options && target.options.length) {
+  //
+  // Discovery confirmation: guarantee a GUI confirm button (sends the literal
+  // "1" the programmatic gate expects) even if a backend call file omitted the
+  // option, so the button + the "输入 1 确认" textual prompt always coexist.
+  let options = target.options || [];
+  if (target.kind === "discovery_confirm" && !options.length) {
+    options = [{ label: "确认并继续 (输入 1)", value: "1" }];
+  }
+  if (options.length) {
     const opts = el("div", "flow-reply-options");
-    for (const opt of target.options) {
+    for (const opt of options) {
       const optText = optionText(opt);
-      const btn = el("button", "flow-reply-option", optionLabel(opt));
+      const isConfirm = target.kind === "discovery_confirm";
+      const btn = el(
+        "button",
+        "flow-reply-option" + (isConfirm ? " flow-reply-option-primary" : ""),
+        optionLabel(opt),
+      );
       btn.type = "button";
       btn.addEventListener("click", (e) => {
         e.preventDefault();

@@ -100,6 +100,7 @@ eq(app.normalizeKind("call"), "call", "call kind");
 eq(app.normalizeKind("interjection"), "interjection", "interjection kind");
 eq(app.normalizeKind("retry_decision"), "retry_decision", "retry_decision kind");
 eq(app.normalizeKind("cli_confirm"), "cli_confirm", "cli_confirm kind");
+eq(app.normalizeKind("discovery_confirm"), "discovery_confirm", "discovery_confirm kind");
 eq(app.normalizeKind("mystery"), "call", "unknown kind degrades to call");
 eq(app.normalizeKind(undefined), "call", "missing kind degrades to call");
 
