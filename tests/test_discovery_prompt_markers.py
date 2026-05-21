@@ -12,6 +12,7 @@ region.
 
 from __future__ import annotations
 
+from se3.engine.chat_history import get_step_history, record_prompt
 from se3.engine.prompt_markers import (
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,
@@ -185,3 +186,73 @@ def test_continue_initial_description_appears_only_in_prefix():
     first = prompt.find(same)
     user_begin = prompt.index(USER_CONTENT_BEGIN)
     assert first < user_begin
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: markers survive the record_prompt -> history round-trip
+# ---------------------------------------------------------------------------
+#
+# The template-level tests above prove the prompt strings are *assembled*
+# with the three-segment markers. These tests close the loop the running-flow
+# console actually depends on: the discovery prompt sent to the LLM is
+# persisted verbatim into the per-step jsonl history (role="user"), so that
+# the daemon history reader / frontend `splitUserPromptByMarker` has the full
+# marker sequence to split on. A regression that strips or rewrites the
+# recorded prompt would silently break the web user-content bubble even though
+# the in-memory template is still correct — hence a dedicated round-trip test.
+
+_FLOW_ID = "20260521-100145_e2emarkr"
+_STEP_ID = "00_discovery_e2e"
+
+
+def _record_and_read_back(project_root, prompt: str):
+    record_prompt(
+        project_root=project_root,
+        flow_id=_FLOW_ID,
+        step_id=_STEP_ID,
+        step_type="discovery",
+        prompt=prompt,
+        attempt=0,
+    )
+    session = get_step_history(project_root, _FLOW_ID, _STEP_ID)
+    assert session is not None, "history session must exist after record_prompt"
+    assert len(session.messages) == 1
+    return session.messages[0]
+
+
+def test_initial_discovery_prompt_persists_markers_in_history(tmp_path):
+    prompt = _render_initial()
+    msg = _record_and_read_back(tmp_path, prompt)
+
+    # The recorded turn is a user prompt — the role the frontend keys its
+    # marker-aware rendering off of.
+    assert msg.role == "user"
+    # All three markers survive the round-trip in canonical order, so the
+    # frontend can perform the full three-segment split.
+    user_seg = _extract_user_segment(msg.content)
+    assert user_seg.strip() == _FIXED_INITIAL_DESCRIPTION.strip()
+    # Framework boilerplate stays in prefix/suffix, not in the user region.
+    assert "## Project Context" not in user_seg
+    assert "Respond in JSON format" not in user_seg
+
+
+def test_continue_discovery_prompt_persists_markers_in_history(tmp_path):
+    prompt = _render_continue()
+    msg = _record_and_read_back(tmp_path, prompt)
+
+    assert msg.role == "user"
+    user_seg = _extract_user_segment(msg.content)
+    assert user_seg.strip() == _FIXED_USER_RESPONSE.strip()
+    # The round 0 initial_description is historical context in PREFIX, never
+    # in the user-content region.
+    assert _FIXED_INITIAL_DESCRIPTION not in user_seg
+
+
+def test_history_user_content_round_trips_byte_for_byte(tmp_path):
+    # The user's literal multiline input must survive the persistence layer
+    # exactly (the frontend only trims leading/trailing newline join-glue).
+    multiline = "答复:\n  - 第一点\n  - 第二点 with `inline code`"
+    prompt = _render_continue(user_response=multiline)
+    msg = _record_and_read_back(tmp_path, prompt)
+    user_seg = _extract_user_segment(msg.content)
+    assert user_seg.strip() == multiline.strip()
