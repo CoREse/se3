@@ -679,10 +679,33 @@ function computeInterventions(flow) {
   return entries;
 }
 
+// Decide which intervention the reply box should target after the chip bar is
+// rebuilt from the latest `pending_calls`. Pure: depends only on its args.
+//
+//   - Keep the current selection when its chip still exists, so a live
+//     pending_calls refresh that left the selected call in place does not
+//     yank the reply box out from under the user mid-reply.
+//   - Otherwise (the selected call was answered/withdrawn and dropped by the
+//     backend aggregator, so its chip is gone) re-home onto the first real
+//     pending call, falling back to the first entry — or `null` when the bar
+//     is now empty, which resets the reply box to its disabled/idle state.
+function reconcileReplyTarget(entries, currentTargetId) {
+  if (!Array.isArray(entries) || !entries.length) return null;
+  if (entries.some((e) => e.id === currentTargetId)) return currentTargetId;
+  const firstCall = entries.find((e) => !e.synthetic);
+  return (firstCall || entries[0]).id || null;
+}
+
 // Rebuild the intervention chip-bar (sits inside the docked reply form, above
 // the reply-context panel) and re-sync the reply box. Called from the 3s
-// detail poll; selection (`flowReplyTargetId`) and the typed-but-unsent reply
-// text are deliberately preserved across rebuilds. Chips do NOT render the
+// detail poll AND from every `refreshFlowDetail` (status_update / WS) so the
+// chip bar tracks the latest `pending_calls`: a call the backend no longer
+// reports loses its chip immediately (no stale "待回复" hanging through the
+// run), and a newly-appeared call gains its chip on the next refresh.
+// Selection (`flowReplyTargetId`) and the typed-but-unsent reply text are
+// deliberately preserved across rebuilds when the selected chip survives;
+// when it does not, `reconcileReplyTarget` re-homes (or clears) the target so
+// the reply box never points at a vanished chip. Chips do NOT render the
 // intervention's prompt/context/options — that lives in `updateReplyBox`'s
 // reply-context panel for the currently selected chip only.
 function renderInterventions(flow) {
@@ -691,13 +714,7 @@ function renderInterventions(flow) {
   const entries = computeInterventions(flow);
   state.flowInterventions = entries;
 
-  // Keep the prior selection if it still exists; otherwise prefer the first
-  // real pending call (a call needing an answer) over the synthetic
-  // interjection, falling back to whatever is first.
-  if (!entries.some((e) => e.id === state.flowReplyTargetId)) {
-    const firstCall = entries.find((e) => !e.synthetic);
-    state.flowReplyTargetId = (firstCall || entries[0] || {}).id || null;
-  }
+  state.flowReplyTargetId = reconcileReplyTarget(entries, state.flowReplyTargetId);
 
   for (const entry of entries) {
     region.appendChild(renderInterventionChip(entry));
@@ -1604,10 +1621,15 @@ function stepKey(norm) {
 //   { count: number of raw records already rendered }
 function renderConversation(container, records, append) {
   const st = container.__convState;
+  // Fast incremental path: only when we have a live reconciliation state AND
+  // the incoming array is a strict superset of what is already rendered
+  // (`records.length >= st.count`). A shorter array means the snapshot was
+  // replaced out from under us (full re-fetch, reconnect) — fall through to a
+  // clean rebuild instead of silently doing nothing, which would otherwise
+  // look like the conversation "froze".
   if (append && st && st.count > 0 && records.length >= st.count) {
     if (records.length > st.count) {
       addConversationRecords(container, st, records, st.count);
-      st.count = records.length;
     }
     return;
   }
@@ -1620,7 +1642,6 @@ function renderConversation(container, records, append) {
     return;
   }
   addConversationRecords(container, fresh, records, 0);
-  fresh.count = records.length;
 }
 
 // Build records `records[startIndex..]` and merge them into `container`,
@@ -1628,16 +1649,37 @@ function renderConversation(container, records, append) {
 // Each bubble carries its step key so a single linear sweep can rebuild the
 // `.history-step-header` separators after all bubbles for this batch have
 // been placed.
+//
+// `st.count` is advanced here (not by the caller) and ALWAYS reaches
+// `records.length`, even if an individual record fails to render: a single
+// malformed record must never stall the append cursor, or every subsequent
+// delta would re-attempt the same broken slot and the stream would freeze.
+// Each record is built behind a try/catch and degrades to a minimal
+// placeholder bubble (carrying the same ordering metadata) so the rest of the
+// batch — and all future appends — keep flowing.
 function addConversationRecords(container, st, records, startIndex) {
   for (let i = startIndex; i < records.length; i++) {
-    const norm = normalizeRecord(records[i]);
-    const bubble = renderConversationRecord(norm);
-    bubble.__convTs = tsValue(norm.timestamp);
+    let norm = null;
+    let bubble;
+    try {
+      norm = normalizeRecord(records[i]);
+      bubble = renderConversationRecord(norm);
+    } catch (err) {
+      try { console.warn("conversation record render failed", i, err); }
+      catch (_) { /* console may be absent */ }
+      bubble = el("div", "history-record conv-record role-error");
+      bubble.appendChild(
+        el("p", "md-p conv-empty", "(this record could not be rendered)"));
+    }
+    bubble.__convTs = tsValue(norm && norm.timestamp);
     bubble.__convIdx = i;
-    bubble.__convStepKey = stepKey(norm);
-    bubble.__convStepLabel = norm.stepType || norm.stepId || "step";
+    bubble.__convStepKey = stepKey(norm || {});
+    bubble.__convStepLabel = (norm && (norm.stepType || norm.stepId)) || "step";
     insertBubbleSorted(container, bubble);
   }
+  // Advance the cursor before the (stateless) header rebuild so the count is
+  // correct even if header rebuilding ever throws.
+  st.count = records.length;
   rebuildStepHeaders(container);
 }
 
@@ -2101,6 +2143,107 @@ function renderDiscoveryAssistant(content, _norm) {
 }
 registerAssistantRenderer("discovery", renderDiscoveryAssistant);
 
+// --- generic structured assistant renderer (all non-discovery steps) -------
+//
+// Beyond discovery, most step types emit an assistant message that is a JSON
+// object — optionally wrapped in a ```json``` fence and/or preceded by
+// narrative — carrying the same structured fields the CLI end-of-step Panel
+// reads from `step.outputs`. Rather than re-implement a bespoke field layout
+// per step, we reuse the existing STEP_REPORT_RENDERERS (the web counterparts
+// of `step_renderers.py`) so an assistant turn's default view shows exactly the
+// same structured fields a reader sees on that step's report card, and web/CLI
+// stay in field parity.
+//
+// `reportRendererFor` resolves the report renderer at call time (not capture
+// time) so registration order does not matter, and lets `plan_tasks` borrow the
+// `plan` renderer (both consume `task_groups`).
+function reportRendererFor(stepType) {
+  if (stepType === "plan_tasks") return STEP_REPORT_RENDERERS.plan;
+  return STEP_REPORT_RENDERERS[stepType] || null;
+}
+
+// Build an assistant renderer for `stepType` that parses the JSON body and
+// renders its fields via the shared report renderer. Returns a renderer
+// `(content, norm) -> Node | null`:
+//   1. Extract structured JSON + narrative (extractStructuredJson). When no
+//      JSON is recoverable — or the top level is not a dict — return null so
+//      renderConversationRecord falls back to the renderToolMarkers + markdown
+//      path and nothing is lost.
+//   2. Render any narrative (text outside the JSON) at the top via
+//      renderToolMarkers, preserving inline [Tool: …] markers.
+//   3. Delegate field rendering to the step's report renderer, passing the
+//      parsed JSON as the synthetic `step.outputs`. Any throw inside the report
+//      renderer → return null (full fallback) so a partial structured render
+//      never strands the assistant text.
+function makeStructuredAssistantRenderer(stepType) {
+  return function (content, _norm) {
+    const reportRenderer = reportRendererFor(stepType);
+    if (!reportRenderer) return null;
+    const extracted = extractStructuredJson(content);
+    if (!extracted) return null;
+    const value = extracted.value;
+    // The CLI parser is dict-only; a top-level array / scalar is not a
+    // structured step result — fall back to the generic path.
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+    const frag = document.createDocumentFragment();
+    let rendered = false;
+
+    // 2. narrative prefix (tool markers preserved)
+    if (extracted.narrative) {
+      const narWrap = el("div", "assistant-narrative");
+      for (const node of renderToolMarkers(extracted.narrative)) {
+        narWrap.appendChild(node);
+      }
+      if (narWrap.childNodes.length) {
+        frag.appendChild(narWrap);
+        rendered = true;
+      }
+    }
+
+    // 3. structured fields via the shared report renderer
+    let body;
+    try {
+      const synthStep = {
+        step_type: stepType,
+        status: typeof value.status === "string" ? value.status : "completed",
+        outputs: value,
+        error_message: "",
+      };
+      body = reportRenderer(synthStep, value);
+    } catch (err) {
+      // A report renderer fault must never strand the assistant text — bail to
+      // the generic fallback, which re-renders the whole body verbatim.
+      try { console.warn("assistant report renderer failed", stepType, err); }
+      catch (_) { /* console may be absent */ }
+      return null;
+    }
+    const bodyHasContent = !!(body && body.childNodes && body.childNodes.length);
+    if (bodyHasContent) {
+      const wrap = el("div", "assistant-structured kind-" + stepType);
+      const bodyWrap = el("div", "step-report__body");
+      bodyWrap.appendChild(body);
+      wrap.appendChild(bodyWrap);
+      frag.appendChild(wrap);
+      rendered = true;
+    }
+
+    if (!rendered) return null;
+    return frag;
+  };
+}
+
+// Register the generic structured renderer for every step type that has a
+// report renderer (discovery keeps its dedicated card-style renderer above).
+// The registry stays open for new step types — adding one is a one-line
+// registration here plus its report renderer.
+for (const stepType of [
+  "analyze", "plan", "plan_tasks", "implement", "test", "self_check",
+  "verify_spec", "update_spec", "commit", "version_analyze", "summarize",
+]) {
+  registerAssistantRenderer(stepType, makeStructuredAssistantRenderer(stepType));
+}
+
 // --- long-content folding --------------------------------------------------
 
 // Records longer than this (characters) are folded by default — a `user` step
@@ -2211,6 +2354,139 @@ function makeRawToggle(norm) {
   return wrap;
 }
 
+// --- assistant three-layer progressive disclosure -------------------------
+
+// "展开全部" — Layer 2 of the assistant's three-layer disclosure. Collapsed by
+// default; on first expand it lazily renders the full per-turn process via
+// `renderToolMarkers` (tool calls + intermediate narrative + the unrendered
+// result JSON text). Expanding scrolls the freshly shown block into view;
+// collapsing leaves the reader's position untouched.
+function makeProcessToggle(content) {
+  const wrap = el("div", "process-toggle-wrap folded");
+  const btn = el("button", "process-toggle", "▸ 展开全部");
+  btn.type = "button";
+  const full = el("div", "process-full hidden");
+  let built = false;
+  let expanded = false;
+  btn.addEventListener("click", () => {
+    expanded = !expanded;
+    if (expanded && !built) {
+      for (const node of renderToolMarkers(content)) full.appendChild(node);
+      built = true;
+    }
+    full.classList.toggle("hidden", !expanded);
+    wrap.classList.toggle("folded", !expanded);
+    wrap.classList.toggle("expanded", expanded);
+    btn.textContent = expanded ? "▾ 收起全部" : "▸ 展开全部";
+    if (expanded) {
+      requestAnimationFrame(() => full.scrollIntoView({ block: "nearest" }));
+    }
+  });
+  wrap.append(btn, full);
+  return wrap;
+}
+
+// --- user-prompt three-layer progressive disclosure -----------------------
+
+// Append the "模板前缀" (template prefix) and "框架后缀" (framework suffix)
+// subsections of a split user prompt into `target`. Each subsection carries a
+// labeled heading so a developer can tell what the engine injected before vs.
+// after the user's literal input. Empty segments are skipped — legacy
+// two-segment records carry no suffix, and a prefix that starts at index 0 is
+// empty — so a subsection only appears when it has content.
+function appendPromptSubsections(target, split) {
+  const hasPrefix = typeof split.prefix === "string" && split.prefix.length > 0;
+  const hasSuffix = typeof split.suffix === "string" && split.suffix.length > 0;
+  if (hasPrefix) {
+    const sec = el("div", "user-prompt-chip__section");
+    sec.appendChild(el("h6", "user-prompt-chip__section-title", "模板前缀"));
+    sec.appendChild(el("pre", "conv-plain", split.prefix));
+    target.appendChild(sec);
+  }
+  if (hasSuffix) {
+    const sec = el("div", "user-prompt-chip__section");
+    sec.appendChild(el("h6", "user-prompt-chip__section-title", "框架后缀"));
+    sec.appendChild(el("pre", "conv-plain", split.suffix));
+    target.appendChild(sec);
+  }
+}
+
+// "展开全部" — Layer 2 of the user turn's three-layer disclosure, the mirror of
+// the assistant side's `makeProcessToggle`. Collapsed by default; on first
+// expand it lazily renders the full prompt the LLM actually saw as the two
+// labeled subsections (模板前缀 / 框架后缀) so the default view (the user-content
+// bubble above it) stays limited to the user's literal input. Control naming
+// ("▸ 展开全部" / "▾ 收起全部") and the expand-only scroll-into-view behavior are
+// shared verbatim with the assistant process toggle.
+function makeUserPromptToggle(split) {
+  const wrap = el("div", "process-toggle-wrap user-prompt-toggle-wrap folded");
+  const btn = el("button", "process-toggle", "▸ 展开全部");
+  btn.type = "button";
+  const full = el("div", "process-full hidden");
+  let built = false;
+  let expanded = false;
+  btn.addEventListener("click", () => {
+    expanded = !expanded;
+    if (expanded && !built) {
+      appendPromptSubsections(full, split);
+      built = true;
+    }
+    full.classList.toggle("hidden", !expanded);
+    wrap.classList.toggle("folded", !expanded);
+    wrap.classList.toggle("expanded", expanded);
+    btn.textContent = expanded ? "▾ 收起全部" : "▸ 展开全部";
+    if (expanded) {
+      requestAnimationFrame(() => full.scrollIntoView({ block: "nearest" }));
+    }
+  });
+  wrap.append(btn, full);
+  return wrap;
+}
+
+// Build the inner content of an assistant bubble using the three-layer
+// progressive disclosure model:
+//   Layer 1 (default): the clean structured result, via STEP_ASSISTANT_RENDERERS
+//                       — no tool markers, no raw JSON, just the fields.
+//   Layer 2 ("展开全部"): the full per-turn process (tool calls + narrative +
+//                       unrendered result JSON), collapsed by default.
+//   Layer 3 ("查看原始"): the raw NDJSON — provided by `makeRawToggle`, appended
+//                       by the caller at the record-row level.
+// When no structured renderer matches (or one bails / throws), the Layer-2
+// process view becomes the default so no assistant text is ever hidden, and a
+// huge body still folds via `makeFoldable`.
+function renderAssistantBubble(content, norm) {
+  const frag = document.createDocumentFragment();
+  const stepType = String(norm.stepType || "").toLowerCase();
+  const renderer = stepType && STEP_ASSISTANT_RENDERERS[stepType];
+  let structured = null;
+  if (renderer) {
+    try {
+      structured = renderer(content, norm);
+    } catch (err) {
+      // A registry renderer must never break the wider conversation — log once
+      // and fall back to the default process view.
+      try { console.warn("assistant renderer failed", stepType, err); }
+      catch (_) { /* console may be absent */ }
+      structured = null;
+    }
+  }
+
+  if (structured) {
+    const resultWrap = el("div", "assistant-result");
+    resultWrap.appendChild(structured);
+    frag.appendChild(resultWrap);
+    frag.appendChild(makeProcessToggle(content));
+  } else {
+    const buildFull = () => {
+      const f = document.createDocumentFragment();
+      for (const node of renderToolMarkers(content)) f.appendChild(node);
+      return f;
+    };
+    frag.appendChild(makeFoldable(buildFull, content));
+  }
+  return frag;
+}
+
 // --- record bubble ---------------------------------------------------------
 
 // Render a single normalized record as a role-tagged conversation bubble.
@@ -2251,30 +2527,12 @@ function renderConversationRecord(norm) {
       bubble.appendChild(
         el("p", "md-p conv-empty", "(no readable content for this record)"));
     } else if (role === "assistant") {
-      // assistant: dispatch through STEP_ASSISTANT_RENDERERS first so step
-      // types that emit structured JSON (e.g. discovery) get a purpose-built
-      // renderer instead of dumping `\`\`\`json…\`\`\`` as a code block. The
-      // registry lookup falls back to the generic tool-marker + Markdown
-      // path when no renderer is registered or when one throws.
-      const buildFull = () => {
-        const stepType = String(norm.stepType || "").toLowerCase();
-        const renderer = stepType && STEP_ASSISTANT_RENDERERS[stepType];
-        if (renderer) {
-          try {
-            const node = renderer(content, norm);
-            if (node) return node;
-          } catch (err) {
-            // Registry renderers must never break the wider conversation —
-            // log once and fall back to the default Markdown path.
-            try { console.warn("assistant renderer failed", stepType, err); }
-            catch (_) { /* console may be absent */ }
-          }
-        }
-        const frag = document.createDocumentFragment();
-        for (const node of renderToolMarkers(content)) frag.appendChild(node);
-        return frag;
-      };
-      bubble.appendChild(makeFoldable(buildFull, content));
+      // assistant: three-layer progressive disclosure. The default view is the
+      // clean structured result (via STEP_ASSISTANT_RENDERERS); the full
+      // per-turn process is tucked behind "展开全部", and the raw NDJSON behind
+      // "查看原始" (the row-level makeRawToggle). When no structured renderer
+      // matches, the process view becomes the default so nothing is hidden.
+      bubble.appendChild(renderAssistantBubble(content, norm));
     } else {
       // user / system / other: literal text — these are large structured
       // prompts whose exact whitespace matters; do not Markdown-mangle them.
@@ -2388,70 +2646,73 @@ function renderStepEventRecord(norm) {
 // User-prompt marker record (template prefix chip + actual content bubble)
 // ---------------------------------------------------------------------------
 
-// Build the row for a `user` message whose body has a TEMPLATE_PREFIX_END
-// marker. The system-instructions boilerplate (prefix) and the framework-
-// injected tail (suffix — Available Specs / runtime env / READ-ONLY /
-// language directive) both go into a single default-collapsed system-
-// prompt chip; the user's actual literal input (middle USER_CONTENT
-// section) goes into a default-expanded bubble below the chip. When the
-// content section is empty (e.g. a step that injected only a prefix +
-// suffix sandwich), the bubble is omitted and only the chip is shown.
-// The raw payload toggle stays available regardless.
+// Build the row for a `user` message whose body has the sentinel markers,
+// using the same three-layer progressive disclosure as the assistant side:
+//   Layer 1 (default): the user's literal input (the middle USER_CONTENT
+//                      section) as a default-expanded bubble — only what the
+//                      human typed, never the framework boilerplate.
+//   Layer 2 ("展开全部"): the full prompt the LLM saw, as the 模板前缀 /
+//                      框架后缀 subsections, collapsed by default via
+//                      `makeUserPromptToggle` (the mirror of the assistant
+//                      `makeProcessToggle`).
+//   Layer 3 ("查看原始"): the raw NDJSON, via the shared row-level
+//                      `makeRawToggle`.
+//
+// When the content section is empty (legacy two-segment record, or a step
+// whose template wrapped an empty user_content), there is no user literal to
+// surface as Layer 1: the record degrades to a single default-collapsed
+// system-prompt chip combining the prefix + suffix (no user bubble), matching
+// the no-marker whole-chip fallback. The raw payload toggle stays available in
+// both shapes.
 function renderUserMarkerRecord(norm, split) {
   const row = el("div", "history-record conv-record role-user user-prompt-marker");
 
   const ctx = norm.stepType || norm.stepId || "step";
-  const label = `system prompt · ${ctx}`;
-  const chipWrap = el("div", "msg-chip-wrap collapsed user-prompt-chip");
-  const chip = el("button", "msg-chip", "▸ " + label);
-  chip.type = "button";
-  const chipDetail = el("div", "msg-chip-detail");
-  let chipBuilt = false;
-  let chipExpanded = false;
-  const hasSuffix = typeof split.suffix === "string" && split.suffix.length > 0;
-  chip.addEventListener("click", () => {
-    chipExpanded = !chipExpanded;
-    if (chipExpanded && !chipBuilt) {
-      // Two subsections inside the chip: "模板前缀" (template prefix) and
-      // "框架后缀" (framework suffix appended after the user input). The
-      // suffix subsection is only rendered when a USER_CONTENT_END marker
-      // was found and there is something after it — legacy two-segment
-      // history records have an empty suffix and render only the prefix.
-      const prefixSec = el("div", "user-prompt-chip__section");
-      prefixSec.appendChild(
-        el("h6", "user-prompt-chip__section-title", "模板前缀"));
-      prefixSec.appendChild(el("pre", "conv-plain", split.prefix));
-      chipDetail.appendChild(prefixSec);
-      if (hasSuffix) {
-        const suffixSec = el("div", "user-prompt-chip__section");
-        suffixSec.appendChild(
-          el("h6", "user-prompt-chip__section-title", "框架后缀"));
-        suffixSec.appendChild(el("pre", "conv-plain", split.suffix));
-        chipDetail.appendChild(suffixSec);
-      }
-      chipBuilt = true;
-    }
-    chipWrap.classList.toggle("collapsed", !chipExpanded);
-    chip.textContent = (chipExpanded ? "▾ " : "▸ ") + label;
-    if (chipExpanded) {
-      requestAnimationFrame(() => chipDetail.scrollIntoView({ block: "nearest" }));
-    }
-  });
-  chipWrap.append(chip, chipDetail);
-  row.appendChild(chipWrap);
-
-  // Default-expanded bubble carrying the user's real task content. Literal
-  // text is preserved so the exact prompt body the LLM saw is reproduced.
-  // Empty content (three-segment record with no literal user input — e.g.
-  // a step whose template wrapped an empty user_content) skips the bubble
-  // entirely so only the chip is shown.
   const hasContent = typeof split.content === "string" && split.content.length > 0;
+  const hasPrefix = typeof split.prefix === "string" && split.prefix.length > 0;
+  const hasSuffix = typeof split.suffix === "string" && split.suffix.length > 0;
+
   if (hasContent) {
+    // Layer 1 — default-expanded bubble carrying ONLY the user's real input.
+    // Literal text is preserved so the exact body the LLM saw is reproduced.
     const bubble = el("div", "conv-bubble user-content-bubble");
     bubble.appendChild(el("pre", "conv-plain", split.content));
     row.appendChild(bubble);
+
+    // Layer 2 — "展开全部" toggle revealing the 模板前缀 / 框架后缀 subsections,
+    // collapsed by default so the framework boilerplate stays out of the
+    // default view. Skipped only when there is no boilerplate at all.
+    if (hasPrefix || hasSuffix) {
+      row.appendChild(makeUserPromptToggle(split));
+    }
+  } else {
+    // Empty user-content (legacy two-segment / prefix+suffix sandwich):
+    // degrade to a single default-collapsed system-prompt chip combining the
+    // prefix and suffix subsections, with no user bubble.
+    const label = `system prompt · ${ctx}`;
+    const chipWrap = el("div", "msg-chip-wrap collapsed user-prompt-chip");
+    const chip = el("button", "msg-chip", "▸ " + label);
+    chip.type = "button";
+    const chipDetail = el("div", "msg-chip-detail");
+    let chipBuilt = false;
+    let chipExpanded = false;
+    chip.addEventListener("click", () => {
+      chipExpanded = !chipExpanded;
+      if (chipExpanded && !chipBuilt) {
+        appendPromptSubsections(chipDetail, split);
+        chipBuilt = true;
+      }
+      chipWrap.classList.toggle("collapsed", !chipExpanded);
+      chip.textContent = (chipExpanded ? "▾ " : "▸ ") + label;
+      if (chipExpanded) {
+        requestAnimationFrame(() => chipDetail.scrollIntoView({ block: "nearest" }));
+      }
+    });
+    chipWrap.append(chip, chipDetail);
+    row.appendChild(chipWrap);
   }
 
+  // Layer 3 — raw NDJSON, shared row-level toggle.
   const rawToggle = makeRawToggle(norm);
   if (rawToggle) row.appendChild(rawToggle);
 
@@ -3440,11 +3701,26 @@ if (typeof module !== "undefined" && module.exports) {
     STEP_ASSISTANT_RENDERERS,
     registerAssistantRenderer,
     renderDiscoveryAssistant,
+    makeStructuredAssistantRenderer,
+    renderAssistantBubble,
     extractStructuredJson,
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,
     USER_CONTENT_END,
     KIND_META,
     extractAssistantText,
+    // Incremental conversation reconciliation + chip refresh (exposed for the
+    // DOM-stub tests in tests/frontend/test_app_pure.mjs).
+    renderConversation,
+    addConversationRecords,
+    insertBubbleSorted,
+    rebuildStepHeaders,
+    renderConversationRecord,
+    renderInterventions,
+    reconcileReplyTarget,
+    tsValue,
+    stepKey,
+    recordKey,
+    mergeSnapshotWithLiveAppends,
   };
 }

@@ -398,6 +398,38 @@ check("registerAssistantRenderer rejects non-function values", () => {
   app.registerAssistantRenderer("", () => null);
   assert.equal(Object.keys(app.STEP_ASSISTANT_RENDERERS).length, before);
 });
+check("STEP_ASSISTANT_RENDERERS covers every structured step type", () => {
+  // Discovery has its dedicated card renderer; the rest share the generic
+  // factory. All structured step types must have an assistant renderer so an
+  // assistant turn defaults to fields, never a raw ```json``` blob.
+  const expected = [
+    "discovery", "analyze", "plan", "plan_tasks", "implement", "test",
+    "self_check", "verify_spec", "update_spec", "commit", "version_analyze",
+    "summarize",
+  ];
+  for (const t of expected) {
+    assert.equal(
+      typeof app.STEP_ASSISTANT_RENDERERS[t], "function",
+      "missing assistant renderer for " + t,
+    );
+  }
+});
+// -- makeStructuredAssistantRenderer (DOM-free fallbacks) -------------------
+// The factory must return null (→ caller falls back to the generic renderer)
+// rather than throw, so no assistant message is ever lost.
+check("makeStructuredAssistantRenderer returns null when no JSON is present", () => {
+  const r = app.makeStructuredAssistantRenderer("analyze");
+  assert.equal(r("just prose, no json here", {}), null);
+});
+check("makeStructuredAssistantRenderer returns null for a top-level array", () => {
+  const r = app.makeStructuredAssistantRenderer("analyze");
+  // A bare trailing array is valid JSON but not a dict step result.
+  assert.equal(r("preamble\n[1, 2, 3]", {}), null);
+});
+check("makeStructuredAssistantRenderer returns null for an unknown step type", () => {
+  const r = app.makeStructuredAssistantRenderer("__no_report_renderer__");
+  assert.equal(r('```json\n{"a":1}\n```', {}), null);
+});
 
 // -- extractStructuredJson --------------------------------------------------
 // Mirror of backend `parse_json_response`: pulls JSON out of fenced
@@ -626,6 +658,718 @@ check("extractAssistantText skips noise event types silently", () => {
     { type: "ping" },
   ]);
   assert.equal(out, "");
+});
+
+// ---------------------------------------------------------------------------
+// Minimal DOM stub for the incremental-reconciliation + chip-refresh tests
+// ---------------------------------------------------------------------------
+//
+// renderConversation / addConversationRecords / insertBubbleSorted /
+// rebuildStepHeaders / renderInterventions are DOM functions, but they only
+// touch a small, well-understood slice of the DOM API. The stub below
+// implements just that slice — createElement / createTextNode /
+// createDocumentFragment, appendChild / insertBefore / removeChild, a
+// className<->classList mirror, textContent, and a `children` view that
+// excludes text/fragment nodes (mirroring the real `Element.children`). It is
+// in the same spirit as the FakeSelect / FakeHint stubs above: enough to
+// exercise the reconciliation logic headlessly, no more.
+
+class FakeNode {
+  constructor(tag) {
+    this.tagName = String(tag || "").toUpperCase();
+    this.nodeType = this.tagName === "#TEXT" ? 3 : 1;
+    this._classes = new Set();
+    this.childNodes = [];
+    this._text = "";
+    this.dataset = {};
+    this.style = {};
+    this._listeners = {};
+    this.parentNode = null;
+    this.type = "";
+    this.title = "";
+    this.id = "";
+    this.value = "";
+    this.disabled = false;
+    this.placeholder = "";
+    this.classList = {
+      add: (...cs) => { for (const c of cs) if (c) this._classes.add(c); },
+      remove: (...cs) => { for (const c of cs) this._classes.delete(c); },
+      contains: (c) => this._classes.has(c),
+      toggle: (c, force) => {
+        const want = force === undefined ? !this._classes.has(c) : !!force;
+        if (want) this._classes.add(c); else this._classes.delete(c);
+        return want;
+      },
+    };
+  }
+  set className(v) {
+    this._classes = new Set(String(v || "").split(/\s+/).filter(Boolean));
+  }
+  get className() { return Array.from(this._classes).join(" "); }
+  set textContent(v) { this._text = String(v == null ? "" : v); this.childNodes = []; }
+  get textContent() {
+    if (this.childNodes.length) {
+      return this.childNodes.map((c) => c.textContent).join("");
+    }
+    return this._text;
+  }
+  // Only "" is ever assigned in app.js (to clear a container).
+  set innerHTML(_v) { this.childNodes = []; this._text = ""; }
+  get innerHTML() { return ""; }
+  get children() {
+    return this.childNodes.filter((c) => c && c.nodeType !== 3);
+  }
+  _detach(node) {
+    const i = this.childNodes.indexOf(node);
+    if (i >= 0) { this.childNodes.splice(i, 1); node.parentNode = null; }
+  }
+  appendChild(child) {
+    if (child && child.tagName === "#FRAGMENT") {
+      for (const c of child.childNodes.slice()) this.appendChild(c);
+      child.childNodes = [];
+      return child;
+    }
+    if (child.parentNode) child.parentNode._detach(child);
+    child.parentNode = this;
+    this.childNodes.push(child);
+    return child;
+  }
+  append(...nodes) {
+    for (const n of nodes) {
+      this.appendChild(typeof n === "string" ? makeText(n) : n);
+    }
+  }
+  insertBefore(node, ref) {
+    if (node && node.tagName === "#FRAGMENT") {
+      for (const c of node.childNodes.slice()) this.insertBefore(c, ref);
+      node.childNodes = [];
+      return node;
+    }
+    if (node.parentNode) node.parentNode._detach(node);
+    node.parentNode = this;
+    if (ref == null) { this.childNodes.push(node); return node; }
+    const idx = this.childNodes.indexOf(ref);
+    if (idx < 0) this.childNodes.push(node);
+    else this.childNodes.splice(idx, 0, node);
+    return node;
+  }
+  removeChild(node) { this._detach(node); return node; }
+  addEventListener(type, fn) {
+    (this._listeners[type] = this._listeners[type] || []).push(fn);
+  }
+  dispatch(type) {
+    for (const fn of (this._listeners[type] || []).slice()) {
+      fn({ preventDefault() {} });
+    }
+  }
+  closest() { return null; }
+  focus() {}
+  scrollIntoView() {}
+}
+
+function makeText(text) {
+  const n = new FakeNode("#text");
+  n._text = String(text == null ? "" : text);
+  return n;
+}
+
+const _elementsById = {};
+// Report renderers (reused by the structured assistant renderers) test nodes
+// with `x instanceof Node`. Every node the app builds is a FakeNode, so map the
+// global `Node` to FakeNode; strings stay non-instances, matching the browser.
+globalThis.Node = FakeNode;
+globalThis.requestAnimationFrame = () => {};
+globalThis.document = {
+  createElement: (tag) => new FakeNode(tag),
+  createTextNode: (text) => makeText(text),
+  createDocumentFragment: () => new FakeNode("#fragment"),
+  getElementById: (id) => {
+    if (!_elementsById[id]) _elementsById[id] = new FakeNode("div");
+    return _elementsById[id];
+  },
+  addEventListener: () => {},
+};
+
+// DFS the fake tree collecting element nodes carrying CSS class `cls`.
+function findAll(node, cls, acc = []) {
+  if (!node || !node.childNodes) return acc;
+  for (const c of node.childNodes) {
+    if (c.classList && c.classList.contains(cls)) acc.push(c);
+    findAll(c, cls, acc);
+  }
+  return acc;
+}
+function findOne(node, cls) { return findAll(node, cls)[0] || null; }
+
+// The ordered list of (timestamp, stepKey) for the conversation bubbles in a
+// container — headers (no __convIdx) are skipped, matching the spec's notion
+// of "rendered record order".
+function describeBubbles(container) {
+  return container.children
+    .filter((c) => c.__convIdx !== undefined)
+    .map((c) => ({ ts: c.__convTs, step: c.__convStepKey, idx: c.__convIdx }));
+}
+
+const asstRecord = (content, ts, stepId, stepType) => ({
+  step_id: stepId,
+  message: { role: "assistant", content, timestamp: ts, step_type: stepType },
+});
+
+// -- renderConversation: full-after-append consistency ----------------------
+check("renderConversation: incremental append matches a one-shot full render", () => {
+  const finalRecords = [
+    asstRecord("A1", 1, "s1", "discovery"),
+    asstRecord("A2", 2, "s1", "discovery"),
+    asstRecord("A3", 3, "s2", "analyze"),
+    asstRecord("A4", 4, "s2", "analyze"),
+  ];
+
+  const full = document.createElement("div");
+  app.renderConversation(full, finalRecords, false);
+
+  const incr = document.createElement("div");
+  app.renderConversation(incr, finalRecords.slice(0, 2), false);
+  app.renderConversation(incr, finalRecords.slice(0, 3), true);
+  app.renderConversation(incr, finalRecords, true);
+
+  assert.deepEqual(describeBubbles(incr), describeBubbles(full));
+  // The bubble bodies also line up A1..A4 in order (read the .conv-bubble body,
+  // not the whole row which also carries the role/time head).
+  const texts = (c) => c.children
+    .filter((x) => x.__convIdx !== undefined)
+    .map((x) => { const b = findOne(x, "conv-bubble"); return b ? b.textContent : ""; });
+  assert.deepEqual(texts(incr), ["A1", "A2", "A3", "A4"]);
+  assert.deepEqual(texts(incr), texts(full));
+});
+
+// -- renderConversation: out-of-order insertion -----------------------------
+check("renderConversation: a late earlier-ts record inserts into its slot, not the tail", () => {
+  const container = document.createElement("div");
+  // Two records arrive in ts order 1, 3.
+  app.renderConversation(container, [
+    asstRecord("first", 1, "s1", "discovery"),
+    asstRecord("third", 3, "s1", "discovery"),
+  ], false);
+  // A third record arrives late carrying ts=2 (between the two on screen).
+  app.renderConversation(container, [
+    asstRecord("first", 1, "s1", "discovery"),
+    asstRecord("third", 3, "s1", "discovery"),
+    asstRecord("second", 2, "s2", "analyze"),
+  ], true);
+
+  const order = describeBubbles(container).map((b) => b.ts);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b),
+    "bubbles must be ordered by ascending timestamp");
+  const texts = container.children
+    .filter((c) => c.__convIdx !== undefined)
+    .map((c) => { const b = findOne(c, "conv-bubble"); return b ? b.textContent : ""; });
+  // "second" (ts=2) lands between "first" (ts=1) and "third" (ts=3), not at tail.
+  assert.deepEqual(texts, ["first", "second", "third"]);
+});
+
+// -- renderConversation: cross-role/step chronological order ----------------
+check("renderConversation: user reply between two assistant turns keeps ts order", () => {
+  // A1 (discovery, ts1) → U1 (discovery_continue, ts2) → A2 (discovery, ts3):
+  // even though U1 maps to a different step key, it stays between A1 and A2.
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    asstRecord("A1", 1, "discovery", "discovery"),
+    { step_id: "discovery_continue",
+      message: { role: "user", content: "U1", timestamp: 2, step_type: "discovery_continue" } },
+    asstRecord("A2", 3, "discovery", "discovery"),
+  ], false);
+  // Read the bodies in rendered order: U1 must sit between A1 and A2 even
+  // though it maps to a different step key.
+  const bodies = container.children
+    .filter((c) => c.__convIdx !== undefined)
+    .map((c) => { const b = findOne(c, "conv-bubble"); return b ? b.textContent : c.textContent; });
+  assert.ok(bodies[0].includes("A1"));
+  assert.ok(bodies[2].includes("A2"));
+  const order = describeBubbles(container).map((b) => b.ts);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+});
+
+// -- renderConversation: step headers are separators, not reorderers --------
+check("renderConversation: a step header is inserted at each step boundary", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    asstRecord("A1", 1, "s1", "discovery"),
+    asstRecord("A2", 2, "s1", "discovery"),
+    asstRecord("A3", 3, "s2", "analyze"),
+  ], false);
+  const headers = container.children.filter(
+    (c) => c.classList && c.classList.contains("history-step-header"));
+  // Two distinct step keys → two header separators (s1 then s2).
+  assert.equal(headers.length, 2);
+  // The bubbles themselves stay in ascending ts order regardless of headers.
+  const ts = describeBubbles(container).map((b) => b.ts);
+  assert.deepEqual(ts, [...ts].sort((a, b) => a - b));
+  assert.equal(describeBubbles(container).length, 3);
+});
+
+// -- renderConversation: append never collapses an expanded fold ------------
+check("renderConversation: append does not re-collapse a user-expanded fold", () => {
+  const container = document.createElement("div");
+  const longBody = "x".repeat(2500); // exceeds FOLD_THRESHOLD → makeFoldable
+  app.renderConversation(container, [asstRecord(longBody, 1, "s1", "discovery")], false);
+
+  const fold = findOne(container, "foldable");
+  assert.ok(fold, "expected a foldable wrapper for the long body");
+  assert.equal(fold.classList.contains("folded"), true);
+  // The reader expands it.
+  const toggle = findOne(fold, "fold-toggle");
+  assert.ok(toggle, "expected a fold-toggle button");
+  toggle.dispatch("click");
+  assert.equal(fold.classList.contains("expanded"), true);
+  assert.equal(fold.classList.contains("folded"), false);
+
+  // A new record streams in (append fast-path).
+  app.renderConversation(container, [
+    asstRecord(longBody, 1, "s1", "discovery"),
+    asstRecord("new turn", 2, "s1", "discovery"),
+  ], true);
+
+  // The SAME fold node must still be expanded — append must not rebuild it.
+  assert.equal(fold.classList.contains("expanded"), true,
+    "an append must not re-collapse the reader's expanded fold");
+  assert.equal(fold.classList.contains("folded"), false);
+  assert.equal(describeBubbles(container).length, 2);
+});
+
+// -- renderConversation: a malformed record cannot stall the stream ---------
+check("renderConversation: a record that throws degrades to a placeholder and never freezes", () => {
+  const container = document.createElement("div");
+  // A record whose `message` getter throws during normalize/render. The stream
+  // must keep flowing: a placeholder bubble takes its slot and subsequent
+  // appends are not blocked.
+  const boom = {};
+  Object.defineProperty(boom, "message", {
+    enumerable: true,
+    get() { throw new Error("boom"); },
+  });
+  app.renderConversation(container, [
+    asstRecord("ok1", 1, "s1", "discovery"),
+    boom,
+    asstRecord("ok3", 3, "s1", "discovery"),
+  ], false);
+  // All three slots are present (the bad one as a placeholder).
+  assert.equal(describeBubbles(container).length, 3);
+  const errBubble = findOne(container, "role-error");
+  assert.ok(errBubble, "expected a placeholder bubble for the failed record");
+
+  // A further append still lands — the cursor advanced past the bad record.
+  app.renderConversation(container, [
+    asstRecord("ok1", 1, "s1", "discovery"),
+    boom,
+    asstRecord("ok3", 3, "s1", "discovery"),
+    asstRecord("ok4", 4, "s1", "discovery"),
+  ], true);
+  assert.equal(describeBubbles(container).length, 4);
+});
+
+// -- renderConversation: a shorter array falls back to a clean rebuild ------
+check("renderConversation: a shorter records array rebuilds rather than stalling", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    asstRecord("A1", 1, "s1", "discovery"),
+    asstRecord("A2", 2, "s1", "discovery"),
+    asstRecord("A3", 3, "s1", "discovery"),
+  ], false);
+  assert.equal(describeBubbles(container).length, 3);
+  // A replacement (shorter) snapshot arrives flagged append — must not be a
+  // no-op; the view rebuilds to the new, shorter content.
+  app.renderConversation(container, [asstRecord("only", 5, "s9", "commit")], true);
+  const d = describeBubbles(container);
+  assert.equal(d.length, 1);
+  const body = findOne(container, "conv-bubble");
+  assert.ok(body && body.textContent.includes("only"));
+});
+
+// -- reconcileReplyTarget (pure): chip-bar selection survival / reset -------
+check("reconcileReplyTarget keeps a still-present selection", () => {
+  const entries = [
+    { id: "call:c1", synthetic: false },
+    { id: "interjection:new", synthetic: true },
+  ];
+  assert.equal(app.reconcileReplyTarget(entries, "call:c1"), "call:c1");
+});
+check("reconcileReplyTarget re-homes onto the first real call when selection vanished", () => {
+  const entries = [
+    { id: "interjection:new", synthetic: true },
+    { id: "call:c1", synthetic: false },
+  ];
+  // Prefer the real pending call over the synthetic interjection.
+  assert.equal(app.reconcileReplyTarget(entries, "call:gone"), "call:c1");
+});
+check("reconcileReplyTarget falls back to the first entry when no real call exists", () => {
+  const entries = [{ id: "interjection:new", synthetic: true }];
+  assert.equal(app.reconcileReplyTarget(entries, "call:gone"), "interjection:new");
+});
+check("reconcileReplyTarget resets to null when the chip bar is empty", () => {
+  assert.equal(app.reconcileReplyTarget([], "call:c1"), null);
+  assert.equal(app.reconcileReplyTarget(null, "call:c1"), null);
+});
+
+// -- renderInterventions (DOM): chip bar tracks pending_calls --------------
+// Drives the real renderInterventions against the DOM stub. The sequence
+// add → shrink → empty → re-add exercises every chip-refresh acceptance
+// criterion in one consistent timeline (module state carries over between
+// calls exactly as it does in the browser).
+check("renderInterventions: chips appear, disappear, and the reply box resets", () => {
+  const region = document.getElementById("flow-interventions");
+  const submit = document.getElementById("flow-reply-submit");
+  const flow = (calls) => ({ status: "running", pending_calls: calls });
+
+  // Two pending calls → two chips, reply box armed (a target exists).
+  app.renderInterventions(flow([
+    { call_id: "c1", kind: "call", prompt: "approve?" },
+    { call_id: "c2", kind: "cli_confirm", prompt: "press 1", options: ["1"] },
+  ]));
+  assert.equal(region.children.length, 2, "two pending calls → two chips");
+  assert.equal(submit.disabled, false, "send enabled when a target exists");
+
+  // Backend stops reporting c2 → its chip disappears immediately.
+  app.renderInterventions(flow([
+    { call_id: "c1", kind: "call", prompt: "approve?" },
+  ]));
+  assert.equal(region.children.length, 1, "withdrawn call loses its chip");
+  assert.equal(submit.disabled, false);
+
+  // All calls cleared → no chips, reply box disarms (target reset to null).
+  app.renderInterventions(flow([]));
+  assert.equal(region.children.length, 0, "no pending calls → empty chip bar");
+  assert.equal(submit.disabled, true, "send disabled once the bar is empty");
+
+  // A brand-new call arrives → chip appears and the box re-arms.
+  app.renderInterventions(flow([
+    { call_id: "c9", kind: "call", prompt: "continue?" },
+  ]));
+  assert.equal(region.children.length, 1, "new call surfaces a chip");
+  assert.equal(submit.disabled, false);
+});
+
+// -- mergeSnapshotWithLiveAppends: dedup snapshot vs in-flight appends ------
+check("mergeSnapshotWithLiveAppends appends only records absent from the snapshot", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const r2 = asstRecord("A2", 2, "s1", "discovery");
+  const r3 = asstRecord("A3", 3, "s1", "discovery");
+  // Snapshot already contains r1, r2; the live array had r2 (dup) and r3 (new).
+  const merged = app.mergeSnapshotWithLiveAppends([r1, r2], [r2, r3]);
+  assert.equal(merged.length, 3);
+  assert.equal(app.recordKey(merged[2]), app.recordKey(r3));
+});
+check("mergeSnapshotWithLiveAppends returns the snapshot unchanged when no live appends", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const snap = [r1];
+  assert.equal(app.mergeSnapshotWithLiveAppends(snap, []), snap);
+});
+
+// ---------------------------------------------------------------------------
+// Assistant three-layer progressive disclosure (DOM)
+// ---------------------------------------------------------------------------
+//
+// Drive the real renderConversationRecord against the DOM stub for assistant
+// turns of several step types. Layer 1 = clean structured fields; Layer 2 =
+// "展开全部" full process; Layer 3 = "查看原始" raw NDJSON. Parse failure must
+// degrade to the generic text path without losing the message.
+
+// Build a normalized assistant record (optionally with a raw NDJSON payload).
+const asstNorm = (content, stepType, rawNdjson) => app.normalizeRecord({
+  step_id: stepType,
+  message: {
+    role: "assistant",
+    content,
+    timestamp: 1,
+    step_type: stepType,
+    raw_ndjson: rawNdjson != null ? rawNdjson : null,
+  },
+});
+
+check("assistant analyze turn renders structured fields, not a JSON blob", () => {
+  const content =
+    "Looking at the engine.\n```json\n" +
+    JSON.stringify({
+      task_type: "feature",
+      complexity: "medium",
+      scope: "src/engine",
+      reasoning: "Touches the state machine.",
+      relevant_specs: ["base:Directory Structure"],
+    }) +
+    "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "analyze"));
+
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "expected a Layer-1 structured result wrapper");
+  const bar = findOne(result, "step-report__status-bar");
+  assert.ok(bar, "expected a status bar in the structured render");
+  assert.ok(bar.textContent.includes("feature"));
+  assert.ok(result.textContent.includes("src/engine"));
+  assert.ok(result.textContent.includes("Touches the state machine."));
+  // The narrative outside the JSON is still shown at the top.
+  assert.ok(result.textContent.includes("Looking at the engine."));
+  // The default (Layer-1) view must NOT dump the raw JSON keys as a code block.
+  assert.equal(result.textContent.includes('"task_type"'), false);
+});
+
+check("assistant commit turn renders the commit report fields", () => {
+  const content = JSON.stringify({
+    committed: true,
+    commit_hash: "abcdef1234567890",
+    commit_message: "feat: add the thing",
+  });
+  const row = app.renderConversationRecord(asstNorm(content, "commit"));
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "expected a structured result for commit");
+  // Short hash (first 7 chars) and the commit message body are surfaced.
+  assert.ok(result.textContent.includes("abcdef1"));
+  assert.ok(result.textContent.includes("feat: add the thing"));
+});
+
+check("assistant plan_tasks turn reuses the plan renderer (task groups)", () => {
+  const content = "```json\n" + JSON.stringify({
+    task_groups: [
+      { group_id: "G1", name: "core", tasks: [{ estimated_loc: 40 }], depends_on: [] },
+      { group_id: "G2", name: "tests", tasks: [{ estimated_loc: 20 }], depends_on: ["G1"] },
+    ],
+  }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "plan_tasks"));
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "expected a structured result for plan_tasks");
+  assert.ok(result.textContent.includes("G1"));
+  assert.ok(result.textContent.includes("G2"));
+  assert.ok(result.textContent.includes("core"));
+});
+
+check("assistant turn falls back to text when the body has no JSON", () => {
+  const content = "I inspected the repo but produced only this prose summary.";
+  const row = app.renderConversationRecord(asstNorm(content, "analyze"));
+  // No structured wrapper: the generic path took over.
+  assert.equal(findOne(row, "assistant-result"), null);
+  assert.equal(findOne(row, "process-toggle"), null);
+  // The assistant text is still visible — nothing is lost.
+  const bubble = findOne(row, "conv-bubble");
+  assert.ok(bubble && bubble.textContent.includes("prose summary"));
+});
+
+check("assistant turn falls back to text when the JSON is malformed", () => {
+  // A broken fence that neither strict parse nor the trailing-comma repair can
+  // recover — the renderer must not throw and must keep the text visible.
+  const content = "Result follows:\n```json\n{ this is : not, valid json ]\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "verify_spec"));
+  assert.equal(findOne(row, "assistant-result"), null);
+  const bubble = findOne(row, "conv-bubble");
+  assert.ok(bubble && bubble.textContent.includes("Result follows:"));
+  assert.ok(bubble.textContent.includes("not, valid json"));
+});
+
+check("assistant three layers: structured default, 展开全部 process, 查看原始 ndjson", () => {
+  const ndjson = '{"raw_marker":"NDJSON_PAYLOAD_TOKEN"}';
+  const content = "```json\n" + JSON.stringify({
+    task_type: "bugfix",
+    complexity: "small",
+    scope: "src/x",
+    reasoning: "tiny",
+  }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "analyze", ndjson));
+
+  // Layer 1: structured result is the default visible surface.
+  assert.ok(findOne(row, "assistant-result"), "Layer 1 structured result present");
+
+  // Layer 2: the "展开全部" process toggle reveals the full per-turn process,
+  // which DOES include the raw JSON text (rendered as a markdown code block).
+  const procToggle = findOne(row, "process-toggle");
+  assert.ok(procToggle, "Layer 2 process toggle present");
+  const procWrap = findOne(row, "process-toggle-wrap");
+  const procFull = findOne(procWrap, "process-full");
+  assert.equal(procFull.classList.contains("hidden"), true, "process is folded by default");
+  procToggle.dispatch("click");
+  assert.equal(procFull.classList.contains("hidden"), false, "process expands on click");
+  assert.ok(procFull.textContent.includes('"task_type"'),
+    "the full process shows the unrendered result JSON");
+
+  // Layer 3: the row-level "查看原始" toggle reveals the raw NDJSON.
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "Layer 3 raw toggle present");
+  const rawPre = findOne(row, "raw-json");
+  assert.equal(rawPre.classList.contains("hidden"), true, "raw is hidden by default");
+  rawToggle.dispatch("click");
+  assert.equal(rawPre.classList.contains("hidden"), false, "raw expands on click");
+  assert.ok(rawPre.textContent.includes("NDJSON_PAYLOAD_TOKEN"),
+    "the raw layer shows the original NDJSON payload");
+});
+
+check("assistant structured renderer that throws is caught and degrades", () => {
+  // Register a renderer that throws for a synthetic step type; renderAssistantBubble
+  // must swallow it and fall back to the generic text path.
+  const fakeStep = "__throwing_" + Math.random().toString(36).slice(2);
+  app.registerAssistantRenderer(fakeStep, () => { throw new Error("kaboom"); });
+  const row = app.renderConversationRecord(asstNorm("still visible body", fakeStep));
+  delete app.STEP_ASSISTANT_RENDERERS[fakeStep];
+  assert.equal(findOne(row, "assistant-result"), null);
+  const bubble = findOne(row, "conv-bubble");
+  assert.ok(bubble && bubble.textContent.includes("still visible body"));
+});
+
+// ---------------------------------------------------------------------------
+// User-turn three-layer progressive disclosure (DOM)
+// ---------------------------------------------------------------------------
+//
+// A marker-bearing `user` record mirrors the assistant side's three layers:
+// Layer 1 = the user's literal input bubble (default-expanded, no framework
+// boilerplate); Layer 2 = the "展开全部" toggle revealing 模板前缀 / 框架后缀;
+// Layer 3 = the "查看原始" raw NDJSON. An empty user-content section (legacy
+// two-segment layout) degrades to a single collapsed system-prompt chip, and a
+// marker-free body falls all the way back to the whole-message chip.
+
+// Build a normalized `user` record whose body carries the sentinel markers.
+// `content === null` emits the legacy two-segment layout (TEMPLATE_PREFIX_END +
+// USER_CONTENT_BEGIN, no USER_CONTENT_END) where the post-BEGIN tail is the
+// framework `suffix`.
+const userMarkerNorm = (prefix, content, suffix, stepType, rawNdjson) => {
+  const TPE = app.TEMPLATE_PREFIX_END;
+  const UCB = app.USER_CONTENT_BEGIN;
+  const UCE = app.USER_CONTENT_END;
+  const body = content == null
+    ? prefix + "\n" + TPE + "\n" + UCB + "\n" + (suffix || "")
+    : prefix + "\n" + TPE + "\n" + UCB + "\n" + content + "\n" + UCE + "\n" + (suffix || "");
+  return app.normalizeRecord({
+    step_id: stepType,
+    message: {
+      role: "user",
+      content: body,
+      timestamp: 1,
+      step_type: stepType,
+      raw_ndjson: rawNdjson != null ? rawNdjson : null,
+    },
+  });
+};
+
+check("user three layers: literal bubble default, 展开全部 prefix/suffix, 查看原始 ndjson", () => {
+  const ndjson = '{"raw_marker":"USER_NDJSON_TOKEN"}';
+  const norm = userMarkerNorm(
+    "You are an expert engineer.\n## Project Context\nlots of boilerplate",
+    "Please add retry logic to the daemon.",
+    "## Available Specs\nspec list\nREAD-ONLY CONSTRAINT",
+    "discovery", ndjson);
+  const row = app.renderConversationRecord(norm);
+
+  // Layer 1: the default-expanded bubble surfaces ONLY the user's literal input.
+  const bubble = findOne(row, "user-content-bubble");
+  assert.ok(bubble, "Layer 1 user-content bubble present");
+  assert.ok(bubble.textContent.includes("Please add retry logic to the daemon."));
+  // No framework boilerplate leaks into the default view — the 展开全部 body is
+  // built lazily, so prefix/suffix are absent from the DOM until expanded.
+  assert.equal(row.textContent.includes("Project Context"), false,
+    "template prefix must not appear in the default view");
+  assert.equal(row.textContent.includes("Available Specs"), false,
+    "framework suffix must not appear in the default view");
+
+  // Layer 2: the "展开全部" toggle reveals 模板前缀 / 框架后缀, folded by default.
+  const wrap = findOne(row, "user-prompt-toggle-wrap");
+  assert.ok(wrap, "Layer 2 展开全部 toggle present");
+  const toggle = findOne(wrap, "process-toggle");
+  assert.ok(toggle.textContent.includes("展开全部"));
+  const full = findOne(wrap, "process-full");
+  assert.equal(full.classList.contains("hidden"), true, "prefix/suffix folded by default");
+  toggle.dispatch("click");
+  assert.equal(full.classList.contains("hidden"), false, "expands on click");
+  assert.ok(full.textContent.includes("模板前缀"), "template-prefix subsection labeled");
+  assert.ok(full.textContent.includes("框架后缀"), "framework-suffix subsection labeled");
+  assert.ok(full.textContent.includes("Project Context"), "prefix body now visible");
+  assert.ok(full.textContent.includes("Available Specs"), "suffix body now visible");
+
+  // Layer 3: the row-level "查看原始" toggle reveals the raw NDJSON.
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "Layer 3 raw toggle present");
+  const rawPre = findOne(row, "raw-json");
+  assert.equal(rawPre.classList.contains("hidden"), true, "raw hidden by default");
+  rawToggle.dispatch("click");
+  assert.equal(rawPre.classList.contains("hidden"), false, "raw expands on click");
+  assert.ok(rawPre.textContent.includes("USER_NDJSON_TOKEN"),
+    "the raw layer shows the original NDJSON payload");
+});
+
+check("user two-segment marker degrades to a single collapsed chip (no bubble)", () => {
+  const norm = userMarkerNorm(
+    "You are an expert engineer.",
+    null, // legacy two-segment: no USER_CONTENT_END
+    "## Task\nframework tail and project context",
+    "analyze");
+  const row = app.renderConversationRecord(norm);
+  // No user literal to surface → no Layer-1 bubble and no 展开全部 toggle.
+  assert.equal(findOne(row, "user-content-bubble"), null);
+  assert.equal(findOne(row, "user-prompt-toggle-wrap"), null);
+  // A single collapsed system-prompt chip instead.
+  const wrap = findOne(row, "user-prompt-chip");
+  assert.ok(wrap, "degraded system-prompt chip present");
+  assert.equal(wrap.classList.contains("collapsed"), true, "collapsed by default");
+  const chip = findOne(wrap, "msg-chip");
+  assert.ok(chip.textContent.includes("system prompt · analyze"));
+  // The framework tail must NOT leak before expansion.
+  assert.equal(row.textContent.includes("framework tail"), false);
+  chip.dispatch("click");
+  assert.equal(wrap.classList.contains("collapsed"), false, "expands on click");
+  const detail = findOne(wrap, "msg-chip-detail");
+  assert.ok(detail.textContent.includes("模板前缀"));
+  assert.ok(detail.textContent.includes("框架后缀"));
+  assert.ok(detail.textContent.includes("framework tail"), "suffix body now visible");
+});
+
+check("user message without markers falls back to a whole-message chip", () => {
+  const norm = app.normalizeRecord({
+    step_id: "discovery",
+    message: { role: "user", content: "just a plain reply", timestamp: 1, step_type: "discovery" },
+  });
+  const row = app.renderConversationRecord(norm);
+  // Not the marker path: no user-prompt-marker class, no Layer-1 bubble.
+  assert.equal(row.classList.contains("user-prompt-marker"), false);
+  assert.equal(findOne(row, "user-content-bubble"), null);
+  // The legacy collapsible chip carries the whole message (lazy: hidden until click).
+  const chip = findOne(row, "msg-chip");
+  assert.ok(chip, "whole-message chip present");
+  assert.ok(chip.textContent.includes("user prompt"));
+  assert.equal(row.textContent.includes("just a plain reply"), false,
+    "content hidden until the chip is expanded");
+  chip.dispatch("click");
+  assert.ok(row.textContent.includes("just a plain reply"), "content visible after expand");
+});
+
+// ---------------------------------------------------------------------------
+// Stage sectioning with the new user render path (DOM)
+// ---------------------------------------------------------------------------
+//
+// A marker-bearing user reply produced mid-discovery must stay in strict
+// timestamp order between the surrounding assistant turns, with step headers
+// acting only as visual separators — never reordering records.
+check("renderConversation: user marker reply interleaves by ts; step headers only separate", () => {
+  const TPE = app.TEMPLATE_PREFIX_END;
+  const UCB = app.USER_CONTENT_BEGIN;
+  const UCE = app.USER_CONTENT_END;
+  const userBody = "boiler\n" + TPE + "\n" + UCB + "\nmy answer\n" + UCE + "\ntail";
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    asstRecord("A1", 1, "discovery", "discovery"),
+    { step_id: "discovery_continue",
+      message: { role: "user", content: userBody, timestamp: 2, step_type: "discovery_continue" } },
+    asstRecord("A2", 3, "discovery", "discovery"),
+  ], false);
+
+  // Strict timestamp order is preserved across the role/step boundary.
+  const order = describeBubbles(container).map((b) => b.ts);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b),
+    "bubbles must be ordered by ascending timestamp");
+
+  // The middle bubble is the new user-marker record carrying the literal input.
+  const bubbles = container.children.filter((c) => c.__convIdx !== undefined);
+  const mid = bubbles[1];
+  assert.ok(mid.classList.contains("user-prompt-marker"), "middle record uses the marker path");
+  const ucb = findOne(mid, "user-content-bubble");
+  assert.ok(ucb && ucb.textContent.includes("my answer"));
+
+  // Step headers separate discovery / discovery_continue / discovery (visual only):
+  // three boundaries → three headers, and they never shuffle the bubbles.
+  const headers = findAll(container, "history-step-header");
+  assert.equal(headers.length, 3, "a header at each step boundary");
 });
 
 console.log(`\n${passed} checks passed.`);
