@@ -44,6 +44,15 @@ def _make_reader(*roots):
     return DaemonHistoryReader(project_roots_provider=lambda: list(roots))
 
 
+def _write_engine(root, flow_id, status):
+    """Write a minimal active ``engine.json`` for *flow_id* with *status*."""
+    state_dir = root / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps({"flow_id": flow_id, "status": status}), encoding="utf-8"
+    )
+
+
 # --------------------------------------------------------------------------
 # index construction
 # --------------------------------------------------------------------------
@@ -298,6 +307,205 @@ def test_read_active_flows_only_returns_active(tmp_path):
     again = reader.read_active_flows(cursors)
     assert again[0].mode == HISTORY_MODE_APPEND
     assert again[0].records == []
+
+
+def test_read_active_flows_multi_step_append_incremental_matches_full(tmp_path):
+    """Running-flow incremental reads across multiple step files lose no line
+    and duplicate no line: the union of every delta equals one full read."""
+    _write_engine(tmp_path, "live", "RUNNING")
+    hist = tmp_path / "se3" / "history" / "live"
+    s1 = hist / "01_analyze.jsonl"
+    _write_jsonl(s1, [_msg("user", "a0"), _msg("assistant", "a1")])
+
+    reader = _make_reader(tmp_path)
+    collected: list = []
+    cursors: dict = {}
+
+    reads = reader.read_active_flows(cursors)
+    cursors = {r.flow_id: r.cursor for r in reads}
+    collected += [r["message"]["content"] for r in reads[0].records]
+
+    # Append to the existing step file AND start a brand-new step file.
+    _append_jsonl(s1, [_msg("user", "a2")])
+    s2 = hist / "02_plan.jsonl"
+    _write_jsonl(s2, [_msg("assistant", "b0", step_type="plan")])
+
+    reads = reader.read_active_flows(cursors)
+    cursors = {r.flow_id: r.cursor for r in reads}
+    collected += [r["message"]["content"] for r in reads[0].records]
+
+    # Append again to both files in the same round.
+    _append_jsonl(s1, [_msg("assistant", "a3")])
+    _append_jsonl(s2, [_msg("user", "b1", step_type="plan")])
+
+    reads = reader.read_active_flows(cursors)
+    cursors = {r.flow_id: r.cursor for r in reads}
+    collected += [r["message"]["content"] for r in reads[0].records]
+
+    # Nothing new -> empty append, no spurious re-push.
+    reads = reader.read_active_flows(cursors)
+    assert reads[0].records == []
+
+    full = reader.read_flow("live")
+    full_contents = [r["message"]["content"] for r in full.records]
+    assert sorted(collected) == sorted(full_contents)
+    assert len(collected) == len(set(collected))  # no duplicates
+
+
+def test_read_active_flows_paused_then_resumed_stays_active(tmp_path):
+    """A flow that PAUSES (e.g. discovery clarification) and is later resumed
+    stays in the active set and keeps streaming incrementally."""
+    _write_engine(tmp_path, "live", "RUNNING")
+    hist = tmp_path / "se3" / "history" / "live"
+    s1 = hist / "01_discovery.jsonl"
+    _write_jsonl(s1, [_msg("user", "q1", step_type="discovery")])
+
+    reader = _make_reader(tmp_path)
+    reads = reader.read_active_flows({})
+    assert [r.flow_id for r in reads] == ["live"]
+    cursors = {r.flow_id: r.cursor for r in reads}
+
+    # Flow pauses awaiting input: still active, still read (no new records).
+    _write_engine(tmp_path, "live", "PAUSED")
+    assert reader.build_index()[0].active is True
+    reads = reader.read_active_flows(cursors)
+    assert [r.flow_id for r in reads] == ["live"]
+    assert reads[0].records == []
+    cursors = {r.flow_id: r.cursor for r in reads}
+
+    # Resume: status flips back to RUNNING and new records are appended.
+    _write_engine(tmp_path, "live", "RUNNING")
+    _append_jsonl(s1, [_msg("assistant", "a1", step_type="discovery")])
+    reads = reader.read_active_flows(cursors)
+    assert [r.flow_id for r in reads] == ["live"]
+    assert [r["message"]["content"] for r in reads[0].records] == ["a1"]
+
+
+def test_read_active_flows_new_step_file_included_with_cursor(tmp_path):
+    """A step jsonl that appears after the first read is picked up whole on the
+    next read, and its cursor is established without re-delivering old files."""
+    _write_engine(tmp_path, "live", "RUNNING")
+    hist = tmp_path / "se3" / "history" / "live"
+    _write_jsonl(hist / "01_analyze.jsonl", [_msg("user", "q1")])
+    reader = _make_reader(tmp_path)
+
+    reads = reader.read_active_flows({})
+    cursors = {r.flow_id: r.cursor for r in reads}
+    assert "01_analyze.jsonl" in cursors["live"]
+    assert "02_plan.jsonl" not in cursors["live"]
+
+    # A new step begins: a brand-new jsonl file appears.
+    _write_jsonl(
+        hist / "02_plan.jsonl",
+        [_msg("user", "q2", step_type="plan"), _msg("assistant", "a2", step_type="plan")],
+    )
+    reads = reader.read_active_flows(cursors)
+    assert [r["message"]["content"] for r in reads[0].records] == ["q2", "a2"]
+    assert reads[0].cursor["02_plan.jsonl"] == 2
+    # The earlier file's cursor is preserved (no re-delivery).
+    assert reads[0].cursor["01_analyze.jsonl"] == 1
+
+
+def test_read_active_flows_truncation_resumes_without_loss(tmp_path, monkeypatch):
+    """When a single read hits MAX_RECORDS, successive active reads drain the
+    remainder with no lost or duplicated line."""
+    monkeypatch.setattr(history_mod, "MAX_RECORDS_PER_REPORT", 2)
+    _write_engine(tmp_path, "live", "RUNNING")
+    s1 = tmp_path / "se3" / "history" / "live" / "01_analyze.jsonl"
+    _write_jsonl(s1, [_msg("user", f"m{i}") for i in range(5)])
+    reader = _make_reader(tmp_path)
+
+    collected: list = []
+    cursors: dict = {}
+    for _ in range(4):
+        reads = reader.read_active_flows(cursors)
+        cursors = {r.flow_id: r.cursor for r in reads}
+        if reads:
+            collected += [r["message"]["content"] for r in reads[0].records]
+    assert collected == ["m0", "m1", "m2", "m3", "m4"]
+
+
+def test_read_active_flows_flushes_tail_after_terminal_transition(tmp_path):
+    """Records appended just before a flow goes terminal are flushed once via
+    the active stream (not stranded until archival) and never duplicated."""
+    _write_engine(tmp_path, "live", "RUNNING")
+    s1 = tmp_path / "se3" / "history" / "live" / "01_analyze.jsonl"
+    _write_jsonl(s1, [_msg("user", "q1")])
+    reader = _make_reader(tmp_path)
+
+    reads = reader.read_active_flows({})
+    cursors = {r.flow_id: r.cursor for r in reads}
+
+    # The flow writes its tail (e.g. a final step_completed line) and then
+    # flips to a terminal status before the next poll.
+    _append_jsonl(s1, [_msg("assistant", "final")])
+    _write_engine(tmp_path, "live", "completed")
+
+    reads = reader.read_active_flows(cursors)
+    assert len(reads) == 1
+    assert reads[0].flow_id == "live"
+    assert [r["message"]["content"] for r in reads[0].records] == ["final"]
+    cursors = {r.flow_id: r.cursor for r in reads}
+
+    # The drained terminal flow is no longer returned -> no duplicate, and the
+    # caller can prune its cursor.
+    reads = reader.read_active_flows(cursors)
+    assert reads == []
+
+
+# --------------------------------------------------------------------------
+# active-flow change signature
+# --------------------------------------------------------------------------
+
+
+def test_active_flow_signature_changes_on_engine_json_update(tmp_path):
+    """A status transition (engine.json rewrite) moves the signature."""
+    _write_engine(tmp_path, "live", "RUNNING")
+    reader = _make_reader(tmp_path)
+    sig1 = reader.active_flow_signature()
+    assert set(sig1) == {"live"}
+
+    _write_engine(tmp_path, "live", "PAUSED")
+    sig2 = reader.active_flow_signature()
+    assert sig2 != sig1
+    assert set(sig2) == {"live"}
+
+
+def test_active_flow_signature_changes_on_jsonl_append(tmp_path):
+    """An appended line and a brand-new step file each move the signature,
+    even within the filesystem's mtime resolution (size is part of the token)."""
+    _write_engine(tmp_path, "live", "RUNNING")
+    hist = tmp_path / "se3" / "history" / "live"
+    s1 = hist / "01_analyze.jsonl"
+    _write_jsonl(s1, [_msg("user", "q1")])
+    reader = _make_reader(tmp_path)
+
+    sig1 = reader.active_flow_signature()
+    _append_jsonl(s1, [_msg("assistant", "a1")])
+    sig2 = reader.active_flow_signature()
+    assert sig2 != sig1
+
+    _write_jsonl(hist / "02_plan.jsonl", [_msg("user", "q2", step_type="plan")])
+    sig3 = reader.active_flow_signature()
+    assert sig3 != sig2
+
+
+def test_active_flow_signature_excludes_terminal_flows(tmp_path):
+    """A completed flow contributes nothing to the signature."""
+    _write_engine(tmp_path, "live", "completed")
+    reader = _make_reader(tmp_path)
+    assert reader.active_flow_signature() == {}
+
+
+def test_active_flow_signature_stable_when_nothing_changes(tmp_path):
+    """Back-to-back signatures over an unchanged tree are equal (debounce)."""
+    _write_engine(tmp_path, "live", "RUNNING")
+    _write_jsonl(
+        tmp_path / "se3" / "history" / "live" / "01_analyze.jsonl",
+        [_msg("user", "q1")],
+    )
+    reader = _make_reader(tmp_path)
+    assert reader.active_flow_signature() == reader.active_flow_signature()
 
 
 # --------------------------------------------------------------------------

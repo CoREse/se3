@@ -47,6 +47,11 @@ _BACKOFF_FACTOR = 2.0
 # Default seconds between STATUS_UPDATE pushes.
 _STATUS_INTERVAL = 5.0
 
+# Default fast cadence (seconds) at which the push loop checks the active-flow
+# disk signature so a CLI step that advances ``engine.json`` / appends a jsonl
+# line is reflected on the web within a tick instead of a full status interval.
+_HISTORY_POLL_INTERVAL = 1.0
+
 #: Type of the snapshot provider — returns a JSON-serializable machine snapshot.
 SnapshotProvider = Callable[[], Dict[str, Any]]
 #: Type of the spawn handler — called with
@@ -115,6 +120,7 @@ class DaemonClient:
         respond_handler: Optional[RespondHandler] = None,
         history_provider: Optional[HistoryProvider] = None,
         status_interval: float = _STATUS_INTERVAL,
+        history_poll_interval: float = _HISTORY_POLL_INTERVAL,
     ) -> None:
         """Create a client.
 
@@ -139,6 +145,12 @@ class DaemonClient:
                 and answer HISTORY_REQUEST pulls. When ``None`` history support
                 is disabled and the client behaves as before.
             status_interval: Seconds between STATUS_UPDATE pushes.
+            history_poll_interval: Fast cadence (seconds) at which the push loop
+                samples the active-flow disk signature to decide whether to push
+                an incremental history delta. Clamped to ``status_interval`` so
+                a very low status interval still polls history at least as
+                often; the steady STATUS_UPDATE heartbeat keeps its own
+                ``status_interval`` cadence regardless.
         """
         self.server_url = _normalize_ws_url(server_url)
         self.machine_id = machine_id
@@ -151,6 +163,9 @@ class DaemonClient:
         self._interject_handler = _default_interject_handler
         self._history_provider = history_provider
         self.status_interval = max(0.5, float(status_interval))
+        self.history_poll_interval = max(
+            0.1, min(float(history_poll_interval), self.status_interval)
+        )
 
         self._seq = 0
         self._connected = False
@@ -159,6 +174,9 @@ class DaemonClient:
         # connected server always receives a fresh index and full snapshots.
         self._last_index: Optional[list] = None
         self._history_cursors: Dict[str, Dict[str, int]] = {}
+        # Last active-flow disk signature seen by the push loop; an unchanged
+        # signature means there is nothing new to push (debounce).
+        self._last_history_signature: Dict[str, Any] = {}
 
     # -- introspection -----------------------------------------------------
 
@@ -234,15 +252,19 @@ class DaemonClient:
             # fresh index and full active-flow snapshots after every reconnect.
             self._last_index = None
             self._history_cursors = {}
+            self._last_history_signature = {}
             # Announce ourselves, then push a full snapshot immediately so a
             # freshly (re)connected server has state before the first tick.
             await self._send(ws, protocol.make_hello(self.machine_id, self.hostname, self.se3_version))
             await self._push_status(ws)
             await self._push_history(ws, force_index=True)
+            # Prime the signature so the fast push loop only fires on the *next*
+            # disk change rather than immediately re-pushing what we just sent.
+            self._history_changed()
             logger.info("Connected to central server; HELLO sent")
 
             recv_task = asyncio.create_task(self._receive_loop(ws, stop_event))
-            push_task = asyncio.create_task(self._status_loop(ws, stop_event))
+            push_task = asyncio.create_task(self._push_loop(ws, stop_event))
             stop_task = asyncio.create_task(stop_event.wait())
             done, pending = await asyncio.wait(
                 {recv_task, push_task, stop_task},
@@ -268,17 +290,63 @@ class DaemonClient:
                 continue
             await self._dispatch(ws, message)
 
-    async def _status_loop(self, ws: Any, stop_event: asyncio.Event) -> None:
-        """Push a STATUS_UPDATE every ``status_interval`` seconds."""
+    async def _push_loop(self, ws: Any, stop_event: asyncio.Event) -> None:
+        """Drive status + history pushes on a single loop until shutdown.
+
+        The loop wakes on the fast ``history_poll_interval`` cadence. A
+        STATUS_UPDATE is sent on the steady ``status_interval`` heartbeat. A
+        HISTORY push fires whenever the active-flow disk signature changed since
+        the last check — so a CLI step that advances ``engine.json`` / appends a
+        jsonl line reaches the web within one fast tick instead of waiting a
+        whole status interval — and also on every status tick as a backstop in
+        case a change is ever missed. When nothing changed, the history check is
+        a cheap stat-only scan and no frame is sent (debounce).
+
+        Both pushes share this one coroutine so their ``ws.send`` calls never
+        interleave (which two independent loops racing on the same socket could
+        do), keeping every wire frame intact.
+        """
+        last_status = time.monotonic()
         while not stop_event.is_set():
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=self.status_interval)
+                await asyncio.wait_for(
+                    stop_event.wait(), timeout=self.history_poll_interval
+                )
             except asyncio.TimeoutError:
                 pass
             else:
                 break
-            await self._push_status(ws)
-            await self._push_history(ws)
+            now = time.monotonic()
+            status_due = (now - last_status) >= self.status_interval
+            if status_due:
+                last_status = now
+                await self._push_status(ws)
+            # Push history on a real disk change, or on the status tick (backstop).
+            if status_due or self._history_changed():
+                await self._push_history(ws)
+
+    def _history_changed(self) -> bool:
+        """Return whether any active flow's disk signature changed since last check.
+
+        Updates :attr:`_last_history_signature` as a side effect. Returns
+        ``False`` when no history provider (or signature support) is configured,
+        so a provider-less client never spuriously pushes. A signature lookup
+        failure conservatively reports a change so the next push still runs.
+        """
+        provider = self._history_provider
+        if provider is None or not hasattr(provider, "active_flow_signature"):
+            return False
+        try:
+            signature = provider.active_flow_signature()
+        except Exception:
+            logger.debug(
+                "active_flow_signature failed; forcing a history push",
+                exc_info=True,
+            )
+            return True
+        changed = signature != self._last_history_signature
+        self._last_history_signature = signature
+        return changed
 
     # -- message handling --------------------------------------------------
 
@@ -489,10 +557,15 @@ class DaemonClient:
         except Exception:
             logger.exception("Active-flow history read failed")
             return
+        # Rebuild the cursor map from this read so it tracks exactly the flows
+        # still producing records: every active flow (always returned, even with
+        # an empty delta, so its cursor keeps advancing) plus any terminal flow
+        # flushed one last time. A fully-drained terminal flow drops out, which
+        # bounds the map's growth over a long-lived daemon. Atomic engine.json
+        # writes mean an active flow is never transiently missing, so pruning
+        # cannot accidentally trigger a duplicate full re-read.
+        self._history_cursors = {read.flow_id: read.cursor for read in reads}
         for read in reads:
-            # Always advance the stored cursor, even for an empty delta, so the
-            # next tick continues from the right position.
-            self._history_cursors[read.flow_id] = read.cursor
             if not read.records:
                 continue
             try:

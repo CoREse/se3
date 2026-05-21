@@ -59,6 +59,19 @@ MAX_RECORDS_PER_REPORT = 2000
 #: *active* (``engine.json``) source is treated as an in-progress session.
 _TERMINAL_STATUSES = frozenset({"completed", "failed"})
 
+
+def _is_active_status(status: str) -> bool:
+    """Return whether *status* names a still-running (non-terminal) flow.
+
+    Anything that is not COMPLETED / FAILED counts as active — INIT, RUNNING,
+    PAUSED and RECOVERING included — so a flow that pauses (a discovery
+    clarification, a confirm gate) and is later resumed keeps being read
+    incrementally rather than dropping out of the active set the moment it
+    pauses. The comparison is case-insensitive because ``engine.json`` stores
+    the enum value verbatim (e.g. ``"RUNNING"`` / ``"PAUSED"``).
+    """
+    return status.strip().lower() not in _TERMINAL_STATUSES
+
 #: Index task-description fields are clipped to this many characters.
 _DESC_CLIP = 200
 
@@ -229,7 +242,7 @@ class DaemonHistoryReader:
     ) -> SessionMeta:
         """Build a :class:`SessionMeta` from an ``engine.json``-shaped dict."""
         status = str(data.get("status") or "unknown")
-        active = source == "active" and status.lower() not in _TERMINAL_STATUSES
+        active = source == "active" and _is_active_status(status)
         updated = str(data.get("updated_at") or "")
         if not updated and fallback_mtime:
             updated = datetime.fromtimestamp(fallback_mtime).isoformat()
@@ -373,15 +386,20 @@ class DaemonHistoryReader:
                 ``append`` delta.
 
         Returns:
-            One :class:`FlowRead` per active flow. The caller should always
-            store the returned ``cursor`` (even for an empty ``records`` list)
-            and only transmit reads whose ``records`` are non-empty.
+            One :class:`FlowRead` per active flow (always, even with an empty
+            ``records`` list, so the caller keeps advancing the cursor), plus a
+            *final-flush* read for any flow the caller was tracking that has
+            since gone terminal but still has un-pushed records. The caller
+            should always store the returned ``cursor`` and only transmit reads
+            whose ``records`` are non-empty.
         """
         cursors = cursors or {}
         reads: List[FlowRead] = []
+        active_ids: Set[str] = set()
         for meta in self.build_index():
             if not meta.active:
                 continue
+            active_ids.add(meta.flow_id)
             reads.append(
                 self.read_flow(
                     meta.flow_id,
@@ -389,7 +407,69 @@ class DaemonHistoryReader:
                     cursor=cursors.get(meta.flow_id),
                 )
             )
+        # Final flush: a flow the caller was tracking (it has a cursor) but that
+        # is no longer active may still have records appended between the last
+        # push and its terminal transition — e.g. the commit / summarize
+        # ``step_completed`` lines written just before the flow flips to
+        # COMPLETED and is archived. Without this, that tail only surfaces after
+        # archival (the "web catches up only once the run finishes" symptom).
+        # Read each such flow once more and surface it only when it has pending
+        # records, so the next idle poll returns nothing and the caller can drop
+        # its cursor without ever re-pushing an already-delivered line.
+        for flow_id, cursor in cursors.items():
+            if flow_id in active_ids:
+                continue
+            read = self.read_flow(flow_id, cursor=cursor)
+            if read.records:
+                reads.append(read)
         return reads
+
+    def active_flow_signature(self) -> Dict[str, Any]:
+        """Return a cheap change-detection fingerprint for every active flow.
+
+        Maps ``flow_id`` to a comparable token built from the on-disk artifacts
+        that move forward as a running flow makes progress:
+
+        * the active ``engine.json``'s ``(mtime, size)`` plus its ``status`` — a
+          step transition (and the PAUSED↔RUNNING flip around a resume) rewrites
+          ``engine.json``;
+        * each per-step ``jsonl``'s ``(name, mtime, size)`` — a new prompt /
+          response / ``step_completed`` record appends to (or creates) a jsonl.
+
+        Including the byte *size* (not just the mtime) makes the token change on
+        every append even when two writes land inside the filesystem's mtime
+        resolution, so a caller can drive history pushes off real disk changes
+        rather than a fixed timer. Terminal (completed / failed) flows are
+        excluded — they have nothing left to stream incrementally.
+
+        This is intentionally lighter than :func:`build_index`: it only reads
+        the active ``engine.json`` per root (and that flow's jsonl files),
+        skipping the archive / history-only enumeration, so it is safe to call
+        on a fast polling cadence.
+        """
+        signature: Dict[str, Any] = {}
+        for root in self._iter_roots():
+            engine_json = root / "se3" / "state" / "engine.json"
+            data = _read_json(engine_json)
+            if not isinstance(data, dict):
+                continue
+            flow_id = str(data.get("flow_id") or "")
+            if not flow_id:
+                continue
+            status = str(data.get("status") or "")
+            if not _is_active_status(status):
+                continue
+            parts: List[Any] = [
+                ("__engine__", *_safe_stat(engine_json)),
+                ("__status__", status.strip().lower()),
+            ]
+            hist_dir = root / "se3" / "history" / flow_id
+            if hist_dir.is_dir():
+                for jsonl in sorted(hist_dir.glob("*.jsonl")):
+                    mtime, size = _safe_stat(jsonl)
+                    parts.append((jsonl.name, mtime, size))
+            signature[flow_id] = tuple(parts)
+        return signature
 
 
 # -- module-level file helpers --------------------------------------------
@@ -409,6 +489,20 @@ def _safe_mtime(path: Path) -> Optional[float]:
         return path.stat().st_mtime
     except OSError:
         return None
+
+
+def _safe_stat(path: Path) -> tuple:
+    """Return *path*'s ``(mtime, size)``, or ``(0.0, 0)`` when unreadable.
+
+    Used by :meth:`DaemonHistoryReader.active_flow_signature`; pairing mtime
+    with byte size makes the signature change on every append even when two
+    writes land inside the filesystem's mtime resolution.
+    """
+    try:
+        st = path.stat()
+        return (st.st_mtime, st.st_size)
+    except OSError:
+        return (0.0, 0)
 
 
 def _count_jsonl(history_dir: Path) -> int:
