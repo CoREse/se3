@@ -597,3 +597,170 @@ def test_step_completed_appended_to_existing_step_file_is_picked_up():
         # Not re-pushed afterwards.
         reads = reader.read_active_flows(cursors)
         assert reads[0].records == []
+
+
+# ---------------------------------------------------------------------------
+# Group G5: summarize landing + incremental push (standard 5).
+#
+# These pin the summarize-specific leg of the chain:
+#
+# * Task 1 — the summarize step's USER prompt AND ASSISTANT markdown result
+#   must land in se3/history/{flow_id}/{step_id}.jsonl via the *real* LLMCaller
+#   record_prompt/record_response path. ``summarize_handler`` calls
+#   ``caller.call(json_mode="off")`` with ``flow_id`` / ``step_id`` /
+#   ``step_type`` wired through, so the recording is not bypassed and the IDs
+#   are set. We drive the handler with a mocked agent runner so the actual
+#   chat_history write path executes end-to-end.
+# * Task 2 — those records, together with the ``step_completed`` card carrying
+#   ``outputs.summary``, must be readable by the daemon's incremental cursor in
+#   the exact shape the frontend's ``renderSummarizeReport`` consumes
+#   (``message.data.step.outputs.summary``), so the web console shows
+#   ``user + assistant + Work Summary report card``.
+# ---------------------------------------------------------------------------
+
+
+def _ndjson_assistant(text: str) -> str:
+    """A minimal stream-json transcript carrying one assistant text block.
+
+    Mirrors what Claude CLI streams: an ``assistant`` message with a text
+    content block, followed by a terminal ``result`` line. Both
+    ``LLMCaller._extract_text_from_ndjson`` (the value returned to the
+    handler) and ``chat_history.extract_assistant_text`` (the recorded
+    assistant content) pull the text out of the assistant block.
+    """
+    return "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "assistant",
+                    "message": {"content": [{"type": "text", "text": text}]},
+                }
+            ),
+            json.dumps({"type": "result", "result": text}),
+        ]
+    )
+
+
+def test_summarize_records_user_and_assistant_to_jsonl():
+    """Task 1: summarize_handler lands BOTH the user prompt and the assistant
+    markdown summary in the per-step jsonl through the real LLMCaller path."""
+    from se3.engine.steps.summarize import summarize_handler
+    from se3.engine.chat_history import get_step_history
+
+    summary_md = "## Work Summary\n\n- Did the thing\n- Tests pass"
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        flow = FlowInstance(
+            flow_id="sum-flow-1",
+            task_description="summarize task",
+            task_type="feature",
+            status=FlowStatus.RUNNING,
+        )
+        # change_path.parent resolves to project_root so history lands under it.
+        flow.change_path = project_root / "dummy"
+        step = Step(
+            step_type=StepType.SUMMARIZE,
+            status=StepStatus.PENDING,
+            step_id="12_summarize_abc12345",
+            inputs={"task_description": "summarize task"},
+            outputs={},
+        )
+
+        with patch("se3.engine.llm_caller.ClaudeCodeRunner") as MockRunner:
+            mock_runner = MagicMock()
+            mock_runner.run_with_monitor.return_value = MagicMock(
+                success=True,
+                output=_ndjson_assistant(summary_md),
+                returncode=0,
+                interrupted=False,
+                cmd_used="claude",
+            )
+            MockRunner.return_value = mock_runner
+
+            result = summarize_handler(step, flow)
+
+        assert result == StepStatus.COMPLETED
+        # The handler stores the LLM-produced markdown as the summary output.
+        assert step.outputs["summary"] == summary_md
+
+        jsonl = (
+            project_root
+            / "se3"
+            / "history"
+            / "sum-flow-1"
+            / "12_summarize_abc12345.jsonl"
+        )
+        assert jsonl.exists(), "summarize did not write the per-step jsonl"
+
+        session = get_step_history(project_root, "sum-flow-1", "12_summarize_abc12345")
+        assert session is not None
+        roles = [m.role for m in session.messages]
+        assert "user" in roles, "summarize user prompt was not persisted"
+        assert "assistant" in roles, "summarize assistant result was not persisted"
+        # The assistant turn carries the markdown summary the web bubble shows.
+        assistant_msgs = [m for m in session.messages if m.role == "assistant"]
+        assert any(summary_md in (m.content or "") for m in assistant_msgs)
+
+
+def test_summarize_records_incrementally_readable_in_frontend_shape():
+    """Task 2: the summarize user/assistant turns AND the step_completed card
+    (carrying ``outputs.summary``) are surfaced by the daemon incremental reader
+    in the shape ``renderSummarizeReport`` consumes."""
+    summary_md = "## Work Summary\n\n- shipped"
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        jsonl = _seed_active_flow(
+            project_root,
+            "SUMF",
+            "12_summarize_abc",
+            lines=[
+                {
+                    "role": "user",
+                    "content": "summarize prompt",
+                    "step_type": "summarize",
+                    "timestamp": "2026-05-21T02:00:00",
+                },
+                {
+                    "role": "assistant",
+                    "content": summary_md,
+                    "step_type": "summarize",
+                    "timestamp": "2026-05-21T02:30:00",
+                },
+                _step_completed_line(
+                    "12_summarize_abc", "summarize", {"summary": summary_md}
+                ),
+            ],
+        )
+        reader = DaemonHistoryReader(lambda: [str(project_root)])
+
+        reads = reader.read_active_flows()
+        assert len(reads) == 1
+        read = reads[0]
+        assert read.flow_id == "SUMF"
+        # user + assistant + step_completed are all surfaced together.
+        assert len(read.records) == 3
+        roles = [
+            r["message"].get("role")
+            for r in read.records
+            if r["message"].get("role")
+        ]
+        assert "user" in roles and "assistant" in roles
+
+        events = _step_events(read)
+        assert len(events) == 1
+        # The Work Summary report card reads outputs.summary; prove the payload
+        # carries it through make_history_data in the frontend-consumable shape.
+        assert _frontend_outputs(events[0]) == {"summary": summary_md}
+
+        msg = daemon_protocol.make_history_data(
+            read.flow_id, read.mode, read.records, cursor=read.cursor
+        )
+        pushed_events = [
+            r
+            for r in msg.payload["records"]
+            if r["message"].get("type") == "step_completed"
+        ]
+        assert len(pushed_events) == 1
+        assert _frontend_outputs(pushed_events[0])["summary"] == summary_md
+        # Cursor counts all three lines so the next poll is incremental.
+        assert msg.payload["cursor"]["12_summarize_abc.jsonl"] == 3
