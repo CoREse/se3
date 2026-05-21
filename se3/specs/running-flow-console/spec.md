@@ -242,9 +242,13 @@ prompt (`cli_confirm`); (5) a non-interactive discovery confirmation gate
 whose `kind` field identifies the interaction; an unrecognized `kind`
 degrades to a plain `call` chip.
 
-A `discovery_confirm` chip is produced when a daemon-spawned discovery flow
-pauses at the programmatic confirmation gate (see the `flow-engine`
-*Discovery Workflow* requirement). The chip carries the LLM's refined task
+A `discovery_confirm` chip is produced when a discovery flow pauses at the
+programmatic confirmation gate (see the `flow-engine` *Discovery Workflow*
+requirement) — whether that flow was daemon-spawned (non-interactive) or
+started interactively from the CLI, because the interactive pause is now
+mirrored to the same `se3/calls/` call file so the web console can answer it
+in the live process (terminal and web are awaited in parallel; whichever
+answers first drives the flow). The chip carries the LLM's refined task
 description in its `prompt` and at least one `options` entry encoding the
 one-click confirm action whose **value is the literal `"1"`** — the exact
 token the gate's `== "1"` check expects. The reply context panel MUST render
@@ -450,6 +454,28 @@ current step (or that step has already reached a COMPLETED / REVISION-handled
 status), and drop it from the flow's `pending_calls` even when no sibling
 response file exists. Calls whose step is still the current, unanswered step
 remain pending and continue to surface as chips.
+
+Pending calls are additionally **deduplicated per `(flow_id, step_id)`, newest
+wins** (`DaemonAggregator._dedup_calls_by_step`). An interactive discovery flow
+reuses the *same* `step_id` across successive clarification turns and the
+confirmation gate, so each new pause writes a fresh call file keyed to the same
+`(flow_id, step_id)`. Only the most recent such call is a live interaction; the
+earlier ones are superseded leftovers that, without dedup, would pile up as
+stale "待回复" chips. The aggregator therefore keeps only the newest unanswered
+call per `(flow_id, step_id)` and discards the rest. Calls that cannot be keyed
+(missing `flow_id` or `step_id`) are exempt from dedup and are never collapsed
+against one another.
+
+#### Scenario: Superseded same-step calls are deduplicated to the newest
+- **GIVEN** an interactive discovery flow `F1` whose current step `S` wrote two
+  successive call files (an earlier clarification call and a newer one) both
+  keyed to `(flow_id = "F1", step_id = "S")`
+- **WHEN** the aggregator enumerates `F1`'s `pending_calls`
+- **THEN** only the newest call for `(F1, S)` is reported as pending
+- **AND** the earlier, superseded call is dropped so no stale "待回复" chip
+  accumulates
+- **AND** any call that cannot be keyed (missing `flow_id` or `step_id`) is left
+  untouched by the dedup pass
 
 #### Scenario: Calls with matching flow_id are surfaced
 - **GIVEN** the current running flow has `flow_id = "F1"`
@@ -894,6 +920,63 @@ message is ever dropped.
 - **WHEN** the user opens the per-record `view raw` toggle
 - **THEN** the original unrendered assistant body (including the JSON
   literal and the underlying NDJSON envelope) is shown unchanged
+
+### Requirement: Authoritative Step-Type Sourcing
+
+The running-flow conversation's per-record `stepType` — the value that drives
+assistant-bubble dispatch (`renderAssistantBubble` /
+`STEP_ASSISTANT_RENDERERS[stepType]`), the per-phase step headers / labels
+(`stepKey` / `stepHeaderLabel`), and the per-step report cards — MUST be taken
+from an **authoritative, daemon-injected envelope field**, NOT guessed from the
+inner message body. Real daemon chat records are envelopes of the form
+`{step_id, step_type, message}` where `message` is `{role, content}` and carries
+**no** `step_type` of its own; the `step_type` is parsed deterministically by the
+daemon from the per-step jsonl file-name convention `NN_<step_type>_<hash>(_Gk)`
+(see the `history.py` bullet of the `base` spec's *Daemon Modules* requirement).
+
+`normalizeRecord` MUST source `stepType` with the priority **envelope
+`rec.step_type` > inner `message.step_type` > empty string**, applied
+identically to both the chat-record branch and the step-event branch. The
+envelope value is authoritative because it is recovered from the file-name (it
+can never be missing or dirtied by an `_Gk` group suffix); the inner-message
+fallback preserves compatibility with older daemons that did not yet inject the
+envelope field; and the empty-string default keeps the renderer safe when
+neither is present.
+
+When `stepType` is empty, the renderer MUST degrade gracefully — the
+structured-JSON dispatch falls back to the shared `renderToolMarkers` + markdown
+path (per *Structured-JSON Assistant Rendering*) and the step header falls back
+to a best-effort label — and MUST NOT raise.
+
+#### Scenario: Envelope step_type drives dispatch on real daemon records
+- **GIVEN** a real daemon record `{"step_id": "01_discovery_975607bb",
+  "step_type": "discovery", "message": {"role": "assistant", "content": ...}}`
+  whose inner `message` carries no `step_type`
+- **WHEN** `normalizeRecord` processes the record
+- **THEN** `norm.stepType` is `"discovery"` (taken from the envelope, not the
+  inner message)
+- **AND** the assistant bubble dispatches to `STEP_ASSISTANT_RENDERERS["discovery"]`
+  so the structured result fields render rather than the raw process being dumped
+
+#### Scenario: Step header label uses the step type, not the file-name stem
+- **GIVEN** a record whose `step_id` is the jsonl stem `01_discovery_975607bb`
+  and whose injected envelope `step_type` is `discovery`
+- **WHEN** the conversation builds the step header for that record
+- **THEN** the header label reflects the step type (e.g. `DISCOVERY`), not the
+  raw `01_discovery_975607bb` stem
+
+#### Scenario: Inner-message fallback for legacy daemons
+- **GIVEN** a record from an older daemon that has no envelope `step_type` but
+  whose inner `message` happens to carry a `step_type` field
+- **WHEN** `normalizeRecord` processes the record
+- **THEN** `norm.stepType` falls back to the inner `message.step_type`
+
+#### Scenario: Missing step type degrades without raising
+- **WHEN** a record carries neither an envelope `step_type` nor an inner
+  `message.step_type`
+- **THEN** `norm.stepType` is the empty string
+- **AND** the assistant bubble degrades to the shared `renderToolMarkers` +
+  markdown fallback and no exception is raised
 
 ### Requirement: Per-Step Report Cards
 

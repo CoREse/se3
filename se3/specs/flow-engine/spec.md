@@ -232,6 +232,20 @@ se3 run --discover "我想做一个用户管理功能"
 - **AND** `context` 携带 `flow_id` / `step_id` 以供 aggregator 按 flow 归属过滤
 - **AND** 用户经 GUI 确认按钮或手动键入 `1` 提交的响应都被同一个程序化确认门控消费，门控的严格 `== "1"` 语义不变
 
+**交互模式（CLI/TTY）下的 web 镜像应答：**
+
+交互式 discovery 暂停过去只阻塞终端读取、不写 call 文件，因此从 CLI 起步的 discovery session 在 web 控制台『没有可以回复的对象』。现在交互式澄清问答暂停（`_handle_discovery_pause`）与程序化确认门控（`_handle_discovery_programmatic_confirm`）SHALL 同样通过 `_maybe_write_discovery_call` 把暂停镜像为 `se3/calls/` 下的 call 文件（澄清问答写 `CALL_KIND_CALL`、确认门控写 `CALL_KIND_DISCOVERY_CONFIRM`，元数据规则与上文非交互形态一致），随后由 `_await_terminal_or_web` **并行**等待终端输入与 web 响应文件，谁先应答谁驱动流程，在**同一个活进程内**续跑而无需 `--resume`。
+
+为避免被监管 daemon 以重复 `--resume` 重新 spawn，交互式暂停期间 flow SHALL 全程保持 `RUNNING`、不置为 `PAUSED`（仅 Ctrl+C/EOF 取消这一例外才持久化并退出待 resume）。每一轮暂停被解决（终端应答 / web 应答 / 取消）后 SHALL 经 `_cleanup_discovery_call` 幂等清理 call 文件及其 `.response` 兄弟文件，且被消费的 web 响应文件即时删除，使确认门控空输入重绘循环不会重读已消费的应答。
+
+#### Scenario: 交互式 discovery 暂停镜像为 web 可应答的 call 文件
+- **GIVEN** 从 CLI 交互式起步的 discovery flow 在澄清问答或确认门控处暂停，且 project root 已知
+- **WHEN** 暂停处理器开始等待用户
+- **THEN** 通过 `_maybe_write_discovery_call` 写出对应 kind 的 `se3/calls/` call 文件，使 web 控制台显示同一待处理交互
+- **AND** 终端输入与 web 响应文件被并行等待，谁先应答谁在同一活进程内驱动续跑
+- **AND** flow 全程保持 `RUNNING`，不被置为 `PAUSED`（避免 daemon 重复 spawn）
+- **AND** 该轮被解决后 call 文件与其 `.response` 兄弟文件被幂等清理
+
 #### Scenario: Discovery LLM JSON 提取失败时的友好错误提示
 - **GIVEN** discovery 步骤执行 LLM 调用使用 two-phase JSON 模式
 - **WHEN** LLM 返回叙述性文本而非有效 JSON，导致 `LLMCallError`（消息包含 "JSON extraction failed"）

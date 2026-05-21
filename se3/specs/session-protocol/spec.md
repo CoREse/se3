@@ -354,6 +354,14 @@ The discovery step SHALL gate the transition from "LLM-confirmed refined descrip
 - Any other non-empty input clears `awaiting_programmatic_confirm` and is returned as the next discovery user turn, continuing the conversation rather than confirming.
 - Ctrl+C / EOF from the prompt persists the flow and returns `None` so the orchestrator pauses for later resume.
 
+**Web-Mirrored Dual-Wait:**
+- When a project root is known, the gate is mirrored to a `se3/calls/` call file of kind `CALL_KIND_DISCOVERY_CONFIRM` (one-click `"1"` option) via `_maybe_write_discovery_call`, so the web console surfaces the *same* pending confirmation as a `discovery_confirm` chip — even for a discovery flow started interactively from the CLI, which previously only blocked the terminal read and gave the web console nothing to answer.
+- The terminal prompt and the web response file are then awaited **in parallel** by `_await_terminal_or_web`: whichever answers first drives the flow in this same live process (no `--resume` round-trip). A web confirm click submits the same literal `"1"` through the call/response channel that the strict `== "1"` check consumes, so the web and terminal paths share one gate semantics.
+- Throughout the dual-wait the flow stays `RUNNING` — it is **never** marked `PAUSED` — so a watching daemon does not race this live process with a duplicate `--resume` spawn. (The interactive Ctrl+C/EOF cancel above is the one exception that persists and exits for later resume.)
+- Each resolved round (terminal answer, web answer, or cancel) cleans up the call file plus any sibling `.response` answer files via `_cleanup_discovery_call`, and a consumed web answer's response file is removed so the gate's empty-input re-display loop cannot re-read an already-consumed answer.
+
+The same call-file mirroring + parallel terminal/web dual-wait applies to the ordinary discovery clarification-question pause (`_handle_discovery_pause`): the question is written as a `CALL_KIND_CALL` file and answered from the terminal or the web in the same live RUNNING process.
+
 **Resume Display:**
 - `_restore_discovery_display` re-renders the LAST assistant message from `discovery_state.history` on resume. When `outputs["awaiting_programmatic_confirm"]` is set, the rendering uses `is_confirmation=True` so the confirmation panel (not the question panel) is shown, and `refined_description` is preferred over `proposed_description` for the body.
 
@@ -384,6 +392,19 @@ The discovery step SHALL gate the transition from "LLM-confirmed refined descrip
 - **WHEN** the flow is resumed
 - **THEN** `_restore_discovery_display` re-renders the last assistant message with `is_confirmation=True`
 - **AND** the body prefers `refined_description` over `proposed_description`
+
+#### Scenario: Interactive gate is mirrored to a web-answerable call file
+- **GIVEN** a discovery flow started interactively from the CLI reaches the programmatic confirmation gate with a known project root
+- **WHEN** the gate handler begins waiting for the user
+- **THEN** a `CALL_KIND_DISCOVERY_CONFIRM` call file is written under `se3/calls/` so the web console shows the same pending confirmation
+- **AND** the terminal prompt and the web response file are awaited in parallel
+- **AND** the flow stays `RUNNING` (it is not marked `PAUSED`) during the wait
+
+#### Scenario: Web confirm drives the live process
+- **GIVEN** the interactive gate is mirrored to a `discovery_confirm` call file and is awaiting both the terminal and the web
+- **WHEN** the user clicks confirm in the web console (submitting the literal `"1"` through the call/response channel) before any terminal input
+- **THEN** the same strict `== "1"` gate consumes it, `inputs["programmatic_confirmed"]` is set to `True`, and the flow proceeds in the same live process without a `--resume` round-trip
+- **AND** the call file and its consumed `.response` siblings are cleaned up so the answer cannot be re-read
 
 ### Requirement: User Interjection Persistence Across Downstream Steps
 
