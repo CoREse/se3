@@ -72,6 +72,117 @@ def _is_active_status(status: str) -> bool:
     """
     return status.strip().lower() not in _TERMINAL_STATUSES
 
+
+#: The authoritative set of step types, mirroring ``StepType`` values in
+#: ``se3.engine.models``. Hard-coded (not imported) on purpose: importing
+#: ``se3.engine.models`` would execute ``se3.engine.__init__`` and drag the
+#: whole engine (``llm_caller`` / ``state_machine`` / …) into the daemon's
+#: import graph, against the daemon's deferred-import design. Used only as a
+#: *soft* confidence signal by :func:`parse_step_type_from_step_id`; a name
+#: that follows the file-name convention but is absent here still parses to its
+#: middle segment, so a future step type drifting out of this set degrades to
+#: best-effort rather than to a wrong answer.
+_KNOWN_STEP_TYPES = frozenset(
+    {
+        "discovery",
+        "analyze",
+        "project_summary",
+        "plan",
+        "propose",
+        "design",
+        "plan_tasks",
+        "confirm",
+        "implement",
+        "test",
+        "self_check",
+        "verify_spec",
+        "update_spec",
+        "version_analyze",
+        "commit",
+        "summarize",
+    }
+)
+
+
+def parse_step_type_from_step_id(stem: str) -> str:
+    """Parse the authoritative step type out of a history jsonl file-name stem.
+
+    Real daemon chat-history files are named by the convention
+    ``NN_<step_type>_<hash>(_Gk)`` (the file-name stem; ``NN`` is a two-digit
+    sequence number, ``<hash>`` a hexadecimal id, and an optional ``_Gk`` group
+    suffix is appended for DAG-grouped steps). The raw ``message`` records the
+    daemon pushes carry *no* ``step_type`` field, so this parser recovers it
+    deterministically from the stem instead of having the frontend guess.
+
+    The middle segment may itself contain underscores (e.g. ``version_analyze``),
+    so the parser peels the known structural pieces — leading ``NN_`` sequence,
+    trailing ``_G\\d+`` group suffix, trailing hexadecimal hash — and treats
+    whatever remains as the step type. Examples::
+
+        01_discovery_975607bb      -> "discovery"
+        13_version_analyze_def456  -> "version_analyze"
+        05_implement_61605e42_G2   -> "implement"
+
+    The result is soft-validated against :data:`_KNOWN_STEP_TYPES`. A name that
+    clearly follows the convention but whose type is not (yet) known still
+    returns its parsed middle segment (self-describing, drift-tolerant). An
+    old / non-conforming name with no sequence prefix and no hash tail (e.g.
+    the legacy ``commit_summary``) gracefully falls back to the original stem
+    rather than guessing.
+
+    This is a pure function: it never reads disk, has no side effects, and never
+    raises — any unexpected input yields an empty string.
+    """
+    try:
+        if not isinstance(stem, str):
+            return ""
+        original = stem.strip()
+        if not original:
+            return ""
+
+        s = original
+
+        # 1. Strip a leading numeric sequence number ("NN_").
+        without_seq = re.sub(r"^\d+_", "", s, count=1)
+        seq_stripped = without_seq != s
+        s = without_seq
+
+        # 2. Strip an optional trailing group suffix ("_G\\d+").
+        without_group = re.sub(r"_G\d+$", "", s, count=1)
+        group_stripped = without_group != s
+        s = without_group
+
+        # 3. Strip a trailing hexadecimal hash segment, keeping the middle
+        #    (which may itself contain underscores, e.g. "version_analyze").
+        hash_stripped = False
+        parts = s.split("_")
+        if (
+            len(parts) >= 2
+            and parts[-1]
+            and re.fullmatch(r"[0-9a-fA-F]+", parts[-1])
+        ):
+            s = "_".join(parts[:-1])
+            hash_stripped = True
+
+        candidate = s.strip("_")
+
+        # Soft-validate against the known step types (authoritative confidence).
+        if candidate in _KNOWN_STEP_TYPES:
+            return candidate
+
+        # Followed the naming convention (had a sequence / hash / group marker)
+        # but the type is not in the known set: the parsed middle is still the
+        # best self-describing answer, so future step types keep working.
+        if candidate and (seq_stripped or hash_stripped or group_stripped):
+            return candidate
+
+        # Old / non-conforming name (no NN prefix, no hash, e.g.
+        # "commit_summary"): fall back to the original stem rather than guess.
+        return original
+    except Exception:  # pragma: no cover - parser must never raise
+        return ""
+
+
 #: Index task-description fields are clipped to this many characters.
 _DESC_CLIP = 200
 
@@ -120,8 +231,12 @@ class FlowRead:
         mode: :data:`~se3.daemon.protocol.HISTORY_MODE_FULL` for the initial
             batch (the requester had no cursor) or
             :data:`~se3.daemon.protocol.HISTORY_MODE_APPEND` for a delta.
-        records: A list of ``{"step_id": str, "message": dict}`` records, one
-            per conversation line, ordered by step file then line.
+        records: A list of ``{"step_id": str, "step_type": str, "message":
+            dict}`` records, one per conversation line, ordered by step file
+            then line. ``step_type`` is the authoritative type parsed from the
+            jsonl file-name stem (see :func:`parse_step_type_from_step_id`); it
+            is injected at the envelope level so the frontend never has to guess
+            it, while ``message`` keeps its original bytes untouched.
         cursor: The updated per-step line cursor to send back on the next
             request to continue incrementally.
     """
@@ -347,6 +462,7 @@ class DaemonHistoryReader:
             if truncated:
                 break
             step_id = jsonl.stem
+            step_type = parse_step_type_from_step_id(step_id)
             try:
                 lines = jsonl.read_text(encoding="utf-8").splitlines()
             except OSError:  # pragma: no cover - defensive
@@ -366,7 +482,13 @@ class DaemonHistoryReader:
                     continue
                 if not isinstance(message, dict):
                     continue
-                records.append({"step_id": step_id, "message": message})
+                records.append(
+                    {
+                        "step_id": step_id,
+                        "step_type": step_type,
+                        "message": message,
+                    }
+                )
                 if len(records) >= MAX_RECORDS_PER_REPORT:
                     truncated = True
                     break
