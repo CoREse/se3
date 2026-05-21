@@ -134,6 +134,69 @@ class HistoryRequestRegistry:
             self._waiters.pop(flow_id, None)
 
 
+class IndexRefreshRegistry:
+    """Tracks in-flight history-index refreshes awaiting a daemon's re-push.
+
+    ``GET /api/history`` broadcasts a ``MSG_HISTORY_INDEX_REQUEST`` to every
+    connected daemon and parks one :class:`asyncio.Future` per ``machine_id``
+    here. When that daemon's forced ``MSG_HISTORY_INDEX`` lands on the receive
+    loop the matching waiter is resolved, so the REST handler can return the
+    freshly aggregated index instead of a stale relayed snapshot. Mirrors
+    :class:`HistoryRequestRegistry` but is keyed by machine rather than flow.
+    Lives entirely in process memory.
+    """
+
+    def __init__(self) -> None:
+        self._waiters: Dict[str, list] = {}
+
+    def register(self, machine_id: str) -> "asyncio.Future":
+        """Park and return a future that resolves when *machine_id* re-pushes."""
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._waiters.setdefault(machine_id, []).append(fut)
+        return fut
+
+    def resolve(self, machine_id: str) -> None:
+        """Resolve every waiter parked for *machine_id* (no-op when none)."""
+        for fut in self._waiters.pop(machine_id, []):
+            if not fut.done():
+                fut.set_result(True)
+
+    def discard(self, machine_id: str, fut: "asyncio.Future") -> None:
+        """Drop a single waiter (e.g. after a timeout) without resolving it."""
+        waiters = self._waiters.get(machine_id)
+        if not waiters:
+            return
+        if fut in waiters:
+            waiters.remove(fut)
+        if not waiters:
+            self._waiters.pop(machine_id, None)
+
+
+async def broadcast_index_refresh(
+    manager: ConnectionManager,
+    registry: "IndexRefreshRegistry",
+) -> Dict[str, "asyncio.Future"]:
+    """Ask every connected daemon to rebuild and immediately re-push its index.
+
+    Sends a ``MSG_HISTORY_INDEX_REQUEST`` down each live daemon socket and
+    parks one waiter future per machine that accepted the request. Returns a
+    ``{machine_id: future}`` mapping the caller can await with a bounded
+    timeout; each future resolves when that daemon's forced
+    ``MSG_HISTORY_INDEX`` is applied to the cache. Returns an empty mapping
+    when no daemon is connected. A machine whose send fails has its waiter
+    discarded immediately so no future is left dangling.
+    """
+    waiters: Dict[str, "asyncio.Future"] = {}
+    for machine_id in manager.machine_ids:
+        fut = registry.register(machine_id)
+        sent = await manager.send_to(machine_id, protocol.make_history_index_request())
+        if sent:
+            waiters[machine_id] = fut
+        else:
+            registry.discard(machine_id, fut)
+    return waiters
+
+
 async def request_history(
     manager: ConnectionManager,
     state: ServerState,
@@ -273,6 +336,7 @@ async def handle_daemon_connection(
     state: ServerState,
     hub: Optional["UiHub"] = None,
     registry: Optional["HistoryRequestRegistry"] = None,
+    index_registry: Optional["IndexRefreshRegistry"] = None,
 ) -> None:
     """Serve one daemon WebSocket connection end to end.
 
@@ -280,7 +344,9 @@ async def handle_daemon_connection(
     answers with ``WELCOME``, then runs the receive + heartbeat loops until the
     daemon disconnects or the heartbeat times out. Connection and state changes
     are mirrored to web-frontend clients via *hub*. Inbound ``MSG_HISTORY_DATA``
-    frames resolve any on-demand pull parked in *registry*.
+    frames resolve any on-demand pull parked in *registry*; inbound
+    ``MSG_HISTORY_INDEX`` frames resolve any index-refresh parked in
+    *index_registry*.
     """
     await websocket.accept()
     machine_id: Optional[str] = None
@@ -322,7 +388,9 @@ async def handle_daemon_connection(
         await websocket.send_text(protocol.make_welcome(SERVER_VERSION).to_json())
         await _push_state(hub, state, "status_update")
 
-        await _serve_loop(websocket, manager, state, machine_id, hub, registry)
+        await _serve_loop(
+            websocket, manager, state, machine_id, hub, registry, index_registry
+        )
     except Exception:  # WebSocketDisconnect and friends
         logger.debug("Daemon connection ended", exc_info=True)
     finally:
@@ -339,6 +407,7 @@ async def _serve_loop(
     machine_id: str,
     hub: Optional["UiHub"] = None,
     registry: Optional["HistoryRequestRegistry"] = None,
+    index_registry: Optional["IndexRefreshRegistry"] = None,
 ) -> None:
     """Run the receive loop alongside a heartbeat loop; stop when either ends."""
     last_seen = {"ts": time.time()}
@@ -352,7 +421,9 @@ async def _serve_loop(
             except protocol.ProtocolError as exc:
                 logger.warning("Dropping malformed frame from %s: %s", machine_id, exc)
                 continue
-            await _handle_message(message, state, machine_id, hub, registry)
+            await _handle_message(
+                message, state, machine_id, hub, registry, index_registry
+            )
 
     async def heartbeat() -> None:
         seq = 0
@@ -393,6 +464,7 @@ async def _handle_message(
     machine_id: str,
     hub: Optional["UiHub"] = None,
     registry: Optional["HistoryRequestRegistry"] = None,
+    index_registry: Optional["IndexRefreshRegistry"] = None,
 ) -> None:
     """Apply one inbound daemon message to the server state."""
     if message.type == protocol.MSG_STATUS_UPDATE:
@@ -414,6 +486,11 @@ async def _handle_message(
         if isinstance(sessions, list):
             await state.update_history_index(machine_id, sessions)
             await _push_history_index(hub, state)
+        # Resolve any GET /api/history refresh waiting on this machine's
+        # re-push (after the cache has been updated above), even when the
+        # session list was malformed — the daemon answered.
+        if index_registry is not None:
+            index_registry.resolve(machine_id)
     elif message.type == protocol.MSG_HISTORY_DATA:
         # History records — either an on-demand pull's reply or an active
         # flow's incremental append. Cache them, resolve any waiting REST

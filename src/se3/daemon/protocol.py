@@ -25,7 +25,7 @@ Message directions
   :data:`MSG_HISTORY_INDEX`, :data:`MSG_HISTORY_DATA`.
 * server → daemon: :data:`MSG_WELCOME`, :data:`MSG_SPAWN_FLOW`,
   :data:`MSG_RESPOND_CALL`, :data:`MSG_PING`, :data:`MSG_HISTORY_REQUEST`,
-  :data:`MSG_INTERJECT_FLOW`.
+  :data:`MSG_HISTORY_INDEX_REQUEST`, :data:`MSG_INTERJECT_FLOW`.
 
 Backward compatibility
 ----------------------
@@ -69,6 +69,13 @@ MSG_SPAWN_FLOW = "spawn_flow"
 MSG_RESPOND_CALL = "respond_call"
 MSG_PING = "ping"
 MSG_HISTORY_REQUEST = "history_request"
+#: server → daemon: force a fresh rebuild + immediate re-push of the history
+#: index (:data:`MSG_HISTORY_INDEX`), bypassing the daemon's change-debounce.
+#: The web ``GET /api/history`` broadcasts this to every connected daemon so
+#: entering the history view always reflects the latest sessions rather than
+#: the last index a daemon happened to push. The payload is empty — it has no
+#: flow dimension and merely triggers the re-push.
+MSG_HISTORY_INDEX_REQUEST = "history_index_request"
 #: server → daemon: deliver a mid-flow user interjection to a running flow.
 #: The daemon turns it into an ``interjection``-kind call file under
 #: ``se3/calls/`` which ``se3 run`` drains at the next step boundary.
@@ -127,6 +134,7 @@ SERVER_TO_DAEMON: FrozenSet[str] = frozenset(
         MSG_RESPOND_CALL,
         MSG_PING,
         MSG_HISTORY_REQUEST,
+        MSG_HISTORY_INDEX_REQUEST,
         MSG_INTERJECT_FLOW,
     }
 )
@@ -353,6 +361,19 @@ def make_history_index(sessions: Any, *, seq: int = 0) -> Message:
         payload={"sessions": list(sessions)},
         seq=seq,
     )
+
+
+def make_history_index_request(*, seq: int = 0) -> Message:
+    """server → daemon: force a fresh rebuild + re-push of the history index.
+
+    Carries no payload — it has no flow dimension and merely instructs the
+    daemon to rebuild its index from disk and send a :data:`MSG_HISTORY_INDEX`
+    immediately, even if the index has not changed since the last push (it
+    bypasses the daemon's change-debounce via ``force_index``). The web
+    ``GET /api/history`` broadcasts this to every connected daemon so the
+    history list always reflects the latest sessions.
+    """
+    return Message(type=MSG_HISTORY_INDEX_REQUEST, payload={}, seq=seq)
 
 
 def make_history_request(
