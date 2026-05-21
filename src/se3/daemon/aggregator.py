@@ -288,6 +288,8 @@ class DaemonAggregator:
 
         flow_id = data.get("flow_id")
         flow_id_str = str(flow_id) if flow_id else None
+        flow_calls = self._filter_calls_for_flow(pending_calls, flow_id_str)
+        flow_calls = self._filter_stale_calls(flow_calls, state)
         return FlowSnapshot(
             project_root=str(root),
             flow_id=flow_id_str,
@@ -299,7 +301,7 @@ class DaemonAggregator:
             total_steps=total,
             progress=round(progress, 4),
             updated_at=data.get("updated_at"),
-            pending_calls=self._filter_calls_for_flow(pending_calls, flow_id_str),
+            pending_calls=flow_calls,
             log_count=log_count,
             issue_count=issue_count,
             summary=self._read_summary(state_dir, flow_id_str),
@@ -376,6 +378,56 @@ class DaemonAggregator:
                 continue
             if str(call_flow_id) == flow_id:
                 result.append(call)
+        return result
+
+    @staticmethod
+    def _filter_stale_calls(
+        calls: List[PendingCall], state: Dict[str, Any]
+    ) -> List[PendingCall]:
+        """Drop calls whose owning step the flow has already moved past.
+
+        The response-file heuristic in :meth:`_enumerate_calls` only clears a
+        call once a sibling ``.response`` file appears. Interactive confirm /
+        human calls answered in the CLI terminal never get such a sibling: the
+        ``se3 run`` loop consumes the terminal answer directly and advances. So
+        those call files linger for the whole run and, without this filter, the
+        web console would keep showing a stale "待回复" chip even though the
+        flow has long since moved on.
+
+        A call is judged **stale** when its owning step is resolvable in the
+        flow ``state`` and the flow has already passed it — either the step is
+        no longer ``current_step_id`` or the step itself reached a processed
+        status (``completed`` / ``partial`` / ``failed`` / ``revision_needed``).
+        Such calls are dropped.
+
+        A call whose step cannot be resolved (no ``step_id``, or a ``step_id``
+        absent from ``state.steps``) is kept untouched, so a genuinely pending
+        interaction is never lost to an over-eager progress heuristic.
+        """
+        if not isinstance(state, dict):
+            return list(calls)
+        steps = state.get("steps")
+        if not isinstance(steps, dict):
+            return list(calls)
+        current_step_id = state.get("current_step_id")
+        processed = {"completed", "partial", "failed", "revision_needed"}
+        result: List[PendingCall] = []
+        for call in calls:
+            step_id = _call_step_id(call)
+            if not step_id or step_id not in steps:
+                # Unattributable to a step in this flow — keep, do not risk
+                # dropping a real pending interaction.
+                result.append(call)
+                continue
+            step = steps.get(step_id)
+            status = ""
+            if isinstance(step, dict):
+                status = str(step.get("status") or "").lower()
+            if step_id != current_step_id or status in processed:
+                # The flow has walked past this step (or already finished it) —
+                # the call is stale; do not surface it as pending.
+                continue
+            result.append(call)
         return result
 
     @staticmethod
@@ -472,6 +524,20 @@ def _read_json(path: Path) -> Optional[dict]:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+
+
+def _call_step_id(call: PendingCall) -> Optional[str]:
+    """Resolve the step a :class:`PendingCall` belongs to, or ``None``.
+
+    Prefers the call's own ``step_id`` field, falling back to
+    ``context.step_id`` (where confirm / discovery / retry-decision writers
+    record it). Returns ``None`` when neither is present.
+    """
+    if call.step_id:
+        return str(call.step_id)
+    ctx = call.context if isinstance(call.context, dict) else {}
+    sid = ctx.get("step_id")
+    return str(sid) if sid else None
 
 
 def _current_step(state: dict) -> Optional[str]:

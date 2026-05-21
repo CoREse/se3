@@ -937,3 +937,245 @@ def test_summarize_records_incrementally_readable_in_frontend_shape():
         assert _frontend_outputs(pushed_events[0])["summary"] == summary_md
         # Cursor counts all three lines so the next poll is incremental.
         assert msg.payload["cursor"]["12_summarize_abc.jsonl"] == 3
+
+
+# ---------------------------------------------------------------------------
+# Group G2: stale "待回复" chip lifecycle.
+#
+# Interactive confirm / human calls answered in the CLI terminal never get a
+# sibling ``.response`` file (the run loop consumes the answer and advances),
+# so the response-file heuristic in ``_enumerate_calls`` cannot clear them and
+# the chip would otherwise linger for the entire run. The aggregator now also
+# judges a call against the flow's *progress*: a call whose owning step the
+# flow has already walked past (no longer ``current_step_id``, or the step
+# reached a processed status) is dropped from ``FlowSnapshot.pending_calls``,
+# while a call for the step the flow is genuinely waiting on is kept. The
+# machine-level ``MachineStatus.pending_calls`` stays unfiltered.
+# ---------------------------------------------------------------------------
+
+
+def _seed_engine_with_steps(
+    project_root: Path,
+    *,
+    flow_id: str,
+    current_step_id: str,
+    steps: dict,
+    status: str = "RUNNING",
+) -> None:
+    """Write an engine.json whose ``state`` carries a steps map + current step."""
+    state_dir = project_root / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps(
+            {
+                "flow_id": flow_id,
+                "task_description": "t",
+                "task_type": "feature",
+                "status": status,
+                "state": {
+                    "current_step_id": current_step_id,
+                    "selected_steps": [
+                        v.get("step_type", "") for v in steps.values()
+                    ],
+                    "current_step_index": 0,
+                    "steps": steps,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_flow_call(
+    project_root: Path,
+    *,
+    call_id: str,
+    flow_id: str,
+    step_id: str,
+    kind: str = "call",
+    prompt: str = "Need a human?",
+) -> Path:
+    """Write a flow-scoped call file (kind-tagged, with context.flow_id/step_id)."""
+    calls_dir = project_root / "se3" / "calls"
+    calls_dir.mkdir(parents=True, exist_ok=True)
+    path = calls_dir / f"{call_id}.json"
+    path.write_text(
+        json.dumps(
+            {
+                "call_id": call_id,
+                "kind": kind,
+                "prompt": prompt,
+                "context": {"flow_id": flow_id, "step_id": step_id},
+                "step_id": step_id,
+                "options": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_stale_chip_dropped_after_flow_walks_past_its_step():
+    """A confirm call whose step is no longer current is dropped from the
+    flow snapshot, even though no .response sibling was ever written."""
+    from se3.daemon.aggregator import DaemonAggregator
+
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        _seed_engine_with_steps(
+            project_root,
+            flow_id="F1",
+            current_step_id="02_plan_x",
+            steps={
+                "01_discovery_x": {"step_type": "discovery", "status": "completed"},
+                "02_plan_x": {"step_type": "plan", "status": "running"},
+            },
+        )
+        # An unanswered confirm call left over from the (now-finished) discovery
+        # step — exactly the file that used to keep a stale chip showing.
+        _write_flow_call(
+            project_root,
+            call_id="discovery_01_discovery_x_001",
+            flow_id="F1",
+            step_id="01_discovery_x",
+            kind="discovery_confirm",
+        )
+
+        aggregator = DaemonAggregator()
+        aggregator.add_project_root(project_root)
+        snapshot = aggregator._snapshot_for_root(project_root)
+
+        assert snapshot is not None
+        assert snapshot.flow_id == "F1"
+        # The flow has moved on to plan -> the discovery chip is cleared.
+        assert snapshot.pending_calls == []
+
+
+def test_real_pending_chip_for_current_step_is_kept():
+    """A call for the step the flow is genuinely waiting on survives the
+    progress filter."""
+    from se3.daemon.aggregator import DaemonAggregator
+
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        _seed_engine_with_steps(
+            project_root,
+            flow_id="F1",
+            current_step_id="01_discovery_x",
+            steps={
+                "01_discovery_x": {"step_type": "discovery", "status": "paused"},
+            },
+            status="PAUSED",
+        )
+        _write_flow_call(
+            project_root,
+            call_id="discovery_01_discovery_x_002",
+            flow_id="F1",
+            step_id="01_discovery_x",
+            kind="discovery_confirm",
+        )
+
+        aggregator = DaemonAggregator()
+        aggregator.add_project_root(project_root)
+        snapshot = aggregator._snapshot_for_root(project_root)
+
+        assert snapshot is not None
+        assert len(snapshot.pending_calls) == 1
+        assert snapshot.pending_calls[0].step_id == "01_discovery_x"
+
+
+def test_chip_dropped_when_current_step_already_processed():
+    """Even while still ``current_step_id``, a call whose step reached a
+    processed status (completed/partial/failed/revision_needed) is stale."""
+    from se3.daemon.aggregator import DaemonAggregator
+
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        _seed_engine_with_steps(
+            project_root,
+            flow_id="F1",
+            current_step_id="01_discovery_x",
+            steps={
+                "01_discovery_x": {"step_type": "discovery", "status": "completed"},
+            },
+        )
+        _write_flow_call(
+            project_root,
+            call_id="discovery_01_discovery_x_003",
+            flow_id="F1",
+            step_id="01_discovery_x",
+            kind="discovery_confirm",
+        )
+
+        aggregator = DaemonAggregator()
+        aggregator.add_project_root(project_root)
+        snapshot = aggregator._snapshot_for_root(project_root)
+
+        assert snapshot is not None
+        assert snapshot.pending_calls == []
+
+
+def test_unresolvable_step_call_is_kept():
+    """A call whose step_id is absent from the flow's steps map is kept — the
+    progress heuristic must never drop a call it cannot attribute."""
+    from se3.daemon.aggregator import DaemonAggregator
+
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        _seed_engine_with_steps(
+            project_root,
+            flow_id="F1",
+            current_step_id="02_plan_x",
+            steps={"02_plan_x": {"step_type": "plan", "status": "running"}},
+        )
+        _write_flow_call(
+            project_root,
+            call_id="mcp_call_004",
+            flow_id="F1",
+            step_id="99_unknown_step",
+        )
+
+        aggregator = DaemonAggregator()
+        aggregator.add_project_root(project_root)
+        snapshot = aggregator._snapshot_for_root(project_root)
+
+        assert snapshot is not None
+        assert len(snapshot.pending_calls) == 1
+        assert snapshot.pending_calls[0].call_id == "mcp_call_004"
+
+
+def test_machine_level_pending_calls_unaffected_by_progress_filter():
+    """The stale-call progress filter is flow-scoped only — the machine-wide
+    ``MachineStatus.pending_calls`` still enumerates the call unfiltered."""
+    from se3.daemon.aggregator import DaemonAggregator
+
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        _seed_engine_with_steps(
+            project_root,
+            flow_id="F1",
+            current_step_id="02_plan_x",
+            steps={
+                "01_discovery_x": {"step_type": "discovery", "status": "completed"},
+                "02_plan_x": {"step_type": "plan", "status": "running"},
+            },
+        )
+        _write_flow_call(
+            project_root,
+            call_id="discovery_01_discovery_x_005",
+            flow_id="F1",
+            step_id="01_discovery_x",
+            kind="discovery_confirm",
+        )
+
+        aggregator = DaemonAggregator()
+        aggregator.add_project_root(project_root)
+        status = aggregator.get_snapshot()
+
+        # Flow-scoped view drops the stale chip ...
+        assert len(status.flows) == 1
+        assert status.flows[0].pending_calls == []
+        # ... but the machine-level view keeps every queued call file.
+        assert [c.call_id for c in status.pending_calls] == [
+            "discovery_01_discovery_x_005"
+        ]

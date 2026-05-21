@@ -301,6 +301,121 @@ def test_read_active_flows_only_returns_active(tmp_path):
 
 
 # --------------------------------------------------------------------------
+# Group G2: every step type's terminal event arrives via the incremental read
+# --------------------------------------------------------------------------
+
+
+def _step_event_line(event_type, step_id, step_type, outputs):
+    """The exact line shape ``record_step_event`` writes for a terminal step."""
+    return {
+        "type": event_type,
+        "step_id": step_id,
+        "step_type": step_type,
+        "timestamp": "2026-05-21T01:00:00",
+        "data": {
+            "step": {
+                "step_id": step_id,
+                "step_type": step_type,
+                "status": (
+                    "failed" if event_type == "step_failed" else "completed"
+                ),
+                "outputs": outputs,
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "step_type, outputs",
+    [
+        ("discovery", {"refined_description": "explore"}),
+        ("analyze", {"reasoning": "ok"}),
+        ("plan", {"task_groups": []}),
+        ("confirm", {"review_result": {"approved": True}}),
+        ("implement", {"completion_status": "complete"}),
+        ("test", {"test_results": {"overall_passed": True}}),
+        ("self_check", {"issues": []}),
+        ("verify_spec", {"verified": True}),
+        ("update_spec", {"updated_specs": []}),
+        ("commit", {"committed": True}),
+        ("version_analyze", {"suggested_version": "1.2.0"}),
+        ("summarize", {"summary": "done"}),
+    ],
+)
+def test_each_terminal_step_event_arrives_via_incremental_read(
+    tmp_path, step_type, outputs
+):
+    """A terminal ``step_completed`` line appended to an active flow's per-step
+    jsonl is surfaced by ``read_active_flows`` exactly once, with the cursor
+    advancing so it is never re-pushed."""
+    state_dir = tmp_path / "se3" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps({"flow_id": "live", "status": "RUNNING"}), encoding="utf-8"
+    )
+    step_id = f"01_{step_type}_abc"
+    jsonl = tmp_path / "se3" / "history" / "live" / f"{step_id}.jsonl"
+    _write_jsonl(jsonl, [_msg("assistant", "narrative", step_type=step_type)])
+
+    reader = _make_reader(tmp_path)
+    cursors: dict = {}
+
+    # First poll: only the chat turn, no terminal card yet.
+    reads = reader.read_active_flows(cursors)
+    cursors[reads[0].flow_id] = reads[0].cursor
+    assert all(
+        r["message"].get("type") not in ("step_completed", "step_failed")
+        for r in reads[0].records
+    )
+
+    # The step finishes -> HistorySink appends the terminal event line.
+    _append_jsonl(jsonl, [_step_event_line("step_completed", step_id, step_type, outputs)])
+
+    reads = reader.read_active_flows(cursors)
+    cursors[reads[0].flow_id] = reads[0].cursor
+    events = [
+        r
+        for r in reads[0].records
+        if r["message"].get("type") == "step_completed"
+    ]
+    assert len(events) == 1
+    event = events[0]
+    assert event["step_id"] == step_id
+    # The structured outputs the web report card renders are carried verbatim.
+    assert event["message"]["data"]["step"]["outputs"] == outputs
+
+    # Not re-pushed on the next poll — the cursor consumed the line.
+    reads = reader.read_active_flows(cursors)
+    assert reads[0].records == []
+
+
+def test_step_failed_terminal_event_arrives_via_incremental_read(tmp_path):
+    """A ``step_failed`` terminal line is surfaced incrementally just like
+    ``step_completed`` and carries the error payload."""
+    state_dir = tmp_path / "se3" / "state"
+    state_dir.mkdir(parents=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps({"flow_id": "live", "status": "RUNNING"}), encoding="utf-8"
+    )
+    step_id = "03_plan_def"
+    jsonl = tmp_path / "se3" / "history" / "live" / f"{step_id}.jsonl"
+    _write_jsonl(
+        jsonl,
+        [_step_event_line("step_failed", step_id, "plan", {"error": "boom"})],
+    )
+
+    reads = _make_reader(tmp_path).read_active_flows({})
+    assert len(reads) == 1
+    failed = [
+        r
+        for r in reads[0].records
+        if r["message"].get("type") == "step_failed"
+    ]
+    assert len(failed) == 1
+    assert failed[0]["message"]["data"]["step"]["outputs"] == {"error": "boom"}
+
+
+# --------------------------------------------------------------------------
 # enumerate_historical_project_roots
 # --------------------------------------------------------------------------
 
