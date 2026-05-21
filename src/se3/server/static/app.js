@@ -2143,6 +2143,107 @@ function renderDiscoveryAssistant(content, _norm) {
 }
 registerAssistantRenderer("discovery", renderDiscoveryAssistant);
 
+// --- generic structured assistant renderer (all non-discovery steps) -------
+//
+// Beyond discovery, most step types emit an assistant message that is a JSON
+// object — optionally wrapped in a ```json``` fence and/or preceded by
+// narrative — carrying the same structured fields the CLI end-of-step Panel
+// reads from `step.outputs`. Rather than re-implement a bespoke field layout
+// per step, we reuse the existing STEP_REPORT_RENDERERS (the web counterparts
+// of `step_renderers.py`) so an assistant turn's default view shows exactly the
+// same structured fields a reader sees on that step's report card, and web/CLI
+// stay in field parity.
+//
+// `reportRendererFor` resolves the report renderer at call time (not capture
+// time) so registration order does not matter, and lets `plan_tasks` borrow the
+// `plan` renderer (both consume `task_groups`).
+function reportRendererFor(stepType) {
+  if (stepType === "plan_tasks") return STEP_REPORT_RENDERERS.plan;
+  return STEP_REPORT_RENDERERS[stepType] || null;
+}
+
+// Build an assistant renderer for `stepType` that parses the JSON body and
+// renders its fields via the shared report renderer. Returns a renderer
+// `(content, norm) -> Node | null`:
+//   1. Extract structured JSON + narrative (extractStructuredJson). When no
+//      JSON is recoverable — or the top level is not a dict — return null so
+//      renderConversationRecord falls back to the renderToolMarkers + markdown
+//      path and nothing is lost.
+//   2. Render any narrative (text outside the JSON) at the top via
+//      renderToolMarkers, preserving inline [Tool: …] markers.
+//   3. Delegate field rendering to the step's report renderer, passing the
+//      parsed JSON as the synthetic `step.outputs`. Any throw inside the report
+//      renderer → return null (full fallback) so a partial structured render
+//      never strands the assistant text.
+function makeStructuredAssistantRenderer(stepType) {
+  return function (content, _norm) {
+    const reportRenderer = reportRendererFor(stepType);
+    if (!reportRenderer) return null;
+    const extracted = extractStructuredJson(content);
+    if (!extracted) return null;
+    const value = extracted.value;
+    // The CLI parser is dict-only; a top-level array / scalar is not a
+    // structured step result — fall back to the generic path.
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+    const frag = document.createDocumentFragment();
+    let rendered = false;
+
+    // 2. narrative prefix (tool markers preserved)
+    if (extracted.narrative) {
+      const narWrap = el("div", "assistant-narrative");
+      for (const node of renderToolMarkers(extracted.narrative)) {
+        narWrap.appendChild(node);
+      }
+      if (narWrap.childNodes.length) {
+        frag.appendChild(narWrap);
+        rendered = true;
+      }
+    }
+
+    // 3. structured fields via the shared report renderer
+    let body;
+    try {
+      const synthStep = {
+        step_type: stepType,
+        status: typeof value.status === "string" ? value.status : "completed",
+        outputs: value,
+        error_message: "",
+      };
+      body = reportRenderer(synthStep, value);
+    } catch (err) {
+      // A report renderer fault must never strand the assistant text — bail to
+      // the generic fallback, which re-renders the whole body verbatim.
+      try { console.warn("assistant report renderer failed", stepType, err); }
+      catch (_) { /* console may be absent */ }
+      return null;
+    }
+    const bodyHasContent = !!(body && body.childNodes && body.childNodes.length);
+    if (bodyHasContent) {
+      const wrap = el("div", "assistant-structured kind-" + stepType);
+      const bodyWrap = el("div", "step-report__body");
+      bodyWrap.appendChild(body);
+      wrap.appendChild(bodyWrap);
+      frag.appendChild(wrap);
+      rendered = true;
+    }
+
+    if (!rendered) return null;
+    return frag;
+  };
+}
+
+// Register the generic structured renderer for every step type that has a
+// report renderer (discovery keeps its dedicated card-style renderer above).
+// The registry stays open for new step types — adding one is a one-line
+// registration here plus its report renderer.
+for (const stepType of [
+  "analyze", "plan", "plan_tasks", "implement", "test", "self_check",
+  "verify_spec", "update_spec", "commit", "version_analyze", "summarize",
+]) {
+  registerAssistantRenderer(stepType, makeStructuredAssistantRenderer(stepType));
+}
+
 // --- long-content folding --------------------------------------------------
 
 // Records longer than this (characters) are folded by default — a `user` step
@@ -2253,6 +2354,82 @@ function makeRawToggle(norm) {
   return wrap;
 }
 
+// --- assistant three-layer progressive disclosure -------------------------
+
+// "展开全部" — Layer 2 of the assistant's three-layer disclosure. Collapsed by
+// default; on first expand it lazily renders the full per-turn process via
+// `renderToolMarkers` (tool calls + intermediate narrative + the unrendered
+// result JSON text). Expanding scrolls the freshly shown block into view;
+// collapsing leaves the reader's position untouched.
+function makeProcessToggle(content) {
+  const wrap = el("div", "process-toggle-wrap folded");
+  const btn = el("button", "process-toggle", "▸ 展开全部");
+  btn.type = "button";
+  const full = el("div", "process-full hidden");
+  let built = false;
+  let expanded = false;
+  btn.addEventListener("click", () => {
+    expanded = !expanded;
+    if (expanded && !built) {
+      for (const node of renderToolMarkers(content)) full.appendChild(node);
+      built = true;
+    }
+    full.classList.toggle("hidden", !expanded);
+    wrap.classList.toggle("folded", !expanded);
+    wrap.classList.toggle("expanded", expanded);
+    btn.textContent = expanded ? "▾ 收起全部" : "▸ 展开全部";
+    if (expanded) {
+      requestAnimationFrame(() => full.scrollIntoView({ block: "nearest" }));
+    }
+  });
+  wrap.append(btn, full);
+  return wrap;
+}
+
+// Build the inner content of an assistant bubble using the three-layer
+// progressive disclosure model:
+//   Layer 1 (default): the clean structured result, via STEP_ASSISTANT_RENDERERS
+//                       — no tool markers, no raw JSON, just the fields.
+//   Layer 2 ("展开全部"): the full per-turn process (tool calls + narrative +
+//                       unrendered result JSON), collapsed by default.
+//   Layer 3 ("查看原始"): the raw NDJSON — provided by `makeRawToggle`, appended
+//                       by the caller at the record-row level.
+// When no structured renderer matches (or one bails / throws), the Layer-2
+// process view becomes the default so no assistant text is ever hidden, and a
+// huge body still folds via `makeFoldable`.
+function renderAssistantBubble(content, norm) {
+  const frag = document.createDocumentFragment();
+  const stepType = String(norm.stepType || "").toLowerCase();
+  const renderer = stepType && STEP_ASSISTANT_RENDERERS[stepType];
+  let structured = null;
+  if (renderer) {
+    try {
+      structured = renderer(content, norm);
+    } catch (err) {
+      // A registry renderer must never break the wider conversation — log once
+      // and fall back to the default process view.
+      try { console.warn("assistant renderer failed", stepType, err); }
+      catch (_) { /* console may be absent */ }
+      structured = null;
+    }
+  }
+
+  if (structured) {
+    const resultWrap = el("div", "assistant-result");
+    resultWrap.appendChild(structured);
+    frag.appendChild(resultWrap);
+    frag.appendChild(makeProcessToggle(content));
+  } else {
+    const buildFull = () => {
+      const f = document.createDocumentFragment();
+      for (const node of renderToolMarkers(content)) f.appendChild(node);
+      return f;
+    };
+    frag.appendChild(makeFoldable(buildFull, content));
+  }
+  return frag;
+}
+
 // --- record bubble ---------------------------------------------------------
 
 // Render a single normalized record as a role-tagged conversation bubble.
@@ -2293,30 +2470,12 @@ function renderConversationRecord(norm) {
       bubble.appendChild(
         el("p", "md-p conv-empty", "(no readable content for this record)"));
     } else if (role === "assistant") {
-      // assistant: dispatch through STEP_ASSISTANT_RENDERERS first so step
-      // types that emit structured JSON (e.g. discovery) get a purpose-built
-      // renderer instead of dumping `\`\`\`json…\`\`\`` as a code block. The
-      // registry lookup falls back to the generic tool-marker + Markdown
-      // path when no renderer is registered or when one throws.
-      const buildFull = () => {
-        const stepType = String(norm.stepType || "").toLowerCase();
-        const renderer = stepType && STEP_ASSISTANT_RENDERERS[stepType];
-        if (renderer) {
-          try {
-            const node = renderer(content, norm);
-            if (node) return node;
-          } catch (err) {
-            // Registry renderers must never break the wider conversation —
-            // log once and fall back to the default Markdown path.
-            try { console.warn("assistant renderer failed", stepType, err); }
-            catch (_) { /* console may be absent */ }
-          }
-        }
-        const frag = document.createDocumentFragment();
-        for (const node of renderToolMarkers(content)) frag.appendChild(node);
-        return frag;
-      };
-      bubble.appendChild(makeFoldable(buildFull, content));
+      // assistant: three-layer progressive disclosure. The default view is the
+      // clean structured result (via STEP_ASSISTANT_RENDERERS); the full
+      // per-turn process is tucked behind "展开全部", and the raw NDJSON behind
+      // "查看原始" (the row-level makeRawToggle). When no structured renderer
+      // matches, the process view becomes the default so nothing is hidden.
+      bubble.appendChild(renderAssistantBubble(content, norm));
     } else {
       // user / system / other: literal text — these are large structured
       // prompts whose exact whitespace matters; do not Markdown-mangle them.
@@ -3482,6 +3641,8 @@ if (typeof module !== "undefined" && module.exports) {
     STEP_ASSISTANT_RENDERERS,
     registerAssistantRenderer,
     renderDiscoveryAssistant,
+    makeStructuredAssistantRenderer,
+    renderAssistantBubble,
     extractStructuredJson,
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,

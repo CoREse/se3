@@ -398,6 +398,38 @@ check("registerAssistantRenderer rejects non-function values", () => {
   app.registerAssistantRenderer("", () => null);
   assert.equal(Object.keys(app.STEP_ASSISTANT_RENDERERS).length, before);
 });
+check("STEP_ASSISTANT_RENDERERS covers every structured step type", () => {
+  // Discovery has its dedicated card renderer; the rest share the generic
+  // factory. All structured step types must have an assistant renderer so an
+  // assistant turn defaults to fields, never a raw ```json``` blob.
+  const expected = [
+    "discovery", "analyze", "plan", "plan_tasks", "implement", "test",
+    "self_check", "verify_spec", "update_spec", "commit", "version_analyze",
+    "summarize",
+  ];
+  for (const t of expected) {
+    assert.equal(
+      typeof app.STEP_ASSISTANT_RENDERERS[t], "function",
+      "missing assistant renderer for " + t,
+    );
+  }
+});
+// -- makeStructuredAssistantRenderer (DOM-free fallbacks) -------------------
+// The factory must return null (→ caller falls back to the generic renderer)
+// rather than throw, so no assistant message is ever lost.
+check("makeStructuredAssistantRenderer returns null when no JSON is present", () => {
+  const r = app.makeStructuredAssistantRenderer("analyze");
+  assert.equal(r("just prose, no json here", {}), null);
+});
+check("makeStructuredAssistantRenderer returns null for a top-level array", () => {
+  const r = app.makeStructuredAssistantRenderer("analyze");
+  // A bare trailing array is valid JSON but not a dict step result.
+  assert.equal(r("preamble\n[1, 2, 3]", {}), null);
+});
+check("makeStructuredAssistantRenderer returns null for an unknown step type", () => {
+  const r = app.makeStructuredAssistantRenderer("__no_report_renderer__");
+  assert.equal(r('```json\n{"a":1}\n```', {}), null);
+});
 
 // -- extractStructuredJson --------------------------------------------------
 // Mirror of backend `parse_json_response`: pulls JSON out of fenced
@@ -742,6 +774,10 @@ function makeText(text) {
 }
 
 const _elementsById = {};
+// Report renderers (reused by the structured assistant renderers) test nodes
+// with `x instanceof Node`. Every node the app builds is a FakeNode, so map the
+// global `Node` to FakeNode; strings stay non-instances, matching the browser.
+globalThis.Node = FakeNode;
 globalThis.requestAnimationFrame = () => {};
 globalThis.document = {
   createElement: (tag) => new FakeNode(tag),
@@ -1026,6 +1062,152 @@ check("mergeSnapshotWithLiveAppends returns the snapshot unchanged when no live 
   const r1 = asstRecord("A1", 1, "s1", "discovery");
   const snap = [r1];
   assert.equal(app.mergeSnapshotWithLiveAppends(snap, []), snap);
+});
+
+// ---------------------------------------------------------------------------
+// Assistant three-layer progressive disclosure (DOM)
+// ---------------------------------------------------------------------------
+//
+// Drive the real renderConversationRecord against the DOM stub for assistant
+// turns of several step types. Layer 1 = clean structured fields; Layer 2 =
+// "展开全部" full process; Layer 3 = "查看原始" raw NDJSON. Parse failure must
+// degrade to the generic text path without losing the message.
+
+// Build a normalized assistant record (optionally with a raw NDJSON payload).
+const asstNorm = (content, stepType, rawNdjson) => app.normalizeRecord({
+  step_id: stepType,
+  message: {
+    role: "assistant",
+    content,
+    timestamp: 1,
+    step_type: stepType,
+    raw_ndjson: rawNdjson != null ? rawNdjson : null,
+  },
+});
+
+check("assistant analyze turn renders structured fields, not a JSON blob", () => {
+  const content =
+    "Looking at the engine.\n```json\n" +
+    JSON.stringify({
+      task_type: "feature",
+      complexity: "medium",
+      scope: "src/engine",
+      reasoning: "Touches the state machine.",
+      relevant_specs: ["base:Directory Structure"],
+    }) +
+    "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "analyze"));
+
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "expected a Layer-1 structured result wrapper");
+  const bar = findOne(result, "step-report__status-bar");
+  assert.ok(bar, "expected a status bar in the structured render");
+  assert.ok(bar.textContent.includes("feature"));
+  assert.ok(result.textContent.includes("src/engine"));
+  assert.ok(result.textContent.includes("Touches the state machine."));
+  // The narrative outside the JSON is still shown at the top.
+  assert.ok(result.textContent.includes("Looking at the engine."));
+  // The default (Layer-1) view must NOT dump the raw JSON keys as a code block.
+  assert.equal(result.textContent.includes('"task_type"'), false);
+});
+
+check("assistant commit turn renders the commit report fields", () => {
+  const content = JSON.stringify({
+    committed: true,
+    commit_hash: "abcdef1234567890",
+    commit_message: "feat: add the thing",
+  });
+  const row = app.renderConversationRecord(asstNorm(content, "commit"));
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "expected a structured result for commit");
+  // Short hash (first 7 chars) and the commit message body are surfaced.
+  assert.ok(result.textContent.includes("abcdef1"));
+  assert.ok(result.textContent.includes("feat: add the thing"));
+});
+
+check("assistant plan_tasks turn reuses the plan renderer (task groups)", () => {
+  const content = "```json\n" + JSON.stringify({
+    task_groups: [
+      { group_id: "G1", name: "core", tasks: [{ estimated_loc: 40 }], depends_on: [] },
+      { group_id: "G2", name: "tests", tasks: [{ estimated_loc: 20 }], depends_on: ["G1"] },
+    ],
+  }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "plan_tasks"));
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "expected a structured result for plan_tasks");
+  assert.ok(result.textContent.includes("G1"));
+  assert.ok(result.textContent.includes("G2"));
+  assert.ok(result.textContent.includes("core"));
+});
+
+check("assistant turn falls back to text when the body has no JSON", () => {
+  const content = "I inspected the repo but produced only this prose summary.";
+  const row = app.renderConversationRecord(asstNorm(content, "analyze"));
+  // No structured wrapper: the generic path took over.
+  assert.equal(findOne(row, "assistant-result"), null);
+  assert.equal(findOne(row, "process-toggle"), null);
+  // The assistant text is still visible — nothing is lost.
+  const bubble = findOne(row, "conv-bubble");
+  assert.ok(bubble && bubble.textContent.includes("prose summary"));
+});
+
+check("assistant turn falls back to text when the JSON is malformed", () => {
+  // A broken fence that neither strict parse nor the trailing-comma repair can
+  // recover — the renderer must not throw and must keep the text visible.
+  const content = "Result follows:\n```json\n{ this is : not, valid json ]\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "verify_spec"));
+  assert.equal(findOne(row, "assistant-result"), null);
+  const bubble = findOne(row, "conv-bubble");
+  assert.ok(bubble && bubble.textContent.includes("Result follows:"));
+  assert.ok(bubble.textContent.includes("not, valid json"));
+});
+
+check("assistant three layers: structured default, 展开全部 process, 查看原始 ndjson", () => {
+  const ndjson = '{"raw_marker":"NDJSON_PAYLOAD_TOKEN"}';
+  const content = "```json\n" + JSON.stringify({
+    task_type: "bugfix",
+    complexity: "small",
+    scope: "src/x",
+    reasoning: "tiny",
+  }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "analyze", ndjson));
+
+  // Layer 1: structured result is the default visible surface.
+  assert.ok(findOne(row, "assistant-result"), "Layer 1 structured result present");
+
+  // Layer 2: the "展开全部" process toggle reveals the full per-turn process,
+  // which DOES include the raw JSON text (rendered as a markdown code block).
+  const procToggle = findOne(row, "process-toggle");
+  assert.ok(procToggle, "Layer 2 process toggle present");
+  const procWrap = findOne(row, "process-toggle-wrap");
+  const procFull = findOne(procWrap, "process-full");
+  assert.equal(procFull.classList.contains("hidden"), true, "process is folded by default");
+  procToggle.dispatch("click");
+  assert.equal(procFull.classList.contains("hidden"), false, "process expands on click");
+  assert.ok(procFull.textContent.includes('"task_type"'),
+    "the full process shows the unrendered result JSON");
+
+  // Layer 3: the row-level "查看原始" toggle reveals the raw NDJSON.
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "Layer 3 raw toggle present");
+  const rawPre = findOne(row, "raw-json");
+  assert.equal(rawPre.classList.contains("hidden"), true, "raw is hidden by default");
+  rawToggle.dispatch("click");
+  assert.equal(rawPre.classList.contains("hidden"), false, "raw expands on click");
+  assert.ok(rawPre.textContent.includes("NDJSON_PAYLOAD_TOKEN"),
+    "the raw layer shows the original NDJSON payload");
+});
+
+check("assistant structured renderer that throws is caught and degrades", () => {
+  // Register a renderer that throws for a synthetic step type; renderAssistantBubble
+  // must swallow it and fall back to the generic text path.
+  const fakeStep = "__throwing_" + Math.random().toString(36).slice(2);
+  app.registerAssistantRenderer(fakeStep, () => { throw new Error("kaboom"); });
+  const row = app.renderConversationRecord(asstNorm("still visible body", fakeStep));
+  delete app.STEP_ASSISTANT_RENDERERS[fakeStep];
+  assert.equal(findOne(row, "assistant-result"), null);
+  const bubble = findOne(row, "conv-bubble");
+  assert.ok(bubble && bubble.textContent.includes("still visible body"));
 });
 
 console.log(`\n${passed} checks passed.`);
