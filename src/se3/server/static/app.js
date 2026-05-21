@@ -679,10 +679,33 @@ function computeInterventions(flow) {
   return entries;
 }
 
+// Decide which intervention the reply box should target after the chip bar is
+// rebuilt from the latest `pending_calls`. Pure: depends only on its args.
+//
+//   - Keep the current selection when its chip still exists, so a live
+//     pending_calls refresh that left the selected call in place does not
+//     yank the reply box out from under the user mid-reply.
+//   - Otherwise (the selected call was answered/withdrawn and dropped by the
+//     backend aggregator, so its chip is gone) re-home onto the first real
+//     pending call, falling back to the first entry — or `null` when the bar
+//     is now empty, which resets the reply box to its disabled/idle state.
+function reconcileReplyTarget(entries, currentTargetId) {
+  if (!Array.isArray(entries) || !entries.length) return null;
+  if (entries.some((e) => e.id === currentTargetId)) return currentTargetId;
+  const firstCall = entries.find((e) => !e.synthetic);
+  return (firstCall || entries[0]).id || null;
+}
+
 // Rebuild the intervention chip-bar (sits inside the docked reply form, above
 // the reply-context panel) and re-sync the reply box. Called from the 3s
-// detail poll; selection (`flowReplyTargetId`) and the typed-but-unsent reply
-// text are deliberately preserved across rebuilds. Chips do NOT render the
+// detail poll AND from every `refreshFlowDetail` (status_update / WS) so the
+// chip bar tracks the latest `pending_calls`: a call the backend no longer
+// reports loses its chip immediately (no stale "待回复" hanging through the
+// run), and a newly-appeared call gains its chip on the next refresh.
+// Selection (`flowReplyTargetId`) and the typed-but-unsent reply text are
+// deliberately preserved across rebuilds when the selected chip survives;
+// when it does not, `reconcileReplyTarget` re-homes (or clears) the target so
+// the reply box never points at a vanished chip. Chips do NOT render the
 // intervention's prompt/context/options — that lives in `updateReplyBox`'s
 // reply-context panel for the currently selected chip only.
 function renderInterventions(flow) {
@@ -691,13 +714,7 @@ function renderInterventions(flow) {
   const entries = computeInterventions(flow);
   state.flowInterventions = entries;
 
-  // Keep the prior selection if it still exists; otherwise prefer the first
-  // real pending call (a call needing an answer) over the synthetic
-  // interjection, falling back to whatever is first.
-  if (!entries.some((e) => e.id === state.flowReplyTargetId)) {
-    const firstCall = entries.find((e) => !e.synthetic);
-    state.flowReplyTargetId = (firstCall || entries[0] || {}).id || null;
-  }
+  state.flowReplyTargetId = reconcileReplyTarget(entries, state.flowReplyTargetId);
 
   for (const entry of entries) {
     region.appendChild(renderInterventionChip(entry));
@@ -1604,10 +1621,15 @@ function stepKey(norm) {
 //   { count: number of raw records already rendered }
 function renderConversation(container, records, append) {
   const st = container.__convState;
+  // Fast incremental path: only when we have a live reconciliation state AND
+  // the incoming array is a strict superset of what is already rendered
+  // (`records.length >= st.count`). A shorter array means the snapshot was
+  // replaced out from under us (full re-fetch, reconnect) — fall through to a
+  // clean rebuild instead of silently doing nothing, which would otherwise
+  // look like the conversation "froze".
   if (append && st && st.count > 0 && records.length >= st.count) {
     if (records.length > st.count) {
       addConversationRecords(container, st, records, st.count);
-      st.count = records.length;
     }
     return;
   }
@@ -1620,7 +1642,6 @@ function renderConversation(container, records, append) {
     return;
   }
   addConversationRecords(container, fresh, records, 0);
-  fresh.count = records.length;
 }
 
 // Build records `records[startIndex..]` and merge them into `container`,
@@ -1628,16 +1649,37 @@ function renderConversation(container, records, append) {
 // Each bubble carries its step key so a single linear sweep can rebuild the
 // `.history-step-header` separators after all bubbles for this batch have
 // been placed.
+//
+// `st.count` is advanced here (not by the caller) and ALWAYS reaches
+// `records.length`, even if an individual record fails to render: a single
+// malformed record must never stall the append cursor, or every subsequent
+// delta would re-attempt the same broken slot and the stream would freeze.
+// Each record is built behind a try/catch and degrades to a minimal
+// placeholder bubble (carrying the same ordering metadata) so the rest of the
+// batch — and all future appends — keep flowing.
 function addConversationRecords(container, st, records, startIndex) {
   for (let i = startIndex; i < records.length; i++) {
-    const norm = normalizeRecord(records[i]);
-    const bubble = renderConversationRecord(norm);
-    bubble.__convTs = tsValue(norm.timestamp);
+    let norm = null;
+    let bubble;
+    try {
+      norm = normalizeRecord(records[i]);
+      bubble = renderConversationRecord(norm);
+    } catch (err) {
+      try { console.warn("conversation record render failed", i, err); }
+      catch (_) { /* console may be absent */ }
+      bubble = el("div", "history-record conv-record role-error");
+      bubble.appendChild(
+        el("p", "md-p conv-empty", "(this record could not be rendered)"));
+    }
+    bubble.__convTs = tsValue(norm && norm.timestamp);
     bubble.__convIdx = i;
-    bubble.__convStepKey = stepKey(norm);
-    bubble.__convStepLabel = norm.stepType || norm.stepId || "step";
+    bubble.__convStepKey = stepKey(norm || {});
+    bubble.__convStepLabel = (norm && (norm.stepType || norm.stepId)) || "step";
     insertBubbleSorted(container, bubble);
   }
+  // Advance the cursor before the (stateless) header rebuild so the count is
+  // correct even if header rebuilding ever throws.
+  st.count = records.length;
   rebuildStepHeaders(container);
 }
 
@@ -3446,5 +3488,18 @@ if (typeof module !== "undefined" && module.exports) {
     USER_CONTENT_END,
     KIND_META,
     extractAssistantText,
+    // Incremental conversation reconciliation + chip refresh (exposed for the
+    // DOM-stub tests in tests/frontend/test_app_pure.mjs).
+    renderConversation,
+    addConversationRecords,
+    insertBubbleSorted,
+    rebuildStepHeaders,
+    renderConversationRecord,
+    renderInterventions,
+    reconcileReplyTarget,
+    tsValue,
+    stepKey,
+    recordKey,
+    mergeSnapshotWithLiveAppends,
   };
 }

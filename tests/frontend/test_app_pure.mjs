@@ -628,4 +628,404 @@ check("extractAssistantText skips noise event types silently", () => {
   assert.equal(out, "");
 });
 
+// ---------------------------------------------------------------------------
+// Minimal DOM stub for the incremental-reconciliation + chip-refresh tests
+// ---------------------------------------------------------------------------
+//
+// renderConversation / addConversationRecords / insertBubbleSorted /
+// rebuildStepHeaders / renderInterventions are DOM functions, but they only
+// touch a small, well-understood slice of the DOM API. The stub below
+// implements just that slice — createElement / createTextNode /
+// createDocumentFragment, appendChild / insertBefore / removeChild, a
+// className<->classList mirror, textContent, and a `children` view that
+// excludes text/fragment nodes (mirroring the real `Element.children`). It is
+// in the same spirit as the FakeSelect / FakeHint stubs above: enough to
+// exercise the reconciliation logic headlessly, no more.
+
+class FakeNode {
+  constructor(tag) {
+    this.tagName = String(tag || "").toUpperCase();
+    this.nodeType = this.tagName === "#TEXT" ? 3 : 1;
+    this._classes = new Set();
+    this.childNodes = [];
+    this._text = "";
+    this.dataset = {};
+    this.style = {};
+    this._listeners = {};
+    this.parentNode = null;
+    this.type = "";
+    this.title = "";
+    this.id = "";
+    this.value = "";
+    this.disabled = false;
+    this.placeholder = "";
+    this.classList = {
+      add: (...cs) => { for (const c of cs) if (c) this._classes.add(c); },
+      remove: (...cs) => { for (const c of cs) this._classes.delete(c); },
+      contains: (c) => this._classes.has(c),
+      toggle: (c, force) => {
+        const want = force === undefined ? !this._classes.has(c) : !!force;
+        if (want) this._classes.add(c); else this._classes.delete(c);
+        return want;
+      },
+    };
+  }
+  set className(v) {
+    this._classes = new Set(String(v || "").split(/\s+/).filter(Boolean));
+  }
+  get className() { return Array.from(this._classes).join(" "); }
+  set textContent(v) { this._text = String(v == null ? "" : v); this.childNodes = []; }
+  get textContent() {
+    if (this.childNodes.length) {
+      return this.childNodes.map((c) => c.textContent).join("");
+    }
+    return this._text;
+  }
+  // Only "" is ever assigned in app.js (to clear a container).
+  set innerHTML(_v) { this.childNodes = []; this._text = ""; }
+  get innerHTML() { return ""; }
+  get children() {
+    return this.childNodes.filter((c) => c && c.nodeType !== 3);
+  }
+  _detach(node) {
+    const i = this.childNodes.indexOf(node);
+    if (i >= 0) { this.childNodes.splice(i, 1); node.parentNode = null; }
+  }
+  appendChild(child) {
+    if (child && child.tagName === "#FRAGMENT") {
+      for (const c of child.childNodes.slice()) this.appendChild(c);
+      child.childNodes = [];
+      return child;
+    }
+    if (child.parentNode) child.parentNode._detach(child);
+    child.parentNode = this;
+    this.childNodes.push(child);
+    return child;
+  }
+  append(...nodes) {
+    for (const n of nodes) {
+      this.appendChild(typeof n === "string" ? makeText(n) : n);
+    }
+  }
+  insertBefore(node, ref) {
+    if (node && node.tagName === "#FRAGMENT") {
+      for (const c of node.childNodes.slice()) this.insertBefore(c, ref);
+      node.childNodes = [];
+      return node;
+    }
+    if (node.parentNode) node.parentNode._detach(node);
+    node.parentNode = this;
+    if (ref == null) { this.childNodes.push(node); return node; }
+    const idx = this.childNodes.indexOf(ref);
+    if (idx < 0) this.childNodes.push(node);
+    else this.childNodes.splice(idx, 0, node);
+    return node;
+  }
+  removeChild(node) { this._detach(node); return node; }
+  addEventListener(type, fn) {
+    (this._listeners[type] = this._listeners[type] || []).push(fn);
+  }
+  dispatch(type) {
+    for (const fn of (this._listeners[type] || []).slice()) {
+      fn({ preventDefault() {} });
+    }
+  }
+  closest() { return null; }
+  focus() {}
+  scrollIntoView() {}
+}
+
+function makeText(text) {
+  const n = new FakeNode("#text");
+  n._text = String(text == null ? "" : text);
+  return n;
+}
+
+const _elementsById = {};
+globalThis.requestAnimationFrame = () => {};
+globalThis.document = {
+  createElement: (tag) => new FakeNode(tag),
+  createTextNode: (text) => makeText(text),
+  createDocumentFragment: () => new FakeNode("#fragment"),
+  getElementById: (id) => {
+    if (!_elementsById[id]) _elementsById[id] = new FakeNode("div");
+    return _elementsById[id];
+  },
+  addEventListener: () => {},
+};
+
+// DFS the fake tree collecting element nodes carrying CSS class `cls`.
+function findAll(node, cls, acc = []) {
+  if (!node || !node.childNodes) return acc;
+  for (const c of node.childNodes) {
+    if (c.classList && c.classList.contains(cls)) acc.push(c);
+    findAll(c, cls, acc);
+  }
+  return acc;
+}
+function findOne(node, cls) { return findAll(node, cls)[0] || null; }
+
+// The ordered list of (timestamp, stepKey) for the conversation bubbles in a
+// container — headers (no __convIdx) are skipped, matching the spec's notion
+// of "rendered record order".
+function describeBubbles(container) {
+  return container.children
+    .filter((c) => c.__convIdx !== undefined)
+    .map((c) => ({ ts: c.__convTs, step: c.__convStepKey, idx: c.__convIdx }));
+}
+
+const asstRecord = (content, ts, stepId, stepType) => ({
+  step_id: stepId,
+  message: { role: "assistant", content, timestamp: ts, step_type: stepType },
+});
+
+// -- renderConversation: full-after-append consistency ----------------------
+check("renderConversation: incremental append matches a one-shot full render", () => {
+  const finalRecords = [
+    asstRecord("A1", 1, "s1", "discovery"),
+    asstRecord("A2", 2, "s1", "discovery"),
+    asstRecord("A3", 3, "s2", "analyze"),
+    asstRecord("A4", 4, "s2", "analyze"),
+  ];
+
+  const full = document.createElement("div");
+  app.renderConversation(full, finalRecords, false);
+
+  const incr = document.createElement("div");
+  app.renderConversation(incr, finalRecords.slice(0, 2), false);
+  app.renderConversation(incr, finalRecords.slice(0, 3), true);
+  app.renderConversation(incr, finalRecords, true);
+
+  assert.deepEqual(describeBubbles(incr), describeBubbles(full));
+  // The bubble bodies also line up A1..A4 in order (read the .conv-bubble body,
+  // not the whole row which also carries the role/time head).
+  const texts = (c) => c.children
+    .filter((x) => x.__convIdx !== undefined)
+    .map((x) => { const b = findOne(x, "conv-bubble"); return b ? b.textContent : ""; });
+  assert.deepEqual(texts(incr), ["A1", "A2", "A3", "A4"]);
+  assert.deepEqual(texts(incr), texts(full));
+});
+
+// -- renderConversation: out-of-order insertion -----------------------------
+check("renderConversation: a late earlier-ts record inserts into its slot, not the tail", () => {
+  const container = document.createElement("div");
+  // Two records arrive in ts order 1, 3.
+  app.renderConversation(container, [
+    asstRecord("first", 1, "s1", "discovery"),
+    asstRecord("third", 3, "s1", "discovery"),
+  ], false);
+  // A third record arrives late carrying ts=2 (between the two on screen).
+  app.renderConversation(container, [
+    asstRecord("first", 1, "s1", "discovery"),
+    asstRecord("third", 3, "s1", "discovery"),
+    asstRecord("second", 2, "s2", "analyze"),
+  ], true);
+
+  const order = describeBubbles(container).map((b) => b.ts);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b),
+    "bubbles must be ordered by ascending timestamp");
+  const texts = container.children
+    .filter((c) => c.__convIdx !== undefined)
+    .map((c) => { const b = findOne(c, "conv-bubble"); return b ? b.textContent : ""; });
+  // "second" (ts=2) lands between "first" (ts=1) and "third" (ts=3), not at tail.
+  assert.deepEqual(texts, ["first", "second", "third"]);
+});
+
+// -- renderConversation: cross-role/step chronological order ----------------
+check("renderConversation: user reply between two assistant turns keeps ts order", () => {
+  // A1 (discovery, ts1) → U1 (discovery_continue, ts2) → A2 (discovery, ts3):
+  // even though U1 maps to a different step key, it stays between A1 and A2.
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    asstRecord("A1", 1, "discovery", "discovery"),
+    { step_id: "discovery_continue",
+      message: { role: "user", content: "U1", timestamp: 2, step_type: "discovery_continue" } },
+    asstRecord("A2", 3, "discovery", "discovery"),
+  ], false);
+  // Read the bodies in rendered order: U1 must sit between A1 and A2 even
+  // though it maps to a different step key.
+  const bodies = container.children
+    .filter((c) => c.__convIdx !== undefined)
+    .map((c) => { const b = findOne(c, "conv-bubble"); return b ? b.textContent : c.textContent; });
+  assert.ok(bodies[0].includes("A1"));
+  assert.ok(bodies[2].includes("A2"));
+  const order = describeBubbles(container).map((b) => b.ts);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b));
+});
+
+// -- renderConversation: step headers are separators, not reorderers --------
+check("renderConversation: a step header is inserted at each step boundary", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    asstRecord("A1", 1, "s1", "discovery"),
+    asstRecord("A2", 2, "s1", "discovery"),
+    asstRecord("A3", 3, "s2", "analyze"),
+  ], false);
+  const headers = container.children.filter(
+    (c) => c.classList && c.classList.contains("history-step-header"));
+  // Two distinct step keys → two header separators (s1 then s2).
+  assert.equal(headers.length, 2);
+  // The bubbles themselves stay in ascending ts order regardless of headers.
+  const ts = describeBubbles(container).map((b) => b.ts);
+  assert.deepEqual(ts, [...ts].sort((a, b) => a - b));
+  assert.equal(describeBubbles(container).length, 3);
+});
+
+// -- renderConversation: append never collapses an expanded fold ------------
+check("renderConversation: append does not re-collapse a user-expanded fold", () => {
+  const container = document.createElement("div");
+  const longBody = "x".repeat(2500); // exceeds FOLD_THRESHOLD → makeFoldable
+  app.renderConversation(container, [asstRecord(longBody, 1, "s1", "discovery")], false);
+
+  const fold = findOne(container, "foldable");
+  assert.ok(fold, "expected a foldable wrapper for the long body");
+  assert.equal(fold.classList.contains("folded"), true);
+  // The reader expands it.
+  const toggle = findOne(fold, "fold-toggle");
+  assert.ok(toggle, "expected a fold-toggle button");
+  toggle.dispatch("click");
+  assert.equal(fold.classList.contains("expanded"), true);
+  assert.equal(fold.classList.contains("folded"), false);
+
+  // A new record streams in (append fast-path).
+  app.renderConversation(container, [
+    asstRecord(longBody, 1, "s1", "discovery"),
+    asstRecord("new turn", 2, "s1", "discovery"),
+  ], true);
+
+  // The SAME fold node must still be expanded — append must not rebuild it.
+  assert.equal(fold.classList.contains("expanded"), true,
+    "an append must not re-collapse the reader's expanded fold");
+  assert.equal(fold.classList.contains("folded"), false);
+  assert.equal(describeBubbles(container).length, 2);
+});
+
+// -- renderConversation: a malformed record cannot stall the stream ---------
+check("renderConversation: a record that throws degrades to a placeholder and never freezes", () => {
+  const container = document.createElement("div");
+  // A record whose `message` getter throws during normalize/render. The stream
+  // must keep flowing: a placeholder bubble takes its slot and subsequent
+  // appends are not blocked.
+  const boom = {};
+  Object.defineProperty(boom, "message", {
+    enumerable: true,
+    get() { throw new Error("boom"); },
+  });
+  app.renderConversation(container, [
+    asstRecord("ok1", 1, "s1", "discovery"),
+    boom,
+    asstRecord("ok3", 3, "s1", "discovery"),
+  ], false);
+  // All three slots are present (the bad one as a placeholder).
+  assert.equal(describeBubbles(container).length, 3);
+  const errBubble = findOne(container, "role-error");
+  assert.ok(errBubble, "expected a placeholder bubble for the failed record");
+
+  // A further append still lands — the cursor advanced past the bad record.
+  app.renderConversation(container, [
+    asstRecord("ok1", 1, "s1", "discovery"),
+    boom,
+    asstRecord("ok3", 3, "s1", "discovery"),
+    asstRecord("ok4", 4, "s1", "discovery"),
+  ], true);
+  assert.equal(describeBubbles(container).length, 4);
+});
+
+// -- renderConversation: a shorter array falls back to a clean rebuild ------
+check("renderConversation: a shorter records array rebuilds rather than stalling", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    asstRecord("A1", 1, "s1", "discovery"),
+    asstRecord("A2", 2, "s1", "discovery"),
+    asstRecord("A3", 3, "s1", "discovery"),
+  ], false);
+  assert.equal(describeBubbles(container).length, 3);
+  // A replacement (shorter) snapshot arrives flagged append — must not be a
+  // no-op; the view rebuilds to the new, shorter content.
+  app.renderConversation(container, [asstRecord("only", 5, "s9", "commit")], true);
+  const d = describeBubbles(container);
+  assert.equal(d.length, 1);
+  const body = findOne(container, "conv-bubble");
+  assert.ok(body && body.textContent.includes("only"));
+});
+
+// -- reconcileReplyTarget (pure): chip-bar selection survival / reset -------
+check("reconcileReplyTarget keeps a still-present selection", () => {
+  const entries = [
+    { id: "call:c1", synthetic: false },
+    { id: "interjection:new", synthetic: true },
+  ];
+  assert.equal(app.reconcileReplyTarget(entries, "call:c1"), "call:c1");
+});
+check("reconcileReplyTarget re-homes onto the first real call when selection vanished", () => {
+  const entries = [
+    { id: "interjection:new", synthetic: true },
+    { id: "call:c1", synthetic: false },
+  ];
+  // Prefer the real pending call over the synthetic interjection.
+  assert.equal(app.reconcileReplyTarget(entries, "call:gone"), "call:c1");
+});
+check("reconcileReplyTarget falls back to the first entry when no real call exists", () => {
+  const entries = [{ id: "interjection:new", synthetic: true }];
+  assert.equal(app.reconcileReplyTarget(entries, "call:gone"), "interjection:new");
+});
+check("reconcileReplyTarget resets to null when the chip bar is empty", () => {
+  assert.equal(app.reconcileReplyTarget([], "call:c1"), null);
+  assert.equal(app.reconcileReplyTarget(null, "call:c1"), null);
+});
+
+// -- renderInterventions (DOM): chip bar tracks pending_calls --------------
+// Drives the real renderInterventions against the DOM stub. The sequence
+// add → shrink → empty → re-add exercises every chip-refresh acceptance
+// criterion in one consistent timeline (module state carries over between
+// calls exactly as it does in the browser).
+check("renderInterventions: chips appear, disappear, and the reply box resets", () => {
+  const region = document.getElementById("flow-interventions");
+  const submit = document.getElementById("flow-reply-submit");
+  const flow = (calls) => ({ status: "running", pending_calls: calls });
+
+  // Two pending calls → two chips, reply box armed (a target exists).
+  app.renderInterventions(flow([
+    { call_id: "c1", kind: "call", prompt: "approve?" },
+    { call_id: "c2", kind: "cli_confirm", prompt: "press 1", options: ["1"] },
+  ]));
+  assert.equal(region.children.length, 2, "two pending calls → two chips");
+  assert.equal(submit.disabled, false, "send enabled when a target exists");
+
+  // Backend stops reporting c2 → its chip disappears immediately.
+  app.renderInterventions(flow([
+    { call_id: "c1", kind: "call", prompt: "approve?" },
+  ]));
+  assert.equal(region.children.length, 1, "withdrawn call loses its chip");
+  assert.equal(submit.disabled, false);
+
+  // All calls cleared → no chips, reply box disarms (target reset to null).
+  app.renderInterventions(flow([]));
+  assert.equal(region.children.length, 0, "no pending calls → empty chip bar");
+  assert.equal(submit.disabled, true, "send disabled once the bar is empty");
+
+  // A brand-new call arrives → chip appears and the box re-arms.
+  app.renderInterventions(flow([
+    { call_id: "c9", kind: "call", prompt: "continue?" },
+  ]));
+  assert.equal(region.children.length, 1, "new call surfaces a chip");
+  assert.equal(submit.disabled, false);
+});
+
+// -- mergeSnapshotWithLiveAppends: dedup snapshot vs in-flight appends ------
+check("mergeSnapshotWithLiveAppends appends only records absent from the snapshot", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const r2 = asstRecord("A2", 2, "s1", "discovery");
+  const r3 = asstRecord("A3", 3, "s1", "discovery");
+  // Snapshot already contains r1, r2; the live array had r2 (dup) and r3 (new).
+  const merged = app.mergeSnapshotWithLiveAppends([r1, r2], [r2, r3]);
+  assert.equal(merged.length, 3);
+  assert.equal(app.recordKey(merged[2]), app.recordKey(r3));
+});
+check("mergeSnapshotWithLiveAppends returns the snapshot unchanged when no live appends", () => {
+  const r1 = asstRecord("A1", 1, "s1", "discovery");
+  const snap = [r1];
+  assert.equal(app.mergeSnapshotWithLiveAppends(snap, []), snap);
+});
+
 console.log(`\n${passed} checks passed.`);
