@@ -1,0 +1,14 @@
+id: '131'
+title: analyze/plan 等 JSON-step 仍以原始 JSON 展示
+description: STEP_ASSISTANT_RENDERERS 已留扩展位,但目前只注册了 discovery。analyze / plan / plan_tasks
+  / version_analyze 等同样返回结构化 JSON 的 step,在 web 视图中依然以 markdown 代码块呈现,体验与 discovery
+  不一致。
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T17:41:42.544566'
+updated_at: '2026-05-20T17:41:42.544566'

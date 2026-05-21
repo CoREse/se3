@@ -1,0 +1,13 @@
+id: '130'
+title: Verification 状态与 summary 内容不一致
+description: '本次 verification summary 描述实现完全符合 spec,但状态被标记为 Verification passed: False。需要确认是
+  verifier 自身逻辑/标记问题还是某条断言静默失败,以免后续误信号。'
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T17:41:42.543419'
+updated_at: '2026-05-20T17:41:42.543419'

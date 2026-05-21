@@ -302,6 +302,13 @@ class TestSelfCheckHandler:
         assert "do NOT" in SELF_CHECK_PROMPT.lower() or "Do NOT" in SELF_CHECK_PROMPT
         assert "spec compliance" in SELF_CHECK_PROMPT.lower()
 
+    def test_prompt_excludes_version_decisions(self):
+        # Version bump decisions belong to the downstream version_analyze step;
+        # the fix-loop checker must not report them as issues (separation of duties).
+        assert "version_analyze" in SELF_CHECK_PROMPT
+        assert "pyproject.toml" in SELF_CHECK_PROMPT
+        assert "version" in SELF_CHECK_PROMPT.lower()
+
     def test_prompt_includes_review_dimensions(self):
         assert "Logic Completeness" in SELF_CHECK_PROMPT
         assert "Code Robustness" in SELF_CHECK_PROMPT

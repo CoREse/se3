@@ -1,0 +1,13 @@
+id: '132'
+title: 其他 step 的 user-literal 字段尚未包入 USER_CONTENT 区段
+description: analyze 的 task_description / interjection 等仍走两段式 inject_boundary,前端会退化为单一
+  chip。若希望这些 step 的用户输入也呈现为可读 bubble,需要按 discovery 的方式迁移到 wrap_user_section。
+status: open
+priority: low
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-20T17:41:42.545477'
+updated_at: '2026-05-20T17:41:42.545477'

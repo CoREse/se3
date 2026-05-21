@@ -432,6 +432,14 @@ The CLI orchestrator (`_run_flow_impl`) calls these methods in sequence: `create
 - **NOTE** task_groups is intentionally the ONLY plan artifact injected into self_check — `proposal` is redundant with `design`, full `design` is withheld to preserve the verify_spec / self_check responsibility boundary, and neither is added
 - **NOTE** `SELF_CHECK_TASK_GROUPS_MAX_CHARS` lives in `se3/engine/truncation.py` alongside the other shared self_check truncation constants
 
+#### Scenario: SELF_CHECK prompt excludes decisions owned by a downstream specialized step
+- **WHEN** the `self_check` step builds its LLM prompt
+- **THEN** the `## What NOT to check` section includes an exclusion stating the general principle that, as a fix-loop checker, self_check MUST NOT report concerns that a later specialized step decides — because `implement` cannot resolve them within its own responsibility, the fix-loop reaches a standoff and spins (re-reporting and re-deferring the same concern without convergence)
+- **AND** the version number and version files (e.g. the `version` field in `pyproject.toml`) — whether and how to bump them — are named as the concrete example of such a downstream-owned decision, which the downstream `version_analyze` step decides against the pre-session baseline
+- **AND** self_check MUST NOT report "version not bumped" or "version number is wrong" as an issue
+- **NOTE** the exclusion is deliberately phrased as the general "downstream specialized step owns it" principle (with version as the named example) so it generalizes beyond `pyproject.toml` to other version files and to other future downstream-owned concerns, rather than matching one file type
+- **NOTE** the fix is applied on the checker side (self_check) so it covers all task sources — the task may originate from `discovery` or directly from user input; the discovery prompt and `verify_spec` are intentionally left unchanged, and no convergence brake is introduced (`self_check_convergence_enabled` remains default-off — see *SELF_CHECK 收敛检测* scenario), because an unresolved issue staying unresolved is the desired behavior; the root-cause fix is removing the over-reach at its source, not capping the loop
+
 ### Requirement: CONFIRM Step (Dynamically Inserted Review Gate)
 
 The step pool SHALL include a `CONFIRM` step type that does not appear in any default task-type step sequence and is instead inserted dynamically after configured step types, acting as a review gate that can approve the reviewed step (flow continues) or request revision (flow goes back to the reviewed step).

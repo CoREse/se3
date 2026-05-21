@@ -305,6 +305,7 @@ Focus your review on these dimensions. Do NOT check spec compliance — that is 
 - **Spec compliance** — this is handled by the verify_spec step, do NOT duplicate that check.
 - **Code style or formatting** — not actionable here.
 - **Performance optimization suggestions** — only flag if there's a clear correctness issue.
+- **Anything a dedicated downstream step owns** — as a fix-loop checker you MUST NOT report concerns that a later specialized step decides; that creates standoffs where implement cannot resolve them. In particular, the version number and version files (e.g. the `version` field in `pyproject.toml`) — whether and how to bump them — are decided by the downstream `version_analyze` step against the pre-session baseline; do NOT report "version not bumped" or "version number is wrong" as an issue.
 
 ## Severity Levels
 - **critical**: Logic error that will cause incorrect behavior, data corruption, or crashes in normal usage paths.
