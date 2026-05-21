@@ -467,12 +467,14 @@ check("extractStructuredJson tolerates trailing commas", () => {
 // normalized form exposes `kind` and `stepReport` so the renderer can build
 // both the raw event chip and the default-expanded report card.
 check("normalizeRecord recognises step_completed event", () => {
+  // Real daemon shape: authoritative `step_type` at the envelope; the inner
+  // `message` is the engine's structured step_completed event (no step_type).
   const norm = app.normalizeRecord({
     step_id: "07_test",
+    step_type: "test",
     message: {
       type: "step_completed",
       step_id: "07_test",
-      step_type: "test",
       timestamp: 1234,
       data: {
         step: {
@@ -492,14 +494,169 @@ check("normalizeRecord recognises step_completed event", () => {
 });
 check("normalizeRecord recognises step_failed event", () => {
   const norm = app.normalizeRecord({
+    step_type: "implement",
     message: {
       type: "step_failed",
-      step_type: "implement",
       data: { step: { step_type: "implement", status: "failed", outputs: {} } },
     },
   });
   assert.equal(norm.kind, "step_failed");
+  assert.equal(norm.stepType, "implement");
   assert.equal(norm.stepReport.status, "failed");
+});
+
+// -- normalizeRecord: step_type envelope precedence -------------------------
+// The whole point of this group: the daemon injects an authoritative
+// `step_type` at the record ENVELOPE (parsed from the jsonl file-name by
+// `parse_step_type_from_step_id`); real `message` payloads carry no step_type.
+// normalizeRecord MUST prefer the envelope value, fall back to an inner
+// `message.step_type` only for un-upgraded daemons, then to empty — never the
+// reverse precedence. These are pure (no DOM) checks.
+check("normalizeRecord prefers the envelope step_type over an inner one", () => {
+  // A stray inner step_type must NOT shadow the daemon's authoritative
+  // envelope value (the precedence bug `pick` would have introduced).
+  const norm = app.normalizeRecord({
+    step_id: "01_discovery_975607bb",
+    step_type: "discovery",
+    message: { role: "assistant", content: "hi", step_type: "stale_wrong_value" },
+  });
+  assert.equal(norm.stepType, "discovery");
+});
+check("normalizeRecord uses the envelope step_type when message has none", () => {
+  // The real daemon shape: step_type only at the envelope, message has none.
+  const norm = app.normalizeRecord({
+    step_id: "02_analyze_8b536444",
+    step_type: "analyze",
+    message: { role: "assistant", content: "hi" },
+  });
+  assert.equal(norm.stepType, "analyze");
+});
+check("normalizeRecord falls back to message step_type for legacy daemons", () => {
+  // A daemon that predates envelope injection sends no envelope step_type; the
+  // inner message field (if any) is the backward-compatible fallback.
+  const norm = app.normalizeRecord({
+    step_id: "02_analyze_8b536444",
+    message: { role: "assistant", content: "hi", step_type: "analyze" },
+  });
+  assert.equal(norm.stepType, "analyze");
+});
+check("normalizeRecord step_type is empty when neither level provides one", () => {
+  const norm = app.normalizeRecord({
+    step_id: "02_analyze_8b536444",
+    message: { role: "assistant", content: "hi" },
+  });
+  assert.equal(norm.stepType, "");
+});
+check("normalizeRecord step-event branch prefers the envelope step_type", () => {
+  // A stale inner data.step.step_type must not win over the envelope value.
+  const norm = app.normalizeRecord({
+    step_id: "05_implement_61605e42_G2",
+    step_type: "implement",
+    message: {
+      type: "step_completed",
+      data: { step: { step_type: "stale_wrong_value", status: "completed", outputs: {} } },
+    },
+  });
+  assert.equal(norm.stepType, "implement");
+  assert.equal(norm.stepReport.step_type, "implement");
+});
+check("normalizeRecord step-event branch falls back to inner step for legacy daemons", () => {
+  const norm = app.normalizeRecord({
+    step_id: "05_implement_61605e42",
+    message: {
+      type: "step_completed",
+      data: { step: { step_type: "implement", status: "completed", outputs: {} } },
+    },
+  });
+  assert.equal(norm.stepReport.step_type, "implement");
+});
+
+// Group-suffix and underscore-bearing types: the daemon (G1) already strips
+// `_G\d+` group suffixes and the leading sequence / trailing hash, so the
+// envelope value the frontend receives for `05_implement_61605e42_G2` is the
+// clean `"implement"` and for `13_version_analyze_def456` it is
+// `"version_analyze"`. The frontend just consumes that authoritative value.
+check("normalizeRecord receives clean step_type for a group-suffixed step", () => {
+  const norm = app.normalizeRecord({
+    step_id: "05_implement_61605e42_G2",
+    step_type: "implement",
+    message: { role: "assistant", content: "done" },
+  });
+  assert.equal(norm.stepType, "implement");
+  // The raw, group-suffixed file stem is preserved as the step id for grouping.
+  assert.equal(norm.stepId, "05_implement_61605e42_G2");
+});
+check("normalizeRecord receives the underscore-bearing version_analyze type", () => {
+  const norm = app.normalizeRecord({
+    step_id: "13_version_analyze_def456",
+    step_type: "version_analyze",
+    message: { role: "assistant", content: "v" },
+  });
+  assert.equal(norm.stepType, "version_analyze");
+});
+check("normalizeRecord passes through the legacy commit_summary stem", () => {
+  // For a legacy non-conforming name the daemon returns the original stem
+  // ("commit_summary"); the frontend keeps it verbatim and degrades gracefully
+  // (no registered renderer / header title — covered in the DOM section).
+  const norm = app.normalizeRecord({
+    step_id: "commit_summary",
+    step_type: "commit_summary",
+    message: { role: "assistant", content: "c" },
+  });
+  assert.equal(norm.stepType, "commit_summary");
+});
+
+// stepHeaderLabel + renderer lookups against the (post-G1) authoritative
+// step_type values. These are pure registry/string lookups.
+check("stepHeaderLabel maps the group-stripped implement type to IMPLEMENT", () => {
+  assert.equal(app.stepHeaderLabel("implement"), "IMPLEMENT");
+});
+check("implement step_type hits the implement assistant renderer", () => {
+  assert.equal(typeof app.STEP_ASSISTANT_RENDERERS.implement, "function");
+});
+check("legacy commit_summary stem has no renderer / header title (graceful)", () => {
+  // No registered renderer → caller falls back to the generic path; no header
+  // title → stepHeaderLabel returns the fallback, never the raw stem crashing.
+  assert.equal(app.STEP_ASSISTANT_RENDERERS.commit_summary, undefined);
+  assert.equal(app.stepHeaderLabel("commit_summary", "commit_summary"), "commit_summary");
+});
+
+// -- normalizeRecord: real jsonl sample regression --------------------------
+// A literal sample of the real on-disk jsonl line shapes (from
+// se3/history/<flow>/NN_<type>_<hash>(_Gk).jsonl): each `message` is just
+// `{role, content}` with NO step_type. The daemon's read_flow wraps each line
+// in `{step_id, step_type, message}`; this fixture reproduces that exact
+// envelope so the regression catches any drift back to message-based step_type.
+const REAL_JSONL_SAMPLE = [
+  {
+    step_id: "01_discovery_68e9f549",
+    step_type: "discovery",
+    message: { role: "user", content: "You are an expert software engineering assistant in DISCOVERY mode." },
+  },
+  {
+    step_id: "02_analyze_8b536444",
+    step_type: "analyze",
+    message: { role: "assistant", content: "Looking at the engine." },
+  },
+  {
+    step_id: "05_implement_0207ebe4_G2",
+    step_type: "implement",
+    message: { role: "user", content: "You are an expert software engineer. Implement the tasks." },
+  },
+];
+check("normalizeRecord on real jsonl sample yields authoritative step types", () => {
+  const norms = REAL_JSONL_SAMPLE.map(app.normalizeRecord);
+  assert.deepEqual(norms.map((n) => n.stepType), ["discovery", "analyze", "implement"]);
+  // Step ids stay the raw file stems (incl. the group suffix) for grouping.
+  assert.deepEqual(
+    norms.map((n) => n.stepId),
+    ["01_discovery_68e9f549", "02_analyze_8b536444", "05_implement_0207ebe4_G2"],
+  );
+  // Every sample resolves to a known paradigm header — never the file stem.
+  assert.deepEqual(
+    norms.map((n) => app.stepHeaderLabel(n.stepType, n.stepId)),
+    ["DISCOVERY", "ANALYZE", "IMPLEMENT"],
+  );
 });
 
 // -- step report renderer registry -----------------------------------------
@@ -810,9 +967,16 @@ function describeBubbles(container) {
     .map((c) => ({ ts: c.__convTs, step: c.__convStepKey, idx: c.__convIdx }));
 }
 
+// Build a record in the REAL daemon shape: the authoritative `step_type` lives
+// at the record *envelope* (daemon-injected from the jsonl file-name
+// convention by `parse_step_type_from_step_id`), NOT inside `message` — real
+// daemon `message` payloads carry only `{role, content, timestamp}`. Tests must
+// exercise this shape, not a faked inner `message.step_type`, or they pass
+// while the real product is broken (the bug this group fixes).
 const asstRecord = (content, ts, stepId, stepType) => ({
   step_id: stepId,
-  message: { role: "assistant", content, timestamp: ts, step_type: stepType },
+  step_type: stepType,
+  message: { role: "assistant", content, timestamp: ts },
 });
 
 // -- renderConversation: full-after-append consistency ----------------------
@@ -874,8 +1038,8 @@ check("renderConversation: user reply between two assistant turns keeps ts order
   const container = document.createElement("div");
   app.renderConversation(container, [
     asstRecord("A1", 1, "discovery", "discovery"),
-    { step_id: "discovery_continue",
-      message: { role: "user", content: "U1", timestamp: 2, step_type: "discovery_continue" } },
+    { step_id: "discovery_continue", step_type: "discovery_continue",
+      message: { role: "user", content: "U1", timestamp: 2 } },
     asstRecord("A2", 3, "discovery", "discovery"),
   ], false);
   // Read the bodies in rendered order: U1 must sit between A1 and A2 even
@@ -913,7 +1077,8 @@ check("renderConversation: a step header is inserted at each step boundary", () 
 // never folded, per the message paradigm, so it is not the vehicle here.)
 const logRecord = (content, ts, stepId, stepType) => ({
   step_id: stepId,
-  message: { role: "log", content, timestamp: ts, step_type: stepType },
+  step_type: stepType,
+  message: { role: "log", content, timestamp: ts },
 });
 check("renderConversation: append does not re-collapse a user-expanded fold", () => {
   const container = document.createElement("div");
@@ -1080,14 +1245,16 @@ check("mergeSnapshotWithLiveAppends returns the snapshot unchanged when no live 
 // "展开全部" full process; Layer 3 = "查看原始" raw NDJSON. Parse failure must
 // degrade to the generic text path without losing the message.
 
-// Build a normalized assistant record (optionally with a raw NDJSON payload).
+// Build a normalized assistant record (optionally with a raw NDJSON payload)
+// in the real daemon shape: authoritative `step_type` at the envelope, inner
+// `message` carrying only chat fields.
 const asstNorm = (content, stepType, rawNdjson) => app.normalizeRecord({
   step_id: stepType,
+  step_type: stepType,
   message: {
     role: "assistant",
     content,
     timestamp: 1,
-    step_type: stepType,
     raw_ndjson: rawNdjson != null ? rawNdjson : null,
   },
 });
@@ -1245,6 +1412,69 @@ check("assistant no-result turn shows thinking inline, not folded, no toggles", 
     "查看原始 must not show at the row level for a no-result turn");
 });
 
+// -- end-to-end dispatch on the real (post-G1) envelope shape ---------------
+// A group-suffixed implement record arrives from the daemon already carrying
+// the clean envelope step_type "implement" (the `_G2` suffix stripped by
+// parse_step_type_from_step_id). The full render path must dispatch it to the
+// implement structured renderer — exactly the chain that was dead on real data
+// while the unit tests faked an inner message.step_type.
+check("group-suffixed implement record dispatches to the implement structured renderer", () => {
+  const content = "```json\n" + JSON.stringify({
+    summary: "Did the thing.",
+    files_changed: ["src/x.py"],
+    completion_status: "complete",
+  }) + "\n```";
+  const norm = app.normalizeRecord({
+    step_id: "05_implement_61605e42_G2",
+    step_type: "implement",
+    message: { role: "assistant", content },
+  });
+  assert.equal(norm.stepType, "implement");
+  const row = app.renderConversationRecord(norm);
+  // Layer-1 structured result wrapper present → the implement renderer fired
+  // (not the raw ```json``` fallback). Without the envelope-first fix this stayed
+  // empty because norm.stepType was "".
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "expected the implement structured result wrapper");
+  assert.ok(result.textContent.includes("Did the thing."));
+  // The raw JSON keys are NOT dumped in the Layer-1 default view.
+  assert.equal(result.textContent.includes('"completion_status"'), false);
+});
+
+check("group-suffixed implement record renders the IMPLEMENT step header", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    asstRecord("```json\n{\"summary\":\"a\"}\n```", 1, "05_implement_61605e42_G2", "implement"),
+  ], false);
+  const header = container.children.find(
+    (c) => c.classList && c.classList.contains("history-step-header"));
+  assert.ok(header, "expected a step header");
+  assert.ok(header.textContent.includes("IMPLEMENT"),
+    "header must be the paradigm name IMPLEMENT, not the file stem");
+  assert.equal(header.textContent.includes("05_implement_61605e42_G2"), false,
+    "the ugly file stem must not be the visible header");
+});
+
+check("legacy commit_summary record degrades gracefully (no renderer, fallback header)", () => {
+  // The daemon returns the original stem "commit_summary" for this legacy name;
+  // there is no registered renderer and no header title. The render path must
+  // not crash and must keep the content reachable.
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    asstRecord("just a commit summary body", 1, "commit_summary", "commit_summary"),
+  ], false);
+  const header = container.children.find(
+    (c) => c.classList && c.classList.contains("history-step-header"));
+  assert.ok(header, "expected a step header even for the unknown type");
+  // No paradigm title for an unknown type → falls back to the step key/stem.
+  assert.ok(header.textContent.includes("commit_summary"));
+  // Content is still rendered (no structured result, generic path keeps text).
+  const bubbles = container.children.filter((c) => c.__convIdx !== undefined);
+  assert.equal(bubbles.length, 1);
+  assert.equal(findOne(bubbles[0], "assistant-result"), null);
+  assert.ok(bubbles[0].textContent.includes("just a commit summary body"));
+});
+
 // -- step section headers use paradigm names -------------------------------
 // stepHeaderLabel maps a step_type to the paradigm heading; rebuildStepHeaders
 // renders those names (not the raw step_type literal).
@@ -1308,11 +1538,11 @@ const userMarkerNorm = (prefix, content, suffix, stepType, rawNdjson) => {
     : prefix + "\n" + TPE + "\n" + UCB + "\n" + content + "\n" + UCE + "\n" + (suffix || "");
   return app.normalizeRecord({
     step_id: stepType,
+    step_type: stepType,
     message: {
       role: "user",
       content: body,
       timestamp: 1,
-      step_type: stepType,
       raw_ndjson: rawNdjson != null ? rawNdjson : null,
     },
   });
@@ -1398,7 +1628,8 @@ check("user two-segment marker degrades to a single collapsed chip (no bubble)",
 check("user message without markers falls back to a whole-message chip", () => {
   const norm = app.normalizeRecord({
     step_id: "discovery",
-    message: { role: "user", content: "just a plain reply", timestamp: 1, step_type: "discovery" },
+    step_type: "discovery",
+    message: { role: "user", content: "just a plain reply", timestamp: 1 },
   });
   const row = app.renderConversationRecord(norm);
   // Not the marker path: no user-prompt-marker class, no Layer-1 bubble.
@@ -1429,8 +1660,8 @@ check("renderConversation: user marker reply interleaves by ts; step headers onl
   const container = document.createElement("div");
   app.renderConversation(container, [
     asstRecord("A1", 1, "discovery", "discovery"),
-    { step_id: "discovery_continue",
-      message: { role: "user", content: userBody, timestamp: 2, step_type: "discovery_continue" } },
+    { step_id: "discovery_continue", step_type: "discovery_continue",
+      message: { role: "user", content: userBody, timestamp: 2 } },
     asstRecord("A2", 3, "discovery", "discovery"),
   ], false);
 

@@ -1370,6 +1370,21 @@ function normalizeRecord(rec) {
   const msg = (rec.message && typeof rec.message === "object") ? rec.message : rec;
   const pick = (key) => (msg[key] != null ? msg[key] : rec[key]);
 
+  // step_type resolution intentionally diverges from `pick` (which is
+  // message-first). The daemon injects an authoritative `step_type` at the
+  // record *envelope* (`rec.step_type`), parsed deterministically from the
+  // jsonl file-name convention `NN_<type>_<hash>(_Gk)` — real daemon `message`
+  // payloads carry no `step_type` at all. So the envelope value is preferred;
+  // an inner `message.step_type` is only consulted as a backward-compatible
+  // fallback for older daemons (or hand-crafted records) that lack the
+  // envelope field; then empty. Using `pick` here would wrongly let a stray
+  // inner field shadow the authoritative envelope value.
+  const pickStepType = () => {
+    if (rec.step_type != null && rec.step_type !== "") return rec.step_type;
+    if (msg.step_type != null && msg.step_type !== "") return msg.step_type;
+    return "";
+  };
+
   // Step-completion events from the engine's structured event stream. They
   // ride the same conversation channel as chat history but carry the step's
   // structured outputs rather than turn text. We surface them as a non-chat
@@ -1382,7 +1397,7 @@ function normalizeRecord(rec) {
       ? data.step
       : (msg.step && typeof msg.step === "object") ? msg.step : null;
     const stepReport = {
-      step_type: pick("step_type") || (innerStep && innerStep.step_type) || "",
+      step_type: pickStepType() || (innerStep && innerStep.step_type) || "",
       step_id: pick("step_id") || (innerStep && innerStep.step_id) || "",
       status: (innerStep && innerStep.status)
         || data.status
@@ -1434,7 +1449,7 @@ function normalizeRecord(rec) {
     role: role,
     content: content,
     timestamp: pick("timestamp") != null ? pick("timestamp") : pick("time"),
-    stepType: pick("step_type") || "",
+    stepType: pickStepType(),
     stepId: pick("step_id") || "",
     raw: { raw_json: rawJson, raw_ndjson: rawNdjson },
     attempt: pick("attempt"),
