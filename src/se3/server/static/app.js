@@ -2604,9 +2604,13 @@ function renderConversationRecord(norm) {
     } else if (role === "assistant") {
       // assistant: three-layer progressive disclosure. The default view is the
       // clean structured result (via STEP_ASSISTANT_RENDERERS); the full
-      // per-turn process is tucked behind "展开全部", and the raw NDJSON behind
-      // "查看原始" (the row-level makeRawToggle). When no structured renderer
-      // matches, the process view becomes the default so nothing is hidden.
+      // per-turn process is tucked behind "展开全部", and the "查看原始" raw
+      // toggle is nested at the end of that Layer-2 area via makeProcessToggle
+      // (not at the row level). When no result JSON is present — or no
+      // structured renderer can parse the body — the thinking process is
+      // rendered inline in full via renderToolMarkers (never folded), so
+      // nothing is hidden, per the message paradigm and the Three-Tier
+      // Progressive Disclosure requirement.
       bubble.appendChild(renderAssistantBubble(content, norm));
     } else {
       // user / system / other: literal text — these are large structured

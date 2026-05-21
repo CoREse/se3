@@ -1,0 +1,32 @@
+id: '137'
+title: Planned Spec Changes declared 'No planned spec changes', yet se3/specs/running-flow-console/spec.md
+  was modified to add the 'Three-Tier Progressive Disclosure' requirement, the nested-查看原始
+  rule under 'Role-Based Message Collapse', the 'every structured step type has a
+  registered renderer' requirement, and the flow-progress-bound pending-call lifetime.
+  This is the legitimate output of the update_spec step and brings the spec into alignment
+  with the authoritative user paradigm (the task's explicit goal), so it is intentional
+  rather than a regression — noting it only because it was not pre-declared as a planned
+  spec change.
+description: 'Planned Spec Changes declared ''No planned spec changes'', yet se3/specs/running-flow-console/spec.md
+  was modified to add the ''Three-Tier Progressive Disclosure'' requirement, the nested-查看原始
+  rule under ''Role-Based Message Collapse'', the ''every structured step type has
+  a registered renderer'' requirement, and the flow-progress-bound pending-call lifetime.
+  This is the legitimate output of the update_spec step and brings the spec into alignment
+  with the authoritative user paradigm (the task''s explicit goal), so it is intentional
+  rather than a regression — noting it only because it was not pre-declared as a planned
+  spec change.
+
+
+  Suggestion: No action required; informational. If the workflow expects spec edits
+  to be pre-declared, ensure plan_tasks/update_spec declarations stay in sync going
+  forward.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-21T14:36:25.891675'
+updated_at: '2026-05-21T14:36:25.891675'
