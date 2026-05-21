@@ -692,21 +692,287 @@ def _restore_discovery_display(current_step: Any) -> None:
         get_console().print("[dim]Resuming discovery — please respond to continue.[/dim]")
 
 
-def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: PersistenceManager, prompt_history: Any = None) -> Optional[str]:
-    """Handle discovery step pause - get user response.
+def _maybe_write_discovery_call(
+    flow: FlowInstance, current_step: Any, project_root: Optional[Path]
+) -> Optional[Path]:
+    """Mirror an interactive discovery pause to a ``se3/calls/`` call file.
+
+    Writing the call file makes the web console surface the *same* pending
+    interaction the terminal is blocking on, so a CLI-started discovery session
+    can be answered from the web. Returns the call-file path, or ``None`` when
+    no project root is known (the backward-compatible terminal-only path that
+    unit tests exercise) or the write fails — in which case the caller simply
+    falls back to a terminal-only wait.
+    """
+    if project_root is None:
+        return None
+    try:
+        return _write_discovery_call(flow, current_step, Path(project_root))
+    except Exception:  # pragma: no cover - defensive: never block on web mirror
+        logger.exception("Failed to mirror discovery pause to a call file")
+        return None
+
+
+def _cleanup_discovery_response(call_file: Optional[Path]) -> None:
+    """Remove only the sibling ``.response`` answer files for *call_file*.
+
+    Consuming a web answer deletes its response file so a follow-up wait on the
+    *same* call file (e.g. the confirmation gate's empty-input re-display loop)
+    cannot re-read the already-consumed answer. The call file itself is left in
+    place. Idempotent.
+    """
+    if call_file is None:
+        return
+    for path in (
+        call_file.parent / f"{call_file.stem}.response.json",
+        call_file.parent / f"{call_file.stem}.response",
+    ):
+        try:
+            path.unlink()
+        except OSError:
+            pass
+
+
+def _cleanup_discovery_call(call_file: Optional[Path]) -> None:
+    """Remove the call file plus any sibling ``.response`` answer files.
+
+    Called once a pause round is resolved (terminal/web answer, or cancel) so a
+    stale call file never lingers as a "待回复" chip on the web console.
+    Idempotent — safe to call when the files are already gone.
+    """
+    if call_file is None:
+        return
+    _cleanup_discovery_response(call_file)
+    try:
+        call_file.unlink()
+    except OSError:
+        pass
+
+
+# Source markers returned by :func:`_await_terminal_or_web`.
+_DISCOVERY_SRC_TERMINAL = "terminal"
+_DISCOVERY_SRC_WEB = "web"
+_DISCOVERY_SRC_CANCEL = "cancel"
+
+
+def _await_terminal_or_web(
+    call_file: Optional[Path],
+    *,
+    prompt_title: str,
+    prompt_message: str,
+    history: Any = None,
+    strip: bool = True,
+    poll_interval: float = 0.4,
+) -> Tuple[str, Optional[str]]:
+    """Wait for whichever comes first: a terminal answer or a web response.
+
+    Returns a ``(source, value)`` tuple:
+
+    * ``(_DISCOVERY_SRC_WEB, text)``      — a web response file arrived first.
+    * ``(_DISCOVERY_SRC_TERMINAL, text)`` — the operator answered at the terminal.
+    * ``(_DISCOVERY_SRC_CANCEL, None)``   — Ctrl+C / EOF with no answer.
+
+    Determinism / no double-consume:
+
+    * A web response already on disk when the wait begins always wins (it is
+      checked before any terminal read) and is consumed (its ``.response`` file
+      removed) before returning, so it can never be read twice.
+    * When ``call_file`` is ``None`` there is no web channel, so this degrades
+      to a plain :func:`_read_multiline_input` terminal read (the path unit
+      tests exercise when no project root is supplied).
+    """
+    # No web channel — terminal only (backward compatible).
+    if call_file is None:
+        text = _read_multiline_input(
+            prompt_title=prompt_title,
+            prompt_message=prompt_message,
+            history=history,
+            strip=strip,
+        )
+        if text is None:
+            return (_DISCOVERY_SRC_CANCEL, None)
+        return (_DISCOVERY_SRC_TERMINAL, text)
+
+    # Deterministic priority: an answer already waiting on disk wins outright.
+    early = _read_discovery_response(call_file)
+    if early is not None:
+        _cleanup_discovery_response(call_file)
+        return (_DISCOVERY_SRC_WEB, early)
+
+    # No interactive terminal to race against (piped stdin / no TTY): block on
+    # the plain reader, but re-check the web file once afterwards so a response
+    # that landed during the read is still preferred.
+    if not sys.stdin.isatty():
+        text = _read_multiline_input(
+            prompt_title=prompt_title,
+            prompt_message=prompt_message,
+            history=history,
+            strip=strip,
+        )
+        late = _read_discovery_response(call_file)
+        if late is not None:
+            _cleanup_discovery_response(call_file)
+            return (_DISCOVERY_SRC_WEB, late)
+        if text is None:
+            return (_DISCOVERY_SRC_CANCEL, None)
+        return (_DISCOVERY_SRC_TERMINAL, text)
+
+    # Interactive TTY: race the prompt_toolkit read against a background poller
+    # that cancels the prompt the instant a web response file appears.
+    return _await_terminal_or_web_interactive(
+        call_file,
+        prompt_title=prompt_title,
+        prompt_message=prompt_message,
+        history=history,
+        strip=strip,
+        poll_interval=poll_interval,
+    )
+
+
+def _await_terminal_or_web_interactive(
+    call_file: Path,
+    *,
+    prompt_title: str,
+    prompt_message: str,
+    history: Any,
+    strip: bool,
+    poll_interval: float,
+) -> Tuple[str, Optional[str]]:
+    """TTY dual-wait: a prompt_toolkit read raced against a web-response poller.
+
+    The prompt runs via :meth:`PromptSession.prompt_async` inside a private
+    event loop. A daemon thread polls ``call_file`` for a sibling response and,
+    when one appears, cancels the prompt by scheduling ``app.exit`` on the loop
+    with ``loop.call_soon_threadsafe`` (re-scheduling until the app is actually
+    running, to close the build-race window). Whichever side completes first
+    wins; the loser is torn down without consuming anything twice. Any
+    unexpected failure degrades to a plain terminal read.
+    """
+    import asyncio
+    import threading
+
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.keys import Keys
+    from prompt_toolkit.patch_stdout import patch_stdout
+
+    from ..engine.display import render_text
+
+    render_text(prompt_message, title=prompt_title)
+
+    kb = KeyBindings()
+
+    @kb.add(Keys.ControlD)
+    def _(event):  # noqa: ANN001 - prompt_toolkit callback signature
+        event.app.current_buffer.validate_and_handle()
+
+    session = PromptSession(
+        multiline=True, message="> ", key_bindings=kb, history=history
+    )
+    web_sentinel = object()
+
+    async def _race() -> Tuple[str, Optional[str]]:
+        loop = asyncio.get_running_loop()
+        stop = threading.Event()
+        web_holder: Dict[str, Optional[str]] = {"value": None}
+
+        def _cancel_prompt() -> None:
+            app = session.app
+            if app is not None and app.is_running:
+                app.exit(result=web_sentinel)
+
+        def _poll() -> None:
+            while not stop.is_set():
+                resp = _read_discovery_response(call_file)
+                if resp is not None:
+                    web_holder["value"] = resp
+                    # The app may not be running yet on the first try; keep
+                    # scheduling the cancel until the prompt tears down.
+                    while not stop.is_set():
+                        loop.call_soon_threadsafe(_cancel_prompt)
+                        if stop.wait(poll_interval):
+                            break
+                    return
+                stop.wait(poll_interval)
+
+        poller = threading.Thread(target=_poll, daemon=True)
+        poller.start()
+        try:
+            with patch_stdout():
+                result = await session.prompt_async()
+        except (KeyboardInterrupt, EOFError):
+            result = None
+        finally:
+            stop.set()
+
+        if result is web_sentinel:
+            _cleanup_discovery_response(call_file)
+            return (_DISCOVERY_SRC_WEB, web_holder["value"])
+        if result is None:
+            # Cancelled — but a web answer may have landed during teardown.
+            if web_holder["value"] is not None:
+                _cleanup_discovery_response(call_file)
+                return (_DISCOVERY_SRC_WEB, web_holder["value"])
+            return (_DISCOVERY_SRC_CANCEL, None)
+        if strip:
+            result = result.strip()
+        return (_DISCOVERY_SRC_TERMINAL, result)
+
+    try:
+        return asyncio.run(_race())
+    except KeyboardInterrupt:
+        return (_DISCOVERY_SRC_CANCEL, None)
+    except Exception:  # pragma: no cover - defensive: fall back to plain read
+        logger.exception(
+            "Interactive discovery dual-wait failed; using a plain terminal read"
+        )
+        text = _read_multiline_input(
+            prompt_title=prompt_title,
+            prompt_message=prompt_message,
+            history=history,
+            strip=strip,
+        )
+        late = _read_discovery_response(call_file)
+        if late is not None:
+            _cleanup_discovery_response(call_file)
+            return (_DISCOVERY_SRC_WEB, late)
+        if text is None:
+            return (_DISCOVERY_SRC_CANCEL, None)
+        return (_DISCOVERY_SRC_TERMINAL, text)
+
+
+def _handle_discovery_pause(
+    flow: FlowInstance,
+    current_step: Any,
+    persistence: PersistenceManager,
+    prompt_history: Any = None,
+    project_root: Optional[Path] = None,
+) -> Optional[str]:
+    """Handle an interactive discovery pause — get the user's response.
+
+    The clarifying question is mirrored to a ``se3/calls/`` call file (when a
+    project root is known) so the web console surfaces the same pending
+    interaction; the terminal and the web response file are then awaited in
+    parallel and whichever answers first drives the flow in this same process
+    (no ``--resume`` needed). The flow stays RUNNING throughout — it is never
+    marked PAUSED — so a watching daemon does not race this live process with a
+    duplicate ``--resume`` spawn.
 
     Args:
         flow: Current flow instance
         current_step: The discovery step
         persistence: Persistence manager
+        prompt_history: Prompt history for readline
+        project_root: Project root for mirroring the pause to a call file
 
     Returns:
-        User response string, or None to exit
+        The user's response string, the :data:`_PROGRAMMATIC_CONFIRM` sentinel
+        (confirmation gate), or ``None`` to exit.
     """
     # Programmatic confirmation gate: LLM confirmed, now require human approval
     if current_step.outputs.get("awaiting_programmatic_confirm"):
         return _handle_discovery_programmatic_confirm(
-            flow, current_step, persistence, prompt_history
+            flow, current_step, persistence, prompt_history, project_root
         )
 
     render_full(
@@ -715,28 +981,37 @@ def _handle_discovery_pause(flow: FlowInstance, current_step: Any, persistence: 
         title="Discovery Pause"
     )
 
-    user_input = _read_multiline_input(
-        prompt_title="Discovery Response",
-        prompt_message="Enter your response (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
-        history=prompt_history,
-    )
+    call_file = _maybe_write_discovery_call(flow, current_step, project_root)
+    try:
+        while True:
+            source, value = _await_terminal_or_web(
+                call_file,
+                prompt_title="Discovery Response",
+                prompt_message="Enter your response (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+                history=prompt_history,
+                strip=True,
+            )
 
-    if user_input is None:
-        # User cancelled
-        persistence.save_flow(flow)
-        render_full(
-            "Discovery paused. Flow state saved.\n"
-            "Resume with: se3 run --resume",
-            title="Paused"
-        )
-        return None
+            if source == _DISCOVERY_SRC_CANCEL:
+                # User cancelled
+                persistence.save_flow(flow)
+                render_full(
+                    "Discovery paused. Flow state saved.\n"
+                    "Resume with: se3 run --resume",
+                    title="Paused"
+                )
+                return None
 
-    if not user_input:
-        # Empty input — ask again
-        get_console().print("[yellow]Please provide a response or press Ctrl+C to exit.[/yellow]")
-        return _handle_discovery_pause(flow, current_step, persistence, prompt_history)
+            if not value:
+                # Empty terminal input — ask again (web never submits empty).
+                get_console().print(
+                    "[yellow]Please provide a response or press Ctrl+C to exit.[/yellow]"
+                )
+                continue
 
-    return user_input
+            return value
+    finally:
+        _cleanup_discovery_call(call_file)
 
 
 # Sentinel returned by programmatic confirm handler when user chooses to proceed.
@@ -753,19 +1028,27 @@ def _handle_discovery_programmatic_confirm(
     current_step: Any,
     persistence: PersistenceManager,
     prompt_history: Any = None,
+    project_root: Optional[Path] = None,
 ) -> Optional[str]:
-    """Handle programmatic confirmation gate after LLM confirms discovery.
+    """Handle the programmatic confirmation gate after the LLM confirms discovery.
 
-    Uses the regular discovery multiline input box. The user types exactly
-    "1" (strict equality, no whitespace stripping) to confirm and proceed.
-    Empty input is a no-op (re-displays the confirmation panel). Any other
-    non-empty input continues discovery as the next user turn.
+    Mirrored to a :data:`~se3.engine.interaction_calls.CALL_KIND_DISCOVERY_CONFIRM`
+    call file (one-click ``"1"`` option) when a project root is known, then the
+    terminal and the web response file are awaited in parallel. The user types
+    exactly ``"1"`` (strict equality, only trailing-newline artifacts stripped)
+    — or clicks the web confirm button, which submits the same ``"1"`` through
+    the call/response channel — to confirm and proceed. Empty input is a no-op
+    (re-displays the confirmation panel). Any other non-empty input continues
+    discovery as the next user turn. The flow stays RUNNING throughout — it is
+    never marked PAUSED — so a watching daemon does not race this live process
+    with a duplicate ``--resume`` spawn.
 
     Args:
         flow: Current flow instance
         current_step: The discovery step
         persistence: Persistence manager
         prompt_history: Prompt history for readline
+        project_root: Project root for mirroring the gate to a call file
 
     Returns:
         _PROGRAMMATIC_CONFIRM sentinel if user confirms,
@@ -774,65 +1057,70 @@ def _handle_discovery_programmatic_confirm(
     """
     # The confirmation panel was already displayed by the discovery handler
     # or _restore_discovery_display.
-    while True:
-        user_input = _read_multiline_input(
-            prompt_title="Discovery Confirmation",
-            prompt_message="Type 1 to confirm and proceed, or type your questions/feedback to continue discovery (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
-            history=prompt_history,
-            strip=False,
-        )
-
-        if user_input is None:
-            # None = Ctrl+C (interactive) or EOF/empty pipe (non-interactive).
-            # NOTE: Intentional divergence — interactive empty input (Ctrl+D on
-            # empty buffer) returns "" and loops with re-display. Non-interactive
-            # empty input returns None because sys.stdin.read() consumes all data
-            # at once; there is nothing left to re-read, so pausing is the only
-            # safe behavior. Scripted drivers that pipe "\n" or empty input will
-            # see the flow pause rather than loop.
-            persistence.save_flow(flow)
-            render_full(
-                "Discovery paused. Flow state saved.\n"
-                "Resume with: se3 run --resume",
-                title="Paused",
+    call_file = _maybe_write_discovery_call(flow, current_step, project_root)
+    try:
+        while True:
+            source, user_input = _await_terminal_or_web(
+                call_file,
+                prompt_title="Discovery Confirmation",
+                prompt_message="Type 1 to confirm and proceed, or type your questions/feedback to continue discovery (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
+                history=prompt_history,
+                strip=False,
             )
-            return None
 
-        # Strip trailing newlines — these are artifacts of the multiline input
-        # UI (pressing Enter before Ctrl+D), not part of the user's intended
-        # input. The spec's strict == "1" rule still rejects " 1 ", "1.",
-        # "yes", " 1", etc.; only the exact single character "1" confirms.
-        if user_input.rstrip('\n\r') == "1":
-            current_step.inputs["programmatic_confirmed"] = True
-            return _PROGRAMMATIC_CONFIRM
+            if source == _DISCOVERY_SRC_CANCEL:
+                # None = Ctrl+C (interactive) or EOF/empty pipe (non-interactive).
+                # NOTE: Intentional divergence — interactive empty input (Ctrl+D
+                # on empty buffer) returns "" and loops with re-display.
+                # Non-interactive empty input returns None because
+                # sys.stdin.read() consumes all data at once; there is nothing
+                # left to re-read, so pausing is the only safe behavior.
+                persistence.save_flow(flow)
+                render_full(
+                    "Discovery paused. Flow state saved.\n"
+                    "Resume with: se3 run --resume",
+                    title="Paused",
+                )
+                return None
 
-        if not user_input.strip():
-            # Empty or whitespace-only input — no-op: re-display the cached
-            # confirmation panel. This covers both interactive empty input
-            # and non-interactive piped whitespace (e.g., "   \n").
-            from ..engine.steps.discovery import _display_discovery_message
+            # Strip trailing newlines — these are artifacts of the multiline
+            # input UI (pressing Enter before Ctrl+D), not part of the user's
+            # intended input. The spec's strict == "1" rule still rejects
+            # " 1 ", "1.", "yes", " 1", etc.; only the exact "1" confirms.
+            if user_input.rstrip('\n\r') == "1":
+                current_step.inputs["programmatic_confirmed"] = True
+                return _PROGRAMMATIC_CONFIRM
 
-            content = current_step.outputs.get("message", "")
-            refined = (
-                current_step.outputs.get("refined_description")
-                or current_step.outputs.get("proposed_description")
-                or ""
+            if not user_input.strip():
+                # Empty or whitespace-only input — no-op: re-display the cached
+                # confirmation panel and keep waiting on the same call file.
+                # (The web console never submits an empty confirm; this is the
+                # terminal empty-buffer affordance.)
+                from ..engine.steps.discovery import _display_discovery_message
+
+                content = current_step.outputs.get("message", "")
+                refined = (
+                    current_step.outputs.get("refined_description")
+                    or current_step.outputs.get("proposed_description")
+                    or ""
+                )
+                raw_result_text = current_step.outputs.get("raw_result_text", "")
+
+                _display_discovery_message(
+                    content, refined, is_confirmation=True, raw_result_text=raw_result_text
+                )
+                continue
+
+            # Non-empty, non-"1" input — continue discovery:
+            # clear the programmatic confirm flag, use this input as the next
+            # discovery user input directly (no separate prompt for questions)
+            current_step.outputs.pop("awaiting_programmatic_confirm", None)
+            get_console().print(
+                "[dim]Captured input — continuing discovery with your feedback.[/dim]"
             )
-            raw_result_text = current_step.outputs.get("raw_result_text", "")
-
-            _display_discovery_message(
-                content, refined, is_confirmation=True, raw_result_text=raw_result_text
-            )
-            continue
-
-        # Non-empty, non-"1" input — continue discovery:
-        # clear the programmatic confirm flag, use this input as the next
-        # discovery user input directly (no separate prompt for questions)
-        current_step.outputs.pop("awaiting_programmatic_confirm", None)
-        get_console().print(
-            "[dim]Captured input — continuing discovery with your feedback.[/dim]"
-        )
-        return user_input
+            return user_input
+    finally:
+        _cleanup_discovery_call(call_file)
 
 
 # Sentinel returned by the non-interactive discovery pause handler when a call
@@ -1468,8 +1756,15 @@ def _run_flow_impl(
                     ))
                     return 0
             else:
-                # Discovery is waiting for an interactive user response.
-                user_response = _handle_discovery_pause(flow, current_step, persistence, prompt_history)
+                # Discovery is waiting for an interactive user response. The
+                # pause is mirrored to a se3/calls/ call file so the web console
+                # can answer it too; terminal + web are awaited in parallel and
+                # whichever answers first drives this same live process. The
+                # flow stays RUNNING (never PAUSED) so the daemon does not spawn
+                # a duplicate --resume against the live interactive process.
+                user_response = _handle_discovery_pause(
+                    flow, current_step, persistence, prompt_history, project_root
+                )
 
                 if user_response is None:
                     # User chose to exit

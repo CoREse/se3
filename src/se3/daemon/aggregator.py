@@ -290,6 +290,7 @@ class DaemonAggregator:
         flow_id_str = str(flow_id) if flow_id else None
         flow_calls = self._filter_calls_for_flow(pending_calls, flow_id_str)
         flow_calls = self._filter_stale_calls(flow_calls, state)
+        flow_calls = self._dedup_calls_by_step(flow_calls)
         return FlowSnapshot(
             project_root=str(root),
             flow_id=flow_id_str,
@@ -431,6 +432,55 @@ class DaemonAggregator:
         return result
 
     @staticmethod
+    def _dedup_calls_by_step(calls: List[PendingCall]) -> List[PendingCall]:
+        """Keep only the newest unanswered call per ``(flow_id, step_id)``.
+
+        Discovery reuses the *same* ``step_id`` across multiple clarification
+        rounds (the run loop pauses, is answered, re-runs the step, pauses
+        again). When a CLI-terminal answer is consumed directly by the run loop
+        without writing a sibling ``.response`` file, the old round's call file
+        can linger while a new round writes a fresh one — leaving several call
+        files all tagged with the same ``(flow_id, step_id)``. Only the most
+        recent is a live interaction; the rest are superseded leftovers that
+        would otherwise pile up as stale "待回复" chips.
+
+        Newest-wins is decided by ``(created_at, call_id)`` — the call file's
+        mtime, with the timestamp-bearing ``call_id`` as a stable tie-breaker.
+        Calls that cannot be keyed (missing ``flow_id`` or ``step_id``) are
+        passed through untouched, so unrelated interactions are never collapsed
+        together. This composes after :meth:`_filter_calls_for_flow` and
+        :meth:`_filter_stale_calls` without changing their behavior.
+        """
+        newest: Dict[tuple, PendingCall] = {}
+        for call in calls:
+            ctx = call.context if isinstance(call.context, dict) else {}
+            flow_id = ctx.get("flow_id")
+            step_id = _call_step_id(call)
+            if not flow_id or not step_id:
+                continue
+            key = (str(flow_id), str(step_id))
+            existing = newest.get(key)
+            if existing is None or _call_sort_key(call) >= _call_sort_key(existing):
+                newest[key] = call
+
+        result: List[PendingCall] = []
+        emitted: Set[tuple] = set()
+        for call in calls:
+            ctx = call.context if isinstance(call.context, dict) else {}
+            flow_id = ctx.get("flow_id")
+            step_id = _call_step_id(call)
+            if not flow_id or not step_id:
+                # Un-keyable — never deduplicated against other calls.
+                result.append(call)
+                continue
+            key = (str(flow_id), str(step_id))
+            if key in emitted:
+                continue
+            emitted.add(key)
+            result.append(newest[key])
+        return result
+
+    @staticmethod
     def _parse_call_file(entry: Path, root: Path) -> PendingCall:
         """Build a :class:`PendingCall` from one ``se3/calls/`` file.
 
@@ -538,6 +588,16 @@ def _call_step_id(call: PendingCall) -> Optional[str]:
     ctx = call.context if isinstance(call.context, dict) else {}
     sid = ctx.get("step_id")
     return str(sid) if sid else None
+
+
+def _call_sort_key(call: PendingCall) -> tuple:
+    """Recency key for a :class:`PendingCall` — newer sorts greater.
+
+    Primary key is the call file's mtime (``created_at``); the ``call_id`` is a
+    stable tie-breaker (discovery call ids embed a high-resolution timestamp, so
+    string order matches creation order when two files share an mtime).
+    """
+    return (call.created_at or 0.0, call.call_id or "")
 
 
 def _current_step(state: dict) -> Optional[str]:
