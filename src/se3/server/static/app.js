@@ -2386,6 +2386,63 @@ function makeProcessToggle(content) {
   return wrap;
 }
 
+// --- user-prompt three-layer progressive disclosure -----------------------
+
+// Append the "模板前缀" (template prefix) and "框架后缀" (framework suffix)
+// subsections of a split user prompt into `target`. Each subsection carries a
+// labeled heading so a developer can tell what the engine injected before vs.
+// after the user's literal input. Empty segments are skipped — legacy
+// two-segment records carry no suffix, and a prefix that starts at index 0 is
+// empty — so a subsection only appears when it has content.
+function appendPromptSubsections(target, split) {
+  const hasPrefix = typeof split.prefix === "string" && split.prefix.length > 0;
+  const hasSuffix = typeof split.suffix === "string" && split.suffix.length > 0;
+  if (hasPrefix) {
+    const sec = el("div", "user-prompt-chip__section");
+    sec.appendChild(el("h6", "user-prompt-chip__section-title", "模板前缀"));
+    sec.appendChild(el("pre", "conv-plain", split.prefix));
+    target.appendChild(sec);
+  }
+  if (hasSuffix) {
+    const sec = el("div", "user-prompt-chip__section");
+    sec.appendChild(el("h6", "user-prompt-chip__section-title", "框架后缀"));
+    sec.appendChild(el("pre", "conv-plain", split.suffix));
+    target.appendChild(sec);
+  }
+}
+
+// "展开全部" — Layer 2 of the user turn's three-layer disclosure, the mirror of
+// the assistant side's `makeProcessToggle`. Collapsed by default; on first
+// expand it lazily renders the full prompt the LLM actually saw as the two
+// labeled subsections (模板前缀 / 框架后缀) so the default view (the user-content
+// bubble above it) stays limited to the user's literal input. Control naming
+// ("▸ 展开全部" / "▾ 收起全部") and the expand-only scroll-into-view behavior are
+// shared verbatim with the assistant process toggle.
+function makeUserPromptToggle(split) {
+  const wrap = el("div", "process-toggle-wrap user-prompt-toggle-wrap folded");
+  const btn = el("button", "process-toggle", "▸ 展开全部");
+  btn.type = "button";
+  const full = el("div", "process-full hidden");
+  let built = false;
+  let expanded = false;
+  btn.addEventListener("click", () => {
+    expanded = !expanded;
+    if (expanded && !built) {
+      appendPromptSubsections(full, split);
+      built = true;
+    }
+    full.classList.toggle("hidden", !expanded);
+    wrap.classList.toggle("folded", !expanded);
+    wrap.classList.toggle("expanded", expanded);
+    btn.textContent = expanded ? "▾ 收起全部" : "▸ 展开全部";
+    if (expanded) {
+      requestAnimationFrame(() => full.scrollIntoView({ block: "nearest" }));
+    }
+  });
+  wrap.append(btn, full);
+  return wrap;
+}
+
 // Build the inner content of an assistant bubble using the three-layer
 // progressive disclosure model:
 //   Layer 1 (default): the clean structured result, via STEP_ASSISTANT_RENDERERS
@@ -2589,70 +2646,73 @@ function renderStepEventRecord(norm) {
 // User-prompt marker record (template prefix chip + actual content bubble)
 // ---------------------------------------------------------------------------
 
-// Build the row for a `user` message whose body has a TEMPLATE_PREFIX_END
-// marker. The system-instructions boilerplate (prefix) and the framework-
-// injected tail (suffix — Available Specs / runtime env / READ-ONLY /
-// language directive) both go into a single default-collapsed system-
-// prompt chip; the user's actual literal input (middle USER_CONTENT
-// section) goes into a default-expanded bubble below the chip. When the
-// content section is empty (e.g. a step that injected only a prefix +
-// suffix sandwich), the bubble is omitted and only the chip is shown.
-// The raw payload toggle stays available regardless.
+// Build the row for a `user` message whose body has the sentinel markers,
+// using the same three-layer progressive disclosure as the assistant side:
+//   Layer 1 (default): the user's literal input (the middle USER_CONTENT
+//                      section) as a default-expanded bubble — only what the
+//                      human typed, never the framework boilerplate.
+//   Layer 2 ("展开全部"): the full prompt the LLM saw, as the 模板前缀 /
+//                      框架后缀 subsections, collapsed by default via
+//                      `makeUserPromptToggle` (the mirror of the assistant
+//                      `makeProcessToggle`).
+//   Layer 3 ("查看原始"): the raw NDJSON, via the shared row-level
+//                      `makeRawToggle`.
+//
+// When the content section is empty (legacy two-segment record, or a step
+// whose template wrapped an empty user_content), there is no user literal to
+// surface as Layer 1: the record degrades to a single default-collapsed
+// system-prompt chip combining the prefix + suffix (no user bubble), matching
+// the no-marker whole-chip fallback. The raw payload toggle stays available in
+// both shapes.
 function renderUserMarkerRecord(norm, split) {
   const row = el("div", "history-record conv-record role-user user-prompt-marker");
 
   const ctx = norm.stepType || norm.stepId || "step";
-  const label = `system prompt · ${ctx}`;
-  const chipWrap = el("div", "msg-chip-wrap collapsed user-prompt-chip");
-  const chip = el("button", "msg-chip", "▸ " + label);
-  chip.type = "button";
-  const chipDetail = el("div", "msg-chip-detail");
-  let chipBuilt = false;
-  let chipExpanded = false;
-  const hasSuffix = typeof split.suffix === "string" && split.suffix.length > 0;
-  chip.addEventListener("click", () => {
-    chipExpanded = !chipExpanded;
-    if (chipExpanded && !chipBuilt) {
-      // Two subsections inside the chip: "模板前缀" (template prefix) and
-      // "框架后缀" (framework suffix appended after the user input). The
-      // suffix subsection is only rendered when a USER_CONTENT_END marker
-      // was found and there is something after it — legacy two-segment
-      // history records have an empty suffix and render only the prefix.
-      const prefixSec = el("div", "user-prompt-chip__section");
-      prefixSec.appendChild(
-        el("h6", "user-prompt-chip__section-title", "模板前缀"));
-      prefixSec.appendChild(el("pre", "conv-plain", split.prefix));
-      chipDetail.appendChild(prefixSec);
-      if (hasSuffix) {
-        const suffixSec = el("div", "user-prompt-chip__section");
-        suffixSec.appendChild(
-          el("h6", "user-prompt-chip__section-title", "框架后缀"));
-        suffixSec.appendChild(el("pre", "conv-plain", split.suffix));
-        chipDetail.appendChild(suffixSec);
-      }
-      chipBuilt = true;
-    }
-    chipWrap.classList.toggle("collapsed", !chipExpanded);
-    chip.textContent = (chipExpanded ? "▾ " : "▸ ") + label;
-    if (chipExpanded) {
-      requestAnimationFrame(() => chipDetail.scrollIntoView({ block: "nearest" }));
-    }
-  });
-  chipWrap.append(chip, chipDetail);
-  row.appendChild(chipWrap);
-
-  // Default-expanded bubble carrying the user's real task content. Literal
-  // text is preserved so the exact prompt body the LLM saw is reproduced.
-  // Empty content (three-segment record with no literal user input — e.g.
-  // a step whose template wrapped an empty user_content) skips the bubble
-  // entirely so only the chip is shown.
   const hasContent = typeof split.content === "string" && split.content.length > 0;
+  const hasPrefix = typeof split.prefix === "string" && split.prefix.length > 0;
+  const hasSuffix = typeof split.suffix === "string" && split.suffix.length > 0;
+
   if (hasContent) {
+    // Layer 1 — default-expanded bubble carrying ONLY the user's real input.
+    // Literal text is preserved so the exact body the LLM saw is reproduced.
     const bubble = el("div", "conv-bubble user-content-bubble");
     bubble.appendChild(el("pre", "conv-plain", split.content));
     row.appendChild(bubble);
+
+    // Layer 2 — "展开全部" toggle revealing the 模板前缀 / 框架后缀 subsections,
+    // collapsed by default so the framework boilerplate stays out of the
+    // default view. Skipped only when there is no boilerplate at all.
+    if (hasPrefix || hasSuffix) {
+      row.appendChild(makeUserPromptToggle(split));
+    }
+  } else {
+    // Empty user-content (legacy two-segment / prefix+suffix sandwich):
+    // degrade to a single default-collapsed system-prompt chip combining the
+    // prefix and suffix subsections, with no user bubble.
+    const label = `system prompt · ${ctx}`;
+    const chipWrap = el("div", "msg-chip-wrap collapsed user-prompt-chip");
+    const chip = el("button", "msg-chip", "▸ " + label);
+    chip.type = "button";
+    const chipDetail = el("div", "msg-chip-detail");
+    let chipBuilt = false;
+    let chipExpanded = false;
+    chip.addEventListener("click", () => {
+      chipExpanded = !chipExpanded;
+      if (chipExpanded && !chipBuilt) {
+        appendPromptSubsections(chipDetail, split);
+        chipBuilt = true;
+      }
+      chipWrap.classList.toggle("collapsed", !chipExpanded);
+      chip.textContent = (chipExpanded ? "▾ " : "▸ ") + label;
+      if (chipExpanded) {
+        requestAnimationFrame(() => chipDetail.scrollIntoView({ block: "nearest" }));
+      }
+    });
+    chipWrap.append(chip, chipDetail);
+    row.appendChild(chipWrap);
   }
 
+  // Layer 3 — raw NDJSON, shared row-level toggle.
   const rawToggle = makeRawToggle(norm);
   if (rawToggle) row.appendChild(rawToggle);
 

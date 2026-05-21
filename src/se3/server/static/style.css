@@ -1078,25 +1078,35 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   border-left: 2px solid var(--border);
 }
 
-/* -- user prompt marker (chip + bubble) ----------------------------- */
+/* -- user prompt marker (bubble + 展开全部 toggle) ------------------- */
 /*
- * When the engine injects TEMPLATE_PREFIX_END / USER_CONTENT_BEGIN
- * markers into a user-role prompt, the frontend splits the message into
- * a default-collapsed chip (the boilerplate prefix) and a default-
- * expanded bubble (the actual task / context). The chip sits directly
- * above the bubble so the two read as one visual unit.
+ * When the engine injects TEMPLATE_PREFIX_END / USER_CONTENT_BEGIN /
+ * USER_CONTENT_END markers into a user-role prompt, the frontend uses the
+ * same three-layer progressive disclosure as the assistant side:
+ *   Layer 1 — a default-expanded bubble with ONLY the user's literal input.
+ *   Layer 2 — a default-collapsed "展开全部" toggle (`.user-prompt-toggle-wrap`)
+ *             revealing the 模板前缀 / 框架后缀 boilerplate.
+ *   Layer 3 — the shared "查看原始" raw toggle.
+ * The user-content bubble sits on top; the toggle reads as a quiet control
+ * directly beneath it. A legacy/empty-content record degrades to the single
+ * collapsed `.user-prompt-chip` instead.
  */
+.conv-record.user-prompt-marker .user-content-bubble {
+  align-self: flex-end;
+  background: rgba(76, 141, 255, 0.12);
+  border-color: rgba(76, 141, 255, 0.4);
+}
+.conv-record.user-prompt-marker .user-prompt-toggle-wrap {
+  align-self: flex-end;
+  max-width: 88%;
+  margin-top: 4px;
+}
 .conv-record.user-prompt-marker .user-prompt-chip {
   align-self: flex-end;
   max-width: 88%;
   margin-bottom: 4px;
 }
 .conv-record.user-prompt-marker .user-prompt-chip .msg-chip { width: 100%; }
-.conv-record.user-prompt-marker .user-content-bubble {
-  align-self: flex-end;
-  background: rgba(76, 141, 255, 0.12);
-  border-color: rgba(76, 141, 255, 0.4);
-}
 
 /* -- step event chip (raw step_completed / step_failed) ------------- */
 

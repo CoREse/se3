@@ -1210,4 +1210,166 @@ check("assistant structured renderer that throws is caught and degrades", () => 
   assert.ok(bubble && bubble.textContent.includes("still visible body"));
 });
 
+// ---------------------------------------------------------------------------
+// User-turn three-layer progressive disclosure (DOM)
+// ---------------------------------------------------------------------------
+//
+// A marker-bearing `user` record mirrors the assistant side's three layers:
+// Layer 1 = the user's literal input bubble (default-expanded, no framework
+// boilerplate); Layer 2 = the "展开全部" toggle revealing 模板前缀 / 框架后缀;
+// Layer 3 = the "查看原始" raw NDJSON. An empty user-content section (legacy
+// two-segment layout) degrades to a single collapsed system-prompt chip, and a
+// marker-free body falls all the way back to the whole-message chip.
+
+// Build a normalized `user` record whose body carries the sentinel markers.
+// `content === null` emits the legacy two-segment layout (TEMPLATE_PREFIX_END +
+// USER_CONTENT_BEGIN, no USER_CONTENT_END) where the post-BEGIN tail is the
+// framework `suffix`.
+const userMarkerNorm = (prefix, content, suffix, stepType, rawNdjson) => {
+  const TPE = app.TEMPLATE_PREFIX_END;
+  const UCB = app.USER_CONTENT_BEGIN;
+  const UCE = app.USER_CONTENT_END;
+  const body = content == null
+    ? prefix + "\n" + TPE + "\n" + UCB + "\n" + (suffix || "")
+    : prefix + "\n" + TPE + "\n" + UCB + "\n" + content + "\n" + UCE + "\n" + (suffix || "");
+  return app.normalizeRecord({
+    step_id: stepType,
+    message: {
+      role: "user",
+      content: body,
+      timestamp: 1,
+      step_type: stepType,
+      raw_ndjson: rawNdjson != null ? rawNdjson : null,
+    },
+  });
+};
+
+check("user three layers: literal bubble default, 展开全部 prefix/suffix, 查看原始 ndjson", () => {
+  const ndjson = '{"raw_marker":"USER_NDJSON_TOKEN"}';
+  const norm = userMarkerNorm(
+    "You are an expert engineer.\n## Project Context\nlots of boilerplate",
+    "Please add retry logic to the daemon.",
+    "## Available Specs\nspec list\nREAD-ONLY CONSTRAINT",
+    "discovery", ndjson);
+  const row = app.renderConversationRecord(norm);
+
+  // Layer 1: the default-expanded bubble surfaces ONLY the user's literal input.
+  const bubble = findOne(row, "user-content-bubble");
+  assert.ok(bubble, "Layer 1 user-content bubble present");
+  assert.ok(bubble.textContent.includes("Please add retry logic to the daemon."));
+  // No framework boilerplate leaks into the default view — the 展开全部 body is
+  // built lazily, so prefix/suffix are absent from the DOM until expanded.
+  assert.equal(row.textContent.includes("Project Context"), false,
+    "template prefix must not appear in the default view");
+  assert.equal(row.textContent.includes("Available Specs"), false,
+    "framework suffix must not appear in the default view");
+
+  // Layer 2: the "展开全部" toggle reveals 模板前缀 / 框架后缀, folded by default.
+  const wrap = findOne(row, "user-prompt-toggle-wrap");
+  assert.ok(wrap, "Layer 2 展开全部 toggle present");
+  const toggle = findOne(wrap, "process-toggle");
+  assert.ok(toggle.textContent.includes("展开全部"));
+  const full = findOne(wrap, "process-full");
+  assert.equal(full.classList.contains("hidden"), true, "prefix/suffix folded by default");
+  toggle.dispatch("click");
+  assert.equal(full.classList.contains("hidden"), false, "expands on click");
+  assert.ok(full.textContent.includes("模板前缀"), "template-prefix subsection labeled");
+  assert.ok(full.textContent.includes("框架后缀"), "framework-suffix subsection labeled");
+  assert.ok(full.textContent.includes("Project Context"), "prefix body now visible");
+  assert.ok(full.textContent.includes("Available Specs"), "suffix body now visible");
+
+  // Layer 3: the row-level "查看原始" toggle reveals the raw NDJSON.
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "Layer 3 raw toggle present");
+  const rawPre = findOne(row, "raw-json");
+  assert.equal(rawPre.classList.contains("hidden"), true, "raw hidden by default");
+  rawToggle.dispatch("click");
+  assert.equal(rawPre.classList.contains("hidden"), false, "raw expands on click");
+  assert.ok(rawPre.textContent.includes("USER_NDJSON_TOKEN"),
+    "the raw layer shows the original NDJSON payload");
+});
+
+check("user two-segment marker degrades to a single collapsed chip (no bubble)", () => {
+  const norm = userMarkerNorm(
+    "You are an expert engineer.",
+    null, // legacy two-segment: no USER_CONTENT_END
+    "## Task\nframework tail and project context",
+    "analyze");
+  const row = app.renderConversationRecord(norm);
+  // No user literal to surface → no Layer-1 bubble and no 展开全部 toggle.
+  assert.equal(findOne(row, "user-content-bubble"), null);
+  assert.equal(findOne(row, "user-prompt-toggle-wrap"), null);
+  // A single collapsed system-prompt chip instead.
+  const wrap = findOne(row, "user-prompt-chip");
+  assert.ok(wrap, "degraded system-prompt chip present");
+  assert.equal(wrap.classList.contains("collapsed"), true, "collapsed by default");
+  const chip = findOne(wrap, "msg-chip");
+  assert.ok(chip.textContent.includes("system prompt · analyze"));
+  // The framework tail must NOT leak before expansion.
+  assert.equal(row.textContent.includes("framework tail"), false);
+  chip.dispatch("click");
+  assert.equal(wrap.classList.contains("collapsed"), false, "expands on click");
+  const detail = findOne(wrap, "msg-chip-detail");
+  assert.ok(detail.textContent.includes("模板前缀"));
+  assert.ok(detail.textContent.includes("框架后缀"));
+  assert.ok(detail.textContent.includes("framework tail"), "suffix body now visible");
+});
+
+check("user message without markers falls back to a whole-message chip", () => {
+  const norm = app.normalizeRecord({
+    step_id: "discovery",
+    message: { role: "user", content: "just a plain reply", timestamp: 1, step_type: "discovery" },
+  });
+  const row = app.renderConversationRecord(norm);
+  // Not the marker path: no user-prompt-marker class, no Layer-1 bubble.
+  assert.equal(row.classList.contains("user-prompt-marker"), false);
+  assert.equal(findOne(row, "user-content-bubble"), null);
+  // The legacy collapsible chip carries the whole message (lazy: hidden until click).
+  const chip = findOne(row, "msg-chip");
+  assert.ok(chip, "whole-message chip present");
+  assert.ok(chip.textContent.includes("user prompt"));
+  assert.equal(row.textContent.includes("just a plain reply"), false,
+    "content hidden until the chip is expanded");
+  chip.dispatch("click");
+  assert.ok(row.textContent.includes("just a plain reply"), "content visible after expand");
+});
+
+// ---------------------------------------------------------------------------
+// Stage sectioning with the new user render path (DOM)
+// ---------------------------------------------------------------------------
+//
+// A marker-bearing user reply produced mid-discovery must stay in strict
+// timestamp order between the surrounding assistant turns, with step headers
+// acting only as visual separators — never reordering records.
+check("renderConversation: user marker reply interleaves by ts; step headers only separate", () => {
+  const TPE = app.TEMPLATE_PREFIX_END;
+  const UCB = app.USER_CONTENT_BEGIN;
+  const UCE = app.USER_CONTENT_END;
+  const userBody = "boiler\n" + TPE + "\n" + UCB + "\nmy answer\n" + UCE + "\ntail";
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    asstRecord("A1", 1, "discovery", "discovery"),
+    { step_id: "discovery_continue",
+      message: { role: "user", content: userBody, timestamp: 2, step_type: "discovery_continue" } },
+    asstRecord("A2", 3, "discovery", "discovery"),
+  ], false);
+
+  // Strict timestamp order is preserved across the role/step boundary.
+  const order = describeBubbles(container).map((b) => b.ts);
+  assert.deepEqual(order, [...order].sort((a, b) => a - b),
+    "bubbles must be ordered by ascending timestamp");
+
+  // The middle bubble is the new user-marker record carrying the literal input.
+  const bubbles = container.children.filter((c) => c.__convIdx !== undefined);
+  const mid = bubbles[1];
+  assert.ok(mid.classList.contains("user-prompt-marker"), "middle record uses the marker path");
+  const ucb = findOne(mid, "user-content-bubble");
+  assert.ok(ucb && ucb.textContent.includes("my answer"));
+
+  // Step headers separate discovery / discovery_continue / discovery (visual only):
+  // three boundaries → three headers, and they never shuffle the bubbles.
+  const headers = findAll(container, "history-step-header");
+  assert.equal(headers.length, 3, "a header at each step boundary");
+});
+
 console.log(`\n${passed} checks passed.`);
