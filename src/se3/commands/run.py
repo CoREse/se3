@@ -1370,13 +1370,24 @@ def _run_flow_impl(
                     return 130
                 continue
 
-        # Emit the step's terminal event (skip for CONFIRM/DISCOVERY/PLAN —
-        # their output is presented by the interactive prompt). CliSink routes
-        # STEP_COMPLETED/STEP_FAILED to step_renderers.render_step_output(),
-        # producing byte-identical CLI output to the previous direct call;
-        # JsonSink forwards the structured event. run.py itself no longer
+        # Emit the step's terminal event for EVERY step type — including the
+        # interactive CONFIRM/DISCOVERY steps and PLAN, which used to be
+        # excluded here. Emitting it is what lets HistorySink persist the
+        # step's structured outputs to the per-step jsonl (→ web report cards)
+        # and JsonSink forward the event to the daemon; without it, a finished
+        # discovery/plan/confirm/summarize step left the web console with no
+        # final card to render. We only emit on a *terminal* result: a step
+        # that returned PAUSED (DISCOVERY awaiting user input, CONFIRM awaiting
+        # approval) or REVISION_NEEDED has not finished yet, so its terminal
+        # event is deferred until a later re-run reaches COMPLETED / PARTIAL /
+        # FAILED.
+        #
+        # CliSink deliberately skips rendering CONFIRM/DISCOVERY/PLAN (their CLI
+        # output is owned by the orchestrator's interactive/special paths), so
+        # this emit does NOT double-render the interactive steps on the CLI;
+        # HistorySink and JsonSink still receive it. run.py itself no longer
         # imports render_step_output — rendering lives entirely in the sink.
-        if current_step.step_type not in (StepType.CONFIRM, StepType.DISCOVERY, StepType.PLAN):
+        if result in (StepStatus.COMPLETED, StepStatus.PARTIAL, StepStatus.FAILED):
             step_event_type = (
                 EventType.STEP_FAILED
                 if result == StepStatus.FAILED

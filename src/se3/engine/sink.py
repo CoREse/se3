@@ -64,7 +64,23 @@ class CliSink(Sink):
 
     Raw ``STEP_OUTPUT`` and ``STEP_STARTED`` events are likewise a no-op — the
     per-step renderer already presents the full output once the step finishes.
+
+    Finally, ``STEP_COMPLETED`` / ``STEP_FAILED`` events for the interactive
+    CONFIRM and DISCOVERY steps and for PLAN are a **no-op** here: their CLI
+    output is owned by the ``se3 run`` orchestrator's interactive/special paths
+    (the discovery message panel, the confirm approval prompt, …), so routing
+    them through ``render_step_output`` too would double-render the CLI. These
+    steps now *do* emit terminal events (so HistorySink can persist them for
+    the web report cards and JsonSink can forward them to the daemon); CliSink
+    is the layer that keeps the CLI output unchanged by skipping them.
     """
+
+    #: Step types whose terminal events CliSink must NOT render — their CLI
+    #: output is presented by the orchestrator's interactive/special paths, so
+    #: rendering them here would duplicate the CLI output. The values match
+    #: ``StepType.CONFIRM/DISCOVERY/PLAN`` ``.value`` strings (compared as
+    #: strings to avoid importing the heavier models module into this sink).
+    _CLI_SKIP_STEP_TYPES = frozenset({"confirm", "discovery", "plan"})
 
     def __init__(self, console: Optional[object] = None) -> None:
         """Create a CLI sink.
@@ -89,9 +105,21 @@ class CliSink(Sink):
     # -- internals ---------------------------------------------------------
 
     def _render_step(self, event: Event) -> None:
-        """Route a step event to the existing step-output renderer."""
+        """Route a step event to the existing step-output renderer.
+
+        Interactive steps (CONFIRM/DISCOVERY) and PLAN are skipped: their CLI
+        output is presented by the orchestrator's interactive/special paths, so
+        rendering them here too would double the CLI output. Their events still
+        reach HistorySink (web report cards) and JsonSink (daemon NDJSON).
+        """
         step = event.data.get("step")
         if step is None:
+            return
+        step_type = event.step_type
+        if step_type is None:
+            st = getattr(step, "step_type", None)
+            step_type = getattr(st, "value", st)
+        if step_type in self._CLI_SKIP_STEP_TYPES:
             return
         from .step_renderers import render_step_output
 
