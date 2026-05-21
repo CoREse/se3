@@ -156,14 +156,35 @@ def test_history_caches_are_not_persisted(tmp_path):
 
 
 @pytest.fixture()
-def client_and_app():
+def client_and_app(monkeypatch):
     from fastapi.testclient import TestClient
 
+    import se3.server.app as app_module
     from se3.server.app import create_app
+
+    # ``GET /api/history`` now broadcasts a forced index re-push to every
+    # connected daemon and waits for the replies. Tests using a stand-in
+    # daemon that does not answer would otherwise block the full 2 s timeout
+    # on every call, so shorten the wait here.
+    monkeypatch.setattr(app_module, "HISTORY_INDEX_REFRESH_TIMEOUT", 0.3)
 
     app = create_app()
     with TestClient(app) as client:
         yield client, app
+
+
+def _receive_until(daemon, msg_type):
+    """Read frames from *daemon*, skipping index-refresh broadcasts.
+
+    ``GET /api/history`` queues a ``MSG_HISTORY_INDEX_REQUEST`` on every
+    connected daemon; a test that next expects a different server→daemon frame
+    must skip past those broadcasts. Returns the first frame of *msg_type*.
+    """
+    while True:
+        frame = protocol.decode(daemon.receive_text())
+        if frame.type == msg_type:
+            return frame
+        assert frame.type == protocol.MSG_HISTORY_INDEX_REQUEST
 
 
 def test_history_index_message_routed_to_state(client_and_app):
@@ -247,9 +268,9 @@ def test_history_detail_on_demand_pull(client_and_app):
         worker = threading.Thread(target=do_get)
         worker.start()
         try:
-            # The server should route a pull request to the daemon.
-            req = protocol.decode(daemon.receive_text())
-            assert req.type == protocol.MSG_HISTORY_REQUEST
+            # The server should route a pull request to the daemon (skipping
+            # any index-refresh broadcast queued by the GET /api/history above).
+            req = _receive_until(daemon, protocol.MSG_HISTORY_REQUEST)
             assert req.payload["flow_id"] == "f1"
             daemon.send_text(
                 protocol.make_history_data(
@@ -295,15 +316,227 @@ def test_history_detail_pull_timeout(client_and_app, monkeypatch):
         worker = threading.Thread(target=do_get)
         worker.start()
         try:
-            # Drain the request but deliberately never answer it.
-            req = protocol.decode(daemon.receive_text())
-            assert req.type == protocol.MSG_HISTORY_REQUEST
+            # Drain the request but deliberately never answer it (skipping any
+            # index-refresh broadcast queued by the GET /api/history above).
+            _receive_until(daemon, protocol.MSG_HISTORY_REQUEST)
         finally:
             worker.join(timeout=5)
         assert result["resp"].status_code == 504
 
 
 def test_history_endpoints_empty(client_and_app):
+    client, _ = client_and_app
+    resp = client.get("/api/history")
+    assert resp.status_code == 200
+    assert resp.json() == {"sessions": [], "count": 0}
+
+
+# --------------------------------------------------------------------------
+# IndexRefreshRegistry + broadcast_index_refresh (unit)
+# --------------------------------------------------------------------------
+
+
+class _FakeServerWS:
+    """A server-side WebSocket stand-in capturing what the server sends down."""
+
+    def __init__(self):
+        self.sent = []
+
+    async def send_text(self, data):
+        self.sent.append(protocol.decode(data))
+
+
+def test_index_refresh_registry_resolve_and_discard():
+    from se3.server.ws import IndexRefreshRegistry
+
+    async def scenario():
+        reg = IndexRefreshRegistry()
+        fut = reg.register("m1")
+        reg.resolve("m1")
+        assert fut.result() is True
+        # resolve with no parked waiter is a no-op (no error).
+        reg.resolve("ghost")
+        # discard removes a waiter without resolving it.
+        fut2 = reg.register("m2")
+        reg.discard("m2", fut2)
+        assert not fut2.done()
+        # discard on an already-cleared machine is harmless.
+        reg.discard("m2", fut2)
+
+    asyncio.run(scenario())
+
+
+def test_broadcast_index_refresh_sends_to_connected_and_returns_waiters():
+    from se3.server.ws import (
+        ConnectionManager,
+        IndexRefreshRegistry,
+        broadcast_index_refresh,
+    )
+
+    async def scenario():
+        mgr = ConnectionManager()
+        ws1, ws2 = _FakeServerWS(), _FakeServerWS()
+        await mgr.connect("m1", ws1)
+        await mgr.connect("m2", ws2)
+        reg = IndexRefreshRegistry()
+
+        waiters = await broadcast_index_refresh(mgr, reg)
+
+        assert set(waiters) == {"m1", "m2"}
+        assert ws1.sent[0].type == protocol.MSG_HISTORY_INDEX_REQUEST
+        assert ws2.sent[0].type == protocol.MSG_HISTORY_INDEX_REQUEST
+        # A daemon's re-push resolves only its own waiter.
+        reg.resolve("m1")
+        assert waiters["m1"].result() is True
+        assert not waiters["m2"].done()
+
+    asyncio.run(scenario())
+
+
+def test_broadcast_index_refresh_no_daemon_returns_empty():
+    from se3.server.ws import (
+        ConnectionManager,
+        IndexRefreshRegistry,
+        broadcast_index_refresh,
+    )
+
+    async def scenario():
+        waiters = await broadcast_index_refresh(
+            ConnectionManager(), IndexRefreshRegistry()
+        )
+        assert waiters == {}
+
+    asyncio.run(scenario())
+
+
+def test_broadcast_index_refresh_discards_waiter_on_send_failure():
+    from se3.server.ws import (
+        ConnectionManager,
+        IndexRefreshRegistry,
+        broadcast_index_refresh,
+    )
+
+    class _BadWS:
+        async def send_text(self, data):
+            raise RuntimeError("boom")
+
+    async def scenario():
+        mgr = ConnectionManager()
+        await mgr.connect("m1", _BadWS())
+        reg = IndexRefreshRegistry()
+        waiters = await broadcast_index_refresh(mgr, reg)
+        # Send failed -> the machine is not returned as a waiter ...
+        assert waiters == {}
+        # ... and no dangling waiter was left behind in the registry.
+        reg.resolve("m1")  # no-op, must not raise
+
+    asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------
+# GET /api/history actively refreshes the index on entry
+# --------------------------------------------------------------------------
+
+
+def test_history_list_broadcasts_index_refresh_request(client_and_app):
+    """Entering the history view asks every connected daemon to re-push."""
+    client, _ = client_and_app
+    with client.websocket_connect("/ws") as daemon:
+        daemon.send_text(protocol.make_hello("m1", "host", "6.4.0").to_json())
+        protocol.decode(daemon.receive_text())  # WELCOME
+
+        result: dict = {}
+
+        def do_get():
+            result["resp"] = client.get("/api/history")
+
+        worker = threading.Thread(target=do_get)
+        worker.start()
+        try:
+            req = _receive_until(daemon, protocol.MSG_HISTORY_INDEX_REQUEST)
+            assert req.type == protocol.MSG_HISTORY_INDEX_REQUEST
+        finally:
+            worker.join(timeout=5)
+        assert result["resp"].status_code == 200
+
+
+def test_history_list_returns_latest_after_forced_repush(client_and_app):
+    """A stale cached index (5/14) is replaced by the daemon's forced
+    re-push (5/21) before GET /api/history aggregates and returns."""
+    client, _ = client_and_app
+    with client.websocket_connect("/ws") as daemon:
+        daemon.send_text(protocol.make_hello("m1", "host", "6.4.0").to_json())
+        protocol.decode(daemon.receive_text())  # WELCOME
+        # Stale index the server caches up front (only an old 5/14 entry).
+        daemon.send_text(
+            protocol.make_history_index(
+                [{"flow_id": "f1", "updated_at": "2026-05-14"}]
+            ).to_json()
+        )
+
+        result: dict = {}
+
+        def do_get():
+            result["resp"] = client.get("/api/history")
+
+        worker = threading.Thread(target=do_get)
+        worker.start()
+        try:
+            # The GET broadcasts a forced index-refresh; the daemon answers
+            # with a fresh index carrying the latest 5/21 session.
+            req = _receive_until(daemon, protocol.MSG_HISTORY_INDEX_REQUEST)
+            assert req.type == protocol.MSG_HISTORY_INDEX_REQUEST
+            daemon.send_text(
+                protocol.make_history_index(
+                    [{"flow_id": "f1", "updated_at": "2026-05-21"}]
+                ).to_json()
+            )
+        finally:
+            worker.join(timeout=5)
+
+        resp = result["resp"]
+        assert resp.status_code == 200
+        sessions = resp.json()["sessions"]
+        assert sessions and sessions[0]["flow_id"] == "f1"
+        # The forced re-push won: the response carries the latest date.
+        assert sessions[0]["updated_at"] == "2026-05-21"
+
+
+def test_history_list_degrades_to_cache_on_timeout(client_and_app):
+    """A connected daemon that never answers the refresh request still yields
+    a prompt 200 with the currently cached index (no 5xx, no hang)."""
+    client, _ = client_and_app
+    with client.websocket_connect("/ws") as daemon:
+        daemon.send_text(protocol.make_hello("m1", "host", "6.4.0").to_json())
+        protocol.decode(daemon.receive_text())  # WELCOME
+        daemon.send_text(
+            protocol.make_history_index(
+                [{"flow_id": "f1", "updated_at": "2026-05-14"}]
+            ).to_json()
+        )
+
+        result: dict = {}
+
+        def do_get():
+            result["resp"] = client.get("/api/history")
+
+        worker = threading.Thread(target=do_get)
+        worker.start()
+        try:
+            # Drain the refresh request but never answer it -> forced timeout.
+            _receive_until(daemon, protocol.MSG_HISTORY_INDEX_REQUEST)
+        finally:
+            worker.join(timeout=5)
+
+        resp = result["resp"]
+        assert resp.status_code == 200
+        sessions = resp.json()["sessions"]
+        assert sessions and sessions[0]["flow_id"] == "f1"
+
+
+def test_history_list_no_daemon_returns_200_without_blocking(client_and_app):
+    """With no connected daemon the endpoint returns the cached index
+    immediately (no waiter to await) and never errors."""
     client, _ = client_and_app
     resp = client.get("/api/history")
     assert resp.status_code == 200

@@ -42,7 +42,9 @@ from .state import ServerState
 from .ws import (
     ConnectionManager,
     HistoryRequestRegistry,
+    IndexRefreshRegistry,
     UiHub,
+    broadcast_index_refresh,
     handle_daemon_connection,
     handle_ui_connection,
     request_history,
@@ -55,6 +57,13 @@ STATIC_DIR = Path(__file__).parent / "static"
 #: Seconds a ``GET /api/history/{flow_id}`` cache-miss waits for the owning
 #: daemon to answer the on-demand ``MSG_HISTORY_REQUEST`` before giving up.
 HISTORY_PULL_TIMEOUT = 10.0
+
+#: Seconds ``GET /api/history`` waits for connected daemons to answer the
+#: broadcast ``MSG_HISTORY_INDEX_REQUEST`` (a forced index re-push) before it
+#: gives up and returns whatever index is currently cached. Kept short so the
+#: history list refreshes promptly on entry without blocking the response when
+#: a daemon is slow or unreachable.
+HISTORY_INDEX_REFRESH_TIMEOUT = 2.0
 
 
 # -- request models --------------------------------------------------------
@@ -90,18 +99,20 @@ def create_app() -> FastAPI:
     manager = ConnectionManager()
     ui_hub = UiHub()
     history_registry = HistoryRequestRegistry()
+    index_refresh_registry = IndexRefreshRegistry()
     # Expose for tests / introspection.
     app.state.server_state = state
     app.state.connection_manager = manager
     app.state.ui_hub = ui_hub
     app.state.history_registry = history_registry
+    app.state.index_refresh_registry = index_refresh_registry
 
     # -- daemon WebSocket endpoint -----------------------------------------
 
     @app.websocket("/ws")
     async def daemon_ws(websocket: WebSocket) -> None:
         await handle_daemon_connection(
-            websocket, manager, state, ui_hub, history_registry
+            websocket, manager, state, ui_hub, history_registry, index_refresh_registry
         )
 
     # -- web-frontend WebSocket endpoint -----------------------------------
@@ -256,6 +267,24 @@ def create_app() -> FastAPI:
 
     @app.get("/api/history")
     async def list_history() -> dict:
+        # Entering the history view must always reflect the latest sessions, not
+        # whatever index a daemon last happened to push. Actively ask every
+        # connected daemon to rebuild and re-push its index, then briefly wait
+        # for those re-pushes to land before aggregating. With no connected
+        # daemon — or when a daemon is slow and the wait times out — we degrade
+        # gracefully to the currently cached index and still return 200.
+        waiters = await broadcast_index_refresh(manager, index_refresh_registry)
+        if waiters:
+            try:
+                await asyncio.wait(
+                    list(waiters.values()),
+                    timeout=HISTORY_INDEX_REFRESH_TIMEOUT,
+                )
+            finally:
+                # Drop every parked waiter regardless of whether it resolved,
+                # so a late re-push never leaves a dangling future behind.
+                for machine_id, fut in waiters.items():
+                    index_refresh_registry.discard(machine_id, fut)
         sessions = await state.get_history_index()
         return {"sessions": sessions, "count": len(sessions)}
 

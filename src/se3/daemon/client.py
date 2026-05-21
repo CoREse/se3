@@ -365,6 +365,8 @@ class DaemonClient:
             self._handle_interject(message.payload)
         elif message.type == protocol.MSG_HISTORY_REQUEST:
             await self._handle_history_request(ws, message.payload)
+        elif message.type == protocol.MSG_HISTORY_INDEX_REQUEST:
+            await self._handle_history_index_request(ws)
         else:  # pragma: no cover - defensive; decode() already validates
             logger.debug("Ignoring unexpected server message type %s", message.type)
 
@@ -505,6 +507,26 @@ class DaemonClient:
             )
         except Exception:
             logger.debug("HISTORY_DATA send failed", exc_info=True)
+
+    async def _handle_history_index_request(self, ws: Any) -> None:
+        """Force a fresh rebuild + re-push of the history index.
+
+        The server broadcasts :data:`~se3.daemon.protocol.MSG_HISTORY_INDEX_REQUEST`
+        when a browser enters the history view, so we rebuild the index from
+        disk and push it immediately. ``force_index=True`` bypasses the
+        change-debounce in :meth:`_push_history`, so the server's waiter is
+        resolved even when the index has not changed since the last push. A
+        missing history provider is a safe no-op, and any failure is swallowed
+        (and logged) so the connection survives.
+        """
+        if self._history_provider is None:
+            logger.debug("Ignoring HISTORY_INDEX_REQUEST: no history provider")
+            return
+        try:
+            await self._push_history(ws, force_index=True)
+            logger.info("HISTORY_INDEX_REQUEST handled: forced index re-push")
+        except Exception:
+            logger.exception("HISTORY_INDEX_REQUEST handling failed")
 
     # -- sending -----------------------------------------------------------
 

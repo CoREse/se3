@@ -16,6 +16,7 @@ from se3.daemon.protocol import (
     HISTORY_MODE_FULL,
     MSG_HISTORY_DATA,
     MSG_HISTORY_INDEX,
+    MSG_HISTORY_INDEX_REQUEST,
     MSG_HISTORY_REQUEST,
     Message,
     ProtocolError,
@@ -34,6 +35,25 @@ def test_history_message_types_registered():
     assert MSG_HISTORY_INDEX in protocol.ALL_MESSAGE_TYPES
     assert MSG_HISTORY_DATA in protocol.ALL_MESSAGE_TYPES
     assert MSG_HISTORY_REQUEST in protocol.ALL_MESSAGE_TYPES
+
+
+def test_history_index_request_type_registered():
+    # server -> daemon only; never sent the other way.
+    assert MSG_HISTORY_INDEX_REQUEST in protocol.SERVER_TO_DAEMON
+    assert MSG_HISTORY_INDEX_REQUEST in protocol.ALL_MESSAGE_TYPES
+    assert MSG_HISTORY_INDEX_REQUEST not in protocol.DAEMON_TO_SERVER
+
+
+def test_make_history_index_request_round_trip():
+    msg = protocol.make_history_index_request(seq=5)
+    assert msg.type == MSG_HISTORY_INDEX_REQUEST
+    assert msg.seq == 5
+    # No flow dimension — the payload is empty; it only triggers a re-push.
+    assert msg.payload == {}
+
+    decoded = decode(msg.to_json())
+    assert decoded.type == MSG_HISTORY_INDEX_REQUEST
+    assert decoded.payload == {}
 
 
 # -- make_history_index ---------------------------------------------------

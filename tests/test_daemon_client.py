@@ -329,6 +329,58 @@ def test_push_history_keeps_empty_active_flow_cursor():
 
 
 # --------------------------------------------------------------------------
+# index-refresh request handling (server -> daemon forced re-push)
+# --------------------------------------------------------------------------
+
+
+def test_dispatch_history_index_request_forces_index_push():
+    """An index-refresh request re-pushes the index even when it is unchanged."""
+    provider = _FakeHistoryProvider()
+    client = _make_client(history_provider=provider)
+    ws = _FakeWS()
+    # Simulate an index already pushed and unchanged since (build_index() -> []).
+    client._last_index = []
+
+    async def scenario():
+        await client._dispatch(ws, protocol.make_history_index_request())
+
+    asyncio.run(scenario())
+    index_frames = [m for m in ws.sent if m.type == protocol.MSG_HISTORY_INDEX]
+    # Forced re-push: a HISTORY_INDEX is emitted despite the unchanged index.
+    assert len(index_frames) == 1
+
+
+def test_dispatch_history_index_request_without_provider_is_noop():
+    """No history provider -> the request is safely ignored (no frames)."""
+    client = _make_client()  # no history_provider
+    ws = _FakeWS()
+
+    async def scenario():
+        await client._dispatch(ws, protocol.make_history_index_request())
+
+    asyncio.run(scenario())
+    assert ws.sent == []
+
+
+def test_dispatch_history_index_request_swallows_provider_errors():
+    """A failing provider is logged and swallowed; the connection survives."""
+
+    class _BoomProvider(_FakeHistoryProvider):
+        def build_index(self):
+            raise RuntimeError("boom")
+
+    client = _make_client(history_provider=_BoomProvider())
+    ws = _FakeWS()
+
+    async def scenario():
+        # Must not raise.
+        await client._dispatch(ws, protocol.make_history_index_request())
+
+    asyncio.run(scenario())
+    assert not [m for m in ws.sent if m.type == protocol.MSG_HISTORY_INDEX]
+
+
+# --------------------------------------------------------------------------
 # Daemon integration
 # --------------------------------------------------------------------------
 
