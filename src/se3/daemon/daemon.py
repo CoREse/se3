@@ -102,6 +102,10 @@ class DaemonConfig:
         project_roots: Initial project roots to aggregate, beyond those
             discovered from running flows.
         shutdown_grace: Seconds to wait for spawned flows to exit on shutdown.
+        history_poll_interval: Fast cadence (seconds) at which the outbound
+            client samples active flows' on-disk signature to drive incremental
+            history pushes off real ``engine.json`` / jsonl changes instead of
+            only the 5 s status tick.
     """
 
     server_url: Optional[str] = None
@@ -110,6 +114,7 @@ class DaemonConfig:
     machine_id: Optional[str] = None
     project_roots: List[str] = field(default_factory=list)
     shutdown_grace: float = 10.0
+    history_poll_interval: float = 1.0
 
     def __post_init__(self) -> None:
         self.pid_dir = Path(self.pid_dir)
@@ -241,6 +246,7 @@ class Daemon:
             ensure_handler=self._handle_ensure_request,
             respond_handler=self._handle_respond_request,
             history_provider=self.history_reader,
+            history_poll_interval=self.config.history_poll_interval,
         )
         self._client = client
         assert self._stop_event is not None

@@ -245,6 +245,90 @@ def test_push_status_sends_status_update():
 
 
 # --------------------------------------------------------------------------
+# history push: signature-gated trigger + cursor pruning
+# --------------------------------------------------------------------------
+
+
+class _FakeHistoryProvider:
+    """Minimal history provider for exercising the client's push debounce."""
+
+    def __init__(self):
+        self.signature: dict = {}
+        self.reads: list = []  # FlowRead-likes returned by read_active_flows
+
+    def build_index(self):
+        return []
+
+    def active_flow_signature(self):
+        return dict(self.signature)
+
+    def read_active_flows(self, cursors):
+        return list(self.reads)
+
+
+def test_history_changed_detects_signature_delta():
+    """_history_changed reports a change only when the signature actually moves."""
+    provider = _FakeHistoryProvider()
+    client = _make_client(history_provider=provider)
+
+    provider.signature = {"f1": (1, 10)}
+    assert client._history_changed() is True  # changed from the initial {}
+    assert client._history_changed() is False  # unchanged -> debounced
+
+    provider.signature = {"f1": (2, 20)}
+    assert client._history_changed() is True  # engine.json / jsonl advanced
+
+
+def test_history_changed_without_provider_is_false():
+    client = _make_client()  # no history_provider
+    assert client._history_changed() is False
+
+
+def test_push_history_prunes_drained_terminal_flow_cursor():
+    """The cursor map keeps active/flushed flows and drops drained ones."""
+    from se3.daemon.history import FlowRead
+
+    provider = _FakeHistoryProvider()
+    client = _make_client(history_provider=provider)
+    ws = _FakeWS()
+
+    provider.reads = [
+        FlowRead(
+            "f1",
+            protocol.HISTORY_MODE_FULL,
+            [{"step_id": "s", "message": {"role": "user", "content": "x"}}],
+            {"s.jsonl": 1},
+        )
+    ]
+    asyncio.run(client._push_history(ws))
+    assert client._history_cursors == {"f1": {"s.jsonl": 1}}
+    data_frames = [m for m in ws.sent if m.type == protocol.MSG_HISTORY_DATA]
+    assert len(data_frames) == 1
+
+    # Next round: f1 is drained/terminal and no longer returned -> pruned.
+    provider.reads = []
+    asyncio.run(client._push_history(ws))
+    assert client._history_cursors == {}
+
+
+def test_push_history_keeps_empty_active_flow_cursor():
+    """An active flow with an empty delta keeps its cursor (no re-snapshot)."""
+    from se3.daemon.history import FlowRead
+
+    provider = _FakeHistoryProvider()
+    client = _make_client(history_provider=provider)
+    ws = _FakeWS()
+
+    provider.reads = [
+        FlowRead("f1", protocol.HISTORY_MODE_APPEND, [], {"s.jsonl": 3})
+    ]
+    asyncio.run(client._push_history(ws))
+    assert client._history_cursors == {"f1": {"s.jsonl": 3}}
+    # Empty delta -> no HISTORY_DATA frame emitted.
+    assert not [m for m in ws.sent if m.type == protocol.MSG_HISTORY_DATA]
+
+
+# --------------------------------------------------------------------------
 # Daemon integration
 # --------------------------------------------------------------------------
 
