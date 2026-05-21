@@ -1078,6 +1078,29 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   border-left: 2px solid var(--border);
 }
 
+/*
+ * Layer 3 ("查看原始") nests at the end of the Layer-2 "展开全部" area instead of
+ * sitting at the row level. A little top spacing plus a hairline separator
+ * keeps the raw toggle visually distinct from the process / prefix-suffix
+ * content above it. Wrapping rules for the .raw-json body itself are unchanged
+ * (Long-Content Wrapping), so a long single-line payload still wraps with no
+ * inner horizontal scrollbar.
+ */
+.process-full .raw-toggle-wrap {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border);
+}
+
+/*
+ * No-result assistant turn: the thinking process is shown inline and in full
+ * (never folded or contracted), per the message paradigm. The wrapper is a
+ * quiet container — it must not introduce its own max-height / overflow so the
+ * conversation stays the single vertical scroller and code blocks keep wrapping
+ * to the container width.
+ */
+.assistant-process-inline { margin: 0; }
+
 /* -- user prompt marker (bubble + 展开全部 toggle) ------------------- */
 /*
  * When the engine injects TEMPLATE_PREFIX_END / USER_CONTENT_BEGIN /

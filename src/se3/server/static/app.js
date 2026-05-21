@@ -1593,6 +1593,41 @@ function stepKey(norm) {
   return String(norm.stepId || norm.stepType || "step");
 }
 
+// Friendly, upper-case step-section headings matching the message paradigm
+// (DISCOVERY / ANALYZE / PLAN / IMPLEMENT / TEST / SELF CHECK / UPDATE SPEC /
+// VERSION ANALYZE / COMMIT / SUMMARY …). Keyed by lower-case `step_type`. These
+// are intentionally distinct from `STEP_REPORT_TITLES` (the title-case report-
+// card labels such as "Analysis" / "Work Summary"): the conversation step
+// headers follow the paradigm's exact wording, e.g. ANALYZE (not "Analysis")
+// and SUMMARY (not "Summarize").
+const STEP_HEADER_TITLES = {
+  discovery: "DISCOVERY",
+  analyze: "ANALYZE",
+  project_summary: "PROJECT SUMMARY",
+  propose: "PROPOSE",
+  design: "DESIGN",
+  plan: "PLAN",
+  plan_tasks: "PLAN TASKS",
+  confirm: "CONFIRM",
+  implement: "IMPLEMENT",
+  test: "TEST",
+  self_check: "SELF CHECK",
+  verify_spec: "VERIFY SPEC",
+  update_spec: "UPDATE SPEC",
+  version_analyze: "VERSION ANALYZE",
+  commit: "COMMIT",
+  summarize: "SUMMARY",
+};
+
+// Resolve the conversation step-header label for a step type. Known step types
+// map to their paradigm heading; unknown ones fall back to the original step
+// key/label so the strict time order and separator rebuild are never broken.
+function stepHeaderLabel(stepType, fallback) {
+  const key = String(stepType || "").toLowerCase();
+  if (key && STEP_HEADER_TITLES[key]) return STEP_HEADER_TITLES[key];
+  return fallback || stepType || "step";
+}
+
 // Render a flat list of raw records into `container` as a CLI-style chat
 // stream. Shared verbatim by the history view and the running-flow view so
 // both present identical bubbles / folding.
@@ -1674,6 +1709,7 @@ function addConversationRecords(container, st, records, startIndex) {
     bubble.__convTs = tsValue(norm && norm.timestamp);
     bubble.__convIdx = i;
     bubble.__convStepKey = stepKey(norm || {});
+    bubble.__convStepType = (norm && norm.stepType) || "";
     bubble.__convStepLabel = (norm && (norm.stepType || norm.stepId)) || "step";
     insertBubbleSorted(container, bubble);
   }
@@ -1717,8 +1753,13 @@ function rebuildStepHeaders(container) {
     if (child.__convStepKey === undefined) continue;
     if (child.__convStepKey !== lastKey) {
       const header = el("div", "history-step-header");
-      header.appendChild(el("h5", "history-step-title",
-        child.__convStepLabel || child.__convStepKey || "step"));
+      // Use the paradigm step name (DISCOVERY / ANALYZE / …); unknown step
+      // types fall back to the record's original label / step key.
+      const title = stepHeaderLabel(
+        child.__convStepType,
+        child.__convStepLabel || child.__convStepKey,
+      );
+      header.appendChild(el("h5", "history-step-title", title));
       container.insertBefore(header, child);
       lastKey = child.__convStepKey;
     }
@@ -2314,22 +2355,38 @@ function formatRaw(payload) {
   catch (_) { return String(payload); }
 }
 
+// Resolve the raw payload + kind for a record, or `{payload:null}` when the
+// record carries nothing inspectable. Shared by `hasRawPayload` (a cheap
+// predicate the user-marker path uses to decide whether a "展开全部" toggle is
+// worth offering for raw access alone) and `makeRawToggle` (which builds the
+// control).
+function resolveRawPayload(norm) {
+  const raw = (norm && norm.raw) || {};
+  if (raw.raw_json != null &&
+      !(Array.isArray(raw.raw_json) && raw.raw_json.length === 0)) {
+    return { payload: raw.raw_json, kind: "raw_json" };
+  }
+  if (raw.raw_ndjson != null && raw.raw_ndjson !== "") {
+    return { payload: raw.raw_ndjson, kind: "raw_ndjson" };
+  }
+  return { payload: null, kind: "" };
+}
+
+// True when a record has a raw_json / raw_ndjson payload reachable through a
+// "查看原始" toggle.
+function hasRawPayload(norm) {
+  return resolveRawPayload(norm).payload != null;
+}
+
 // Build a "view raw" control for one record: a small button plus a hidden
 // formatted-JSON block showing the pre-normalization raw_json / raw_ndjson.
 // Hidden by default — the default view stays human-readable. Returns null
-// when the record carries no raw payload.
+// when the record carries no raw payload. Per the message paradigm this control
+// is only ever appended *inside* a "展开全部" expand area (assistant
+// `makeProcessToggle` / user `makeUserPromptToggle`) or a collapsed chip's
+// detail — never at the always-visible row level.
 function makeRawToggle(norm) {
-  const raw = norm.raw || {};
-  let payload = null;
-  let kind = "";
-  if (raw.raw_json != null &&
-      !(Array.isArray(raw.raw_json) && raw.raw_json.length === 0)) {
-    payload = raw.raw_json;
-    kind = "raw_json";
-  } else if (raw.raw_ndjson != null && raw.raw_ndjson !== "") {
-    payload = raw.raw_ndjson;
-    kind = "raw_ndjson";
-  }
+  const { payload, kind } = resolveRawPayload(norm);
   if (payload == null) return null;
 
   const wrap = el("div", "raw-toggle-wrap");
@@ -2359,9 +2416,11 @@ function makeRawToggle(norm) {
 // "展开全部" — Layer 2 of the assistant's three-layer disclosure. Collapsed by
 // default; on first expand it lazily renders the full per-turn process via
 // `renderToolMarkers` (tool calls + intermediate narrative + the unrendered
-// result JSON text). Expanding scrolls the freshly shown block into view;
-// collapsing leaves the reader's position untouched.
-function makeProcessToggle(content) {
+// result JSON text), then nests Layer 3 ("查看原始", the raw NDJSON) at the end
+// of the expanded area so the raw toggle never shows in the default Layer-1
+// view. Expanding scrolls the freshly shown block into view; collapsing leaves
+// the reader's position untouched.
+function makeProcessToggle(content, norm) {
   const wrap = el("div", "process-toggle-wrap folded");
   const btn = el("button", "process-toggle", "▸ 展开全部");
   btn.type = "button";
@@ -2372,6 +2431,10 @@ function makeProcessToggle(content) {
     expanded = !expanded;
     if (expanded && !built) {
       for (const node of renderToolMarkers(content)) full.appendChild(node);
+      // Layer 3 nests inside the expanded Layer-2 area, after the process
+      // content — the raw toggle is never visible until "展开全部" is opened.
+      const rawToggle = makeRawToggle(norm);
+      if (rawToggle) full.appendChild(rawToggle);
       built = true;
     }
     full.classList.toggle("hidden", !expanded);
@@ -2414,11 +2477,13 @@ function appendPromptSubsections(target, split) {
 // "展开全部" — Layer 2 of the user turn's three-layer disclosure, the mirror of
 // the assistant side's `makeProcessToggle`. Collapsed by default; on first
 // expand it lazily renders the full prompt the LLM actually saw as the two
-// labeled subsections (模板前缀 / 框架后缀) so the default view (the user-content
-// bubble above it) stays limited to the user's literal input. Control naming
-// ("▸ 展开全部" / "▾ 收起全部") and the expand-only scroll-into-view behavior are
-// shared verbatim with the assistant process toggle.
-function makeUserPromptToggle(split) {
+// labeled subsections (模板前缀 / 框架后缀), then nests Layer 3 ("查看原始", the raw
+// NDJSON) at the end of the expanded area, so the default view (the user-content
+// bubble above it) stays limited to the user's literal input and the raw toggle
+// never shows until "展开全部" is opened. Control naming ("▸ 展开全部" / "▾ 收起全部")
+// and the expand-only scroll-into-view behavior are shared verbatim with the
+// assistant process toggle.
+function makeUserPromptToggle(split, norm) {
   const wrap = el("div", "process-toggle-wrap user-prompt-toggle-wrap folded");
   const btn = el("button", "process-toggle", "▸ 展开全部");
   btn.type = "button";
@@ -2429,6 +2494,10 @@ function makeUserPromptToggle(split) {
     expanded = !expanded;
     if (expanded && !built) {
       appendPromptSubsections(full, split);
+      // Layer 3 nests inside the expanded Layer-2 area, after the prefix /
+      // suffix subsections — never visible in the default Layer-1 bubble.
+      const rawToggle = makeRawToggle(norm);
+      if (rawToggle) full.appendChild(rawToggle);
       built = true;
     }
     full.classList.toggle("hidden", !expanded);
@@ -2449,11 +2518,15 @@ function makeUserPromptToggle(split) {
 //                       — no tool markers, no raw JSON, just the fields.
 //   Layer 2 ("展开全部"): the full per-turn process (tool calls + narrative +
 //                       unrendered result JSON), collapsed by default.
-//   Layer 3 ("查看原始"): the raw NDJSON — provided by `makeRawToggle`, appended
-//                       by the caller at the record-row level.
-// When no structured renderer matches (or one bails / throws), the Layer-2
-// process view becomes the default so no assistant text is ever hidden, and a
-// huge body still folds via `makeFoldable`.
+//   Layer 3 ("查看原始"): the raw NDJSON — nested inside the Layer-2 "展开全部"
+//                       area by `makeProcessToggle`, never at the row level.
+// This mirrors the message paradigm's two assistant cases:
+//   * a turn that produced a result JSON shows only the rendered result by
+//     default, with the thinking process (and the unrendered result JSON text)
+//     collected behind "展开全部";
+//   * a turn with NO result JSON keeps its thinking process shown in full,
+//     never collapsed/contracted — so the process is rendered inline via
+//     `renderToolMarkers` (not folded), and nothing is ever hidden.
 function renderAssistantBubble(content, norm) {
   const frag = document.createDocumentFragment();
   const stepType = String(norm.stepType || "").toLowerCase();
@@ -2464,7 +2537,7 @@ function renderAssistantBubble(content, norm) {
       structured = renderer(content, norm);
     } catch (err) {
       // A registry renderer must never break the wider conversation — log once
-      // and fall back to the default process view.
+      // and fall back to the inline process view.
       try { console.warn("assistant renderer failed", stepType, err); }
       catch (_) { /* console may be absent */ }
       structured = null;
@@ -2472,17 +2545,19 @@ function renderAssistantBubble(content, norm) {
   }
 
   if (structured) {
+    // Result-JSON turn: Layer 1 is the clean rendered result; "展开全部" folds
+    // the thinking process (with the raw result JSON text and the nested
+    // "查看原始" raw toggle) away.
     const resultWrap = el("div", "assistant-result");
     resultWrap.appendChild(structured);
     frag.appendChild(resultWrap);
-    frag.appendChild(makeProcessToggle(content));
+    frag.appendChild(makeProcessToggle(content, norm));
   } else {
-    const buildFull = () => {
-      const f = document.createDocumentFragment();
-      for (const node of renderToolMarkers(content)) f.appendChild(node);
-      return f;
-    };
-    frag.appendChild(makeFoldable(buildFull, content));
+    // No result JSON this turn (or the body could not be structured): keep the
+    // full thinking process shown inline, never folded or contracted to empty.
+    const inline = el("div", "assistant-process-inline");
+    for (const node of renderToolMarkers(content)) inline.appendChild(node);
+    frag.appendChild(inline);
   }
   return frag;
 }
@@ -2574,11 +2649,12 @@ function renderConversationRecord(norm) {
     return row;
   }
 
-  // assistant / other: expanded by default.
+  // assistant / other: expanded by default. The "查看原始" raw toggle is NOT
+  // appended at the row level — for an assistant turn it is nested inside the
+  // "展开全部" process area by `renderAssistantBubble` → `makeProcessToggle`, so
+  // the default Layer-1 view stays clean (per the message paradigm).
   row.appendChild(renderRecordHead(norm));
   row.appendChild(buildBubble());
-  const rawToggle = makeRawToggle(norm);
-  if (rawToggle) row.appendChild(rawToggle);
   return row;
 }
 
@@ -2655,15 +2731,15 @@ function renderStepEventRecord(norm) {
 //                      框架后缀 subsections, collapsed by default via
 //                      `makeUserPromptToggle` (the mirror of the assistant
 //                      `makeProcessToggle`).
-//   Layer 3 ("查看原始"): the raw NDJSON, via the shared row-level
-//                      `makeRawToggle`.
+//   Layer 3 ("查看原始"): the raw NDJSON, nested at the end of the Layer-2
+//                      expand area (never a row-level always-visible control).
 //
 // When the content section is empty (legacy two-segment record, or a step
 // whose template wrapped an empty user_content), there is no user literal to
 // surface as Layer 1: the record degrades to a single default-collapsed
 // system-prompt chip combining the prefix + suffix (no user bubble), matching
 // the no-marker whole-chip fallback. The raw payload toggle stays available in
-// both shapes.
+// both shapes — nested inside the chip's expand detail or the Layer-2 area.
 function renderUserMarkerRecord(norm, split) {
   const row = el("div", "history-record conv-record role-user user-prompt-marker");
 
@@ -2679,16 +2755,19 @@ function renderUserMarkerRecord(norm, split) {
     bubble.appendChild(el("pre", "conv-plain", split.content));
     row.appendChild(bubble);
 
-    // Layer 2 — "展开全部" toggle revealing the 模板前缀 / 框架后缀 subsections,
-    // collapsed by default so the framework boilerplate stays out of the
-    // default view. Skipped only when there is no boilerplate at all.
-    if (hasPrefix || hasSuffix) {
-      row.appendChild(makeUserPromptToggle(split));
+    // Layer 2 — "展开全部" toggle revealing the 模板前缀 / 框架后缀 subsections, with
+    // Layer 3 ("查看原始") nested at the end of its expand area. Collapsed by
+    // default so neither the framework boilerplate nor the raw toggle shows in
+    // the default view. Offered whenever there is boilerplate OR a raw payload
+    // to reach — the raw toggle is no longer a row-level always-visible control.
+    if (hasPrefix || hasSuffix || hasRawPayload(norm)) {
+      row.appendChild(makeUserPromptToggle(split, norm));
     }
   } else {
     // Empty user-content (legacy two-segment / prefix+suffix sandwich):
     // degrade to a single default-collapsed system-prompt chip combining the
-    // prefix and suffix subsections, with no user bubble.
+    // prefix and suffix subsections (and the nested "查看原始" raw toggle), with
+    // no user bubble.
     const label = `system prompt · ${ctx}`;
     const chipWrap = el("div", "msg-chip-wrap collapsed user-prompt-chip");
     const chip = el("button", "msg-chip", "▸ " + label);
@@ -2700,6 +2779,9 @@ function renderUserMarkerRecord(norm, split) {
       chipExpanded = !chipExpanded;
       if (chipExpanded && !chipBuilt) {
         appendPromptSubsections(chipDetail, split);
+        // Layer 3 — nested inside the chip's expand detail, never row-level.
+        const rawToggle = makeRawToggle(norm);
+        if (rawToggle) chipDetail.appendChild(rawToggle);
         chipBuilt = true;
       }
       chipWrap.classList.toggle("collapsed", !chipExpanded);
@@ -2711,10 +2793,6 @@ function renderUserMarkerRecord(norm, split) {
     chipWrap.append(chip, chipDetail);
     row.appendChild(chipWrap);
   }
-
-  // Layer 3 — raw NDJSON, shared row-level toggle.
-  const rawToggle = makeRawToggle(norm);
-  if (rawToggle) row.appendChild(rawToggle);
 
   return row;
 }
@@ -3697,6 +3775,9 @@ if (typeof module !== "undefined" && module.exports) {
     PROJECT_MANUAL_SENTINEL,
     splitUserPromptByMarker,
     STEP_REPORT_TITLES,
+    STEP_HEADER_TITLES,
+    stepHeaderLabel,
+    hasRawPayload,
     STEP_REPORT_RENDERERS,
     STEP_ASSISTANT_RENDERERS,
     registerAssistantRenderer,

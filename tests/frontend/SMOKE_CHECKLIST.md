@@ -56,6 +56,32 @@ interaction-call backend (`protocol.py`, `aggregator.py`,
       record carry identical text — classification uses the structured
       `role` field, never text matching.
 
+## Three-tier progressive disclosure (message paradigm)
+
+The chat must match the authoritative message paradigm (B1): the default view
+is the clean payload; the process is reachable but never in the way.
+
+- [ ] **User turn — "查看原始" nested, not row-level.** A marker-bearing `user`
+      turn shows the literal input bubble (Layer 1). No "查看原始" button is
+      visible by default. Click **展开全部** → the 模板前缀 / 框架后缀 subsections
+      appear, and **"查看原始" now appears at the end of that expanded area**.
+- [ ] **Assistant turn with a result JSON.** Only the rendered structured
+      result shows by default (no "查看原始"). Click **展开全部** → the full
+      thinking process (incl. the unrendered result JSON text) appears, with
+      **"查看原始" nested at the end** of it; clicking it shows the raw NDJSON.
+- [ ] **Assistant turn with NO result JSON.** The thinking process is shown
+      **inline and in full** — it is **not** folded/contracted and there is
+      **no 展开全部 / 查看原始 button** in the default view.
+- [ ] **Step section headers use paradigm names.** Each step group header reads
+      the uppercase paradigm name — `DISCOVERY`, `ANALYZE`, `PLAN`, `IMPLEMENT`,
+      `TEST`, `SELF CHECK`, `UPDATE SPEC`, `VERSION ANALYZE`, `COMMIT`,
+      `SUMMARY` — not the raw `step_type` literal. An unknown step type still
+      gets a header (its original label).
+- [ ] **Long single-line payloads still wrap.** A 200+ char single-line JSON in
+      a `.raw-json` viewer or a `.md-code` block wraps to the column width with
+      **no inner horizontal scrollbar** (Long-Content Wrapping intact, now that
+      the raw toggle lives inside the expand area).
+
 ## Intervention items (one per kind, default-expanded & prominent)
 
 - [ ] **`call`** — a pending MCP call appears as a distinct, prominent,
@@ -139,9 +165,9 @@ chain hop-by-hop; the manual pass confirms the rendered result matches.
 
 | Suite | Result |
 |-------|--------|
-| `pytest` full suite (`tests/`) | 4642 passed, 10 skipped |
+| `pytest` full suite (`tests/`) | 4677 passed, 10 skipped |
 | `tests/test_running_flow_console_chain.py` | 21 passed |
-| `tests/frontend/test_app_pure.mjs` | 54 checks passed |
+| `tests/frontend/test_app_pure.mjs` | 88 checks passed (incl. G2 message-paradigm alignment) |
 | `tests/frontend/interaction_view.test.mjs` | 22 passed, 0 failed |
 
 > Note: `src/se3/engine/test_steps.py` has 5 pre-existing failures (step

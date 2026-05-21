@@ -78,6 +78,30 @@ def _read_app_js() -> str:
     return APP_JS.read_text(encoding="utf-8")
 
 
+def _extract_js_function_body(src: str, name: str) -> str:
+    """Return the brace-balanced body of ``function <name>(...) { ... }``.
+
+    A small, dependency-free brace matcher: locate the ``function <name>``
+    declaration, find its first ``{`` and scan forward counting braces until
+    the matching close. Good enough for the static-source guardrails below,
+    which only need to screen a single function's text for the presence /
+    absence of a few call expressions.
+    """
+    m = re.search(r"function\s+" + re.escape(name) + r"\s*\(", src)
+    assert m, f"could not locate function {name!r} in app.js"
+    open_idx = src.index("{", m.end())
+    depth = 0
+    for i in range(open_idx, len(src)):
+        ch = src[i]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[open_idx : i + 1]
+    raise AssertionError(f"unbalanced braces while scanning function {name!r}")
+
+
 def _extract_kind_meta_block(src: str) -> str:
     """Return the literal text of the ``const KIND_META = { … };`` block.
 
@@ -125,6 +149,90 @@ def test_no_visible_call_id_template_strings_in_chip_or_reply_header():
         assert match is None, (
             f"visible call_id leak pattern detected in app.js: {match.group(0)!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# 2b. Static guardrail: message-paradigm rendering placement
+# ---------------------------------------------------------------------------
+#
+# These codify the message paradigm (B1) the running-flow chat must match:
+#   * "查看原始" (raw toggle) is nested inside the "展开全部" expand area / a chip's
+#     expand detail — never a row-level always-visible control.
+#   * an assistant turn with NO result JSON shows its thinking process inline
+#     (renderToolMarkers), never folded/contracted via makeFoldable.
+#   * conversation step headers use the paradigm step names via STEP_HEADER_TITLES.
+
+
+def test_raw_toggle_is_never_appended_at_row_level():
+    """The "查看原始" toggle must not be a row-level always-visible control.
+
+    Every raw toggle is now appended into an expand area — the assistant
+    ``makeProcessToggle`` / user ``makeUserPromptToggle`` "展开全部" body, or a
+    collapsed chip's expand detail. The historical row-level form
+    (``row.appendChild(rawToggle)``) must be gone, so the default Layer-1 view
+    never shows the raw toggle.
+    """
+    src = _read_app_js()
+    assert "row.appendChild(rawToggle)" not in src, (
+        "查看原始 must not be appended at the row level — nest it inside the "
+        "展开全部 expand area / chip detail instead"
+    )
+
+
+def test_raw_toggle_is_nested_inside_expand_area_factories():
+    """``makeProcessToggle`` and ``makeUserPromptToggle`` MUST nest the raw
+    toggle inside their lazily-built expand area (Layer 3 inside Layer 2)."""
+    src = _read_app_js()
+    for fn in ("makeProcessToggle", "makeUserPromptToggle"):
+        body = _extract_js_function_body(src, fn)
+        assert "makeRawToggle" in body, (
+            f"{fn} must nest makeRawToggle inside its 展开全部 expand area"
+        )
+
+
+def test_assistant_no_result_branch_does_not_fold():
+    """``renderAssistantBubble`` MUST NOT route any branch through
+    ``makeFoldable``: the no-result turn shows its thinking inline and the
+    result-JSON turn hides the process behind ``makeProcessToggle`` — neither
+    collapses the thinking into a fold."""
+    body = _extract_js_function_body(_read_app_js(), "renderAssistantBubble")
+    assert "makeFoldable" not in body, (
+        "renderAssistantBubble must not fold the thinking process — a no-result "
+        "assistant turn shows it inline via renderToolMarkers"
+    )
+    # The result-JSON branch still tucks the process behind 展开全部.
+    assert "makeProcessToggle" in body, (
+        "renderAssistantBubble must keep the 展开全部 process toggle for the "
+        "result-JSON branch"
+    )
+
+
+def test_step_header_titles_map_exists_and_is_used():
+    """A paradigm step-name map (STEP_HEADER_TITLES) MUST exist with the
+    paradigm headings, and ``rebuildStepHeaders`` MUST resolve labels through
+    ``stepHeaderLabel`` rather than emitting the raw step_type literal."""
+    src = _read_app_js()
+    assert "const STEP_HEADER_TITLES" in src, (
+        "missing STEP_HEADER_TITLES map for conversation step headers"
+    )
+    m = re.search(
+        r"const\s+STEP_HEADER_TITLES\s*=\s*\{.*?^\};\s*$",
+        src,
+        flags=re.DOTALL | re.MULTILINE,
+    )
+    assert m, "could not locate STEP_HEADER_TITLES block in app.js"
+    block = m.group(0)
+    for heading in [
+        "DISCOVERY", "ANALYZE", "PLAN", "IMPLEMENT", "TEST", "SELF CHECK",
+        "UPDATE SPEC", "VERSION ANALYZE", "COMMIT", "SUMMARY",
+    ]:
+        assert heading in block, (
+            f"STEP_HEADER_TITLES must include the paradigm heading {heading!r}"
+        )
+    body = _extract_js_function_body(src, "rebuildStepHeaders")
+    assert "stepHeaderLabel" in body, (
+        "rebuildStepHeaders must resolve step names via stepHeaderLabel"
+    )
 
 
 # ---------------------------------------------------------------------------

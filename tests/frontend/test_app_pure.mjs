@@ -908,10 +908,17 @@ check("renderConversation: a step header is inserted at each step boundary", () 
 });
 
 // -- renderConversation: append never collapses an expanded fold ------------
+// Uses a non-assistant ("log"/other) record: its long body still folds via
+// makeFoldable. (An assistant no-result turn renders its thinking inline and is
+// never folded, per the message paradigm, so it is not the vehicle here.)
+const logRecord = (content, ts, stepId, stepType) => ({
+  step_id: stepId,
+  message: { role: "log", content, timestamp: ts, step_type: stepType },
+});
 check("renderConversation: append does not re-collapse a user-expanded fold", () => {
   const container = document.createElement("div");
   const longBody = "x".repeat(2500); // exceeds FOLD_THRESHOLD → makeFoldable
-  app.renderConversation(container, [asstRecord(longBody, 1, "s1", "discovery")], false);
+  app.renderConversation(container, [logRecord(longBody, 1, "s1", "discovery")], false);
 
   const fold = findOne(container, "foldable");
   assert.ok(fold, "expected a foldable wrapper for the long body");
@@ -925,8 +932,8 @@ check("renderConversation: append does not re-collapse a user-expanded fold", ()
 
   // A new record streams in (append fast-path).
   app.renderConversation(container, [
-    asstRecord(longBody, 1, "s1", "discovery"),
-    asstRecord("new turn", 2, "s1", "discovery"),
+    logRecord(longBody, 1, "s1", "discovery"),
+    logRecord("new turn", 2, "s1", "discovery"),
   ], true);
 
   // The SAME fold node must still be expanded — append must not rebuild it.
@@ -1174,6 +1181,10 @@ check("assistant three layers: structured default, 展开全部 process, 查看�
 
   // Layer 1: structured result is the default visible surface.
   assert.ok(findOne(row, "assistant-result"), "Layer 1 structured result present");
+  // Layer 3 ("查看原始") MUST NOT be present in the default Layer-1 view — it is
+  // nested inside the Layer-2 expand area and built lazily on first expand.
+  assert.equal(findOne(row, "raw-toggle"), null,
+    "查看原始 must not show at the default Layer-1 view");
 
   // Layer 2: the "展开全部" process toggle reveals the full per-turn process,
   // which DOES include the raw JSON text (rendered as a markdown code block).
@@ -1187,10 +1198,11 @@ check("assistant three layers: structured default, 展开全部 process, 查看�
   assert.ok(procFull.textContent.includes('"task_type"'),
     "the full process shows the unrendered result JSON");
 
-  // Layer 3: the row-level "查看原始" toggle reveals the raw NDJSON.
-  const rawToggle = findOne(row, "raw-toggle");
-  assert.ok(rawToggle, "Layer 3 raw toggle present");
-  const rawPre = findOne(row, "raw-json");
+  // Layer 3: the "查看原始" toggle now appears nested INSIDE the expanded Layer-2
+  // process area (not at the row level), and reveals the raw NDJSON.
+  const rawToggle = findOne(procFull, "raw-toggle");
+  assert.ok(rawToggle, "Layer 3 raw toggle nested inside the 展开全部 area");
+  const rawPre = findOne(procFull, "raw-json");
   assert.equal(rawPre.classList.contains("hidden"), true, "raw is hidden by default");
   rawToggle.dispatch("click");
   assert.equal(rawPre.classList.contains("hidden"), false, "raw expands on click");
@@ -1208,6 +1220,68 @@ check("assistant structured renderer that throws is caught and degrades", () => 
   assert.equal(findOne(row, "assistant-result"), null);
   const bubble = findOne(row, "conv-bubble");
   assert.ok(bubble && bubble.textContent.includes("still visible body"));
+});
+
+// -- assistant no-result turn: thinking shown inline, never folded ----------
+// Per the message paradigm, an assistant turn with NO structured result keeps
+// its thinking process shown in full — it MUST NOT be folded/contracted and
+// MUST NOT carry a default-visible 展开全部 / 查看原始 control.
+check("assistant no-result turn shows thinking inline, not folded, no toggles", () => {
+  const longProse = "Reasoning step. ".repeat(400); // > FOLD_THRESHOLD
+  const row = app.renderConversationRecord(asstNorm(longProse, "analyze"));
+  // No structured result, and the body did not parse to JSON.
+  assert.equal(findOne(row, "assistant-result"), null);
+  // The thinking is rendered inline (not behind a fold).
+  const inline = findOne(row, "assistant-process-inline");
+  assert.ok(inline, "expected an inline process wrapper");
+  assert.equal(findOne(row, "foldable"), null,
+    "a no-result assistant turn must not collapse its thinking into a fold");
+  assert.ok(inline.textContent.includes("Reasoning step."),
+    "the full thinking process is visible by default");
+  // Neither Layer-2 nor Layer-3 controls show in the default view.
+  assert.equal(findOne(row, "process-toggle"), null,
+    "no 展开全部 toggle for a turn that has no result to hide behind it");
+  assert.equal(findOne(row, "raw-toggle"), null,
+    "查看原始 must not show at the row level for a no-result turn");
+});
+
+// -- step section headers use paradigm names -------------------------------
+// stepHeaderLabel maps a step_type to the paradigm heading; rebuildStepHeaders
+// renders those names (not the raw step_type literal).
+check("stepHeaderLabel maps known step types to paradigm names", () => {
+  assert.equal(app.stepHeaderLabel("discovery"), "DISCOVERY");
+  assert.equal(app.stepHeaderLabel("self_check"), "SELF CHECK");
+  assert.equal(app.stepHeaderLabel("update_spec"), "UPDATE SPEC");
+  assert.equal(app.stepHeaderLabel("version_analyze"), "VERSION ANALYZE");
+  assert.equal(app.stepHeaderLabel("summarize"), "SUMMARY");
+});
+check("stepHeaderLabel falls back to the original key for unknown steps", () => {
+  // Unknown step types keep the original key so grouping / ordering is intact.
+  assert.equal(app.stepHeaderLabel("mystery_step", "mystery_step"), "mystery_step");
+  assert.equal(app.stepHeaderLabel("", "raw_key"), "raw_key");
+});
+check("rebuildStepHeaders renders paradigm step names, not raw step_type", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    asstRecord("A1", 1, "01_discovery", "discovery"),
+    asstRecord("A2", 2, "06_self_check", "self_check"),
+  ], false);
+  const headers = findAll(container, "history-step-title");
+  const titles = headers.map((h) => h.textContent);
+  assert.deepEqual(titles, ["DISCOVERY", "SELF CHECK"],
+    "step headers must use the paradigm names, not the raw step_type");
+});
+check("rebuildStepHeaders falls back to the step key for an unknown step type", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    asstRecord("A1", 1, "99_mystery", "mystery_step"),
+  ], false);
+  const header = findOne(container, "history-step-title");
+  // Unknown step → original label (step_type here) rather than crashing or
+  // dropping the header.
+  assert.ok(header && header.textContent.length > 0,
+    "an unknown step still gets a header (fallback to its original label)");
+  assert.equal(header.textContent, "mystery_step");
 });
 
 // ---------------------------------------------------------------------------
@@ -1264,6 +1338,11 @@ check("user three layers: literal bubble default, 展开全部 prefix/suffix, �
   assert.equal(row.textContent.includes("Available Specs"), false,
     "framework suffix must not appear in the default view");
 
+  // Layer 3 ("查看原始") MUST NOT be present in the default Layer-1 view — it is
+  // nested inside the Layer-2 expand area, built lazily on first expand.
+  assert.equal(findOne(row, "raw-toggle"), null,
+    "查看原始 must not show at the default Layer-1 user view");
+
   // Layer 2: the "展开全部" toggle reveals 模板前缀 / 框架后缀, folded by default.
   const wrap = findOne(row, "user-prompt-toggle-wrap");
   assert.ok(wrap, "Layer 2 展开全部 toggle present");
@@ -1278,10 +1357,11 @@ check("user three layers: literal bubble default, 展开全部 prefix/suffix, �
   assert.ok(full.textContent.includes("Project Context"), "prefix body now visible");
   assert.ok(full.textContent.includes("Available Specs"), "suffix body now visible");
 
-  // Layer 3: the row-level "查看原始" toggle reveals the raw NDJSON.
-  const rawToggle = findOne(row, "raw-toggle");
-  assert.ok(rawToggle, "Layer 3 raw toggle present");
-  const rawPre = findOne(row, "raw-json");
+  // Layer 3: the "查看原始" toggle now appears nested INSIDE the expanded Layer-2
+  // area (not at the row level), and reveals the raw NDJSON.
+  const rawToggle = findOne(full, "raw-toggle");
+  assert.ok(rawToggle, "Layer 3 raw toggle nested inside the 展开全部 area");
+  const rawPre = findOne(full, "raw-json");
   assert.equal(rawPre.classList.contains("hidden"), true, "raw hidden by default");
   rawToggle.dispatch("click");
   assert.equal(rawPre.classList.contains("hidden"), false, "raw expands on click");
