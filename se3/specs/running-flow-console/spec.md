@@ -551,6 +551,13 @@ lacks the marker protocol entirely (legacy history written before any marker
 was introduced) MUST fall back to the original behavior of rendering the
 entire record as a single collapsed chip.
 
+The original NDJSON for any collapsed record (查看原始) MUST stay reachable, but
+it is **nested inside the record's own expand area** — the collapsed chip's
+expand detail for a whole-chip / empty-user-content record, or the Layer-2
+"展开全部" area for a marker-split `user` message (see *Three-Tier Progressive
+Disclosure*) — NOT surfaced as a row-level always-visible control beside the
+record.
+
 Step-prompt modules under `src/se3/engine/steps/` MUST inject the boundary
 markers via the helpers in `prompt_markers.py`. Step prompts whose template
 assembles a real user-literal field (e.g. discovery's `initial_description` /
@@ -669,27 +676,49 @@ requirement). Each turn exposes the same three layers:
 2. **Layer 2 ("展开全部")** — the complete prompt the LLM actually saw,
    presented as the labeled 模板前缀 / 框架后缀 subsections (the template prefix
    and the framework suffix). Folded by default.
-3. **Layer 3 ("查看原始")** — the original NDJSON record for the message, via
-   the shared row-level raw toggle.
+3. **Layer 3 ("查看原始")** — the original NDJSON record for the message,
+   reachable via the shared raw toggle (查看原始) **nested at the end of the
+   Layer-2 "展开全部" expand area** (built by `makeUserPromptToggle`), NOT as a
+   row-level always-visible button.
 
-**Assistant turn**
+**Assistant turn** — the three-layer model below applies **only when this turn
+produced a final result JSON**; a turn with no result JSON is handled by the
+separate no-result rule stated after Layer 3.
 1. **Layer 1 (default)** — only this turn's rendered result: the structured
    fields produced by the `STEP_ASSISTANT_RENDERERS` entry for the step type
    (e.g. discovery's `content` / `refined_description` / `questions`). No raw
    ```` ```json ```` blob and no isolated pending chip in the default view.
 2. **Layer 2 ("展开全部")** — this turn's full process: tool calls, intermediate
    narrative, and the unrendered result JSON literal, rendered through
-   `renderToolMarkers` + markdown. Folded by default.
-3. **Layer 3 ("查看原始")** — the original NDJSON record, via the shared
-   row-level raw toggle.
+   `renderToolMarkers` + markdown. Folded by default. Any intermediate JSON
+   tool calls — including the case where a single turn carries two or more
+   JSON calls — count as part of this thinking process, NOT as the final
+   result, and so they live here under Layer 2 rather than as the Layer-1
+   rendered result.
+3. **Layer 3 ("查看原始")** — the original NDJSON record, reachable via the
+   shared raw toggle (查看原始) **nested at the end of the Layer-2 "展开全部"
+   expand area** (built by `makeProcessToggle`), NOT as a row-level
+   always-visible button. Raw stays reachable for every result-JSON assistant
+   turn; it simply lives inside Layer 2 instead of beside the bubble.
+
+**Assistant turn with no result JSON** — when this turn produced no final
+result JSON (its body is thinking process only — narrative plus tool calls,
+including a turn whose only JSON content is intermediate tool calls), the
+thinking process MUST stay shown inline as the default view via
+`renderToolMarkers` and MUST NOT be folded or contracted into an empty
+"展开全部" toggle. It never collapses to empty: because the process is already
+the visible default, this case has no separate "展开全部" / "查看原始" nesting and
+the content is shown in full directly.
 
 When a turn has no Layer-1 payload to surface — e.g. a legacy `user` record
 whose user-content section is empty, or an assistant turn whose body cannot be
-parsed into structured fields — the renderer MUST degrade gracefully: it falls
-back to the foldable / markdown path (the assistant fallback is the same
-`renderToolMarkers` + markdown path described in *Structured-JSON Assistant
-Rendering*) and never drops content. Expanding a Layer-2 / Layer-3 toggle
-follows the same `scrollIntoView({block: "nearest"})`-on-expand,
+parsed into structured fields — the renderer MUST degrade gracefully and never
+drops content: a legacy empty `user` turn collapses to a single chip (with its
+查看原始 raw toggle nested inside the chip's expand detail), while an assistant
+turn with no parseable result keeps its thinking process shown inline via the
+same `renderToolMarkers` + markdown path described in *Structured-JSON
+Assistant Rendering* — shown in full, not folded. Expanding a Layer-2 /
+Layer-3 toggle follows the same `scrollIntoView({block: "nearest"})`-on-expand,
 no-scroll-on-collapse behavior used elsewhere in the view.
 
 #### Scenario: Assistant turn defaults to the clean rendered result
@@ -701,8 +730,9 @@ no-scroll-on-collapse behavior used elsewhere in the view.
 - **AND** the tool calls, intermediate narrative, and unrendered result JSON
   literal are NOT in the default view — they are reachable only by expanding
   the "展开全部" (Layer 2) toggle
-- **AND** the original NDJSON is reachable only via the "查看原始" (Layer 3)
-  toggle
+- **AND** the original NDJSON is reachable only by opening the "查看原始"
+  (Layer 3) toggle nested at the end of that expanded "展开全部" area, never via
+  a row-level always-visible button
 
 #### Scenario: User turn defaults to the literal input only
 - **GIVEN** a `user` turn whose stored body contains the three-segment marker
@@ -713,6 +743,8 @@ no-scroll-on-collapse behavior used elsewhere in the view.
 - **AND** the full prompt the LLM saw is reachable as the 模板前缀 / 框架后缀
   subsections behind the "展开全部" (Layer 2) toggle
 - **AND** the original NDJSON is reachable via the "查看原始" (Layer 3) toggle
+  nested at the end of that expanded "展开全部" area, never via a row-level
+  always-visible button
 
 #### Scenario: No isolated pending chip embedded in the assistant default view
 - **WHEN** an assistant turn is rendered in its default Layer-1 form
@@ -725,10 +757,31 @@ no-scroll-on-collapse behavior used elsewhere in the view.
 - **GIVEN** an assistant turn whose body cannot be parsed into structured
   fields, or a legacy `user` turn with an empty user-content section
 - **WHEN** the turn is rendered
-- **THEN** the renderer falls back to the foldable / markdown path rather than
-  raising, and the full content remains reachable through the disclosure
+- **THEN** the renderer falls back without raising — an assistant turn with no
+  parseable result shows its thinking process inline via `renderToolMarkers`
+  (in full, not folded), while a legacy empty `user` turn collapses to a
+  single chip — and the full content remains reachable through the disclosure
   layers
 - **AND** no message text is dropped
+
+#### Scenario: Assistant turn with no result JSON keeps its thinking inline
+- **GIVEN** an assistant turn whose body is thinking process only — narrative
+  and tool calls (including a turn whose only JSON content is intermediate
+  tool calls) — with no final result JSON
+- **WHEN** the turn is rendered in `#flow-view`
+- **THEN** the thinking process is shown inline as the default view via
+  `renderToolMarkers`, in full
+- **AND** it is NOT folded or contracted into an empty "展开全部" toggle, and it
+  never collapses to empty
+
+#### Scenario: Layer 3 raw toggle is nested inside the Layer 2 expansion
+- **GIVEN** a result-JSON assistant turn or a marker-split `user` turn
+  rendered with its default Layer-1 payload
+- **WHEN** the conversation row is first rendered, before any toggle is opened
+- **THEN** no row-level always-visible "查看原始" button is present beside the
+  bubble
+- **AND** the "查看原始" (Layer 3) toggle becomes reachable only after the
+  "展开全部" (Layer 2) toggle is expanded, nested at the end of that expand area
 
 ### Requirement: Structured-JSON Assistant Rendering
 
@@ -783,8 +836,11 @@ report; it is the worked example below:
    - `questions` — rendered as an ordered list.
 3. Always preserve the **view raw** affordance: the original assistant body
    (including the JSON literal and NDJSON envelope) MUST remain reachable via
-   the same per-record raw toggle used by other records, so a developer can
-   still inspect the unrendered string when debugging.
+   the same shared raw toggle (查看原始) used by other records — for a rendered
+   result-JSON turn that toggle is **nested at the end of the Layer-2 "展开全部"
+   expand area** (see *Three-Tier Progressive Disclosure*) rather than shown as
+   a row-level always-visible button, so a developer can still inspect the
+   unrendered string when debugging.
 
 The registry MUST remain open for future step types without re-architecting
 the dispatch path. Every step type listed above MUST have a registered
