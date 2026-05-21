@@ -33,6 +33,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from se3.commands.run import run_flow
+from se3.daemon import protocol as daemon_protocol
+from se3.daemon.history import DaemonHistoryReader
 from se3.engine.models import (
     FlowInstance,
     FlowStatus,
@@ -345,3 +347,253 @@ def test_get_step_history_skips_step_event_records():
         # The CLI viewer surfaces only the chat turn, not the report-card event.
         assert len(session.messages) == 1
         assert session.messages[0].role == "assistant"
+
+
+# ---------------------------------------------------------------------------
+# Task 5 (group G2): daemon incremental read + history-data push chain.
+#
+# The engine-side fix (G1) writes a ``step_completed`` line into the per-step
+# jsonl. These tests pin the next two hops — ``DaemonHistoryReader`` and
+# ``protocol.make_history_data`` — so the report card actually reaches the
+# frontend:
+#
+# * ``read_active_flows`` returns the ``step_completed`` line of an active flow
+#   WITHOUT filtering it out as a non-chat record (the bug behind "even a
+#   finished step shows no final card");
+# * the record rides ``make_history_data`` in the exact ``{step_id, message:
+#   {type, data:{step:{outputs}}}}`` shape ``app.js`` ``normalizeRecord``
+#   unwraps;
+# * the per-step line cursor advances so repeated polls never re-push the same
+#   line, while a freshly-appended ``step_completed`` line (same file or a new
+#   step file) is surfaced on the next poll.
+# ---------------------------------------------------------------------------
+
+
+def _seed_active_flow(project_root: Path, flow_id: str, step_id: str, *, lines):
+    """Write engine.json (active) + a per-step jsonl with *lines* raw records.
+
+    Returns the path to the seeded jsonl so a test can append to it, mimicking
+    how ``HistorySink`` appends a ``step_completed`` line when the step
+    finishes mid-flow.
+    """
+    state_dir = project_root / "se3" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / "engine.json").write_text(
+        json.dumps(
+            {
+                "flow_id": flow_id,
+                "task_description": "console chain task",
+                "task_type": "feature",
+                "status": "running",  # not terminal -> active source
+                "project_root": str(project_root),
+            }
+        ),
+        encoding="utf-8",
+    )
+    hist_dir = project_root / "se3" / "history" / flow_id
+    hist_dir.mkdir(parents=True, exist_ok=True)
+    jsonl = hist_dir / f"{step_id}.jsonl"
+    with jsonl.open("w", encoding="utf-8") as f:
+        for line in lines:
+            f.write(json.dumps(line, ensure_ascii=False) + "\n")
+    return jsonl
+
+
+def _step_completed_line(step_id: str, step_type: str, outputs: dict) -> dict:
+    """The exact line shape ``record_step_event`` writes for a finished step."""
+    return {
+        "type": "step_completed",
+        "step_id": step_id,
+        "step_type": step_type,
+        "timestamp": "2026-05-21T01:00:00",
+        "data": {
+            "step": {
+                "step_id": step_id,
+                "step_type": step_type,
+                "status": "completed",
+                "outputs": outputs,
+            }
+        },
+    }
+
+
+def _frontend_outputs(record: dict) -> dict:
+    """Mirror ``app.js`` ``normalizeRecord``'s outputs extraction for an event.
+
+    A pushed record is ``{step_id, message:{...}}``; the frontend reads the
+    step output from ``message.data.step.outputs``. Asserting through this
+    helper proves the daemon payload is consumable by the report-card path.
+    """
+    msg = record["message"]
+    assert msg["type"] in ("step_completed", "step_failed")
+    return msg["data"]["step"]["outputs"]
+
+
+def _step_events(read) -> list:
+    return [
+        r
+        for r in read.records
+        if r["message"].get("type") in ("step_completed", "step_failed")
+    ]
+
+
+def test_read_active_flows_returns_step_completed_record():
+    """An active flow's ``step_completed`` line is returned by the incremental
+    reader (interleaved with chat turns, not filtered) and rides
+    ``make_history_data`` in the frontend-consumable shape."""
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        outputs = {
+            "task_type": "feature",
+            "complexity": "medium",
+            "reasoning": "ok",
+            "relevant_specs": ["base"],
+        }
+        _seed_active_flow(
+            project_root,
+            "F1",
+            "01_analyze_abc",
+            lines=[
+                {
+                    "role": "user",
+                    "content": "prompt",
+                    "step_type": "analyze",
+                    "timestamp": "2026-05-21T00:00:00",
+                },
+                {
+                    "role": "assistant",
+                    "content": "resp",
+                    "step_type": "analyze",
+                    "timestamp": "2026-05-21T00:30:00",
+                },
+                _step_completed_line("01_analyze_abc", "analyze", outputs),
+            ],
+        )
+        reader = DaemonHistoryReader(lambda: [str(project_root)])
+
+        reads = reader.read_active_flows()
+        assert len(reads) == 1
+        read = reads[0]
+        assert read.flow_id == "F1"
+        assert read.mode == daemon_protocol.HISTORY_MODE_FULL
+        # The chat turns AND the step_completed line are all present.
+        assert len(read.records) == 3
+        events = _step_events(read)
+        assert len(events) == 1
+        assert events[0]["step_id"] == "01_analyze_abc"
+        assert _frontend_outputs(events[0]) == outputs
+
+        # The record rides make_history_data verbatim in the right shape.
+        msg = daemon_protocol.make_history_data(
+            read.flow_id, read.mode, read.records, cursor=read.cursor
+        )
+        assert msg.type == daemon_protocol.MSG_HISTORY_DATA
+        assert msg.payload["flow_id"] == "F1"
+        assert msg.payload["mode"] == daemon_protocol.HISTORY_MODE_FULL
+        pushed_events = [
+            r
+            for r in msg.payload["records"]
+            if r["message"].get("type") == "step_completed"
+        ]
+        assert len(pushed_events) == 1
+        assert _frontend_outputs(pushed_events[0]) == outputs
+        # The cursor counts every consumed line so the next poll is incremental.
+        assert msg.payload["cursor"]["01_analyze_abc.jsonl"] == 3
+
+
+def test_active_flow_incremental_does_not_duplicate_step_completed():
+    """Repeated polling with the returned cursor never re-pushes a line; a
+    NEW step's step_completed line (a fresh jsonl) is surfaced exactly once."""
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        _seed_active_flow(
+            project_root,
+            "F2",
+            "01_analyze_abc",
+            lines=[
+                {
+                    "role": "assistant",
+                    "content": "r",
+                    "step_type": "analyze",
+                    "timestamp": "2026-05-21T00:00:00",
+                },
+                _step_completed_line("01_analyze_abc", "analyze", {"reasoning": "first"}),
+            ],
+        )
+        reader = DaemonHistoryReader(lambda: [str(project_root)])
+        cursors: dict = {}
+
+        # First poll: full snapshot includes the step_completed line.
+        reads = reader.read_active_flows(cursors)
+        cursors[reads[0].flow_id] = reads[0].cursor
+        assert len(_step_events(reads[0])) == 1
+
+        # Second poll, same cursor, no new lines: nothing re-pushed.
+        reads = reader.read_active_flows(cursors)
+        cursors[reads[0].flow_id] = reads[0].cursor
+        assert reads[0].records == []
+        assert reads[0].mode == daemon_protocol.HISTORY_MODE_APPEND
+
+        # A new step finishes -> a new per-step jsonl with its own card line.
+        new_jsonl = project_root / "se3" / "history" / "F2" / "03_plan_def.jsonl"
+        new_jsonl.write_text(
+            json.dumps(_step_completed_line("03_plan_def", "plan", {"task_groups": []}))
+            + "\n",
+            encoding="utf-8",
+        )
+        reads = reader.read_active_flows(cursors)
+        cursors[reads[0].flow_id] = reads[0].cursor
+        events = _step_events(reads[0])
+        assert len(events) == 1
+        assert events[0]["step_id"] == "03_plan_def"
+        assert _frontend_outputs(events[0]) == {"task_groups": []}
+
+        # And it is not re-pushed on the subsequent poll.
+        reads = reader.read_active_flows(cursors)
+        assert reads[0].records == []
+
+
+def test_step_completed_appended_to_existing_step_file_is_picked_up():
+    """The real "step finished" path: ``HistorySink`` appends the
+    ``step_completed`` line to the SAME jsonl that already holds the step's
+    chat turns. The next incremental poll must surface exactly that line."""
+    with tempfile.TemporaryDirectory() as td:
+        project_root = Path(td)
+        jsonl = _seed_active_flow(
+            project_root,
+            "F3",
+            "01_analyze_abc",
+            lines=[
+                {
+                    "role": "assistant",
+                    "content": "r",
+                    "step_type": "analyze",
+                    "timestamp": "2026-05-21T00:00:00",
+                },
+            ],
+        )
+        reader = DaemonHistoryReader(lambda: [str(project_root)])
+        cursors: dict = {}
+
+        reads = reader.read_active_flows(cursors)
+        cursors[reads[0].flow_id] = reads[0].cursor
+        assert _step_events(reads[0]) == []  # no card yet
+
+        # Step finishes: append the terminal-event line to the same file.
+        with jsonl.open("a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    _step_completed_line("01_analyze_abc", "analyze", {"reasoning": "done"})
+                )
+                + "\n"
+            )
+
+        reads = reader.read_active_flows(cursors)
+        cursors[reads[0].flow_id] = reads[0].cursor
+        events = _step_events(reads[0])
+        assert len(events) == 1
+        assert _frontend_outputs(events[0]) == {"reasoning": "done"}
+
+        # Not re-pushed afterwards.
+        reads = reader.read_active_flows(cursors)
+        assert reads[0].records == []
