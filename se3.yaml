@@ -71,5 +71,17 @@ e2e:
   default_viewport: "1280x720"        # Default browser viewport size
   test_paths: []                      # URL paths to test (e.g., ["/", "/login"])
 
+# Test step configuration
+# `critical_tests` registers acceptance tests that MUST genuinely run during
+# verification. If any of these is skipped or silently missing from the test
+# results, the engine treats the run as unverified (tests_passed=False) instead
+# of accepting "skip == no failures". Entries are matched as substrings against
+# pytest's per-test ids (file::test), so a fully-qualified id is the precise
+# anchor. Requires the browser extra: `pip install se3[browser]` then
+# `playwright install chromium`.
+test:
+  critical_tests:
+    - "tests/test_console_real_daemon_e2e.py::test_render_paradigm_in_headless_browser"
+
 workflow:
   max_fix_iterations: 30
