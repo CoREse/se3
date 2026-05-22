@@ -92,27 +92,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _chromium_available() -> bool:
-    """Return True only if Playwright can actually launch headless Chromium.
-
-    A mere import is not enough — the bundled browser frequently fails to start
-    for want of system libraries. We try a real (brief) launch and treat any
-    failure as "unavailable", so the browser sub-case skips cleanly while the
-    HTTP + node-render assertions carry the acceptance.
-    """
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception:
-        return False
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
-            browser.close()
-        return True
-    except Exception:
-        return False
-
-
 # --------------------------------------------------------------------------
 # Small HTTP helpers
 # --------------------------------------------------------------------------
@@ -517,20 +496,35 @@ def test_render_paradigm_via_appjs_on_real_records(console: "_IsolatedConsole") 
 def test_render_paradigm_in_headless_browser(console: "_IsolatedConsole") -> None:
     """Task 2 (browser): a real headless browser loads the console and, over
     real HTTP, fetches the flow history and confirms the daemon-injected
-    paradigm ``step_type`` on real records. Skipped when Chromium cannot
-    launch — the HTTP + node-render assertions above still carry the
-    acceptance, so it is never reduced to a faked-step_type unit test."""
-    if not _chromium_available():
-        pytest.skip("headless Chromium unavailable (cannot launch a real browser)")
+    paradigm ``step_type`` on real records.
 
-    from playwright.sync_api import sync_playwright
+    This is a *critical acceptance test* (registered in ``se3.yaml`` under
+    ``test.critical_tests``): it is the only case that exercises the real UI
+    render path end to end through a browser, so it MUST actually run rather
+    than skip. When Playwright or its Chromium binary is missing the test
+    fails loudly with install guidance instead of silently skipping —
+    skipping a critical acceptance test is treated by the engine as an
+    unverified result, not as "no failures"."""
+    install_hint = (
+        "Install the browser test dependency with `pip install se3[browser]`, "
+        "then download the Chromium binary with `playwright install chromium`."
+    )
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as exc:
+        pytest.fail(f"Playwright is not installed. {install_hint} ({exc})")
 
     flow_id = "t2_render_flow"
     _write_real_history_flow(console.project, flow_id)
     _poll(lambda: console.flow_history(flow_id) or None, attempts=60, delay=0.3)
 
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        try:
+            browser = p.chromium.launch()
+        except Exception as exc:
+            pytest.fail(
+                f"Could not launch headless Chromium. {install_hint} ({exc})"
+            )
         try:
             page = browser.new_page()
             page.goto(console.base, wait_until="domcontentloaded")

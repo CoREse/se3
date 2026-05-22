@@ -29,6 +29,16 @@ server = [
     "uvicorn>=0.29.0",
     "websockets>=12.0",
 ]
+# Headless-browser dependency for the UI render acceptance test
+# (`tests/test_console_real_daemon_e2e.py::test_render_paradigm_in_headless_browser`).
+# Installing the Python package is not sufficient on its own: after
+# `pip install se3[browser]` you MUST also download the Chromium binary with
+# `playwright install chromium`. Without it the critical acceptance test fails
+# loudly (it is registered under `test.critical_tests` in se3.yaml) rather than
+# silently skipping.
+browser = [
+    "playwright>=1.40.0",
+]
 
 [project.scripts]
 se3 = "se3.cli:app"
