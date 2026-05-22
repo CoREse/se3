@@ -421,3 +421,148 @@ class TestVerifySpecCriticalGate:
         assert step.outputs["verified"] is True
         assert step.outputs["in_scope_count"] == 0
         assert "fix_instructions" not in step.outputs
+
+    def test_verified_bridged_into_verification_result(self, tmp_path):
+        # The authoritative `verified` must be written into the
+        # verification_result dict so downstream (summarize) reads the
+        # rule-based verdict rather than the LLM's value.
+        flow, step = _make_verify_flow_and_step(
+            tmp_path,
+            {
+                "overall_passed": True,
+                "returncode": 0,
+                "critical_skipped": ["tests/test_ui.py::test_render_paradigm"],
+                "critical_missing": [],
+                "stdout": "",
+                "stderr": "",
+            },
+        )
+        _run_verify(flow, step)
+        assert step.outputs["verification_result"]["verified"] is False
+
+
+# ---------------------------------------------------------------------------
+# summarize: pure session report + verified=False completion gate (G3)
+#
+# summarize must (a) gate completion claims when verified=False on BOTH the
+# LLM path (gate instruction injected into the prompt) and the fallback path
+# (basic summary text), and (b) no longer inject or collect B-class
+# issue-discovery.
+# ---------------------------------------------------------------------------
+
+from se3.engine.steps.summarize import (
+    summarize_handler,
+    _build_completion_section,
+    _create_basic_summary_text,
+)
+
+
+def _make_summarize_flow_and_step(tmp_path, verification_result):
+    flow = FlowInstance(
+        flow_id="sum-flow",
+        task_description="Summarize session",
+        task_type="feature",
+    )
+    flow.change_path = tmp_path / "dummy"
+    step = Step(
+        step_type=StepType.SUMMARIZE,
+        status=StepStatus.PENDING,
+        inputs={
+            "task_description": "Summarize session",
+            "changes_made": {"files_changed": ["a.py"]},
+            "test_results": {"passed": True},
+            "verification_result": verification_result,
+            "commit_hash": "abc1234",
+        },
+    )
+    return flow, step
+
+
+def _run_summarize(flow, step, llm_text="Session report."):
+    with patch("se3.engine.steps.summarize.LLMCaller") as mock_cls:
+        mock_caller = MagicMock()
+        mock_caller.call.return_value = llm_text
+        mock_cls.return_value = mock_caller
+        result = summarize_handler(step, flow)
+    prompt = ""
+    if mock_caller.call.called:
+        ca = mock_caller.call.call_args
+        prompt = ca.kwargs.get("prompt", "")
+        if not prompt and ca.args:
+            prompt = ca.args[0]
+    return result, prompt
+
+
+class TestSummarizeCompletionGate:
+    def test_llm_path_prompt_carries_gate_when_verified_false(self, tmp_path):
+        flow, step = _make_summarize_flow_and_step(tmp_path, {"verified": False})
+        result, prompt = _run_summarize(flow, step)
+
+        assert result == StepStatus.COMPLETED
+        # The prompt instructs the LLM not to claim completion / all-green.
+        assert "Verification Status: NOT PASSED" in prompt
+        assert "verified=False" in prompt
+        assert "MUST NOT" in prompt
+
+    def test_llm_path_no_gate_when_verified_true(self, tmp_path):
+        flow, step = _make_summarize_flow_and_step(tmp_path, {"verified": True})
+        result, prompt = _run_summarize(flow, step)
+
+        assert result == StepStatus.COMPLETED
+        assert "Verification Status: NOT PASSED" not in prompt
+
+    def test_fallback_path_summary_not_complete_when_verified_false(self, tmp_path):
+        # Empty LLM output forces the basic-summary fallback path.
+        flow, step = _make_summarize_flow_and_step(tmp_path, {"verified": False})
+        result, _ = _run_summarize(flow, step, llm_text="")
+
+        assert result == StepStatus.COMPLETED
+        summary = step.outputs["summary"]
+        assert "NOT PASSED" in summary
+        assert "Not verified" in summary
+        assert "all green" not in summary.lower()
+
+    def test_basic_summary_text_gate_direct(self, tmp_path):
+        flow = FlowInstance(
+            flow_id="f", task_description="t", task_type="feature",
+        )
+        flow.change_path = tmp_path / "dummy"
+        text = _create_basic_summary_text(
+            flow, {"files_changed": ["a.py"]}, {"passed": True},
+            "task", [], "complete", verified=False,
+        )
+        assert "Not verified (incomplete)" in text
+        assert "NOT PASSED" in text
+        assert "all green" not in text.lower()
+        # Verified=True keeps the normal "Completed" report.
+        text_ok = _create_basic_summary_text(
+            flow, {"files_changed": ["a.py"]}, {"passed": True},
+            "task", [], "complete", verified=True,
+        )
+        assert "Completed" in text_ok
+        assert "NOT PASSED" not in text_ok
+
+    def test_completion_section_gate_only_when_verified_false(self):
+        section = _build_completion_section("complete", [], "", [], [], verified=False)
+        assert "NOT PASSED" in section
+        assert "MUST NOT" in section
+        # Common case: complete + verified True/unknown -> empty section.
+        assert _build_completion_section("complete", [], "", [], [], verified=True) == ""
+        assert _build_completion_section("complete", [], "", [], []) == ""
+
+
+class TestSummarizeNoIssueDiscovery:
+    def test_no_injection_in_prompt_and_no_discovered_issues_output(self, tmp_path):
+        flow, step = _make_summarize_flow_and_step(tmp_path, {"verified": True})
+        result, prompt = _run_summarize(flow, step)
+
+        assert result == StepStatus.COMPLETED
+        # No B-class issue-discovery injection in the prompt.
+        assert "discovered_issues" not in prompt
+        # And the step produces no discovered_issues output.
+        assert "discovered_issues" not in step.outputs
+
+    def test_summarize_default_not_whitelisted(self, tmp_path):
+        from se3.engine.context_builder import get_issue_discovery_injection
+
+        assert get_issue_discovery_injection("summarize", tmp_path) == ""

@@ -18,7 +18,9 @@ from ..prompt_markers import inject_boundary
 logger = logging.getLogger(__name__)
 
 
-SUMMARIZE_PROMPT = """You are an expert software engineering assistant. Generate a summary of the completed work.
+SUMMARIZE_PROMPT = """You are an expert software engineering assistant. Write a report of what THIS session actually did.
+
+Your only job is to tell the user what happened in this session: the work that was performed, what changed, and the resulting test/verification status. This is a plain session report — do NOT hunt for new problems, do NOT propose unrelated issues to file, and do NOT pad the report with speculative work that did not happen.
 
 ## Task Description
 {task_description}
@@ -39,17 +41,15 @@ SUMMARIZE_PROMPT = """You are an expert software engineering assistant. Generate
 {commit_info}
 {completion_section}
 ## Instructions
-Generate a comprehensive summary in Markdown format. Include:
+Write a concise Markdown report covering ONLY this session. Include:
 
-1. **What was accomplished** - Brief description of what was done
-2. **Key changes** - List of major changes made
-3. **Files modified** - List of files that were changed
-4. **Testing status** - Whether tests pass and any notes
-5. **Remaining work** - Any follow-up tasks or TODOs
-6. **Handoff context** - Information useful for future sessions
-7. **Suggested next steps** - Recommended next actions
+1. **What was done** - What this session actually accomplished
+2. **Key changes** - The notable changes made this session
+3. **Files modified** - The files that were changed this session
+4. **Test & verification status** - Whether tests passed and whether the work was verified, stated honestly based on the status above
+5. **Handoff notes** - Anything the next session needs in order to continue (only when relevant)
 
-Format your response as clean Markdown with clear headings and bullet points.
+Report only facts about this session. Do not invent work that did not happen, and do not claim the work is complete, verified, or "all green" unless the status above confirms it.
 """
 
 # Two-segment marker only: USER_CONTENT region is empty.
@@ -85,6 +85,12 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     restricted_edits_applied = step.inputs.get("restricted_edits_applied", [])
     restricted_edits_failed = step.inputs.get("restricted_edits_failed", [])
 
+    # Authoritative verification verdict (computed by verify_spec, bridged into
+    # verification_result). True/False when verify_spec ran, None when the
+    # workflow has no verify_spec step. The completion gate trips only on an
+    # explicit False so verify_spec-less workflows report normally.
+    verified = _resolve_verified(verification_result)
+
     # Format inputs
     changes_text = _format_changes(changes_made)
     test_text = _format_test_results(test_results)
@@ -95,6 +101,7 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     completion_section = _build_completion_section(
         completion_status, incomplete_tasks, implement_summary,
         restricted_edits_applied, restricted_edits_failed,
+        verified=verified,
     )
 
     # Build prompt
@@ -108,21 +115,18 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         completion_section=completion_section,
     )
 
-    # Append language instruction if configured
+    # Append language instruction if configured.
+    # Note: summarize deliberately does NOT receive B-class issue-discovery
+    # injection. Its sole job is to report what this session did; it no longer
+    # collects discovered_issues from the LLM response.
     from ..context_builder import (
         get_step_language_instruction,
-        get_issue_discovery_injection,
         get_runtime_environment_injection,
     )
     project_root = flow.change_path.parent if flow.change_path else Path.cwd()
     lang_instruction = get_step_language_instruction("summarize", project_root)
     if lang_instruction:
         prompt += lang_instruction
-
-    # Append issue discovery injection if applicable
-    injection = get_issue_discovery_injection("summarize", project_root)
-    if injection:
-        prompt += injection
 
     # Append runtime environment injection if applicable
     runtime_env = get_runtime_environment_injection("summarize", project_root)
@@ -144,13 +148,13 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
         summary_text = response
 
         if not summary_text:
-            summary_text = _create_basic_summary_text(flow, changes_made, test_results, task_description, incomplete_tasks, completion_status)
+            summary_text = _create_basic_summary_text(
+                flow, changes_made, test_results, task_description,
+                incomplete_tasks, completion_status, verified,
+            )
 
         # Store output
         step.outputs["summary"] = summary_text
-
-        # Extract discovered_issues from LLM response for B-class collection
-        _extract_discovered_issues(response, step)
 
         # Save to file
         _save_summary(flow, summary_text)
@@ -162,7 +166,10 @@ def summarize_handler(step: Step, flow: FlowInstance) -> StepStatus:
     except Exception as e:
         logger.exception("Summarize step failed")
         # Don't fail the flow - create a basic summary
-        summary_text = _create_basic_summary_text(flow, changes_made, test_results, task_description, incomplete_tasks, completion_status)
+        summary_text = _create_basic_summary_text(
+            flow, changes_made, test_results, task_description,
+            incomplete_tasks, completion_status, verified,
+        )
         step.outputs["summary"] = summary_text
         return StepStatus.COMPLETED
 
@@ -220,22 +227,71 @@ def _format_verification(verification_result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _resolve_verified(verification_result: dict[str, Any]) -> bool | None:
+    """Extract the authoritative ``verified`` verdict from verification_result.
+
+    verify_spec bridges its rule-based ``verified`` into the
+    ``verification_result`` dict. Returns the bool when present, or ``None``
+    when the workflow had no verify_spec step (so the completion gate stays
+    inactive instead of falsely reporting "not verified").
+    """
+    if not isinstance(verification_result, dict):
+        return None
+    value = verification_result.get("verified")
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _verification_gate_lines(verified: bool | None) -> list[str]:
+    """Return the verified=False completion-gate instruction lines.
+
+    Empty unless ``verified`` is explicitly ``False``. This is the prompt-side
+    half of the downstream completion gate: when the work did not pass
+    verification, the summary must not claim it is done/all-green.
+    """
+    if verified is not False:
+        return []
+    return [
+        "\n## Verification Status: NOT PASSED",
+        "This session did NOT pass verification (`verified=False`). Report this "
+        "honestly: you MUST NOT describe the work as \"complete\", \"done\", "
+        "\"all green\", \"fully working\", or \"verified\". State clearly that "
+        "verification did not pass and the work is unverified / unfinished, and "
+        "summarize what still needs to happen.",
+    ]
+
+
 def _build_completion_section(
     completion_status: str,
     incomplete_tasks: list,
     implement_summary: str,
     restricted_edits_applied: list,
     restricted_edits_failed: list,
+    verified: bool | None = None,
 ) -> str:
     """Build the completion status section for the summarize prompt.
 
-    Returns an empty string when status is 'complete' and there is nothing
-    extra to report, keeping the prompt unchanged for the common case.
+    Returns an empty string when status is 'complete', there is nothing extra
+    to report, and verification did not fail — keeping the prompt unchanged for
+    the common case. When ``verified`` is ``False`` the completion gate is
+    always included regardless of completion_status.
     """
-    if completion_status == "complete" and not restricted_edits_applied and not restricted_edits_failed:
+    gate_lines = _verification_gate_lines(verified)
+
+    if (
+        completion_status == "complete"
+        and not restricted_edits_applied
+        and not restricted_edits_failed
+    ):
+        # Nothing extra to report — but the verified=False gate, if present,
+        # must still reach the prompt.
+        if gate_lines:
+            return "\n".join(gate_lines + [""])
         return ""
 
-    lines: list[str] = ["\n## Completion Status"]
+    lines: list[str] = list(gate_lines)
+    lines.append("\n## Completion Status")
     lines.append(f"Status: **{completion_status}**")
 
     if implement_summary:
@@ -284,6 +340,7 @@ def _create_basic_summary_text(
     task_description: str = "",
     incomplete_tasks: list | None = None,
     completion_status: str = "complete",
+    verified: bool | None = None,
 ) -> str:
     """Create a basic summary if LLM generation fails.
 
@@ -292,6 +349,11 @@ def _create_basic_summary_text(
         changes_made: Changes made during implementation
         test_results: Test results
         task_description: Resolved task description (refined or original)
+        incomplete_tasks: Tasks that were not completed
+        completion_status: 'complete' or 'partial'
+        verified: Authoritative verification verdict. When ``False`` the
+            fallback summary must not claim the work is completed/verified
+            (the completion gate, fallback half).
 
     Returns:
         Basic summary text in Markdown format
@@ -307,14 +369,27 @@ def _create_basic_summary_text(
         else:
             file_list.append(str(f))
 
-    status_label = "Partially completed" if completion_status == "partial" else "Completed"
+    if verified is False:
+        status_label = "Not verified (incomplete)"
+    elif completion_status == "partial":
+        status_label = "Partially completed"
+    else:
+        status_label = "Completed"
     lines = [
         f"## Work Summary\n",
         f"{status_label} {flow.task_type or 'task'}: {task_description[:100]}...\n",
+    ]
+    if verified is False:
+        lines.extend([
+            "### Verification Status: NOT PASSED",
+            "This session did NOT pass verification — the work is unverified and "
+            "not complete.\n",
+        ])
+    lines.extend([
         f"### Key Changes",
         f"- Modified {len(file_list)} files\n",
         f"### Files Modified",
-    ]
+    ])
     for f in file_list[:10]:
         lines.append(f"- {f}")
     if len(file_list) > 10:
@@ -333,59 +408,25 @@ def _create_basic_summary_text(
                     entry += f" ({reason})"
                 lines.append(entry)
 
+    if verified is False:
+        testing_status = "Tests passed" if test_results.get("passed") else "Test status unknown"
+        handoff = (
+            f"Flow {flow.flow_id} ended NOT verified on {datetime.now().isoformat()}"
+        )
+    else:
+        testing_status = "Tests passed" if test_results.get("passed") else "Test status unknown"
+        handoff = f"Flow {flow.flow_id} completed on {datetime.now().isoformat()}"
+
     lines.extend([
         "",
         f"### Testing Status",
-        f"{'Tests passed' if test_results.get('passed') else 'Test status unknown'}",
+        testing_status,
         "",
         f"### Handoff Context",
-        f"Flow {flow.flow_id} completed on {datetime.now().isoformat()}",
+        handoff,
     ])
 
     return "\n".join(lines)
-
-
-def _extract_discovered_issues(response: str, step: Step) -> None:
-    """Extract discovered_issues JSON from LLM natural language response.
-
-    Looks for a JSON block containing discovered_issues in the response text.
-    Stores found issues in step.outputs['discovered_issues'].
-
-    Args:
-        response: Raw LLM response (may be NDJSON stream or plain text)
-        step: Step to store discovered issues in
-    """
-    import json
-    import re
-
-    text = response or ""
-
-    # Look for JSON block containing discovered_issues
-    # Try to find ```json ... ``` blocks first
-    json_blocks = re.findall(r'```(?:json)?\s*\n?(.*?)\n?```', text, re.DOTALL)
-    for block in json_blocks:
-        try:
-            data = json.loads(block.strip())
-            if isinstance(data, dict) and "discovered_issues" in data:
-                issues = data["discovered_issues"]
-                if isinstance(issues, list) and issues:
-                    step.outputs["discovered_issues"] = issues
-                    return
-        except (json.JSONDecodeError, ValueError):
-            continue
-
-    # Try to find inline JSON with discovered_issues
-    pattern = r'\{[^{}]*"discovered_issues"\s*:\s*\[.*?\]\s*\}'
-    matches = re.findall(pattern, text, re.DOTALL)
-    for match in matches:
-        try:
-            data = json.loads(match)
-            issues = data.get("discovered_issues", [])
-            if isinstance(issues, list) and issues:
-                step.outputs["discovered_issues"] = issues
-                return
-        except (json.JSONDecodeError, ValueError):
-            continue
 
 
 def _save_summary(flow: FlowInstance, summary_text: str) -> None:

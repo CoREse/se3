@@ -65,8 +65,20 @@ def get_step_language_instruction(step_type: str, project_root: Path) -> str:
 # Steps explicitly forbidden from issue discovery injection
 ISSUE_DISCOVERY_FORBIDDEN_STEPS = {"implement", "test"}
 
-# Default steps that receive issue discovery prompt injection
-ISSUE_DISCOVERY_DEFAULT_STEPS = ["summarize"]
+# Default steps that receive B-class issue discovery prompt injection.
+#
+# Empty by default: no step receives B-class issue-discovery injection unless a
+# project explicitly opts a step in via ``issue_discovery.steps`` in se3.yaml.
+# The whitelist mechanism itself is retained so steps that can surface
+# ``discovered_issues`` from their own output (e.g. verify_spec via its JSON
+# response) can still be enabled through config.
+#
+# ``summarize`` is intentionally NOT eligible for B-class discovery: its
+# collection logic (``_extract_discovered_issues``) was removed so the step's
+# sole job is to report what the session actually did. Whitelisting it via
+# config would inject the prompt fragment with nothing to collect the result,
+# so the summarize handler no longer calls the injection at all.
+ISSUE_DISCOVERY_DEFAULT_STEPS: list[str] = []
 
 # Steps explicitly forbidden from spec names injection
 SPEC_NAMES_INJECTION_FORBIDDEN_STEPS = frozenset({"summarize", "commit"})

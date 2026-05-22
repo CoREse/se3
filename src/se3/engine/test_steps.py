@@ -402,21 +402,21 @@ class TestContextBuilder:
 class TestIssueDiscoveryInjection:
     """Tests for get_issue_discovery_injection() function."""
 
-    def test_whitelisted_step_returns_prompt(self, tmp_path):
-        """Whitelisted step (summarize) returns non-empty prompt."""
+    def test_summarize_not_injected_by_default(self, tmp_path):
+        """summarize is no longer in the default whitelist (B-class removed),
+        so it receives no injection by default."""
         from .context_builder import get_issue_discovery_injection
 
         result = get_issue_discovery_injection("summarize", tmp_path)
-        assert result != ""
-        assert "discovered_issues" in result
+        assert result == ""
 
-    def test_whitelisted_step_verify_spec(self, tmp_path):
-        """Whitelisted step (verify_spec) returns non-empty prompt."""
+    def test_verify_spec_not_injected_by_default(self, tmp_path):
+        """verify_spec was removed from the default whitelist; it files
+        out-of-scope issues deterministically instead."""
         from .context_builder import get_issue_discovery_injection
 
         result = get_issue_discovery_injection("verify_spec", tmp_path)
-        assert result != ""
-        assert "discovered_issues" in result
+        assert result == ""
 
     def test_non_whitelisted_step_returns_empty(self, tmp_path):
         """Non-whitelisted step (propose) returns empty string."""
@@ -471,22 +471,30 @@ class TestIssueDiscoveryInjection:
         result = get_issue_discovery_injection("implement", tmp_path)
         assert result == ""
 
-    def test_missing_config_uses_defaults(self, tmp_path):
-        """Missing se3.yaml uses default whitelist."""
+    def test_missing_config_uses_empty_default(self, tmp_path):
+        """Missing se3.yaml uses the default whitelist, which is now empty —
+        summarize receives no injection."""
         from .context_builder import get_issue_discovery_injection
 
         # No se3.yaml exists in tmp_path
         result = get_issue_discovery_injection("summarize", tmp_path)
-        assert result != ""
-        assert "discovered_issues" in result
+        assert result == ""
+
+    def test_default_whitelist_is_empty(self):
+        """The default whitelist no longer contains any step."""
+        from .context_builder import ISSUE_DISCOVERY_DEFAULT_STEPS
+
+        assert ISSUE_DISCOVERY_DEFAULT_STEPS == []
 
 
 class TestSummarizeHandlerIssueDiscoveryIntegration:
-    """Integration test: verify summarize handler prompt includes issue discovery."""
+    """Integration test: summarize handler no longer injects issue discovery
+    nor produces discovered_issues. Its job is a pure session report."""
 
     @patch("se3.engine.steps.summarize.LLMCaller")
-    def test_summarize_prompt_contains_issue_discovery(self, MockLLMCaller):
-        """The actual prompt sent to LLM by summarize handler contains issue discovery text."""
+    def test_summarize_prompt_omits_issue_discovery(self, MockLLMCaller):
+        """The prompt sent to LLM by summarize must NOT contain issue discovery
+        text, and the step must NOT produce discovered_issues."""
         mock_caller = MagicMock()
         # Return valid NDJSON with summary text
         mock_caller.call.return_value = '{"type": "assistant", "message": {"content": [{"type": "text", "text": "Summary here"}]}}'
@@ -502,17 +510,17 @@ class TestSummarizeHandlerIssueDiscoveryIntegration:
             from .steps.summarize import summarize_handler
             summarize_handler(step, flow)
 
-            # Verify the prompt sent to LLM contains issue discovery text
+            # Verify the prompt sent to LLM does NOT contain issue discovery text
             assert mock_caller.call.called
             call_kwargs = mock_caller.call.call_args
-            prompt = call_kwargs.kwargs.get("prompt") or call_kwargs[1].get("prompt") or call_kwargs[0][0] if call_kwargs[0] else ""
-            # The prompt keyword argument
-            if not prompt and call_kwargs.kwargs:
-                prompt = call_kwargs.kwargs.get("prompt", "")
-            assert "discovered_issues" in prompt, (
-                "Issue discovery injection was NOT found in the summarize handler prompt. "
-                "This means the injection is not reaching the LLM."
+            prompt = call_kwargs.kwargs.get("prompt", "")
+            if not prompt and call_kwargs.args:
+                prompt = call_kwargs.args[0]
+            assert "discovered_issues" not in prompt, (
+                "summarize must not inject issue discovery into its prompt."
             )
+            # And no discovered_issues output is produced.
+            assert "discovered_issues" not in step.outputs
 
 
 class TestBuildStepInputs:

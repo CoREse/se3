@@ -260,6 +260,14 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         # Rule-based verified: ignore LLM's verified field
         verified = (in_scope_count == 0) and tests_passed
 
+        # Bridge the authoritative verdict into the verification_result dict so
+        # downstream consumers that only receive ``verification_result`` (the
+        # summarize step) read the rule-based ``verified`` rather than the LLM's
+        # untrustworthy/absent value. This overwrites any ``verified`` the LLM
+        # may have emitted, keeping the rule the single source of truth.
+        if isinstance(verification, dict):
+            verification["verified"] = verified
+
         # Store outputs
         step.outputs["verification_result"] = verification
         step.outputs["verified"] = verified
