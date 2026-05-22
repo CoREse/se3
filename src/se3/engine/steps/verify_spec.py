@@ -229,11 +229,30 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         out_of_scope_count = len(out_of_scope_issues)
 
         # Check test results - support both old flat format and new structured format
+        critical_skipped: list[str] = []
+        critical_missing: list[str] = []
         if test_results and isinstance(test_results, dict):
             tests_passed = test_results.get("overall_passed", test_results.get("passed", False))
             returncode = test_results.get("returncode", 0)
             if returncode != 0 and tests_passed:
                 logger.warning(f"Test return code is {returncode}, marking as failed")
+                tests_passed = False
+
+            # Defensive backstop for the critical acceptance gate. The test
+            # step (steps/test.py) flags critical acceptance tests that were
+            # skipped or never collected via these fields. As the authoritative
+            # ``verified`` computation point, verify_spec consumes them
+            # explicitly so a skipped/missing critical test can never count as
+            # passing — even if some upstream branch left ``overall_passed``
+            # truthy. Skip != pass for these tests.
+            critical_skipped = list(test_results.get("critical_skipped") or [])
+            critical_missing = list(test_results.get("critical_missing") or [])
+            if (critical_skipped or critical_missing) and tests_passed:
+                logger.warning(
+                    "Critical acceptance test(s) skipped/missing "
+                    f"(skipped={critical_skipped}, missing={critical_missing}); "
+                    "marking tests as not passed"
+                )
                 tests_passed = False
         else:
             tests_passed = True
@@ -266,6 +285,15 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
             fix_instructions = f"Tests are failing. Please review and fix the implementation.\n\nTest output:\n{_extract_failures_section(stdout, max_chars=FAILURES_SECTION_MAX_CHARS)}\n\nStderr:\n{stderr[-FIX_STDERR_TAIL_CHARS:]}"
             logger.warning("Tests failed but LLM didn't provide fix instructions - using default")
 
+        # Prepend targeted guidance when the gate failed because a critical
+        # acceptance test was skipped or is missing. These never surface in a
+        # FAILURES section, so without this the implement step would see only
+        # generic test output (or none) and miss why verification failed.
+        if critical_skipped or critical_missing:
+            fix_instructions = _build_critical_fix_instructions(
+                critical_skipped, critical_missing, fix_instructions,
+            )
+
         # Store fix instructions in outputs
         if fix_instructions:
             step.outputs["fix_instructions"] = fix_instructions
@@ -284,8 +312,14 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
                 "test_results": test_results,
                 "test_analysis": test_analysis,
                 "fix_instructions": fix_instructions,
-                "reason": "test_failure",
+                "reason": (
+                    "critical_acceptance_not_verified"
+                    if (critical_skipped or critical_missing)
+                    else "test_failure"
+                ),
                 "iteration": fix_iteration + 1,
+                "critical_skipped": critical_skipped,
+                "critical_missing": critical_missing,
             }
 
             return StepStatus.REVISION_NEEDED
@@ -327,6 +361,54 @@ def verify_spec_handler(step: Step, flow: FlowInstance) -> StepStatus:
         logger.exception("Verify step failed")
         step.error_message = f"Verification failed: {str(e)}"
         return StepStatus.FAILED
+
+
+def _build_critical_fix_instructions(
+    critical_skipped: list[str],
+    critical_missing: list[str],
+    base_instructions: str,
+) -> str:
+    """Build fix instructions for a critical acceptance gate failure.
+
+    A skipped or missing critical acceptance test is treated as a
+    verification failure (skip != pass): the test never ran its assertions,
+    so the implementation is not actually verified. This guidance tells the
+    implement step to make the test run for real rather than silence it.
+    Any pre-existing ``base_instructions`` (e.g. LLM-provided or default
+    test output) are preserved underneath.
+    """
+    parts: list[str] = []
+    if critical_skipped:
+        parts.append(
+            "The following CRITICAL acceptance test(s) were SKIPPED and "
+            "therefore did NOT actually run:\n  - "
+            + "\n  - ".join(critical_skipped)
+        )
+    if critical_missing:
+        parts.append(
+            "The following CRITICAL acceptance test pattern(s) matched neither "
+            "a test that ran nor a test that was skipped — they appear to be "
+            "MISSING (renamed, un-collected due to an import error, or a typo "
+            "in the configured pattern):\n  - "
+            + "\n  - ".join(critical_missing)
+        )
+
+    note = (
+        "CRITICAL ACCEPTANCE TESTS NOT VERIFIED (skip/missing == verification "
+        "failure)\n\n"
+        + "\n\n".join(parts)
+        + "\n\nThese critical acceptance tests MUST actually run and pass; a "
+        "skip or a missing test is treated as a verification failure (skip != "
+        "pass). Do NOT silence them with skip guards. Instead: install any "
+        "required dependencies so the test can run, remove the skip guard, and "
+        "fix test collection (imports/renames) so each critical test is "
+        "collected and executed. If the feature under test is genuinely broken, "
+        "fix the implementation so the assertions pass."
+    )
+
+    if base_instructions:
+        return f"{note}\n\n{base_instructions}"
+    return note
 
 
 def _file_out_of_scope_issues(
