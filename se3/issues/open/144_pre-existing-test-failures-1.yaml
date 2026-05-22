@@ -1,0 +1,25 @@
+id: '144'
+title: Pre-existing test failures (1 test)
+description: "**1 pre-existing test failure(s)** detected during flow execution.\n\
+  These failures were NOT introduced by the current change.\n\n**Failing tests:**\n\
+  - `tests/engine/test_spec_format.py::TestRealSpecFiles::test_flow_engine_spec_requirement_count`:\
+  \ test failed (details in pytest output)\n\n**Task:** 刚那个session出现了以下的内容：why？从哪个commit改成这样的？以前一直都是llm审阅的（默认就是），现在变成要我人工审阅？你看看发生了什么事：##\
+  \ Task Summary \n\n┌──────────────────────┬──────────────────────────────────────────┐\n\
+  │ Task Groups          │ 4                                        │\n│ Total Tasks\
+  \          │ 14                                       │\n│ Complexity          \
+  \ │ 8 small | 6 medium                       │\n│ Est. Effort          │ ~2.5 days\
+  \                                │\n└──────────────────────┴──────────────────────────────────────────┘\n\
+  \n    \n\n  ✓ plan completed (221.3s)\nCONFIRM step inserted for analyze but no\
+  \ entry under confirmation.steps; defaulting to human reviewer\n\nReview analyze\
+  \ output above:\n  1. Approve and continue\n  2. Request changes\n  3. Exit (pause\
+  \ flow)\n\nSelect (number):\n\nThese tests should be investigated and fixed to prevent\
+  \ the broken-window effect."
+status: open
+priority: medium
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:test-pre-existing
+created_at: '2026-05-22T16:28:45.464052'
+updated_at: '2026-05-22T16:28:45.464052'

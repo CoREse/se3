@@ -1172,7 +1172,21 @@ class StateMachine:
                     for sid in flow.state.step_history:
                         s = flow.state.steps.get(sid)
                         if s and s.step_type == StepType.CONFIRM:
-                            if s.outputs.get("review_result", {}).get("step_to_review_id") == step_id:
+                            review_result = s.outputs.get("review_result", {})
+                            # Only an *approved* CONFIRM marks its reviewed
+                            # step as confirmed. A CONFIRM that requested
+                            # changes (approved is False / absent) must NOT
+                            # shield its target step: after the revision
+                            # re-runs that step, the next CONFIRM has to
+                            # re-review the same step with the LLM instead of
+                            # skipping forward to an unconfigured later step
+                            # (which would otherwise hit the human fallback
+                            # below). Strict 'is True' so a missing/false
+                            # approved never counts.
+                            if (
+                                review_result.get("step_to_review_id") == step_id
+                                and review_result.get("approved") is True
+                            ):
                                 already_confirmed = True
                                 break
                     if not already_confirmed:

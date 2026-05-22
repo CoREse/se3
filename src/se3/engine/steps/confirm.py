@@ -159,8 +159,21 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
     max_iterations = step.inputs.get('max_iterations', 3) or 3
     agents = step.inputs.get('agents')
 
-    # Track iteration count
-    review_iteration = step.inputs.get('_llm_review_iteration', 0)
+    # Iteration cap is driven by the persisted, cross-revision review
+    # counter on flow.state, NOT a per-confirm counter. Each revision
+    # creates a brand-new CONFIRM step (state_machine.transition_to_next),
+    # so the old per-confirm step.inputs['_llm_review_iteration'] reset to
+    # 0 every cycle and the max_iterations safety net never engaged. The
+    # persisted counter is incremented once per revision by
+    # _transition_to_revision (flow.state.increment_review_iteration), so
+    # reading it here makes the cap actually bound the review<->revise loop
+    # across the new-confirm chain.
+    if step_to_review_id is not None:
+        review_iteration = flow.state.get_review_iteration(step_to_review_id)
+    else:
+        # Degenerate confirm with no reviewed step — fall back to the
+        # legacy per-confirm counter so behavior stays safe (no crash).
+        review_iteration = step.inputs.get('_llm_review_iteration', 0)
 
     # Check max iterations — auto-approve if exceeded
     if review_iteration >= max_iterations:
@@ -228,8 +241,10 @@ def _llm_review(step: Step, flow: FlowInstance) -> Tuple[StepStatus, Dict[str, A
         approved = True
         feedback = f"Auto-approved due to LLM call failure: {e}"
 
-    # Increment iteration count for next cycle
-    step.inputs['_llm_review_iteration'] = review_iteration + 1
+    # NOTE: the iteration counter is intentionally NOT incremented here.
+    # The single source of truth for the cross-revision review count is
+    # flow.state.review_iterations, incremented once per revision by
+    # _transition_to_revision. Incrementing here too would double-count.
 
     review_result = {
         'approved': approved,

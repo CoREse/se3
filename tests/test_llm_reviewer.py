@@ -226,7 +226,7 @@ class TestLLMReviewMaxIterations:
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
     def test_auto_approve_when_max_iterations_exceeded(self):
-        """When _llm_review_iteration >= max_iterations, auto-approve without calling LLM."""
+        """When the persisted review count >= max_iterations, auto-approve without calling LLM."""
         from se3.engine.steps.confirm import confirm_handler
 
         confirm_step = Step(
@@ -239,10 +239,13 @@ class TestLLMReviewMaxIterations:
                 "reviewer": "reviewer_bot",
                 "agents": [{"name": "reviewer_bot", "type": "claude-code", "cmd": "claude", "priority": 0}],
                 "max_iterations": 2,
-                "_llm_review_iteration": 2,
             },
         )
         self.flow.state.add_step(confirm_step)
+        # The iteration cap is read from the persisted, cross-revision
+        # counter on flow.state (incremented per revision), not from a
+        # per-confirm step input.
+        self.flow.state.review_iterations["plan-001"] = 2
 
         # No LLMCaller mock needed — should not be called
         result = confirm_handler(confirm_step, self.flow)
@@ -265,10 +268,11 @@ class TestLLMReviewMaxIterations:
                 "reviewer": "reviewer_bot",
                 "agents": [{"name": "reviewer_bot", "type": "claude-code", "cmd": "claude", "priority": 0}],
                 "max_iterations": 3,
-                "_llm_review_iteration": 3,
             },
         )
         self.flow.state.add_step(confirm_step)
+        # Persisted cross-revision counter exactly at the cap.
+        self.flow.state.review_iterations["plan-001"] = 3
 
         result = confirm_handler(confirm_step, self.flow)
 

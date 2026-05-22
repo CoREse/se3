@@ -479,7 +479,7 @@ The step pool SHALL include a `CONFIRM` step type that does not appear in any de
 
 | Step | uses_llm | Read-Only | Inputs | Outputs |
 |------|----------|-----------|--------|---------|
-| `confirm` | conditional (LLM reviewer only) | **No** | step_to_review_id, step_to_review_type, reviewer, agents (LLM mode only), max_iterations, task_description, _llm_review_iteration | review_result {approved, feedback, step_to_review_id, step_to_review_type, reviewer?}, revision_feedback, call_file (human mode) |
+| `confirm` | conditional (LLM reviewer only) | **No** | step_to_review_id, step_to_review_type, reviewer, agents (LLM mode only), max_iterations, task_description, _llm_review_iteration (degenerate fallback only; the iteration cap source is the persisted cross-revision counter `flow.state.review_iterations[step_to_review_id]`) | review_result {approved, feedback, step_to_review_id, step_to_review_type, reviewer?}, revision_feedback, call_file (human mode) |
 
 The CONFIRM step's `read_only` attribute is `False` — the step itself produces no source-file edits, but it is deliberately not marked read-only because (a) on the revision path it triggers re-execution of a non-read-only step and (b) the human reviewer path writes call-file artifacts to `se3/calls/`.
 
@@ -512,7 +512,7 @@ The `reviewer` field, resolved by `resolve_confirm_inputs(project_root, reviewed
 2. **LLM reviewer** (`reviewer != "human"` — either an explicit agent name or `null` to fall back to `llm_caller.defaults`):
    - `confirm_handler._llm_review()` builds a review prompt via `build_llm_review_prompt(reviewed_type, step_output, task_description, revision_feedback, project_root)` and dispatches it through `LLMCaller` with `step_type="confirm_llm_review"` and `json_mode="two_phase"`.
    - The LLM response is parsed via `parse_json_response(response, required_keys=["approved"])`; the handler reads `approved` (bool) and `feedback` (string).
-   - The handler maintains `step.inputs["_llm_review_iteration"]` and auto-approves with feedback `Auto-approved: max review iterations (N) reached.` when the iteration counter reaches `max_iterations` (default `3`), preventing infinite review loops.
+   - The handler reads the persisted cross-revision counter `flow.state.review_iterations[step_to_review_id]` (incremented once per revision by `_transition_to_revision`) and auto-approves with feedback `Auto-approved: max review iterations (N) reached.` when that counter reaches `max_iterations` (default `3`), preventing infinite review loops. Because each revision creates a brand-new CONFIRM step, the persisted counter — not a per-confirm `step.inputs["_llm_review_iteration"]`, which would reset to 0 every cycle — is what makes the cap bound the review↔revise loop across the new-confirm chain. `step.inputs["_llm_review_iteration"]` is retained only as a degenerate fallback when there is no reviewed step (`step_to_review_id` is `None`).
    - If the LLM call itself raises, the handler auto-approves with feedback prefixed `Auto-approved due to LLM call failure:` rather than blocking the flow. Malformed JSON responses are treated as `approved == False` with a parse-failure feedback message.
    - The synchronous path never returns `PAUSED` and never writes a call file.
 
@@ -522,6 +522,10 @@ The `reviewer` field, resolved by `resolve_confirm_inputs(project_root, reviewed
 
 - `approved == True`: normal forward progression to the next step in the selected sequence.
 - `approved == False`: the state machine calls `_transition_to_revision(flow, confirm_step, step_to_review_id)`, which re-executes the originally reviewed step with the prior output and revision feedback available to it.
+
+**Step-to-review resolution:**
+
+When `_build_step_inputs` constructs inputs for a CONFIRM step, it scans `flow.state.step_history` in reverse for the most recent non-CONFIRM step that has not yet been confirmed. A step counts as "already confirmed" only when some CONFIRM in history both reviewed it (`review_result.step_to_review_id` matches the step's id) **and** approved it (strict `review_result.approved is True`). A CONFIRM that requested changes (`approved` is `False` or absent) does NOT mark its target as confirmed. Because each revision creates a brand-new CONFIRM step, this rule ensures that after a rejected step is re-executed, the next CONFIRM re-selects that same step and re-reviews it (with its configured reviewer), rather than treating it as done and skipping forward to a later — possibly unconfigured — step (which would resolve to `None` and trip the human defensive fallback below).
 
 **Defensive fallback:**
 
@@ -566,7 +570,7 @@ If a CONFIRM step is present in the sequence but `resolve_confirm_inputs` return
 
 #### Scenario: LLM reviewer max iterations auto-approval
 - **GIVEN** `confirmation.steps.<step>.max_iterations` is configured to N (default 3)
-- **WHEN** `step.inputs["_llm_review_iteration"]` has reached N before the LLM call
+- **WHEN** the persisted counter `flow.state.review_iterations[step_to_review_id]` has reached N before the LLM call
 - **THEN** the handler skips the LLM call, returns `StepStatus.COMPLETED`, and stores feedback `Auto-approved: max review iterations (N) reached.`
 
 #### Scenario: LLM reviewer call failure does not block flow
@@ -580,6 +584,13 @@ If a CONFIRM step is present in the sequence but `resolve_confirm_inputs` return
 - **THEN** `_transition_to_revision(flow, confirm_step, X)` is invoked
 - **AND** the step identified by X is re-executed with revision feedback available
 - **AND** the state machine does NOT advance to the step that would normally follow CONFIRM in the selected sequence
+
+#### Scenario: Revision-requested CONFIRM does not mark its reviewed step as confirmed
+- **GIVEN** a CONFIRM reviewed step `plan`, returned `approved == false` (revision requested), and `plan` was subsequently re-executed
+- **WHEN** `_build_step_inputs` resolves the step-to-review for the next CONFIRM
+- **THEN** `plan` is selected again because the rejected CONFIRM does not shield it (only `approved is True` counts as confirmed)
+- **AND** the new CONFIRM re-reviews `plan` with its configured reviewer
+- **AND** the resolution does NOT skip forward to a later unconfigured step (e.g. `analyze`) and therefore does NOT trigger the human defensive fallback
 
 #### Scenario: Defensive fallback when CONFIRM config is missing at build-input time
 - **GIVEN** the sequence contains a CONFIRM step (because `confirmation.steps.<reviewed_type>` existed when `insert_confirmation_steps` ran)

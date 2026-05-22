@@ -478,7 +478,7 @@ class TestRealSpecFiles:
     def test_flow_engine_spec_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "flow-engine" / "spec.md").read_text()
         parsed = parse_spec(text)
-        assert len(parsed.requirements) == 42
+        assert len(parsed.requirements) == 43
 
     def test_spec_guardrails_requirement_count(self, specs_dir: Path):
         text = (specs_dir / "spec-guardrails" / "spec.md").read_text()
