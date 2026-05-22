@@ -241,6 +241,12 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         shlex.split(config.command) if config.command
         else _detect_test_command(project_root)
     )
+    # When critical acceptance tests are configured, make sure a pytest
+    # command surfaces skipped tests so the critical skip/missing gate can
+    # parse them (no-op when no critical_tests are configured).
+    primary_command = _ensure_verbose_pytest(
+        primary_command, bool(config.critical_tests),
+    )
     primary_result = _run_command(
         primary_command, project_root, primary_timeout,
     )
@@ -269,6 +275,36 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         if phase.get("required", True) and not phase_results[i + 1]["passed"]:
             overall_passed = False
 
+    # 4b. Critical acceptance test gate.
+    # pytest returns 0 for a SKIPPED test, and a critical test that has been
+    # renamed / un-collected (import error, typo'd pattern) silently vanishes
+    # while the run still exits 0. Either case would otherwise let
+    # tests_passed (and downstream `verified`) go false-green. A skipped or
+    # missing critical test is treated as "not verified" → overall_passed False.
+    critical_skipped: List[str] = []
+    critical_missing: List[str] = []
+    if config.critical_tests:
+        ran_ids = [tid for tid, _passed in _parse_test_ids(primary_result["stdout"])]
+        skipped_ids = _parse_skipped_test_ids(primary_result["stdout"])
+        if not ran_ids and not skipped_ids:
+            logger.warning(
+                "critical_tests is configured but no per-test results could be "
+                "parsed from the test output; skipping critical-missing "
+                "detection to avoid false positives. Ensure the test command "
+                "emits verbose per-test output (e.g. `python -m pytest -v`)."
+            )
+        critical_skipped, critical_missing = _detect_critical_failures(
+            ran_ids, skipped_ids, list(config.critical_tests),
+        )
+        if critical_skipped or critical_missing:
+            overall_passed = False
+            logger.warning(
+                "Critical acceptance test gate failed (skip != pass): "
+                "skipped=%s missing=%s",
+                critical_skipped, critical_missing,
+            )
+    critical_failed = bool(critical_skipped) or bool(critical_missing)
+
     # 5. Distinguish pre-existing failures from net-new regressions
     known_failures = _load_known_failures(project_root)
     known_ids = set(known_failures.keys())
@@ -296,8 +332,14 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         not overall_passed
         and not regression["failed"]
         and not new_tests["failed"]
+        and not critical_failed
     )
-    should_fix = bool(new_tests["failed"]) or bool(net_new_regression) or unparseable_failure
+    should_fix = (
+        bool(new_tests["failed"])
+        or bool(net_new_regression)
+        or unparseable_failure
+        or critical_failed
+    )
 
     # 6. Store structured output
     step.outputs["test_results"] = {
@@ -305,6 +347,11 @@ def test_handler(step: Step, flow: FlowInstance) -> StepStatus:
         "regression": regression,
         "phases": phase_results,
         "overall_passed": overall_passed,
+        # Critical acceptance test gate signals (consumed defensively by
+        # verify_spec to force tests_passed=False even if overall_passed were
+        # mis-set upstream). Empty lists when no critical_tests are configured.
+        "critical_skipped": critical_skipped,
+        "critical_missing": critical_missing,
         # Backward compat fields
         "command": " ".join(primary_command),
         "returncode": primary_result["returncode"],
@@ -386,12 +433,51 @@ Error output:
 {stderr_tail}
 """
 
+        # Prepend targeted guidance when a critical acceptance test was
+        # skipped or is missing — these never produce a FAILURES section, so
+        # without this the implement step would see only generic test output.
+        if critical_failed:
+            critical_parts: list[str] = []
+            if critical_skipped:
+                critical_parts.append(
+                    "The following CRITICAL acceptance test(s) were SKIPPED and "
+                    "therefore did NOT actually run:\n  - "
+                    + "\n  - ".join(critical_skipped)
+                )
+            if critical_missing:
+                critical_parts.append(
+                    "The following CRITICAL acceptance test pattern(s) matched "
+                    "neither a test that ran nor a test that was skipped — they "
+                    "appear to be MISSING (renamed, un-collected due to an import "
+                    "error, or a typo in the configured pattern):\n  - "
+                    + "\n  - ".join(critical_missing)
+                )
+            fix_instructions = (
+                "CRITICAL ACCEPTANCE TESTS NOT VERIFIED (skip/missing == "
+                "verification failure)\n\n"
+                + "\n\n".join(critical_parts)
+                + "\n\nThese critical acceptance tests MUST actually run and "
+                "pass; a skip or a missing test is treated as a verification "
+                "failure (skip != pass). Do NOT silence them with skip guards. "
+                "Instead: install any required dependencies so the test can run, "
+                "remove the skip guard, and fix test collection "
+                "(imports/renames) so each critical test is collected and "
+                "executed. If the feature under test is genuinely broken, fix "
+                "the implementation so the assertions pass.\n\n"
+                + fix_instructions
+            )
+
         # Store fix context in outputs for the fix loop
         fix_context: dict[str, Any] = {
             "test_failed": True,
             "test_results": step.outputs["test_results"],
-            "reason": "test_failure",
+            "reason": (
+                "critical_acceptance_not_verified" if critical_failed
+                else "test_failure"
+            ),
             "iteration": step.inputs.get("fix_iteration", 0) + 1,
+            "critical_skipped": critical_skipped,
+            "critical_missing": critical_missing,
         }
 
         # If primary test timed out, include timeout info so implement can
@@ -663,6 +749,150 @@ def _parse_test_ids(stdout: str) -> list[tuple[str, bool]]:
         results.append((m.group(2), m.group(1) == "PASS"))
 
     return results
+
+
+def _parse_skipped_test_ids(stdout: str) -> list[str]:
+    """Parse SKIPPED test IDs from pytest verbose output.
+
+    Matches the per-test lines emitted by ``pytest -v``, e.g.
+    ``tests/test_foo.py::test_bar SKIPPED`` (optionally followed by a reason
+    in parentheses/brackets). The ``-rs`` short-summary form
+    (``SKIPPED [1] file:line: reason``) is intentionally NOT parsed here: it
+    carries ``file:line`` rather than ``file::test`` and so cannot be matched
+    against critical-test patterns by test name.
+
+    Returns the skipped test IDs in order of first appearance, deduplicated.
+    """
+    if not stdout:
+        return []
+    seen: set[str] = set()
+    skipped: list[str] = []
+    for m in re.finditer(r'^(\S+::\S+)\s+SKIPPED', stdout, re.MULTILINE):
+        tid = m.group(1)
+        if tid not in seen:
+            seen.add(tid)
+            skipped.append(tid)
+    return skipped
+
+
+def _critical_pattern_matches(pattern: str, test_id: str) -> bool:
+    """Return True if a critical-test pattern matches a test ID.
+
+    Matching is by substring (which also covers exact-ID and prefix forms),
+    so a pattern like ``test_render_paradigm_in_headless_browser`` or
+    ``tests/test_console_real_daemon_e2e.py::test_render`` both work.
+    """
+    if not pattern:
+        return False
+    return pattern in test_id
+
+
+def _detect_critical_failures(
+    ran_ids: list[str],
+    skipped_ids: list[str],
+    critical_patterns: list[str],
+) -> tuple[list[str], list[str]]:
+    """Detect critical acceptance tests that were skipped or are missing.
+
+    A pytest run that *skips* a critical acceptance test still exits 0, and a
+    critical test that has been renamed / silently un-collected (import error,
+    typo'd pattern) simply disappears from the output while the run still
+    exits 0. Either case would otherwise yield a false-green ``tests_passed``
+    downstream. This helper flags both.
+
+    For each entry in ``critical_patterns`` (matched as a substring of a test
+    ID via :func:`_critical_pattern_matches`):
+
+    - if it matches one or more SKIPPED tests, those test IDs are added to
+      ``critical_skipped`` (skip != pass for a critical test);
+    - else if it matches one or more tests that actually ran (PASSED/FAILED),
+      the pattern is considered genuinely exercised and ignored here — a real
+      FAILED critical test is surfaced through the normal failure path;
+    - else the pattern matched neither a run nor a skip and is added to
+      ``critical_missing`` — but ONLY when the run produced parseable per-test
+      results (``ran_ids`` or ``skipped_ids`` non-empty). Under a non-verbose
+      command nothing is parseable, so flagging every pattern as missing would
+      be a false positive; in that case missing-detection is skipped.
+
+    Returns ``(critical_skipped, critical_missing)``; both empty when
+    ``critical_patterns`` is empty.
+    """
+    if not critical_patterns:
+        return [], []
+
+    parseable = bool(ran_ids) or bool(skipped_ids)
+    critical_skipped: list[str] = []
+    critical_missing: list[str] = []
+    skipped_seen: set[str] = set()
+    missing_seen: set[str] = set()
+
+    for pattern in critical_patterns:
+        matched_skipped = [
+            tid for tid in skipped_ids if _critical_pattern_matches(pattern, tid)
+        ]
+        if matched_skipped:
+            for tid in matched_skipped:
+                if tid not in skipped_seen:
+                    skipped_seen.add(tid)
+                    critical_skipped.append(tid)
+            continue
+
+        if any(_critical_pattern_matches(pattern, tid) for tid in ran_ids):
+            # Critical test actually ran (passed or failed) — not our concern.
+            continue
+
+        if parseable and pattern not in missing_seen:
+            missing_seen.add(pattern)
+            critical_missing.append(pattern)
+
+    return critical_skipped, critical_missing
+
+
+_VERBOSE_PYTEST_FLAGS = ("-v", "-vv", "-vvv", "--verbose", "-rs", "-ra", "-rA")
+
+
+def _is_pytest_command(command: list[str]) -> bool:
+    """Heuristic: does ``command`` invoke pytest?
+
+    Recognises ``pytest ...``, ``.../pytest ...``, and ``python -m pytest ...``.
+    """
+    if not command:
+        return False
+    for tok in command:
+        if tok == "pytest" or tok.rsplit("/", 1)[-1] == "pytest":
+            return True
+    for i, tok in enumerate(command):
+        if tok == "-m" and i + 1 < len(command) and command[i + 1] == "pytest":
+            return True
+    return False
+
+
+def _ensure_verbose_pytest(command: list[str], has_critical: bool) -> list[str]:
+    """Ensure a pytest command emits skip information when critical tests gate.
+
+    When ``has_critical`` is set and ``command`` is a pytest invocation that
+    lacks any verbose/report flag, ``-rs`` is appended so skipped tests are
+    surfaced. When the command is not recognisably pytest, a warning is logged
+    (critical skip/missing detection may not work) and the command is returned
+    unchanged. A no-op when ``has_critical`` is False.
+    """
+    if not has_critical:
+        return command
+    if not _is_pytest_command(command):
+        logger.warning(
+            "critical_tests is configured but the test command %r does not "
+            "look like pytest; per-test SKIPPED/PASSED/FAILED lines may not be "
+            "parseable, so critical-test skip/missing detection may not work.",
+            " ".join(command),
+        )
+        return command
+    if any(flag in command for flag in _VERBOSE_PYTEST_FLAGS):
+        return command
+    logger.info(
+        "critical_tests configured; appending -rs to the pytest command to "
+        "surface skipped tests for critical-test detection."
+    )
+    return [*command, "-rs"]
 
 
 def _resolve_cwd(project_root: Path, cwd: str | None) -> Path:

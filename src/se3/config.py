@@ -2006,6 +2006,13 @@ class TestConfig:
     # timeouts in the fix loop can compound the LLM's estimated duration
     # beyond any reasonable bound, masking a hung test as "just slow".
     max_dynamic_timeout: int = 14400  # 4 hours
+    # Critical acceptance tests: a list of test-ID substrings/prefixes that
+    # identify tests whose verification value is so high that a SKIP (or the
+    # test going missing entirely) must be treated as a verification failure,
+    # not a pass. Empty by default — this is an explicit opt-in so ordinary
+    # platform/optional-dependency skips are never penalised. See the test
+    # step's _detect_critical_failures for the matching/gating semantics.
+    critical_tests: list[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, project_root: Path) -> "TestConfig":
@@ -2077,6 +2084,25 @@ class TestConfig:
                 )
                 max_dyn = min_dyn
 
+            # Parse critical_tests: must be a list of strings. A non-list
+            # value is tolerated (reset to empty + warning) rather than
+            # raising, matching the clamp-and-warn policy used for the other
+            # fields above. Elements are coerced to str so YAML scalars
+            # (e.g. an accidental bare number) do not break substring matching
+            # downstream.
+            raw_critical = test_data.get("critical_tests", [])
+            if raw_critical is None:
+                critical_tests: list[str] = []
+            elif isinstance(raw_critical, list):
+                critical_tests = [str(item) for item in raw_critical]
+            else:
+                logger.warning(
+                    "test.critical_tests in %s is not a list (got %s); "
+                    "ignoring (critical-test gating disabled)",
+                    source_label, type(raw_critical).__name__,
+                )
+                critical_tests = []
+
             return cls(
                 command=test_data.get("command"),
                 timeout=timeout,
@@ -2084,6 +2110,7 @@ class TestConfig:
                 timeout_multiplier=multiplier,
                 min_dynamic_timeout=min_dyn,
                 max_dynamic_timeout=max_dyn,
+                critical_tests=critical_tests,
             )
         except Exception as e:
             logger.warning(
