@@ -1,0 +1,13 @@
+id: '139'
+title: Verification passed 标记与文字结论矛盾
+description: 自动化 verification 的布尔标记为 False,但其文字总结却称所有套件全绿、无任何问题。最可能由 e2e 中 1 项 headless
+  浏览器用例被跳过触发了'必须经浏览器逐条核对'的硬性门槛。交付前需澄清此矛盾,不应仅凭文字结论判定完成。
+status: open
+priority: high
+scope: in_scope
+type: bug
+tags:
+- auto-discovered
+- source:summarize
+created_at: '2026-05-21T16:32:38.891549'
+updated_at: '2026-05-21T16:32:38.891549'

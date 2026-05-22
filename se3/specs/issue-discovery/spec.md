@@ -31,7 +31,7 @@ The system SHALL support two classes of issue discovery:
 - **AND** duplicate issues are suppressed within the same flow execution
 
 #### Scenario: B-class injection into whitelisted step
-- **WHEN** a whitelisted step (e.g., `summarize`) builds its LLM prompt
+- **WHEN** a configured whitelisted step builds its LLM prompt (note: the default whitelist is empty, and `summarize` is no longer a participant)
 - **THEN** the issue discovery prompt fragment is appended to the prompt
 - **AND** the LLM may optionally report `discovered_issues` in its response
 
@@ -46,26 +46,33 @@ The system SHALL determine which steps receive B-class prompt injection via a co
 **Configuration (`se3.yaml`):**
 ```yaml
 issue_discovery:
-  steps:
-    - summarize
+  steps: []          # default: empty — no step receives B-class injection
 ```
 
-**Default whitelist:** `["summarize"]`
+**Default whitelist:** `[]` (empty). The default whitelist constant `ISSUE_DISCOVERY_DEFAULT_STEPS` in `context_builder.py` is the empty list, so out of the box NO step receives B-class prompt injection.
 
-**Note:** `verify_spec` was removed from the default whitelist. The `verify_spec` step now uses a deterministic scope mechanism to file out-of-scope issues directly via `IssueManager.create()`, replacing the probabilistic B-class discovery approach.
+**Note — `summarize` no longer participates in B-class discovery:** The default whitelist previously contained `["summarize"]`. `summarize` has since been reworked into a pure, user-facing session report (see the flow-engine *Summarize Session Report and Completion Gate* requirement); both its injection call AND its `discovered_issues` extraction (`_extract_discovered_issues`) were removed. Re-adding `summarize` to `issue_discovery.steps` is therefore explicitly **unsupported**: even when configured, `summarize` neither appends the injection fragment nor writes `discovered_issues`, so nothing is collected. The whitelist mechanism itself is retained (default empty) so that other steps which can capture `discovered_issues` from their own output may still be opted in explicitly.
+
+**Note:** `verify_spec` is likewise not in the default whitelist. The `verify_spec` step uses a deterministic scope mechanism to file out-of-scope issues directly via `IssueManager.create()`, replacing the probabilistic B-class discovery approach.
 
 **Forbidden steps (hardcoded):** `{"implement", "test"}` — these steps NEVER receive injection regardless of configuration.
 
 The `get_issue_discovery_injection(step_type, project_root)` function encapsulates all whitelist and forbidden-list logic. All handlers call this function uniformly; non-whitelisted steps receive an empty string with no side effects.
 
-#### Scenario: Default whitelist
+#### Scenario: Default whitelist is empty
 - **WHEN** no `issue_discovery.steps` is configured in `se3.yaml`
-- **THEN** only `summarize` receives injection
+- **THEN** no step receives B-class injection (the default whitelist is empty)
+- **AND** in particular `summarize` does NOT receive injection
 
-#### Scenario: Custom whitelist
-- **WHEN** `issue_discovery.steps: ["plan", "summarize"]` is configured
-- **THEN** `plan` and `summarize` receive injection
-- **AND** `verify_spec` does NOT receive injection (removed from whitelist)
+#### Scenario: summarize opt-in is unsupported
+- **WHEN** `issue_discovery.steps: ["summarize"]` is configured to try to re-enable injection for summarize
+- **THEN** `summarize` still does not append the injection fragment and never produces `discovered_issues`
+- **AND** no B-class issues are collected from summarize, because its injection and extraction were removed when it became a pure session report
+
+#### Scenario: Custom whitelist for a capable step
+- **WHEN** `issue_discovery.steps: ["plan"]` is configured
+- **THEN** `plan` receives injection
+- **AND** `verify_spec` does NOT receive injection (it files issues deterministically instead)
 
 #### Scenario: Forbidden step override
 - **WHEN** config includes `implement` in `issue_discovery.steps`
@@ -80,15 +87,16 @@ The injection prompt SHALL instruct the LLM to optionally report issues outside 
 - `description`: Details about the issue (required)
 - `priority_hint`: One of `"critical"`, `"high"`, `"medium"`, or `"low"` (required)
 
-The LLM may include `discovered_issues` as a JSON field in its response (for JSON-mode steps like `verify_spec`) or as a JSON code block in natural language responses (for text-mode steps like `summarize`).
+The LLM may include `discovered_issues` as a JSON field in its response (for JSON-mode steps) or as a JSON code block in natural language responses (for text-mode steps). **Note:** `summarize` was the original text-mode example, but it no longer participates in B-class discovery — its injection and `discovered_issues` extraction (`_extract_discovered_issues`) were removed when it became a pure session report (see *Whitelist Configuration*).
 
 #### Scenario: JSON-mode step (verify_spec)
 - **WHEN** verify_spec LLM response includes `"discovered_issues"` field
 - **THEN** the field is transparently passed through to `step.outputs["discovered_issues"]`
 
-#### Scenario: Text-mode step (summarize)
-- **WHEN** summarize LLM response contains a JSON code block with `discovered_issues`
-- **THEN** `_extract_discovered_issues()` parses it and stores in `step.outputs["discovered_issues"]`
+#### Scenario: Text-mode step extraction (summarize removed)
+- **WHEN** a `summarize` LLM response contains a JSON code block with `discovered_issues`
+- **THEN** nothing is extracted — `summarize` no longer has a `_extract_discovered_issues()` path and never writes `step.outputs["discovered_issues"]`
+- **AND** the text-mode JSON-code-block extraction format remains available only for any future text-mode step that is explicitly given such a collector
 
 ### Requirement: Deduplication
 

@@ -29,3 +29,7 @@ tmp*.prompt
 se3.local.yaml
 src/se3/__pycache__/
 *.egg-info/
+
+# Userspace-installed system libraries for the headless-browser acceptance
+# test (populated by scripts/install_browser_test_libs.sh on no-root hosts).
+.browser-libs/

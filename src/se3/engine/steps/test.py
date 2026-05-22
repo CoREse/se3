@@ -848,7 +848,12 @@ def _detect_critical_failures(
     return critical_skipped, critical_missing
 
 
-_VERBOSE_PYTEST_FLAGS = ("-v", "-vv", "-vvv", "--verbose", "-rs", "-ra", "-rA")
+# Only the per-test verbose flags make pytest emit the ``file::test SKIPPED``
+# / ``PASSED`` / ``FAILED`` lines that _parse_skipped_test_ids / _parse_test_ids
+# can match. The ``-r`` report flags (``-rs``/``-ra``/``-rA``) only produce
+# short-summary ``SKIPPED [n] file:line: reason`` lines, which are NOT parseable
+# by test name, so they MUST NOT count as sufficient for critical-test gating.
+_VERBOSE_PYTEST_FLAGS = ("-v", "-vv", "-vvv", "--verbose")
 
 
 def _is_pytest_command(command: list[str]) -> bool:
@@ -868,11 +873,15 @@ def _is_pytest_command(command: list[str]) -> bool:
 
 
 def _ensure_verbose_pytest(command: list[str], has_critical: bool) -> list[str]:
-    """Ensure a pytest command emits skip information when critical tests gate.
+    """Ensure a pytest command emits per-test skip information for the gate.
 
     When ``has_critical`` is set and ``command`` is a pytest invocation that
-    lacks any verbose/report flag, ``-rs`` is appended so skipped tests are
-    surfaced. When the command is not recognisably pytest, a warning is logged
+    lacks a per-test verbose flag (``-v`` / ``-vv`` / ``-vvv`` / ``--verbose``),
+    ``-v`` is appended so skipped tests are surfaced as parseable
+    ``file::test SKIPPED`` lines. The ``-r`` report flags are deliberately NOT
+    accepted as sufficient: they only emit ``SKIPPED [n] file:line: reason``
+    short-summary lines that cannot be matched against critical-test patterns by
+    name. When the command is not recognisably pytest, a warning is logged
     (critical skip/missing detection may not work) and the command is returned
     unchanged. A no-op when ``has_critical`` is False.
     """
@@ -889,10 +898,10 @@ def _ensure_verbose_pytest(command: list[str], has_critical: bool) -> list[str]:
     if any(flag in command for flag in _VERBOSE_PYTEST_FLAGS):
         return command
     logger.info(
-        "critical_tests configured; appending -rs to the pytest command to "
-        "surface skipped tests for critical-test detection."
+        "critical_tests configured; appending -v to the pytest command to "
+        "surface per-test SKIPPED lines for critical-test detection."
     )
-    return [*command, "-rs"]
+    return [*command, "-v"]
 
 
 def _resolve_cwd(project_root: Path, cwd: str | None) -> Path:

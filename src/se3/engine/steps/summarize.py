@@ -198,13 +198,27 @@ def _format_changes(changes_made: dict[str, Any]) -> str:
     return "\n".join(lines) if lines else "Changes made but details unavailable."
 
 
+def _gated_tests_passed(test_results: dict[str, Any]) -> bool:
+    """Return the gated test verdict for the session report.
+
+    Prefers ``overall_passed`` — the value the critical-acceptance gate forces
+    to False when a critical test is skipped or missing — over the
+    backward-compat ``passed`` key (the raw primary-pytest returncode==0, which
+    stays True on a skip). Falls back to ``passed`` only for legacy
+    ``test_results`` dicts written before ``overall_passed`` existed, so a
+    skipped critical test is never reported as a green test status.
+    """
+    if "overall_passed" in test_results:
+        return bool(test_results.get("overall_passed"))
+    return bool(test_results.get("passed", False))
+
+
 def _format_test_results(test_results: dict[str, Any]) -> str:
     """Format test results for inclusion in prompt."""
     if not test_results:
         return "No test results available."
 
-    passed = test_results.get("passed", False)
-    return f"Tests passed: {passed}"
+    return f"Tests passed: {_gated_tests_passed(test_results)}"
 
 
 def _format_verification(verification_result: dict[str, Any]) -> str:
@@ -408,13 +422,12 @@ def _create_basic_summary_text(
                     entry += f" ({reason})"
                 lines.append(entry)
 
+    testing_status = "Tests passed" if _gated_tests_passed(test_results) else "Test status unknown"
     if verified is False:
-        testing_status = "Tests passed" if test_results.get("passed") else "Test status unknown"
         handoff = (
             f"Flow {flow.flow_id} ended NOT verified on {datetime.now().isoformat()}"
         )
     else:
-        testing_status = "Tests passed" if test_results.get("passed") else "Test status unknown"
         handoff = f"Flow {flow.flow_id} completed on {datetime.now().isoformat()}"
 
     lines.extend([

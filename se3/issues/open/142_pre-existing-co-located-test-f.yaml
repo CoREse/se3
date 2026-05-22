@@ -1,0 +1,26 @@
+id: '142'
+title: 'Pre-existing co-located test failure: src/se3/engine/test_steps.py::TestStepSequences::test_review_sequence_has_verify_spec
+  asserts the ''review'' workflow sequence is [ANALYZE, VERIFY_SPEC, SUMMARIZE], but
+  models.py get_default_step_sequence(''review'') returns [ANALYZE, VERIFY_SPEC].
+  models.py was not modified by this task and this test is not collected by the standard
+  testpaths=[''tests''] run, so it does not affect the authoritative suite.'
+description: 'Pre-existing co-located test failure: src/se3/engine/test_steps.py::TestStepSequences::test_review_sequence_has_verify_spec
+  asserts the ''review'' workflow sequence is [ANALYZE, VERIFY_SPEC, SUMMARIZE], but
+  models.py get_default_step_sequence(''review'') returns [ANALYZE, VERIFY_SPEC].
+  models.py was not modified by this task and this test is not collected by the standard
+  testpaths=[''tests''] run, so it does not affect the authoritative suite.
+
+
+  Suggestion: Outside this task''s scope. Either restore SUMMARIZE to the review sequence
+  in models.py or update the test to match the intended review sequence, in a separate
+  change.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-22T15:29:03.899495'
+updated_at: '2026-05-22T15:29:03.899495'

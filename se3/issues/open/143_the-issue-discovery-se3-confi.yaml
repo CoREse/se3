@@ -1,0 +1,24 @@
+id: '143'
+title: The issue-discovery, se3-config, and flow-engine spec files still document
+  the old behavior (default whitelist ['summarize'], no test.critical_tests option,
+  no critical-acceptance gate or Summarize Session Report/Completion Gate requirement).
+  The code now implements the new behavior.
+description: 'The issue-discovery, se3-config, and flow-engine spec files still document
+  the old behavior (default whitelist [''summarize''], no test.critical_tests option,
+  no critical-acceptance gate or Summarize Session Report/Completion Gate requirement).
+  The code now implements the new behavior.
+
+
+  Suggestion: These are declared in Planned Spec Changes and reconcile via se3 sync
+  (the feature workflow has no UPDATE_SPEC step); no action needed within this flow.
+  Run se3 sync afterward to bring spec text in line with the implemented behavior.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-22T15:29:03.901256'
+updated_at: '2026-05-22T15:29:03.901256'

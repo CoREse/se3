@@ -20,6 +20,7 @@ import pytest
 from se3.engine.models import FlowInstance, Step, StepStatus, StepType
 from se3.engine.steps.test import (
     _detect_critical_failures,
+    _ensure_verbose_pytest,
     _parse_skipped_test_ids,
     test_handler as run_test_step,
 )
@@ -59,6 +60,40 @@ class TestParseSkippedTestIds:
             "tests/test_ui.py::test_browser SKIPPED\n"
         )
         assert _parse_skipped_test_ids(stdout) == ["tests/test_ui.py::test_browser"]
+
+
+# ---------------------------------------------------------------------------
+# _ensure_verbose_pytest
+# ---------------------------------------------------------------------------
+
+class TestEnsureVerbosePytest:
+    def test_noop_when_no_critical(self):
+        cmd = ["python", "-m", "pytest", "-q"]
+        assert _ensure_verbose_pytest(cmd, False) == cmd
+
+    def test_appends_v_when_missing(self):
+        # A bare pytest command gets -v (the per-test form parseable by
+        # _parse_skipped_test_ids), NOT a -r report flag.
+        assert _ensure_verbose_pytest(["python", "-m", "pytest"], True) == [
+            "python", "-m", "pytest", "-v",
+        ]
+
+    def test_report_flags_are_not_sufficient(self):
+        # -rs / -ra / -rA only emit "SKIPPED [n] file:line" summary lines that
+        # _parse_skipped_test_ids cannot match by test name, so -v is still
+        # appended to force parseable per-test output.
+        for report_flag in ("-rs", "-ra", "-rA"):
+            cmd = ["python", "-m", "pytest", report_flag]
+            assert _ensure_verbose_pytest(cmd, True) == [*cmd, "-v"]
+
+    def test_verbose_flag_present_is_unchanged(self):
+        for verbose_flag in ("-v", "-vv", "-vvv", "--verbose"):
+            cmd = ["python", "-m", "pytest", verbose_flag]
+            assert _ensure_verbose_pytest(cmd, True) == cmd
+
+    def test_non_pytest_command_unchanged(self):
+        cmd = ["npm", "test"]
+        assert _ensure_verbose_pytest(cmd, True) == cmd
 
 
 # ---------------------------------------------------------------------------
@@ -454,6 +489,8 @@ from se3.engine.steps.summarize import (
     summarize_handler,
     _build_completion_section,
     _create_basic_summary_text,
+    _format_test_results,
+    _gated_tests_passed,
 )
 
 
@@ -549,6 +586,41 @@ class TestSummarizeCompletionGate:
         # Common case: complete + verified True/unknown -> empty section.
         assert _build_completion_section("complete", [], "", [], [], verified=True) == ""
         assert _build_completion_section("complete", [], "", [], []) == ""
+
+
+class TestSummarizeGatedTestStatus:
+    """The session report's test status must reflect the gated ``overall_passed``,
+    not the backward-compat ``passed`` key (raw returncode==0, True on a skip)."""
+
+    def test_gated_prefers_overall_passed_false(self):
+        # Critical skip: overall_passed forced False while passed stays True.
+        tr = {"passed": True, "overall_passed": False}
+        assert _gated_tests_passed(tr) is False
+        assert "Tests passed: False" in _format_test_results(tr)
+
+    def test_gated_uses_overall_passed_true(self):
+        tr = {"passed": True, "overall_passed": True}
+        assert _gated_tests_passed(tr) is True
+        assert "Tests passed: True" in _format_test_results(tr)
+
+    def test_gated_falls_back_to_passed_for_legacy_dict(self):
+        # Legacy test_results without overall_passed -> fall back to passed.
+        assert _gated_tests_passed({"passed": True}) is True
+        assert _gated_tests_passed({"passed": False}) is False
+
+    def test_basic_summary_does_not_report_green_on_critical_skip(self, tmp_path):
+        flow = FlowInstance(
+            flow_id="f", task_description="t", task_type="feature",
+        )
+        flow.change_path = tmp_path / "dummy"
+        # overall_passed False (critical skip) but passed True (skip exits 0).
+        text = _create_basic_summary_text(
+            flow, {"files_changed": ["a.py"]},
+            {"passed": True, "overall_passed": False},
+            "task", [], "complete", verified=False,
+        )
+        assert "Tests passed" not in text
+        assert "Test status unknown" in text
 
 
 class TestSummarizeNoIssueDiscovery:

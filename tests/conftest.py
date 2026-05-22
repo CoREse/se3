@@ -7,12 +7,40 @@ of which warnings a given test happens to trigger.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import sys
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+
+
+def _wire_browser_test_libs() -> None:
+    """Make userspace-installed browser system libraries discoverable.
+
+    The headless-browser acceptance test launches a real Chromium, which needs
+    a set of system shared libraries (``libnspr4``, ``libnss3``, ``libgbm1`` …).
+    On hosts without those packages installed system-wide and without root,
+    ``scripts/install_browser_test_libs.sh`` extracts them into
+    ``.browser-libs/lib`` (gitignored). Chromium is launched as a child process
+    and reads ``LD_LIBRARY_PATH`` at exec time, so prepending that directory to
+    the current process environment is enough for the child to find the libs.
+
+    No-op when the directory does not exist (e.g. the libs are already present
+    system-wide, or the test environment expects a loud failure with install
+    guidance).
+    """
+    lib_dir = Path(__file__).parent.parent / ".browser-libs" / "lib"
+    if not lib_dir.is_dir():
+        return
+    existing = os.environ.get("LD_LIBRARY_PATH", "")
+    parts = existing.split(os.pathsep) if existing else []
+    if str(lib_dir) not in parts:
+        os.environ["LD_LIBRARY_PATH"] = os.pathsep.join([str(lib_dir), *parts])
+
+
+_wire_browser_test_libs()
 
 import se3.config as _cfg  # noqa: E402
 

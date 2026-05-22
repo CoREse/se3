@@ -128,7 +128,8 @@ would silently ignore the developer's main-repo override.
 - `confirmation.steps`: Per-step confirmation dict `{<step_name>: {reviewer?, max_iterations?}}` — steps not listed are NOT confirmed (there is no global `enabled` switch; see Confirmation Configuration requirement)
 - `language.language`: Language for human-facing steps (default: null)
 - `language.spec_language`: Language for spec writing (default: null)
-- `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: ["summarize"])
+- `issue_discovery.steps`: Steps that receive issue discovery prompt injection (string list, default: `[]` — empty; `summarize` no longer participates, see issue-discovery *Whitelist Configuration*)
+- `test.critical_tests`: Critical acceptance test ID/substring patterns; a listed test that is skipped or missing is treated as not-passed (string list, default: `[]`; see Test Configuration requirement)
 - `conflict_resolver.strategy`: In-loop branch-merge conflict resolution strategy used by `se3 run --loop --merge` — `"human"` or `"llm"` (default: `"human"`)
 - `merge.strategy`: Default conflict-resolution tier for the standalone `se3 merge` command — `"fast"` (new default), `"safe"`, or `"strict"`. The previous `"default"` / `"robust"` values have been removed and trigger fail-fast at config load (see Merge Configuration requirement).
 - `merge.delete_merged_default`: Whether `se3 merge` defaults to deleting merged branches and archiving their worktrees under `.se3/archive/` (default: `true`).
@@ -895,6 +896,7 @@ The system SHALL support configuration for the test step's execution, including 
 - `min_dynamic_timeout`: Lower bound in seconds on the computed dynamic timeout (default: 30)
 - `max_dynamic_timeout`: Upper bound in seconds on the computed dynamic timeout (default: 14400). When the user's `test.timeout` is larger than the default ceiling, the framework raises the ceiling to at least `test.timeout` so an explicit high fallback is never silently capped.
 - `phases`: List of additional test phases. Each phase's own `timeout` is always used; the dynamic timeout mechanism does NOT apply to phases.
+- `critical_tests`: List of test ID / substring patterns marking **critical acceptance tests** (default: `[]` — opt-in). This is the configuration surface for the "critical acceptance test" annotation mechanism. A listed test that is **skipped**, or a listed pattern that is **missing** (matches neither a real PASSED/FAILED run nor a SKIPPED line in the parseable per-test output), is treated as **not passed / not verified** — the test step forces `overall_passed`/`tests_passed` to `False` and triggers the fix loop (see flow-engine *Test 步骤配置与多阶段执行*). Ordinary non-critical skips are unaffected, so platform/optional-dependency skips are not swept up. **Tolerant parsing:** an invalid value (not a list) falls back to `[]` with a warning, and each element is coerced to `str`. **Verbose prerequisite:** detection relies on pytest's verbose per-test output. When `critical_tests` is configured, the framework ensures the pytest command carries a per-test verbose flag (the default auto-detected command already includes `-v`; `-v` is appended when missing). Under a custom non-verbose command the missing-detection safely skips with a logged warning rather than producing false positives.
 
 **Example configuration:**
 ```yaml
@@ -904,6 +906,8 @@ test:
   timeout_multiplier: 2.0
   min_dynamic_timeout: 30
   max_dynamic_timeout: 14400
+  critical_tests:
+    - "test_render_paradigm_in_headless_browser"
   phases:
     - name: "e2e"
       command: "python -m pytest tests/e2e -v"
@@ -936,6 +940,22 @@ test:
 - **GIVEN** `test.timeout: 20000` in se3.yaml (legitimately slow suite) with no explicit `max_dynamic_timeout`
 - **WHEN** TestConfig is loaded
 - **THEN** `max_dynamic_timeout` defaults to at least `test.timeout` (20000), not the built-in 14400 ceiling
+
+#### Scenario: critical_tests gates skipped or missing acceptance tests
+- **GIVEN** `test.critical_tests` lists one or more patterns
+- **WHEN** a listed critical test is skipped in the test step, or a listed pattern matches neither a run nor a skip in the parseable per-test output (missing)
+- **THEN** that test is treated as not passed (the test step forces `overall_passed`/`tests_passed` to `False`)
+- **AND** ordinary skips that match no critical pattern keep their current behavior
+
+#### Scenario: critical_tests unset preserves skip behavior
+- **GIVEN** no `test.critical_tests` is configured (default empty)
+- **WHEN** the test step runs
+- **THEN** all skips behave as before (a skip alone never forces a not-passed verdict)
+
+#### Scenario: critical_tests invalid value tolerated
+- **GIVEN** `test.critical_tests` is set to a non-list value
+- **WHEN** TestConfig is loaded
+- **THEN** the value falls back to `[]` and a warning is logged
 
 ### Requirement: Language Configuration
 

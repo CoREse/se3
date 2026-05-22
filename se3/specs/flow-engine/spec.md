@@ -1585,6 +1585,10 @@ The `verify_spec` step SHALL use the unified issue priority system (`critical/hi
 - If the LLM outputs a `verified` field, it is ignored/overridden by the rule-based computation
 - This eliminates inconsistency between displayed verification status and actual flow behavior
 
+**Honest `tests_passed` — critical acceptance test consumption:**
+
+The `tests_passed` input to the formula MUST honestly reflect whether the critical acceptance tests actually ran. The verify_spec step SHALL explicitly consume the `test_results["critical_skipped"]` and `test_results["critical_missing"]` signals produced by the test step (see *Test 步骤配置与多阶段执行*): if **either** list is non-empty, `tests_passed` is forced to `False`, so the authoritative `verified` cannot be polluted by a false-green. This is a defensive double-safety net that sits alongside the existing returncode/`overall_passed` check — even if an upstream branch failed to force `overall_passed=False`, a skipped or missing critical acceptance test still drives `verified` to `False`. When this gate trips, verify_spec returns REVISION_NEEDED and its `fix_instructions` note that a critical acceptance test was skipped or is missing and must be made to truly run.
+
 **REVISION_NEEDED Logic:**
 - Triggered when `in_scope_count > 0` (spec compliance issues) OR `tests_passed == False` (test failures)
 - verify_spec handler always returns REVISION_NEEDED when issues are found (does not check exhaustion internally)
@@ -1643,6 +1647,13 @@ The "Planned Spec Changes" section is formatted into the prompt using `_format_s
 - **WHEN** verify_spec processes the result
 - **THEN** `verified` is overridden to `False` by the rule: `(in_scope_count == 0) and tests_passed`
 
+#### Scenario: Critical skip/missing forces tests_passed False
+- **GIVEN** `test_results["critical_skipped"]` or `test_results["critical_missing"]` is non-empty (a critical acceptance test was skipped or silently un-collected)
+- **WHEN** verify_spec computes `tests_passed`
+- **THEN** `tests_passed` is forced to `False` regardless of the pytest returncode
+- **AND** `verified` is computed as `False` via `(in_scope_count == 0) and tests_passed`
+- **AND** verify_spec returns REVISION_NEEDED with fix_instructions noting the skipped/missing critical acceptance test
+
 ### Requirement: update_spec Guided Execution
 
 The `update_spec` step SHALL receive `spec_changes` and `design_doc` from the plan step, shifting from pure inference mode to guided execution when guidance is available.
@@ -1676,6 +1687,58 @@ The `update_spec` step SHALL receive `spec_changes` and `design_doc` from the pl
 - **THEN** the LLM evaluates the four criteria before deciding to append or create a new spec
 - **AND** the JSON output includes `spec_decisions` with `decision: new_spec` and `reasoning`
 - **AND** a new spec file is created following the standard structure
+
+### Requirement: Summarize Session Report and Completion Gate
+
+The `summarize` step SHALL be a pure, user-facing session report whose only job is to clearly tell the user what THIS session actually did. It does NOT hunt for new problems, does NOT propose unrelated issues to file, and does NOT pad the report with speculative work that did not happen.
+
+**No B-class issue discovery:**
+
+`summarize` SHALL NOT participate in B-class issue discovery. Both halves are removed:
+- The `get_issue_discovery_injection(...)` injection call is removed from `summarize_handler` — the prompt never carries the issue-discovery fragment.
+- The `_extract_discovered_issues()` function and the write of `step.outputs["discovered_issues"]` are removed — summarize never produces `discovered_issues`.
+
+Re-adding `summarize` to `issue_discovery.steps` in `se3.yaml` is therefore explicitly **unsupported**: with no injection and no extraction, nothing is collected even if it is configured. The whitelist mechanism itself is retained (default empty) for other steps that can capture `discovered_issues` from their own output (see the issue-discovery spec *Whitelist Configuration* requirement).
+
+**Completion Gate (`verified == False`):**
+
+The summarize step SHALL enforce a downstream completion gate: when the authoritative verification verdict is `verified == False`, the report MUST honestly state that verification did not pass and the work is unverified / unfinished, and MUST NOT describe the work as "complete", "done", "all green", "fully working", or "verified". The gate trips ONLY on an explicit `False`:
+
+- The authoritative `verified` verdict is resolved from `verification_result` (`_resolve_verified`). It is `True`/`False` when a verify_spec step ran, and `None` when the workflow has no verify_spec step — in the `None` case the gate stays inactive so verify_spec-less workflows report normally.
+- The gate covers **both** rendering paths:
+  - **LLM path:** when `verified == False`, a "Verification Status: NOT PASSED" instruction block is injected into the prompt (via the completion section) instructing the LLM to report the non-passing status honestly.
+  - **Basic-summary fallback path:** `_create_basic_summary_text()` (used when the LLM call returns empty or raises) likewise labels the work "Not verified (incomplete)", emits a "Verification Status: NOT PASSED" section, and writes a handoff line stating the flow ended NOT verified.
+
+**Honest test status in the report:**
+
+The session report's test status SHALL be derived via the gated verdict (`_gated_tests_passed`), which prefers `test_results["overall_passed"]` (the value the critical-acceptance gate forces to `False` on a skipped/missing critical test) over the backward-compat `passed` key (raw pytest `returncode == 0`, which stays `True` on a skip). The `passed` key is used only as a fallback for legacy `test_results` dicts written before `overall_passed` existed, so a skipped critical test is never reported as a green test status.
+
+#### Scenario: Summary reports only this session's work
+- **WHEN** the summarize step runs
+- **THEN** the prompt instructs the LLM to report only what this session actually did (work performed, key changes, files modified, honest test/verification status, handoff notes)
+- **AND** the prompt does NOT include any issue-discovery injection fragment
+- **AND** `step.outputs` does NOT contain `discovered_issues`
+
+#### Scenario: Completion gate trips on verified=False (LLM path)
+- **GIVEN** `verification_result["verified"]` is `False`
+- **WHEN** the summarize prompt is built
+- **THEN** a "Verification Status: NOT PASSED" instruction block is injected instructing the report to state honestly that verification did not pass and the work is unverified/unfinished
+- **AND** the report MUST NOT claim the work is "complete", "done", "all green", or "verified"
+
+#### Scenario: Completion gate trips on verified=False (fallback path)
+- **GIVEN** `verification_result["verified"]` is `False` and the LLM call returns empty or raises
+- **WHEN** `_create_basic_summary_text()` produces the fallback summary
+- **THEN** the status label is "Not verified (incomplete)", a "Verification Status: NOT PASSED" section is emitted, and the handoff line states the flow ended NOT verified
+
+#### Scenario: Gate inactive without verify_spec
+- **GIVEN** the workflow has no verify_spec step, so the authoritative `verified` resolves to `None`
+- **WHEN** the summarize step runs
+- **THEN** the completion gate stays inactive and the report is generated normally without a NOT-PASSED block
+
+#### Scenario: Skipped critical test not reported as green
+- **GIVEN** `test_results["overall_passed"]` is `False` (critical test skipped/missing) while the backward-compat `passed` is `True`
+- **WHEN** the report's test status is rendered
+- **THEN** the gated verdict (`_gated_tests_passed`) reports the test status as not passing, not green
 
 ### Requirement: Implement Step DAG Execution Strategy
 
@@ -2460,14 +2523,33 @@ test:
   "new_tests": {"passed": [...], "failed": [...], "count": 0},
   "regression": {"passed": [...], "failed": [...], "count": 0},
   "phases": [{"name": "default", "passed": true, ...}],
-  "overall_passed": true
+  "overall_passed": true,
+  "critical_skipped": [],
+  "critical_missing": [],
+  "passed": true
 }
 ```
 
 **分类逻辑：**
 - `new_tests`: 文件路径匹配 implement 步骤的 `tests_added`
 - `regression`: 其余所有测试
-- `overall_passed`: 所有 `required: true` 阶段全部通过
+- `overall_passed`: 所有 `required: true` 阶段全部通过 **且** 关键验收用例闸门未被触发（见下）。`overall_passed` **不再等价于** pytest 进程的 `returncode == 0`：pytest 对 skip 的用例返回 0，因此返回码为真不足以证明关键验收真的跑过。原始 `returncode == 0` 仍以 backward-compat 的 `passed` 字段单独保留，供需要区分二者的消费方使用。
+
+**关键验收用例（Critical Acceptance Test）skip/缺失检测：**
+
+test 步骤 SHALL 在配置了 `test.critical_tests`（关键验收用例的 test ID/子串模式列表，见 se3-config *Test Configuration*）时，对照本次 pytest 逐条结果检测两类绕过路径，任一命中即把 `overall_passed`（及 `tests_passed`）置为 `False`、纳入 `should_fix` 并返回 `REVISION_NEEDED` 触发 fix loop：
+
+- **被 skip（critical_skipped）：** `_parse_skipped_test_ids()` 从 verbose 输出解析 `file::test SKIPPED` 行；某关键模式匹配到一个或多个 SKIPPED 用例，则这些 test ID 计入 `critical_skipped`（对关键验收用例而言，`skip != pass`）。
+- **缺失（critical_missing）：** 某关键模式在本次结果中既未命中任何真实运行（PASSED/FAILED）的用例、也未命中任何 SKIPPED 用例，则该模式计入 `critical_missing`。这覆盖关键用例被改名 / import 失败被静默漏收 / 模式打错字导致用例从输出消失而 `returncode` 仍为 0 的绕过路径。
+
+缺失检测的防误报与 verbose 前提：
+
+- 缺失检测仅在本次运行产出了可解析的逐条结果（`ran_ids` 或 `skipped_ids` 至少一者非空）时生效。当 `critical_tests` 非空但解析不到任何逐条结果（命令非 verbose）时，记 warning 并跳过缺失检测，避免把每个关键模式都误判为缺失。
+- `_detect_critical_failures(ran_ids, skipped_ids, critical_patterns)` 返回 `(critical_skipped, critical_missing)`，二者在 `critical_patterns` 为空时均为空。
+- 当配置了 `critical_tests` 且主命令是可识别的 pytest 调用但缺少 per-test verbose 标志（`-v`/`-vv`/`-vvv`/`--verbose`）时，`_ensure_verbose_pytest()` 追加 `-v` 以确保 skip 以可解析的 `file::test SKIPPED` 行呈现（`-r` 报告标志只产出无法按用例名匹配的短摘要行，不被接受为充分）；命令不像 pytest 时记 warning 并原样返回。
+- 普通的非关键 skip 不受影响：未被任何关键模式匹配的 skip 不进入 `critical_skipped`/`critical_missing`，不触发该路径。
+
+`critical_skipped` / `critical_missing` 同时写入 `step.outputs["test_results"]`，供下游 verify_spec 作为权威 `verified` 计算的诚实信号显式消费（见 *verify_spec Unified Priority and Scope Mechanism*）。
 
 **verify_spec 消费 test_mapping：**
 - 对比 `test_mapping` 值与 spec 中的 scenario 列表
@@ -2599,6 +2681,30 @@ The `State.fix_history` list SHALL be capped at `FIX_HISTORY_MAX_ENTRIES` (defin
 - **WHEN** verify_spec 接收到 `test_mapping`
 - **THEN** 检查 spec scenario 的测试覆盖
 - **AND** 未覆盖的 scenario 记为 warning
+
+#### Scenario: 关键验收用例被 skip 触发 fix loop
+- **GIVEN** `test.critical_tests` 配置了某关键验收用例的模式
+- **WHEN** test 步骤运行后该关键用例在输出中为 SKIPPED（即使 pytest `returncode == 0`）
+- **THEN** test 步骤把 `overall_passed`/`tests_passed` 置为 `False`，返回 `REVISION_NEEDED`
+- **AND** `test_results["critical_skipped"]` 包含该 skipped 用例的 test ID
+- **AND** fix instructions 指明关键验收用例不得被 skip、必须真实运行
+
+#### Scenario: 关键验收用例缺失触发 fix loop
+- **GIVEN** `test.critical_tests` 配置了某关键模式，且本次运行产出了可解析的逐条结果
+- **WHEN** 该模式既未命中任何真实运行（PASSED/FAILED）的用例、也未命中任何 SKIPPED 用例（被改名 / 漏收 / 模式打错字）
+- **THEN** test 步骤把 `overall_passed`/`tests_passed` 置为 `False`，返回 `REVISION_NEEDED`
+- **AND** `test_results["critical_missing"]` 包含该缺失的模式
+
+#### Scenario: 普通 skip 不触发关键闸门
+- **GIVEN** `test.critical_tests` 已配置
+- **WHEN** 本次运行中被 skip 的用例均不匹配任何关键模式（如平台/可选依赖类 skip）
+- **THEN** `critical_skipped` 与 `critical_missing` 均为空
+- **AND** test 步骤不因这些 skip 触发 fix loop
+
+#### Scenario: 结果不可解析时不产出缺失误报
+- **GIVEN** `test.critical_tests` 非空，但本次主命令非 verbose、解析不到任何逐条结果（`ran_ids` 与 `skipped_ids` 都为空）
+- **THEN** 缺失检测被跳过，`critical_missing` 为空（不假阳性）
+- **AND** 记录一条提示 verbose 前提的 warning
 
 ### Requirement: Test Dynamic Timeout
 
