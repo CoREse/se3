@@ -6,7 +6,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from se3.engine.models import STEP_POOL, StepType, get_step_info
-from se3.engine.context_builder import get_read_only_injection
+from se3.engine.context_builder import get_read_only_injection, is_step_read_only
 
 
 # --- STEP_POOL completeness tests ---
@@ -105,6 +105,43 @@ class TestGetReadOnlyInjection:
         assert "Read" in result
         assert "Grep" in result
         assert "Glob" in result
+
+
+# --- Sync pseudo-step read-only classification (bugfix) ---
+
+
+class TestSyncStepReadOnly:
+    """sync_scan/sync_analyze are read-only sync pseudo-steps; sync_resolve
+    is writable (its Way-A path edits se3/specs in place)."""
+
+    def test_is_step_read_only_sync_scan_and_analyze(self):
+        assert is_step_read_only("sync_scan") is True
+        assert is_step_read_only("sync_analyze") is True
+
+    def test_is_step_read_only_sync_resolve_is_false(self):
+        assert is_step_read_only("sync_resolve") is False
+
+    def test_is_step_read_only_writable_steps_false(self):
+        assert is_step_read_only("implement") is False
+        assert is_step_read_only("update_spec") is False
+        assert is_step_read_only("commit") is False
+
+    def test_is_step_read_only_pool_read_only_steps_true(self):
+        assert is_step_read_only("analyze") is True
+        assert is_step_read_only("plan") is True
+
+    def test_is_step_read_only_unknown_step_false(self):
+        assert is_step_read_only("totally_unknown_step") is False
+        assert is_step_read_only("") is False
+
+    def test_injection_for_sync_scan_and_analyze_non_empty(self):
+        assert get_read_only_injection("sync_scan") != ""
+        assert "READ-ONLY" in get_read_only_injection("sync_scan")
+        assert get_read_only_injection("sync_analyze") != ""
+        assert "READ-ONLY" in get_read_only_injection("sync_analyze")
+
+    def test_injection_for_sync_resolve_empty(self):
+        assert get_read_only_injection("sync_resolve") == ""
 
 
 # --- LLMCaller integration tests ---

@@ -143,9 +143,68 @@ def validate_spec_structure(content: str, spec_name: str) -> ValidationResult:
     return ValidationResult(passed=not errors, errors=errors)
 
 
+def extract_spec_body(text: str, spec_name: str) -> str:
+    """Slice the markdown spec body out of an agentic sub-agent output.
+
+    Sub-agent stdout frequently carries narrative preamble ("I have enough
+    context…"), tool-process chatter, and only then the actual spec
+    document. This helper drops everything before the first structural
+    anchor so the downstream :func:`validate_spec_structure` gate sees a
+    clean spec body instead of prose.
+
+    Anchor precedence:
+
+    1. The v1 marker line ``<!-- spec-format: v1 -->``.
+    2. A ``# <spec_name> Specification`` level-1 heading (case-insensitive,
+       token-tolerant — same rule as :func:`_is_valid_title`).
+    3. The first level-1 ``# `` heading of any kind (fallback).
+
+    When no anchor is found the text is returned unchanged so the validator
+    can reject it on its own terms. The function never raises and performs
+    no I/O — it is a pure transform over ``(text, spec_name)``.
+    """
+    if not isinstance(text, str) or not text:
+        return text
+
+    # Keep line endings so a matched anchor's character offset can slice the
+    # original string verbatim (no trailing-newline loss, no line-ending
+    # normalization).
+    lines = text.splitlines(keepends=True)
+
+    offset = _line_offset(lines, lambda s: s == V1_MARKER)
+    if offset is None:
+        offset = _line_offset(
+            lines,
+            lambda s: s.startswith("# ") and _is_valid_title(s, spec_name),
+        )
+    if offset is None:
+        offset = _line_offset(lines, lambda s: s.startswith("# "))
+
+    if offset is None:
+        # No structural anchor — leave the text for the validator to reject.
+        return text
+    return text[offset:]
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+def _line_offset(lines_keepends: List[str], predicate) -> int | None:
+    """Return the character offset of the first line whose stripped form
+    satisfies ``predicate``, or ``None`` if no line matches.
+
+    ``lines_keepends`` must be produced by ``str.splitlines(keepends=True)``
+    so the cumulative length of preceding lines is the exact byte/char offset
+    into the original string.
+    """
+    offset = 0
+    for line in lines_keepends:
+        if predicate(line.strip()):
+            return offset
+        offset += len(line)
+    return None
+
 
 def _first_non_blank(lines: List[str], start: int) -> int | None:
     for idx in range(start, len(lines)):

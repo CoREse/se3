@@ -607,7 +607,7 @@ se3 sync --confirm-cleanup            # Prompt for human approval before deletin
 - **GIVEN** the on-disk spec hash is unchanged after the sub-agent call
 - **AND** the sub-agent's stdout contains a complete spec.md body
 - **WHEN** the engine parses the response
-- **THEN** the full-rewrite write path is taken (markdown code fences are stripped first)
+- **THEN** the full-rewrite write path is taken (markdown code fences are stripped first, then the stdout is purified with `extract_spec_body(...)` to drop any leading agentic narrative before the spec body — the same purification `sync_discovery` applies)
 - **AND** the written content is validated with `validate_spec_structure(...)`
 - **AND** the in-memory cache is refreshed only after validation passes
 - **AND** a content length safety guard observes when the rewrite is < 50% of the prior length but downgrades the observation to a warning rather than rejecting the update, so legitimate condensations are not blocked
@@ -643,9 +643,18 @@ se3 sync --confirm-cleanup            # Prompt for human approval before deletin
 #### Scenario: Newly created spec must pass structural validation
 - **GIVEN** sync discovery invokes the LLM to generate a brand-new `se3/specs/<name>/spec.md`
 - **WHEN** the LLM returns content
-- **THEN** the discovery layer calls `validate_spec_structure(content, name)` instead of the legacy "length ≥ 50 chars" heuristic
-- **AND** rejects responses that are sub-agent meta summaries (no v1 marker, no `# <name> Specification` heading, no `## Purpose`, no `### Requirement:`, or a narrative-prose first line such as "I have enough context...")
+- **THEN** the discovery layer first strips outer markdown code fences, then purifies the off-mode agentic stream by calling `extract_spec_body(content, name)` to slice the spec body away from any leading narrative preamble / tool-process chatter
+- **AND** if the LLM omitted the v1 marker, the marker is auto-prepended ONLY after extraction, so it attaches to the spec body rather than to discarded narrative
+- **AND** the discovery layer then calls `validate_spec_structure(content, name)` instead of the legacy "length ≥ 50 chars" heuristic
+- **AND** rejects responses that are sub-agent meta summaries (no v1 marker, no `# <name> Specification` heading, no `## Purpose`, no `### Requirement:`, or a narrative-prose first line such as "I have enough context...") — purification removes leading narrative when a real spec body is present, so this gate now rejects only genuinely body-less output
 - **AND** the file is not created when validation fails
+
+#### Scenario: Discovered spec is written only by se3 and only to the folder format
+- **GIVEN** a sub-agent generates a brand-new spec that passes structural validation after purification
+- **WHEN** the discovery layer persists it
+- **THEN** se3 itself writes the spec, and writes it uniquely to `se3/specs/<name>/spec.md` (folder format), creating the `se3/specs/<name>/` directory as needed
+- **AND** no file is created or written in any top-level `specs/` directory of the managed project, and no flat `se3/specs/<name>.md` is produced
+- **AND** the generation prompt instructs the sub-agent to output ONLY the complete spec document (no preamble or closing remarks) and to NOT create or modify any files (no `Write`/`Edit`/`NotebookEdit`), reserving disk writes for the framework
 
 #### Scenario: Quota exhaustion triggers interactive pause and checkpoint
 - **GIVEN** the loop layer counts consecutive infrastructure failures across LLM calls

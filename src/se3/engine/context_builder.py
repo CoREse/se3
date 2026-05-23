@@ -342,28 +342,55 @@ def get_spec_names_injection(
     )
 
 
+# Sync-engine pseudo-steps that run read-only sub-agents. These are NOT
+# `se3 run` state-machine steps (so they are absent from STEP_POOL / StepType),
+# but their sub-agents must only read code and return spec text — never write
+# to disk. ``sync_resolve`` is deliberately excluded: its Way-A update path
+# edits ``se3/specs/<name>/spec.md`` in place via the Edit tool and therefore
+# must remain writable.
+_READ_ONLY_SYNC_STEPS = frozenset({"sync_scan", "sync_analyze"})
+
+
+def is_step_read_only(step_type: str) -> bool:
+    """Return True if ``step_type`` runs under read-only constraints.
+
+    Resolution order:
+      1. ``se3 run`` state-machine steps — looked up in STEP_POOL by name,
+         honoring each step's ``read_only`` attribute.
+      2. Sync-engine read-only pseudo-steps (``sync_scan`` / ``sync_analyze``).
+
+    ``sync_resolve`` and every writable step (implement / update_spec / …)
+    return False. Unknown step types return False.
+
+    This is the single source of truth for both the prompt-level read-only
+    injection (:func:`get_read_only_injection`) and the tool-level
+    ``--disallowedTools`` enforcement in ``llm_caller``.
+    """
+    from .models import STEP_POOL
+
+    for _st, info in STEP_POOL.items():
+        if info.get("name") == step_type:
+            return bool(info.get("read_only", False))
+
+    return step_type in _READ_ONLY_SYNC_STEPS
+
+
 def get_read_only_injection(step_type: str) -> str:
     """Get read-only constraint prompt injection for a step.
 
-    Queries STEP_POOL to check if the given step_type is marked as read_only.
-    If so, returns a prompt constraint forbidding file modifications.
+    Delegates the read-only decision to :func:`is_step_read_only`, which
+    covers both STEP_POOL steps and sync-engine read-only pseudo-steps.
+    If the step is read-only, returns a prompt constraint forbidding file
+    modifications; otherwise returns an empty string.
 
     Args:
-        step_type: Current step type name (e.g., "analyze", "implement")
+        step_type: Current step type name (e.g., "analyze", "implement",
+            "sync_scan")
 
     Returns:
         Read-only constraint prompt string, or empty string if step is not read-only.
     """
-    from .models import STEP_POOL
-
-    # Find matching step in STEP_POOL by name
-    is_read_only = False
-    for _st, info in STEP_POOL.items():
-        if info.get("name") == step_type:
-            is_read_only = info.get("read_only", False)
-            break
-
-    if not is_read_only:
+    if not is_step_read_only(step_type):
         return ""
 
     return (

@@ -10,6 +10,7 @@ from __future__ import annotations
 from se3.engine.spec_validator import (
     V1_MARKER,
     ValidationResult,
+    extract_spec_body,
     validate_spec_structure,
 )
 
@@ -237,3 +238,103 @@ class TestRealWorldFixtures:
         assert not result.passed
         # No marker, no title, no Purpose, no Requirement, narrative.
         assert len(result.errors) >= 3
+
+
+# ---------------------------------------------------------------------------
+# extract_spec_body — purify agentic output to a clean spec body
+# ---------------------------------------------------------------------------
+
+class TestExtractSpecBody:
+    def test_narrative_then_v1_marker_slices_from_marker(self):
+        text = (
+            "I have enough context from the source code. Let me produce it now.\n"
+            "Here is the spec:\n"
+            "\n"
+            f"{V1_MARKER}\n"
+            "# my-feature Specification\n"
+            "## Purpose\nDoes things.\n"
+            "### Requirement: Thing\nDetails.\n"
+        )
+        body = extract_spec_body(text, "my-feature")
+        assert body.startswith(V1_MARKER)
+
+    def test_narrative_then_title_heading_slices_from_heading(self):
+        # No v1 marker present — slice from the '# <name> Specification' heading.
+        text = (
+            "I explored the code. The module does X, Y, Z.\n"
+            "I'll write the spec now.\n"
+            "\n"
+            "# data-pipeline Specification\n"
+            "## Purpose\nProcesses data.\n"
+            "### Requirement: Run\nRuns.\n"
+        )
+        body = extract_spec_body(text, "data-pipeline")
+        assert body.startswith("# data-pipeline Specification")
+
+    def test_narrative_with_tool_process_then_body(self):
+        text = (
+            "Let me read the files.\n"
+            "[tool_use] Read src/foo.py\n"
+            "[tool_result] (contents...)\n"
+            "Now I understand the module. Here's the spec:\n"
+            "\n"
+            f"{V1_MARKER}\n"
+            "# foo Specification\n"
+            "## Purpose\nFoo.\n"
+            "### Requirement: Bar\nBar.\n"
+        )
+        body = extract_spec_body(text, "foo")
+        assert body.startswith(V1_MARKER)
+        # Tool process / narrative is dropped.
+        assert "tool_use" not in body
+        assert "Let me read" not in body
+
+    def test_already_pure_marker_returned_unchanged(self):
+        text = (
+            f"{V1_MARKER}\n"
+            "# foo Specification\n"
+            "## Purpose\nFoo.\n"
+            "### Requirement: Bar\nBar.\n"
+        )
+        assert extract_spec_body(text, "foo") == text
+
+    def test_already_pure_heading_returned_from_heading(self):
+        text = "# foo Specification\n## Purpose\nFoo.\n### Requirement: Bar\nBar.\n"
+        assert extract_spec_body(text, "foo") == text
+
+    def test_pure_narrative_no_anchor_returned_unchanged(self):
+        text = "I have enough context to write the spec. Let me produce it now.\n"
+        assert extract_spec_body(text, "foo") == text
+
+    def test_fallback_to_first_level1_heading(self):
+        # No v1 marker and the title token doesn't match spec_name, but a
+        # level-1 heading exists — fall back to it.
+        text = (
+            "Some narrative preamble here.\n"
+            "\n"
+            "# Completely Different Specification\n"
+            "## Purpose\nX.\n"
+            "### Requirement: Y\nY.\n"
+        )
+        body = extract_spec_body(text, "foo")
+        assert body.startswith("# Completely Different Specification")
+
+    def test_empty_and_non_string_inputs_do_not_raise(self):
+        assert extract_spec_body("", "foo") == ""
+        assert extract_spec_body(None, "foo") is None  # type: ignore[arg-type]
+
+    def test_purified_narrative_output_passes_validation(self):
+        # End-to-end: agentic narrative + body, slice, then validate.
+        text = (
+            "I explored the subsystem and understand it well.\n"
+            "Here is the complete spec:\n"
+            "\n"
+            f"{V1_MARKER}\n"
+            "# widget Specification\n"
+            "\n## Purpose\nManages widgets.\n"
+            "\n## Requirements\n"
+            "\n### Requirement: Create\nCreates a widget.\n"
+        )
+        body = extract_spec_body(text, "widget")
+        result = validate_spec_structure(body, "widget")
+        assert result.passed, result.errors

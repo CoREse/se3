@@ -172,3 +172,75 @@ class TestCreateRunnerForwardsProjectRoot:
             )
         runner = caller._get_current_runner()
         assert runner.setting_sources == ["user"]
+
+
+class _FakeResult:
+    """Minimal stand-in for the runner result accessed by _call_with_retry."""
+
+    def __init__(self, output: str = "") -> None:
+        self.success = True
+        self.output = output
+        self.interrupted = False
+
+
+class _ArgsCapturingRunner:
+    """Fake runner that records the args passed to run_with_monitor."""
+
+    def __init__(self) -> None:
+        self.captured_args = None
+
+    def run_with_monitor(self, args, **kwargs):
+        self.captured_args = list(args)
+        return _FakeResult(output="")
+
+
+class TestReadOnlyToolDisallowList:
+    """Tool-layer enforcement: read-only steps append --disallowedTools for the
+    write tools; writable steps (sync_resolve / implement) do not."""
+
+    def _run_and_capture_args(self, step_type: str):
+        caller = _make_caller(step_type=step_type)
+        runner = _ArgsCapturingRunner()
+        with patch.object(LLMCaller, "_get_current_runner", return_value=runner), \
+             patch.object(LLMCaller, "_record_prompt"), \
+             patch.object(LLMCaller, "_record_response"):
+            caller.call("do the thing", json_mode="off")
+        assert runner.captured_args is not None
+        return runner.captured_args
+
+    def test_sync_scan_args_contain_disallowed_write_tools(self):
+        args = self._run_and_capture_args("sync_scan")
+        assert "--disallowedTools" in args
+        for tool in ("Write", "Edit", "NotebookEdit", "AskUserQuestion"):
+            assert tool in args, f"{tool} should be in disallowed list"
+
+    def test_sync_analyze_args_contain_disallowed_write_tools(self):
+        args = self._run_and_capture_args("sync_analyze")
+        assert "--disallowedTools" in args
+        assert "Write" in args and "Edit" in args
+
+    def test_read_tools_not_disallowed(self):
+        """Read/Grep/Glob/Bash must remain available (not in the disallow list)."""
+        args = self._run_and_capture_args("sync_scan")
+        di = args.index("--disallowedTools")
+        disallowed = args[di + 1:]
+        for tool in ("Read", "Grep", "Glob", "Bash"):
+            assert tool not in disallowed, f"{tool} must not be disallowed"
+
+    def test_sync_resolve_args_have_no_disallowed_tools(self):
+        """sync_resolve is the writable update path (Way A edits the spec)."""
+        args = self._run_and_capture_args("sync_resolve")
+        assert "--disallowedTools" not in args
+
+    def test_implement_args_have_no_disallowed_tools(self):
+        args = self._run_and_capture_args("implement")
+        assert "--disallowedTools" not in args
+
+    def test_update_spec_args_have_no_disallowed_tools(self):
+        args = self._run_and_capture_args("update_spec")
+        assert "--disallowedTools" not in args
+
+    def test_analyze_read_only_step_has_disallowed_tools(self):
+        """STEP_POOL read-only steps also get tool-layer enforcement."""
+        args = self._run_and_capture_args("analyze")
+        assert "--disallowedTools" in args

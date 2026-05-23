@@ -373,6 +373,43 @@ These short-circuits guarantee callers can pass arbitrary candidate buffers — 
 - **THEN** no validation or rollback is performed
 - **AND** the engine returns failure for the spec update
 
+### Requirement: Spec Body Extraction (Agentic Output Purification)
+
+The spec-format package SHALL expose a pure helper `extract_spec_body(text: str, spec_name: str) -> str` that slices the markdown spec body out of an agentic sub-agent's raw output before that output is handed to `validate_spec_structure`. Sub-agent stdout in off-mode frequently carries narrative preamble (e.g., `"I have enough context…"`), tool-process chatter (`[tool_use] Read …`, `[tool_result] …`), and only then the actual spec document at its tail. Without purification, the leading prose would make the structural validator reject an otherwise-valid spec body, so the spec would never be written to disk. This helper is the single source of truth shared by `sync_discovery` (newly generated specs) and `sync_engine` Way B (full-rewrite updates).
+
+**Behavior:**
+
+1. The function MUST be a pure transform over `(text, spec_name)` — no filesystem reads, no network, no global state — and it MUST never raise.
+2. It drops everything before the first structural anchor and returns the original string from that anchor onward, preserving the text verbatim from the anchor (including line endings) so no content is lost.
+3. **Anchor precedence** (first match wins):
+   1. The v1 marker line `<!-- spec-format: v1 -->`.
+   2. A `# <spec_name> Specification` level-1 heading, matched with the same case-insensitive, dash-token-tolerant rule used by the Specification-title check of the structural contract.
+   3. As a fallback, the first level-1 `# ` heading of any kind.
+4. **No anchor found** — when none of the anchors is present (e.g., a pure meta-summary with no spec body), the function returns the text unchanged so the downstream `validate_spec_structure` gate can reject it on its own terms. The extractor is a purifier, not a gate: it never fabricates structure and never substitutes for validation.
+
+**Caller obligations:**
+
+- Callers SHALL invoke `extract_spec_body` AFTER stripping any outer markdown code fences and BEFORE calling `validate_spec_structure`.
+- When a caller auto-prepends the v1 marker for an LLM that omitted it, the prepend MUST happen AFTER extraction so the marker attaches to the spec body and not to discarded narrative.
+
+#### Scenario: Narrative preamble before the spec body is sliced off
+- **GIVEN** a `text` consisting of a narrative preamble and tool-process lines followed by a complete spec body that begins with `<!-- spec-format: v1 -->`
+- **WHEN** `extract_spec_body(text, name)` is called
+- **THEN** the returned string begins at the v1 marker and contains none of the preceding narrative or tool-process text
+- **AND** the subsequent `validate_spec_structure` call passes
+
+#### Scenario: Body lacking the v1 marker is anchored on the Specification title
+- **GIVEN** a `text` whose spec body lacks the v1 marker but contains a `# <spec_name> Specification` heading after some narrative
+- **WHEN** `extract_spec_body(text, spec_name)` is called
+- **THEN** the returned string begins at the `# <spec_name> Specification` heading
+- **AND** a caller that auto-prepends the v1 marker afterward produces a body whose first line is the marker and whose second line is the Specification title
+
+#### Scenario: Pure meta-summary with no anchor is returned unchanged for the validator to reject
+- **GIVEN** a `text` that is entirely narrative prose with no v1 marker and no `# ` heading
+- **WHEN** `extract_spec_body(text, name)` is called
+- **THEN** the text is returned unchanged
+- **AND** `validate_spec_structure` subsequently rejects it (narrative first line / missing structure) so nothing is written to disk
+
 ### Requirement: Orphan H2 Tracking
 
 In addition to producing the list of Requirements, the spec parser SHALL detect and expose **orphan H2 headings** — second-level (`## `) headings that appear in the gap *between* Requirements rather than in the shared header at the top of the file. Orphan H2s represent a content-loss hazard because items-mode loading drops shared sections that appear after the first Requirement, so any prose attached to such headings would silently disappear from item-level output.

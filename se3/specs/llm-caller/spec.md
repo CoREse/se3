@@ -82,6 +82,30 @@ The caller exposes module-level state for prompts that must be injected into the
 - **WHEN** `get_read_only_injection(step_type)` returns a non-empty constraint
 - **THEN** it is appended directly to the prompt (without an `[Additional user instruction]:` header) after the extra-prompt injection
 
+#### Scenario: Sync read-only pseudo-steps receive the prompt-level constraint
+- **GIVEN** the step type is `sync_scan` or `sync_analyze` (sync-engine read-only pseudo-steps that are absent from the `se3 run` STEP_POOL/StepType)
+- **WHEN** the read-only decision is resolved via `is_step_read_only(step_type)` — the single source of truth that consults STEP_POOL's `read_only` attribute and additionally classifies `sync_scan`/`sync_analyze` as read-only
+- **THEN** `get_read_only_injection(step_type)` returns the non-empty constraint and it is injected into the prompt
+- **AND** `sync_resolve` is deliberately excluded (its Way-A update path edits `se3/specs/<name>/spec.md` in place via `Edit`), so it is classified writable and receives no constraint
+
+### Requirement: Tool-Layer Read-Only Enforcement
+
+Because read-only sub-agents run under `--dangerously-skip-permissions`, the prompt-level read-only constraint alone cannot reliably stop a sub-agent from writing files. For read-only steps the caller therefore ALSO forbids the write tools at the CLI layer when constructing the agent-runner argv, while keeping the read tools available. This makes se3 itself the only writer for sync-discovered specs and prevents stray files from being created in a managed project.
+
+The read-only decision uses the same `is_step_read_only(step_type)` classifier as the prompt-level injection, so the prompt and tool layers can never disagree about which steps are read-only.
+
+#### Scenario: Read-only step disallows the write tools
+- **GIVEN** a read-only step (any STEP_POOL step with `read_only=True`, or the sync pseudo-steps `sync_scan` / `sync_analyze`)
+- **WHEN** the caller builds the agent-runner args
+- **THEN** it appends `--disallowedTools Write Edit NotebookEdit AskUserQuestion` to the args
+- **AND** the read tools `Read`, `Grep`, `Glob`, and `Bash` are NOT disallowed and remain available
+
+#### Scenario: Writable steps are unaffected by the tool-layer restriction
+- **GIVEN** a writable step (e.g., `implement`, `update_spec`, or the sync update path `sync_resolve`)
+- **WHEN** the caller builds the agent-runner args
+- **THEN** no `--disallowedTools` argument is added, so the step retains its full default tool set
+- **AND** `sync_resolve` in particular keeps `Edit` so its Way-A path can modify `se3/specs/<name>/spec.md` in place
+
 ### Requirement: JSON Mode Resolution and Dispatch
 
 `call()` accepts both legacy boolean flags (`require_json`, `two_phase_json`) and an explicit `json_mode` string. Resolution priority is: explicit `json_mode` > `two_phase_json` > `require_json` > `"off"`. Unknown explicit modes fall back to `"off"` with a warning.

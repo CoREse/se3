@@ -1,0 +1,28 @@
+id: '146'
+title: 'Pre-existing pytest collection gap: src/se3/engine/steps/conftest.py sets
+  collect_ignore=["test.py"] but does not ignore the sibling step-implementation module
+  test_with_fail_loop.py, so pointing pytest directly at src/se3/engine/steps/ collects
+  its test_handler_with_fail_loop function and errors with fixture ''step'' not found.
+  This is unrelated to the current task (no changed file lives under steps/), does
+  not appear in the canonical `pytest tests/` run, and does not block this flow.'
+description: 'Pre-existing pytest collection gap: src/se3/engine/steps/conftest.py
+  sets collect_ignore=["test.py"] but does not ignore the sibling step-implementation
+  module test_with_fail_loop.py, so pointing pytest directly at src/se3/engine/steps/
+  collects its test_handler_with_fail_loop function and errors with fixture ''step''
+  not found. This is unrelated to the current task (no changed file lives under steps/),
+  does not appear in the canonical `pytest tests/` run, and does not block this flow.
+
+
+  Suggestion: Optionally extend collect_ignore to include "test_with_fail_loop.py"
+  (and any other test_-prefixed step modules) in src/se3/engine/steps/conftest.py.
+  Track separately from this bugfix.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-23T23:44:13.263267'
+updated_at: '2026-05-23T23:44:13.263267'

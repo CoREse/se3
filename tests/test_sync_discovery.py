@@ -412,6 +412,129 @@ class TestGenerateSpecForSubsystem:
         assert "src/a.py" in prompt
         assert "src/b.py" in prompt
 
+    def test_prompt_forbids_file_writes_and_demands_body_only(self, tmp_path):
+        """The generation prompt must instruct the sub-agent to only output
+        the spec body and not create/modify files."""
+        spec_content = "# sub Specification\n\n## Purpose\n\nSub.\n\n## Requirements\n\n### Requirement: Sub\nDetails."
+        discovery, llm = _make_discovery(tmp_path, spec_content)
+
+        subsystem = {"name": "sub", "description": "Subsystem desc", "relevant_files": []}
+        discovery.generate_spec_for_subsystem(subsystem)
+
+        prompt = llm.call.call_args[1].get("prompt") or llm.call.call_args[0][0]
+        # Only-output-the-spec instruction.
+        assert "ONLY" in prompt
+        # No-write instruction naming the write tools.
+        assert "Write" in prompt and "Edit" in prompt
+        assert "do not create" in prompt.lower() or "not create or modify" in prompt.lower()
+        # v1 marker requirement.
+        assert "<!-- spec-format: v1 -->" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Purification of agentic narrative + write-path correctness (bugfix)
+# ---------------------------------------------------------------------------
+
+class TestGenerateSpecPurification:
+    """The off-mode call returns the full agentic stream (narrative preamble +
+    tool process + spec body). generate_spec_for_subsystem must purify it down
+    to the spec body, pass validation, and write ONLY to
+    se3/specs/<name>/spec.md — never to a flat top-level specs/<name>.md."""
+
+    _NARRATIVE_PREAMBLE = (
+        "I have enough context from the source code and usage sites to write "
+        "the spec. Let me read the remaining files first.\n"
+        "[tool_use] Read src/myapp/widget.py\n"
+        "[tool_result] (file contents elided...)\n"
+        "Now I understand the widget subsystem. Here is the complete spec:\n"
+        "\n"
+    )
+
+    def _spec_body(self, name: str, with_marker: bool = True) -> str:
+        marker = "<!-- spec-format: v1 -->\n" if with_marker else ""
+        return (
+            f"{marker}"
+            f"# {name} Specification\n"
+            "\n## Purpose\n"
+            "\nManages widgets in the application.\n"
+            "\n## Requirements\n"
+            "\n### Requirement: Create Widget\n"
+            "Creates a new widget instance.\n"
+            "\n#### Scenario: Valid input\n"
+            "- **WHEN** valid parameters are supplied\n"
+            "- **THEN** a widget is created\n"
+        )
+
+    def test_narrative_prefix_purified_and_written(self, tmp_path):
+        """Narrative preamble + tool process + spec body (WITH v1 marker)."""
+        raw = self._NARRATIVE_PREAMBLE + self._spec_body("widget", with_marker=True)
+        discovery, llm = _make_discovery(tmp_path, raw)
+
+        subsystem = {"name": "widget", "description": "Widgets", "relevant_files": []}
+        result = discovery.generate_spec_for_subsystem(subsystem)
+
+        assert result is not None
+        assert result == tmp_path / "se3" / "specs" / "widget" / "spec.md"
+        content = result.read_text(encoding="utf-8")
+        # First line is the v1 marker; narrative is gone.
+        assert content.splitlines()[0].strip() == "<!-- spec-format: v1 -->"
+        assert "I have enough context" not in content
+        assert "tool_use" not in content
+        assert "widget Specification" in content
+
+    def test_narrative_prefix_missing_marker_purified_and_written(self, tmp_path):
+        """Narrative preamble + spec body that LACKS the v1 marker. The marker
+        must be prepended AFTER extraction (attached to the body, not the
+        narrative), and the file must validate and be written."""
+        raw = self._NARRATIVE_PREAMBLE + self._spec_body("widget", with_marker=False)
+        discovery, llm = _make_discovery(tmp_path, raw)
+
+        subsystem = {"name": "widget", "description": "Widgets", "relevant_files": []}
+        result = discovery.generate_spec_for_subsystem(subsystem)
+
+        assert result is not None
+        content = result.read_text(encoding="utf-8")
+        lines = content.splitlines()
+        # Marker prepended to the body, immediately followed by the title —
+        # NOT by the discarded narrative.
+        assert lines[0].strip() == "<!-- spec-format: v1 -->"
+        assert lines[1].strip() == "# widget Specification"
+        assert "I have enough context" not in content
+
+    def test_write_target_is_folder_format_and_no_flat_specs(self, tmp_path):
+        """Write target is ALWAYS se3/specs/<name>/spec.md (folder format),
+        and nothing is written to a top-level specs/ directory."""
+        raw = self._NARRATIVE_PREAMBLE + self._spec_body("data-pipeline")
+        discovery, llm = _make_discovery(tmp_path, raw)
+
+        subsystem = {"name": "data-pipeline", "description": "Pipeline", "relevant_files": []}
+        result = discovery.generate_spec_for_subsystem(subsystem)
+
+        assert result == tmp_path / "se3" / "specs" / "data-pipeline" / "spec.md"
+        assert result.exists()
+        # No flat top-level specs/ directory or file created by se3.
+        top_specs = tmp_path / "specs"
+        assert not top_specs.exists()
+        # And no flat <name>.md beside the se3/specs folder.
+        assert not (tmp_path / "se3" / "specs" / "data-pipeline.md").exists()
+
+    def test_pure_narrative_no_body_is_discarded(self, tmp_path):
+        """Safety net: a pure meta-summary with no spec body anchor still
+        fails validation and is discarded (return None, nothing written)."""
+        raw = (
+            "I have enough context from the source code and usage sites to "
+            "write the spec. Let me produce it now. The module manages "
+            "widgets and exposes a create method.\n"
+        )
+        discovery, llm = _make_discovery(tmp_path, raw)
+
+        subsystem = {"name": "widget", "description": "Widgets", "relevant_files": []}
+        result = discovery.generate_spec_for_subsystem(subsystem)
+
+        assert result is None
+        assert not (tmp_path / "se3" / "specs" / "widget").exists()
+        assert not (tmp_path / "specs").exists()
+
 
 # ---------------------------------------------------------------------------
 # SyncEngine integration

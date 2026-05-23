@@ -1022,6 +1022,23 @@ class LLMCaller:
 
             args = ["--output-format", "stream-json", "--verbose", "-p", effective_prompt]
 
+            # Tool-layer read-only enforcement. Under
+            # ``--dangerously-skip-permissions`` the prompt-level read-only
+            # constraint alone cannot reliably stop a sub-agent from writing
+            # files, so for read-only steps we forbid the write tools at the
+            # CLI layer while keeping Read/Grep/Glob/Bash available. Writable
+            # steps (implement / update_spec / sync_resolve) are unaffected.
+            # This makes se3 itself the only writer for sync-discovered specs.
+            from .context_builder import is_step_read_only
+            if is_step_read_only(self.step_type):
+                args += [
+                    "--disallowedTools",
+                    "Write",
+                    "Edit",
+                    "NotebookEdit",
+                    "AskUserQuestion",
+                ]
+
             if context_files:
                 for f in context_files:
                     if f.exists():

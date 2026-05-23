@@ -98,9 +98,18 @@ the implementation before writing the spec.
 
 ## Output Format
 
+**CRITICAL output rules:**
+- Output ONLY the complete spec markdown document itself — no preamble, no \
+explanation, no narration, no closing remarks. Your entire response must BE the spec.
+- Do NOT create or modify any files. Do NOT use the Write, Edit, or NotebookEdit \
+tools. The se3 framework — not you — writes the spec to disk; if you write a file \
+yourself it lands in the wrong place. Use Read/Grep/Glob only, to inspect the code.
+- The document MUST start with the literal first line `<!-- spec-format: v1 -->`.
+
 Return a complete markdown spec document following this structure:
 
 ```
+<!-- spec-format: v1 -->
 # {name} Specification
 
 ## Purpose
@@ -235,13 +244,24 @@ class SpecDiscovery:
             from .sync_engine import strip_markdown_fences
             spec_content = strip_markdown_fences(spec_content)
 
-            from .spec_validator import V1_MARKER, validate_spec_structure
+            from .spec_validator import (
+                V1_MARKER,
+                extract_spec_body,
+                validate_spec_structure,
+            )
 
-            # Auto-prepend the v1 marker if the LLM forgot it. The
-            # validator below still enforces every other structural
-            # rule, so an LLM that returned a meta summary instead of a
-            # spec body will be rejected even after the marker is
-            # added.
+            # Purify the agentic output: an off-mode call returns the full
+            # sub-agent stream (narrative preamble + tool process + the spec
+            # body at the tail). Slice out the spec document from its first
+            # structural anchor so the validation/write path below sees a
+            # clean spec body rather than leading prose.
+            spec_content = extract_spec_body(spec_content, name)
+
+            # Auto-prepend the v1 marker if the LLM forgot it — AFTER
+            # extraction, so the marker attaches to the spec body and not to
+            # discarded narrative. The validator below still enforces every
+            # other structural rule, so an LLM that returned only a meta
+            # summary (no anchor to slice on) is still rejected.
             if spec_content and not spec_content.lstrip().startswith(V1_MARKER):
                 spec_content = f"{V1_MARKER}\n{spec_content}"
 

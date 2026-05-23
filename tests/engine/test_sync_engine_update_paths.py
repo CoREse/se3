@@ -145,6 +145,39 @@ class TestWayBRewrite:
         assert spec_path.read_text(encoding="utf-8") == expected
         assert engine._specs["auth"]["content"] == expected
 
+    def test_way_b_narrative_preamble_is_purified_before_write(self, tmp_path):
+        """Way-B stdout that leads with agentic narrative + tool process is
+        purified (sliced to the spec body) before validation and write, so a
+        valid body at the tail is not rejected as a narrative first line."""
+        spec_path = _init_git_repo(tmp_path)
+        engine = _engine_with_loaded_specs(tmp_path)
+
+        rewrite_body = VALID_SPEC_BODY.replace("Sample", "Purified")
+        noisy_stdout = (
+            "I have enough context to rewrite the spec. Let me do it now.\n"
+            "[tool_use] Read src/auth.py\n"
+            "[tool_result] (contents...)\n"
+            "Here is the complete updated spec:\n"
+            "\n" + rewrite_body
+        )
+
+        llm = MagicMock()
+        llm.call.return_value = noisy_stdout
+
+        diff = SpecDiff(DiffType.EXTENSION, "auth", "Helper added", "src/u.py:1")
+        applied, label = engine._apply_spec_drift_update(diff, llm)
+
+        assert applied is True
+        written = spec_path.read_text(encoding="utf-8")
+        # Narrative / tool process is gone; spec body persisted to se3/specs.
+        assert written.startswith("<!-- spec-format: v1 -->")
+        assert "I have enough context" not in written
+        assert "tool_use" not in written
+        assert spec_path == tmp_path / "se3" / "specs" / "auth" / "spec.md"
+        # No flat top-level specs/ file created.
+        assert not (tmp_path / "specs").exists()
+        assert engine._specs["auth"]["content"] == written
+
 
 # ---------------------------------------------------------------------------
 # Way C — no disk change, stdout carries no spec body

@@ -886,7 +886,7 @@ class SyncEngine:
              restore the original content and report.
           6. If neither — log an error and return False.
         """
-        from .spec_validator import validate_spec_structure
+        from .spec_validator import extract_spec_body, validate_spec_structure
 
         spec_info = self._specs.get(spec_name)
         if not spec_info:
@@ -1008,9 +1008,17 @@ class SyncEngine:
             return True
 
         # --- Way B: full-rewrite via stdout -------------------------------
+        # Purify the stdout the same way sync_discovery does: strip the
+        # outer markdown fences, then slice out the spec body from its first
+        # structural anchor so any agentic narrative preamble is dropped
+        # before validation. Without this an off-mode response that leads
+        # with prose would fail validation even though a valid spec body
+        # sits at its tail.
         cleaned_stdout = ""
         if isinstance(raw_stdout, str):
-            cleaned_stdout = strip_markdown_fences(raw_stdout.strip()).strip()
+            cleaned_stdout = extract_spec_body(
+                strip_markdown_fences(raw_stdout.strip()).strip(), spec_name
+            ).strip()
 
         if self._stdout_contains_spec_body(raw_stdout or ""):
             if len(cleaned_stdout) < len(original_content) * 0.5:
