@@ -504,7 +504,25 @@ def test_render_paradigm_in_headless_browser(console: "_IsolatedConsole") -> Non
     than skip. When Playwright or its Chromium binary is missing the test
     fails loudly with install guidance instead of silently skipping —
     skipping a critical acceptance test is treated by the engine as an
-    unverified result, not as "no failures"."""
+    unverified result, not as "no failures".
+
+    G1 BASELINE (provision + run; recorded for the G2 upgrade) — as written,
+    this real-browser case verifies only:
+      (1) the page shell boots inside Chromium (``#se3-version`` renders, which
+          itself comes from ``GET /api/version``); and
+      (2) the daemon-injected paradigm ``step_type`` *HTTP envelope* — fetched
+          with ``page.evaluate(fetch('/api/history/{flow_id}'))`` — i.e. the
+          discovery/implement/version_analyze types are present and the inner
+          ``message`` carries no ``step_type``.
+    It does NOT drive the production ``app.js`` ``renderConversation`` in-page
+    and asserts NO rendered DOM: the paradigm step headers (DISCOVERY /
+    IMPLEMENT / VERSION ANALYZE), the structured discovery result card, the
+    three-tier disclosure, and the per-step report cards are verified ONLY by
+    the node + DOM-stub path (``test_render_paradigm_via_appjs_on_real_records``
+    → ``tests/frontend/render_real_records.mjs``), never inside a real browser.
+    G2 must upgrade this case to call ``renderConversation`` via
+    ``page.evaluate`` and assert the rendered DOM paradigm, so the *critical*
+    acceptance is the in-browser render rather than only the HTTP envelope."""
     install_hint = (
         "Install the browser test dependency with `pip install se3[browser]`, "
         "then download the Chromium binary with `playwright install chromium`."
