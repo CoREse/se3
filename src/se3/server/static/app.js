@@ -2100,6 +2100,121 @@ function extractStructuredJson(text) {
   return null;
 }
 
+// --- result-identification: in-progress vs. final assistant turn -----------
+//
+// An assistant turn folds its thinking process behind "展开全部" ONLY when it
+// has produced a *final result* JSON for the step. The signal for "final
+// result" is NOT "the body parsed as some JSON" — an intermediate tool call
+// (Bash/Edit/Grep/… arguments), including a turn carrying two or more such
+// tool-call JSON segments, also parses as JSON. The signal is "the parsed JSON
+// carries at least one field belonging to this step's result set" — the same
+// fields the step's report renderer / CLI Panel reads from `step.outputs`.
+//
+// `STEP_RESULT_FIELDS` enumerates those result keys per step type. A turn whose
+// only JSON is a tool call has none of them, so the renderer returns null and
+// the caller keeps the thinking process inline (never collapsing it into an
+// empty "展开全部" toggle).
+const STEP_RESULT_FIELDS = {
+  analyze: ["task_type", "complexity", "scope", "reasoning",
+    "relevant_specs", "selected_items"],
+  plan: ["plan", "task_groups"],
+  plan_tasks: ["task_groups", "plan"],
+  implement: ["completion_status", "files_changed", "tests_added",
+    "implemented_groups", "summary", "incomplete_tasks",
+    "restricted_edits_applied", "restricted_edits_failed"],
+  test: ["test_results"],
+  self_check: ["issues", "actionable_count", "self_check_result"],
+  verify_spec: ["verified", "summary", "issues", "recommendations",
+    "verification_result", "fix_needed"],
+  update_spec: ["updated_specs", "specs_updated", "new_capabilities"],
+  commit: ["committed", "commit_hash", "commit_message"],
+  version_analyze: ["current_version", "suggested_version", "bump_type",
+    "confidence", "reasoning"],
+  summarize: ["summary"],
+  discovery: ["content", "refined_description", "questions"],
+};
+
+// True when `value` is a dict carrying at least one of `stepType`'s result
+// fields with a non-null value. Presence (not non-emptiness) is the test, so a
+// genuine-but-empty result such as `{committed: false}` or `{actionable_count:
+// 0}` still counts; a tool-call JSON (no result key) does not.
+function isStepResultDict(stepType, value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const fields = STEP_RESULT_FIELDS[stepType];
+  if (!fields) return false;
+  for (const f of fields) {
+    if (Object.prototype.hasOwnProperty.call(value, f) && value[f] != null) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Collect every parseable JSON region in `text`: each fenced ```json``` block
+// (in document order) plus a trailing bare object/array that is not already
+// covered by a fence. Each entry is `{value, startIndex, endIndex}` (slice
+// indices into `text`) so the caller can compute the narrative by removing the
+// chosen region. This is the multi-segment generalization of the single-shot
+// `extractStructuredJson`, used to find a *result* JSON among several tool-call
+// JSON segments in one turn.
+function collectJsonRegions(text) {
+  const regions = [];
+  if (typeof text !== "string" || !text) return regions;
+  const re = /```(?:json)?\s*\n?([\s\S]*?)\n?```/gi;
+  let m;
+  let lastFenceEnd = 0;
+  while ((m = re.exec(text)) !== null) {
+    const value = tryParseJsonLenient(m[1]);
+    if (value !== undefined) {
+      regions.push({
+        value: value,
+        startIndex: m.index,
+        endIndex: m.index + m[0].length,
+      });
+    }
+    lastFenceEnd = m.index + m[0].length;
+  }
+  // A trailing bare object/array only counts if it sits after the last fence —
+  // otherwise it is the inside of a fenced block we already captured.
+  const bare = extractTrailingBareJson(text);
+  if (bare && bare.startIndex >= lastFenceEnd) {
+    regions.push({
+      value: bare.value,
+      startIndex: bare.startIndex,
+      endIndex: text.length,
+    });
+  }
+  return regions;
+}
+
+// Pick the JSON region from `text` whose value satisfies `predicate` — i.e. the
+// step's real result among possibly several tool-call JSON segments. The LAST
+// matching region wins, because a result conventionally follows the tool calls
+// that produced it. Returns `{value, narrative}` with the chosen region removed
+// from the narrative (trimmed), or null when no region matches (→ the caller
+// keeps the thinking process inline). A turn with 2+ JSON segments none of
+// which is a result therefore yields null, exactly as required.
+function extractResultJson(text, predicate) {
+  if (typeof text !== "string" || !text) return null;
+  const regions = collectJsonRegions(text);
+  let chosen = null;
+  for (const r of regions) {
+    if (predicate(r.value)) chosen = r;
+  }
+  if (!chosen) return null;
+  // Narrative = the prose with EVERY JSON region removed (not just the chosen
+  // one), so intermediate tool-call JSON segments do not leak into the clean
+  // Layer-1 view; the full original content (incl. all JSON) remains available
+  // in the Layer-2 "展开全部" process area, which re-renders `content` verbatim.
+  // Splice from the tail so earlier indices stay valid.
+  let narrative = text;
+  const sorted = regions.slice().sort((a, b) => b.startIndex - a.startIndex);
+  for (const r of sorted) {
+    narrative = narrative.slice(0, r.startIndex) + narrative.slice(r.endIndex);
+  }
+  return { value: chosen.value, narrative: narrative.trim() };
+}
+
 // --- discovery assistant renderer ------------------------------------------
 //
 // Mirror of the CLI `_display_discovery_message` /
@@ -2117,40 +2232,42 @@ function extractStructuredJson(text) {
 //   5. Render `questions` as an ordered list.
 // Returns a DocumentFragment ready to append into the assistant bubble, or
 // null when no JSON was found (caller falls back to the default path).
+// A discovery RESULT carries a non-empty `content`, `refined_description`, or
+// `questions` field. A turn whose JSON is just a tool call (or whose result
+// fields are all empty) is not a final result — it is thinking process.
+function isDiscoveryResultDict(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (typeof value.content === "string" && value.content.trim()) return true;
+  if (typeof value.refined_description === "string" &&
+      value.refined_description.trim()) return true;
+  if (Array.isArray(value.questions) && value.questions.length) return true;
+  return false;
+}
+
 function renderDiscoveryAssistant(content, _norm) {
-  const extracted = extractStructuredJson(content);
+  // Result identification: only fold the thinking process when this turn parsed
+  // a real discovery result (content / refined_description / questions). A turn
+  // whose only JSON is a tool call — including 2+ such segments — matches no
+  // result region, so we return null and the caller keeps the thinking process
+  // inline (never collapsing it into an empty "展开全部").
+  const extracted = extractResultJson(content, isDiscoveryResultDict);
   if (!extracted) return null;
   const value = extracted.value;
-  // Defensive: parse_json_response is dict-only on the backend; arrays /
-  // scalars at the top level mean this is not a discovery JSON record —
-  // bail to the generic renderer.
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 
-  const frag = document.createDocumentFragment();
-  let rendered = false;
+  // Render the result fields first; the narrative is surfaced only alongside a
+  // real result so a narrative-only (no-result) turn never masquerades as a
+  // final result.
+  const resultFrag = document.createDocumentFragment();
 
-  // 2. narrative prefix
-  if (extracted.narrative) {
-    const narWrap = el("div", "assistant-narrative");
-    for (const node of renderToolMarkers(extracted.narrative)) {
-      narWrap.appendChild(node);
-    }
-    if (narWrap.childNodes.length) {
-      frag.appendChild(narWrap);
-      rendered = true;
-    }
-  }
-
-  // 3. content as markdown
+  // content as markdown
   const jsonContent = value.content;
   if (typeof jsonContent === "string" && jsonContent.trim()) {
     const contentWrap = el("div", "discovery-content");
     contentWrap.appendChild(renderMarkdown(jsonContent));
-    frag.appendChild(contentWrap);
-    rendered = true;
+    resultFrag.appendChild(contentWrap);
   }
 
-  // 4. refined_description as a Proposed Task Description card
+  // refined_description as a Proposed Task Description card
   const refined = value.refined_description;
   if (typeof refined === "string" && refined.trim()) {
     const card = el(
@@ -2167,11 +2284,10 @@ function renderDiscoveryAssistant(content, _norm) {
     md.appendChild(renderMarkdown(refined));
     body.appendChild(md);
     card.appendChild(body);
-    frag.appendChild(card);
-    rendered = true;
+    resultFrag.appendChild(card);
   }
 
-  // 5. questions as a numbered list
+  // questions as a numbered list
   const questions = value.questions;
   if (Array.isArray(questions) && questions.length) {
     const qWrap = el("div", "discovery-questions");
@@ -2190,11 +2306,23 @@ function renderDiscoveryAssistant(content, _norm) {
       ol.appendChild(li);
     }
     qWrap.appendChild(ol);
-    frag.appendChild(qWrap);
-    rendered = true;
+    resultFrag.appendChild(qWrap);
   }
 
-  if (!rendered) return null;
+  // Predicate guaranteed at least one of the above rendered; if somehow none
+  // did, fall back to the inline thinking path rather than fold an empty card.
+  if (!resultFrag.childNodes.length) return null;
+
+  const frag = document.createDocumentFragment();
+  // narrative prefix (only with a real result present)
+  if (extracted.narrative) {
+    const narWrap = el("div", "assistant-narrative");
+    for (const node of renderToolMarkers(extracted.narrative)) {
+      narWrap.appendChild(node);
+    }
+    if (narWrap.childNodes.length) frag.appendChild(narWrap);
+  }
+  frag.appendChild(resultFrag);
   return frag;
 }
 registerAssistantRenderer("discovery", renderDiscoveryAssistant);
@@ -2235,29 +2363,17 @@ function makeStructuredAssistantRenderer(stepType) {
   return function (content, _norm) {
     const reportRenderer = reportRendererFor(stepType);
     if (!reportRenderer) return null;
-    const extracted = extractStructuredJson(content);
+    // Result identification: pick the JSON region carrying a real result field
+    // for this step. A turn whose only JSON is a tool call (or 2+ tool calls)
+    // matches no result region → null → the caller keeps the thinking process
+    // inline (never folded into an empty "展开全部"). The CLI parser is dict-only,
+    // and isStepResultDict already rejects arrays / scalars.
+    const extracted = extractResultJson(
+      content, (v) => isStepResultDict(stepType, v));
     if (!extracted) return null;
     const value = extracted.value;
-    // The CLI parser is dict-only; a top-level array / scalar is not a
-    // structured step result — fall back to the generic path.
-    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
 
-    const frag = document.createDocumentFragment();
-    let rendered = false;
-
-    // 2. narrative prefix (tool markers preserved)
-    if (extracted.narrative) {
-      const narWrap = el("div", "assistant-narrative");
-      for (const node of renderToolMarkers(extracted.narrative)) {
-        narWrap.appendChild(node);
-      }
-      if (narWrap.childNodes.length) {
-        frag.appendChild(narWrap);
-        rendered = true;
-      }
-    }
-
-    // 3. structured fields via the shared report renderer
+    // structured fields via the shared report renderer
     let body;
     try {
       const synthStep = {
@@ -2275,16 +2391,28 @@ function makeStructuredAssistantRenderer(stepType) {
       return null;
     }
     const bodyHasContent = !!(body && body.childNodes && body.childNodes.length);
-    if (bodyHasContent) {
-      const wrap = el("div", "assistant-structured kind-" + stepType);
-      const bodyWrap = el("div", "step-report__body");
-      bodyWrap.appendChild(body);
-      wrap.appendChild(bodyWrap);
-      frag.appendChild(wrap);
-      rendered = true;
+    // Both conditions must hold to fold: a real result field is present (by
+    // construction of extractResultJson) AND the report renderer produced
+    // content. If the body is empty, keep the thinking inline so nothing is
+    // lost rather than fold behind an empty toggle.
+    if (!bodyHasContent) return null;
+
+    const frag = document.createDocumentFragment();
+    // narrative prefix (tool markers preserved) — surfaced only alongside the
+    // real result, so a narrative-only turn never folds.
+    if (extracted.narrative) {
+      const narWrap = el("div", "assistant-narrative");
+      for (const node of renderToolMarkers(extracted.narrative)) {
+        narWrap.appendChild(node);
+      }
+      if (narWrap.childNodes.length) frag.appendChild(narWrap);
     }
 
-    if (!rendered) return null;
+    const wrap = el("div", "assistant-structured kind-" + stepType);
+    const bodyWrap = el("div", "step-report__body");
+    bodyWrap.appendChild(body);
+    wrap.appendChild(bodyWrap);
+    frag.appendChild(wrap);
     return frag;
   };
 }
@@ -3804,6 +3932,11 @@ if (typeof module !== "undefined" && module.exports) {
     makeStructuredAssistantRenderer,
     renderAssistantBubble,
     extractStructuredJson,
+    extractResultJson,
+    collectJsonRegions,
+    isStepResultDict,
+    isDiscoveryResultDict,
+    STEP_RESULT_FIELDS,
     TEMPLATE_PREFIX_END,
     USER_CONTENT_BEGIN,
     USER_CONTENT_END,

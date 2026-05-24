@@ -1412,6 +1412,187 @@ check("assistant no-result turn shows thinking inline, not folded, no toggles", 
     "查看原始 must not show at the row level for a no-result turn");
 });
 
+// ---------------------------------------------------------------------------
+// Message-paradigm §2: in-progress (2a/2c) vs. final (2b) assistant turns
+// ---------------------------------------------------------------------------
+//
+// These assertions pin the result-identification contract: a turn folds its
+// thinking behind "展开全部" ONLY when its JSON carries a real result field for
+// the step. A tool-call JSON (Bash/Edit/Grep/… args), including 2+ such
+// segments, is thinking process — it stays inline, never folds, and never
+// produces an empty "展开全部" toggle. The previous renderer mistook any parseable
+// JSON for a result (analyze/version_analyze always draw a status bar), so a
+// tool-call-only turn was wrongly collapsed; these tests guard the fix. All
+// assertions are DOM-structural (presence of assistant-result / process-toggle
+// / assistant-process-inline / nested raw-toggle), not text guesses.
+
+// 2a/2c: a turn whose only JSON is a single tool call is NOT an analyze result
+// (no task_type/complexity/… key) — even though renderAnalyzeReport would draw
+// a status bar from any dict. It must stay inline, not fold.
+check("2c: single tool-call JSON (no result field) stays inline, no fold, no empty toggle", () => {
+  const content = "Let me list files.\n```json\n" +
+    JSON.stringify({ command: "ls -la", description: "list files" }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "analyze"));
+  assert.equal(findOne(row, "assistant-result"), null,
+    "a tool-call-only turn must not render a structured result");
+  assert.equal(findOne(row, "process-toggle"), null,
+    "no 展开全部 toggle for a tool-call-only turn — nothing to fold behind it");
+  const inline = findOne(row, "assistant-process-inline");
+  assert.ok(inline, "thinking is shown inline");
+  assert.ok(inline.textContent.includes("Let me list files."),
+    "the narrative is preserved");
+  assert.ok(inline.textContent.includes("ls -la"),
+    "the tool-call JSON content is not lost");
+});
+
+// 2c: two or more tool-call JSON segments in one turn are all thinking process.
+check("2c: 2+ tool-call JSON segments stay inline, never collapse to an empty 展开全部", () => {
+  const content =
+    "Checking.\n```json\n" + JSON.stringify({ command: "ls" }) + "\n```\n" +
+    "Now editing.\n```json\n" +
+    JSON.stringify({ file_path: "x.py", old_string: "a", new_string: "b" }) +
+    "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "implement"));
+  assert.equal(findOne(row, "assistant-result"), null,
+    "neither tool-call JSON is an implement result");
+  assert.equal(findOne(row, "process-toggle"), null,
+    "2+ tool-call JSONs with no result must not fold into an empty 展开全部");
+  const inline = findOne(row, "assistant-process-inline");
+  assert.ok(inline, "thinking shown inline");
+  assert.ok(inline.textContent.includes("Checking."));
+  assert.ok(inline.textContent.includes("Now editing."),
+    "both thinking segments are visible by default");
+});
+
+// 2b: a turn carrying a real result field renders the structured result by
+// default and folds the thinking process behind "展开全部".
+check("2b: real result JSON renders structured result, folds thinking behind 展开全部", () => {
+  const content = "```json\n" + JSON.stringify({
+    completion_status: "complete",
+    files_changed: ["src/x.py"],
+    summary: "Did the thing.",
+  }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "implement"));
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "result JSON → structured result is the default view");
+  assert.ok(result.textContent.includes("Did the thing."));
+  assert.equal(findOne(row, "assistant-process-inline"), null,
+    "a result turn does not also render the inline thinking path");
+  const procFull = findOne(row, "process-full");
+  assert.ok(procFull, "Layer-2 process area exists");
+  assert.equal(procFull.classList.contains("hidden"), true,
+    "the thinking process is folded by default");
+  assert.equal(findOne(row, "raw-toggle"), null,
+    "查看原始 is nested inside Layer 2, not at the row level");
+});
+
+// 2b mixed: tool-call JSON followed by a real result JSON — the result is the
+// chosen Layer-1 surface; the tool-call JSON is folded as thinking (and does
+// not leak into the clean default view).
+check("2b: tool-call JSON before a result JSON — result shown, tool JSON folded as thinking", () => {
+  const content =
+    "Running tests.\n```json\n" + JSON.stringify({ command: "pytest -q" }) + "\n```\n" +
+    "Result:\n```json\n" + JSON.stringify({
+      test_results: {
+        overall_passed: true,
+        phases: [{ name: "unit", passed: true }],
+      },
+    }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "test"));
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "the real test result is the structured default surface");
+  assert.ok(result.textContent.includes("PASSED"));
+  assert.equal(result.textContent.includes("pytest -q"), false,
+    "the intermediate tool-call JSON must not leak into the clean Layer-1 view");
+  // The tool-call JSON lives in the folded Layer-2 process area.
+  const toggle = findOne(row, "process-toggle");
+  assert.ok(toggle, "展开全部 toggle present (thinking incl. the tool-call JSON)");
+  toggle.dispatch("click");
+  const procFull = findOne(row, "process-full");
+  assert.ok(procFull.textContent.includes("pytest -q"),
+    "the tool-call JSON is part of the folded thinking process");
+});
+
+// 2b narrative+result: narrative outside the JSON is surfaced alongside the
+// structured result (Layer 1), the process is folded.
+check("2b: narrative + result JSON — both render in the default view, thinking folded", () => {
+  const content = "Analyzed the engine.\n```json\n" + JSON.stringify({
+    task_type: "feature",
+    complexity: "medium",
+    scope: "src/engine",
+    reasoning: "Touches the state machine.",
+  }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "analyze"));
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "structured analyze result present");
+  assert.ok(result.textContent.includes("Analyzed the engine."),
+    "the narrative is shown alongside the result");
+  assert.ok(result.textContent.includes("Touches the state machine."));
+  assert.ok(findOne(row, "process-toggle"), "thinking folded behind 展开全部");
+});
+
+// Result identification is step-scoped: a JSON whose only keys belong to a
+// DIFFERENT step's result set is not this step's result.
+check("result identification is scoped to the step's own result fields", () => {
+  // `verified` is a verify_spec result field, not an analyze one. For an analyze
+  // turn this is therefore NOT a result → stays inline.
+  const content = "```json\n" + JSON.stringify({ verified: true }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "analyze"));
+  assert.equal(findOne(row, "assistant-result"), null,
+    "a foreign-step result field does not count as this step's result");
+  assert.ok(findOne(row, "assistant-process-inline"),
+    "the turn stays inline");
+  // The same JSON IS a verify_spec result for a verify_spec turn → folds.
+  const row2 = app.renderConversationRecord(asstNorm(content, "verify_spec"));
+  assert.ok(findOne(row2, "assistant-result"),
+    "verified is a verify_spec result field → structured result");
+});
+
+// Discovery's dedicated renderer follows the same contract.
+check("2c: discovery turn with only a tool-call JSON stays inline", () => {
+  const content = "Reading the spec.\n```json\n" +
+    JSON.stringify({ file_path: "se3/specs/base/spec.md" }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "discovery"));
+  assert.equal(findOne(row, "assistant-result"), null,
+    "a discovery tool-call turn (no content/refined/questions) is not a result");
+  assert.equal(findOne(row, "process-toggle"), null);
+  const inline = findOne(row, "assistant-process-inline");
+  assert.ok(inline && inline.textContent.includes("Reading the spec."));
+});
+
+check("2b: discovery result JSON renders structured fields, folds thinking", () => {
+  const content = "Thinking about scope.\n```json\n" + JSON.stringify({
+    content: "Here is what I understand.",
+    refined_description: "Fix the chat renderer.",
+    questions: ["Which browser?", "Headless?"],
+  }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "discovery"));
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "discovery result → structured result");
+  assert.ok(result.textContent.includes("Here is what I understand."));
+  assert.ok(findOne(result, "step-report--proposed-task"),
+    "refined_description renders as a Proposed Task Description card");
+  assert.ok(result.textContent.includes("Which browser?"));
+  assert.ok(findOne(row, "process-toggle"), "thinking folded behind 展开全部");
+});
+
+// A turn whose JSON has a result KEY but renders to nothing must not fold into
+// an empty toggle — it degrades to the inline thinking path so nothing is lost.
+check("2c: discovery result keys present but all empty → inline, no empty fold", () => {
+  const content = "Just thinking.\n```json\n" + JSON.stringify({
+    content: "",
+    refined_description: "   ",
+    questions: [],
+  }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "discovery"));
+  assert.equal(findOne(row, "assistant-result"), null,
+    "empty result fields do not constitute a final result");
+  assert.equal(findOne(row, "process-toggle"), null,
+    "must not fold into an empty 展开全部");
+  assert.ok(findOne(row, "assistant-process-inline"),
+    "thinking stays inline, content preserved");
+});
+
 // -- end-to-end dispatch on the real (post-G1) envelope shape ---------------
 // A group-suffixed implement record arrives from the daemon already carrying
 // the clean envelope step_type "implement" (the `_G2` suffix stripped by
