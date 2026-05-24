@@ -1,0 +1,31 @@
+id: '148'
+title: 'tests/engine/test_spec_format.py::TestRealSpecFiles::test_spec_format_self_describing
+  fails: the snapshot expects se3/specs/spec-format/spec.md to have 11 Requirements
+  but it now parses to 12. This is a stale snapshot count, NOT introduced by this
+  task — spec-format/spec.md was last modified in commit 42b69c8 (a prior sync flow)
+  and is untouched by this flow''s implementation commits (e0dcfe3..f363e16) and by
+  every file this task changed (app.js, frontend mjs helpers, console/daemon/discovery/event-stream
+  tests). Already tracked as pre-existing issue 147.'
+description: 'tests/engine/test_spec_format.py::TestRealSpecFiles::test_spec_format_self_describing
+  fails: the snapshot expects se3/specs/spec-format/spec.md to have 11 Requirements
+  but it now parses to 12. This is a stale snapshot count, NOT introduced by this
+  task — spec-format/spec.md was last modified in commit 42b69c8 (a prior sync flow)
+  and is untouched by this flow''s implementation commits (e0dcfe3..f363e16) and by
+  every file this task changed (app.js, frontend mjs helpers, console/daemon/discovery/event-stream
+  tests). Already tracked as pre-existing issue 147.
+
+
+  Suggestion: Out of scope for the running-flow-console task. Fix separately: either
+  bump the expected count to 12 in test_spec_format_self_describing (and verify the
+  12th requirement ''Parsed-Spec Issue Validator'' is intended), or update the spec
+  snapshot — under issue 147.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-25T03:29:16.688947'
+updated_at: '2026-05-25T03:29:16.688947'

@@ -709,7 +709,11 @@ requirement). Each turn exposes the same three layers:
 
 **Assistant turn** — the three-layer model below applies **only when this turn
 produced a final result JSON**; a turn with no result JSON is handled by the
-separate no-result rule stated after Layer 3.
+separate no-result rule stated after Layer 3. The precise, field-based test for
+what counts as a *final result JSON* — as opposed to an intermediate tool-call
+JSON that merely happens to parse — is defined in *Structured-JSON Assistant
+Rendering* (the per-step result-field registry); the fold decision here MUST use
+that same discriminator so the two requirements never diverge.
 1. **Layer 1 (default)** — only this turn's rendered result: the structured
    fields produced by the `STEP_ASSISTANT_RENDERERS` entry for the step type
    (e.g. discovery's `content` / `refined_description` / `questions`). No raw
@@ -875,6 +879,57 @@ renderer so an assistant turn defaults to structured fields rather than a raw
 renderer that cannot parse the body — degrades gracefully through the shared
 `renderToolMarkers` + markdown / foldable fallback path, and no assistant
 message is ever dropped.
+
+**Result-vs-tool-call identification.** A structured renderer MUST surface a
+Layer-1 result (and thereby let *Three-Tier Progressive Disclosure* fold the
+turn's thinking process behind "展开全部") **only when the turn actually produced a
+final result JSON** — not merely because some region of the body parsed as JSON.
+The discriminator is **field-based**: the frontend maintains a per-step
+result-field registry (e.g. `STEP_RESULT_FIELDS`) enumerating the keys that
+belong to each step type's result set — the same fields the matching
+`STEP_REPORT_RENDERERS` entry / CLI Panel reads from `step.outputs` (for
+`discovery`: `content` / `refined_description` / `questions`). A parsed JSON
+object counts as a final result **iff it carries at least one of its step type's
+result fields with a non-null value** — presence, not non-emptiness, so a genuine
+but empty result such as `{"committed": false}` or `{"actionable_count": 0}`
+still counts. An intermediate tool-call JSON (Bash / Edit / Grep / … arguments)
+carries none of those keys and is therefore NOT a result.
+
+Because a single turn may interleave several JSON regions, the renderer MUST
+collect **every** parseable JSON region — each fenced ```` ```json ... ````
+block in document order plus a trailing bare object/array that follows the last
+fence — and select the **last** region satisfying the result predicate as the
+turn's result (a result conventionally follows the tool calls that produced it).
+The Layer-1 narrative is then the body with **all** JSON regions removed (not
+just the chosen one), so intermediate tool-call JSON never leaks into the clean
+default view while the full original body — every JSON region included — stays
+reachable through the Layer-2 "展开全部" process area and the Layer-3 "查看原始"
+toggle. When **no** region satisfies the result predicate — including a turn
+carrying two or more tool-call JSON segments — the renderer MUST return no result
+so the caller keeps the thinking process inline per *Three-Tier Progressive
+Disclosure*, never folding it into an empty "展开全部" toggle.
+
+#### Scenario: Tool-call-only turn is not mistaken for a final result
+- **GIVEN** an assistant turn whose body carries one or more JSON regions that
+  are all tool-call arguments (e.g. two ```` ```json ... ```` blocks of
+  Bash / Edit arguments) and no region carrying any of the step type's result
+  fields
+- **WHEN** the structured renderer evaluates the turn
+- **THEN** no region satisfies the per-step result-field predicate, so the
+  renderer surfaces no structured Layer-1 result
+- **AND** the caller keeps the full thinking process inline via
+  `renderToolMarkers`, never folding it into an empty "展开全部" toggle
+
+#### Scenario: Final result region wins among interleaved tool-call JSON
+- **GIVEN** an assistant turn that emits one or more tool-call JSON regions
+  followed by a final result JSON carrying at least one of the step type's
+  result fields with a non-null value
+- **WHEN** the structured renderer evaluates the turn
+- **THEN** the last region satisfying the result predicate is chosen as the
+  turn's result and rendered as the Layer-1 structured fields
+- **AND** the Layer-1 narrative has every JSON region (the tool calls and the
+  result literal) removed, while the unmodified body remains reachable behind
+  the "展开全部" / "查看原始" disclosure layers
 
 #### Scenario: Discovery assistant message renders structured fields
 - **GIVEN** an assistant record with `step_type = "discovery"` whose body

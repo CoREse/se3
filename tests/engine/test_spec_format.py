@@ -507,7 +507,7 @@ class TestRealSpecFiles:
         text = (specs_dir / "spec-format" / "spec.md").read_text()
         parsed = parse_spec(text)
         assert parsed.has_v1_marker is True
-        assert len(parsed.requirements) == 11
+        assert len(parsed.requirements) == 12
         names = [r.name for r in parsed.requirements]
         assert "Spec Format Version" in names
         assert "Requirement Boundary" in names
