@@ -373,6 +373,36 @@ def _write_real_history_flow(project: Path, flow_id: str) -> Dict[str, str]:
         "\n".join(json.dumps(r) for r in discovery_records), encoding="utf-8"
     )
 
+    # A ``step_completed`` event — the per-step jsonl line the engine's
+    # HistorySink persists. The frontend turns it into a default-expanded,
+    # no-max-height report card (the Per-Step Report Cards paradigm), so the
+    # in-browser render path can assert that card on real-shaped data. Its
+    # inner ``message`` is the raw event object (``type`` = step_completed,
+    # nested ``data.step.outputs``) and still carries no envelope-level
+    # ``step_type`` — that stays the daemon's file-name-derived injection.
+    analyze_event = {
+        "type": "step_completed",
+        "step_id": "03_analyze_a1b2c3d4",
+        "timestamp": "2026-05-21T10:00:30",
+        "data": {
+            "step": {
+                "step_type": "analyze",
+                "step_id": "03_analyze_a1b2c3d4",
+                "status": "COMPLETED",
+                "outputs": {
+                    "task_type": "feature",
+                    "complexity": "medium",
+                    "scope": "src/se3/server",
+                    "reasoning": "Add a GET /health endpoint to the server module.",
+                    "relevant_specs": ["base:Server Modules"],
+                },
+            }
+        },
+    }
+    (hist / "03_analyze_a1b2c3d4.jsonl").write_text(
+        json.dumps(analyze_event), encoding="utf-8"
+    )
+
     # Group-suffixed implement step — exercises the ``_G1`` suffix peeling.
     impl_record = {
         "role": "assistant",
@@ -494,9 +524,10 @@ def test_render_paradigm_via_appjs_on_real_records(console: "_IsolatedConsole") 
 
 
 def test_render_paradigm_in_headless_browser(console: "_IsolatedConsole") -> None:
-    """Task 2 (browser): a real headless browser loads the console and, over
-    real HTTP, fetches the flow history and confirms the daemon-injected
-    paradigm ``step_type`` on real records.
+    """Task 2 (browser): a real headless browser loads the console, drives the
+    production ``app.js`` ``renderConversation`` over the real
+    ``GET /api/history/{flow_id}`` records, and asserts the rendered DOM
+    paradigm — NOT merely the HTTP envelope.
 
     This is a *critical acceptance test* (registered in ``se3.yaml`` under
     ``test.critical_tests``): it is the only case that exercises the real UI
@@ -506,31 +537,48 @@ def test_render_paradigm_in_headless_browser(console: "_IsolatedConsole") -> Non
     skipping a critical acceptance test is treated by the engine as an
     unverified result, not as "no failures".
 
-    G1 BASELINE (provision + run; recorded for the G2 upgrade) — as written,
-    this real-browser case verifies only:
-      (1) the page shell boots inside Chromium (``#se3-version`` renders, which
-          itself comes from ``GET /api/version``); and
-      (2) the daemon-injected paradigm ``step_type`` *HTTP envelope* — fetched
-          with ``page.evaluate(fetch('/api/history/{flow_id}'))`` — i.e. the
+    What it proves, inside real Chromium, on real daemon records:
+      (1) the page shell boots (``#se3-version`` renders from
+          ``GET /api/version``) and the production ``app.js`` is live in-page;
+      (2) feeding the real ``/api/history`` records through ``renderConversation``
+          produces the message paradigm in the rendered DOM:
+            - step-section headers read the paradigm names (DISCOVERY /
+              IMPLEMENT / VERSION ANALYZE) — never the raw ``NN_<type>_<hash>``
+              file stem;
+            - the discovery assistant turn renders structured fields (a
+              Proposed Task Description card) instead of a raw ```json``` blob;
+            - the marker-split user turn shows ONLY the literal input by default
+              (Three-Tier Progressive Disclosure), with no row-level ``查看原始``
+              raw toggle leaking into the default view;
+            - a ``step_completed`` event renders a default-expanded report card
+              whose body has NO ``max-height`` cap (the browser-only CSS
+              contract verified via ``getComputedStyle``);
+      (3) the daemon-injected paradigm ``step_type`` envelope is intact (the
           discovery/implement/version_analyze types are present and the inner
-          ``message`` carries no ``step_type``.
-    It does NOT drive the production ``app.js`` ``renderConversation`` in-page
-    and asserts NO rendered DOM: the paradigm step headers (DISCOVERY /
-    IMPLEMENT / VERSION ANALYZE), the structured discovery result card, the
-    three-tier disclosure, and the per-step report cards are verified ONLY by
-    the node + DOM-stub path (``test_render_paradigm_via_appjs_on_real_records``
-    → ``tests/frontend/render_real_records.mjs``), never inside a real browser.
-    G2 must upgrade this case to call ``renderConversation`` via
-    ``page.evaluate`` and assert the rendered DOM paradigm, so the *critical*
-    acceptance is the in-browser render rather than only the HTTP envelope."""
+          ``message`` carries no ``step_type``).
+
+    The rendered-DOM judgement (1)/(2) is the SINGLE shared source
+    ``tests/frontend/render_in_browser.mjs::paradigmAssertions`` — the very same
+    function the node + DOM-stub path
+    (``test_render_paradigm_via_appjs_on_real_records``) runs — injected here as
+    a classic ``<script>`` so the in-browser and node checks can never drift."""
+    # Keep the isolation invariants enforced even on the browser path.
+    console.assert_isolation_guards()
+
     install_hint = (
         "Install the browser test dependency with `pip install se3[browser]`, "
-        "then download the Chromium binary with `playwright install chromium`."
+        "then download the Chromium binary with `playwright install chromium`, "
+        "and provision its system libraries with "
+        "`scripts/install_browser_test_libs.sh`."
     )
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         pytest.fail(f"Playwright is not installed. {install_hint} ({exc})")
+
+    shared = _WORKTREE / "tests" / "frontend" / "render_in_browser.mjs"
+    assert shared.exists(), shared
+    shared_js = shared.read_text(encoding="utf-8")
 
     flow_id = "t2_render_flow"
     _write_real_history_flow(console.project, flow_id)
@@ -546,22 +594,94 @@ def test_render_paradigm_in_headless_browser(console: "_IsolatedConsole") -> Non
         try:
             page = browser.new_page()
             page.goto(console.base, wait_until="domcontentloaded")
-            # The console boots and renders its version label from /api/version.
+            # The console boots and renders its version label from /api/version,
+            # which also proves the production app.js loaded in-page.
             page.wait_for_selector("#se3-version", timeout=15000)
-            # Fetch the real flow history from inside the browser context and
-            # assert the paradigm step_type injection on real records.
-            records = page.evaluate(
+            page.wait_for_function("typeof window.renderConversation === 'function'",
+                                   timeout=15000)
+
+            # Inject the shared paradigm judgement (classic <script>; the file
+            # has no import/export and self-attaches to window.__se3Paradigm).
+            page.add_script_tag(content=shared_js)
+            page.wait_for_function(
+                "window.__se3Paradigm && "
+                "typeof window.__se3Paradigm.paradigmAssertions === 'function'",
+                timeout=15000,
+            )
+
+            # Fetch the REAL flow history in-page, render it through the
+            # production renderConversation, and run the shared DOM-paradigm
+            # judgement plus the browser-only CSS (max-height) contract.
+            result = page.evaluate(
                 """async (fid) => {
                     const r = await fetch(`/api/history/${fid}`);
                     const j = await r.json();
-                    return j.records || [];
+                    const records = j.records || [];
+
+                    const container = document.createElement("div");
+                    container.id = "__paradigm_test_container__";
+                    document.body.appendChild(container);
+                    // Production renderer, real records, full (non-append) build.
+                    window.renderConversation(container, records, false);
+
+                    // Shared, single-source DOM-paradigm judgement.
+                    const res = window.__se3Paradigm.paradigmAssertions(
+                        records, container);
+
+                    // Browser-only CSS contract: every report-card body must be
+                    // visible (default-expanded) and carry NO max-height cap, so
+                    // long reports scroll with the page, not inside a captive
+                    // viewport (running-flow-console: no per-block height caps).
+                    res.report_card_maxheight_ok = true;
+                    res.report_card_visible = true;
+                    res.report_body_count = 0;
+                    res.maxheight_value = "";
+                    const bodies = Array.from(
+                        container.querySelectorAll(".step-report__body"));
+                    res.report_body_count = bodies.length;
+                    for (const b of bodies) {
+                        const cs = getComputedStyle(b);
+                        if (cs.maxHeight !== "none") {
+                            res.report_card_maxheight_ok = false;
+                            res.maxheight_value = cs.maxHeight;
+                        }
+                        if (cs.display === "none") {
+                            res.report_card_visible = false;
+                        }
+                    }
+
+                    // Envelope step_type integrity, surfaced for the Python
+                    // side to assert on real records.
+                    res.envelope_types = records.map((x) => x.step_type);
+                    res.inner_has_step_type = records.some(
+                        (x) => x.message &&
+                            Object.prototype.hasOwnProperty.call(
+                                x.message, "step_type"));
+                    return res;
                 }""",
                 flow_id,
             )
-            types = {r["step_type"] for r in records}
-            assert {"discovery", "implement", "version_analyze"} <= types, types
-            for r in records:
-                assert "step_type" not in (r.get("message") or {}), r
+
+            # (2) The rendered-DOM paradigm took effect in a real browser.
+            assert result["ok"], result
+            assert "DISCOVERY" in result["headers"], result
+            assert "IMPLEMENT" in result["headers"], result
+            assert "VERSION ANALYZE" in result["headers"], result
+            assert result["discovery_structured"], result
+            assert result["discovery_proposed_card"], result
+            assert result["user_literal_only"], result
+            assert result["raw_nested"], result
+            # Per-step report card present, default-expanded, no max-height cap.
+            assert result["report_card_present"], result
+            assert result.get("report_body_count", 0) >= 1, result
+            assert result["report_card_visible"], result
+            assert result["report_card_maxheight_ok"], result
+
+            # (3) The daemon-injected paradigm step_type envelope is intact.
+            assert {"discovery", "implement", "version_analyze"} <= set(
+                result["envelope_types"]
+            ), result
+            assert not result["inner_has_step_type"], result
         finally:
             browser.close()
 

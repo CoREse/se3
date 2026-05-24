@@ -10,13 +10,13 @@
  * inner `message`). This script feeds those records through the production
  * `app.js` conversation renderer (`renderConversation`) against a minimal
  * DOM stub and asserts the message-rendering paradigm actually takes effect on
- * real data:
+ * real data.
  *
- *   - step-section headers read the paradigm names (DISCOVERY / IMPLEMENT /
- *     VERSION ANALYZE …) — never the raw `NN_<type>_<hash>` file stem;
- *   - a discovery assistant turn renders its structured fields (content /
- *     refined_description / questions) rather than dumping the raw ```json```
- *     blob.
+ * The paradigm judgement itself lives in `render_in_browser.mjs`
+ * (`paradigmAssertions`) — the SINGLE source shared verbatim with the real
+ * Chromium acceptance test, so the node-stub and in-browser checks can never
+ * drift. This script only owns the node-side plumbing: the DOM stub, loading
+ * `app.js` via `require`, and printing the result for the pytest harness.
  *
  * On success it prints a JSON line `{"ok": true, ...}` and exits 0; on any
  * assertion failure it prints `{"ok": false, "error": ...}` and exits 1. The
@@ -30,6 +30,9 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
+// Side-effect import: populates `globalThis.__se3Paradigm` with the shared
+// `paradigmAssertions` judgement (the same source the browser test injects).
+import "./render_in_browser.mjs";
 
 const require = createRequire(import.meta.url);
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -128,15 +131,6 @@ globalThis.document = {
   addEventListener: () => {},
 };
 
-function findAll(node, cls, acc = []) {
-  if (!node || !node.childNodes) return acc;
-  for (const c of node.childNodes) {
-    if (c.classList && c.classList.contains(cls)) acc.push(c);
-    findAll(c, cls, acc);
-  }
-  return acc;
-}
-
 function fail(msg) {
   process.stdout.write(JSON.stringify({ ok: false, error: msg }) + "\n");
   process.exit(1);
@@ -149,78 +143,30 @@ function main() {
   if (!Array.isArray(records) || records.length === 0) fail("no records to render");
 
   const app = require(appPath);
-
-  // Guard: the records must be in the REAL daemon shape — authoritative
-  // step_type at the envelope, NOT inside the inner message. If a record
-  // leaks an inner message.step_type, the test fixture is faking the shape
-  // (the exact bug this group fixes) and the assertion is meaningless.
-  for (const r of records) {
-    if (r && r.message && Object.prototype.hasOwnProperty.call(r.message, "step_type")) {
-      fail("record.message leaked a step_type — not a real daemon envelope shape");
-    }
-  }
-
   const container = document.createElement("div");
   app.renderConversation(container, records, false);
 
-  // 1. Step-section headers use the paradigm names, never the file stem.
-  const titles = findAll(container, "history-step-title").map((h) => h.textContent);
-  const stems = records
-    .map((r) => String(r.step_id || ""))
-    .filter((s) => /^\d+_/.test(s));
-  for (const t of titles) {
-    for (const stem of stems) {
-      if (t === stem) fail(`step header showed the raw file stem '${stem}' instead of a paradigm name`);
-    }
+  // The paradigm judgement is the shared single source — the same
+  // `paradigmAssertions` the real-browser acceptance test runs in-page — so the
+  // node-stub and in-browser DOM checks can never drift apart.
+  const paradigm = globalThis.__se3Paradigm;
+  if (!paradigm || typeof paradigm.paradigmAssertions !== "function") {
+    fail("shared paradigm assertions (render_in_browser.mjs) failed to load");
   }
-  const envTypes = new Set(records.map((r) => String(r.step_type || "").toLowerCase()));
-  const expectHeaders = [];
-  if (envTypes.has("discovery")) expectHeaders.push("DISCOVERY");
-  if (envTypes.has("implement")) expectHeaders.push("IMPLEMENT");
-  if (envTypes.has("version_analyze")) expectHeaders.push("VERSION ANALYZE");
-  for (const want of expectHeaders) {
-    if (!titles.includes(want)) {
-      fail(`expected a '${want}' step header; got headers ${JSON.stringify(titles)}`);
-    }
-  }
-
-  // 2. The discovery assistant turn renders structured fields, not a raw blob.
-  //    Find the discovery assistant record, locate its rendered bubble, and
-  //    assert the refined_description / content text is present while the raw
-  //    JSON key literal is NOT dumped as the primary surface.
-  const discAsst = records.find(
-    (r) => String(r.step_type).toLowerCase() === "discovery" &&
-      r.message && (r.message.role === "assistant"),
-  );
-  let structured = false;
-  if (discAsst) {
-    let parsed = null;
-    try {
-      const body = String(discAsst.message.content || "");
-      const m = body.match(/\{[\s\S]*\}/);
-      parsed = m ? JSON.parse(m[0]) : null;
-    } catch (_e) { parsed = null; }
-    if (parsed && (parsed.refined_description || parsed.content)) {
-      const wholeText = container.textContent;
-      const needle = String(parsed.refined_description || parsed.content);
-      if (!wholeText.includes(needle)) {
-        fail("discovery refined_description/content was not rendered into the bubble");
-      }
-      // A structured render must NOT surface the JSON key literal as text.
-      if (wholeText.includes('"refined_description":')) {
-        fail("discovery turn dumped raw JSON (found '\"refined_description\":' literal) instead of structured fields");
-      }
-      structured = true;
-    }
-  }
+  const result = paradigm.paradigmAssertions(records, container);
+  if (!result.ok) fail(result.error || "paradigm assertion failed");
 
   process.stdout.write(
     JSON.stringify({
       ok: true,
-      headers: titles,
-      expected_headers: expectHeaders,
-      discovery_structured: structured,
-      record_count: records.length,
+      headers: result.headers,
+      expected_headers: result.expected_headers,
+      discovery_structured: result.discovery_structured,
+      discovery_proposed_card: result.discovery_proposed_card,
+      user_literal_only: result.user_literal_only,
+      raw_nested: result.raw_nested,
+      report_card_present: result.report_card_present,
+      record_count: result.record_count,
     }) + "\n",
   );
   process.exit(0);
