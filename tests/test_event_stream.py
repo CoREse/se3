@@ -393,3 +393,123 @@ def test_get_step_history_skips_step_event_lines(tmp_path):
     assert session is not None
     assert len(session.messages) == 1
     assert session.messages[0].role == "assistant"
+
+
+# ---------------------------------------------------------------------------
+# Terminal events for EVERY step type (including the interactive/special ones)
+# ---------------------------------------------------------------------------
+#
+# The orchestrator now emits a terminal STEP_COMPLETED / STEP_FAILED for every
+# step type — including the interactive DISCOVERY / CONFIRM steps, PLAN and
+# SUMMARIZE that used to be excluded. HistorySink MUST persist them all (so the
+# web console gets a report card / the running assistant turn folds), while
+# CliSink MUST skip the interactive/special trio (CONFIRM / DISCOVERY / PLAN)
+# so the CLI output stays byte-identical to the orchestrator's own rendering.
+
+
+def _completed_step(step_type_value: str, step_id: str):
+    from se3.engine.models import Step, StepStatus, StepType
+
+    step = Step(step_id=step_id, step_type=StepType(step_type_value))
+    step.status = StepStatus.COMPLETED
+    step.outputs = {"summary": "done", "refined_description": "x"}
+    return step
+
+
+@pytest.mark.parametrize(
+    "step_type_value, step_id",
+    [
+        ("discovery", "00_discovery_aa"),
+        ("analyze", "01_analyze_bb"),
+        ("plan", "02_plan_cc"),
+        ("confirm", "03_confirm_dd"),
+        ("implement", "04_implement_ee"),
+        ("test", "05_test_ff"),
+        ("self_check", "06_self_check_gg"),
+        ("verify_spec", "07_verify_spec_hh"),
+        ("update_spec", "08_update_spec_ii"),
+        ("version_analyze", "09_version_analyze_jj"),
+        ("commit", "10_commit_kk"),
+        ("summarize", "11_summarize_ll"),
+    ],
+)
+def test_history_sink_persists_terminal_event_for_every_step_type(
+    tmp_path, step_type_value, step_id
+):
+    """HistorySink writes a step_completed line for EVERY step type, including
+    the interactive DISCOVERY / CONFIRM and PLAN / SUMMARIZE steps."""
+    step = _completed_step(step_type_value, step_id)
+    HistorySink(tmp_path).consume(new_event(
+        EventType.STEP_COMPLETED,
+        flow_id="flow-all",
+        step_id=step_id,
+        step_type=step_type_value,
+        step=step,
+    ))
+
+    path = tmp_path / "se3" / "history" / "flow-all" / f"{step_id}.jsonl"
+    assert path.exists(), f"no report line persisted for step type {step_type_value}"
+    rec = json.loads(path.read_text().splitlines()[0])
+    assert rec["type"] == "step_completed"
+    assert rec["step_type"] == step_type_value
+
+
+@pytest.mark.parametrize("step_type_value", ["confirm", "discovery", "plan"])
+def test_cli_sink_skips_interactive_terminal_events(captured_console, step_type_value):
+    """CliSink must NOT render CONFIRM / DISCOVERY / PLAN terminal events — their
+    CLI output is owned by the orchestrator's interactive/special paths, so the
+    CLI stays byte-identical."""
+    step = _completed_step(step_type_value, f"00_{step_type_value}")
+    CliSink().consume(new_event(
+        EventType.STEP_COMPLETED,
+        step_id=step.step_id,
+        step_type=step_type_value,
+        step=step,
+    ))
+    assert captured_console.export_text() == ""
+
+
+def test_cli_skips_but_history_persists_same_interactive_event(tmp_path, captured_console):
+    """The same DISCOVERY terminal event is skipped by CliSink (no CLI output)
+    yet persisted by HistorySink (web report card) — the two sinks diverge
+    exactly as the spec requires."""
+    step = _completed_step("discovery", "00_discovery_zz")
+    event = new_event(
+        EventType.STEP_COMPLETED,
+        flow_id="flow-z",
+        step_id="00_discovery_zz",
+        step_type="discovery",
+        step=step,
+    )
+
+    CliSink().consume(event)
+    HistorySink(tmp_path).consume(event)
+
+    # CLI rendered nothing.
+    assert captured_console.export_text() == ""
+    # History persisted the report record.
+    path = tmp_path / "se3" / "history" / "flow-z" / "00_discovery_zz.jsonl"
+    assert path.exists()
+    rec = json.loads(path.read_text().splitlines()[0])
+    assert rec["type"] == "step_completed"
+    assert rec["step_type"] == "discovery"
+
+
+def test_history_sink_persists_partial_completion_as_step_completed(tmp_path):
+    """A PARTIAL terminal result is persisted as a step_completed record (only
+    FAILED maps to step_failed); the report card still renders."""
+    from se3.engine.models import StepStatus
+
+    step = _completed_step("implement", "04_implement_partial")
+    step.status = StepStatus.PARTIAL
+    HistorySink(tmp_path).consume(new_event(
+        EventType.STEP_COMPLETED,
+        flow_id="flow-p",
+        step_id="04_implement_partial",
+        step_type="implement",
+        step=step,
+    ))
+    path = tmp_path / "se3" / "history" / "flow-p" / "04_implement_partial.jsonl"
+    rec = json.loads(path.read_text().splitlines()[0])
+    assert rec["type"] == "step_completed"
+    assert rec["data"]["step"]["status"] == "partial"

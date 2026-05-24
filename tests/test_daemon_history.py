@@ -754,3 +754,98 @@ def test_enumerate_dedups_and_sorts(tmp_path):
 def test_enumerate_handles_empty_input():
     assert enumerate_historical_project_roots() == []
     assert enumerate_historical_project_roots([]) == []
+
+
+# --------------------------------------------------------------------------
+# active_flow_signature — the "result JSON arrived" incremental-push signal
+# --------------------------------------------------------------------------
+#
+# The web console's running-flow paradigm needs a running assistant turn to flip
+# from inline thinking to a folded result within one push cycle the moment the
+# result JSON lands. The daemon client drives history pushes off
+# ``active_flow_signature``: when a new record (the assistant result, or the
+# step_completed report line) is appended to a live flow's jsonl, the signature
+# MUST change so a push is triggered — even when two writes land inside the
+# filesystem's mtime resolution (hence the byte-size component). A terminal flow
+# has nothing left to stream and MUST be excluded.
+
+
+def test_active_flow_signature_changes_when_result_record_appended(tmp_path):
+    """Appending a record to a live flow's jsonl changes its signature so the
+    daemon pushes the new result within one cycle (thinking -> folded)."""
+    _write_engine(tmp_path, "live", "RUNNING")
+    jsonl = tmp_path / "se3" / "history" / "live" / "01_discovery.jsonl"
+    _write_jsonl(jsonl, [_msg("user", "q1", step_type="discovery")])
+
+    reader = _make_reader(tmp_path)
+    before = reader.active_flow_signature()
+    assert "live" in before
+
+    # The assistant's result JSON arrives — a new record is appended.
+    _append_jsonl(
+        jsonl,
+        [_msg("assistant", '{"mode":"question","content":"ok"}', step_type="discovery")],
+    )
+
+    after = reader.active_flow_signature()
+    assert after["live"] != before["live"], (
+        "signature must change on append so the push fires within one cycle"
+    )
+
+
+def test_active_flow_signature_changes_on_new_step_file(tmp_path):
+    """A brand-new per-step jsonl (e.g. the step_completed report card file)
+    also moves the signature forward."""
+    _write_engine(tmp_path, "live", "RUNNING")
+    hist = tmp_path / "se3" / "history" / "live"
+    _write_jsonl(hist / "01_analyze.jsonl", [_msg("assistant", "a0")])
+
+    reader = _make_reader(tmp_path)
+    before = reader.active_flow_signature()
+
+    # A new step's report card lands as a fresh jsonl file.
+    _write_jsonl(
+        hist / "02_plan.jsonl",
+        [{"type": "step_completed", "step_id": "02_plan", "step_type": "plan"}],
+    )
+
+    after = reader.active_flow_signature()
+    assert after["live"] != before["live"]
+
+
+def test_active_flow_signature_stable_without_changes(tmp_path):
+    """No on-disk change -> identical signature (no spurious push)."""
+    _write_engine(tmp_path, "live", "RUNNING")
+    _write_jsonl(
+        tmp_path / "se3" / "history" / "live" / "01_analyze.jsonl",
+        [_msg("assistant", "a0")],
+    )
+    reader = _make_reader(tmp_path)
+    assert reader.active_flow_signature() == reader.active_flow_signature()
+
+
+def test_active_flow_signature_excludes_terminal_flow(tmp_path):
+    """A completed flow has nothing left to stream and is excluded."""
+    _write_engine(tmp_path, "done", "completed")
+    _write_jsonl(
+        tmp_path / "se3" / "history" / "done" / "01_analyze.jsonl",
+        [_msg("assistant", "a0")],
+    )
+    reader = _make_reader(tmp_path)
+    assert "done" not in reader.active_flow_signature()
+
+
+def test_active_flow_signature_tracks_status_flip(tmp_path):
+    """The signature folds in engine.json status, so a PAUSED->RUNNING resume
+    flip (around a discovery answer) is observed as a change."""
+    _write_engine(tmp_path, "live", "PAUSED")
+    _write_jsonl(
+        tmp_path / "se3" / "history" / "live" / "01_discovery.jsonl",
+        [_msg("user", "q1", step_type="discovery")],
+    )
+    reader = _make_reader(tmp_path)
+    paused_sig = reader.active_flow_signature()
+
+    _write_engine(tmp_path, "live", "RUNNING")
+    running_sig = reader.active_flow_signature()
+    assert running_sig["live"] != paused_sig["live"]
