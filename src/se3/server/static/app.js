@@ -894,7 +894,18 @@ function updateReplyBox(flow) {
   }
 
   // Optional context payload — preformatted, no max-height cap.
-  if (target.context != null && target.context !== "") {
+  //
+  // discovery_confirm: the prompt already embeds the refined task description
+  // ("Proposed task description: …"), and the backend mirrors that same text
+  // into context.refined_description. Rendering the context block here would
+  // therefore duplicate the proposed description below the prompt, so we skip
+  // it for this kind only. All other kinds (call / interjection / cli_confirm /
+  // retry_decision) keep rendering their context block unchanged.
+  if (
+    target.kind !== "discovery_confirm" &&
+    target.context != null &&
+    target.context !== ""
+  ) {
     const ctxBlock = el("div", "flow-reply-context-block");
     ctxBlock.append(
       el("span", "flow-reply-context-label", "context"),
