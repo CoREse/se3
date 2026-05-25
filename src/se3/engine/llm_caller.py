@@ -247,7 +247,23 @@ class StreamJSONTracker:
     # Maximum number of cached tool entries before oldest are evicted
     _MAX_CACHE_SIZE = 100
 
-    def __init__(self, stream_prefix: str = '', project_root: Optional[Path] = None):
+    # Coalesce streamed assistant text/thinking into batched progress lines:
+    # a run of small text chunks is flushed as ONE stream_progress record once
+    # it crosses this many characters (or when a non-text semantic event or the
+    # stream end forces a flush). This keeps progress writes at semantic-event
+    # granularity rather than one append per tiny chunk (the acceptance
+    # criterion "非逐字节行").
+    _PROGRESS_FLUSH_CHARS = 200
+
+    def __init__(
+        self,
+        stream_prefix: str = '',
+        project_root: Optional[Path] = None,
+        flow_id: Optional[str] = None,
+        step_id: Optional[str] = None,
+        step_type: str = '',
+        attempt: int = 0,
+    ):
         self.stream_prefix = stream_prefix
         self.message_count = 0
         self.tool_calls = []
@@ -261,6 +277,63 @@ class StreamJSONTracker:
         self._tool_use_id_to_old_content: Dict[str, Optional[str]] = {}  # Cache Write target file content
         self._touched_files: Set[str] = set()
         self._project_root = project_root
+        # Flow context for incremental progress recording. Progress lines are
+        # only written when BOTH flow_id and step_id are set (the same gate
+        # LLMCaller uses for record_prompt / record_response); without them the
+        # tracker behaves exactly as before (stdout rendering only).
+        self._flow_id = flow_id
+        self._step_id = step_id
+        self._step_type = step_type or ''
+        self._attempt = attempt
+        # Pending coalesced text/thinking awaiting a flush.
+        self._progress_text_buf: List[str] = []
+        self._progress_text_len = 0
+
+    @property
+    def _progress_enabled(self) -> bool:
+        return bool(self._flow_id and self._step_id)
+
+    def _emit_progress(self, content: str, raw_obj: Any) -> None:
+        """Append one in-progress line to the step jsonl (best-effort).
+
+        No-op unless flow context is set. A write failure is swallowed so the
+        in-flight LLM stream is never disrupted by history I/O.
+        """
+        if not self._progress_enabled or not content:
+            return
+        try:
+            from .chat_history import record_stream_progress
+
+            record_stream_progress(
+                self._project_root or Path.cwd(),
+                self._flow_id,
+                self._step_id,
+                self._step_type,
+                content,
+                raw_obj,
+                self._attempt,
+            )
+        except Exception:  # pragma: no cover - defensive; never break the stream
+            logger.debug("Failed to record stream progress", exc_info=True)
+
+    def _buffer_progress_text(self, text: str) -> None:
+        """Accumulate streamed text/thinking; flush when it crosses the batch
+        threshold so writes stay at semantic-event granularity."""
+        if not self._progress_enabled or not text:
+            return
+        self._progress_text_buf.append(text)
+        self._progress_text_len += len(text)
+        if self._progress_text_len >= self._PROGRESS_FLUSH_CHARS:
+            self._flush_progress_text()
+
+    def _flush_progress_text(self) -> None:
+        """Emit any buffered text/thinking as a single coalesced progress line."""
+        if not self._progress_text_buf:
+            return
+        content = "".join(self._progress_text_buf)
+        self._progress_text_buf = []
+        self._progress_text_len = 0
+        self._emit_progress(content, None)
 
     def _handle_tool_result(self, tool_use_id: str, content: Any, is_error: bool) -> None:
         """Handle a single tool_result event.
@@ -271,9 +344,12 @@ class StreamJSONTracker:
         self.tool_results.append(tool_use_id)
         tool_name = self._tool_use_id_to_name.get(tool_use_id, '')
 
+        # Flush pending text first so the recorded progress order matches stdout.
+        self._flush_progress_text()
         if is_error:
             error_preview = truncate_preview(str(content)) if content else "Unknown error"
             print(f"  {self.stream_prefix}[llm-stream] ❌ Tool error: {error_preview}...")
+            self._emit_progress(f"❌ Tool error: {error_preview}", None)
             # Clean up caches for failed tool calls to prevent leaks
             self._tool_use_id_to_input.pop(tool_use_id, None)
             self._tool_use_id_to_old_content.pop(tool_use_id, None)
@@ -281,6 +357,7 @@ class StreamJSONTracker:
         else:
             preview = format_tool_result_preview(tool_name, content)
             print(f"  {self.stream_prefix}[llm-stream] ✅ {preview}...")
+            self._emit_progress(f"✅ {preview}", None)
             # Render diff for Edit/Write tools
             cached_input = self._tool_use_id_to_input.pop(tool_use_id, None)
             old_content = self._tool_use_id_to_old_content.pop(tool_use_id, None)
@@ -319,12 +396,15 @@ class StreamJSONTracker:
                                 # Stream full text content directly
                                 print(text, end='', flush=True)
                                 self._last_ended_with_newline = text.endswith('\n')
+                                # Buffer for incremental progress (coalesced).
+                                self._buffer_progress_text(text)
                         elif item_type == 'thinking':
                             thinking = item.get('thinking', '')
                             if thinking:
                                 # Stream thinking content in gray italic
                                 print(f"{GRAY}{ITALIC}{thinking}{RESET}", end='', flush=True)
                                 self._last_ended_with_newline = thinking.endswith('\n')
+                                self._buffer_progress_text(thinking)
                         elif item_type == 'tool_use':
                             name = item.get('name', 'unknown')
                             tool_input = item.get('input', {})
@@ -366,6 +446,11 @@ class StreamJSONTracker:
                                 print()
                             print(f"  {self.stream_prefix}[llm-stream] 🔧 {preview}...")
                             self._last_ended_with_newline = True
+                            # Flush any pending text first so progress lines keep
+                            # the same order the user sees on stdout, then record
+                            # the tool_use as its own semantic progress line.
+                            self._flush_progress_text()
+                            self._emit_progress(f"🔧 {preview}", item)
 
             elif msg_type == 'tool_result':
                 # Legacy top-level tool_result format (backward compat)
@@ -389,6 +474,8 @@ class StreamJSONTracker:
             elif msg_type == 'error':
                 error_msg = data.get('error', 'Unknown error')
                 print(f"  {self.stream_prefix}[llm-stream] ❌ Error: {truncate_preview(str(error_msg))}")
+                self._flush_progress_text()
+                self._emit_progress(f"❌ Error: {truncate_preview(str(error_msg))}", None)
                 self._last_ended_with_newline = True
 
         except json.JSONDecodeError:
@@ -412,6 +499,9 @@ class StreamJSONTracker:
 
     def print_summary(self) -> None:
         """Print final summary of the stream."""
+        # Flush any trailing buffered text as a last progress line before the
+        # stream's final result is recorded by LLMCaller._record_response.
+        self._flush_progress_text()
         duration = time.time() - self.start_time
         print(f"  {self.stream_prefix}[llm-stream] ✓ Stream complete: {self.message_count} messages, "
               f"{len(self.tool_calls)} tool calls, {self.total_text_len} chars "
@@ -1085,9 +1175,22 @@ class LLMCaller:
                     )
                 else:
                     set_project_root(self.project_root)
+                    # Pass flow context so the tracker can flush in-progress
+                    # process lines to the step jsonl BEFORE the final result is
+                    # recorded — the daemon's incremental reader then forwards
+                    # them so the web console shows the running step line by line.
+                    # Only step paths with flow_id/step_id (i.e. caller.call from
+                    # the state machine) write progress; ad-hoc callers (no
+                    # flow_id/step_id) keep the prior stdout-only behavior. The
+                    # on_output!=None branch above is unchanged: no current step
+                    # routes through it.
                     stream_tracker = StreamJSONTracker(
                         stream_prefix=self.stream_prefix,
                         project_root=self.project_root,
+                        flow_id=self.flow_id,
+                        step_id=self.step_id,
+                        step_type=self.step_type,
+                        attempt=self.external_attempt,
                     )
 
                     def on_stream_output(line: str) -> None:

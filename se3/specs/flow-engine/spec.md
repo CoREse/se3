@@ -966,7 +966,8 @@ The markdown body is the single source of truth; it MAY be iterated independentl
 **核心功能：**
 - `record_prompt()` — 记录发送的 prompt
 - `record_response()` — 记录 LLM 原始回应
-- `format_history_for_retry()` — 为重试格式化之前的对话上下文
+- `record_stream_progress()` — 在 LLM 出最终结果**之前**，把当前步骤的进行过程内容以 partial 记录逐次整行追加到 per-step jsonl，供 daemon 增量读取与 WS 推送做实时逐行呈现。每条 partial 记录形如 `{type: 'stream_progress', role: 'assistant', step_type, content, raw_json: [<obj>], timestamp, attempt, partial: true}`（`raw_json` 为单元素数组），采用与 `record_step_event` 相同的「一次写一整行」原子追加语义，使每行在落盘后即可被增量 reader 完整读到。与最终结果通过 `(step_id, attempt)` 同组：终态（非 partial）assistant 记录到达后，前端按该 turn 折叠移除过程气泡（见 running-flow-console *Three-Tier Progressive Disclosure*）
+- `format_history_for_retry()` — 为重试格式化之前的对话上下文（跳过 `stream_progress` 记录，避免重试 prompt 被过程行膨胀，与既有跳过 `step_completed` / `step_failed` 事件同模式）
 - `extract_assistant_text()` — 从 NDJSON 提取 assistant 文本内容
 - `segment_prompt()` — 将 prompt 拆分为标注段落，用于结构化展示
 - `render_session_detailed()` — 渲染带结构化 prompt 和 response 的 Rich 可视输出
@@ -1008,6 +1009,17 @@ The markdown body is the single source of truth; it MAY be iterated independentl
 - **THEN** 将每行解析为 dict 并存储为数组
 - **AND** 避免双重编码（不再将 JSON 转为字符串存储）
 - **AND** 可直接用 jq 等工具查询历史记录
+
+#### Scenario: 进行过程在出结果前逐行落盘
+- **WHEN** 某步骤的 LLM 调用在产出最终 JSON 结果之前持续生成进行过程内容
+- **THEN** `record_stream_progress()` 把过程内容以 `type: 'stream_progress'`、`partial: true` 记录逐次整行追加到 `se3/history/{flow_id}/{step_id}.jsonl`
+- **AND** 每条 partial 记录的 `attempt` 与最终结果记录一致，使二者按 `(step_id, attempt)` 同组
+- **AND** 过程行在最终结果记录写入之前即已落盘，可被 daemon 增量 reader 完整读取并经 WS 推送
+
+#### Scenario: CLI 历史与重试上下文跳过 stream_progress 记录
+- **WHEN** `get_step_history()` 渲染历史，或 `format_history_for_retry()` 构造重试上下文
+- **THEN** 二者跳过 `stream_progress`（partial）记录，与既有跳过 `step_completed` / `step_failed` 事件同模式
+- **AND** CLI 历史不重复渲染过程行，重试 prompt 不被过程行膨胀
 
 #### Scenario: 重试时注入对话上下文
 - **WHEN** LLM 调用失败并重试

@@ -197,6 +197,60 @@ def record_step_event(
         logger.warning("Failed to record step event for %s: %s", step_id, exc)
 
 
+def record_stream_progress(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    step_type: str,
+    content: str,
+    raw_obj: Any,
+    attempt: int,
+    timestamp: Optional[str] = None,
+) -> None:
+    """Append a single in-progress (partial) stream line to the step jsonl.
+
+    Unlike :func:`record_response`, which writes the *final* result once a turn
+    completes, this writes process content **incrementally, before the final
+    result lands** — each semantic stream event (assistant text/thinking block,
+    tool_use, tool_result) is flushed as its own line as it streams. The
+    daemon's incremental reader (``DaemonHistoryReader.read_flow``) picks the
+    new line up on its next cursor advance and forwards it over the existing
+    ``history_data`` push channel, so the web console can render the running
+    step's output line by line instead of staring at a blank step until the
+    final JSON arrives.
+
+    The line is a self-contained dict (not a :class:`ChatMessage`) carrying
+    ``type='stream_progress'`` and ``partial=True`` so the frontend can group
+    it under its turn and fold it away once the final assistant result for the
+    same ``(step_id, attempt)`` arrives. ``get_step_history`` (and therefore
+    ``format_history_for_retry``) skips ``stream_progress`` lines so CLI
+    history rendering and retry-context construction never ingest the
+    intermediate process.
+
+    Follows :func:`record_step_event`'s write semantics — ``mkdir`` + a single
+    whole-line ``write`` (so a half-written final line cannot corrupt earlier
+    lines) wrapped in an ``OSError`` guard so a write failure never breaks the
+    in-flight LLM call.
+    """
+    record = {
+        "type": "stream_progress",
+        "role": "assistant",
+        "step_type": step_type,
+        "content": content,
+        "raw_json": [raw_obj] if raw_obj is not None else [],
+        "timestamp": timestamp or datetime.now().isoformat(),
+        "attempt": attempt,
+        "partial": True,
+    }
+    path = _history_file(project_root, flow_id, step_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("Failed to record stream progress for %s: %s", step_id, exc)
+
+
 def get_step_history(
     project_root: Path, flow_id: str, step_id: str
 ) -> Optional[ChatSession]:
@@ -219,6 +273,15 @@ def get_step_history(
                 "step_completed",
                 "step_failed",
             ) and "role" not in data:
+                continue
+            # Stream-progress records (written by record_stream_progress) carry
+            # a ``role`` field and would otherwise deserialize as a ChatMessage,
+            # so they must be skipped explicitly. They are the *intermediate*
+            # process for a turn whose final result is recorded separately by
+            # record_response; CLI history and retry-context construction
+            # (format_history_for_retry, which reads through get_step_history)
+            # MUST NOT ingest them.
+            if isinstance(data, dict) and data.get("type") == "stream_progress":
                 continue
             msg = ChatMessage.from_dict(data)
             messages.append(msg)

@@ -23,7 +23,7 @@ Every point in a running flow that needs a human in the loop — a pending MCP
 call, a Ctrl-C mid-flow interjection, a retry/failure decision, or a CLI
 subprocess confirmation prompt — is surfaced as a status chip on the docked
 reply bar, never as an inline card in the chat-stream. Selecting a chip
-expands that intervention's full prompt / context / options directly above the
+expands that intervention's full prompt / options directly above the
 reply textarea and enables that same textarea as the reply input; this mirrors
 the CLI's "you can only type when stdin is being read" behavior. The view is
 implemented in `app.js` and shares the conversation rendering engine
@@ -134,10 +134,11 @@ stacked parts, all sitting below the conversation:
    preserved on a hidden `data-call-id` attribute and inside the chip's
    `title` hover tooltip for developer debugging only.
 2. **Reply context panel** — when a chip is selected, the panel above the
-   textarea expands the selected intervention's full prompt (Markdown
-   rendered), optional context block (no `max-height` truncation), and any
-   `options` action buttons. When no chip is selected the panel is empty or
-   shows a brief "no pending interaction" hint.
+   textarea renders, for **every** intervention kind, only the intervention's
+   kind header, its full prompt (Markdown rendered), and any `options` action
+   buttons. It MUST NOT render a separate `context` block — the panel never
+   duplicates context text that the prompt already carries. When no chip is
+   selected the panel is empty or shows a brief "no pending interaction" hint.
 3. **Reply input row** — a single horizontal row carrying three elements,
    left-to-right: an inline **Interject icon button**, the **reply
    textarea**, and the **send button**. The Interject button is a compact
@@ -198,15 +199,15 @@ settles.
 - **WHEN** the running flow has at least one pending intervention and the
   user selects its chip in the docked chip bar
 - **THEN** the reply context panel above the textarea expands the
-  intervention's full kind header, Markdown-rendered prompt, optional
-  untruncated context block, and any `options` action buttons
+  intervention's full kind header, Markdown-rendered prompt, and any
+  `options` action buttons (no separate context block)
 - **AND** the reply textarea and submit control become enabled
 - **AND** the reply area clearly states which intervention it is targeting
 
 #### Scenario: Pending interventions do not appear as cards in chat-stream
 - **WHEN** a running flow has one or more pending interventions
 - **THEN** they appear only as chips in the docked reply bar (with the full
-  prompt/context/options expanded above the reply textarea on selection)
+  prompt/options expanded above the reply textarea on selection)
 - **AND** they MUST NOT also be rendered as message cards inside the
   conversation chat-stream
 
@@ -239,10 +240,10 @@ literal pattern `call <id>` MUST NOT appear in the chip's visible text. The
 underlying call identifier, when retained for debugging, lives only on hidden
 DOM attributes (e.g. `data-call-id`) and `title` hover tooltips, not in any
 text node a screen reader or sighted user can read. Selecting a chip expands
-that intervention's full `prompt` (Markdown rendered), optional `context`
-block (no truncation), and any `options` action buttons inside the reply
-context panel above the shared reply textarea. The same reply textarea is
-the single input surface for every intervention kind.
+that intervention's full `prompt` (Markdown rendered) and any `options` action
+buttons inside the reply context panel above the shared reply textarea; the
+panel MUST NOT render a separate `context` block for any kind. The same reply
+textarea is the single input surface for every intervention kind.
 
 The recognized intervention kinds are at least: (1) a pending MCP call
 (`call`); (2) a post-Ctrl-C mid-flow interjection (`interjection`); (3) a
@@ -270,14 +271,16 @@ frontend MUST guarantee the confirm button even when the backend call file
 omitted the `options` array — it synthesizes a single confirm option whose
 value is `"1"` so the button and the textual hint always coexist.
 
-Because the `discovery_confirm` `prompt` already embeds the refined task
-description (`Proposed task description: …`) and the backend mirrors the same
-text into `context.refined_description`, the reply context panel MUST NOT also
-render the `context` block for a `discovery_confirm` chip — doing so would
-duplicate the proposed description directly below the prompt. This context
-suppression is scoped to `discovery_confirm` only; every other kind (`call` /
-`interjection` / `retry_decision` / `cli_confirm`) continues to render its
-`context` block unchanged when one is present.
+The reply context panel MUST NOT render a separate `context` block for **any**
+intervention kind. The `context` text duplicates information the `prompt`
+already carries (e.g. a `discovery_confirm` whose `prompt` embeds the refined
+task description and whose backend also mirrors it into
+`context.refined_description`), so rendering it would repeat the same content
+directly below the prompt. This context suppression is **uniform across all
+kinds** (`call` / `interjection` / `retry_decision` / `cli_confirm` /
+`discovery_confirm`); `discovery_confirm` is no longer a special case — every
+kind renders only the kind header, the Markdown prompt, and any `options`
+buttons.
 
 A synthetic `interjection` chip is **opt-in**, not always-on: an active flow
 that is not already waiting on a real interjection MUST render an inline
@@ -323,15 +326,16 @@ untouched.
 - **WHEN** the user selects the chip
 - **THEN** the reply context panel renders the prompt and the confirm
   affordances but does NOT render the `context` block beneath the prompt
-- **AND** for any other intervention kind (`call` / `interjection` /
-  `retry_decision` / `cli_confirm`) the `context` block is still rendered when
-  one is present
+- **AND** every other intervention kind (`call` / `interjection` /
+  `retry_decision` / `cli_confirm`) likewise renders no `context` block — the
+  context suppression is uniform across all kinds, not a `discovery_confirm`
+  special case
 
-#### Scenario: Selecting a chip expands its full context above the textarea
+#### Scenario: Selecting a chip expands its prompt and options above the textarea
 - **WHEN** the user selects an intervention chip
 - **THEN** the reply context panel above the textarea shows the
-  intervention's full kind header, Markdown-rendered `prompt`, optional
-  untruncated `context` block, and any `options` action buttons
+  intervention's full kind header, Markdown-rendered `prompt`, and any
+  `options` action buttons — and renders no separate `context` block
 - **AND** the reply textarea + send button are enabled
 - **AND** the same textarea is reused as the reply input regardless of
   intervention kind

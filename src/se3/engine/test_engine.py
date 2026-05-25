@@ -419,5 +419,142 @@ class TestStateTransitions:
             assert call_count == 2
 
 
+class TestStreamProgressHistory:
+    """Cover record_stream_progress writing + skipping, and daemon incremental
+    reads over in-progress (partial) lines (flow-engine Chat History)."""
+
+    def _step(self):
+        # jsonl stem follows the NN_<step_type>_<hash> convention so the daemon
+        # reader can parse the authoritative step_type from the file name.
+        return "01_discovery_abc12345"
+
+    def test_record_stream_progress_writes_partial_line(self):
+        from . import chat_history
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            step_id = self._step()
+            raw_obj = {"type": "assistant", "message": {"content": "x"}}
+            chat_history.record_stream_progress(
+                root, "flow1", step_id, "discovery", "🔧 Read: foo.py",
+                raw_obj, attempt=0,
+            )
+            path = root / "se3" / "history" / "flow1" / f"{step_id}.jsonl"
+            lines = path.read_text(encoding="utf-8").strip().split("\n")
+            assert len(lines) == 1
+            rec = json.loads(lines[0])
+            assert rec["type"] == "stream_progress"
+            assert rec["role"] == "assistant"
+            assert rec["partial"] is True
+            assert rec["step_type"] == "discovery"
+            assert rec["content"] == "🔧 Read: foo.py"
+            assert rec["raw_json"] == [raw_obj]
+            assert rec["attempt"] == 0
+            assert "timestamp" in rec
+
+    def test_get_step_history_skips_stream_progress(self):
+        from . import chat_history
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            step_id = self._step()
+            chat_history.record_prompt(root, "flow1", step_id, "discovery", "do it", 0)
+            chat_history.record_stream_progress(
+                root, "flow1", step_id, "discovery", "PARTIAL_ONLY", None, attempt=0,
+            )
+            # Final assistant result (NDJSON with a text block).
+            ndjson = json.dumps(
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": "FINAL"}]}}
+            )
+            chat_history.record_response(root, "flow1", step_id, "discovery", ndjson, 0)
+
+            session = chat_history.get_step_history(root, "flow1", step_id)
+            assert session is not None
+            roles = [m.role for m in session.messages]
+            # Only the user prompt + the final assistant turn survive; the
+            # stream_progress line is skipped.
+            assert roles == ["user", "assistant"]
+            assert all("PARTIAL_ONLY" not in m.content for m in session.messages)
+
+    def test_format_history_for_retry_skips_stream_progress(self):
+        from . import chat_history
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            step_id = self._step()
+            chat_history.record_prompt(root, "flow1", step_id, "discovery", "do it", 0)
+            chat_history.record_stream_progress(
+                root, "flow1", step_id, "discovery", "PARTIAL_ONLY", None, attempt=0,
+            )
+            ndjson = json.dumps(
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": "FINAL"}]}}
+            )
+            chat_history.record_response(root, "flow1", step_id, "discovery", ndjson, 0)
+
+            ctx = chat_history.format_history_for_retry(root, "flow1", step_id)
+            assert ctx is not None
+            assert "PARTIAL_ONLY" not in ctx
+
+    def test_truncated_last_line_does_not_break_reads(self):
+        from . import chat_history
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            step_id = self._step()
+            chat_history.record_prompt(root, "flow1", step_id, "discovery", "do it", 0)
+            chat_history.record_stream_progress(
+                root, "flow1", step_id, "discovery", "P1", None, attempt=0,
+            )
+            # Simulate a half-written final line (e.g. process killed mid-write).
+            path = root / "se3" / "history" / "flow1" / f"{step_id}.jsonl"
+            with path.open("a", encoding="utf-8") as f:
+                f.write('{"type": "stream_progress", "content": "broke')  # no newline, no close
+            # Earlier valid lines still parse; the malformed tail is skipped.
+            session = chat_history.get_step_history(root, "flow1", step_id)
+            assert session is not None
+            assert [m.role for m in session.messages] == ["user"]
+
+    def test_read_flow_incremental_cursor_over_progress(self):
+        """The daemon reader advances its per-file cursor across progress lines
+        without losing or re-emitting any record."""
+        from . import chat_history
+        from ..daemon.history import DaemonHistoryReader
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            step_id = self._step()
+            fname = f"{step_id}.jsonl"
+            reader = DaemonHistoryReader(lambda: [str(root)])
+
+            # First two progress lines.
+            chat_history.record_stream_progress(root, "flow1", step_id, "discovery", "P1", None, 0)
+            chat_history.record_stream_progress(root, "flow1", step_id, "discovery", "P2", None, 0)
+
+            first = reader.read_flow("flow1", cursor=None)
+            assert first.mode == "full"
+            assert [r["message"]["content"] for r in first.records] == ["P1", "P2"]
+            # Authoritative step_type parsed from the file name.
+            assert all(r["step_type"] == "discovery" for r in first.records)
+            assert first.cursor[fname] == 2
+
+            # One more progress line + the final result.
+            chat_history.record_stream_progress(root, "flow1", step_id, "discovery", "P3", None, 0)
+            ndjson = json.dumps(
+                {"type": "assistant", "message": {"content": [{"type": "text", "text": "FINAL"}]}}
+            )
+            chat_history.record_response(root, "flow1", step_id, "discovery", ndjson, 0)
+
+            second = reader.read_flow("flow1", cursor=first.cursor)
+            assert second.mode == "append"
+            # Exactly the two NEW lines — no dup of P1/P2, no loss of P3/final.
+            contents = [r["message"].get("content") for r in second.records]
+            assert "P1" not in contents and "P2" not in contents
+            assert "P3" in contents
+            types = [r["message"].get("type") for r in second.records]
+            assert "stream_progress" in types  # P3
+            assert len(second.records) == 2
+            assert second.cursor[fname] == 4
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

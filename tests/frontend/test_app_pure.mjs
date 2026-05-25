@@ -1157,6 +1157,126 @@ check("renderConversation: a shorter records array rebuilds rather than stalling
   assert.ok(body && body.textContent.includes("only"));
 });
 
+// -- stream_progress (partial) normalization + supersede folding ------------
+//
+// Daemon-forwarded partial records ride the same {step_id, step_type, message}
+// envelope; the inner message carries type:'stream_progress' / partial:true.
+// They render live (line by line) while a step thinks, then fold away once the
+// turn's final (non-partial) assistant result for the same (step_id, attempt)
+// arrives.
+const partialRecord = (content, ts, stepId, stepType, attempt) => ({
+  step_id: stepId,
+  step_type: stepType,
+  message: {
+    type: "stream_progress",
+    role: "assistant",
+    content,
+    timestamp: ts,
+    attempt,
+    partial: true,
+  },
+});
+const finalRecord = (content, ts, stepId, stepType, attempt) => ({
+  step_id: stepId,
+  step_type: stepType,
+  message: { role: "assistant", content, timestamp: ts, attempt },
+});
+
+check("normalizeRecord flags stream_progress as a partial assistant record", () => {
+  const norm = app.normalizeRecord(partialRecord("thinking…", 1, "s1", "discovery", 0));
+  assert.equal(norm.role, "assistant");
+  assert.equal(norm.partial, true);
+  assert.equal(norm.content, "thinking…");
+  assert.equal(norm.stepType, "discovery");
+});
+check("normalizeRecord also honors an explicit partial:true without the type tag", () => {
+  const norm = app.normalizeRecord({
+    step_id: "s1", step_type: "analyze",
+    message: { role: "assistant", content: "x", partial: true },
+  });
+  assert.equal(norm.partial, true);
+  assert.equal(norm.role, "assistant");
+});
+check("normalizeRecord leaves an ordinary record non-partial", () => {
+  const norm = app.normalizeRecord(finalRecord("done", 2, "s1", "discovery", 0));
+  assert.equal(norm.role, "assistant");
+  assert.equal(norm.partial, false);
+});
+
+check("markSupersededProgress: partials with no final turn supersede nothing", () => {
+  const superseded = app.markSupersededProgress([
+    partialRecord("p1", 1, "s1", "discovery", 0),
+    partialRecord("p2", 2, "s1", "discovery", 0),
+  ]);
+  assert.equal(superseded.size, 0);
+});
+check("markSupersededProgress: a final result supersedes its turn's partials", () => {
+  const superseded = app.markSupersededProgress([
+    partialRecord("p1", 1, "s1", "discovery", 0),  // idx 0
+    partialRecord("p2", 2, "s1", "discovery", 0),  // idx 1
+    finalRecord("result", 3, "s1", "discovery", 0), // idx 2 — terminal
+  ]);
+  // Both partials (0,1) are superseded; the final (2) is not.
+  assert.deepEqual([...superseded].sort((a, b) => a - b), [0, 1]);
+});
+check("markSupersededProgress: only same (stepId, attempt) partials fold", () => {
+  const superseded = app.markSupersededProgress([
+    partialRecord("a-p", 1, "s1", "discovery", 0),   // idx 0 — folds
+    partialRecord("b-p", 2, "s2", "analyze", 0),     // idx 1 — different step, stays
+    partialRecord("a2-p", 3, "s1", "discovery", 1),  // idx 2 — different attempt, stays
+    finalRecord("a-final", 4, "s1", "discovery", 0), // idx 3 — terminal for (s1,0)
+  ]);
+  assert.deepEqual([...superseded], [0]);
+});
+check("markSupersededProgress: a later round's partials stay live despite an earlier final on the same (stepId, attempt) key", () => {
+  // Multi-round discovery / fix-loop implement re-run the SAME step_id with
+  // retry_count reset to 0, so round 1's final and round 2's freshly-streaming
+  // partials share the identical (s1, attempt=0) key. Round 2's progress must
+  // remain visible until its OWN final lands — only round 1's partials fold.
+  const superseded = app.markSupersededProgress([
+    partialRecord("r1-p1", 1, "s1", "discovery", 0),   // idx 0 — round 1, folds
+    partialRecord("r1-p2", 2, "s1", "discovery", 0),   // idx 1 — round 1, folds
+    finalRecord("r1-final", 3, "s1", "discovery", 0),  // idx 2 — round 1 terminal
+    partialRecord("r2-p1", 4, "s1", "discovery", 0),   // idx 3 — round 2, stays live
+    partialRecord("r2-p2", 5, "s1", "discovery", 0),   // idx 4 — round 2, stays live
+  ]);
+  // Only round 1's partials (0,1) are superseded; round 2's (3,4) stay live.
+  assert.deepEqual([...superseded].sort((a, b) => a - b), [0, 1]);
+});
+check("markSupersededProgress: round 2's partials fold once round 2's own final lands", () => {
+  const superseded = app.markSupersededProgress([
+    partialRecord("r1-p1", 1, "s1", "discovery", 0),   // idx 0 — round 1, folds
+    finalRecord("r1-final", 2, "s1", "discovery", 0),  // idx 1 — round 1 terminal
+    partialRecord("r2-p1", 3, "s1", "discovery", 0),   // idx 2 — round 2, folds
+    partialRecord("r2-p2", 4, "s1", "discovery", 0),   // idx 3 — round 2, folds
+    finalRecord("r2-final", 5, "s1", "discovery", 0),  // idx 4 — round 2 terminal
+  ]);
+  assert.deepEqual([...superseded].sort((a, b) => a - b), [0, 2, 3]);
+});
+
+check("renderConversation: live partials show, then fold away when the result lands", () => {
+  const container = document.createElement("div");
+  // First push: two streamed partial lines for the discovery turn.
+  app.renderConversation(container, [
+    partialRecord("step 1 thinking", 1, "s1", "discovery", 0),
+    partialRecord("step 1 tool use", 2, "s1", "discovery", 0),
+  ], false);
+  assert.equal(describeBubbles(container).length, 2);
+  assert.equal(findAll(container, "conv-partial").length, 2);
+
+  // Append the final result — the partials must be removed, leaving only it.
+  app.renderConversation(container, [
+    partialRecord("step 1 thinking", 1, "s1", "discovery", 0),
+    partialRecord("step 1 tool use", 2, "s1", "discovery", 0),
+    finalRecord("final answer", 3, "s1", "discovery", 0),
+  ], true);
+  const bubbles = describeBubbles(container);
+  assert.equal(bubbles.length, 1, "only the final result bubble should remain");
+  assert.equal(findAll(container, "conv-partial").length, 0);
+  const body = findOne(container, "conv-bubble");
+  assert.ok(body && body.textContent.includes("final answer"));
+});
+
 // -- reconcileReplyTarget (pure): chip-bar selection survival / reset -------
 check("reconcileReplyTarget keeps a still-present selection", () => {
   const entries = [
@@ -1220,17 +1340,18 @@ check("renderInterventions: chips appear, disappear, and the reply box resets", 
   assert.equal(submit.disabled, false);
 });
 
-// -- updateReplyBox: discovery_confirm suppresses the duplicated context block
+// -- updateReplyBox: no kind renders the duplicated context block
 // (item 4) ------------------------------------------------------------------
-// The discovery_confirm prompt already embeds the refined task description
-// ("Proposed task description: …") and the backend mirrors that same text into
-// context.refined_description. Rendering the reply-context <pre> below the
-// prompt would therefore duplicate the proposed description, so updateReplyBox
-// skips the context block for the discovery_confirm kind ONLY — every other
-// kind still renders it. These DOM-stub checks drive the branch through the
-// exported renderInterventions (which calls updateReplyBox) so a future
-// regression — inverting/weakening the kind check, or the backend ceasing to
-// mirror refined_description into context — cannot ship undetected.
+// Every pending intervention's prompt already carries the human-meaningful
+// text the user needs to act on (discovery_confirm embeds the refined task
+// description; the other kinds carry their full prompt), and the backend
+// mirrors the same payload into the prompt. A separate context <pre> below the
+// prompt therefore only duplicated content, so updateReplyBox now suppresses
+// the context block for ALL kinds (matching the prior discovery_confirm-only
+// behavior). These DOM-stub checks drive the branch through the exported
+// renderInterventions (which calls updateReplyBox) so a future regression —
+// re-introducing a per-kind context block — cannot ship undetected. They also
+// assert header / prompt / options rendering is unaffected.
 check("updateReplyBox: discovery_confirm hides the duplicated context block", () => {
   const ctx = document.getElementById("flow-reply-context");
   app.state.flowInterjectRequested = false;
@@ -1250,9 +1371,14 @@ check("updateReplyBox: discovery_confirm hides the duplicated context block", ()
   assert.equal(findOne(ctx, "flow-reply-context-block"), null,
     "discovery_confirm must NOT render the duplicated context block even " +
     "when context is non-empty");
+  // Header / prompt / options rendering is unaffected by context suppression.
+  assert.ok(findOne(ctx, "flow-reply-head"), "header still renders");
+  assert.ok(findOne(ctx, "flow-reply-prompt"), "prompt still renders");
+  assert.ok(findOne(ctx, "flow-reply-options"),
+    "discovery_confirm still synthesizes its confirm option button");
 });
 
-check("updateReplyBox: non-discovery_confirm kinds still render their context block", () => {
+check("updateReplyBox: all kinds suppress the duplicated context block", () => {
   const ctx = document.getElementById("flow-reply-context");
   for (const kind of ["call", "cli_confirm", "retry_decision", "interjection"]) {
     app.state.flowInterjectRequested = false;
@@ -1263,15 +1389,20 @@ check("updateReplyBox: non-discovery_confirm kinds still render their context bl
           call_id: "k_" + kind,
           kind,
           prompt: "please respond",
+          // Non-empty context that the old renderer would have shown as a
+          // <pre> block — it must now be suppressed for every kind.
           context: "CONTEXT_BODY_TOKEN for " + kind,
+          options: [{ label: "OK", value: "ok" }],
         },
       ],
     });
-    const block = findOne(ctx, "flow-reply-context-block");
-    assert.ok(block,
-      kind + " must render its context block when context is non-empty");
-    assert.ok(block.textContent.includes("CONTEXT_BODY_TOKEN"),
-      kind + " context block must carry the context text");
+    assert.equal(findOne(ctx, "flow-reply-context-block"), null,
+      kind + " must NOT render a context block (suppressed for all kinds)");
+    // Header / prompt / options rendering remains intact.
+    assert.ok(findOne(ctx, "flow-reply-head"), kind + " header still renders");
+    assert.ok(findOne(ctx, "flow-reply-prompt"), kind + " prompt still renders");
+    assert.ok(findOne(ctx, "flow-reply-options"),
+      kind + " options still render");
   }
 });
 
@@ -1948,15 +2079,73 @@ check("renderConversation: user marker reply interleaves by ts; step headers onl
   assert.equal(headers.length, 3, "a header at each step boundary");
 });
 
-// -- renderHistoryList: refresh-in-progress feedback ------------------------
-// The history list must distinguish "still refreshing" from "confirmed no
-// history" so opening the view never shows a bare blank page while the
-// /api/history round-trip is in flight.
+// -- historyListEmptyState: loading / connecting / confirmed-empty split ----
+// The history list must split "empty" into three distinct semantics so opening
+// the view never shows a bare empty-state while the daemon is still connecting
+// or has not yet pushed its history_index (the ~1min window before the WS push).
+check("historyListEmptyState: any sessions -> has-sessions", () => {
+  assert.equal(
+    app.historyListEmptyState({
+      sessions: [{ flow_id: "f1" }], loading: false,
+      daemonConnected: false, indexConfirmed: false,
+    }),
+    "has-sessions");
+  // has-sessions short-circuits regardless of the other flags.
+  assert.equal(
+    app.historyListEmptyState({
+      sessions: [{ flow_id: "f1" }], loading: true,
+      daemonConnected: true, indexConfirmed: true,
+    }),
+    "has-sessions");
+});
+
+check("historyListEmptyState: empty + loading -> loading-refresh", () => {
+  assert.equal(
+    app.historyListEmptyState({
+      sessions: [], loading: true,
+      daemonConnected: true, indexConfirmed: true,
+    }),
+    "loading-refresh");
+});
+
+check("historyListEmptyState: empty + no daemon -> loading-connect", () => {
+  assert.equal(
+    app.historyListEmptyState({
+      sessions: [], loading: false,
+      daemonConnected: false, indexConfirmed: false,
+    }),
+    "loading-connect");
+});
+
+check("historyListEmptyState: empty + daemon connected but unconfirmed -> loading-connect", () => {
+  assert.equal(
+    app.historyListEmptyState({
+      sessions: [], loading: false,
+      daemonConnected: true, indexConfirmed: false,
+    }),
+    "loading-connect");
+});
+
+check("historyListEmptyState: empty + connected + confirmed zero -> empty-confirmed", () => {
+  assert.equal(
+    app.historyListEmptyState({
+      sessions: [], loading: false,
+      daemonConnected: true, indexConfirmed: true,
+    }),
+    "empty-confirmed");
+});
+
+// -- renderHistoryList: empty/loading/connect feedback rendered ---------------
 check("renderHistoryList: empty + loading shows the refreshing hint, not the empty state", () => {
   app.state.historySessions = [];
   app.state.historyIndexLoading = true;
+  app.state.machines = [{ machine_id: "m1", online: true }];
+  app.state.historyIndexConfirmed = true;
   app.renderHistoryList();
   const list = document.getElementById("history-list");
+  // loading wins over connect/confirmed even when the daemon is connected.
+  assert.ok(findOne(list, "empty-loading-refresh"),
+    "loading-refresh modifier class must be present");
   const texts = findAll(list, "empty").map((n) => n.textContent);
   assert.ok(texts.some((t) => t.includes("正在刷新历史")),
     "loading hint must be shown");
@@ -1964,16 +2153,36 @@ check("renderHistoryList: empty + loading shows the refreshing hint, not the emp
     "empty state must NOT be shown while loading");
 });
 
-check("renderHistoryList: empty + not loading shows the original empty state", () => {
+check("renderHistoryList: empty + not loading + unconfirmed shows the connecting hint, not the empty state", () => {
   app.state.historySessions = [];
   app.state.historyIndexLoading = false;
+  app.state.machines = [];
+  app.state.historyIndexConfirmed = false;
   app.renderHistoryList();
   const list = document.getElementById("history-list");
+  assert.ok(findOne(list, "empty-loading-connect"),
+    "loading-connect modifier class must be present");
+  const texts = findAll(list, "empty").map((n) => n.textContent);
+  assert.ok(texts.some((t) => t.includes("正在连接") || t.includes("正在等待历史数据")),
+    "connecting/waiting hint must be shown");
+  assert.ok(!texts.some((t) => t.includes("No history sessions reported.")),
+    "empty state must NOT be shown before history is confirmed");
+});
+
+check("renderHistoryList: empty + connected + confirmed shows the confirmed empty state", () => {
+  app.state.historySessions = [];
+  app.state.historyIndexLoading = false;
+  app.state.machines = [{ machine_id: "m1", online: true }];
+  app.state.historyIndexConfirmed = true;
+  app.renderHistoryList();
+  const list = document.getElementById("history-list");
+  assert.ok(findOne(list, "empty-confirmed"),
+    "empty-confirmed modifier class must be present");
   const texts = findAll(list, "empty").map((n) => n.textContent);
   assert.ok(texts.some((t) => t.includes("No history sessions reported.")),
-    "empty state must be shown when not loading");
-  assert.ok(!texts.some((t) => t.includes("正在刷新历史")),
-    "refreshing hint must NOT be shown when not loading");
+    "empty state must be shown once confirmed");
+  assert.ok(!texts.some((t) => t.includes("正在刷新历史") || t.includes("正在连接")),
+    "no loading/connecting hint once confirmed");
 });
 
 check("renderHistoryList: non-empty + loading prepends a refresh bar above the items", () => {

@@ -886,6 +886,16 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 }
 .conv-empty { color: var(--fg-dim); font-style: italic; }
 
+/* In-progress (stream_progress / partial) bubbles: shown live, line by line,
+   while a step is still thinking. Dimmed + a left accent bar so they read as
+   transient process output; they are removed once the turn's final result
+   arrives. */
+.conv-record.conv-partial .conv-bubble {
+  opacity: 0.72;
+  border-style: dashed;
+  border-left: 2px solid rgba(76, 175, 106, 0.55);
+}
+
 /* -- markdown elements ---------------------------------------------- */
 
 .conv-bubble .md-p { margin: 6px 0; }
@@ -1050,6 +1060,12 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 }
 
 .empty { color: var(--fg-dim); font-size: 13px; }
+/* History empty-state variants: the loading/connecting hints read as "in
+ * progress" (accent), while the confirmed-empty state stays muted so the three
+ * are visually distinguishable, not just DOM-distinguishable. */
+.empty-loading-refresh,
+.empty-loading-connect { color: var(--accent); }
+.empty-confirmed { color: var(--fg-dim); }
 .hidden { display: none !important; }
 
 /* -- assistant three-layer progressive disclosure ------------------- */

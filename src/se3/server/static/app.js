@@ -30,6 +30,11 @@ const state = {
   flowInterjectFlowId: null, // flow id the interject opt-in belongs to
   historySessions: [],    // [{flow_id, task_description, status, updated_at, ...}]
   historyIndexLoading: false, // true while /api/history is in flight (refresh)
+  historyIndexConfirmed: false, // true once we've *confirmed* real history data:
+                                // a WS history_index push (even an empty list) or
+                                // a non-empty /api/history return. A 2s empty
+                                // /api/history timeout does NOT confirm — it fires
+                                // before any daemon pushed its index.
   selectedHistoryId: null,// flow whose records are shown in the history detail
   historyRecords: [],     // records currently rendered in the history detail
   connStale: false,       // true while the WS is down — data may be stale
@@ -894,29 +899,14 @@ function updateReplyBox(flow) {
     ctx.appendChild(el("p", "flow-reply-hint", meta.hint));
   }
 
-  // Optional context payload — preformatted, no max-height cap.
-  //
-  // discovery_confirm: the prompt already embeds the refined task description
-  // ("Proposed task description: …"), and the backend mirrors that same text
-  // into context.refined_description. Rendering the context block here would
-  // therefore duplicate the proposed description below the prompt, so we skip
-  // it for this kind only. All other kinds (call / interjection / cli_confirm /
-  // retry_decision) keep rendering their context block unchanged.
-  if (
-    target.kind !== "discovery_confirm" &&
-    target.context != null &&
-    target.context !== ""
-  ) {
-    const ctxBlock = el("div", "flow-reply-context-block");
-    ctxBlock.append(
-      el("span", "flow-reply-context-label", "context"),
-      el("pre", "flow-reply-context-body",
-        typeof target.context === "string"
-          ? target.context
-          : safeStringify(target.context)),
-    );
-    ctx.appendChild(ctxBlock);
-  }
+  // Context block is intentionally NOT rendered for any kind. Every pending
+  // intervention's prompt already carries the human-meaningful text the user
+  // needs to act (discovery_confirm embeds the refined task description; the
+  // other kinds — call / interjection / cli_confirm / retry_decision — carry
+  // their full prompt), and the backend mirrors the same payload into the
+  // prompt, so a separate context block only duplicated content below the
+  // prompt. Suppressing it for all kinds keeps the reply panel free of
+  // redundant context, matching the prior discovery_confirm-only behavior.
 
   // Optional options — render as one-click reply buttons. Clicking sends the
   // option text directly via sendReply, same path the inline option click on
@@ -1117,6 +1107,13 @@ async function fetchHistoryIndex() {
     const data = await resp.json();
     if (Array.isArray(data.sessions)) {
       state.historySessions = data.sessions;
+      // Only a *non-empty* result confirms real history. An empty array here is
+      // usually the 2s HISTORY_INDEX_REFRESH_TIMEOUT firing before any daemon
+      // pushed its index, so it MUST NOT flip us into the confirmed state — that
+      // would wrongly fall back to the empty-state during the ~1min a daemon
+      // takes to push its history_index (the authoritative confirmation arrives
+      // via applyHistoryIndex below).
+      if (data.sessions.length) state.historyIndexConfirmed = true;
     }
   } catch (_) {
     /* transient — a WS history_index push will refresh it */
@@ -1131,6 +1128,10 @@ async function fetchHistoryIndex() {
 // Push handler: the daemon's full session index, rebroadcast by the server.
 function applyHistoryIndex(sessions) {
   state.historySessions = sessions;
+  // Any history_index push — even an empty list — is an authoritative report
+  // that the daemon has accounted for its history, so an empty result can now
+  // settle into the confirmed-empty state instead of "still connecting".
+  state.historyIndexConfirmed = true;
   if (isHistoryOpen()) renderHistoryList();
 }
 
@@ -1186,18 +1187,53 @@ function formatTime(ts) {
   return isNaN(d.getTime()) ? String(ts) : d.toLocaleString();
 }
 
+// True when at least one daemon is currently connected (any machine online).
+// The history empty-state logic uses this to tell "still connecting / waiting
+// for history" apart from "confirmed no history".
+function daemonConnected() {
+  return (state.machines || []).some((m) => m && m.online);
+}
+
+// Classify the history list's empty/loading semantics into one of four states so
+// renderHistoryList can show a distinct, user-readable hint for each instead of
+// collapsing "still connecting" into the confirmed-empty state. Pure (all inputs
+// passed in) so it can be unit-tested without a DOM.
+//   has-sessions    : there are sessions to render
+//   loading-refresh : empty but an /api/history round-trip is in flight
+//   loading-connect : empty and not yet confirmed (no daemon connected, or no
+//                     history_index pushed) — keep showing a waiting hint, never
+//                     fall back to the empty-state on the 2s /api/history timeout
+//   empty-confirmed : empty AND confirmed (daemon connected and zero sessions)
+function historyListEmptyState({ sessions, loading, daemonConnected, indexConfirmed }) {
+  if (Array.isArray(sessions) && sessions.length) return "has-sessions";
+  if (loading) return "loading-refresh";
+  if (!daemonConnected || !indexConfirmed) return "loading-connect";
+  return "empty-confirmed";
+}
+
 function renderHistoryList() {
   const list = $("history-list");
   list.innerHTML = "";
   const sessions = state.historySessions || [];
-  if (!sessions.length) {
-    // Distinguish "still refreshing" from "confirmed no history": while the
-    // /api/history round-trip is in flight, show a refreshing hint instead of
-    // the empty-state so the user isn't left staring at a blank page.
-    if (state.historyIndexLoading) {
-      list.appendChild(el("p", "empty", "正在刷新历史…"));
+  const emptyState = historyListEmptyState({
+    sessions,
+    loading: state.historyIndexLoading,
+    daemonConnected: daemonConnected(),
+    indexConfirmed: state.historyIndexConfirmed,
+  });
+  if (emptyState !== "has-sessions") {
+    // Distinguish "still refreshing" / "still connecting / waiting for data"
+    // from "confirmed no history" so the user is never left staring at a bare
+    // empty-state while the daemon is still connecting or pushing its index.
+    // Each state carries its own modifier class so it is DOM-distinguishable.
+    if (emptyState === "loading-refresh") {
+      list.appendChild(el("p", "empty empty-loading-refresh", "正在刷新历史…"));
+    } else if (emptyState === "loading-connect") {
+      list.appendChild(
+        el("p", "empty empty-loading-connect", "正在连接 / 正在等待历史数据…"));
     } else {
-      list.appendChild(el("p", "empty", "No history sessions reported."));
+      list.appendChild(
+        el("p", "empty empty-confirmed", "No history sessions reported."));
     }
     return;
   }
@@ -1459,10 +1495,21 @@ function normalizeRecord(rec) {
     };
   }
 
+  // Stream-progress records (written by record_stream_progress, daemon-read
+  // and pushed BEFORE the turn's final result) are in-progress process output.
+  // They carry `type:'stream_progress'` and/or `partial:true` and are always
+  // assistant-role; mark them so the renderer can show them live, line by line,
+  // and fold them away once the turn's final (non-partial) assistant result
+  // for the same (stepId, attempt) arrives.
+  const isPartial =
+    pick("partial") === true ||
+    String(pick("type") || "").toLowerCase() === "stream_progress";
+
   let role = String(pick("role") || msg.type || "log").toLowerCase();
   if (!["user", "assistant", "system"].includes(role)) {
     role = role === "human" ? "user" : (role || "log");
   }
+  if (isPartial) role = "assistant";
 
   const rawJson = pick("raw_json");
   const rawNdjson = pick("raw_ndjson");
@@ -1487,6 +1534,7 @@ function normalizeRecord(rec) {
     stepId: pick("step_id") || "",
     raw: { raw_json: rawJson, raw_ndjson: rawNdjson },
     attempt: pick("attempt"),
+    partial: isPartial,
   };
 }
 
@@ -1760,12 +1808,87 @@ function addConversationRecords(container, st, records, startIndex) {
     bubble.__convStepKey = stepKey(norm || {});
     bubble.__convStepType = (norm && norm.stepType) || "";
     bubble.__convStepLabel = (norm && (norm.stepType || norm.stepId)) || "step";
+    // Tag partial (stream-progress) bubbles so they can be folded away once the
+    // turn's final result arrives (see removeSupersededProgress).
+    bubble.__convPartial = !!(norm && norm.partial);
+    if (bubble.__convPartial) {
+      bubble.classList.add("conv-partial");
+      bubble.__convTurnKey = progressTurnKey(norm);
+    }
     insertBubbleSorted(container, bubble);
   }
   // Advance the cursor before the (stateless) header rebuild so the count is
-  // correct even if header rebuilding ever throws.
+  // correct even if header rebuilding ever throws. The cursor counts processed
+  // records, NOT rendered bubbles, so removing superseded partial bubbles below
+  // never desyncs it.
   st.count = records.length;
+  // Once a turn produces its final (non-partial) assistant result, drop the
+  // in-progress bubbles that streamed before it — the structured result bubble
+  // is the turn's terminal form per the message paradigm. Stateful affordances
+  // (folds / raw toggles / chips) on surviving bubbles are untouched.
+  removeSupersededProgress(container, records);
   rebuildStepHeaders(container);
+}
+
+// Stable per-turn key grouping a streamed turn's partial progress lines with
+// the final assistant result that supersedes them. record_stream_progress and
+// record_response both stamp the same (step_id, attempt), so a partial and its
+// terminal result share this key.
+function progressTurnKey(norm) {
+  const stepId = (norm && norm.stepId) || "";
+  const attempt = norm && norm.attempt != null ? norm.attempt : "";
+  return stepId + "#" + attempt + "#assistant";
+}
+
+// Pure: given the full ordered records array, return the Set of indices of
+// `partial` records whose OWN turn has reached a final (non-partial) assistant
+// result — i.e. a partial is superseded only by a non-partial assistant record
+// of the same (step_id, attempt) key that appears AFTER it in the stream. A
+// turn with only partials (no final yet) supersedes nothing — its progress
+// stays visible live.
+//
+// Order matters because `_reset_retry_counter_for_new_call` resets retry_count
+// to 0 for each new discovery round / fix iteration / revision while those
+// re-runs reuse the same step_id and per-step jsonl file. So an earlier round's
+// final result and a later round's freshly-streaming partials share the same
+// (step_id, attempt=0) key; a positional check keeps the later round's live
+// progress visible until ITS OWN final lands. Exposed for unit testing.
+function markSupersededProgress(records) {
+  const norms = [];
+  for (let i = 0; i < records.length; i++) {
+    let norm = null;
+    try { norm = normalizeRecord(records[i]); } catch (_) { norm = null; }
+    norms.push(norm);
+  }
+  // Walk backward, tracking keys finalized strictly after the current index.
+  // A partial is superseded iff a later final shares its key.
+  const finalizedAfter = new Set();
+  const superseded = new Set();
+  for (let i = norms.length - 1; i >= 0; i--) {
+    const norm = norms[i];
+    if (!norm || norm.role !== "assistant") continue;
+    if (norm.partial) {
+      if (finalizedAfter.has(progressTurnKey(norm))) {
+        superseded.add(i);
+      }
+    } else {
+      finalizedAfter.add(progressTurnKey(norm));
+    }
+  }
+  return superseded;
+}
+
+// Remove already-rendered partial bubbles whose turn has been finalized. Driven
+// by `markSupersededProgress` so the render path and the unit test share one
+// discriminator. Only `.conv-partial` bubbles are ever removed.
+function removeSupersededProgress(container, records) {
+  const superseded = markSupersededProgress(records);
+  if (!superseded.size) return;
+  for (const child of Array.from(container.children)) {
+    if (child.__convPartial && superseded.has(child.__convIdx)) {
+      container.removeChild(child);
+    }
+  }
 }
 
 // Insert `bubble` into `container` keeping all bubbles ordered globally by
@@ -4003,6 +4126,8 @@ if (typeof module !== "undefined" && module.exports) {
     addConversationRecords,
     insertBubbleSorted,
     rebuildStepHeaders,
+    markSupersededProgress,
+    progressTurnKey,
     renderConversationRecord,
     renderInterventions,
     reconcileReplyTarget,
@@ -4013,6 +4138,8 @@ if (typeof module !== "undefined" && module.exports) {
     // History list rendering + shared mutable state (exposed for the DOM-stub
     // tests in tests/frontend/test_app_pure.mjs).
     renderHistoryList,
+    historyListEmptyState,
+    daemonConnected,
     state,
   };
 }
