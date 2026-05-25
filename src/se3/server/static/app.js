@@ -29,6 +29,7 @@ const state = {
   flowInterjectRequested: false, // user clicked Interject — synth chip on
   flowInterjectFlowId: null, // flow id the interject opt-in belongs to
   historySessions: [],    // [{flow_id, task_description, status, updated_at, ...}]
+  historyIndexLoading: false, // true while /api/history is in flight (refresh)
   selectedHistoryId: null,// flow whose records are shown in the history detail
   historyRecords: [],     // records currently rendered in the history detail
   connStale: false,       // true while the WS is down — data may be stale
@@ -1093,16 +1094,26 @@ function closeHistory() {
 }
 
 async function fetchHistoryIndex() {
+  // Enter the loading state so renderHistoryList can show "正在刷新历史…"
+  // instead of a blank page while the server forces a fresh index refresh
+  // (broadcast_index_refresh → daemon force_index). The underlying live-pull
+  // mechanism is unchanged; this only surfaces the in-flight feedback.
+  state.historyIndexLoading = true;
+  renderHistoryList();
   try {
     const resp = await fetch("/api/history");
     if (!resp.ok) return;
     const data = await resp.json();
     if (Array.isArray(data.sessions)) {
       state.historySessions = data.sessions;
-      renderHistoryList();
     }
   } catch (_) {
     /* transient — a WS history_index push will refresh it */
+  } finally {
+    // Clear the loading state on every exit path (success / non-ok / error)
+    // and re-render the final list.
+    state.historyIndexLoading = false;
+    renderHistoryList();
   }
 }
 
@@ -1169,8 +1180,20 @@ function renderHistoryList() {
   list.innerHTML = "";
   const sessions = state.historySessions || [];
   if (!sessions.length) {
-    list.appendChild(el("p", "empty", "No history sessions reported."));
+    // Distinguish "still refreshing" from "confirmed no history": while the
+    // /api/history round-trip is in flight, show a refreshing hint instead of
+    // the empty-state so the user isn't left staring at a blank page.
+    if (state.historyIndexLoading) {
+      list.appendChild(el("p", "empty", "正在刷新历史…"));
+    } else {
+      list.appendChild(el("p", "empty", "No history sessions reported."));
+    }
     return;
+  }
+  // Have sessions: when a refresh is in flight, prepend a lightweight bar so
+  // the user knows the list is being updated without hiding existing entries.
+  if (state.historyIndexLoading) {
+    list.appendChild(el("p", "history-refreshing", "正在刷新历史…"));
   }
   for (const s of sessions) {
     const card = el("div", "history-item");
@@ -3955,5 +3978,9 @@ if (typeof module !== "undefined" && module.exports) {
     stepKey,
     recordKey,
     mergeSnapshotWithLiveAppends,
+    // History list rendering + shared mutable state (exposed for the DOM-stub
+    // tests in tests/frontend/test_app_pure.mjs).
+    renderHistoryList,
+    state,
   };
 }

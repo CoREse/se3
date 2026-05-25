@@ -1864,4 +1864,58 @@ check("renderConversation: user marker reply interleaves by ts; step headers onl
   assert.equal(headers.length, 3, "a header at each step boundary");
 });
 
+// -- renderHistoryList: refresh-in-progress feedback ------------------------
+// The history list must distinguish "still refreshing" from "confirmed no
+// history" so opening the view never shows a bare blank page while the
+// /api/history round-trip is in flight.
+check("renderHistoryList: empty + loading shows the refreshing hint, not the empty state", () => {
+  app.state.historySessions = [];
+  app.state.historyIndexLoading = true;
+  app.renderHistoryList();
+  const list = document.getElementById("history-list");
+  const texts = findAll(list, "empty").map((n) => n.textContent);
+  assert.ok(texts.some((t) => t.includes("正在刷新历史")),
+    "loading hint must be shown");
+  assert.ok(!texts.some((t) => t.includes("No history sessions reported.")),
+    "empty state must NOT be shown while loading");
+});
+
+check("renderHistoryList: empty + not loading shows the original empty state", () => {
+  app.state.historySessions = [];
+  app.state.historyIndexLoading = false;
+  app.renderHistoryList();
+  const list = document.getElementById("history-list");
+  const texts = findAll(list, "empty").map((n) => n.textContent);
+  assert.ok(texts.some((t) => t.includes("No history sessions reported.")),
+    "empty state must be shown when not loading");
+  assert.ok(!texts.some((t) => t.includes("正在刷新历史")),
+    "refreshing hint must NOT be shown when not loading");
+});
+
+check("renderHistoryList: non-empty + loading prepends a refresh bar above the items", () => {
+  app.state.historySessions = [
+    { flow_id: "f1", task_description: "task one", status: "running" },
+    { flow_id: "f2", task_description: "task two", status: "completed" },
+  ];
+  app.state.historyIndexLoading = true;
+  app.renderHistoryList();
+  const list = document.getElementById("history-list");
+  assert.equal(findAll(list, "history-item").length, 2, "all sessions render");
+  const bar = findOne(list, "history-refreshing");
+  assert.ok(bar && bar.textContent.includes("正在刷新历史"),
+    "a lightweight refresh bar is prepended while loading");
+});
+
+check("renderHistoryList: non-empty + not loading renders items with no refresh bar", () => {
+  app.state.historySessions = [
+    { flow_id: "f1", task_description: "task one", status: "running" },
+  ];
+  app.state.historyIndexLoading = false;
+  app.renderHistoryList();
+  const list = document.getElementById("history-list");
+  assert.equal(findAll(list, "history-item").length, 1, "the session renders");
+  assert.equal(findOne(list, "history-refreshing"), null,
+    "no refresh bar when not loading");
+});
+
 console.log(`\n${passed} checks passed.`);
