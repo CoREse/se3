@@ -43,6 +43,13 @@ logger = logging.getLogger(__name__)
 PID_FILENAME = "daemon.pid"
 STATUS_FILENAME = "daemon_status.json"
 LOG_FILENAME = "daemon.log"
+#: Machine-local registry of every project root that has ever run an ``se3``
+#: flow through this daemon. Lives next to the pidfile / status file under
+#: ``pid_dir`` so it inherits the same ``SE3_DAEMON_DIR`` / ``DaemonConfig``
+#: overrides (and test isolation). Persisting roots here lets the history index
+#: and the New Task project dropdown stay populated even when no ``se3 run``
+#: process is currently live — and across daemon restarts.
+PROJECT_ROOTS_FILENAME = "project_roots.json"
 
 #: Log format for the daemon process; the leading ``%(asctime)s`` is what makes
 #: every line in ``~/.se3/daemon.log`` (and the foreground terminal) attributable
@@ -131,6 +138,10 @@ class DaemonConfig:
     def log_file(self) -> Path:
         return self.pid_dir / LOG_FILENAME
 
+    @property
+    def project_roots_file(self) -> Path:
+        return self.pid_dir / PROJECT_ROOTS_FILENAME
+
 
 class Daemon:
     """The resident control-plane process."""
@@ -139,16 +150,26 @@ class Daemon:
         self.config = config or DaemonConfig()
         self.supervisor = DaemonSupervisor()
         self.spawner = DaemonSpawner(supervisor=self.supervisor)
+        # Machine-local persistent registry of every project root that has run
+        # a flow through this daemon. Wiring the load/persist callbacks makes
+        # aggregator.add_project_root write through to ``project_roots_file`` so
+        # the history index and New Task dropdown stay populated with no live
+        # ``se3 run`` process and across daemon restarts.
+        registry_file = self.config.project_roots_file
         self.aggregator = DaemonAggregator(
             machine_id=self.config.machine_id,
             poll_interval=self.config.poll_interval,
+            registry_load=lambda: _read_project_roots(registry_file),
+            registry_persist=lambda root: _append_project_root(registry_file, root),
         )
         for root in self.config.project_roots:
             self.aggregator.add_project_root(root)
         # Reads se3/history of every root the aggregator tracks; injected into
-        # the outbound DaemonClient as its history_provider.
+        # the outbound DaemonClient as its history_provider. Uses the merged
+        # root view (active ∪ registry ∪ disk-history) so build_index sees the
+        # registry roots even with no live flow.
         self.history_reader = DaemonHistoryReader(
-            project_roots_provider=lambda: self.aggregator.project_roots
+            project_roots_provider=lambda: self.aggregator.all_project_roots()
         )
         self._stop_event: Optional[asyncio.Event] = None
         self._running = False
@@ -514,6 +535,48 @@ def _atomic_write_json(path: Path, payload: Dict[str, object]) -> None:
         encoding="utf-8",
     )
     tmp.replace(path)
+
+
+def _read_project_roots(path: Path) -> List[str]:
+    """Return the persisted project roots from the registry file at *path*.
+
+    The registry is a ``{"project_roots": [...]}`` JSON document written by
+    :func:`_append_project_root`. A missing or corrupt file is treated as an
+    empty registry (returns ``[]``) so a first-run or partially-written file
+    never aborts the daemon's snapshot / history index.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict):
+        return []
+    roots = data.get("project_roots")
+    if not isinstance(roots, list):
+        return []
+    return [str(r) for r in roots if isinstance(r, str) and r]
+
+
+def _append_project_root(path: Path, root: object) -> None:
+    """Append *root* to the registry file at *path* (realpath-deduplicated).
+
+    *root* is normalised via :func:`os.path.realpath` before comparison so the
+    same directory reached by different relative / symlinked spellings is stored
+    once. The file is rewritten (atomically, with a sorted root list) only when
+    a genuinely new root appears — an already-registered root is a no-op and
+    leaves the file untouched.
+    """
+    try:
+        resolved = os.path.realpath(str(root))
+    except OSError:  # pragma: no cover - defensive
+        return
+    if not resolved:
+        return
+    existing = _read_project_roots(path)
+    if resolved in existing:
+        return
+    existing.append(resolved)
+    _atomic_write_json(path, {"project_roots": sorted(set(existing))})
 
 
 def start_daemon(

@@ -21,7 +21,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 from . import protocol
 from .history import enumerate_historical_project_roots
@@ -146,19 +146,53 @@ class DaemonAggregator:
         *,
         machine_id: Optional[str] = None,
         poll_interval: float = DEFAULT_POLL_INTERVAL,
+        registry_load: Optional[Callable[[], Iterable[str]]] = None,
+        registry_persist: Optional[Callable[[str], None]] = None,
     ) -> None:
+        """Create the aggregator.
+
+        Args:
+            machine_id: Stable machine id; auto-derived when ``None``.
+            poll_interval: Seconds between aggregation polls.
+            registry_load: Optional zero-arg callable returning the persisted
+                project roots (a machine-local registry of every root that has
+                run a flow through this daemon). When ``None`` (the default) the
+                aggregator keeps its legacy in-memory-only behavior.
+            registry_persist: Optional single-arg callable that durably records
+                one project root. Wired together with *registry_load* it makes
+                :meth:`add_project_root` write through to disk so the history
+                index and New Task dropdown survive a daemon with no live flow.
+        """
         self.machine_id = machine_id or _stable_machine_id()
         self.hostname = socket.gethostname()
         self.poll_interval = max(0.1, float(poll_interval))
         self._project_roots: Set[Path] = set()
+        self._registry_load = registry_load
+        self._registry_persist = registry_persist
         # engine.json mtime per project root, for change detection.
         self._mtimes: Dict[str, float] = {}
 
     # -- project-root registry --------------------------------------------
 
     def add_project_root(self, path: object) -> None:
-        """Register a project root whose ``engine.json`` should be polled."""
-        self._project_roots.add(Path(path).resolve())
+        """Register a project root whose ``engine.json`` should be polled.
+
+        Besides joining the in-memory active set, the resolved root is written
+        through to the persistent registry (when a ``registry_persist`` callback
+        was supplied), so a root that ran a flow stays known across restarts and
+        when no ``se3 run`` process is currently live. Persistence is
+        best-effort: a failing callback is logged, never propagated, so a
+        registry I/O hiccup can't break aggregation.
+        """
+        resolved = Path(path).resolve()
+        self._project_roots.add(resolved)
+        if self._registry_persist is not None:
+            try:
+                self._registry_persist(str(resolved))
+            except Exception:  # pragma: no cover - defensive
+                logger.exception(
+                    "aggregator: failed to persist project root %s", resolved
+                )
 
     def remove_project_root(self, path: object) -> None:
         """Stop polling *path*."""
@@ -218,37 +252,66 @@ class DaemonAggregator:
             project_roots=self._merge_project_roots(),
         )
 
-    def _merge_project_roots(self) -> List[str]:
-        """Merge active and historical project roots into one sorted list.
+    def all_project_roots(self) -> List[str]:
+        """Return the union view used for reporting and the history index.
 
-        Three sources feed the reported list, all deduplicated by their
-        resolved absolute path:
+        This is the single source of truth for both the ``project_roots`` field
+        of the :class:`MachineStatus` snapshot (which drives the web *New Task*
+        project dropdown) and the history index's root provider (which drives
+        the history list). Three sources feed it, deduplicated by resolved
+        absolute path and returned sorted:
 
         * the currently registered active roots (``self._project_roots`` —
-          supervisor / spawner / config-seeded entries);
-        * roots that contain SE3 history artifacts, discovered from those
-          same active roots via
-          :func:`~se3.daemon.history.enumerate_historical_project_roots`;
-        * the existing in-process registry once more, so a root that is
-          live but has no on-disk history yet (e.g. a freshly spawned flow
-          before its first persistence write) still appears.
+          supervisor / spawner / config-seeded entries discovered this process
+          lifetime);
+        * the persistent registry roots (``registry_load`` — every root that
+          has ever run a flow through this daemon, surviving restarts and
+          zero-live-process periods);
+        * the disk-history roots discovered by
+          :func:`~se3.daemon.history.enumerate_historical_project_roots`, fed
+          the *union* of the two sets above so a registry root with on-disk
+          history (but no live flow) is still scanned for its artifacts.
 
-        ``self._project_roots`` itself remains a mutable :class:`set` —
-        spawn paths continue to ``add()`` directly into it; this helper is
-        a pure read of the merged view.
+        Crucially this view is **not** what per-flow polling iterates: that loop
+        stays on ``self._project_roots`` (the active set) so adding many
+        historical roots here never widens the per-tick snapshot work.
         """
-        merged: Set[str] = set()
+        base: Set[str] = set()
         for path in self._project_roots:
             try:
-                merged.add(os.path.realpath(str(path)))
+                base.add(os.path.realpath(str(path)))
             except OSError:  # pragma: no cover - defensive
-                merged.add(str(path))
+                base.add(str(path))
+        if self._registry_load is not None:
+            try:
+                for entry in self._registry_load() or []:
+                    if not entry:
+                        continue
+                    try:
+                        base.add(os.path.realpath(str(entry)))
+                    except OSError:  # pragma: no cover - defensive
+                        base.add(str(entry))
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("aggregator: registry_load failed")
+
+        merged: Set[str] = set(base)
         try:
-            for path in enumerate_historical_project_roots(self._project_roots):
+            for path in enumerate_historical_project_roots(base):
                 merged.add(path)
         except Exception:  # pragma: no cover - defensive
             logger.exception("aggregator: enumerate_historical_project_roots failed")
         return sorted(merged)
+
+    def _merge_project_roots(self) -> List[str]:
+        """Produce the snapshot's ``project_roots`` field.
+
+        Delegates to :meth:`all_project_roots` so the machine snapshot, the
+        history index and the New Task dropdown all share one root-union source.
+        ``self._project_roots`` itself remains a mutable :class:`set` — spawn
+        paths continue to ``add()`` directly into it; this helper is a pure read
+        of the merged view.
+        """
+        return self.all_project_roots()
 
     # -- internals ---------------------------------------------------------
 

@@ -665,9 +665,15 @@ def enumerate_historical_project_roots(
     not a directory) is dropped. Corrupt or unreadable JSON files are logged
     at warning level and skipped — they do not abort the enumeration.
 
+    Callers (see :meth:`DaemonAggregator.all_project_roots`) now feed the
+    *union* of the live active roots and the persistent registry roots, so a
+    root that has on-disk history but no currently running flow is still scanned
+    for its archive / history artifacts.
+
     Args:
         search_roots: Iterable of base directories to scan. Anything that
-            cannot be turned into a real path is silently skipped.
+            cannot be turned into a real path is silently skipped; a non-dir
+            entry is robustly skipped without aborting the rest.
 
     Returns:
         Sorted, deduplicated absolute paths of historical project roots.

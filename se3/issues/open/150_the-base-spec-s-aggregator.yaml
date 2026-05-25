@@ -1,0 +1,33 @@
+id: '150'
+title: 'The `base` spec''s `aggregator.py` bullet enumerates exactly three sources
+  for MachineStatus.project_roots: (a) the in-memory active `_project_roots`, (b)
+  roots from `enumerate_historical_project_roots`, and (c) ensure-init roots. The
+  implementation introduces a durable fourth source — the persistent `pid_dir/project_roots.json`
+  registry that survives daemon restarts and zero-live-process periods. The observable
+  contract (a union of live + historical roots feeding the dropdown/index) is preserved,
+  so this is not a regression, but the spec''s detailed source enumeration is now
+  slightly behind the code.'
+description: 'The `base` spec''s `aggregator.py` bullet enumerates exactly three sources
+  for MachineStatus.project_roots: (a) the in-memory active `_project_roots`, (b)
+  roots from `enumerate_historical_project_roots`, and (c) ensure-init roots. The
+  implementation introduces a durable fourth source — the persistent `pid_dir/project_roots.json`
+  registry that survives daemon restarts and zero-live-process periods. The observable
+  contract (a union of live + historical roots feeding the dropdown/index) is preserved,
+  so this is not a regression, but the spec''s detailed source enumeration is now
+  slightly behind the code.
+
+
+  Suggestion: Optionally update the `aggregator.py` (and/or daemon `pid_dir` files)
+  description in the `base` spec to register the persistent project-roots registry
+  as a durable source. Not blocking; ''Planned Spec Changes: No planned spec changes''
+  was declared and the public contract is unchanged.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-25T16:18:32.967972'
+updated_at: '2026-05-25T16:18:32.967972'

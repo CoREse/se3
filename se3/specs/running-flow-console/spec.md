@@ -1207,9 +1207,17 @@ provides two complementary entry points for the `project_root` field, both
 sourced from the selected machine's record:
 
 1. **Known-project dropdown** — populated from
-   `MachineRecord.project_roots` (the union of the daemon's live registered
-   roots and the historical roots enumerated from `se3/history/` and
-   `se3/state/archive/`; see the `aggregator.py` bullet in the `base` spec).
+   `MachineRecord.project_roots`, which the daemon computes via
+   `all_project_roots()` as the union of: its live registered roots, a
+   **machine-local persistent project-roots registry** that records every root
+   that has ever run a flow (written through on each spawn / ensure / resume /
+   poll-discovery registration and reloaded on daemon restart), and the
+   historical roots enumerated from `se3/history/` and `se3/state/archive/`; see
+   the `aggregator.py` / `daemon.py` bullets in the `base` spec. Because the
+   registry is persisted to disk and is independent of any live process, the
+   dropdown stays populated even when the machine currently has **no** `se3 run`
+   process running and across daemon restarts — not only for roots the daemon
+   has seen as live in its current process lifetime.
 2. **`Other path…` sentinel option** — always appended to the dropdown,
    including when the machine has zero known roots. Selecting it reveals a
    text input that accepts an absolute path; the entered path is sent as
@@ -1239,6 +1247,17 @@ Task form itself need not require the user to pre-initialize the directory.
 - **THEN** the project dropdown still offers the `Other path…` entry so the
   user can type an absolute path manually
 - **AND** the form can submit a flow against that path
+
+#### Scenario: Dropdown stays populated with no live process and across daemon restart
+- **GIVEN** a machine with a project root that has previously run a flow (so it
+  is recorded in the daemon's persistent project-roots registry) but currently
+  has **no** live `se3 run` process
+- **WHEN** the New Task form's project dropdown is rendered, including after the
+  daemon has been restarted with the same `pid_dir`
+- **THEN** the root still appears in the dropdown without the user falling back
+  to the `Other path…` manual entry
+- **AND** the same registry-backed `all_project_roots()` source keeps the
+  machine's history list populated rather than empty
 
 #### Scenario: Server accepts absolute path outside known roots
 - **GIVEN** the user submits a New Task with an absolute `project_root` that

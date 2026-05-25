@@ -21,7 +21,12 @@ from se3.daemon import (
     start_daemon,
     stop_daemon,
 )
-from se3.daemon.daemon import DaemonAlreadyRunning
+from se3.daemon.daemon import (
+    DaemonAlreadyRunning,
+    PROJECT_ROOTS_FILENAME,
+    _append_project_root,
+    _read_project_roots,
+)
 from se3.daemon import spawner as spawner_mod
 
 
@@ -846,3 +851,233 @@ class TestDaemonStartWarnings:
         # The stale connected=True is ignored; we report pending instead.
         assert "WARNING" in out
         assert "not connected" in out.lower()
+
+
+# --------------------------------------------------------------------------
+# Persistent project-roots registry (pid_dir/project_roots.json)
+# --------------------------------------------------------------------------
+
+
+def _make_history_flow(root, *, flow_id="flow-hist", project_root=None):
+    """Create a history-only flow under *root* (``se3/history/<flow_id>``).
+
+    Writes a ``_meta.json`` carrying ``project_root`` and one per-step ``jsonl``
+    file so the flow is enumerable by both
+    :func:`enumerate_historical_project_roots` and
+    :meth:`DaemonHistoryReader.build_index`.
+    """
+    project_root = project_root if project_root is not None else str(root)
+    flow_dir = root / "se3" / "history" / flow_id
+    flow_dir.mkdir(parents=True, exist_ok=True)
+    (flow_dir / "_meta.json").write_text(
+        json.dumps(
+            {
+                "flow_id": flow_id,
+                "project_root": project_root,
+                "type": "feature",
+                "created_at": "2026-05-18T10:00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (flow_dir / "01_analyze_abc123.jsonl").write_text(
+        json.dumps({"step_id": "01_analyze_abc123", "message": {"role": "user"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    return flow_dir
+
+
+class TestProjectRootsRegistryHelpers:
+    """Unit tests for _read_project_roots / _append_project_root (all in tmp)."""
+
+    def test_read_missing_file_returns_empty(self, tmp_path):
+        assert _read_project_roots(tmp_path / "project_roots.json") == []
+
+    def test_read_corrupt_file_returns_empty(self, tmp_path):
+        path = tmp_path / "project_roots.json"
+        path.write_text("{ not valid json", encoding="utf-8")
+        assert _read_project_roots(path) == []
+
+    def test_append_then_read_roundtrip(self, tmp_path):
+        path = tmp_path / "project_roots.json"
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        _append_project_root(path, str(proj))
+        assert _read_project_roots(path) == [os.path.realpath(str(proj))]
+
+    def test_append_deduplicates(self, tmp_path):
+        path = tmp_path / "project_roots.json"
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        _append_project_root(path, str(proj))
+        first_mtime = path.stat().st_mtime
+        time.sleep(0.01)
+        # A second append of the same root must be a no-op: no duplicate entry
+        # and the file is left untouched (not rewritten).
+        _append_project_root(path, str(proj))
+        assert _read_project_roots(path) == [os.path.realpath(str(proj))]
+        assert path.stat().st_mtime == first_mtime
+
+    def test_append_normalises_realpath(self, tmp_path):
+        path = tmp_path / "project_roots.json"
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        # A non-normalised spelling of the same dir collapses to one entry.
+        messy = str(proj) + os.sep + "." + os.sep
+        _append_project_root(path, messy)
+        _append_project_root(path, str(proj))
+        assert _read_project_roots(path) == [os.path.realpath(str(proj))]
+
+    def test_append_uses_atomic_write(self, tmp_path, monkeypatch):
+        """The write goes through _atomic_write_json (temp file + rename)."""
+        from se3.daemon import daemon as daemon_mod
+
+        calls = []
+        real_atomic = daemon_mod._atomic_write_json
+
+        def spy(p, payload):
+            calls.append((p, payload))
+            real_atomic(p, payload)
+
+        monkeypatch.setattr(daemon_mod, "_atomic_write_json", spy)
+        path = tmp_path / "project_roots.json"
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        _append_project_root(path, str(proj))
+        assert len(calls) == 1
+        assert calls[0][0] == path
+
+    def test_config_project_roots_file_under_pid_dir(self, tmp_path):
+        config = DaemonConfig(pid_dir=tmp_path)
+        assert config.project_roots_file == tmp_path / PROJECT_ROOTS_FILENAME
+
+
+class TestRegistryWriteThrough:
+    """add_project_root / request_spawn / _poll_once persist roots to disk."""
+
+    def test_add_project_root_writes_through(self, tmp_path):
+        config = DaemonConfig(pid_dir=tmp_path / "rt")
+        daemon = Daemon(config)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        daemon.aggregator.add_project_root(str(proj))
+        roots = _read_project_roots(config.project_roots_file)
+        assert os.path.realpath(str(proj)) in roots
+
+    def test_repeated_registration_dedupes_on_disk(self, tmp_path):
+        config = DaemonConfig(pid_dir=tmp_path / "rt")
+        daemon = Daemon(config)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        daemon.aggregator.add_project_root(str(proj))
+        daemon.aggregator.add_project_root(str(proj))
+        roots = _read_project_roots(config.project_roots_file)
+        assert roots.count(os.path.realpath(str(proj))) == 1
+
+    def test_request_spawn_writes_through(self, fake_se3, tmp_path):
+        config = DaemonConfig(pid_dir=tmp_path / "rt")
+        daemon = Daemon(config)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        spawned = daemon.request_spawn("task", project_root=str(proj))
+        roots = _read_project_roots(config.project_roots_file)
+        assert os.path.realpath(str(proj)) in roots
+        daemon.spawner.wait(spawned.pid, timeout=10)
+        daemon.spawner.reap()
+
+    def test_poll_once_persists_discovered_root(self, tmp_path, monkeypatch):
+        """A root discovered by the supervisor poll is written through."""
+        config = DaemonConfig(pid_dir=tmp_path / "rt")
+        daemon = Daemon(config)
+        proj = tmp_path / "proj"
+        _make_engine_json(proj)
+
+        class _FakeRecord:
+            def __init__(self, root):
+                self.project_root = str(root)
+
+            def to_dict(self):
+                return {"project_root": self.project_root}
+
+        monkeypatch.setattr(
+            daemon.supervisor, "discover_flows", lambda: [_FakeRecord(proj)]
+        )
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+        daemon._poll_once()
+        roots = _read_project_roots(config.project_roots_file)
+        assert os.path.realpath(str(proj)) in roots
+
+    def test_write_through_only_touches_tmp(self, tmp_path):
+        """Registration writes solely under the isolated pid_dir."""
+        config = DaemonConfig(pid_dir=tmp_path / "rt")
+        daemon = Daemon(config)
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        daemon.aggregator.add_project_root(str(proj))
+        assert config.project_roots_file.exists()
+        # The registry file lives under the isolated pid_dir, nowhere else.
+        assert config.project_roots_file.parent == (tmp_path / "rt")
+
+
+class TestRegistryDrivesHistoryWithNoLiveProcess:
+    """Reload / zero-live-process: the registry alone repopulates both outputs.
+
+    Equivalent to a daemon restart with no ``se3 run`` process anywhere: the
+    in-memory active set is empty and only the on-disk registry remains.
+    """
+
+    def test_registry_repopulates_snapshot_and_index(self, tmp_path):
+        # A project with real on-disk history but no live flow / no engine.json.
+        proj = tmp_path / "proj"
+        _make_history_flow(proj, flow_id="flow-hist", project_root=str(proj))
+        proj_real = os.path.realpath(str(proj))
+
+        # Pre-seed the registry file under an isolated pid_dir (as a prior
+        # daemon would have left it), then build a brand-new Daemon with no
+        # config project_roots and no discovered live processes.
+        config = DaemonConfig(pid_dir=tmp_path / "rt")
+        config.pid_dir.mkdir(parents=True, exist_ok=True)
+        _append_project_root(config.project_roots_file, str(proj))
+
+        daemon = Daemon(config)
+        # No active roots registered this lifetime.
+        assert daemon.aggregator.project_roots == []
+
+        # (a) snapshot.project_roots is non-empty and contains the history root.
+        snapshot = daemon.aggregator.get_snapshot()
+        assert proj_real in snapshot.project_roots
+
+        # (b) build_index() returns that historical session under no live flow.
+        index = daemon.history_reader.build_index()
+        flow_ids = {meta.flow_id for meta in index}
+        assert "flow-hist" in flow_ids
+
+    def test_aggregator_all_project_roots_union(self, tmp_path):
+        """all_project_roots() unions active ∪ registry ∪ disk-history roots."""
+        proj = tmp_path / "proj"
+        _make_history_flow(proj, flow_id="flow-hist", project_root=str(proj))
+        registry_file = tmp_path / "rt" / "project_roots.json"
+        registry_file.parent.mkdir(parents=True, exist_ok=True)
+        _append_project_root(registry_file, str(proj))
+
+        agg = DaemonAggregator(
+            registry_load=lambda: _read_project_roots(registry_file),
+            registry_persist=lambda r: _append_project_root(registry_file, r),
+        )
+        # No active roots, yet the registry root surfaces.
+        assert agg.project_roots == []
+        assert os.path.realpath(str(proj)) in agg.all_project_roots()
+        # _merge_project_roots delegates to all_project_roots (identical output).
+        assert agg._merge_project_roots() == agg.all_project_roots()
+
+    def test_bare_aggregator_has_no_persistence(self, tmp_path):
+        """Default DaemonAggregator() keeps legacy in-memory-only behavior."""
+        agg = DaemonAggregator()
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        agg.add_project_root(str(proj))
+        # No registry file is created anywhere for a bare aggregator.
+        assert not (tmp_path / "project_roots.json").exists()
+        # all_project_roots still works, sourced purely from the active set.
+        assert os.path.realpath(str(proj)) in agg.all_project_roots()
