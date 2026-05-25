@@ -1237,13 +1237,17 @@ check("mergeSnapshotWithLiveAppends returns the snapshot unchanged when no live 
 });
 
 // ---------------------------------------------------------------------------
-// Assistant three-layer progressive disclosure (DOM)
+// Assistant two-layer progressive disclosure (DOM)
 // ---------------------------------------------------------------------------
 //
 // Drive the real renderConversationRecord against the DOM stub for assistant
-// turns of several step types. Layer 1 = clean structured fields; Layer 2 =
-// "展开全部" full process; Layer 3 = "查看原始" raw NDJSON. Parse failure must
-// degrade to the generic text path without losing the message.
+// turns of several step types. The assistant side is TWO layers (the user side
+// keeps three): Layer 1 = the narrative + clean structured fields (both visible
+// by default); Layer 2 = a single "查看原始" fold (button always visible, body
+// folded by default) holding the turn's original record (raw NDJSON, or the
+// unrendered content literal when no raw payload exists). There is no assistant
+// "展开全部" wrapper and no "process-toggle". Parse failure must degrade to the
+// generic text path without losing the message.
 
 // Build a normalized assistant record (optionally with a raw NDJSON payload)
 // in the real daemon shape: authoritative `step_type` at the envelope, inner
@@ -1319,7 +1323,8 @@ check("assistant turn falls back to text when the body has no JSON", () => {
   const row = app.renderConversationRecord(asstNorm(content, "analyze"));
   // No structured wrapper: the generic path took over.
   assert.equal(findOne(row, "assistant-result"), null);
-  assert.equal(findOne(row, "process-toggle"), null);
+  // No-result turn: no single 查看原始 fold is added (thinking shown inline).
+  assert.equal(findOne(row, "raw-toggle"), null);
   // The assistant text is still visible — nothing is lost.
   const bubble = findOne(row, "conv-bubble");
   assert.ok(bubble && bubble.textContent.includes("prose summary"));
@@ -1336,7 +1341,7 @@ check("assistant turn falls back to text when the JSON is malformed", () => {
   assert.ok(bubble.textContent.includes("not, valid json"));
 });
 
-check("assistant three layers: structured default, 展开全部 process, 查看原始 ndjson", () => {
+check("assistant two layers: structured default + single 查看原始 raw fold (ndjson)", () => {
   const ndjson = '{"raw_marker":"NDJSON_PAYLOAD_TOKEN"}';
   const content = "```json\n" + JSON.stringify({
     task_type: "bugfix",
@@ -1348,33 +1353,41 @@ check("assistant three layers: structured default, 展开全部 process, 查看�
 
   // Layer 1: structured result is the default visible surface.
   assert.ok(findOne(row, "assistant-result"), "Layer 1 structured result present");
-  // Layer 3 ("查看原始") MUST NOT be present in the default Layer-1 view — it is
-  // nested inside the Layer-2 expand area and built lazily on first expand.
-  assert.equal(findOne(row, "raw-toggle"), null,
-    "查看原始 must not show at the default Layer-1 view");
+  // No assistant "展开全部" wrapper exists anymore — the assistant side is two
+  // layers, not three.
+  assert.equal(findOne(row, "process-toggle"), null,
+    "assistant side must have no 展开全部 process toggle");
 
-  // Layer 2: the "展开全部" process toggle reveals the full per-turn process,
-  // which DOES include the raw JSON text (rendered as a markdown code block).
-  const procToggle = findOne(row, "process-toggle");
-  assert.ok(procToggle, "Layer 2 process toggle present");
-  const procWrap = findOne(row, "process-toggle-wrap");
-  const procFull = findOne(procWrap, "process-full");
-  assert.equal(procFull.classList.contains("hidden"), true, "process is folded by default");
-  procToggle.dispatch("click");
-  assert.equal(procFull.classList.contains("hidden"), false, "process expands on click");
-  assert.ok(procFull.textContent.includes('"task_type"'),
-    "the full process shows the unrendered result JSON");
-
-  // Layer 3: the "查看原始" toggle now appears nested INSIDE the expanded Layer-2
-  // process area (not at the row level), and reveals the raw NDJSON.
-  const rawToggle = findOne(procFull, "raw-toggle");
-  assert.ok(rawToggle, "Layer 3 raw toggle nested inside the 展开全部 area");
-  const rawPre = findOne(procFull, "raw-json");
-  assert.equal(rawPre.classList.contains("hidden"), true, "raw is hidden by default");
+  // Layer 2: a single "查看原始" toggle BUTTON is visible by default (single-layer
+  // fold), but its raw body is hidden until clicked.
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "single 查看原始 toggle button is visible by default");
+  const rawPre = findOne(row, "raw-json");
+  assert.equal(rawPre.classList.contains("hidden"), true, "raw body hidden by default");
   rawToggle.dispatch("click");
   assert.equal(rawPre.classList.contains("hidden"), false, "raw expands on click");
   assert.ok(rawPre.textContent.includes("NDJSON_PAYLOAD_TOKEN"),
-    "the raw layer shows the original NDJSON payload");
+    "the raw fold shows the original NDJSON payload");
+});
+
+check("assistant 查看原始 fold falls back to the content literal when no raw payload", () => {
+  // No raw_ndjson / raw_json on the record → the assistant raw fold must fall
+  // back to the unrendered content literal so the original record stays reachable.
+  const content = "```json\n" + JSON.stringify({
+    task_type: "feature",
+    complexity: "medium",
+    scope: "src/y",
+    reasoning: "RAW_FALLBACK_TOKEN in the body",
+  }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "analyze")); // no ndjson
+  assert.ok(findOne(row, "assistant-result"), "structured result present");
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "single 查看原始 toggle present even without a raw payload");
+  const rawPre = findOne(row, "raw-json");
+  assert.equal(rawPre.classList.contains("hidden"), true, "raw body hidden by default");
+  rawToggle.dispatch("click");
+  assert.ok(rawPre.textContent.includes("RAW_FALLBACK_TOKEN"),
+    "the raw fold falls back to the unrendered content literal");
 });
 
 check("assistant structured renderer that throws is caught and degrades", () => {
@@ -1405,38 +1418,41 @@ check("assistant no-result turn shows thinking inline, not folded, no toggles", 
     "a no-result assistant turn must not collapse its thinking into a fold");
   assert.ok(inline.textContent.includes("Reasoning step."),
     "the full thinking process is visible by default");
-  // Neither Layer-2 nor Layer-3 controls show in the default view.
+  // No fold controls in the no-result inline view: no assistant "展开全部" wrapper
+  // (it no longer exists), and no single 查看原始 fold either (thinking is inline).
   assert.equal(findOne(row, "process-toggle"), null,
-    "no 展开全部 toggle for a turn that has no result to hide behind it");
+    "no 展开全部 toggle exists on the assistant side at all");
   assert.equal(findOne(row, "raw-toggle"), null,
-    "查看原始 must not show at the row level for a no-result turn");
+    "查看原始 must not show for a no-result turn — thinking is shown inline");
 });
 
 // ---------------------------------------------------------------------------
 // Message-paradigm §2: in-progress (2a/2c) vs. final (2b) assistant turns
 // ---------------------------------------------------------------------------
 //
-// These assertions pin the result-identification contract: a turn folds its
-// thinking behind "展开全部" ONLY when its JSON carries a real result field for
-// the step. A tool-call JSON (Bash/Edit/Grep/… args), including 2+ such
-// segments, is thinking process — it stays inline, never folds, and never
-// produces an empty "展开全部" toggle. The previous renderer mistook any parseable
-// JSON for a result (analyze/version_analyze always draw a status bar), so a
-// tool-call-only turn was wrongly collapsed; these tests guard the fix. All
-// assertions are DOM-structural (presence of assistant-result / process-toggle
-// / assistant-process-inline / nested raw-toggle), not text guesses.
+// These assertions pin the result-identification contract: a turn renders a
+// structured result (Layer 1) ONLY when its JSON carries a real result field for
+// the step. When it does, the assistant side shows the narrative + result as the
+// visible default and folds only the turn's original record behind the single
+// "查看原始" entry. A tool-call JSON (Bash/Edit/Grep/… args), including 2+ such
+// segments, is thinking process — it stays inline, never folds, and never gets a
+// 查看原始 fold. The previous renderer mistook any parseable JSON for a result
+// (analyze/version_analyze always draw a status bar), so a tool-call-only turn
+// was wrongly collapsed; these tests guard the fix. All assertions are
+// DOM-structural (presence of assistant-result / raw-toggle /
+// assistant-process-inline), not text guesses.
 
 // 2a/2c: a turn whose only JSON is a single tool call is NOT an analyze result
 // (no task_type/complexity/… key) — even though renderAnalyzeReport would draw
 // a status bar from any dict. It must stay inline, not fold.
-check("2c: single tool-call JSON (no result field) stays inline, no fold, no empty toggle", () => {
+check("2c: single tool-call JSON (no result field) stays inline, no fold, no toggle", () => {
   const content = "Let me list files.\n```json\n" +
     JSON.stringify({ command: "ls -la", description: "list files" }) + "\n```";
   const row = app.renderConversationRecord(asstNorm(content, "analyze"));
   assert.equal(findOne(row, "assistant-result"), null,
     "a tool-call-only turn must not render a structured result");
-  assert.equal(findOne(row, "process-toggle"), null,
-    "no 展开全部 toggle for a tool-call-only turn — nothing to fold behind it");
+  assert.equal(findOne(row, "raw-toggle"), null,
+    "no 查看原始 fold for a tool-call-only turn — thinking is shown inline");
   const inline = findOne(row, "assistant-process-inline");
   assert.ok(inline, "thinking is shown inline");
   assert.ok(inline.textContent.includes("Let me list files."),
@@ -1446,7 +1462,7 @@ check("2c: single tool-call JSON (no result field) stays inline, no fold, no emp
 });
 
 // 2c: two or more tool-call JSON segments in one turn are all thinking process.
-check("2c: 2+ tool-call JSON segments stay inline, never collapse to an empty 展开全部", () => {
+check("2c: 2+ tool-call JSON segments stay inline, never get a 查看原始 fold", () => {
   const content =
     "Checking.\n```json\n" + JSON.stringify({ command: "ls" }) + "\n```\n" +
     "Now editing.\n```json\n" +
@@ -1455,8 +1471,8 @@ check("2c: 2+ tool-call JSON segments stay inline, never collapse to an empty �
   const row = app.renderConversationRecord(asstNorm(content, "implement"));
   assert.equal(findOne(row, "assistant-result"), null,
     "neither tool-call JSON is an implement result");
-  assert.equal(findOne(row, "process-toggle"), null,
-    "2+ tool-call JSONs with no result must not fold into an empty 展开全部");
+  assert.equal(findOne(row, "raw-toggle"), null,
+    "2+ tool-call JSONs with no result stay inline — no 查看原始 fold");
   const inline = findOne(row, "assistant-process-inline");
   assert.ok(inline, "thinking shown inline");
   assert.ok(inline.textContent.includes("Checking."));
@@ -1465,8 +1481,8 @@ check("2c: 2+ tool-call JSON segments stay inline, never collapse to an empty �
 });
 
 // 2b: a turn carrying a real result field renders the structured result by
-// default and folds the thinking process behind "展开全部".
-check("2b: real result JSON renders structured result, folds thinking behind 展开全部", () => {
+// default and folds only the original record behind the single "查看原始" entry.
+check("2b: real result JSON renders structured result + single 查看原始 fold", () => {
   const content = "```json\n" + JSON.stringify({
     completion_status: "complete",
     files_changed: ["src/x.py"],
@@ -1478,18 +1494,22 @@ check("2b: real result JSON renders structured result, folds thinking behind 展
   assert.ok(result.textContent.includes("Did the thing."));
   assert.equal(findOne(row, "assistant-process-inline"), null,
     "a result turn does not also render the inline thinking path");
-  const procFull = findOne(row, "process-full");
-  assert.ok(procFull, "Layer-2 process area exists");
-  assert.equal(procFull.classList.contains("hidden"), true,
-    "the thinking process is folded by default");
-  assert.equal(findOne(row, "raw-toggle"), null,
-    "查看原始 is nested inside Layer 2, not at the row level");
+  // No assistant "展开全部" wrapper; the single 查看原始 toggle button is visible but
+  // its raw body is folded by default.
+  assert.equal(findOne(row, "process-toggle"), null,
+    "assistant side has no 展开全部 process toggle");
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "single 查看原始 toggle button present for a result turn");
+  const rawPre = findOne(row, "raw-json");
+  assert.equal(rawPre.classList.contains("hidden"), true,
+    "the raw body is folded by default");
 });
 
 // 2b mixed: tool-call JSON followed by a real result JSON — the result is the
-// chosen Layer-1 surface; the tool-call JSON is folded as thinking (and does
-// not leak into the clean default view).
-check("2b: tool-call JSON before a result JSON — result shown, tool JSON folded as thinking", () => {
+// chosen Layer-1 surface; the intermediate tool-call JSON does not leak into the
+// clean default view but stays reachable in the single 查看原始 fold (which falls
+// back to the full unrendered content body when no raw payload exists).
+check("2b: tool-call JSON before a result JSON — result shown, tool JSON in 查看原始 fold", () => {
   const content =
     "Running tests.\n```json\n" + JSON.stringify({ command: "pytest -q" }) + "\n```\n" +
     "Result:\n```json\n" + JSON.stringify({
@@ -1504,18 +1524,20 @@ check("2b: tool-call JSON before a result JSON — result shown, tool JSON folde
   assert.ok(result.textContent.includes("PASSED"));
   assert.equal(result.textContent.includes("pytest -q"), false,
     "the intermediate tool-call JSON must not leak into the clean Layer-1 view");
-  // The tool-call JSON lives in the folded Layer-2 process area.
-  const toggle = findOne(row, "process-toggle");
-  assert.ok(toggle, "展开全部 toggle present (thinking incl. the tool-call JSON)");
-  toggle.dispatch("click");
-  const procFull = findOne(row, "process-full");
-  assert.ok(procFull.textContent.includes("pytest -q"),
-    "the tool-call JSON is part of the folded thinking process");
+  // The intermediate tool-call JSON stays reachable via the single 查看原始 fold,
+  // which falls back to the full unrendered content body (no raw payload here).
+  const rawToggle = findOne(row, "raw-toggle");
+  assert.ok(rawToggle, "single 查看原始 fold present");
+  rawToggle.dispatch("click");
+  const rawPre = findOne(row, "raw-json");
+  assert.ok(rawPre.textContent.includes("pytest -q"),
+    "the tool-call JSON is reachable in the original record via 查看原始");
 });
 
 // 2b narrative+result: narrative outside the JSON is surfaced alongside the
-// structured result (Layer 1), the process is folded.
-check("2b: narrative + result JSON — both render in the default view, thinking folded", () => {
+// structured result (both in the visible Layer 1); only the original record is
+// behind the single 查看原始 fold.
+check("2b: narrative + result JSON — both render in the default view, single 查看原始 fold", () => {
   const content = "Analyzed the engine.\n```json\n" + JSON.stringify({
     task_type: "feature",
     complexity: "medium",
@@ -1526,9 +1548,12 @@ check("2b: narrative + result JSON — both render in the default view, thinking
   const result = findOne(row, "assistant-result");
   assert.ok(result, "structured analyze result present");
   assert.ok(result.textContent.includes("Analyzed the engine."),
-    "the narrative is shown alongside the result");
+    "the narrative is shown alongside the result in the visible Layer 1");
   assert.ok(result.textContent.includes("Touches the state machine."));
-  assert.ok(findOne(row, "process-toggle"), "thinking folded behind 展开全部");
+  assert.equal(findOne(row, "process-toggle"), null,
+    "assistant side has no 展开全部 process toggle");
+  assert.ok(findOne(row, "raw-toggle"),
+    "the original record is reachable via the single 查看原始 fold");
 });
 
 // Result identification is step-scoped: a JSON whose only keys belong to a
@@ -1555,12 +1580,13 @@ check("2c: discovery turn with only a tool-call JSON stays inline", () => {
   const row = app.renderConversationRecord(asstNorm(content, "discovery"));
   assert.equal(findOne(row, "assistant-result"), null,
     "a discovery tool-call turn (no content/refined/questions) is not a result");
-  assert.equal(findOne(row, "process-toggle"), null);
+  assert.equal(findOne(row, "raw-toggle"), null,
+    "no 查看原始 fold for a tool-call-only discovery turn — thinking is inline");
   const inline = findOne(row, "assistant-process-inline");
   assert.ok(inline && inline.textContent.includes("Reading the spec."));
 });
 
-check("2b: discovery result JSON renders structured fields, folds thinking", () => {
+check("2b: discovery result JSON renders structured fields + single 查看原始 fold", () => {
   const content = "Thinking about scope.\n```json\n" + JSON.stringify({
     content: "Here is what I understand.",
     refined_description: "Fix the chat renderer.",
@@ -1573,7 +1599,10 @@ check("2b: discovery result JSON renders structured fields, folds thinking", () 
   assert.ok(findOne(result, "step-report--proposed-task"),
     "refined_description renders as a Proposed Task Description card");
   assert.ok(result.textContent.includes("Which browser?"));
-  assert.ok(findOne(row, "process-toggle"), "thinking folded behind 展开全部");
+  assert.equal(findOne(row, "process-toggle"), null,
+    "assistant side has no 展开全部 process toggle");
+  assert.ok(findOne(row, "raw-toggle"),
+    "the original record is reachable via the single 查看原始 fold");
 });
 
 // A turn whose JSON has a result KEY but renders to nothing must not fold into
@@ -1587,8 +1616,8 @@ check("2c: discovery result keys present but all empty → inline, no empty fold
   const row = app.renderConversationRecord(asstNorm(content, "discovery"));
   assert.equal(findOne(row, "assistant-result"), null,
     "empty result fields do not constitute a final result");
-  assert.equal(findOne(row, "process-toggle"), null,
-    "must not fold into an empty 展开全部");
+  assert.equal(findOne(row, "raw-toggle"), null,
+    "must not add a 查看原始 fold — thinking stays inline");
   assert.ok(findOne(row, "assistant-process-inline"),
     "thinking stays inline, content preserved");
 });

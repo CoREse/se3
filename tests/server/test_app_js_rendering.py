@@ -156,8 +156,10 @@ def test_no_visible_call_id_template_strings_in_chip_or_reply_header():
 # ---------------------------------------------------------------------------
 #
 # These codify the message paradigm (B1) the running-flow chat must match:
-#   * "查看原始" (raw toggle) is nested inside the "展开全部" expand area / a chip's
-#     expand detail — never a row-level always-visible control.
+#   * "查看原始" (raw toggle) is never a row-level always-visible control — on the
+#     user side it is nested inside the "展开全部" expand area / a chip's expand
+#     detail; on the assistant side it is the single fold below the rendered
+#     result (makeAssistantRawToggle).
 #   * an assistant turn with NO result JSON shows its thinking process inline
 #     (renderToolMarkers), never folded/contracted via makeFoldable.
 #   * conversation step headers use the paradigm step names via STEP_HEADER_TITLES.
@@ -166,44 +168,61 @@ def test_no_visible_call_id_template_strings_in_chip_or_reply_header():
 def test_raw_toggle_is_never_appended_at_row_level():
     """The "查看原始" toggle must not be a row-level always-visible control.
 
-    Every raw toggle is now appended into an expand area — the assistant
-    ``makeProcessToggle`` / user ``makeUserPromptToggle`` "展开全部" body, or a
-    collapsed chip's expand detail. The historical row-level form
-    (``row.appendChild(rawToggle)``) must be gone, so the default Layer-1 view
-    never shows the raw toggle.
+    For the USER side the raw toggle is appended into an expand area — the
+    ``makeUserPromptToggle`` "展开全部" body, or a collapsed chip's expand detail.
+    For the ASSISTANT side it is the single fold built below the rendered result
+    by ``makeAssistantRawToggle``. Either way the historical row-level form
+    (``row.appendChild(rawToggle)``) must be gone, so the default view never
+    shows a row-level raw toggle.
     """
     src = _read_app_js()
     assert "row.appendChild(rawToggle)" not in src, (
         "查看原始 must not be appended at the row level — nest it inside the "
-        "展开全部 expand area / chip detail instead"
+        "展开全部 expand area / chip detail (user) or build it below the result "
+        "via makeAssistantRawToggle (assistant) instead"
     )
 
 
 def test_raw_toggle_is_nested_inside_expand_area_factories():
-    """``makeProcessToggle`` and ``makeUserPromptToggle`` MUST nest the raw
-    toggle inside their lazily-built expand area (Layer 3 inside Layer 2)."""
+    """``makeUserPromptToggle`` MUST nest the shared raw toggle inside its
+    lazily-built "展开全部" expand area (user Layer 3 inside Layer 2).
+
+    The assistant side no longer has a ``makeProcessToggle`` — it was replaced
+    by the single ``makeAssistantRawToggle`` fold — so only the user factory is
+    asserted here. The shared ``makeRawToggle`` (无 raw → null semantics) stays
+    intact for the user path and the collapsed chip.
+    """
     src = _read_app_js()
-    for fn in ("makeProcessToggle", "makeUserPromptToggle"):
-        body = _extract_js_function_body(src, fn)
-        assert "makeRawToggle" in body, (
-            f"{fn} must nest makeRawToggle inside its 展开全部 expand area"
-        )
+    body = _extract_js_function_body(src, "makeUserPromptToggle")
+    assert "makeRawToggle" in body, (
+        "makeUserPromptToggle must nest makeRawToggle inside its 展开全部 expand "
+        "area"
+    )
 
 
 def test_assistant_no_result_branch_does_not_fold():
     """``renderAssistantBubble`` MUST NOT route any branch through
-    ``makeFoldable``: the no-result turn shows its thinking inline and the
-    result-JSON turn hides the process behind ``makeProcessToggle`` — neither
-    collapses the thinking into a fold."""
+    ``makeFoldable``: the no-result turn shows its thinking inline, and the
+    result-JSON turn keeps the narrative + result visible while folding only the
+    original record behind the single ``makeAssistantRawToggle`` "查看原始" entry
+    — neither collapses the thinking into a fold.
+
+    The assistant side is now two layers (no ``makeProcessToggle`` / "展开全部"
+    wrapper), so the result branch must call the dedicated single raw entry."""
     body = _extract_js_function_body(_read_app_js(), "renderAssistantBubble")
     assert "makeFoldable" not in body, (
         "renderAssistantBubble must not fold the thinking process — a no-result "
         "assistant turn shows it inline via renderToolMarkers"
     )
-    # The result-JSON branch still tucks the process behind 展开全部.
-    assert "makeProcessToggle" in body, (
-        "renderAssistantBubble must keep the 展开全部 process toggle for the "
-        "result-JSON branch"
+    # The assistant two-layer model: the result branch builds the single
+    # 查看原始 fold via makeAssistantRawToggle, not a 展开全部 process toggle.
+    assert "makeAssistantRawToggle" in body, (
+        "renderAssistantBubble must build the single 查看原始 fold for the "
+        "result-JSON branch via makeAssistantRawToggle"
+    )
+    assert "makeProcessToggle" not in body, (
+        "renderAssistantBubble must not reference the deleted makeProcessToggle "
+        "— the assistant side is now two layers"
     )
 
 

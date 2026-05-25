@@ -2245,11 +2245,13 @@ function isDiscoveryResultDict(value) {
 }
 
 function renderDiscoveryAssistant(content, _norm) {
-  // Result identification: only fold the thinking process when this turn parsed
-  // a real discovery result (content / refined_description / questions). A turn
-  // whose only JSON is a tool call — including 2+ such segments — matches no
-  // result region, so we return null and the caller keeps the thinking process
-  // inline (never collapsing it into an empty "展开全部").
+  // Result identification: only surface a structured result (Layer 1) when this
+  // turn parsed a real discovery result (content / refined_description /
+  // questions). A turn whose only JSON is a tool call — including 2+ such
+  // segments — matches no result region, so we return null and the caller keeps
+  // the thinking process shown inline in full (never folded). When a result IS
+  // present, the narrative is tiled above it as the visible first layer, and the
+  // caller adds the single "查看原始" entry for the original record.
   const extracted = extractResultJson(content, isDiscoveryResultDict);
   if (!extracted) return null;
   const value = extracted.value;
@@ -2524,10 +2526,13 @@ function hasRawPayload(norm) {
 // Build a "view raw" control for one record: a small button plus a hidden
 // formatted-JSON block showing the pre-normalization raw_json / raw_ndjson.
 // Hidden by default — the default view stays human-readable. Returns null
-// when the record carries no raw payload. Per the message paradigm this control
-// is only ever appended *inside* a "展开全部" expand area (assistant
-// `makeProcessToggle` / user `makeUserPromptToggle`) or a collapsed chip's
-// detail — never at the always-visible row level.
+// when the record carries no raw payload. This shared helper backs the USER
+// side: per the message paradigm it is only ever appended *inside* a "展开全部"
+// expand area (user `makeUserPromptToggle`) or a collapsed chip's detail —
+// never at the always-visible row level. Its "no raw → null" contract is relied
+// on by `makeUserPromptToggle` and the collapsed-chip path, so it MUST stay
+// intact. (The assistant side uses its own `makeAssistantRawToggle`, which
+// instead falls back to the unrendered content literal when no raw exists.)
 function makeRawToggle(norm) {
   const { payload, kind } = resolveRawPayload(norm);
   if (payload == null) return null;
@@ -2554,41 +2559,51 @@ function makeRawToggle(norm) {
   return wrap;
 }
 
-// --- assistant three-layer progressive disclosure -------------------------
+// --- assistant single-layer raw disclosure --------------------------------
 
-// "展开全部" — Layer 2 of the assistant's three-layer disclosure. Collapsed by
-// default; on first expand it lazily renders the full per-turn process via
-// `renderToolMarkers` (tool calls + intermediate narrative + the unrendered
-// result JSON text), then nests Layer 3 ("查看原始", the raw NDJSON) at the end
-// of the expanded area so the raw toggle never shows in the default Layer-1
-// view. Expanding scrolls the freshly shown block into view; collapsing leaves
-// the reader's position untouched.
-function makeProcessToggle(content, norm) {
-  const wrap = el("div", "process-toggle-wrap folded");
-  const btn = el("button", "process-toggle", "▸ 展开全部");
+// "查看原始" — the assistant turn's single fold layer (Layer 2). Unlike the user
+// side's three layers, an assistant turn whose result JSON is rendered keeps
+// just two: Layer 1 is the visible narrative + structured result, and this
+// single "查看原始" entry is the only fold — there is no "展开全部" wrapper. The
+// button is always visible; the body (this turn's original record — raw NDJSON /
+// tool-call JSON / unrendered result-JSON literal) is folded by default.
+//
+// This is a dedicated assistant entry, NOT the shared `makeRawToggle`: that
+// helper returns null when no raw payload exists (a contract the user
+// `makeUserPromptToggle` and the collapsed chip depend on). Here we instead
+// fall back to the unrendered `content` text literal when raw_json / raw_ndjson
+// is absent, so the original turn record is always reachable. Expanding scrolls
+// the freshly shown block into view; collapsing leaves the reader's position
+// untouched.
+function makeAssistantRawToggle(content, norm) {
+  const { payload, kind } = resolveRawPayload(norm);
+  const hasRaw = payload != null;
+  const wrap = el("div", "raw-toggle-wrap assistant-raw-toggle-wrap");
+  const btn = el("button", "raw-toggle", "查看原始");
   btn.type = "button";
-  const full = el("div", "process-full hidden");
-  let built = false;
-  let expanded = false;
+  const pre = el("pre", "raw-json hidden");
+  let rendered = false;
+  let shown = false;
   btn.addEventListener("click", () => {
-    expanded = !expanded;
-    if (expanded && !built) {
-      for (const node of renderToolMarkers(content)) full.appendChild(node);
-      // Layer 3 nests inside the expanded Layer-2 area, after the process
-      // content — the raw toggle is never visible until "展开全部" is opened.
-      const rawToggle = makeRawToggle(norm);
-      if (rawToggle) full.appendChild(rawToggle);
-      built = true;
+    shown = !shown;
+    if (shown && !rendered) {
+      // Prefer the structured raw payload; fall back to the unrendered content
+      // literal so the original record is never unreachable.
+      pre.textContent = hasRaw
+        ? formatRaw(payload)
+        : String(content == null ? "" : content);
+      rendered = true;
     }
-    full.classList.toggle("hidden", !expanded);
-    wrap.classList.toggle("folded", !expanded);
-    wrap.classList.toggle("expanded", expanded);
-    btn.textContent = expanded ? "▾ 收起全部" : "▸ 展开全部";
-    if (expanded) {
-      requestAnimationFrame(() => full.scrollIntoView({ block: "nearest" }));
+    pre.classList.toggle("hidden", !shown);
+    btn.classList.toggle("active", shown);
+    btn.textContent = shown
+      ? `隐藏原始 (${hasRaw ? kind : "content"})`
+      : "查看原始";
+    if (shown) {
+      requestAnimationFrame(() => pre.scrollIntoView({ block: "nearest" }));
     }
   });
-  wrap.append(btn, full);
+  wrap.append(btn, pre);
   return wrap;
 }
 
@@ -2617,15 +2632,17 @@ function appendPromptSubsections(target, split) {
   }
 }
 
-// "展开全部" — Layer 2 of the user turn's three-layer disclosure, the mirror of
-// the assistant side's `makeProcessToggle`. Collapsed by default; on first
-// expand it lazily renders the full prompt the LLM actually saw as the two
-// labeled subsections (模板前缀 / 框架后缀), then nests Layer 3 ("查看原始", the raw
-// NDJSON) at the end of the expanded area, so the default view (the user-content
-// bubble above it) stays limited to the user's literal input and the raw toggle
-// never shows until "展开全部" is opened. Control naming ("▸ 展开全部" / "▾ 收起全部")
-// and the expand-only scroll-into-view behavior are shared verbatim with the
-// assistant process toggle.
+// "展开全部" — Layer 2 of the user turn's three-layer disclosure. (The user side
+// keeps all three layers; the assistant side was simplified to two — narrative +
+// result, then a single "查看原始" — so there is no longer an assistant-side
+// process toggle to mirror.) Collapsed by default; on first expand it lazily
+// renders the full prompt the LLM actually saw as the two labeled subsections
+// (模板前缀 / 框架后缀), then nests Layer 3 ("查看原始", the raw NDJSON) at the end of
+// the expanded area, so the default view (the user-content bubble above it)
+// stays limited to the user's literal input and the raw toggle never shows until
+// "展开全部" is opened. Control naming ("▸ 展开全部" / "▾ 收起全部") and the expand-only
+// scroll-into-view behavior follow the same conventions used elsewhere in the
+// view.
 function makeUserPromptToggle(split, norm) {
   const wrap = el("div", "process-toggle-wrap user-prompt-toggle-wrap folded");
   const btn = el("button", "process-toggle", "▸ 展开全部");
@@ -2655,18 +2672,21 @@ function makeUserPromptToggle(split, norm) {
   return wrap;
 }
 
-// Build the inner content of an assistant bubble using the three-layer
-// progressive disclosure model:
-//   Layer 1 (default): the clean structured result, via STEP_ASSISTANT_RENDERERS
-//                       — no tool markers, no raw JSON, just the fields.
-//   Layer 2 ("展开全部"): the full per-turn process (tool calls + narrative +
-//                       unrendered result JSON), collapsed by default.
-//   Layer 3 ("查看原始"): the raw NDJSON — nested inside the Layer-2 "展开全部"
-//                       area by `makeProcessToggle`, never at the row level.
+// Build the inner content of an assistant bubble using the assistant's
+// two-layer progressive disclosure model (the user side keeps three layers;
+// the assistant side is deliberately simpler):
+//   Layer 1 (default, visible): the narrative + the clean structured result,
+//                       via STEP_ASSISTANT_RENDERERS — the narrative (already
+//                       stripped of every JSON region) tiled above the rendered
+//                       fields, no raw JSON blob.
+//   Layer 2 (single fold, "查看原始"): this turn's original record — raw NDJSON /
+//                       tool-call JSON / unrendered result-JSON literal — folded
+//                       by default via `makeAssistantRawToggle`. There is no
+//                       "展开全部" wrapper: the single "查看原始" entry is the only
+//                       fold for the assistant side.
 // This mirrors the message paradigm's two assistant cases:
-//   * a turn that produced a result JSON shows only the rendered result by
-//     default, with the thinking process (and the unrendered result JSON text)
-//     collected behind "展开全部";
+//   * a turn that produced a result JSON shows the narrative + rendered result
+//     by default, with the original record reachable behind a single "查看原始";
 //   * a turn with NO result JSON keeps its thinking process shown in full,
 //     never collapsed/contracted — so the process is rendered inline via
 //     `renderToolMarkers` (not folded), and nothing is ever hidden.
@@ -2688,13 +2708,14 @@ function renderAssistantBubble(content, norm) {
   }
 
   if (structured) {
-    // Result-JSON turn: Layer 1 is the clean rendered result; "展开全部" folds
-    // the thinking process (with the raw result JSON text and the nested
-    // "查看原始" raw toggle) away.
+    // Result-JSON turn: Layer 1 is the narrative + clean rendered result (the
+    // renderer already prepends the narrative, which has every JSON region
+    // stripped — so the narrative never duplicates the structured fields).
+    // The single "查看原始" entry (Layer 2) holds the original record.
     const resultWrap = el("div", "assistant-result");
     resultWrap.appendChild(structured);
     frag.appendChild(resultWrap);
-    frag.appendChild(makeProcessToggle(content, norm));
+    frag.appendChild(makeAssistantRawToggle(content, norm));
   } else {
     // No result JSON this turn (or the body could not be structured): keep the
     // full thinking process shown inline, never folded or contracted to empty.
@@ -2745,15 +2766,14 @@ function renderConversationRecord(norm) {
       bubble.appendChild(
         el("p", "md-p conv-empty", "(no readable content for this record)"));
     } else if (role === "assistant") {
-      // assistant: three-layer progressive disclosure. The default view is the
-      // clean structured result (via STEP_ASSISTANT_RENDERERS); the full
-      // per-turn process is tucked behind "展开全部", and the "查看原始" raw
-      // toggle is nested at the end of that Layer-2 area via makeProcessToggle
-      // (not at the row level). When no result JSON is present — or no
-      // structured renderer can parse the body — the thinking process is
-      // rendered inline in full via renderToolMarkers (never folded), so
-      // nothing is hidden, per the message paradigm and the Three-Tier
-      // Progressive Disclosure requirement.
+      // assistant: two-layer progressive disclosure. The default view is the
+      // narrative + clean structured result (via STEP_ASSISTANT_RENDERERS); the
+      // turn's original record is reachable behind a single "查看原始" entry
+      // (makeAssistantRawToggle) — there is no "展开全部" wrapper on the assistant
+      // side. When no result JSON is present — or no structured renderer can
+      // parse the body — the thinking process is rendered inline in full via
+      // renderToolMarkers (never folded), so nothing is hidden, per the message
+      // paradigm and the Three-Tier Progressive Disclosure requirement.
       bubble.appendChild(renderAssistantBubble(content, norm));
     } else {
       // user / system / other: literal text — these are large structured
@@ -2797,9 +2817,10 @@ function renderConversationRecord(norm) {
   }
 
   // assistant / other: expanded by default. The "查看原始" raw toggle is NOT
-  // appended at the row level — for an assistant turn it is nested inside the
-  // "展开全部" process area by `renderAssistantBubble` → `makeProcessToggle`, so
-  // the default Layer-1 view stays clean (per the message paradigm).
+  // appended at the row level — for an assistant result turn it is the single
+  // fold built by `renderAssistantBubble` → `makeAssistantRawToggle` (below the
+  // rendered result), so the default Layer-1 view stays clean (per the message
+  // paradigm).
   row.appendChild(renderRecordHead(norm));
   row.appendChild(buildBubble());
   return row;
@@ -2870,14 +2891,14 @@ function renderStepEventRecord(norm) {
 // ---------------------------------------------------------------------------
 
 // Build the row for a `user` message whose body has the sentinel markers,
-// using the same three-layer progressive disclosure as the assistant side:
+// using the user side's three-layer progressive disclosure (the assistant side
+// is now two layers — narrative + result, then a single "查看原始"):
 //   Layer 1 (default): the user's literal input (the middle USER_CONTENT
 //                      section) as a default-expanded bubble — only what the
 //                      human typed, never the framework boilerplate.
 //   Layer 2 ("展开全部"): the full prompt the LLM saw, as the 模板前缀 /
 //                      框架后缀 subsections, collapsed by default via
-//                      `makeUserPromptToggle` (the mirror of the assistant
-//                      `makeProcessToggle`).
+//                      `makeUserPromptToggle`.
 //   Layer 3 ("查看原始"): the raw NDJSON, nested at the end of the Layer-2
 //                      expand area (never a row-level always-visible control).
 //

@@ -108,8 +108,8 @@ squeeze the entire flow into one viewport.
 #### Scenario: Expanding a folded block scrolls the new content into view
 - **GIVEN** the conversation contains a foldable block (e.g. a collapsed
   `user` / `system` prompt chip, a raw-payload `view raw` toggle, or any
-  other `makeFoldable` / `makeRawToggle` consumer) whose tail currently sits
-  below the visible viewport
+  other `makeFoldable` / `makeRawToggle` / `makeAssistantRawToggle` consumer)
+  whose tail currently sits below the visible viewport
 - **WHEN** the user expands the block
 - **THEN** after the expand transition completes the consumer calls
   `Element.scrollIntoView({block: "nearest"})` on the freshly shown block so
@@ -679,23 +679,37 @@ framework boilerplate.
 
 ### Requirement: Three-Tier Progressive Disclosure
 
-Every conversation turn in `#flow-view` — both the `user` side and the
-`assistant` side — MUST follow one unified **three-tier progressive
-disclosure** model so the default view is the clean, human-meaningful payload
-and the surrounding process is reachable but never in the way. This is the
-deliberate inversion of the prior behavior, where an assistant's thinking
-narrative + tool markers were the default surface, the real result was buried
-in a raw JSON blob, and an isolated "待回复" chip sat inline in the stream. The
-target is: **default shows only the rendered result; the full process is
-collected behind "展开全部"; the original NDJSON is behind "查看原始".**
+Every conversation turn in `#flow-view` MUST follow a progressive-disclosure
+model so the default view is the clean, human-meaningful payload and the
+surrounding process is reachable but never in the way. This is the deliberate
+inversion of the prior behavior, where an assistant's thinking narrative + tool
+markers were the default surface, the real result was buried in a raw JSON blob,
+and an isolated "待回复" chip sat inline in the stream.
+
+The two roles use **different disclosure depths**, by design — a deliberate
+**mixed model**, not one unified tier count:
+
+- The **`user` side keeps three layers**: Layer 1 the literal input, Layer 2 the
+  full prompt behind "展开全部", and Layer 3 the raw NDJSON behind "查看原始" nested
+  at the end of the Layer-2 area.
+- The **`assistant` side uses two layers**: Layer 1 the narrative + the rendered
+  structured result (both visible by default), and a single fold layer "查看原始"
+  holding the turn's original record. There is NO assistant-side "展开全部"
+  wrapper and no third assistant layer — the narrative is a JSON-stripped part of
+  the visible first layer, so only the original record is folded.
+
+The target is: **the default view shows the rendered result (plus, on the
+assistant side, the JSON-stripped narrative tiled above it); the original record
+is one click away behind "查看原始"; and, on the user side only, the full prompt
+is behind "展开全部".**
 
 The conversation is grouped into per-phase sections
 (DISCOVERY / ANALYZE / PLAN / …) and, within each section, turns are presented
 in chronological order as User / Assistant pairs (subject to the strict
 chronological ordering of the *Conversation Strict Chronological Order*
-requirement). Each turn exposes the same three layers:
+requirement).
 
-**User turn**
+**User turn** — three layers:
 1. **Layer 1 (default)** — only the user's literal input (the user-content
    section produced by the `prompt_markers.py` split; see *Role-Based Message
    Collapse*). No framework boilerplate leaks into this default view.
@@ -707,38 +721,39 @@ requirement). Each turn exposes the same three layers:
    Layer-2 "展开全部" expand area** (built by `makeUserPromptToggle`), NOT as a
    row-level always-visible button.
 
-**Assistant turn** — the three-layer model below applies **only when this turn
-produced a final result JSON**; a turn with no result JSON is handled by the
-separate no-result rule stated after Layer 3. The precise, field-based test for
-what counts as a *final result JSON* — as opposed to an intermediate tool-call
-JSON that merely happens to parse — is defined in *Structured-JSON Assistant
-Rendering* (the per-step result-field registry); the fold decision here MUST use
-that same discriminator so the two requirements never diverge.
-1. **Layer 1 (default)** — only this turn's rendered result: the structured
-   fields produced by the `STEP_ASSISTANT_RENDERERS` entry for the step type
-   (e.g. discovery's `content` / `refined_description` / `questions`). No raw
-   ```` ```json ```` blob and no isolated pending chip in the default view.
-2. **Layer 2 ("展开全部")** — this turn's full process: tool calls, intermediate
-   narrative, and the unrendered result JSON literal, rendered through
-   `renderToolMarkers` + markdown. Folded by default. Any intermediate JSON
-   tool calls — including the case where a single turn carries two or more
-   JSON calls — count as part of this thinking process, NOT as the final
-   result, and so they live here under Layer 2 rather than as the Layer-1
-   rendered result.
-3. **Layer 3 ("查看原始")** — the original NDJSON record, reachable via the
-   shared raw toggle (查看原始) **nested at the end of the Layer-2 "展开全部"
-   expand area** (built by `makeProcessToggle`), NOT as a row-level
-   always-visible button. Raw stays reachable for every result-JSON assistant
-   turn; it simply lives inside Layer 2 instead of beside the bubble.
+**Assistant turn** — two layers. The two-layer model below applies **only when
+this turn produced a final result JSON**; a turn with no result JSON is handled
+by the separate no-result rule stated after Layer 2. The precise, field-based
+test for what counts as a *final result JSON* — as opposed to an intermediate
+tool-call JSON that merely happens to parse — is defined in *Structured-JSON
+Assistant Rendering* (the per-step result-field registry); the fold decision here
+MUST use that same discriminator so the two requirements never diverge.
+1. **Layer 1 (default, visible)** — this turn's narrative tiled above its
+   rendered result. The narrative (text outside every JSON region, with inline
+   `[Tool: …]` markers preserved and rendered via `renderToolMarkers`) is the
+   human reasoning, already stripped of all JSON, so it does NOT duplicate the
+   structured fields; below it sit the structured fields produced by the
+   `STEP_ASSISTANT_RENDERERS` entry for the step type (e.g. discovery's
+   `content` / `refined_description` / `questions`). No raw ```` ```json ````
+   blob and no isolated pending chip appear in the default view.
+2. **Layer 2 ("查看原始", the single fold)** — the turn's original record: the raw
+   NDJSON / tool-call JSON / unrendered result-JSON literal, with the Layer-1
+   narrative removed. It is folded by default but its toggle button is always
+   visible, sitting directly below the rendered result; it is built by
+   `makeAssistantRawToggle`. There is no "展开全部" wrapper and no third layer:
+   because the narrative already lives in the visible Layer 1, only the original
+   record is folded. The assistant raw entry prefers the raw_ndjson / raw_json
+   payload and, when neither is present, falls back to the unrendered `content`
+   literal so the original record is always reachable.
 
 **Assistant turn with no result JSON** — when this turn produced no final
 result JSON (its body is thinking process only — narrative plus tool calls,
 including a turn whose only JSON content is intermediate tool calls), the
 thinking process MUST stay shown inline as the default view via
-`renderToolMarkers` and MUST NOT be folded or contracted into an empty
-"展开全部" toggle. It never collapses to empty: because the process is already
-the visible default, this case has no separate "展开全部" / "查看原始" nesting and
-the content is shown in full directly.
+`renderToolMarkers` and MUST NOT be folded or contracted into any empty toggle.
+It never collapses to empty: because the process is already the visible default,
+this case has no separate "查看原始" fold and the content is shown in full
+directly.
 
 When a turn has no Layer-1 payload to surface — e.g. a legacy `user` record
 whose user-content section is empty, or an assistant turn whose body cannot be
@@ -747,22 +762,22 @@ drops content: a legacy empty `user` turn collapses to a single chip (with its
 查看原始 raw toggle nested inside the chip's expand detail), while an assistant
 turn with no parseable result keeps its thinking process shown inline via the
 same `renderToolMarkers` + markdown path described in *Structured-JSON
-Assistant Rendering* — shown in full, not folded. Expanding a Layer-2 /
-Layer-3 toggle follows the same `scrollIntoView({block: "nearest"})`-on-expand,
+Assistant Rendering* — shown in full, not folded. Expanding any disclosure
+toggle follows the same `scrollIntoView({block: "nearest"})`-on-expand,
 no-scroll-on-collapse behavior used elsewhere in the view.
 
-#### Scenario: Assistant turn defaults to the clean rendered result
+#### Scenario: Assistant turn defaults to the rendered result with the narrative above it
 - **GIVEN** an assistant turn whose body carries tool-call narrative plus a
   structured-JSON result for its step type
 - **WHEN** the turn is rendered in `#flow-view`
-- **THEN** the default (Layer 1) view shows only the rendered structured
-  fields for that step type
-- **AND** the tool calls, intermediate narrative, and unrendered result JSON
-  literal are NOT in the default view — they are reachable only by expanding
-  the "展开全部" (Layer 2) toggle
-- **AND** the original NDJSON is reachable only by opening the "查看原始"
-  (Layer 3) toggle nested at the end of that expanded "展开全部" area, never via
-  a row-level always-visible button
+- **THEN** the default (Layer 1) view shows the JSON-stripped narrative tiled
+  above the rendered structured fields for that step type
+- **AND** the raw NDJSON / tool-call JSON / unrendered result JSON literal are
+  NOT in the default view — the turn's original record is reachable only by
+  opening the single "查看原始" fold (its button is always visible, its body
+  folded by default)
+- **AND** there is no assistant-side "展开全部" wrapper and no third disclosure
+  layer
 
 #### Scenario: User turn defaults to the literal input only
 - **GIVEN** a `user` turn whose stored body contains the three-segment marker
@@ -801,17 +816,30 @@ no-scroll-on-collapse behavior used elsewhere in the view.
 - **WHEN** the turn is rendered in `#flow-view`
 - **THEN** the thinking process is shown inline as the default view via
   `renderToolMarkers`, in full
-- **AND** it is NOT folded or contracted into an empty "展开全部" toggle, and it
-  never collapses to empty
+- **AND** it is NOT folded or contracted into any empty toggle, and it never
+  collapses to empty
 
-#### Scenario: Layer 3 raw toggle is nested inside the Layer 2 expansion
-- **GIVEN** a result-JSON assistant turn or a marker-split `user` turn
-  rendered with its default Layer-1 payload
+#### Scenario: User Layer 3 raw toggle is nested inside the Layer 2 expansion
+- **GIVEN** a marker-split `user` turn rendered with its default Layer-1
+  literal-input bubble
 - **WHEN** the conversation row is first rendered, before any toggle is opened
 - **THEN** no row-level always-visible "查看原始" button is present beside the
   bubble
 - **AND** the "查看原始" (Layer 3) toggle becomes reachable only after the
   "展开全部" (Layer 2) toggle is expanded, nested at the end of that expand area
+
+#### Scenario: Assistant single 查看原始 fold is the only assistant disclosure
+- **GIVEN** a result-JSON assistant turn rendered with its default Layer-1
+  narrative + structured result
+- **WHEN** the conversation row is rendered
+- **THEN** the only assistant-side fold is the single "查看原始" entry below the
+  rendered result — its toggle button is always visible and its body is folded
+  by default
+- **AND** there is no assistant "展开全部" wrapper, and the "查看原始" fold is NOT
+  nested inside any "展开全部" area
+- **AND** when neither raw_ndjson nor raw_json is present, the "查看原始" fold
+  falls back to the unrendered `content` literal so the original record stays
+  reachable
 
 ### Requirement: Structured-JSON Assistant Rendering
 
@@ -866,11 +894,13 @@ report; it is the worked example below:
    - `questions` — rendered as an ordered list.
 3. Always preserve the **view raw** affordance: the original assistant body
    (including the JSON literal and NDJSON envelope) MUST remain reachable via
-   the same shared raw toggle (查看原始) used by other records — for a rendered
-   result-JSON turn that toggle is **nested at the end of the Layer-2 "展开全部"
-   expand area** (see *Three-Tier Progressive Disclosure*) rather than shown as
-   a row-level always-visible button, so a developer can still inspect the
-   unrendered string when debugging.
+   the assistant's single "查看原始" fold (built by `makeAssistantRawToggle`; see
+   *Three-Tier Progressive Disclosure*) sitting directly below the rendered
+   result rather than shown as a row-level always-visible button, so a developer
+   can still inspect the unrendered string when debugging. This assistant fold
+   is its own dedicated entry — it falls back to the unrendered `content`
+   literal when no raw_ndjson / raw_json payload is present — and is NOT nested
+   inside any "展开全部" wrapper (there is no assistant-side "展开全部").
 
 The registry MUST remain open for future step types without re-architecting
 the dispatch path. Every step type listed above MUST have a registered
@@ -881,9 +911,11 @@ renderer that cannot parse the body — degrades gracefully through the shared
 message is ever dropped.
 
 **Result-vs-tool-call identification.** A structured renderer MUST surface a
-Layer-1 result (and thereby let *Three-Tier Progressive Disclosure* fold the
-turn's thinking process behind "展开全部") **only when the turn actually produced a
-final result JSON** — not merely because some region of the body parsed as JSON.
+Layer-1 result (and thereby let *Three-Tier Progressive Disclosure* render the
+narrative + structured result as the visible default, with only the turn's
+original record folded behind the single "查看原始" entry) **only when the turn
+actually produced a final result JSON** — not merely because some region of the
+body parsed as JSON.
 The discriminator is **field-based**: the frontend maintains a per-step
 result-field registry (e.g. `STEP_RESULT_FIELDS`) enumerating the keys that
 belong to each step type's result set — the same fields the matching
@@ -903,11 +935,11 @@ turn's result (a result conventionally follows the tool calls that produced it).
 The Layer-1 narrative is then the body with **all** JSON regions removed (not
 just the chosen one), so intermediate tool-call JSON never leaks into the clean
 default view while the full original body — every JSON region included — stays
-reachable through the Layer-2 "展开全部" process area and the Layer-3 "查看原始"
-toggle. When **no** region satisfies the result predicate — including a turn
-carrying two or more tool-call JSON segments — the renderer MUST return no result
-so the caller keeps the thinking process inline per *Three-Tier Progressive
-Disclosure*, never folding it into an empty "展开全部" toggle.
+reachable through the assistant's single "查看原始" fold. When **no** region
+satisfies the result predicate — including a turn carrying two or more tool-call
+JSON segments — the renderer MUST return no result so the caller keeps the
+thinking process inline per *Three-Tier Progressive Disclosure*, never folding it
+into any empty toggle.
 
 #### Scenario: Tool-call-only turn is not mistaken for a final result
 - **GIVEN** an assistant turn whose body carries one or more JSON regions that
@@ -918,7 +950,7 @@ Disclosure*, never folding it into an empty "展开全部" toggle.
 - **THEN** no region satisfies the per-step result-field predicate, so the
   renderer surfaces no structured Layer-1 result
 - **AND** the caller keeps the full thinking process inline via
-  `renderToolMarkers`, never folding it into an empty "展开全部" toggle
+  `renderToolMarkers`, never folding it into any empty toggle
 
 #### Scenario: Final result region wins among interleaved tool-call JSON
 - **GIVEN** an assistant turn that emits one or more tool-call JSON regions
@@ -929,7 +961,7 @@ Disclosure*, never folding it into an empty "展开全部" toggle.
   turn's result and rendered as the Layer-1 structured fields
 - **AND** the Layer-1 narrative has every JSON region (the tool calls and the
   result literal) removed, while the unmodified body remains reachable behind
-  the "展开全部" / "查看原始" disclosure layers
+  the assistant's single "查看原始" fold
 
 #### Scenario: Discovery assistant message renders structured fields
 - **GIVEN** an assistant record with `step_type = "discovery"` whose body
