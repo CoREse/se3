@@ -1790,7 +1790,55 @@ function renderConversation(container, records, append) {
 // placeholder bubble (carrying the same ordering metadata) so the rest of the
 // batch — and all future appends — keep flowing.
 function addConversationRecords(container, st, records, startIndex) {
+  // Map every record to a stable segment key over the FULL ordered array (not
+  // by inspecting the DOM): same-segment partials (one turn's run of fragments)
+  // share a key and merge into one accumulating bubble, while a later round's
+  // partials (separated by an intervening final) get a distinct key and a
+  // separate bubble. Computing this purely keeps the incremental (append) and
+  // full-rebuild paths identical, and is immune to removeSupersededProgress
+  // running only at the end of the loop (a just-closed segment's stale bubble
+  // still lingers mid-loop, so a DOM probe would mis-merge the next round).
+  const segments = partialSegments(records);
   for (let i = startIndex; i < records.length; i++) {
+    const segKey = segments[i];
+
+    // Partial fragment: fold it into its segment's live accumulating bubble,
+    // creating that bubble on the segment's first fragment. A malformed partial
+    // must not stall the stream, so on failure we fall through to the generic
+    // per-record path below for the same index.
+    if (segKey != null) {
+      let handled = false;
+      try {
+        const norm = normalizeRecord(records[i]);
+        const live = findLivePartialBubble(container, segKey);
+        if (live) {
+          appendPartialFragment(live, norm);
+          // Track the LATEST fragment for ordering + supersede: the bubble's
+          // (ts, idx) become the newest fragment's, so a later final sorts just
+          // after it and `superseded.has(child.__convIdx)` (the latest member
+          // index is always superseded once the turn finalizes) still drops it.
+          live.__convTs = tsValue(norm.timestamp);
+          live.__convIdx = i;
+        } else {
+          const bubble = buildPartialBubble(norm);
+          bubble.__convTs = tsValue(norm.timestamp);
+          bubble.__convIdx = i;
+          bubble.__convStepKey = stepKey(norm);
+          bubble.__convStepType = norm.stepType || "";
+          bubble.__convStepLabel = norm.stepType || norm.stepId || "step";
+          bubble.__convPartial = true;
+          bubble.__convSegmentKey = segKey;
+          bubble.__convTurnKey = progressTurnKey(norm);
+          insertBubbleSorted(container, bubble);
+        }
+        handled = true;
+      } catch (err) {
+        try { console.warn("partial fragment render failed", i, err); }
+        catch (_) { /* console may be absent */ }
+      }
+      if (handled) continue;
+    }
+
     let norm = null;
     let bubble;
     try {
@@ -1878,6 +1926,48 @@ function markSupersededProgress(records) {
   return superseded;
 }
 
+// Pure: given the full ordered records array, return an array (same length as
+// `records`) of stable per-record *segment keys*. A segment key groups exactly
+// the run of `partial` fragments that belong to ONE turn — the same batch the
+// turn's final result later collapses into a single assistant bubble — so the
+// live (in-progress) view can accumulate those fragments into one bubble and
+// stay consistent with the final collapsed form.
+//
+// A record's segment key is:
+//   * null               — for non-assistant or non-partial records.
+//   * progressTurnKey(norm) + '#seg' + N
+//                        — for a partial, where N is the count of FINAL
+//                          (non-partial) assistant results sharing the same
+//                          progressTurnKey that appear strictly before this
+//                          record.
+//
+// The `#segN` suffix is what keeps multi-round turns apart: discovery
+// continue / fix-loop re-runs reuse the same (step_id, attempt=0) — hence the
+// same progressTurnKey — but a later round's partials follow the earlier
+// round's final, so they land at a higher final-count N and form a distinct
+// segment. This mirrors `markSupersededProgress`'s positional supersede rule
+// (a final supersedes only the partials before it that share its key), so the
+// two never disagree about which fragments belong together. O(n), DOM-free,
+// exposed for unit testing.
+function partialSegments(records) {
+  const segments = new Array(records.length).fill(null);
+  // progressTurnKey -> number of finals seen so far for that key.
+  const finalCounts = Object.create(null);
+  for (let i = 0; i < records.length; i++) {
+    let norm = null;
+    try { norm = normalizeRecord(records[i]); } catch (_) { norm = null; }
+    if (!norm || norm.role !== "assistant") continue;
+    const turnKey = progressTurnKey(norm);
+    if (norm.partial) {
+      const seen = finalCounts[turnKey] || 0;
+      segments[i] = turnKey + "#seg" + seen;
+    } else {
+      finalCounts[turnKey] = (finalCounts[turnKey] || 0) + 1;
+    }
+  }
+  return segments;
+}
+
 // Remove already-rendered partial bubbles whose turn has been finalized. Driven
 // by `markSupersededProgress` so the render path and the unit test share one
 // discriminator. Only `.conv-partial` bubbles are ever removed.
@@ -1889,6 +1979,72 @@ function removeSupersededProgress(container, records) {
       container.removeChild(child);
     }
   }
+}
+
+// --- live partial accumulation --------------------------------------------
+//
+// While a turn streams its partial (stream_progress) fragments, all fragments
+// of one segment (one `partialSegments` key) are folded into ONE accumulating
+// assistant bubble rather than each spawning its own bubble. The bubble lays
+// its content out exactly like a final no-result assistant turn
+// (`renderAssistantProcessInline`), and its head/timestamp track the latest
+// fragment so it reads as a single live assistant message — matching the form
+// it collapses into once the turn's final result lands and
+// `removeSupersededProgress` drops it.
+
+// Build a fresh accumulating bubble for a partial fragment. Mirrors the
+// assistant row that `renderConversationRecord` builds for a no-result turn
+// (head + `.conv-bubble` + `.assistant-process-inline`), plus the `.conv-partial`
+// marker class so `removeSupersededProgress` can drop it. References to the head
+// and inline-process container are stashed on the row so `appendPartialFragment`
+// can extend them without `querySelector` / `replaceChild` (absent from the test
+// DOM stub).
+function buildPartialBubble(norm) {
+  const row = el("div", "history-record conv-record role-assistant conv-partial");
+  const head = renderRecordHead(norm);
+  const bubble = el("div", "conv-bubble");
+  const inline = renderAssistantProcessInline(
+    typeof norm.content === "string" ? norm.content : "");
+  bubble.appendChild(inline);
+  row.appendChild(head);
+  row.appendChild(bubble);
+  row.__partialHead = head;
+  row.__partialInline = inline;
+  return row;
+}
+
+// Extend an existing accumulating bubble with a newly-arrived fragment of the
+// same segment: append the fragment's rendered nodes into the inline-process
+// container, and refresh the head (rebuilt via `renderRecordHead`) so the bubble
+// shows the LATEST fragment's timestamp — the same head structure the final
+// state uses, so the displayed time is byte-identical. The head swap uses
+// insertBefore + removeChild (no `replaceChild`, which the test DOM stub lacks).
+function appendPartialFragment(row, norm) {
+  const inline = row.__partialInline;
+  if (inline) {
+    const content = typeof norm.content === "string" ? norm.content : "";
+    for (const node of renderToolMarkers(content)) inline.appendChild(node);
+  }
+  const oldHead = row.__partialHead;
+  const newHead = renderRecordHead(norm);
+  if (oldHead && oldHead.parentNode === row) {
+    row.insertBefore(newHead, oldHead);
+    row.removeChild(oldHead);
+  } else {
+    row.insertBefore(newHead, row.childNodes[0] || null);
+  }
+  row.__partialHead = newHead;
+}
+
+// Find the live accumulating bubble for `segKey` already present in `container`,
+// or null. Matches on the `__convSegmentKey` tag stamped by
+// `addConversationRecords`; `.history-step-header` separators carry no such tag
+// and are skipped.
+function findLivePartialBubble(container, segKey) {
+  for (const child of container.children) {
+    if (child.__convPartial && child.__convSegmentKey === segKey) return child;
+  }
+  return null;
 }
 
 // Insert `bubble` into `container` keeping all bubbles ordered globally by
@@ -2847,6 +3003,20 @@ function makeUserPromptToggle(split, norm) {
 //   * a turn with NO result JSON keeps its thinking process shown in full,
 //     never collapsed/contracted — so the process is rendered inline via
 //     `renderToolMarkers` (not folded), and nothing is ever hidden.
+// Build the inline thinking-process view of an assistant turn: the narrative +
+// tool markers rendered via `renderToolMarkers`, wrapped in the
+// `assistant-process-inline` container. This is the exact structure the
+// no-result assistant branch of `renderAssistantBubble` produces; it is shared
+// with `buildPartialBubble` so the live accumulating (partial) bubble lays its
+// content out identically to the final no-result assistant turn it collapses
+// into — partials never carry result JSON, so the final form is always this
+// inline-process shape.
+function renderAssistantProcessInline(content) {
+  const inline = el("div", "assistant-process-inline");
+  for (const node of renderToolMarkers(content)) inline.appendChild(node);
+  return inline;
+}
+
 function renderAssistantBubble(content, norm) {
   const frag = document.createDocumentFragment();
   const stepType = String(norm.stepType || "").toLowerCase();
@@ -2876,9 +3046,7 @@ function renderAssistantBubble(content, norm) {
   } else {
     // No result JSON this turn (or the body could not be structured): keep the
     // full thinking process shown inline, never folded or contracted to empty.
-    const inline = el("div", "assistant-process-inline");
-    for (const node of renderToolMarkers(content)) inline.appendChild(node);
-    frag.appendChild(inline);
+    frag.appendChild(renderAssistantProcessInline(content));
   }
   return frag;
 }
@@ -4127,6 +4295,7 @@ if (typeof module !== "undefined" && module.exports) {
     insertBubbleSorted,
     rebuildStepHeaders,
     markSupersededProgress,
+    partialSegments,
     progressTurnKey,
     renderConversationRecord,
     renderInterventions,

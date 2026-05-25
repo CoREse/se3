@@ -1042,6 +1042,127 @@ into any empty toggle.
 - **THEN** the original unrendered assistant body (including the JSON
   literal and the underlying NDJSON envelope) is shown unchanged
 
+### Requirement: Live Per-Turn Stream Accumulation
+
+While a flow is running, the daemon pushes several streaming progress records
+(`type: "stream_progress"` or `partial: true` — thinking text, `🔧 Read`,
+`✅ Read ✓`, etc.) for an LLM turn *before* that turn's final (non-partial)
+assistant result arrives. The running-flow conversation MUST render all of a
+single turn's streaming fragments into **one accumulating assistant bubble**:
+from a turn's first streaming fragment, exactly one assistant bubble (one role
+head + one timestamp) appears, and every later same-turn fragment is appended
+into that same bubble — NOT rendered as its own freshly-headed bubble per
+fragment. This makes the live (in-progress) view consistent with the collapsed
+form the turn settles into once its final result lands.
+
+**Grouping unit.** The set of fragments merged into one accumulating bubble
+MUST be exactly the batch that the turn's final result later collapses into —
+i.e. grouped by turn (`step_id` + `attempt`, the existing `progressTurnKey`).
+Distinct turns within the same step (a retry / fix loop / discovery
+continuation that resets `attempt` while reusing `step_id`) MUST each get their
+own separate accumulating bubble.
+
+**Segment-key determination (data-driven, not DOM-driven).** Merge membership
+MUST be computed by a pure function (`partialSegments`) over the **full ordered
+records array**, NOT by inspecting the DOM at render time to decide whether a
+fragment belongs to an existing bubble. Each partial record's stable *segment
+key* is `progressTurnKey(norm) + "#seg" + N`, where `N` is the count of FINAL
+(non-partial) assistant results sharing the same `progressTurnKey` that appear
+strictly before that record; non-partial and non-assistant records have a null
+key. The `#segN` suffix separates multi-round turns: a later round's partials
+follow the earlier round's final and therefore land at a higher final count,
+forming a distinct segment. This mirrors `markSupersededProgress`'s positional
+supersede rule (a final supersedes only the partials before it that share its
+key), so the merge grouping and the supersede grouping never disagree. The
+DOM-free approach is required because `removeSupersededProgress` runs only at
+the end of `addConversationRecords`: during a full rebuild a closed segment's
+stale bubble is still present in the DOM mid-traversal, so a DOM-membership
+check would wrongly append the next round's fragments into the previous round's
+leftover bubble. It also keeps the incremental-append path and the
+full-rebuild path producing identical results.
+
+**Timestamp tracking.** The accumulating bubble's head MUST display the
+timestamp of the **latest** streaming fragment received for that turn, updating
+to the newest as each new fragment arrives — consistent with the final
+collapsed form. Its sort key (`__convTs` / `__convIdx`) MUST likewise track the
+latest fragment so the turn's eventual final bubble sorts stably after it.
+
+**Content layout during accumulation.** The accumulating bubble's content
+arrangement MUST match the final no-result assistant form: it reuses the shared
+`renderAssistantProcessInline` helper (the `assistant-process-inline` container
+with `renderToolMarkers`), the same path the final no-result assistant turn
+takes, so the live form and the final form never structurally drift.
+
+**Final state is unchanged.** This requirement governs only the *in-progress*
+(pre-final) intermediate rendering. When the turn's final (non-partial) result
+arrives, the accumulating bubble is superseded and the turn collapses to the
+existing final rendering (narrative folded above + structured result, per
+*Three-Tier Progressive Disclosure* and *Structured-JSON Assistant Rendering*)
+with NO change to any final-state behavior or appearance. The semantics and
+signatures of `markSupersededProgress`, `removeSupersededProgress`,
+`insertBubbleSorted`, and `rebuildStepHeaders` are unchanged — a closed
+segment's accumulating bubble is still removed wholesale when the final result
+arrives, because every member index of the closed segment (including the
+latest) is superseded.
+
+**Scope — history / playback too.** Where the history / playback view shares
+the same rendering mechanism, this behavior applies there as well. History
+records normally carry no intermediate partial state; but when a run was
+interrupted mid-turn and left residual partials behind, those residual
+fragments MUST likewise merge into a single accumulating assistant bubble, not
+one bubble per fragment.
+
+#### Scenario: Single turn's fragments accumulate into one bubble
+- **GIVEN** a running flow whose current LLM turn has pushed several streaming
+  fragments (`partial: true`) sharing one `progressTurnKey`, with no final
+  result yet
+- **WHEN** the conversation is rendered in `#flow-view`
+- **THEN** exactly one assistant bubble (one role head + one timestamp) is
+  shown for that turn
+- **AND** every fragment after the first is appended into that same bubble
+  rather than opening a new headed bubble per fragment
+
+#### Scenario: Different rounds of the same step stay separate
+- **GIVEN** a step whose `step_id` is reused across two turns (e.g. a discovery
+  continuation or fix-loop re-run that reset `attempt`), where the first
+  round's partials are followed by a final result and then the second round's
+  fresh partials arrive
+- **WHEN** the conversation is rendered
+- **THEN** `partialSegments` assigns the two rounds different segment keys
+  (the second round lands at a higher final count, `#seg1`)
+- **AND** each round is rendered as its own separate accumulating bubble
+
+#### Scenario: Head timestamp tracks the newest fragment
+- **GIVEN** an accumulating bubble that has already absorbed an earlier
+  fragment
+- **WHEN** a newer same-turn fragment arrives
+- **THEN** the bubble head's displayed timestamp updates to the newest
+  fragment's timestamp
+- **AND** the bubble's sort key advances to the newest fragment so a later
+  final bubble sorts stably after it
+
+#### Scenario: Final result collapses the accumulating bubble unchanged
+- **GIVEN** an accumulating bubble holding a turn's streaming fragments
+- **WHEN** that turn's final (non-partial) assistant result arrives
+- **THEN** the accumulating bubble is superseded and removed wholesale, and the
+  turn renders in the existing final form (narrative folded above + structured
+  result) with no change to final-state behavior or appearance
+
+#### Scenario: Incremental append and full rebuild agree
+- **GIVEN** the same record stream delivered either as one full render pass or
+  as a sequence of incremental appends
+- **WHEN** the conversation is built each way
+- **THEN** both paths produce the same single accumulating bubble per turn,
+  because merge membership is computed by `partialSegments` over the full
+  records array rather than from the live DOM
+
+#### Scenario: History residual partials merge into one bubble
+- **GIVEN** a history / playback record stream from a run interrupted mid-turn,
+  leaving residual `partial` fragments for that turn with no final result
+- **WHEN** the conversation is rendered through the shared mechanism
+- **THEN** those residual fragments merge into a single accumulating assistant
+  bubble, not one bubble per fragment
+
 ### Requirement: Authoritative Step-Type Sourcing
 
 The running-flow conversation's per-record `stepType` — the value that drives

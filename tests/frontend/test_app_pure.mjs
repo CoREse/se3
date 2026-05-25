@@ -1254,17 +1254,25 @@ check("markSupersededProgress: round 2's partials fold once round 2's own final 
   assert.deepEqual([...superseded].sort((a, b) => a - b), [0, 2, 3]);
 });
 
-check("renderConversation: live partials show, then fold away when the result lands", () => {
+check("renderConversation: live partials merge into ONE bubble, then fold away when the result lands", () => {
   const container = document.createElement("div");
-  // First push: two streamed partial lines for the discovery turn.
+  // First push: two streamed partial lines for the discovery turn. They belong
+  // to the SAME turn (one segment) so they merge into a single accumulating
+  // assistant bubble rather than one bubble each.
   app.renderConversation(container, [
     partialRecord("step 1 thinking", 1, "s1", "discovery", 0),
     partialRecord("step 1 tool use", 2, "s1", "discovery", 0),
   ], false);
-  assert.equal(describeBubbles(container).length, 2);
-  assert.equal(findAll(container, "conv-partial").length, 2);
+  assert.equal(describeBubbles(container).length, 1,
+    "both partial fragments must merge into a single accumulating bubble");
+  assert.equal(findAll(container, "conv-partial").length, 1);
+  // The single bubble carries BOTH fragments' text.
+  const liveBody = findOne(container, "conv-bubble");
+  assert.ok(liveBody && liveBody.textContent.includes("step 1 thinking"));
+  assert.ok(liveBody && liveBody.textContent.includes("step 1 tool use"));
 
-  // Append the final result — the partials must be removed, leaving only it.
+  // Append the final result — the accumulating bubble must be removed, leaving
+  // only the final result bubble.
   app.renderConversation(container, [
     partialRecord("step 1 thinking", 1, "s1", "discovery", 0),
     partialRecord("step 1 tool use", 2, "s1", "discovery", 0),
@@ -1275,6 +1283,243 @@ check("renderConversation: live partials show, then fold away when the result la
   assert.equal(findAll(container, "conv-partial").length, 0);
   const body = findOne(container, "conv-bubble");
   assert.ok(body && body.textContent.includes("final answer"));
+});
+
+// -- partialSegments (pure): segment-key computation ------------------------
+check("partialSegments: consecutive same-turn partials share one segment key", () => {
+  const segs = app.partialSegments([
+    partialRecord("p1", 1, "s1", "discovery", 0),
+    partialRecord("p2", 2, "s1", "discovery", 0),
+    partialRecord("p3", 3, "s1", "discovery", 0),
+  ]);
+  assert.equal(segs.length, 3);
+  assert.ok(segs[0] != null);
+  assert.equal(segs[0], segs[1]);
+  assert.equal(segs[1], segs[2]);
+});
+check("partialSegments: two rounds split by a final get different segment keys", () => {
+  // Round 1 partials + round 1 final + round 2 partials, all reusing the same
+  // (s1, attempt=0) — yet the two rounds must fall in distinct segments.
+  const segs = app.partialSegments([
+    partialRecord("r1-p1", 1, "s1", "discovery", 0),  // idx 0 — round 1
+    partialRecord("r1-p2", 2, "s1", "discovery", 0),  // idx 1 — round 1
+    finalRecord("r1-final", 3, "s1", "discovery", 0), // idx 2 — final (null)
+    partialRecord("r2-p1", 4, "s1", "discovery", 0),  // idx 3 — round 2
+    partialRecord("r2-p2", 5, "s1", "discovery", 0),  // idx 4 — round 2
+  ]);
+  assert.equal(segs[2], null, "the final is non-partial → null");
+  assert.equal(segs[0], segs[1], "round 1 partials share a key");
+  assert.equal(segs[3], segs[4], "round 2 partials share a key");
+  assert.notEqual(segs[0], segs[3], "round 1 and round 2 must differ");
+});
+check("partialSegments: non-partial / non-assistant / step-event records are null", () => {
+  const segs = app.partialSegments([
+    finalRecord("done", 1, "s1", "discovery", 0),                       // assistant final
+    { step_id: "s1", step_type: "discovery",
+      message: { role: "user", content: "hi", timestamp: 2 } },          // user
+    { step_id: "s1", step_type: "discovery",
+      message: { role: "system", content: "sys", timestamp: 3 } },       // system
+    { step_id: "s2", step_type: "analyze",
+      message: { type: "step_completed", timestamp: 4, data: {} } },     // step-event
+  ]);
+  assert.deepEqual(segs, [null, null, null, null]);
+});
+
+// -- renderConversation: single-turn accumulation in ONE bubble -------------
+check("renderConversation: many same-turn partials accumulate into a single bubble", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    partialRecord("alpha", 1, "s1", "discovery", 0),
+    partialRecord("beta", 2, "s1", "discovery", 0),
+    partialRecord("gamma", 3, "s1", "discovery", 0),
+    partialRecord("delta", 4, "s1", "discovery", 0),
+  ], false);
+  assert.equal(findAll(container, "conv-partial").length, 1,
+    "all four fragments belong to one turn → one accumulating bubble");
+  assert.equal(describeBubbles(container).length, 1);
+  const body = findOne(container, "conv-bubble");
+  for (const frag of ["alpha", "beta", "gamma", "delta"]) {
+    assert.ok(body.textContent.includes(frag),
+      `accumulating bubble must contain fragment ${frag}`);
+  }
+});
+
+// -- renderConversation: different (step_id, attempt) → separate bubbles ----
+check("renderConversation: partials of different (step_id, attempt) stay separate", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    partialRecord("a-p1", 1, "s1", "discovery", 0),  // turn A
+    partialRecord("a-p2", 2, "s1", "discovery", 0),  // turn A
+    partialRecord("b-p1", 3, "s2", "analyze", 0),    // turn B (different step)
+    partialRecord("c-p1", 4, "s1", "discovery", 1),  // turn C (different attempt)
+  ], false);
+  // Three distinct turns → three accumulating bubbles.
+  assert.equal(findAll(container, "conv-partial").length, 3);
+  assert.equal(describeBubbles(container).length, 3);
+});
+
+// -- renderConversation: multi-round (round1 final + round2 partials) -------
+check("renderConversation: round 1 folds while round 2 accumulates independently", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    partialRecord("r1-p1", 1, "s1", "discovery", 0),
+    partialRecord("r1-p2", 2, "s1", "discovery", 0),
+    finalRecord("r1-final", 3, "s1", "discovery", 0),
+    partialRecord("r2-p1", 4, "s1", "discovery", 0),
+    partialRecord("r2-p2", 5, "s1", "discovery", 0),
+  ], false);
+  // Round 1's accumulating bubble is superseded by r1-final and removed; round 2
+  // remains as a single live accumulating bubble holding only round 2 fragments.
+  const partials = findAll(container, "conv-partial");
+  assert.equal(partials.length, 1, "only round 2 stays live as one bubble");
+  assert.ok(partials[0].textContent.includes("r2-p1"));
+  assert.ok(partials[0].textContent.includes("r2-p2"));
+  assert.ok(!partials[0].textContent.includes("r1-p1"),
+    "round 2 bubble must not absorb round 1 fragments");
+  // The round 1 final survives as a normal (non-partial) bubble.
+  const bodies = container.children
+    .filter((c) => c.__convIdx !== undefined)
+    .map((c) => { const b = findOne(c, "conv-bubble"); return b ? b.textContent : ""; });
+  assert.ok(bodies.some((t) => t.includes("r1-final")),
+    "round 1's final result bubble must remain");
+});
+
+// -- renderConversation: incremental append accumulation == full render -----
+check("renderConversation: incremental partial appends match a one-shot render", () => {
+  const records = [
+    partialRecord("one", 1, "s1", "discovery", 0),
+    partialRecord("two", 2, "s1", "discovery", 0),
+    partialRecord("three", 3, "s1", "discovery", 0),
+  ];
+  const full = document.createElement("div");
+  app.renderConversation(full, records, false);
+
+  const incr = document.createElement("div");
+  app.renderConversation(incr, records.slice(0, 1), false);
+  app.renderConversation(incr, records.slice(0, 2), true);
+  app.renderConversation(incr, records, true);
+
+  // Both paths produce one accumulating bubble with all three fragments.
+  assert.equal(findAll(incr, "conv-partial").length, 1);
+  assert.equal(findAll(full, "conv-partial").length, 1);
+  const incrBody = findOne(incr, "conv-bubble").textContent;
+  const fullBody = findOne(full, "conv-bubble").textContent;
+  for (const frag of ["one", "two", "three"]) {
+    assert.ok(incrBody.includes(frag), `incremental bubble missing ${frag}`);
+    assert.ok(fullBody.includes(frag), `full bubble missing ${frag}`);
+  }
+  assert.deepEqual(describeBubbles(incr).length, describeBubbles(full).length);
+});
+
+// -- renderConversation: multi-round split ACROSS separate append batches ----
+check("renderConversation: round 1 final lands in its own append batch, then round 2 partials append into a distinct bubble", () => {
+  // The product streams in batches: round 1's partials arrive first, round 1's
+  // final arrives in a LATER append, then round 2's partials trickle in across
+  // further appends — all reusing the same (s1, attempt=0) key. This exercises
+  // the exact cross-batch path the one-shot multi-round test cannot: each batch
+  // re-runs partialSegments over the FULL array (so round 2 lands at #seg1), and
+  // the live round-1 bubble's __convIdx must have advanced to its latest fragment
+  // so removeSupersededProgress can drop it once round 1's final appends. A
+  // regression that keyed the bubble by its first fragment's index, or that probed
+  // the DOM instead of segment keys, would either strand round 1's stale bubble or
+  // merge round 2 into round 1 — and only this split-across-appends sequence
+  // catches it.
+  const container = document.createElement("div");
+
+  // Batch 1 (full): round 1's two partials → one accumulating bubble.
+  app.renderConversation(container, [
+    partialRecord("r1-p1", 1, "s1", "discovery", 0),
+    partialRecord("r1-p2", 2, "s1", "discovery", 0),
+  ], false);
+  assert.equal(findAll(container, "conv-partial").length, 1,
+    "round 1 partials accumulate into one bubble");
+
+  // Batch 2 (append): round 1's final arrives in its OWN batch. The live round-1
+  // partial bubble must be superseded and removed, leaving only the final bubble.
+  app.renderConversation(container, [
+    partialRecord("r1-p1", 1, "s1", "discovery", 0),
+    partialRecord("r1-p2", 2, "s1", "discovery", 0),
+    finalRecord("r1-final", 3, "s1", "discovery", 0),
+  ], true);
+  assert.equal(findAll(container, "conv-partial").length, 0,
+    "round 1's accumulating bubble is dropped once its final appends");
+  let bodies = container.children
+    .filter((c) => c.__convIdx !== undefined)
+    .map((c) => { const b = findOne(c, "conv-bubble"); return b ? b.textContent : ""; });
+  assert.ok(bodies.some((t) => t.includes("r1-final")),
+    "round 1's final result bubble must remain");
+
+  // Batch 3 (append): round 2's first partial appears in a later batch. It must
+  // open a DISTINCT accumulating bubble (#seg1), not resurrect/append round 1's.
+  app.renderConversation(container, [
+    partialRecord("r1-p1", 1, "s1", "discovery", 0),
+    partialRecord("r1-p2", 2, "s1", "discovery", 0),
+    finalRecord("r1-final", 3, "s1", "discovery", 0),
+    partialRecord("r2-p1", 4, "s1", "discovery", 0),
+  ], true);
+  assert.equal(findAll(container, "conv-partial").length, 1,
+    "round 2's first partial opens exactly one new accumulating bubble");
+
+  // Batch 4 (append): round 2's second partial appends into that SAME bubble.
+  app.renderConversation(container, [
+    partialRecord("r1-p1", 1, "s1", "discovery", 0),
+    partialRecord("r1-p2", 2, "s1", "discovery", 0),
+    finalRecord("r1-final", 3, "s1", "discovery", 0),
+    partialRecord("r2-p1", 4, "s1", "discovery", 0),
+    partialRecord("r2-p2", 5, "s1", "discovery", 0),
+  ], true);
+
+  const partials = findAll(container, "conv-partial");
+  assert.equal(partials.length, 1,
+    "round 2 stays a single live accumulating bubble across appends");
+  assert.ok(partials[0].textContent.includes("r2-p1"));
+  assert.ok(partials[0].textContent.includes("r2-p2"),
+    "round 2's later partial appended into the same bubble");
+  assert.ok(!partials[0].textContent.includes("r1-p1"),
+    "round 2 bubble must not absorb round 1 fragments");
+  assert.ok(!partials[0].textContent.includes("r1-p2"),
+    "round 2 bubble must not absorb round 1 fragments");
+  // Round 1's final still stands and no stale round-1 partial lingers.
+  bodies = container.children
+    .filter((c) => c.__convIdx !== undefined)
+    .map((c) => { const b = findOne(c, "conv-bubble"); return b ? b.textContent : ""; });
+  assert.ok(bodies.some((t) => t.includes("r1-final")),
+    "round 1's final result bubble must remain after round 2 accumulates");
+  assert.ok(!bodies.some((t) => t.includes("r1-p1")),
+    "no stale round-1 partial bubble may linger on screen");
+});
+
+// -- renderConversation: head timestamp tracks the latest fragment ----------
+check("renderConversation: the accumulating bubble's head time tracks the newest fragment", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    partialRecord("first", 10, "s1", "discovery", 0),
+    partialRecord("second", 20, "s1", "discovery", 0),
+    partialRecord("third", 30, "s1", "discovery", 0),
+  ], true);
+  const bubble = findAll(container, "conv-partial")[0];
+  // Ordering key (and thus the rendered head) reflect the newest fragment.
+  assert.equal(bubble.__convTs, app.tsValue(30),
+    "ordering timestamp must be the latest fragment's");
+  // Exactly one head is present (the stale heads were swapped out, not stacked).
+  assert.equal(findAll(bubble, "history-record-head").length, 1);
+  const time = findOne(bubble, "record-time");
+  assert.ok(time, "the head must carry a record-time span");
+});
+
+// -- renderConversation: leftover history partials (no final) merge ----------
+check("renderConversation: leftover history partials (no final) merge into one bubble", () => {
+  // A run interrupted mid-turn leaves partials with no final in history. They
+  // must still collapse into a single accumulating bubble, not one each.
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    partialRecord("hist-1", 1, "s1", "implement", 0),
+    partialRecord("hist-2", 2, "s1", "implement", 0),
+    partialRecord("hist-3", 3, "s1", "implement", 0),
+  ], false);
+  assert.equal(findAll(container, "conv-partial").length, 1);
+  const body = findOne(container, "conv-bubble").textContent;
+  assert.ok(body.includes("hist-1") && body.includes("hist-2") && body.includes("hist-3"));
 });
 
 // -- reconcileReplyTarget (pure): chip-bar selection survival / reset -------
