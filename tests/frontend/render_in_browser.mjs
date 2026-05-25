@@ -273,13 +273,35 @@
         result.user_literal_only = true;
       }
 
-      // Layer 3 nesting: the "查看原始" raw toggle is NOT a row-level
-      // always-visible control — with nothing expanded, no `.raw-toggle`
-      // button is present in the default view (it nests inside "展开全部").
-      if (findByClass(container, "raw-toggle").length > 0) {
-        return fail(
-          "a row-level 查看原始 raw toggle is visible by default (Layer 3 must nest inside 展开全部)",
-        );
+      // Raw-toggle disclosure rule (mixed model). With nothing expanded:
+      //   * USER side / chips: the "查看原始" raw toggle nests inside the "展开全部"
+      //     (Layer 2) area or a chip's expand detail — it is NOT a row-level
+      //     always-visible control, so no non-assistant `.raw-toggle` button is
+      //     present in the default view.
+      //   * ASSISTANT side (two layers): the single "查看原始" fold's BUTTON is
+      //     visible by default (it is the only assistant fold), but its raw body
+      //     (`.raw-json`) stays folded/hidden until clicked.
+      // So every visible `.raw-toggle` must belong to an assistant single fold
+      // (wrapper `.assistant-raw-toggle-wrap`), and every `.raw-json` body
+      // present by default must be hidden.
+      for (const btn of findByClass(container, "raw-toggle")) {
+        const wrap = btn.parentNode;
+        const isAssistant =
+          wrap && wrap.classList &&
+          wrap.classList.contains("assistant-raw-toggle-wrap");
+        if (!isAssistant) {
+          return fail(
+            "a row-level (non-assistant) 查看原始 raw toggle is visible by " +
+            "default — user-side raw must nest inside 展开全部",
+          );
+        }
+      }
+      for (const pre of findByClass(container, "raw-json")) {
+        if (!pre.classList.contains("hidden")) {
+          return fail(
+            "a 查看原始 raw body is visible by default — raw content must be folded",
+          );
+        }
       }
       result.raw_nested = true;
 
