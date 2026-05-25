@@ -144,7 +144,11 @@ stacked parts, all sitting below the conversation:
    icon control symmetric to Send; for an active flow that is not already
    waiting on a real interjection, clicking it materializes a synthetic
    `interjection` chip in the chip bar and selects it. The same textarea is
-   reused for every intervention kind.
+   reused for every intervention kind. The reply textarea MUST open at a
+   multi-line default height (roughly six rows tall) so a user can draft and
+   review a multi-line reply without cramping, and it MUST remain manually
+   resizable along the vertical axis (`resize: vertical`); a cramped two-row
+   default is not allowed.
 
 The reply **textarea is always enabled** so the user can draft text at any
 time — like an ordinary chat application. The **send button** is the gate:
@@ -167,6 +171,12 @@ settles.
 - **AND** the send button is **disabled** because there is no target to send to
 - **AND** the placeholder advises that there is no target yet (e.g. "No
   pending interaction — draft a reply or click ✎ to interject…")
+
+#### Scenario: Reply textarea opens tall enough for multi-line editing
+- **WHEN** the docked reply box is rendered
+- **THEN** the reply textarea opens at a multi-line default height (roughly
+  six rows) rather than a cramped two-row box
+- **AND** the user can drag the textarea to resize it vertically
 
 #### Scenario: Interject button is inline on the reply row
 - **GIVEN** an active flow with no real pending interjection
@@ -260,6 +270,15 @@ frontend MUST guarantee the confirm button even when the backend call file
 omitted the `options` array — it synthesizes a single confirm option whose
 value is `"1"` so the button and the textual hint always coexist.
 
+Because the `discovery_confirm` `prompt` already embeds the refined task
+description (`Proposed task description: …`) and the backend mirrors the same
+text into `context.refined_description`, the reply context panel MUST NOT also
+render the `context` block for a `discovery_confirm` chip — doing so would
+duplicate the proposed description directly below the prompt. This context
+suppression is scoped to `discovery_confirm` only; every other kind (`call` /
+`interjection` / `retry_decision` / `cli_confirm`) continues to render its
+`context` block unchanged when one is present.
+
 A synthetic `interjection` chip is **opt-in**, not always-on: an active flow
 that is not already waiting on a real interjection MUST render an inline
 Interject icon button at the left end of the reply input row (symmetric to
@@ -296,6 +315,17 @@ untouched.
   type `1` manually instead
 - **AND** when the backend call file omitted the `options` array, the frontend
   still synthesizes the confirm button with value `"1"`
+
+#### Scenario: Discovery confirmation chip does not duplicate the refined description
+- **GIVEN** a `discovery_confirm` chip whose `prompt` already contains the
+  refined task description and whose `context.refined_description` carries the
+  same text
+- **WHEN** the user selects the chip
+- **THEN** the reply context panel renders the prompt and the confirm
+  affordances but does NOT render the `context` block beneath the prompt
+- **AND** for any other intervention kind (`call` / `interjection` /
+  `retry_decision` / `cli_confirm`) the `context` block is still rendered when
+  one is present
 
 #### Scenario: Selecting a chip expands its full context above the textarea
 - **WHEN** the user selects an intervention chip

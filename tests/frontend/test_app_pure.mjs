@@ -1220,6 +1220,61 @@ check("renderInterventions: chips appear, disappear, and the reply box resets", 
   assert.equal(submit.disabled, false);
 });
 
+// -- updateReplyBox: discovery_confirm suppresses the duplicated context block
+// (item 4) ------------------------------------------------------------------
+// The discovery_confirm prompt already embeds the refined task description
+// ("Proposed task description: …") and the backend mirrors that same text into
+// context.refined_description. Rendering the reply-context <pre> below the
+// prompt would therefore duplicate the proposed description, so updateReplyBox
+// skips the context block for the discovery_confirm kind ONLY — every other
+// kind still renders it. These DOM-stub checks drive the branch through the
+// exported renderInterventions (which calls updateReplyBox) so a future
+// regression — inverting/weakening the kind check, or the backend ceasing to
+// mirror refined_description into context — cannot ship undetected.
+check("updateReplyBox: discovery_confirm hides the duplicated context block", () => {
+  const ctx = document.getElementById("flow-reply-context");
+  app.state.flowInterjectRequested = false;
+  app.renderInterventions({
+    status: "running",
+    pending_calls: [
+      {
+        call_id: "dc1",
+        kind: "discovery_confirm",
+        prompt: "Proposed task description: do the thing\n输入 1 确认",
+        // Non-empty context that would normally render a <pre> block — for
+        // discovery_confirm it must be suppressed to avoid the duplicate.
+        context: "Proposed task description: do the thing",
+      },
+    ],
+  });
+  assert.equal(findOne(ctx, "flow-reply-context-block"), null,
+    "discovery_confirm must NOT render the duplicated context block even " +
+    "when context is non-empty");
+});
+
+check("updateReplyBox: non-discovery_confirm kinds still render their context block", () => {
+  const ctx = document.getElementById("flow-reply-context");
+  for (const kind of ["call", "cli_confirm", "retry_decision", "interjection"]) {
+    app.state.flowInterjectRequested = false;
+    app.renderInterventions({
+      status: "running",
+      pending_calls: [
+        {
+          call_id: "k_" + kind,
+          kind,
+          prompt: "please respond",
+          context: "CONTEXT_BODY_TOKEN for " + kind,
+        },
+      ],
+    });
+    const block = findOne(ctx, "flow-reply-context-block");
+    assert.ok(block,
+      kind + " must render its context block when context is non-empty");
+    assert.ok(block.textContent.includes("CONTEXT_BODY_TOKEN"),
+      kind + " context block must carry the context text");
+  }
+});
+
 // -- mergeSnapshotWithLiveAppends: dedup snapshot vs in-flight appends ------
 check("mergeSnapshotWithLiveAppends appends only records absent from the snapshot", () => {
   const r1 = asstRecord("A1", 1, "s1", "discovery");

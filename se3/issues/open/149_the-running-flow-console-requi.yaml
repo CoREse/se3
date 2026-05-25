@@ -1,0 +1,25 @@
+id: '149'
+title: The running-flow-console requirement is still titled 'Three-Tier Progressive
+  Disclosure' while its rewritten body now describes a deliberate mixed model (user
+  side = 3 layers, assistant side = 2 layers). The heading text is mildly stale relative
+  to the new content.
+description: 'The running-flow-console requirement is still titled ''Three-Tier Progressive
+  Disclosure'' while its rewritten body now describes a deliberate mixed model (user
+  side = 3 layers, assistant side = 2 layers). The heading text is mildly stale relative
+  to the new content.
+
+
+  Suggestion: Optional: the body explicitly calls out the ''mixed model, not one unified
+  tier count'', so the content is self-consistent. Renaming the heading would risk
+  a spec-guardrail ''removed requirement'' flag, so leaving the title is a reasonable
+  trade-off. No code change needed.'
+status: open
+priority: low
+scope: out_of_scope
+type: bug
+tags:
+- auto-discovered
+- source:verify-spec
+- out-of-scope
+created_at: '2026-05-25T12:53:18.451962'
+updated_at: '2026-05-25T12:53:18.451962'
