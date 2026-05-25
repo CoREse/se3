@@ -483,7 +483,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   flex: 1 1 220px;
   min-width: 0;
   resize: vertical;
-  min-height: 38px;
+  min-height: 120px;
 }
 .flow-reply-row textarea:disabled {
   opacity: 0.55;
