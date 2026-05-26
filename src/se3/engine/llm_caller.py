@@ -349,7 +349,10 @@ class StreamJSONTracker:
         if is_error:
             error_preview = truncate_preview(str(content)) if content else "Unknown error"
             print(f"  {self.stream_prefix}[llm-stream] ❌ Tool error: {error_preview}...")
-            self._emit_progress(f"❌ Tool error: {error_preview}", None)
+            if tool_name:
+                self._emit_progress(f"[{tool_name} ✗ {error_preview}]", None)
+            else:
+                self._emit_progress(f"[Tool error: {error_preview}]", None)
             # Clean up caches for failed tool calls to prevent leaks
             self._tool_use_id_to_input.pop(tool_use_id, None)
             self._tool_use_id_to_old_content.pop(tool_use_id, None)
@@ -357,7 +360,7 @@ class StreamJSONTracker:
         else:
             preview = format_tool_result_preview(tool_name, content)
             print(f"  {self.stream_prefix}[llm-stream] ✅ {preview}...")
-            self._emit_progress(f"✅ {preview}", None)
+            self._emit_progress(f"[{preview}]", None)
             # Render diff for Edit/Write tools
             cached_input = self._tool_use_id_to_input.pop(tool_use_id, None)
             old_content = self._tool_use_id_to_old_content.pop(tool_use_id, None)
@@ -450,7 +453,7 @@ class StreamJSONTracker:
                             # the same order the user sees on stdout, then record
                             # the tool_use as its own semantic progress line.
                             self._flush_progress_text()
-                            self._emit_progress(f"🔧 {preview}", item)
+                            self._emit_progress(f"[{preview}]", item)
 
             elif msg_type == 'tool_result':
                 # Legacy top-level tool_result format (backward compat)
@@ -475,7 +478,7 @@ class StreamJSONTracker:
                 error_msg = data.get('error', 'Unknown error')
                 print(f"  {self.stream_prefix}[llm-stream] ❌ Error: {truncate_preview(str(error_msg))}")
                 self._flush_progress_text()
-                self._emit_progress(f"❌ Error: {truncate_preview(str(error_msg))}", None)
+                self._emit_progress(f"[Tool error: {truncate_preview(str(error_msg))}]", None)
                 self._last_ended_with_newline = True
 
         except json.JSONDecodeError:

@@ -2456,4 +2456,61 @@ check("renderHistoryList: non-empty + not loading renders items with no refresh 
     "no refresh bar when not loading");
 });
 
+// -- live partials with bracket-format tool markers render as .tool-marker --
+//
+// Backend regression: the in-progress stream now emits tool events as the same
+// `[Name: detail]` bracket markers `extract_assistant_text` produces for final
+// state (instead of the prior `🔧 Name: detail` / `✅ …` / `❌ …` emoji form).
+// That keeps the frontend running on a single TOOL_MARKER_RE path so the live
+// accumulating bubble boxes tool calls the same way the final bubble does.
+check("live partials with bracket-format tool_use mark render as .tool-marker", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    partialRecord("[Read: src/foo.py]", 1, "s1", "implement", 0),
+  ], false);
+  const liveBubble = findOne(container, "conv-bubble");
+  assert.ok(liveBubble, "expected a live accumulating bubble");
+  const marker = findOne(liveBubble, "tool-marker");
+  assert.ok(marker, "live bubble should box [Read: …] as a .tool-marker block");
+  const name = findOne(marker, "tool-marker-name");
+  assert.ok(name && name.textContent === "Read",
+    `tool-marker-name should be 'Read', got ${name && name.textContent}`);
+});
+
+check("live partial with bracket-format tool_result success renders as .tool-marker", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    partialRecord("[Read ✓ (10 lines)]", 1, "s1", "implement", 0),
+  ], false);
+  const liveBubble = findOne(container, "conv-bubble");
+  assert.ok(liveBubble, "expected a live accumulating bubble");
+  const marker = findOne(liveBubble, "tool-marker");
+  assert.ok(marker, "live bubble should box [Read ✓ …] as a .tool-marker block");
+});
+
+check("live partial with bracket-format tool_result error renders as .tool-marker", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    partialRecord("[Edit ✗ permission denied]", 1, "s1", "implement", 0),
+  ], false);
+  const liveBubble = findOne(container, "conv-bubble");
+  assert.ok(liveBubble, "expected a live accumulating bubble");
+  const marker = findOne(liveBubble, "tool-marker");
+  assert.ok(marker, "live bubble should box [Edit ✗ …] as a .tool-marker block");
+  const name = findOne(marker, "tool-marker-name");
+  assert.ok(name && name.textContent === "Edit",
+    `tool-marker-name should be 'Edit', got ${name && name.textContent}`);
+});
+
+check("live partial with bracket-format generic 'Tool error' renders as .tool-marker", () => {
+  const container = document.createElement("div");
+  app.renderConversation(container, [
+    partialRecord("[Tool error: stream blew up]", 1, "s1", "implement", 0),
+  ], false);
+  const liveBubble = findOne(container, "conv-bubble");
+  assert.ok(liveBubble, "expected a live accumulating bubble");
+  const marker = findOne(liveBubble, "tool-marker");
+  assert.ok(marker, "live bubble should box [Tool error: …] as a .tool-marker block");
+});
+
 console.log(`\n${passed} checks passed.`);

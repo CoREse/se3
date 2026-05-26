@@ -1093,6 +1093,22 @@ arrangement MUST match the final no-result assistant form: it reuses the shared
 with `renderToolMarkers`), the same path the final no-result assistant turn
 takes, so the live form and the final form never structurally drift.
 
+**Tool-event content format.** Beyond structural reuse, the *text content* of
+each streaming fragment that represents a tool event (`tool_use` /
+`tool_result` / `tool_error` / stream-level `error`) MUST also match the final
+form's bracket-marker grammar — `[<tool_name>: <detail>]` for successful uses
+and results, `[<tool_name> ✗ <error_preview>]` (or `[Tool error: <preview>]`
+when the tool name is unknown) for failures — so the frontend's single
+`TOOL_MARKER_RE` / `renderToolMarkers` path produces identical `.tool-marker`
+boxes for live fragments and for the final assistant turn. The frontend MUST
+NOT carry a second emoji-prefixed parsing path for live fragments; the
+upstream `StreamJSONTracker` writes the bracket-marker text into the
+`stream_progress` payload while keeping its own CLI stdout emoji-prefixed,
+per the `llm-caller` *Streaming NDJSON Output Display* requirement. The
+running-flow console therefore relies on the producer side for byte-identical
+marker text between live and final views; no client-side reformatting is
+required.
+
 **Final state is unchanged.** This requirement governs only the *in-progress*
 (pre-final) intermediate rendering. When the turn's final (non-partial) result
 arrives, the accumulating bubble is superseded and the turn collapses to the
@@ -1155,6 +1171,19 @@ one bubble per fragment.
 - **THEN** both paths produce the same single accumulating bubble per turn,
   because merge membership is computed by `partialSegments` over the full
   records array rather than from the live DOM
+
+#### Scenario: Live tool events render as bracket markers identical to final state
+- **GIVEN** a running flow whose current LLM turn streams `tool_use`,
+  `tool_result`, and `tool_error` fragments (delivered as
+  `stream_progress` / `partial: true` records by the daemon)
+- **WHEN** the conversation is rendered in `#flow-view`
+- **THEN** each tool-event fragment's text matches the `TOOL_MARKER_RE`
+  bracket-marker pattern and is rendered as a `.tool-marker` box inside the
+  accumulating assistant bubble, visually identical to the boxes the final
+  assistant turn shows after the streaming completes
+- **AND** no emoji-prefixed text (`🔧`, `✅`, `❌`) appears in the rendered
+  live bubble as unboxed markdown — the live and final views share one
+  marker grammar with no second parsing path
 
 #### Scenario: History residual partials merge into one bubble
 - **GIVEN** a history / playback record stream from a run interrupted mid-turn,

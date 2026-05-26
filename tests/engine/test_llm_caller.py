@@ -1,6 +1,7 @@
 """Tests for the LLM caller module, specifically tool preview formatters."""
 
 import json
+import re
 import pytest
 
 from se3.engine.llm_caller import (
@@ -872,6 +873,210 @@ class TestStreamJSONTrackerPrefix:
         out_empty = capsys.readouterr().out
 
         assert out_no_prefix == out_empty
+
+
+class TestStreamJSONTrackerProgressBrackets:
+    """Tool events recorded via _emit_progress MUST use the bracketed
+    `[Name …]` marker format that the web UI's TOOL_MARKER_RE matches and
+    `extract_assistant_text` produces for final-state history, while the
+    CLI stdout emoji lines (🔧/✅/❌) remain byte-for-byte unchanged.
+
+    The two surfaces are decoupled on purpose: emoji is the CLI human
+    presentation; brackets are the structured marker the web frontend
+    boxes as .tool-marker. This test asserts the dual-track invariant.
+    """
+
+    # Regex the frontend uses for matching (TOOL_MARKER_RE), restricted to
+    # the registered names; matching the assertion in the design doc.
+    BRACKET_RE = re.compile(
+        r"^\[(Read|Bash|Edit|Write|Grep|Glob|Tool|MultiEdit|NotebookEdit|"
+        r"WebFetch|WebSearch|LS|TodoWrite|Search|Fetch|Task)\b[^\]\n]*\]"
+    )
+
+    def _make_tracker(self, monkeypatch, tmp_path):
+        """Build a tracker with flow context wired to a captured progress sink."""
+        captured = []
+
+        def fake_record_stream_progress(
+            project_root, flow_id, step_id, step_type, content, raw_obj, attempt
+        ):
+            captured.append({
+                "content": content,
+                "raw_obj": raw_obj,
+                "step_id": step_id,
+                "attempt": attempt,
+            })
+
+        # The tracker imports record_stream_progress lazily inside
+        # _emit_progress; patch on the chat_history module so the lazy
+        # import picks up the fake.
+        from se3.engine import chat_history
+        monkeypatch.setattr(
+            chat_history, "record_stream_progress", fake_record_stream_progress
+        )
+
+        tracker = StreamJSONTracker(
+            project_root=tmp_path,
+            flow_id="flow-x",
+            step_id="step-y",
+            step_type="implement",
+            attempt=0,
+        )
+        return tracker, captured
+
+    def test_tool_use_progress_content_is_bracketed(self, capsys, monkeypatch, tmp_path):
+        tracker, captured = self._make_tracker(monkeypatch, tmp_path)
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-r1",
+                    "name": "Read",
+                    "input": {"file_path": "src/foo.py"},
+                }]
+            }
+        }))
+        # The bracketed content lands in the recorded progress.
+        progress_contents = [c["content"] for c in captured]
+        assert any(
+            self.BRACKET_RE.match(c) and c.startswith("[Read") for c in progress_contents
+        ), f"no bracketed Read marker in {progress_contents!r}"
+        # CLI stdout still carries the emoji line, byte-for-byte unchanged.
+        out = capsys.readouterr().out
+        assert "[llm-stream] 🔧 Read:" in out
+        assert "src/foo.py" in out
+
+    def test_tool_result_success_progress_content_is_bracketed(
+        self, capsys, monkeypatch, tmp_path
+    ):
+        tracker, captured = self._make_tracker(monkeypatch, tmp_path)
+        # tool_use to populate id→name mapping.
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-r2",
+                    "name": "Read",
+                    "input": {"file_path": "a.py"},
+                }]
+            }
+        }))
+        captured.clear()  # focus on the result event
+        tracker.process_line(json.dumps({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu-r2",
+                    "content": "line1\nline2\nline3",
+                    "is_error": False,
+                }]
+            }
+        }))
+        progress_contents = [c["content"] for c in captured]
+        assert any(
+            self.BRACKET_RE.match(c) and c.startswith("[Read") for c in progress_contents
+        ), f"no bracketed Read result marker in {progress_contents!r}"
+        out = capsys.readouterr().out
+        # ✅ line is byte-for-byte preserved.
+        assert "[llm-stream] ✅ Read" in out
+
+    def test_tool_result_error_with_known_tool_uses_bracketed_marker(
+        self, capsys, monkeypatch, tmp_path
+    ):
+        tracker, captured = self._make_tracker(monkeypatch, tmp_path)
+        # tool_use first so we have a tool_name available.
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {
+                "content": [{
+                    "type": "tool_use",
+                    "id": "tu-e1",
+                    "name": "Edit",
+                    "input": {"file_path": "a.py", "old_string": "x", "new_string": "y"},
+                }]
+            }
+        }))
+        captured.clear()
+        tracker.process_line(json.dumps({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "tu-e1",
+                    "content": "permission denied",
+                    "is_error": True,
+                }]
+            }
+        }))
+        progress_contents = [c["content"] for c in captured]
+        # Known tool: bracketed marker starts with the registered tool name.
+        assert any(
+            self.BRACKET_RE.match(c) and c.startswith("[Edit") for c in progress_contents
+        ), f"no bracketed Edit error marker in {progress_contents!r}"
+        out = capsys.readouterr().out
+        assert "[llm-stream] ❌ Tool error: permission denied" in out
+
+    def test_tool_result_error_with_unknown_tool_falls_back_to_tool_marker(
+        self, capsys, monkeypatch, tmp_path
+    ):
+        tracker, captured = self._make_tracker(monkeypatch, tmp_path)
+        # No prior tool_use → tool_name is empty; the error marker must fall
+        # back to "[Tool error: ...]" so the frontend regex still matches.
+        tracker.process_line(json.dumps({
+            "type": "user",
+            "message": {
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "orphan",
+                    "content": "boom",
+                    "is_error": True,
+                }]
+            }
+        }))
+        progress_contents = [c["content"] for c in captured]
+        assert any(
+            self.BRACKET_RE.match(c) and c.startswith("[Tool") for c in progress_contents
+        ), f"no bracketed Tool error marker in {progress_contents!r}"
+        out = capsys.readouterr().out
+        assert "[llm-stream] ❌ Tool error: boom" in out
+
+    def test_stream_level_error_progress_content_is_bracketed(
+        self, capsys, monkeypatch, tmp_path
+    ):
+        tracker, captured = self._make_tracker(monkeypatch, tmp_path)
+        tracker.process_line(json.dumps({
+            "type": "error",
+            "error": "stream blew up",
+        }))
+        progress_contents = [c["content"] for c in captured]
+        assert any(
+            self.BRACKET_RE.match(c) and c.startswith("[Tool") for c in progress_contents
+        ), f"no bracketed Tool error marker in {progress_contents!r}"
+        out = capsys.readouterr().out
+        # ❌ Error stdout line is byte-for-byte preserved.
+        assert "[llm-stream] ❌ Error: stream blew up" in out
+
+    def test_narrative_text_progress_not_bracketed(
+        self, capsys, monkeypatch, tmp_path
+    ):
+        """Plain text/thinking chunks MUST remain unbracketed so the frontend
+        renders them as ordinary markdown narrative, not as fake tool boxes."""
+        tracker, captured = self._make_tracker(monkeypatch, tmp_path)
+        # Feed enough text to cross _PROGRESS_FLUSH_CHARS so the buffer flushes.
+        long_text = "x" * (StreamJSONTracker._PROGRESS_FLUSH_CHARS + 10)
+        tracker.process_line(json.dumps({
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": long_text}]},
+        }))
+        # At least one progress write happened; none of them start with `[`.
+        assert captured, "expected at least one flushed text progress"
+        for c in captured:
+            assert not c["content"].startswith("["), (
+                f"narrative progress unexpectedly bracketed: {c['content']!r}"
+            )
 
 
 class TestLLMCallerStreamPrefix:

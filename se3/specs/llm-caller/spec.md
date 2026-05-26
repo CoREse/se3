@@ -272,6 +272,13 @@ After dedup, `_post_dedup_safety_cap` enforces an upper bound (default `500_000`
 
 When no explicit `on_output` callback is given, the caller installs a `StreamJSONTracker` that consumes each NDJSON line from the subprocess and prints a human-readable summary with tool-use previews and inline diffs.
 
+The tracker has **two output channels that MUST be formatted independently**:
+
+1. The **CLI terminal stdout** — emoji-prefixed lines (`🔧 <preview>`, `✅ <preview>`, `❌ ...`) written via `print(...)`. This is the human-readable terminal stream and its byte sequence MUST remain stable across changes to the web-progress channel.
+2. The **web/jsonl progress channel** — the `content` string passed to `_emit_progress` and persisted in `stream_progress` records that the daemon forwards to the running-flow console. This channel MUST emit tool events as **bracket-marker strings** (`[<tool_name>: <detail>]`, `[<tool_name> ✓ ...]`, `[<tool_name> ✗ <error_preview>]` / `[Tool error: <preview>]`) so the marker text is byte-identical to what `chat_history.extract_assistant_text` writes in the final assistant turn. This is what enables the running-flow console's `TOOL_MARKER_RE` / `renderToolMarkers` to render the same `.tool-marker` boxes during streaming as in the final settled view (see the `running-flow-console` *Live Per-Turn Stream Accumulation* requirement).
+
+The bracket-marker convention covers all three tool-event kinds — `tool_use`, successful `tool_result`, and `tool_error` (both the `is_error` branch of a tool result and a stream-level `error` line) — so the live and final views share a single marker grammar with no second emoji-only parsing path on the frontend.
+
 #### Scenario: Text and thinking streamed inline
 - **WHEN** an `assistant` message contains a `text` or `thinking` content item
 - **THEN** text is printed directly (flush=True)
@@ -280,7 +287,8 @@ When no explicit `on_output` callback is given, the caller installs a `StreamJSO
 
 #### Scenario: Tool use rendered with preview
 - **WHEN** an `assistant` message contains a `tool_use` content item
-- **THEN** the tool name and a `format_tool_use_preview`-formatted input are printed as `  <stream_prefix>[llm-stream] 🔧 <preview>...`
+- **THEN** the tool name and a `format_tool_use_preview`-formatted input are printed to stdout as `  <stream_prefix>[llm-stream] 🔧 <preview>...`
+- **AND** the same event is recorded into the web/jsonl progress channel with content `[<preview>]` (bracket-marker form), not `🔧 <preview>`, so the running-flow console parses it as a tool marker
 - **AND** the tool-use id is recorded in `_tool_use_id_to_name`
 
 #### Scenario: Edit/Write inputs cached for diff
@@ -291,12 +299,19 @@ When no explicit `on_output` callback is given, the caller installs a `StreamJSO
 
 #### Scenario: Tool result rendered with preview and diff
 - **WHEN** a `tool_result` arrives (legacy top-level or nested inside a `user` message)
-- **THEN** if `is_error` is true, an error preview is printed and the caches for that id are popped
-- **AND** if successful, `format_tool_result_preview` is printed and, for cached `Edit`/`Write` ids, `format_tool_diff` is rendered using the cached input and old content
+- **THEN** if `is_error` is true, an error preview is printed to stdout (emoji-prefixed, byte-identical to prior behavior) and the caches for that id are popped, and the web/jsonl progress channel records `[<tool_name> ✗ <error_preview>]` (falling back to `[Tool error: <error_preview>]` when the tool name is unknown)
+- **AND** if successful, `format_tool_result_preview` is printed to stdout and the web/jsonl progress channel records the same preview wrapped as `[<preview>]`, and, for cached `Edit`/`Write` ids, `format_tool_diff` is rendered using the cached input and old content
 
 #### Scenario: Stream-level error printed
 - **WHEN** an NDJSON line has `type == "error"`
-- **THEN** a single `❌ Error: <truncated>` line is printed
+- **THEN** a single `❌ Error: <truncated>` line is printed to stdout
+- **AND** the web/jsonl progress channel records the event as `[Tool error: <truncated>]` so the running-flow console renders it as a `.tool-marker` consistent with the final-state form
+
+#### Scenario: Web/jsonl progress channel uses bracket markers matching the final assistant turn
+- **GIVEN** a streaming call producing one `tool_use`, one successful `tool_result`, and one `tool_error` (or stream-level `error`)
+- **WHEN** the `stream_progress` records produced by the tracker are inspected
+- **THEN** every tool-event `content` string begins with `[` and ends with `]` — using the same bracket-marker grammar `chat_history.extract_assistant_text` writes for the final assistant turn — never the emoji-prefixed CLI form
+- **AND** the CLI stdout for the same call still contains the emoji-prefixed lines (`🔧`, `✅`, `❌`) byte-identical to the pre-change behavior, so terminal users see no regression
 
 #### Scenario: Malformed JSON tolerated
 - **WHEN** a streamed line is not valid JSON

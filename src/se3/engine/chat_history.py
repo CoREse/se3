@@ -857,9 +857,16 @@ def extract_assistant_text(raw_ndjson: str) -> str:
             elif msg_type == "tool_result":
                 result = data.get("result", {})
                 content = result.get("content", "")
-                tool_use_id = result.get("toolUseId", "")
+                is_error = result.get("isError", result.get("is_error", False))
+                tool_use_id = result.get("toolUseId", result.get("tool_use_id", ""))
                 tool_name = tool_use_id_to_name.get(tool_use_id, "")
-                if content:
+                if is_error:
+                    error_preview = truncate_preview(str(content)) if content else "Unknown error"
+                    if tool_name:
+                        text_parts.append(f"[{tool_name} ✗ {error_preview}]")
+                    else:
+                        text_parts.append(f"[Tool error: {error_preview}]")
+                elif content:
                     preview = format_tool_result_preview(tool_name, content)
                     text_parts.append(f"[{preview}]")
 
