@@ -484,7 +484,13 @@ class DaemonClient:
         project_root = str(payload.get("project_root") or "") or None
         cursor = payload.get("cursor") or {}
         try:
-            read = provider.read_flow(flow_id, project_root=project_root, cursor=cursor)
+            # Disk I/O is offloaded to a thread so a large session's jsonl read
+            # cannot block the event loop past the server's pull timeout or the
+            # heartbeat-loss threshold (which would briefly mark the daemon
+            # offline and grey out the machine in the web UI).
+            read = await asyncio.to_thread(
+                provider.read_flow, flow_id, project_root=project_root, cursor=cursor
+            )
         except Exception:
             logger.exception("HISTORY_REQUEST read failed for flow %s", flow_id)
             return
@@ -561,7 +567,11 @@ class DaemonClient:
         if provider is None:
             return
         try:
-            index = [meta.to_dict() for meta in provider.build_index()]
+            # Index rebuild walks history directories from disk; offload it so a
+            # forced rebuild on a machine with many archived flows does not
+            # block the event loop (heartbeats, PONGs, other pushes).
+            metas = await asyncio.to_thread(provider.build_index)
+            index = [meta.to_dict() for meta in metas]
         except Exception:
             logger.exception("History index build failed; skipping history push")
             return
@@ -575,7 +585,11 @@ class DaemonClient:
                 logger.debug("HISTORY_INDEX send failed", exc_info=True)
                 return
         try:
-            reads = provider.read_active_flows(self._history_cursors)
+            # read_active_flows fans out into multiple jsonl reads; offload so a
+            # big active session does not stall the event loop.
+            reads = await asyncio.to_thread(
+                provider.read_active_flows, self._history_cursors
+            )
         except Exception:
             logger.exception("Active-flow history read failed")
             return

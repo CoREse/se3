@@ -501,6 +501,113 @@ def test_client_connects_reports_and_receives():
         _stop_server(server, thread)
 
 
+# --------------------------------------------------------------------------
+# blocking disk I/O must not stall the event loop
+# --------------------------------------------------------------------------
+
+
+class _BlockingHistoryProvider:
+    """Provider whose disk-read methods sleep synchronously to mimic a big session.
+
+    A correct client offloads these calls with ``asyncio.to_thread``; a regression
+    that calls them directly would block the event loop for ``block_seconds``.
+    """
+
+    def __init__(self, block_seconds: float = 0.6):
+        self.block_seconds = block_seconds
+
+    def build_index(self):
+        time.sleep(self.block_seconds)
+        return []
+
+    def active_flow_signature(self):
+        return {}
+
+    def read_active_flows(self, cursors):
+        time.sleep(self.block_seconds)
+        return []
+
+    def read_flow(self, flow_id, *, project_root=None, cursor=None):
+        from se3.daemon.history import FlowRead
+
+        time.sleep(self.block_seconds)
+        return FlowRead(flow_id, protocol.HISTORY_MODE_FULL, [], {})
+
+
+def _loop_responsiveness(stop_event: asyncio.Event, samples: list) -> asyncio.Task:
+    """Run a probe coroutine that records max gap between scheduled wakeups.
+
+    A blocked event loop will show a gap close to the block duration; a
+    healthy loop stays near the sleep interval.
+    """
+
+    async def probe():
+        last = time.monotonic()
+        while not stop_event.is_set():
+            await asyncio.sleep(0.02)
+            now = time.monotonic()
+            samples.append(now - last)
+            last = now
+
+    return asyncio.create_task(probe())
+
+
+def test_handle_history_request_does_not_block_event_loop():
+    """A slow read_flow must not stall the event loop (offloaded to a thread)."""
+    provider = _BlockingHistoryProvider(block_seconds=0.6)
+    client = _make_client(history_provider=provider)
+    ws = _FakeWS()
+
+    async def scenario():
+        stop = asyncio.Event()
+        samples: list = []
+        probe = _loop_responsiveness(stop, samples)
+        # Yield once so the probe records a baseline before the slow read starts.
+        await asyncio.sleep(0.05)
+        await client._handle_history_request(
+            ws, {"flow_id": "f-big", "project_root": None}
+        )
+        stop.set()
+        await probe
+        # The probe's worst single-gap must stay well under the synchronous
+        # block window — a regression that ran read_flow inline on the loop
+        # would show a gap close to 0.6 s.
+        assert samples, "probe never ran"
+        assert max(samples) < 0.25, (
+            f"event loop was blocked: max gap {max(samples):.3f}s "
+            f"with block_seconds={provider.block_seconds}"
+        )
+        # Sanity: the request still produced its HISTORY_DATA reply.
+        assert any(m.type == protocol.MSG_HISTORY_DATA for m in ws.sent)
+
+    asyncio.run(scenario())
+
+
+def test_push_history_force_index_does_not_block_event_loop():
+    """A slow build_index / read_active_flows must not stall the event loop."""
+    provider = _BlockingHistoryProvider(block_seconds=0.6)
+    client = _make_client(history_provider=provider)
+    ws = _FakeWS()
+
+    async def scenario():
+        stop = asyncio.Event()
+        samples: list = []
+        probe = _loop_responsiveness(stop, samples)
+        await asyncio.sleep(0.05)
+        await client._push_history(ws, force_index=True)
+        stop.set()
+        await probe
+        # Both build_index and read_active_flows block for 0.6 s synchronously;
+        # without to_thread the loop would stall for ~1.2 s total.
+        assert samples, "probe never ran"
+        assert max(samples) < 0.25, (
+            f"event loop was blocked: max gap {max(samples):.3f}s "
+            f"with block_seconds={provider.block_seconds}"
+        )
+
+    asyncio.run(scenario())
+
+
 def test_client_reconnects_after_server_drop():
     """The client must re-establish the connection (with backoff) after the
     server goes away and comes back."""

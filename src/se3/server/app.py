@@ -56,7 +56,11 @@ STATIC_DIR = Path(__file__).parent / "static"
 
 #: Seconds a ``GET /api/history/{flow_id}`` cache-miss waits for the owning
 #: daemon to answer the on-demand ``MSG_HISTORY_REQUEST`` before giving up.
-HISTORY_PULL_TIMEOUT = 10.0
+#: Sized to leave headroom for a cold first pull of a large session's jsonl
+#: history (the daemon offloads the read to a thread, but the disk read itself
+#: still takes real time on a multi-MB session); a shorter window risks 504s
+#: even when the daemon is healthy and still reading.
+HISTORY_PULL_TIMEOUT = 30.0
 
 #: Seconds ``GET /api/history`` waits for connected daemons to answer the
 #: broadcast ``MSG_HISTORY_INDEX_REQUEST`` (a forced index re-push) before it
