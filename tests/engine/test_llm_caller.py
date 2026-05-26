@@ -1737,3 +1737,245 @@ class TestCallWithRetryDedup:
             call_args = passed_args[1]["args"] if "args" in (passed_args[1] or {}) else passed_args[0][0]
             prompt_idx = call_args.index("-p")
             assert call_args[prompt_idx + 1] == "unique prompt without repetition"
+
+
+class TestCallExtractContract:
+    """Tests for LLMCaller._call_extract contract alignment with _call_two_phase.
+
+    These tests verify that _call_extract honors required_keys, returns clean
+    json.dumps-serialized output on the fast path, and falls back to
+    JSONExtractor when the fast path cannot satisfy the contract.
+    """
+
+    def _make_caller(self, tmp_path):
+        from se3.engine.llm_caller import LLMCaller
+        return LLMCaller(project_root=tmp_path)
+
+    def test_lenient_parse_extract_dict_required_keys_satisfied(self):
+        from se3.engine.llm_caller import LLMCaller
+        # Narrative + JSON fence containing all required keys
+        output = (
+            "Here's my analysis:\n\n"
+            "```json\n"
+            '{"diffs": [{"type": "gap", "description": "x"}], "code_fully_absent": false}\n'
+            "```"
+        )
+        result = LLMCaller._lenient_parse_extract(output, ["diffs"])
+        assert isinstance(result, dict)
+        assert "diffs" in result
+        # Verify json.dumps round-trips for strict consumers
+        serialized = json.dumps(result, ensure_ascii=False, indent=2)
+        parsed_again = json.loads(serialized)
+        assert parsed_again["diffs"][0]["type"] == "gap"
+
+    def test_lenient_parse_extract_dict_missing_required_keys_returns_none(self):
+        from se3.engine.llm_caller import LLMCaller
+        output = '{"other_key": "value"}'
+        result = LLMCaller._lenient_parse_extract(output, ["diffs"])
+        assert result is None
+
+    def test_lenient_parse_extract_list_when_no_required_keys(self):
+        from se3.engine.llm_caller import LLMCaller
+        output = (
+            "I found these subsystems:\n\n"
+            "```json\n"
+            '[{"name": "auth", "description": "Authentication"}, '
+            '{"name": "db", "description": "Database"}]\n'
+            "```"
+        )
+        result = LLMCaller._lenient_parse_extract(output, None)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["name"] == "auth"
+
+    def test_lenient_parse_extract_bare_list(self):
+        from se3.engine.llm_caller import LLMCaller
+        output = '[{"name": "auth"}, {"name": "db"}]'
+        result = LLMCaller._lenient_parse_extract(output, None)
+        assert isinstance(result, list)
+        assert len(result) == 2
+
+    def test_lenient_parse_extract_narrative_prefix_then_bare_list(self):
+        """Discovery's exact failure mode: narrative + bare top-level list with
+        no markdown fence. The trailing-dict heuristic in parse_json_response
+        must NOT win here, otherwise sync_discovery's `isinstance(_, list)`
+        check fails and discovery silently returns []."""
+        from se3.engine.llm_caller import LLMCaller
+        output = (
+            "Here are the subsystems I discovered:\n\n"
+            '[{"name": "auth"}, {"name": "db"}]'
+        )
+        result = LLMCaller._lenient_parse_extract(output, None)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["name"] == "auth"
+        assert result[1]["name"] == "db"
+        # Strict consumer (sync_discovery) can json.loads the json.dumps output
+        serialized = json.dumps(result, ensure_ascii=False, indent=2)
+        assert json.loads(serialized) == result
+
+    def test_lenient_parse_extract_list_with_required_keys_returns_none(self):
+        """required_keys is dict-only; a list response with required_keys
+        violates the contract and should fall through to phase 2."""
+        from se3.engine.llm_caller import LLMCaller
+        output = '[{"name": "auth"}]'
+        result = LLMCaller._lenient_parse_extract(output, ["diffs"])
+        assert result is None
+
+    def test_lenient_parse_extract_garbage_returns_none(self):
+        from se3.engine.llm_caller import LLMCaller
+        result = LLMCaller._lenient_parse_extract("not json at all", None)
+        assert result is None
+
+    def test_lenient_parse_extract_empty_returns_none(self):
+        from se3.engine.llm_caller import LLMCaller
+        assert LLMCaller._lenient_parse_extract("", None) is None
+        assert LLMCaller._lenient_parse_extract("", ["diffs"]) is None
+
+    def test_lenient_parse_extract_narrative_prefix_then_dict(self):
+        """The exact failure mode the fix targets: narrative + JSON fence."""
+        from se3.engine.llm_caller import LLMCaller
+        output = (
+            "I analyzed the spec and code. Here are my findings:\n\n"
+            "After reading several files I'm confident in this result.\n\n"
+            "```json\n"
+            '{"diffs": [], "code_fully_absent": false}\n'
+            "```\n\n"
+            "Let me know if you need more detail."
+        )
+        result = LLMCaller._lenient_parse_extract(output, ["diffs"])
+        assert isinstance(result, dict)
+        assert result["diffs"] == []
+        # Strict consumer can read the json.dumps output directly
+        serialized = json.dumps(result, ensure_ascii=False, indent=2)
+        assert json.loads(serialized) == result
+
+
+class TestCallExtractFullFlow:
+    """End-to-end tests for _call_extract with mocked LLM output."""
+
+    def test_fast_path_dict_returns_clean_json_dumps(self, tmp_path):
+        """Fast-path with valid dict + required_keys should bypass phase 2."""
+        from unittest.mock import patch
+        from se3.engine.llm_caller import LLMCaller
+
+        caller = LLMCaller(project_root=tmp_path)
+        raw_output = (
+            "Narrative...\n\n"
+            '```json\n{"diffs": [{"type": "gap", "description": "x"}]}\n```'
+        )
+        with patch.object(caller, "_call_with_retry", return_value=raw_output), \
+             patch("se3.engine.json_extractor.JSONExtractor.extract") as mock_extract:
+            result = caller._call_extract(
+                prompt="p",
+                timeout=None,
+                context_files=None,
+                on_output=None,
+                json_schema_hint=None,
+                required_keys=["diffs"],
+            )
+            # Phase 2 should NOT have been called (fast path satisfied)
+            mock_extract.assert_not_called()
+            # Result is strict-loadable
+            parsed = json.loads(result)
+            assert parsed["diffs"][0]["type"] == "gap"
+
+    def test_fast_path_missing_required_keys_falls_back_to_phase_2(self, tmp_path):
+        from unittest.mock import patch
+        from se3.engine.llm_caller import LLMCaller
+
+        caller = LLMCaller(project_root=tmp_path)
+        # Valid dict but missing the required key "diffs"
+        raw_output = '{"other_field": []}'
+        extracted = {"diffs": [{"type": "extension", "description": "y"}]}
+        with patch.object(caller, "_call_with_retry", return_value=raw_output), \
+             patch("se3.engine.json_extractor.JSONExtractor.extract", return_value=extracted) as mock_extract:
+            result = caller._call_extract(
+                prompt="p",
+                timeout=None,
+                context_files=None,
+                on_output=None,
+                json_schema_hint="schema",
+                required_keys=["diffs"],
+            )
+            mock_extract.assert_called_once()
+            # required_keys should be forwarded to the extractor
+            assert mock_extract.call_args.kwargs.get("required_keys") == ["diffs"]
+            parsed = json.loads(result)
+            assert parsed["diffs"][0]["type"] == "extension"
+
+    def test_fast_path_list_no_required_keys(self, tmp_path):
+        """sync_discovery path: list response, required_keys=None."""
+        from unittest.mock import patch
+        from se3.engine.llm_caller import LLMCaller
+
+        caller = LLMCaller(project_root=tmp_path)
+        raw_output = (
+            "Here are the subsystems:\n\n"
+            "```json\n"
+            '[{"name": "auth", "description": "Auth subsystem"}]\n'
+            "```"
+        )
+        with patch.object(caller, "_call_with_retry", return_value=raw_output), \
+             patch("se3.engine.json_extractor.JSONExtractor.extract") as mock_extract:
+            result = caller._call_extract(
+                prompt="p",
+                timeout=None,
+                context_files=None,
+                on_output=None,
+                json_schema_hint=None,
+                required_keys=None,
+            )
+            mock_extract.assert_not_called()
+            parsed = json.loads(result)
+            assert isinstance(parsed, list)
+            assert parsed[0]["name"] == "auth"
+
+    def test_unparseable_output_falls_back_then_raises_on_extractor_none(self, tmp_path):
+        from unittest.mock import patch
+        from se3.engine.llm_caller import LLMCaller, LLMCallError
+
+        caller = LLMCaller(project_root=tmp_path)
+        with patch.object(caller, "_call_with_retry", return_value="garbage no json"), \
+             patch("se3.engine.json_extractor.JSONExtractor.extract", return_value=None) as mock_extract:
+            with pytest.raises(LLMCallError):
+                caller._call_extract(
+                    prompt="p",
+                    timeout=None,
+                    context_files=None,
+                    on_output=None,
+                    json_schema_hint=None,
+                    required_keys=["diffs"],
+                )
+            mock_extract.assert_called_once()
+
+
+class TestCallDispatchExtractRequiredKeys:
+    """Verify LLMCaller.call forwards required_keys into _call_extract."""
+
+    def test_required_keys_forwarded_on_extract_mode(self, tmp_path):
+        from unittest.mock import patch
+        from se3.engine.llm_caller import LLMCaller
+
+        caller = LLMCaller(project_root=tmp_path)
+        with patch.object(caller, "_call_extract", return_value="{}") as mock_extract:
+            caller.call(
+                prompt="hello",
+                json_mode="extract",
+                required_keys=["diffs"],
+            )
+            mock_extract.assert_called_once()
+            assert mock_extract.call_args.kwargs.get("required_keys") == ["diffs"]
+
+    def test_required_keys_none_when_not_provided(self, tmp_path):
+        from unittest.mock import patch
+        from se3.engine.llm_caller import LLMCaller
+
+        caller = LLMCaller(project_root=tmp_path)
+        with patch.object(caller, "_call_extract", return_value="[]") as mock_extract:
+            caller.call(
+                prompt="hello",
+                json_mode="extract",
+            )
+            mock_extract.assert_called_once()
+            assert mock_extract.call_args.kwargs.get("required_keys") is None

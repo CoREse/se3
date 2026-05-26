@@ -261,6 +261,7 @@ class SyncAnalyzer:
                     prompt=prompt,
                     json_mode="extract",
                     json_schema_hint=_ANALYSIS_JSON_SCHEMA,
+                    required_keys=["diffs"],
                 )
                 analysis = self._parse_analysis_response(spec_name, response)
                 analysis.touched_files = sorted(self.llm_caller.last_touched_files)

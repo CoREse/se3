@@ -688,7 +688,7 @@ class LLMCaller:
             two_phase_json: Legacy flag for TWO_PHASE mode (kept for compatibility)
             json_schema_hint: Optional hint about expected JSON schema for extraction
             required_keys: Optional list of keys that must be present in the parsed JSON.
-                          Used by TWO_PHASE mode to validate the fast path result.
+                          Used by TWO_PHASE and EXTRACT modes to validate the fast path result.
             **kwargs: Ignored (accepts model, max_tokens, temperature
                       for forward-compatibility but they don't apply
                       to claude -p subprocess calls)
@@ -740,6 +740,7 @@ class LLMCaller:
                 context_files=context_files,
                 on_output=on_output,
                 json_schema_hint=json_schema_hint,
+                required_keys=required_keys,
             )
         elif mode == "strict":
             return self._call_strict(
@@ -819,8 +820,18 @@ class LLMCaller:
         context_files: Optional[List[Path]],
         on_output: Optional[Callable[[str], None]],
         json_schema_hint: Optional[str],
+        required_keys: Optional[List[str]] = None,
     ) -> str:
-        """Mode 2: EXTRACT - Request JSON, extract with LLM on failure."""
+        """Mode 2: EXTRACT - Request JSON, extract with LLM on failure.
+
+        Fast path: try to leniently parse the raw output as JSON (dict or list,
+        supporting markdown fences and narrative + JSON wrappers). When the fast
+        path yields a dict containing all ``required_keys`` (or any dict when
+        ``required_keys`` is empty / None, or a list when ``required_keys`` is
+        empty / None), the parsed value is re-serialized via ``json.dumps`` and
+        returned so that downstream strict ``json.loads`` consumers can read it
+        directly. Otherwise falls back to the LLM-driven ``JSONExtractor``.
+        """
         # Wrap prompt with JSON constraints (like STRICT)
         json_prompt = (
             "CRITICAL: You MUST respond with ONLY valid JSON. "
@@ -839,11 +850,12 @@ class LLMCaller:
             json_retry_count=0,
         )
 
-        # Check if output is valid JSON
-        if self._contains_valid_json(output):
-            return output
+        # Fast path: lenient parse (dict with required_keys, or list when no required_keys)
+        fast = self._lenient_parse_extract(output, required_keys)
+        if fast is not None:
+            return json.dumps(fast, ensure_ascii=False, indent=2)
 
-        # Extract JSON using LLM
+        # Fallback: extract JSON via second-phase LLM call
         print(f"  {self.stream_prefix}[llm-caller] 🔍 Extracting JSON from output (extract mode)...")
 
         from .json_extractor import JSONExtractor
@@ -856,6 +868,7 @@ class LLMCaller:
         result = extractor.extract(
             raw_output=output,
             schema_hint=json_schema_hint,
+            required_keys=required_keys,
         )
 
         if result is None:
@@ -868,6 +881,97 @@ class LLMCaller:
 
         print(f"  {self.stream_prefix}[llm-caller] ✅ JSON extraction complete")
         return json_str
+
+    @staticmethod
+    def _lenient_parse_extract(
+        output: str,
+        required_keys: Optional[List[str]],
+    ) -> Optional[Any]:
+        """Lenient JSON parse for EXTRACT fast-path.
+
+        Returns the parsed dict or list (suitable for ``json.dumps``) when the
+        fast-path contract is satisfied:
+          - dict with all ``required_keys`` present (when ``required_keys`` is
+            non-empty), or
+          - dict or list when ``required_keys`` is empty / None.
+
+        Returns None when the input cannot be parsed leniently, when a dict is
+        missing required keys, or when the contract is mismatched (a list
+        result paired with non-empty ``required_keys``, since ``required_keys``
+        is dict-only).
+
+        Handles: bare JSON value, markdown ``json`` / generic fences, narrative
+        prose preceding/following the JSON, and the NDJSON multi-line stream
+        format (via ``parse_json_response`` for dict input).
+        """
+        if not output:
+            return None
+
+        from .utils.json_parser import (
+            parse_json_response,
+            _try_parse_with_repairs,
+        )
+
+        # When required_keys is specified, this is a dict-only contract.
+        if required_keys:
+            return parse_json_response(output, required_keys=required_keys)
+
+        text = output.strip()
+        if not text:
+            return None
+
+        # Bare JSON value (dict or list) — straight repair-chain parse first.
+        # This must run before any narrative-extraction heuristic, otherwise a
+        # bare top-level list like '[{...}, {...}]' would be misread as the
+        # final inner dict via the first '{' / last '}' fallback.
+        direct = _try_parse_with_repairs(text)
+        if isinstance(direct, (dict, list)):
+            return direct
+
+        # Markdown-fenced JSON: try each fenced block as a whole value.
+        import re
+        for pattern in (r'```json\s*([\s\S]*?)\s*```', r'```\s*([\s\S]*?)\s*```'):
+            for m in re.finditer(pattern, text):
+                inner = m.group(1).strip()
+                inner_result = _try_parse_with_repairs(inner)
+                if isinstance(inner_result, (dict, list)):
+                    return inner_result
+
+        # Narrative + bare top-level list MUST be detected before the
+        # dict-via-narrative path: parse_json_response's first-'{' / last-'}'
+        # (and trailing-object) heuristics would otherwise pluck the rightmost
+        # inner dict from a list like [{"a":1},{"b":2}] and silently return
+        # that single dict, breaking sync_discovery which expects a list.
+        # Only run when the first JSON sentinel after narrative is '['.
+        first_bracket = text.find('[')
+        first_brace = text.find('{')
+        if first_bracket != -1 and (first_brace == -1 or first_bracket < first_brace):
+            list_end = text.rfind(']')
+            if list_end > first_bracket:
+                candidate = text[first_bracket:list_end + 1]
+                cand_result = _try_parse_with_repairs(candidate)
+                if isinstance(cand_result, list):
+                    return cand_result
+
+        # Dict via narrative-tolerant extraction (uses parse_json_response so
+        # the existing first-'{' / last-'}' + trailing-object heuristics apply,
+        # as well as NDJSON aggregation when the input is multi-line stream).
+        dict_via_narrative = parse_json_response(output)
+        if isinstance(dict_via_narrative, dict):
+            return dict_via_narrative
+
+        # Late fallback: list walk when dict path failed and we did not try
+        # list-first above (i.e. dict sentinel preceded list sentinel but dict
+        # parse did not succeed).
+        if first_bracket != -1:
+            list_end = text.rfind(']')
+            if list_end > first_bracket:
+                candidate = text[first_bracket:list_end + 1]
+                cand_result = _try_parse_with_repairs(candidate)
+                if isinstance(cand_result, list):
+                    return cand_result
+
+        return None
 
     def _get_phase1_cache_path(self) -> Optional[Path]:
         """Return the Phase 1 cache file path for this step, or None if no context."""

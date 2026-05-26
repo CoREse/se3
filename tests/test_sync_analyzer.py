@@ -269,6 +269,33 @@ class TestAnalyzeSpec:
 
         assert caller.call.call_args.kwargs["json_mode"] == "extract"
 
+    def test_passes_required_keys_diffs(self, tmp_path):
+        caller = MagicMock()
+        caller.call.return_value = json.dumps({"diffs": []})
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        analyzer.analyze_spec("x", "s", "c")
+
+        assert caller.call.call_args.kwargs.get("required_keys") == ["diffs"]
+
+    def test_handles_clean_extract_output_with_narrative_origin(self, tmp_path):
+        """End-to-end: even when raw LLM output is 'narrative + JSON fence',
+        the EXTRACT mode now returns json.dumps-clean JSON, so the strict
+        json.loads inside _parse_analysis_response succeeds."""
+        # Simulate what the new _call_extract returns: clean JSON serialized
+        # from a leniently-parsed narrative-wrapped LLM response.
+        clean_json = json.dumps({
+            "diffs": [{"type": "gap", "description": "Missing feature X"}],
+            "code_fully_absent": False,
+        }, ensure_ascii=False, indent=2)
+        caller = MagicMock()
+        caller.call.return_value = clean_json
+        analyzer = SyncAnalyzer(tmp_path, caller)
+        result = analyzer.analyze_spec("auth", "spec", "ctx")
+
+        assert result.failed_analysis_reason is None
+        assert len(result.diffs) == 1
+        assert result.diffs[0].diff_type == DiffType.GAP
+
     def test_passes_json_schema_hint(self, tmp_path):
         caller = MagicMock()
         caller.call.return_value = json.dumps({"diffs": []})

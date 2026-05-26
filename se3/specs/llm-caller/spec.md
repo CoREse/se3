@@ -116,11 +116,28 @@ The read-only decision uses the same `is_step_read_only(step_type)` classifier a
 - **AND** if the response does not parse, up to `max_json_retries=2` further calls are made with a retry prompt that quotes the first 1500 chars of the bad text content
 - **AND** each JSON retry increments `external_attempt` so retry-context injection includes the prior conversation
 
-#### Scenario: Extract mode does not retry, uses LLM extractor
+#### Scenario: Extract mode does not retry, uses LLM extractor on fast-path miss
 - **WHEN** `json_mode="extract"`
 - **THEN** the prompt is wrapped with the same CRITICAL JSON header
-- **AND** if the response is not valid JSON, `JSONExtractor.extract(raw_output, schema_hint=…)` is invoked (5-minute timeout)
-- **AND** if extraction returns `None`, `LLMCallError` is raised
+- **AND** the raw output is first run through a lenient fast-path parser (`_lenient_parse_extract`) that tolerates bare JSON, markdown-fenced JSON, and narrative-prose-wrapped JSON, and aggregates multi-line NDJSON stream output via `parse_json_response`
+- **AND** if the fast-path returns a value, it is re-serialized via `json.dumps(result, ensure_ascii=False, indent=2)` and returned (byte-identical formatting to TWO_PHASE) so downstream strict `json.loads` consumers can read it directly
+- **AND** otherwise `JSONExtractor.extract(raw_output, schema_hint, required_keys)` is invoked (5-minute timeout) and its dict result is likewise serialized via `json.dumps(...)` and returned
+- **AND** if extraction also returns `None`, `LLMCallError` is raised
+
+#### Scenario: Extract mode honors required_keys for dict contracts
+- **GIVEN** `json_mode="extract"` and a non-empty `required_keys` list (a dict-only contract — `required_keys` is meaningless for list outputs)
+- **WHEN** the fast-path parses the output as a dict containing all `required_keys`
+- **THEN** the dict is serialized via `json.dumps(...)` and returned
+- **WHEN** the fast-path parses the output as a dict that is missing any required key
+- **THEN** the fast-path returns `None` and the call falls back to `JSONExtractor.extract(..., required_keys=required_keys)` for Phase-2 LLM re-extraction
+- **WHEN** the fast-path parses the output as a list while `required_keys` is non-empty
+- **THEN** the contract is treated as mismatched: the fast-path returns `None` and the Phase-2 extractor runs (conservative fallback)
+
+#### Scenario: Extract mode without required_keys accepts dict or list
+- **GIVEN** `json_mode="extract"` and `required_keys` is `None` or empty
+- **WHEN** the fast-path parses the output as a dict OR as a list (e.g., a top-level JSON array from `sync_discovery`'s LLM response shaped as a narrative + bracketed list)
+- **THEN** the parsed value is serialized via `json.dumps(...)` and returned, so a downstream `strict json.loads(response)` on the returned string yields the same list/dict without needing additional fence-stripping or extraction
+- **AND** the `LLMCaller.call(json_mode="extract", ...)` dispatch forwards `required_keys` to `_call_extract` symmetrically with the way TWO_PHASE forwards them, so both modes share the same `required_keys` contract
 
 #### Scenario: Two-phase mode runs clean prompt, then extracts
 - **WHEN** `json_mode="two_phase"` (or legacy `two_phase_json=True`)
