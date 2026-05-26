@@ -292,9 +292,19 @@ When no explicit `on_output` callback is given, the caller installs a `StreamJSO
 The tracker has **two output channels that MUST be formatted independently**:
 
 1. The **CLI terminal stdout** — emoji-prefixed lines (`🔧 <preview>`, `✅ <preview>`, `❌ ...`) written via `print(...)`. This is the human-readable terminal stream and its byte sequence MUST remain stable across changes to the web-progress channel.
-2. The **web/jsonl progress channel** — the `content` string passed to `_emit_progress` and persisted in `stream_progress` records that the daemon forwards to the running-flow console. This channel MUST emit tool events as **bracket-marker strings** (`[<tool_name>: <detail>]`, `[<tool_name> ✓ ...]`, `[<tool_name> ✗ <error_preview>]` / `[Tool error: <preview>]`) so the marker text is byte-identical to what `chat_history.extract_assistant_text` writes in the final assistant turn. This is what enables the running-flow console's `TOOL_MARKER_RE` / `renderToolMarkers` to render the same `.tool-marker` boxes during streaming as in the final settled view (see the `running-flow-console` *Live Per-Turn Stream Accumulation* requirement).
+2. The **web/jsonl progress channel** — the `content` string passed to `_emit_progress` and persisted in `stream_progress` records that the daemon forwards to the running-flow console. This channel MUST emit tool events as **bracket-marker strings** (`[<tool_name>: <detail>]`, `[<tool_name> ✓ ...]`, `[<tool_name> ✗ <error_preview>]` / `[Tool error: <preview>]`) so the marker text is byte-identical to what `chat_history.extract_assistant_text` writes in the final assistant turn. This is what enables the running-flow console's `TOOL_MARKER_RE` / `renderToolMarkers` to render the same `.tool-marker` boxes during streaming as in the final settled view (see the `running-flow-console` *Live Per-Turn Stream Accumulation* and *Tool Call Chip State Machine* requirements).
 
 The bracket-marker convention covers all three tool-event kinds — `tool_use`, successful `tool_result`, and `tool_error` (both the `is_error` branch of a tool result and a stream-level `error` line) — so the live and final views share a single marker grammar with no second emoji-only parsing path on the frontend.
+
+**Per-chip extension fields (single-chip protocol).** Beyond the bracket-marker `content` string, every `tool_use` / `tool_result` / `tool_error` event the tracker emits to the web/jsonl progress channel MUST also carry three structured fields so the frontend can collapse the two physical events (use + result) of a single tool call into one progressively-upgraded chip:
+
+- `tool_use_id: str` — the originating Anthropic `tool_use_id`; this is the chip-identity key the frontend uses to pair a later `tool_result` against the earlier `tool_use`. Stream-level `error` lines (no originating tool call) MAY omit this field.
+- `is_error: bool` — present on terminal (result) events only; `true` for a result whose Anthropic `is_error` flag is set or for a stream-level `error`, `false` for a successful result. Absent (or `None`) on the in-flight `tool_use` event.
+- `tool_detail: dict | None` — the structured detail payload (produced by `tool_formatters.build_tool_detail_payload`, keyed by a `kind` field such as `edit_diff` / `write_full` / `write_diff` / `read_text` / `bash_output` / `grep_matches` / `glob_matches` / `text`); present on terminal events only. Absent (or `None`) on the in-flight `tool_use` event so the in-flight chip carries the header only.
+
+These fields ride alongside `content` inside each `stream_progress` record's payload (e.g. `chat_history.record_stream_progress` accepts the matching keyword-only `tool_use_id` / `is_error` / `tool_detail` parameters, defaulting to `None`). When all three default to `None` the persisted jsonl record's key set MUST stay byte-identical to the pre-extension schema, so legacy readers and the existing CLI history view continue to work unchanged.
+
+**Single-record-per-phase rule.** Each tool call produces **exactly two** `stream_progress` records on the web/jsonl channel — one in-flight record at `tool_use` time and one terminal record at `tool_result` time — and **no more**. In particular, the tracker MUST NOT emit a separate result-preview chip in addition to the terminal record: the terminal event's header (computed by `tool_formatters.format_tool_chip_header(...)` from both the cached `tool_use` input and the arriving `tool_result` payload) and its `tool_detail` payload together carry every piece of information the frontend chip needs, so any third `[<preview>]` chip would be a duplicate that the frontend would render as a zombie sibling. The CLI terminal stdout is unaffected by this rule — its emoji-prefixed lines (`🔧` for use, `✅` / `❌` for result) continue to be printed byte-for-byte as before.
 
 #### Scenario: Text and thinking streamed inline
 - **WHEN** an `assistant` message contains a `text` or `thinking` content item
@@ -306,6 +316,7 @@ The bracket-marker convention covers all three tool-event kinds — `tool_use`, 
 - **WHEN** an `assistant` message contains a `tool_use` content item
 - **THEN** the tool name and a `format_tool_use_preview`-formatted input are printed to stdout as `  <stream_prefix>[llm-stream] 🔧 <preview>...`
 - **AND** the same event is recorded into the web/jsonl progress channel with content `[<preview>]` (bracket-marker form), not `🔧 <preview>`, so the running-flow console parses it as a tool marker
+- **AND** the `stream_progress` record carries the originating `tool_use_id` (the chip-identity key) and omits / defaults `is_error` and `tool_detail` to `None`, so the frontend creates an in-flight chip header-only
 - **AND** the tool-use id is recorded in `_tool_use_id_to_name`
 
 #### Scenario: Edit/Write inputs cached for diff
@@ -316,8 +327,8 @@ The bracket-marker convention covers all three tool-event kinds — `tool_use`, 
 
 #### Scenario: Tool result rendered with preview and diff
 - **WHEN** a `tool_result` arrives (legacy top-level or nested inside a `user` message)
-- **THEN** if `is_error` is true, an error preview is printed to stdout (emoji-prefixed, byte-identical to prior behavior) and the caches for that id are popped, and the web/jsonl progress channel records `[<tool_name> ✗ <error_preview>]` (falling back to `[Tool error: <error_preview>]` when the tool name is unknown)
-- **AND** if successful, `format_tool_result_preview` is printed to stdout and the web/jsonl progress channel records the same preview wrapped as `[<preview>]`, and, for cached `Edit`/`Write` ids, `format_tool_diff` is rendered using the cached input and old content
+- **THEN** if `is_error` is true, an error preview is printed to stdout (emoji-prefixed, byte-identical to prior behavior) and the caches for that id are popped, and the web/jsonl progress channel emits **exactly one** terminal `stream_progress` record whose `content` is the failure bracket marker `[<tool_name> ✗ <error_preview>]` (falling back to `[Tool error: <error_preview>]` when the tool name is unknown), carrying `tool_use_id = <id>`, `is_error = true`, and a `tool_detail` payload describing the error
+- **AND** if successful, `format_tool_result_preview` is printed to stdout and the web/jsonl progress channel emits **exactly one** terminal `stream_progress` record whose `content` is the merged success header produced by `format_tool_chip_header(...)` (combining the cached `tool_use` input summary and the arriving result summary, e.g. `[Read ✓ path · 87 lines]`), carrying `tool_use_id = <id>`, `is_error = false`, and the structured `tool_detail` payload returned by `tool_formatters.build_tool_detail_payload(...)`; the tracker MUST NOT emit a separate `[<preview>]` result chip in addition to this terminal record, and, for cached `Edit`/`Write` ids, `format_tool_diff` is rendered to stdout using the cached input and old content
 
 #### Scenario: Stream-level error printed
 - **WHEN** an NDJSON line has `type == "error"`
@@ -329,6 +340,27 @@ The bracket-marker convention covers all three tool-event kinds — `tool_use`, 
 - **WHEN** the `stream_progress` records produced by the tracker are inspected
 - **THEN** every tool-event `content` string begins with `[` and ends with `]` — using the same bracket-marker grammar `chat_history.extract_assistant_text` writes for the final assistant turn — never the emoji-prefixed CLI form
 - **AND** the CLI stdout for the same call still contains the emoji-prefixed lines (`🔧`, `✅`, `❌`) byte-identical to the pre-change behavior, so terminal users see no regression
+
+#### Scenario: In-flight tool_use emits a header-only chip record
+- **GIVEN** a streaming call that has just dispatched a `Read` `tool_use` (no `tool_result` yet)
+- **WHEN** the corresponding `stream_progress` record is inspected
+- **THEN** the record's `content` is the in-flight bracket marker `[Read: <path>:<offset>-<end>]` (the `format_tool_chip_in_flight_header` form computed from the use input alone)
+- **AND** the record's `tool_use_id` equals the originating Anthropic `tool_use_id`, and `is_error` / `tool_detail` are absent (or `None`)
+- **AND** the tracker has emitted **only one** record for this tool call so far (no terminal record yet), so the frontend chip state machine creates a single in-flight chip keyed by that `tool_use_id`
+
+#### Scenario: tool_result success emits a single terminal upgrade record
+- **GIVEN** the same call as above, where the matching `Read` `tool_result` now arrives without `is_error`
+- **WHEN** the `stream_progress` records produced by the tracker are inspected after the `tool_result`
+- **THEN** the tracker has emitted **exactly one** additional record (the terminal record) — not two — so the call's two physical events produce two `stream_progress` records total
+- **AND** the terminal record's `content` is the merged success header `[Read ✓ <path> · <N> lines]` from `format_tool_chip_header(...)`, its `tool_use_id` matches the in-flight record's, its `is_error` is `false`, and its `tool_detail` is the structured payload from `build_tool_detail_payload(...)` (e.g. `{"kind": "read_text", ...}`)
+- **AND** no separate `[<preview>]` chip is emitted in addition to the terminal record, so the frontend can upgrade the existing in-flight chip in place without producing a sibling zombie chip
+
+#### Scenario: tool_result failure emits a single terminal failure record with detail
+- **GIVEN** a `Bash` `tool_use` followed by a matching `tool_result` whose `is_error` flag is `true` (or, equivalently, a stream-level `error` line that pairs with an open in-flight call)
+- **WHEN** the `stream_progress` records produced by the tracker are inspected after the failure
+- **THEN** the tracker has emitted **exactly one** terminal record for the failure (no extra preview chip), and its `content` is the failure bracket marker `[Bash ✗ <error_preview>]` (or `[Tool error: <preview>]` when the tool name is unknown)
+- **AND** the terminal record carries the matching `tool_use_id`, `is_error = true`, and a `tool_detail` payload that describes the error so the frontend chip can default the detail panel to expanded for failures (per the `running-flow-console` *Tool Call Chip State Machine* requirement)
+- **AND** the CLI terminal stdout for the same failure still prints the emoji-prefixed `❌` line byte-for-byte as before
 
 #### Scenario: Malformed JSON tolerated
 - **WHEN** a streamed line is not valid JSON

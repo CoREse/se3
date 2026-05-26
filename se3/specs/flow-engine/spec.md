@@ -981,6 +981,11 @@ The markdown body is the single source of truth; it MAY be iterated independentl
 `tool_formatters.py` 是工具调用预览格式化的唯一权威来源，由 `llm_caller.py`（流式输出）和 `chat_history.py`（历史渲染/重试上下文）共同消费。
 
 - 公共 API：`format_tool_use_preview(tool_name, input_data)`、`format_tool_result_preview(tool_name, result_data)`、和 `format_tool_diff(tool_name, input_data, result_data, old_content=None)`
+- 单 chip 协议公共 API（与 `llm-caller` *Streaming NDJSON Output Display* 的 per-chip 扩展字段及 `running-flow-console` *Tool Call Chip State Machine* 配套，必须保持公开且稳定，未来 LLM 子进程不得随意改名或删除）：
+  - `format_tool_chip_in_flight_header(tool_name, use_input)` — 仅基于 `tool_use` 输入计算 in-flight 状态的 chip 头部文本（如 `Read: <path>:<offset>-<end>`），供 `tool_use` 阶段写入 `stream_progress` 的 `content`
+  - `format_tool_chip_header(tool_name, use_input, result_data, is_error)` — 在 `tool_result` 阶段合并 use 与 result 摘要计算单 chip 终态 header（如 `Read ✓ <path> · <N> lines` 或 `Read ✗ <error_preview>`），写入终态 `stream_progress` 的 `content`，避免前端按冒号切分时丢失 detail
+  - `build_tool_detail_payload(tool_name, use_input, result_data, old_content=None)` — 计算 JSON-safe 的结构化 detail 字典，键 `kind` 取 `edit_diff` / `write_full` / `write_diff` / `read_text` / `bash_output` / `grep_matches` / `glob_matches` / `text` 之一，承载 chip 详情面板所需数据（Edit/Write 的 unified diff 文本与起始行号、Write 新建文件的完整内容、Read 的 `start_line` 与正文、Bash 分离的 stdout/stderr、Grep/Glob 的匹配清单等）；体积受 `engine/truncation.py` 的 `TOOL_DETAIL_PAYLOAD_MAX_CHARS` 约束，超长尾部截断
+  - 未注册的工具走通用 `text` kind 回退，保证新工具不致前端崩溃
 - 内部维护 `TOOL_FORMATTERS` 字典注册表（`{tool_name: {use: fn, result: fn, diff: str}}`），将工具名映射到专用格式化函数；可选的 `diff` 键标记该工具支持 diff 渲染
 - 未注册的工具名回退到通用格式化器（key=value 截断预览）
 - 提供 `truncate_preview()` 通用截断工具函数（用于非路径文本：命令字符串、错误信息、JSON 等）

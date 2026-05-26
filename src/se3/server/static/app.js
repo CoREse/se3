@@ -1349,6 +1349,12 @@ function extractAssistantText(rawJson) {
     }
     parts.push("\n[" + (name || "Tool") + (detail ? ": " + detail : "") + "]\n");
   };
+  // tool_result blocks ride the user-message channel in the NDJSON. Their
+  // bracket text is *not* injected back into the assistant content string —
+  // they are paired by tool_use_id with the matching tool_use marker by the
+  // chip state machine (`extractAssistantChipEvents`) and only the merged
+  // chip is rendered. Emitting a second bracket marker here would produce the
+  // pre-G3 "zombie second chip" the running-flow console used to render.
   const extractBlocks = (blocks) => {
     if (!Array.isArray(blocks)) return;
     for (const block of blocks) {
@@ -1361,7 +1367,7 @@ function extractAssistantText(rawJson) {
       } else if (bt === "tool_use") {
         pushTool(block.name, block.input);
       } else if (bt === "tool_result") {
-        // tool_result blocks are rendered by the tool-marker layer; skip body
+        // paired with the matching tool_use by extractAssistantChipEvents
       } else if (typeof block.text === "string") {
         parts.push(block.text);
       }
@@ -1526,6 +1532,21 @@ function normalizeRecord(rec) {
     }
   }
 
+  // Tool chip state fields written by record_stream_progress on stream_progress
+  // records: tool_use carries `tool_use_id` with `tool_detail=null` / `is_error`
+  // absent (in-flight); tool_result carries the same id plus `is_error` and a
+  // structured `tool_detail` payload (terminal). Expose them so the live chip
+  // state machine can find/upgrade chips by id without re-parsing the bracket
+  // marker text.
+  const toolUseIdRaw = pick("tool_use_id");
+  const toolUseId =
+    typeof toolUseIdRaw === "string" && toolUseIdRaw ? toolUseIdRaw : null;
+  const isErrorRaw = pick("is_error");
+  const isError = isErrorRaw === true || isErrorRaw === false ? isErrorRaw : null;
+  const toolDetailRaw = pick("tool_detail");
+  const toolDetail =
+    toolDetailRaw && typeof toolDetailRaw === "object" ? toolDetailRaw : null;
+
   return {
     role: role,
     content: content,
@@ -1535,6 +1556,9 @@ function normalizeRecord(rec) {
     raw: { raw_json: rawJson, raw_ndjson: rawNdjson },
     attempt: pick("attempt"),
     partial: isPartial,
+    toolUseId: toolUseId,
+    isError: isError,
+    toolDetail: toolDetail,
   };
 }
 
@@ -2003,14 +2027,75 @@ function buildPartialBubble(norm) {
   const row = el("div", "history-record conv-record role-assistant conv-partial");
   const head = renderRecordHead(norm);
   const bubble = el("div", "conv-bubble");
-  const inline = renderAssistantProcessInline(
-    typeof norm.content === "string" ? norm.content : "");
+  const inline = el("div", "assistant-process-inline");
   bubble.appendChild(inline);
   row.appendChild(head);
   row.appendChild(bubble);
   row.__partialHead = head;
   row.__partialInline = inline;
+  // Per-bubble chip registry: keyed by tool_use_id, so the terminal
+  // (tool_result) fragment for an id upgrades the SAME in-flight chip rather
+  // than appending a new one.
+  row.__chipRegistry = new Map();
+  applyFragmentToBubble(row, norm);
   return row;
+}
+
+// Apply one stream_progress fragment to a bubble: either upgrade an existing
+// chip via tool_use_id (state-machine path) or append text via the legacy
+// renderToolMarkers fallback (text / thinking deltas, or records that lack
+// the structured tool_use_id field).
+function applyFragmentToBubble(row, norm) {
+  const inline = row.__partialInline;
+  if (!inline) return;
+  if (norm && typeof norm.toolUseId === "string" && norm.toolUseId) {
+    const reg = row.__chipRegistry || (row.__chipRegistry = new Map());
+    const content = typeof norm.content === "string" ? norm.content : "";
+    // Parse the bracket marker for name + header. Fragment text is exactly
+    // `[<Name>...]` so the first known-name match drives the chip identity;
+    // fall back to "Tool" if no name matches.
+    const nameMatch = TOOL_MARKER_RE.exec(content);
+    TOOL_MARKER_RE.lastIndex = 0;
+    const name = nameMatch ? nameMatch[1] : "Tool";
+    const parsed = nameMatch ? parseToolBracket(name, nameMatch[0])
+      : { name: name, header: "", status: "in-flight" };
+    const existing = reg.get(norm.toolUseId);
+    if (norm.isError === true) {
+      const chip = existing || (() => {
+        const c = createInFlightChip(parsed.name, parsed.header);
+        if (c.dataset) c.dataset.toolUseId = norm.toolUseId;
+        reg.set(norm.toolUseId, c);
+        inline.appendChild(c);
+        return c;
+      })();
+      upgradeChipToFailure(chip, parsed.header, norm.toolDetail);
+    } else if (norm.isError === false) {
+      const chip = existing || (() => {
+        const c = createInFlightChip(parsed.name, parsed.header);
+        if (c.dataset) c.dataset.toolUseId = norm.toolUseId;
+        reg.set(norm.toolUseId, c);
+        inline.appendChild(c);
+        return c;
+      })();
+      upgradeChipToSuccess(chip, parsed.header, norm.toolDetail);
+    } else {
+      // in-flight (tool_use). Skip if we already have a chip for this id —
+      // the daemon emits exactly one in-flight per id, but a duplicate
+      // mid-stream must not produce a second chip.
+      if (!existing) {
+        const chip = createInFlightChip(parsed.name, parsed.header);
+        if (chip.dataset) chip.dataset.toolUseId = norm.toolUseId;
+        reg.set(norm.toolUseId, chip);
+        inline.appendChild(chip);
+      }
+    }
+    return;
+  }
+  // No structured tool_use_id — append content via the legacy bracket-marker
+  // parser. This is the path for text / thinking fragments and for any
+  // pre-G3 jsonl whose stream_progress records lack the id field.
+  const content = typeof norm.content === "string" ? norm.content : "";
+  for (const node of renderToolMarkers(content)) inline.appendChild(node);
 }
 
 // Extend an existing accumulating bubble with a newly-arrived fragment of the
@@ -2020,11 +2105,7 @@ function buildPartialBubble(norm) {
 // state uses, so the displayed time is byte-identical. The head swap uses
 // insertBefore + removeChild (no `replaceChild`, which the test DOM stub lacks).
 function appendPartialFragment(row, norm) {
-  const inline = row.__partialInline;
-  if (inline) {
-    const content = typeof norm.content === "string" ? norm.content : "";
-    for (const node of renderToolMarkers(content)) inline.appendChild(node);
-  }
+  applyFragmentToBubble(row, norm);
   const oldHead = row.__partialHead;
   const newHead = renderRecordHead(norm);
   if (oldHead && oldHead.parentNode === row) {
@@ -2265,15 +2346,748 @@ const TOOL_MARKER_NAMES = [
 const TOOL_MARKER_RE = new RegExp(
   "\\[(" + TOOL_MARKER_NAMES.join("|") + ")\\b[^\\]\\n]*\\]", "g");
 
+// Parse `[<Name> [: ] [✓|✗ ] <header>]` into `{name, header, status}`.
+//
+// The pre-G3 path used `inner.indexOf(":")` to slice off the header; that broke
+// on the success / failure bracket grammar `[Read ✓ path · 87 lines]` (no
+// colon → empty header → an empty "zombie" chip rendered next to the in-flight
+// one). The new parser strips the leading name, then the optional `:` or
+// `✓` / `✗` status glyph, returning a clean header plus the status glyph it
+// observed.
+function parseToolBracket(name, raw) {
+  let inner = String(raw == null ? "" : raw);
+  inner = inner.replace(/^\[/, "").replace(/\]$/, "");
+  // Strip the leading "<name>" prefix.
+  if (inner.slice(0, name.length) === name) {
+    inner = inner.slice(name.length);
+  }
+  // Trim leading whitespace, then peel off the status glyph or colon.
+  inner = inner.replace(/^\s+/, "");
+  let status = "in-flight";
+  if (inner.charAt(0) === "✓") {            // ✓
+    status = "success"; inner = inner.slice(1);
+  } else if (inner.charAt(0) === "✗") {     // ✗
+    status = "failure"; inner = inner.slice(1);
+  } else if (inner.charAt(0) === ":") {
+    status = "in-flight"; inner = inner.slice(1);
+  }
+  return { name: name, header: inner.replace(/^\s+/, "").trim(), status: status };
+}
+
+// --- Chip state machine ----------------------------------------------------
+//
+// A `tool-marker` chip has three visual states keyed by `tool_use_id`:
+//   * in-flight — dashed border, no glyph (tool_use seen, result pending)
+//   * success — solid border + ✓ (tool_result with is_error=false)
+//   * failure — solid border + ✗ (tool_result with is_error=true)
+//
+// `createInFlightChip` builds an in-flight chip; `upgradeChipToSuccess` /
+// `upgradeChipToFailure` mutate the SAME node (preserving DOM identity so the
+// bubble's child order is stable), swap the chip's status class, refresh the
+// header text in place, and attach a default-folded (success) / default-open
+// (failure) detail panel built by `renderToolDetailPanel(detail)`.
+
+function setChipHeader(chip, name, header, status) {
+  // Build header inside `chip` from scratch — keeps detail panel children
+  // attached as siblings, only the head row is regenerated.
+  while (chip.firstChild) {
+    // Stop once we hit the appended detail panel; the head is always the
+    // initial set of `<span>` children.
+    const child = chip.firstChild;
+    if (child.classList && child.classList.contains("tool-marker-details")) {
+      break;
+    }
+    chip.removeChild(child);
+  }
+  const glyph = status === "success" ? "✓"
+    : status === "failure" ? "✗" : "";
+  // Insert head as the first children, ahead of any details panel.
+  const refNode = chip.firstChild;
+  if (glyph) {
+    const g = el("span", "tool-marker-glyph", glyph);
+    chip.insertBefore(g, refNode);
+  }
+  const n = el("span", "tool-marker-name", name);
+  chip.insertBefore(n, refNode);
+  if (header) {
+    const d = el("span", "tool-marker-detail", header);
+    chip.insertBefore(d, refNode);
+  }
+}
+
+function createInFlightChip(name, header) {
+  const chip = el("div", "tool-marker in-flight");
+  chip.__toolName = name;
+  chip.__toolStatus = "in-flight";
+  setChipHeader(chip, name, header || "", "in-flight");
+  return chip;
+}
+
+function upgradeChipToSuccess(chip, header, detail) {
+  if (!chip) return;
+  chip.classList.remove("in-flight", "failure");
+  chip.classList.add("success");
+  chip.__toolStatus = "success";
+  setChipHeader(chip, chip.__toolName || "Tool", header || "", "success");
+  attachChipDetail(chip, detail, /*expanded=*/false);
+}
+
+function upgradeChipToFailure(chip, header, detail) {
+  if (!chip) return;
+  chip.classList.remove("in-flight", "success");
+  chip.classList.add("failure");
+  chip.__toolStatus = "failure";
+  setChipHeader(chip, chip.__toolName || "Tool", header || "", "failure");
+  attachChipDetail(chip, detail, /*expanded=*/true);
+}
+
+function attachChipDetail(chip, detail, expanded) {
+  // Remove any prior details panel so an upgrade replaces, not duplicates.
+  const old = Array.from(chip.children).filter(
+    (c) => c.classList && c.classList.contains("tool-marker-details"));
+  for (const o of old) chip.removeChild(o);
+  if (!detail) return;
+  const panel = el("div", "tool-marker-details" + (expanded ? " expanded" : " folded"));
+  const toggle = el("button", "tool-marker-details-toggle",
+    expanded ? "hide details" : "details");
+  toggle.type = "button";
+  const body = el("div", "tool-marker-details-body");
+  try {
+    body.appendChild(renderToolDetailPanel(detail));
+  } catch (err) {
+    try { console.warn("tool detail render failed", err); }
+    catch (_) { /* console may be absent */ }
+    body.appendChild(el("pre", "tool-marker-details-fallback",
+      _safeJsonStringify(detail)));
+  }
+  toggle.addEventListener("click", () => {
+    const open = panel.classList.contains("expanded");
+    panel.classList.toggle("expanded", !open);
+    panel.classList.toggle("folded", open);
+    toggle.textContent = !open ? "hide details" : "details";
+    if (!open) {
+      try { requestAnimationFrame(() => panel.scrollIntoView({ block: "nearest" })); }
+      catch (_) { /* RAF / DOM optional in test env */ }
+    }
+  });
+  panel.append(toggle, body);
+  chip.appendChild(panel);
+}
+
+function _safeJsonStringify(obj) {
+  try { return JSON.stringify(obj, null, 2); }
+  catch (_) { return String(obj); }
+}
+
+// --- Detail panel renderers (per detail.kind) ------------------------------
+//
+// `build_tool_detail_payload` (tool_formatters.py) emits a JSON-safe dict with
+// a `kind` discriminator. Each sub-renderer maps one kind to DOM, producing
+// the CLI-equivalent visual: line-numbered diffs for Edit / Write-overwrite,
+// the full file content for Write-create, line-numbered text for Read,
+// command + stdout / stderr for Bash, match lists for Grep / Glob, and a
+// generic text fallback for unknown kinds.
+const TOOL_DETAIL_RENDERERS = {};
+
+function registerToolDetailRenderer(kind, fn) {
+  if (kind && typeof fn === "function") TOOL_DETAIL_RENDERERS[kind] = fn;
+}
+
+function renderToolDetailPanel(detail) {
+  if (!detail || typeof detail !== "object") {
+    const frag = document.createDocumentFragment();
+    frag.appendChild(el("p", "tool-detail-empty", "(no details available)"));
+    return frag;
+  }
+  const fn = TOOL_DETAIL_RENDERERS[detail.kind] || TOOL_DETAIL_RENDERERS.text;
+  return fn(detail);
+}
+
+// Render a unified diff with a dim line-number gutter and add/del/hunk/ctx
+// coloring matching the CLI `display.render_diff` palette. Hunk `@@` lines
+// reset the gutter to the diff's encoded new-side / old-side start.
+function renderDiffPanel(detail) {
+  const wrap = el("div", "tool-marker-diff");
+  if (detail.file_path) {
+    wrap.appendChild(el("div", "tool-marker-diff-path", detail.file_path));
+  }
+  const lines = String(detail.diff || "").split("\n");
+  let oldLine = detail.old_start_line || 1;
+  let newLine = detail.new_start_line || 1;
+  for (const ln of lines) {
+    if (ln.startsWith("---") || ln.startsWith("+++")) {
+      // header lines — skip; we already show file path above
+      continue;
+    }
+    let cls = "diff-ctx";
+    let gutter = "";
+    if (ln.startsWith("@@")) {
+      cls = "diff-hunk";
+      const m = /@@\s*-(\d+)(?:,\d+)?\s*\+(\d+)(?:,\d+)?\s*@@/.exec(ln);
+      if (m) {
+        oldLine = parseInt(m[1], 10) || 1;
+        newLine = parseInt(m[2], 10) || 1;
+      }
+    } else if (ln.startsWith("+")) {
+      cls = "diff-add"; gutter = String(newLine); newLine++;
+    } else if (ln.startsWith("-")) {
+      cls = "diff-del"; gutter = String(oldLine); oldLine++;
+    } else if (ln.length) {
+      cls = "diff-ctx"; gutter = String(newLine); newLine++; oldLine++;
+    }
+    const row = el("div", "diff-line " + cls);
+    row.appendChild(el("span", "diff-gutter", gutter));
+    row.appendChild(el("span", "diff-content", ln));
+    wrap.appendChild(row);
+  }
+  if (detail.truncated) {
+    wrap.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+  }
+  return wrap;
+}
+
+function renderTextWithLineNumbers(text, startLine) {
+  const wrap = el("div", "tool-marker-text");
+  const lines = String(text || "").split("\n");
+  let n = startLine || 1;
+  for (const line of lines) {
+    const row = el("div", "text-line");
+    row.appendChild(el("span", "text-gutter", String(n)));
+    row.appendChild(el("span", "text-content", line));
+    wrap.appendChild(row);
+    n++;
+  }
+  return wrap;
+}
+
+registerToolDetailRenderer("edit_diff", renderDiffPanel);
+registerToolDetailRenderer("write_diff", renderDiffPanel);
+
+registerToolDetailRenderer("write_full", (detail) => {
+  const frag = document.createDocumentFragment();
+  if (detail.file_path) {
+    frag.appendChild(el("div", "tool-marker-diff-path", detail.file_path));
+  }
+  frag.appendChild(renderTextWithLineNumbers(detail.content, detail.start_line));
+  if (detail.truncated) {
+    frag.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+  }
+  return frag;
+});
+
+registerToolDetailRenderer("read_text", (detail) => {
+  const frag = document.createDocumentFragment();
+  if (detail.file_path) {
+    frag.appendChild(el("div", "tool-marker-diff-path", detail.file_path));
+  }
+  frag.appendChild(renderTextWithLineNumbers(detail.text, detail.start_line));
+  if (detail.truncated) {
+    frag.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+  }
+  return frag;
+});
+
+registerToolDetailRenderer("bash_output", (detail) => {
+  const frag = document.createDocumentFragment();
+  if (detail.command) {
+    const cmd = el("div", "tool-marker-bash-cmd");
+    cmd.appendChild(el("span", "tool-marker-bash-label", "$"));
+    cmd.appendChild(el("span", "tool-marker-bash-text", String(detail.command)));
+    frag.appendChild(cmd);
+  }
+  if (detail.stdout) {
+    frag.appendChild(el("pre", "tool-marker-bash-stdout", String(detail.stdout)));
+  }
+  if (detail.stderr) {
+    const sw = el("div", "tool-marker-bash-stderr-wrap");
+    sw.appendChild(el("div", "tool-marker-bash-stderr-label", "stderr"));
+    sw.appendChild(el("pre", "tool-marker-bash-stderr", String(detail.stderr)));
+    frag.appendChild(sw);
+  }
+  if (detail.truncated) {
+    frag.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+  }
+  return frag;
+});
+
+function renderMatchList(items, emptyText) {
+  const wrap = el("div", "tool-marker-matches");
+  if (!items || !items.length) {
+    wrap.appendChild(el("p", "tool-detail-empty", emptyText || "(no matches)"));
+    return wrap;
+  }
+  for (const item of items) {
+    wrap.appendChild(el("div", "tool-marker-match", String(item)));
+  }
+  return wrap;
+}
+
+registerToolDetailRenderer("grep_matches", (detail) => {
+  const frag = document.createDocumentFragment();
+  if (detail.pattern || detail.path) {
+    const head = el("div", "tool-marker-diff-path");
+    head.textContent = `pattern=${detail.pattern || ""} path=${detail.path || ""}`;
+    frag.appendChild(head);
+  }
+  frag.appendChild(renderMatchList(detail.matches, "(no matches)"));
+  if (detail.truncated) {
+    frag.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+  }
+  return frag;
+});
+
+registerToolDetailRenderer("glob_matches", (detail) => {
+  const frag = document.createDocumentFragment();
+  if (detail.pattern || detail.path) {
+    const head = el("div", "tool-marker-diff-path");
+    head.textContent = `pattern=${detail.pattern || ""} path=${detail.path || ""}`;
+    frag.appendChild(head);
+  }
+  frag.appendChild(renderMatchList(detail.files, "(no files)"));
+  if (detail.truncated) {
+    frag.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+  }
+  return frag;
+});
+
+registerToolDetailRenderer("text", (detail) => {
+  const wrap = el("div", "tool-marker-text-plain");
+  wrap.appendChild(el("pre", "tool-marker-text-pre", String(detail.text || "")));
+  if (detail.truncated) {
+    wrap.appendChild(el("div", "diff-truncated", "… (output truncated)"));
+  }
+  return wrap;
+});
+
+// --- Per-tool header / detail formatters (JS counterparts) -----------------
+//
+// JS mirror of `src/se3/engine/tool_formatters.py` (`format_tool_chip_header`
+// + `build_tool_detail_payload`). The live path receives these pre-computed
+// from the daemon via `stream_progress.tool_detail`, but the final non-partial
+// assistant record (raw_json) carries only the raw tool_use / tool_result
+// blocks — so the frontend MUST re-format the input/result here, otherwise
+// the moment the live partial bubble is superseded by the final one the
+// chip's header collapses to `JSON.stringify(input)` and the detail panel
+// shows the literal result string (the regression that motivated this).
+//
+// The header strings returned here are the BODY only (e.g.
+// `src/foo.py:0-200 · 87 lines`); the chip frame adds the name span and the
+// ✓ / ✗ glyph from CSS, so we don't repeat the tool name in the body. This
+// matches `_success_combined_*` / `_failure_use_body` on the Python side.
+
+function _toolExtractText(data) {
+  if (data == null) return "";
+  if (typeof data === "string") return data;
+  if (Array.isArray(data)) {
+    const out = [];
+    for (const it of data) {
+      if (it && typeof it === "object" && typeof it.text === "string") out.push(it.text);
+      else if (typeof it === "string") out.push(it);
+    }
+    return out.join("\n");
+  }
+  if (typeof data === "object") {
+    if (typeof data.text === "string") return data.text;
+    if (typeof data.content === "string") return data.content;
+    if (Array.isArray(data.content)) return _toolExtractText(data.content);
+  }
+  return "";
+}
+
+function _toolTruncatePreview(text, max) {
+  if (!text) return "";
+  const s = String(text).replace(/\n/g, " ");
+  const limit = max || 60;
+  if (s.length <= limit) return s;
+  return s.slice(0, Math.max(1, limit - 3)) + "...";
+}
+
+// Body-only header for in-flight (tool_use without result yet). Mirrors
+// `_format_*_use` in tool_formatters.py, stripping the leading `<name>: `
+// prefix since the chip frame adds the name span separately.
+function _toolInFlightBody(toolName, input) {
+  input = input || {};
+  if (toolName === "Read") {
+    const p = String(input.file_path || "?");
+    const o = input.offset, l = input.limit;
+    if (o != null && l != null) return `${p}:${o}-${Number(o) + Number(l)}`;
+    if (o != null) return `${p}:${o}-`;
+    if (l != null) return `${p} (${l} lines)`;
+    return p;
+  }
+  if (toolName === "Edit") {
+    const p = String(input.file_path || "?");
+    const oldS = String(input.old_string || "");
+    const newS = String(input.new_string || "");
+    const ol = oldS ? oldS.split("\n").length : 0;
+    const nl = newS ? newS.split("\n").length : 0;
+    if (ol || nl) return `${p} (${ol} lines → ${nl} lines)`;
+    return p;
+  }
+  if (toolName === "Write") {
+    const p = String(input.file_path || "?");
+    const c = String(input.content || "");
+    const n = c ? c.split("\n").length : 0;
+    if (n) return `${p} (${n} lines)`;
+    return `${p} (empty)`;
+  }
+  if (toolName === "Bash") {
+    return _toolTruncatePreview(input.command || "", 50);
+  }
+  if (toolName === "Grep") {
+    const pat = _toolTruncatePreview(input.pattern || "?", 30);
+    const path = String(input.path || ".");
+    return `/${pat}/ in ${path}`;
+  }
+  if (toolName === "Glob") {
+    const pat = _toolTruncatePreview(input.pattern || "?", 30);
+    const path = String(input.path || ".");
+    return `${pat} in ${path}`;
+  }
+  // Generic fallback: short key=value pairs, up to 3
+  const parts = [];
+  let i = 0;
+  for (const k of Object.keys(input)) {
+    if (i++ >= 3) { parts.push("..."); break; }
+    const v = input[k];
+    let vs;
+    if (typeof v === "string") vs = _toolTruncatePreview(v, 30);
+    else if (typeof v === "number" || typeof v === "boolean") vs = String(v);
+    else {
+      try { vs = _toolTruncatePreview(JSON.stringify(v), 30); }
+      catch (_) { vs = _toolTruncatePreview(String(v), 30); }
+    }
+    parts.push(`${k}=${vs}`);
+  }
+  return parts.join(", ");
+}
+
+// Body-only header for the success terminal state. Mirrors the
+// `_SUCCESS_COMBINED` dispatch table in tool_formatters.py.
+function _toolSuccessBody(toolName, input, resultData) {
+  input = input || {};
+  const text = _toolExtractText(resultData);
+  const nLines = text ? text.split("\n").length : 0;
+  if (toolName === "Read") {
+    const p = String(input.file_path || "?");
+    const o = input.offset, l = input.limit;
+    let range = "";
+    if (o != null && l != null) range = `:${o}-${Number(o) + Number(l)}`;
+    else if (o != null) range = `:${o}-`;
+    return `${p}${range} · ${nLines} lines`;
+  }
+  if (toolName === "Edit") {
+    const p = String(input.file_path || "?");
+    const ol = String(input.old_string || "").split("\n").length;
+    const nl = String(input.new_string || "").split("\n").length;
+    return `${p} (${ol} lines → ${nl} lines)`;
+  }
+  if (toolName === "Write") {
+    const p = String(input.file_path || "?");
+    const n = String(input.content || "").split("\n").length;
+    return `${p} (${n} lines)`;
+  }
+  if (toolName === "Bash") {
+    return `${_toolTruncatePreview(input.command || "", 50)} · ${nLines} lines output`;
+  }
+  if (toolName === "Grep") {
+    const pat = _toolTruncatePreview(input.pattern || "?", 30);
+    const path = String(input.path || ".");
+    return `/${pat}/ in ${path} · ${nLines} matches`;
+  }
+  if (toolName === "Glob") {
+    const pat = _toolTruncatePreview(input.pattern || "?", 30);
+    const path = String(input.path || ".");
+    return `${pat} in ${path} · ${nLines} files`;
+  }
+  // Unregistered tool — use input body + result preview
+  const useBody = _toolInFlightBody(toolName, input);
+  const resPreview = _toolTruncatePreview(text, 60);
+  if (useBody && resPreview) return `${useBody} · ${resPreview}`;
+  return useBody || resPreview;
+}
+
+// Body-only header for the failure terminal state. Mirrors
+// `format_tool_chip_header` on the failure path.
+function _toolFailureBody(toolName, input, resultData) {
+  const useBody = _toolInFlightBody(toolName, input || {});
+  const err = _toolTruncatePreview(_toolExtractText(resultData), 80);
+  if (useBody && err) return `${useBody} · ${err}`;
+  return useBody || err || "";
+}
+
+// Compute a minimal unified diff between two strings, mirroring
+// `generate_edit_diff` (difflib.unified_diff with n=3). Used by Edit/Write
+// detail rendering on the final raw_json path — the live path has it
+// pre-computed by the Python backend.
+function _toolUnifiedDiff(oldStr, newStr, filePath) {
+  if (oldStr === newStr) return "";
+  const a = oldStr.split("\n");
+  const b = newStr.split("\n");
+  // LCS table
+  const n = a.length, m = b.length;
+  const dp = [];
+  for (let i = 0; i <= n; i++) dp.push(new Array(m + 1).fill(0));
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      if (a[i - 1] === b[j - 1]) dp[i][j] = dp[i - 1][j - 1] + 1;
+      else dp[i][j] = dp[i - 1][j] >= dp[i][j - 1] ? dp[i - 1][j] : dp[i][j - 1];
+    }
+  }
+  // Walk back to ops
+  const ops = [];
+  let i = n, j = m;
+  while (i > 0 && j > 0) {
+    if (a[i - 1] === b[j - 1]) { ops.unshift({ op: "eq", line: a[i - 1] }); i--; j--; }
+    else if (dp[i - 1][j] >= dp[i][j - 1]) { ops.unshift({ op: "del", line: a[i - 1] }); i--; }
+    else { ops.unshift({ op: "add", line: b[j - 1] }); j--; }
+  }
+  while (i > 0) { ops.unshift({ op: "del", line: a[--i] }); }
+  while (j > 0) { ops.unshift({ op: "add", line: b[--j] }); }
+  // Emit a single hunk covering the full file (sufficient for the chip view).
+  const lines = [
+    `--- a/${filePath}`,
+    `+++ b/${filePath}`,
+    `@@ -1,${n} +1,${m} @@`,
+  ];
+  for (const o of ops) {
+    if (o.op === "eq") lines.push(" " + o.line);
+    else if (o.op === "add") lines.push("+" + o.line);
+    else lines.push("-" + o.line);
+  }
+  return lines.join("\n");
+}
+
+// Per-tool structured detail payload. JS mirror of
+// `build_tool_detail_payload`. The browser never sees the pre-Write file
+// content, so Write always falls through the "new file" / full-content branch
+// — the live path's `write_diff` is only reachable when the daemon precomputed
+// it. That's an accepted asymmetry for the offline final view.
+function _toolDetailPayload(toolName, input, resultData) {
+  input = input || {};
+  if (toolName === "Edit") {
+    const oldS = String(input.old_string || "");
+    const newS = String(input.new_string || "");
+    const fp = String(input.file_path || "?");
+    const diff = _toolUnifiedDiff(oldS, newS, fp);
+    return {
+      kind: "edit_diff",
+      file_path: fp,
+      diff: diff,
+      old_start_line: 1,
+      new_start_line: 1,
+      truncated: false,
+    };
+  }
+  if (toolName === "Write") {
+    const content = String(input.content || "");
+    return {
+      kind: "write_full",
+      file_path: String(input.file_path || "?"),
+      content: content,
+      start_line: 1,
+      truncated: false,
+    };
+  }
+  if (toolName === "Read") {
+    const text = _toolExtractText(resultData);
+    const offset = Number(input.offset || 0) || 0;
+    return {
+      kind: "read_text",
+      file_path: String(input.file_path || "?"),
+      text: text,
+      start_line: offset + 1,
+      truncated: false,
+    };
+  }
+  if (toolName === "Bash") {
+    return {
+      kind: "bash_output",
+      command: String(input.command || ""),
+      stdout: _toolExtractText(resultData),
+      stderr: "",
+      truncated: false,
+    };
+  }
+  if (toolName === "Grep") {
+    const text = _toolExtractText(resultData);
+    return {
+      kind: "grep_matches",
+      pattern: String(input.pattern || ""),
+      path: String(input.path || "."),
+      matches: text ? text.split("\n") : [],
+      truncated: false,
+    };
+  }
+  if (toolName === "Glob") {
+    const text = _toolExtractText(resultData);
+    return {
+      kind: "glob_matches",
+      pattern: String(input.pattern || ""),
+      path: String(input.path || "."),
+      files: text ? text.split("\n") : [],
+      truncated: false,
+    };
+  }
+  return { kind: "text", text: _toolExtractText(resultData), truncated: false };
+}
+
+// --- Chip event extraction (raw_json → ordered text/chip events) -----------
+//
+// Pairs `tool_use` and `tool_result` blocks by `tool_use_id` in a single pass,
+// preserving stream order. Output: `[{kind:'text', text} | {kind:'chip',
+// toolUseId, name, status, header, detail}]`. A `tool_result` without a
+// preceding `tool_use` (legacy / mis-streamed) becomes its own chip in the
+// terminal state; a `tool_use` without a `tool_result` stays in-flight.
+//
+// Headers and detail payloads are computed by the per-tool `_tool*Body` /
+// `_toolDetailPayload` helpers above so the final-view chip matches the live
+// chip byte-for-byte (the live chip is driven by `format_tool_chip_header` /
+// `build_tool_detail_payload` on the daemon side; these JS helpers are the
+// frontend mirror).
+function extractAssistantChipEvents(rawJson) {
+  if (!Array.isArray(rawJson)) return null;
+  const events = [];
+  const byId = new Map();
+  const pushText = (text) => {
+    if (!text) return;
+    const last = events[events.length - 1];
+    if (last && last.kind === "text") last.text += text;
+    else events.push({ kind: "text", text: text });
+  };
+  const handleToolUse = (name, input, id) => {
+    const toolName = name || "Tool";
+    const header = _toolInFlightBody(toolName, input);
+    const evt = {
+      kind: "chip",
+      toolUseId: id || null,
+      name: toolName,
+      status: "in-flight",
+      header: header,
+      detail: null,
+      _input: input || {},
+    };
+    events.push(evt);
+    if (id) byId.set(id, evt);
+  };
+  const handleToolResult = (id, content, isError) => {
+    const existing = id ? byId.get(id) : null;
+    if (existing) {
+      const toolName = existing.name || "Tool";
+      const input = existing._input || {};
+      existing.status = isError ? "failure" : "success";
+      existing.header = isError
+        ? _toolFailureBody(toolName, input, content)
+        : _toolSuccessBody(toolName, input, content);
+      existing.detail = _toolDetailPayload(toolName, input, content);
+    } else {
+      // Orphan result with no preceding tool_use — we have no input data, so
+      // fall back to a text-kind detail and a plain truncated header.
+      const text = _toolExtractText(content);
+      events.push({
+        kind: "chip",
+        toolUseId: id || null,
+        name: "Tool",
+        status: isError ? "failure" : "success",
+        header: _toolTruncatePreview(text, 60),
+        detail: { kind: "text", text: text, truncated: false },
+      });
+    }
+  };
+  const walkBlocks = (blocks) => {
+    if (!Array.isArray(blocks)) return;
+    for (const block of blocks) {
+      if (block == null || typeof block !== "object") continue;
+      const bt = String(block.type || "").toLowerCase();
+      if (bt === "text" && typeof block.text === "string") {
+        pushText(block.text);
+      } else if (bt === "tool_use") {
+        handleToolUse(block.name, block.input, block.id);
+      } else if (bt === "tool_result") {
+        handleToolResult(
+          block.tool_use_id || block.toolUseId,
+          block.content,
+          block.is_error === true || block.isError === true,
+        );
+      }
+    }
+  };
+
+  for (const line of rawJson) {
+    if (line == null || typeof line !== "object") continue;
+    const type = String(line.type || "").toLowerCase();
+    if (type === "assistant" || type === "user" || type === "message" ||
+        (line.message && typeof line.message === "object")) {
+      const msg = (line.message && typeof line.message === "object")
+        ? line.message : line;
+      if (Array.isArray(msg.content)) walkBlocks(msg.content);
+      else if (typeof msg.content === "string") pushText(msg.content);
+      continue;
+    }
+    if (type === "tool_use") {
+      handleToolUse(line.name, line.input, line.id);
+      continue;
+    }
+    if (type === "tool_result") {
+      handleToolResult(
+        line.tool_use_id || line.toolUseId,
+        line.content || line.result,
+        line.is_error === true || line.isError === true,
+      );
+      continue;
+    }
+  }
+  return events;
+}
+
+// Render an ordered list of chip/text events into DOM nodes. Used by both the
+// final assistant bubble (events derived from raw_json) and by tests that
+// drive the chip state machine directly.
+function renderChipEvents(events) {
+  const nodes = [];
+  if (!Array.isArray(events)) return nodes;
+  for (const evt of events) {
+    if (!evt) continue;
+    if (evt.kind === "text") {
+      const text = evt.text || "";
+      if (text.trim()) {
+        for (const node of renderToolMarkers(text)) nodes.push(node);
+      }
+    } else if (evt.kind === "chip") {
+      const chip = createInFlightChip(evt.name, evt.header);
+      if (evt.toolUseId) chip.dataset && (chip.dataset.toolUseId = evt.toolUseId);
+      if (evt.status === "success") upgradeChipToSuccess(chip, evt.header, evt.detail);
+      else if (evt.status === "failure") upgradeChipToFailure(chip, evt.header, evt.detail);
+      nodes.push(chip);
+    }
+  }
+  return nodes;
+}
+
 // Render one `[Name: detail]` marker as a standalone, visually distinct block.
+//
+// This path is the LEGACY plain-string fallback used by `renderToolMarkers`
+// when no structured chip-event list is available (e.g. older jsonl records
+// with no `tool_use_id` field, or a hand-crafted assistant string). It MUST
+// recognize the success / failure bracket grammar (`[Read ✓ ...]` /
+// `[Read ✗ ...]`) so the chip class reflects the true status — pre-G3 this
+// path defaulted to a plain in-flight chip even on terminal markers, and the
+// fragile `indexOf(":")` split dropped the header when no colon was present.
 function renderToolBlock(name, raw) {
-  const inner = raw.replace(/^\[/, "").replace(/\]$/, "");
-  const colon = inner.indexOf(":");
-  const detail = colon >= 0 ? inner.slice(colon + 1).trim() : "";
-  const block = el("div", "tool-marker");
-  block.appendChild(el("span", "tool-marker-name", name));
-  if (detail) block.appendChild(el("span", "tool-marker-detail", detail));
-  return block;
+  const parsed = parseToolBracket(name, raw);
+  const chip = createInFlightChip(parsed.name, parsed.header);
+  if (parsed.status === "success") {
+    chip.classList.remove("in-flight");
+    chip.classList.add("success");
+    chip.__toolStatus = "success";
+    setChipHeader(chip, parsed.name, parsed.header, "success");
+  } else if (parsed.status === "failure") {
+    chip.classList.remove("in-flight");
+    chip.classList.add("failure");
+    chip.__toolStatus = "failure";
+    setChipHeader(chip, parsed.name, parsed.header, "failure");
+  }
+  return chip;
 }
 
 // Split `text` on inline tool markers: marker spans become standalone tool
@@ -3011,8 +3825,21 @@ function makeUserPromptToggle(split, norm) {
 // content out identically to the final no-result assistant turn it collapses
 // into — partials never carry result JSON, so the final form is always this
 // inline-process shape.
-function renderAssistantProcessInline(content) {
+function renderAssistantProcessInline(content, norm) {
   const inline = el("div", "assistant-process-inline");
+  // Prefer the structured chip-event pipeline whenever raw_json carries tool
+  // blocks — final assistant turns paired with their tool_result blocks render
+  // through the same chip state machine the live partial bubble uses, so
+  // live→final transitions produce the same chip structure (no zombie second
+  // chip, no visual contraction).
+  const rawJson = norm && norm.raw && norm.raw.raw_json;
+  if (Array.isArray(rawJson)) {
+    const events = extractAssistantChipEvents(rawJson);
+    if (events && events.length) {
+      for (const node of renderChipEvents(events)) inline.appendChild(node);
+      return inline;
+    }
+  }
   for (const node of renderToolMarkers(content)) inline.appendChild(node);
   return inline;
 }
@@ -3046,7 +3873,7 @@ function renderAssistantBubble(content, norm) {
   } else {
     // No result JSON this turn (or the body could not be structured): keep the
     // full thinking process shown inline, never folded or contracted to empty.
-    frag.appendChild(renderAssistantProcessInline(content));
+    frag.appendChild(renderAssistantProcessInline(content, norm));
   }
   return frag;
 }
@@ -4288,6 +5115,18 @@ if (typeof module !== "undefined" && module.exports) {
     USER_CONTENT_END,
     KIND_META,
     extractAssistantText,
+    // Tool chip state machine (exposed for the DOM-stub tests in
+    // tests/frontend/tool_chip_state.test.mjs).
+    parseToolBracket,
+    createInFlightChip,
+    upgradeChipToSuccess,
+    upgradeChipToFailure,
+    renderToolDetailPanel,
+    extractAssistantChipEvents,
+    renderChipEvents,
+    applyFragmentToBubble,
+    buildPartialBubble,
+    appendPartialFragment,
     // Incremental conversation reconciliation + chip refresh (exposed for the
     // DOM-stub tests in tests/frontend/test_app_pure.mjs).
     renderConversation,

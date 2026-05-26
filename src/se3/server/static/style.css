@@ -961,6 +961,7 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 
 .tool-marker {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 8px;
   margin: 6px 0;
@@ -982,6 +983,173 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   color: var(--fg-dim);
   word-break: break-word;
   overflow-wrap: anywhere;
+}
+.tool-marker-glyph {
+  flex-shrink: 0;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+/* Chip status variants: in-flight (dashed/gray, no glyph), success (solid
+ * green with ✓), failure (solid red with ✗). Class names match the
+ * `createInFlightChip` / `upgradeChipTo*` state machine. */
+.tool-marker.in-flight {
+  background: rgba(160, 160, 160, 0.10);
+  border-style: dashed;
+  border-color: rgba(160, 160, 160, 0.55);
+  color: var(--fg-dim);
+}
+.tool-marker.in-flight .tool-marker-name { color: var(--fg-dim); }
+.tool-marker.success {
+  background: rgba(82, 196, 102, 0.10);
+  border-color: rgba(82, 196, 102, 0.55);
+}
+.tool-marker.success .tool-marker-name,
+.tool-marker.success .tool-marker-glyph { color: #52c466; }
+.tool-marker.failure {
+  background: rgba(229, 88, 88, 0.10);
+  border-color: rgba(229, 88, 88, 0.7);
+}
+.tool-marker.failure .tool-marker-name,
+.tool-marker.failure .tool-marker-glyph { color: #e55858; }
+
+/* Detail panel (collapsible). `details` toggle button toggles `.expanded`
+ * vs `.folded`. Failure chips default to `.expanded` so the error is
+ * visible without an extra click. */
+.tool-marker-details {
+  flex-basis: 100%;
+  margin-top: 4px;
+  border-top: 1px dashed rgba(160, 160, 160, 0.3);
+  padding-top: 4px;
+}
+.tool-marker-details.folded .tool-marker-details-body { display: none; }
+.tool-marker-details-toggle {
+  background: transparent;
+  border: 1px solid rgba(160, 160, 160, 0.4);
+  border-radius: 3px;
+  color: var(--fg-dim);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 10.5px;
+  padding: 1px 6px;
+}
+.tool-marker-details-toggle:hover { color: var(--fg); }
+.tool-marker-details-body {
+  margin-top: 4px;
+  font-size: 11.5px;
+}
+.tool-marker-details-fallback {
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--fg-dim);
+  padding: 4px 6px;
+  border-radius: 3px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+/* Diff and line-numbered text content inside a detail panel.
+ * Color palette aligns with CLI `display.render_diff` (add=green, del=red,
+ * hunk=cyan, ctx=dim). The gutter is dim and right-aligned. */
+.tool-marker-diff,
+.tool-marker-text,
+.tool-marker-text-plain,
+.tool-marker-matches,
+.tool-marker-bash-stdout,
+.tool-marker-bash-stderr {
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: 11px;
+  background: rgba(0, 0, 0, 0.18);
+  padding: 4px 6px;
+  border-radius: 3px;
+}
+.tool-marker-diff-path {
+  color: var(--fg-dim);
+  font-size: 10.5px;
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.diff-line,
+.text-line {
+  display: flex;
+  gap: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.diff-gutter,
+.text-gutter {
+  flex-shrink: 0;
+  width: 3em;
+  text-align: right;
+  color: var(--fg-dim);
+  opacity: 0.55;
+  user-select: none;
+}
+.diff-content,
+.text-content {
+  flex: 1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.diff-add { color: #52c466; }
+.diff-del { color: #e55858; }
+.diff-hunk { color: var(--cyan); }
+.diff-ctx { color: var(--fg-dim); }
+.diff-truncated {
+  color: var(--fg-dim);
+  font-style: italic;
+  font-size: 10.5px;
+  margin-top: 2px;
+}
+.tool-marker-bash-cmd {
+  font-family: ui-monospace, "JetBrains Mono", Menlo, monospace;
+  font-size: 11px;
+  margin-bottom: 4px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.tool-marker-bash-label {
+  color: var(--cyan);
+  margin-right: 6px;
+}
+.tool-marker-bash-stdout {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.tool-marker-bash-stderr-wrap { margin-top: 4px; }
+.tool-marker-bash-stderr-label {
+  color: #e55858;
+  font-size: 10.5px;
+  margin-bottom: 2px;
+}
+.tool-marker-bash-stderr {
+  margin: 0;
+  color: #e55858;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.tool-marker-match {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.tool-marker-text-pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.tool-detail-empty {
+  color: var(--fg-dim);
+  font-style: italic;
+  font-size: 10.5px;
 }
 
 /* -- long-content folding ------------------------------------------- */

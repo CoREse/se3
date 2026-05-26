@@ -1096,18 +1096,24 @@ takes, so the live form and the final form never structurally drift.
 **Tool-event content format.** Beyond structural reuse, the *text content* of
 each streaming fragment that represents a tool event (`tool_use` /
 `tool_result` / `tool_error` / stream-level `error`) MUST also match the final
-form's bracket-marker grammar — `[<tool_name>: <detail>]` for successful uses
-and results, `[<tool_name> ✗ <error_preview>]` (or `[Tool error: <preview>]`
-when the tool name is unknown) for failures — so the frontend's single
-`TOOL_MARKER_RE` / `renderToolMarkers` path produces identical `.tool-marker`
-boxes for live fragments and for the final assistant turn. The frontend MUST
-NOT carry a second emoji-prefixed parsing path for live fragments; the
-upstream `StreamJSONTracker` writes the bracket-marker text into the
-`stream_progress` payload while keeping its own CLI stdout emoji-prefixed,
-per the `llm-caller` *Streaming NDJSON Output Display* requirement. The
-running-flow console therefore relies on the producer side for byte-identical
-marker text between live and final views; no client-side reformatting is
-required.
+form's bracket-marker grammar — `[<tool_name>: <detail>]` for in-flight tool
+uses, `[<tool_name> ✓ <merged-header>]` for successful terminal records, and
+`[<tool_name> ✗ <error_preview>]` (or `[Tool error: <preview>]` when the tool
+name is unknown) for failures — so the frontend's single bracket-aware parser
+(see *Tool Call Chip State Machine*) produces identical `.tool-marker` /
+`.tool-chip` boxes for live fragments and for the final assistant turn. The
+frontend MUST NOT carry a second emoji-prefixed parsing path for live
+fragments; the upstream `StreamJSONTracker` writes the bracket-marker text
+into the `stream_progress` payload while keeping its own CLI stdout
+emoji-prefixed, per the `llm-caller` *Streaming NDJSON Output Display*
+requirement. The bracket grammar is parsed by a tolerant `parseToolBracket`
+that recognizes the three head forms `[Name: …]`, `[Name ✓ …]`, and
+`[Name ✗ …]` so a result-side bracket that carries no `:` separator still
+contributes its header text to the chip rather than being dropped (the
+previous naive `:` split treated any colonless bracket as a name-only zombie
+chip — this is forbidden). The running-flow console therefore relies on the
+producer side for byte-identical marker text between live and final views;
+no client-side reformatting is required.
 
 **Final state is unchanged.** This requirement governs only the *in-progress*
 (pre-final) intermediate rendering. When the turn's final (non-partial) result
@@ -1191,6 +1197,162 @@ one bubble per fragment.
 - **WHEN** the conversation is rendered through the shared mechanism
 - **THEN** those residual fragments merge into a single accumulating assistant
   bubble, not one bubble per fragment
+
+### Requirement: Tool Call Chip State Machine
+
+Every tool call observed in a running-flow conversation — whether it is being
+streamed live as `stream_progress` fragments or read back from a settled
+assistant turn via `raw_json` — MUST be rendered as **exactly one chip** that
+progresses through a small in-place state machine, never as two adjacent
+sibling chips (one for `tool_use`, one for `tool_result`). The chip's
+identity key is the originating Anthropic `tool_use_id` published by the
+producer side on every `tool_use` / `tool_result` / `tool_error` event (see
+the `llm-caller` *Streaming NDJSON Output Display* requirement's per-chip
+extension fields). A per-bubble chip registry — scoped to the accumulating
+assistant bubble of a single turn (`(turn_key, tool_use_id)`, where
+`turn_key` is the `progressTurnKey` defined in *Live Per-Turn Stream
+Accumulation*) — pairs the later result event back to the chip created by
+the earlier use event so the upgrade happens in place on the existing DOM
+node.
+
+**Three visual states.** Each chip has exactly three terminal-visual states,
+and one chip transitions through them at most once:
+
+- **in-flight** — created on the `tool_use` event; styled with a dashed
+  border and a gray accent and no ✓ / ✗ glyph; the chip header reads
+  `[<Tool>: <use summary>]` (the `format_tool_chip_in_flight_header` form
+  computed from the use input alone).
+- **success** — reached on a non-error `tool_result`; the chip is upgraded
+  in place to a solid green border with the ✓ glyph; its header is replaced
+  by the merged success header `[<Tool> ✓ <use-summary> · <result-summary>]`
+  (the `format_tool_chip_header` output) so the chip carries both the input
+  and the result reading in one line.
+- **failure** — reached on a `tool_result` whose `is_error` is `true`, or on
+  a stream-level `error` that pairs to an open in-flight chip; the chip is
+  upgraded in place to a solid red border with the ✗ glyph and the header
+  becomes `[<Tool> ✗ <error preview>]` (or `[Tool error: <preview>]` when
+  the tool name is unknown).
+
+A chip MUST go from in-flight to success **or** from in-flight to failure;
+it MUST NOT regress, and a second terminal event for the same `tool_use_id`
+is a no-op (idempotent upgrade).
+
+**Detail panel.** Each chip carries an attached detail panel rendered from
+the terminal event's `tool_detail` payload (the structured dict produced by
+`tool_formatters.build_tool_detail_payload`, keyed by a `kind` field —
+`edit_diff` / `write_full` / `write_diff` / `read_text` / `bash_output` /
+`grep_matches` / `glob_matches` / `text`). Per-kind renderers cover at
+minimum: Edit / Write diffs rendered as unified diff with a fixed-width
+line-number gutter and color-aligned `-` / `+` / hunk / context lines
+matching the CLI `display.render_diff` palette; Write-of-new-file rendered
+as the full file body with line numbers; Read rendered as the result text
+with a line-number gutter starting from the request's `offset + 1`; Bash
+rendered as the command line plus separated stdout / stderr blocks; Grep /
+Glob rendered as a match list; and the generic `text` kind rendered as a
+preformatted text block. Long payloads MAY be truncated against the shared
+`TOOL_DETAIL_PAYLOAD_MAX_CHARS` upper bound from `engine/truncation.py` and
+display a `… (N more lines truncated)` tail; the runtime MUST NOT introduce
+a new remote lazy-load endpoint for the panel body.
+
+**Default fold state.** The detail panel is **folded by default** for chips
+in the in-flight and success states (the user clicks the chip head to expand
+it). For chips in the failure state the detail panel is **expanded by
+default**, so the failure reason and any error output are immediately
+visible without an extra click. Fold-state changes follow the same
+`scrollIntoView({block: "nearest"})`-on-expand, no-scroll-on-collapse
+behavior used elsewhere in the view.
+
+**Single rendering pipeline for live and final views.** The chip state
+machine runs over both data sources without branching: the live path
+consumes `stream_progress` records (each carrying `tool_use_id` /
+`is_error` / `tool_detail` per the `llm-caller` *Streaming NDJSON Output
+Display* requirement), and the final path consumes the assistant turn's
+`raw_json` by pairing each inner `tool_use` content block with its
+matching `tool_result` block (by `tool_use_id`) and feeding the same
+`(in-flight event, terminal event)` pair through the same registry +
+upgrade helpers. Consequently `extractAssistantText` MUST NOT silently
+skip `tool_result` blocks during the final-view extraction the way the
+legacy renderer did; instead, the chip pairing is the canonical join, and a
+turn's final-view DOM for the same tool call ends up structurally
+equivalent to its live-view DOM (same chip, same header, same detail).
+
+**Forbidden legacy fallback.** The previous "result-only" fallback path
+that emitted a standalone `[<Tool> ✓ …]` chip without a paired in-flight
+chip MUST be removed; no zombie chip path is preserved as a safety net.
+This makes mis-paired data fail loudly during development rather than
+silently regrowing the duplicate-chip bug.
+
+**Legacy / no-id degradation.** Historical jsonl records written before the
+single-chip protocol existed may contain bracketed tool markers that lack
+the `tool_use_id` extension field (the producer-side per-chip fields are
+optional in `chat_history.record_stream_progress`). For these records the
+frontend MUST degrade gracefully: it parses the bracket header with
+`parseToolBracket` and renders a single chip in the in-flight visual state
+(dashed / gray), with no detail panel and no terminal upgrade — never two
+adjacent zombie chips, never a thrown exception. New records with the
+`tool_use_id` field are unaffected by this fallback.
+
+#### Scenario: tool_use creates a single in-flight chip
+- **GIVEN** a live tool call whose `tool_use` event has arrived (with a
+  `tool_use_id`) but whose `tool_result` has not
+- **WHEN** the running-flow conversation is rendered in `#flow-view`
+- **THEN** the chip registry contains exactly one chip keyed by that
+  `tool_use_id`, in the **in-flight** state — dashed border, gray accent,
+  no ✓ / ✗ glyph
+- **AND** the chip's header reads `[<Tool>: <use-summary>]` (the in-flight
+  form), the detail panel is folded by default, and no second sibling chip
+  exists for the same tool call
+
+#### Scenario: Non-error tool_result upgrades the chip to success in place
+- **GIVEN** an in-flight chip already on screen for a tool call
+- **WHEN** the matching non-error `tool_result` arrives (same `tool_use_id`,
+  `is_error = false`)
+- **THEN** the **same** chip DOM node is upgraded in place to the **success**
+  state — solid green border, ✓ glyph — and its header is replaced by the
+  merged `[<Tool> ✓ <use-summary> · <result-summary>]` form returned by
+  `format_tool_chip_header(...)`
+- **AND** the detail panel is populated from the terminal event's
+  `tool_detail` payload, remains **folded by default**, and the registry
+  still has exactly one chip for that `tool_use_id` (no sibling chip is
+  added)
+
+#### Scenario: Error tool_result upgrades the chip to failure with detail expanded
+- **GIVEN** an in-flight chip already on screen for a tool call
+- **WHEN** the matching `tool_result` arrives with `is_error = true` (or,
+  equivalently, a stream-level `error` line that pairs to the open
+  in-flight chip)
+- **THEN** the same chip is upgraded in place to the **failure** state —
+  solid red border, ✗ glyph — and its header becomes `[<Tool> ✗ <error
+  preview>]` (or `[Tool error: <preview>]` when the tool name is unknown)
+- **AND** the chip's detail panel is **expanded by default** so the error
+  detail (rendered from the terminal event's `tool_detail` payload) is
+  visible without an extra click
+
+#### Scenario: Legacy no-id records degrade to a single in-flight chip
+- **GIVEN** a settled assistant turn read from history whose body contains
+  a bracketed tool marker (e.g. `[Read: path:0-200]` or a colonless
+  `[Read ✓ path]`) but no `tool_use_id` extension field
+- **WHEN** the running-flow conversation renders that turn through the
+  shared chip pipeline
+- **THEN** exactly one chip is rendered for the marker in the **in-flight**
+  visual state (dashed / gray), with no detail panel and no terminal
+  upgrade — never two adjacent zombie chips and never an unhandled
+  exception
+- **AND** newer records that carry `tool_use_id` continue to flow through
+  the full in-flight → success / failure state machine in the same view
+
+#### Scenario: Live and final views produce equivalent chip DOM for the same tool call
+- **GIVEN** a single tool call observable in two ways — the live `stream_progress`
+  pair (in-flight + terminal record, both carrying the same `tool_use_id`) and
+  the same call's `tool_use` / `tool_result` blocks inside the settled assistant
+  turn's `raw_json`
+- **WHEN** the conversation is rendered first as the live progressive stream
+  and then re-rendered from the settled `raw_json` (no live partials)
+- **THEN** both renders feed the chip state machine via the same registry +
+  upgrade helpers and produce structurally equivalent chip DOM — same chip
+  identity, same final header, same per-kind detail panel content — so the
+  view does not visually shrink or reorder when the live stream collapses
+  into the final assistant turn
 
 ### Requirement: Authoritative Step-Type Sourcing
 

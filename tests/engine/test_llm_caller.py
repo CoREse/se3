@@ -898,13 +898,15 @@ class TestStreamJSONTrackerProgressBrackets:
         captured = []
 
         def fake_record_stream_progress(
-            project_root, flow_id, step_id, step_type, content, raw_obj, attempt
+            project_root, flow_id, step_id, step_type, content, raw_obj, attempt,
+            **kwargs,
         ):
             captured.append({
                 "content": content,
                 "raw_obj": raw_obj,
                 "step_id": step_id,
                 "attempt": attempt,
+                **kwargs,
             })
 
         # The tracker imports record_stream_progress lazily inside

@@ -876,6 +876,10 @@ class FakeNode {
   get children() {
     return this.childNodes.filter((c) => c && c.nodeType !== 3);
   }
+  get firstChild() { return this.childNodes[0] || null; }
+  get lastChild() {
+    return this.childNodes.length ? this.childNodes[this.childNodes.length - 1] : null;
+  }
   _detach(node) {
     const i = this.childNodes.indexOf(node);
     if (i >= 0) { this.childNodes.splice(i, 1); node.parentNode = null; }
@@ -2512,5 +2516,10 @@ check("live partial with bracket-format generic 'Tool error' renders as .tool-ma
   const marker = findOne(liveBubble, "tool-marker");
   assert.ok(marker, "live bubble should box [Tool error: …] as a .tool-marker block");
 });
+
+// Register the G3 tool-chip state-machine tests (separate module — same `check`
+// reporter, same `app` module, same shared DOM stub already installed above).
+const chipMod = await import("./tool_chip_state.test.mjs");
+chipMod.registerToolChipStateTests({ app, check, findOne, findAll });
 
 console.log(`\n${passed} checks passed.`);

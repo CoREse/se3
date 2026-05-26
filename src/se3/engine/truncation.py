@@ -45,3 +45,13 @@ FAILURES_SECTION_MAX_CHARS = 3000
 # so long plans don't balloon prompt size.
 # ---------------------------------------------------------------------------
 SELF_CHECK_TASK_GROUPS_MAX_CHARS = 2000
+
+# ---------------------------------------------------------------------------
+# Web tool-chip detail payload max chars
+# Used by: tool_formatters.build_tool_detail_payload
+# Bounds the structured detail body (diff / read text / bash output / matches)
+# shipped via stream_progress to the web console; oversized bodies are
+# tail-truncated and flagged with `truncated: true` so the frontend can render
+# a "... more truncated" hint instead of dropping the chip.
+# ---------------------------------------------------------------------------
+TOOL_DETAIL_PAYLOAD_MAX_CHARS = 20000

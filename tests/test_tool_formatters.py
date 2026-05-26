@@ -10,12 +10,16 @@ from rich.console import Console
 
 from se3.engine.tool_formatters import (
     TOOL_FORMATTERS,
+    build_tool_detail_payload,
+    format_tool_chip_header,
+    format_tool_chip_in_flight_header,
     format_tool_diff,
     format_tool_result_preview,
     format_tool_use_preview,
     generate_edit_diff,
     truncate_preview,
 )
+from se3.engine.truncation import TOOL_DETAIL_PAYLOAD_MAX_CHARS
 
 
 # ---------------------------------------------------------------------------
@@ -664,10 +668,16 @@ class TestStreamJSONTrackerDiff:
         tracker.process_line(self._tool_use_event("Write", input_data))
         assert "tu_1" in tracker._tool_use_id_to_input
 
-    def test_non_edit_write_not_cached(self):
+    def test_non_edit_write_also_cached(self):
+        """Every tool's input is now cached so the single-chip terminal emit
+        on tool_result can build a merged header (input summary + result
+        summary) via format_tool_chip_header and a structured detail payload
+        via build_tool_detail_payload. The Write-specific old_content snapshot
+        still applies only to Write."""
         tracker = self._make_tracker()
         tracker.process_line(self._tool_use_event("Bash", {"command": "ls"}))
-        assert "tu_1" not in tracker._tool_use_id_to_input
+        assert tracker._tool_use_id_to_input["tu_1"] == {"command": "ls"}
+        assert "tu_1" not in tracker._tool_use_id_to_old_content
 
     def test_cache_consumed_on_result(self):
         from se3.engine.display import set_console
@@ -779,3 +789,371 @@ class TestStreamJSONTrackerDiff:
         assert len(tracker._tool_use_id_to_input) == 0
         assert len(tracker._tool_use_id_to_old_content) == 0
         assert len(tracker._tool_use_id_to_name) == 0
+
+
+# ---------------------------------------------------------------------------
+# format_tool_chip_in_flight_header / format_tool_chip_header
+# ---------------------------------------------------------------------------
+
+class TestChipHeader:
+    def test_in_flight_read(self):
+        header = format_tool_chip_in_flight_header(
+            "Read", {"file_path": "src/app.py", "offset": 0, "limit": 200}
+        )
+        assert header.startswith("Read:")
+        assert "src/app.py" in header
+        assert "0-200" in header
+        # in-flight header does NOT contain ✓ or ✗
+        assert "✓" not in header
+        assert "✗" not in header
+
+    def test_in_flight_unknown_tool(self):
+        header = format_tool_chip_in_flight_header(
+            "MysteryTool", {"foo": "bar"}
+        )
+        assert "MysteryTool" in header
+        assert "foo=bar" in header
+
+    def test_success_read_merges_use_and_result(self):
+        header = format_tool_chip_header(
+            "Read",
+            {"file_path": "src/app.py", "offset": 0, "limit": 200},
+            "line1\nline2\nline3",
+            is_error=False,
+        )
+        assert header.startswith("Read ✓")
+        assert "src/app.py" in header
+        assert "0-200" in header
+        assert "3 lines" in header
+        assert "✗" not in header
+
+    def test_success_edit_carries_line_counts(self):
+        header = format_tool_chip_header(
+            "Edit",
+            {"file_path": "f.py", "old_string": "a\nb", "new_string": "a\nb\nc\nd"},
+            "✓ edited",
+            is_error=False,
+        )
+        assert header.startswith("Edit ✓")
+        assert "f.py" in header
+        assert "2 lines" in header
+        assert "4 lines" in header
+
+    def test_success_write(self):
+        header = format_tool_chip_header(
+            "Write",
+            {"file_path": "out.txt", "content": "x\ny\nz"},
+            "Wrote out.txt",
+            is_error=False,
+        )
+        assert header.startswith("Write ✓")
+        assert "out.txt" in header
+        assert "3 lines" in header
+
+    def test_success_bash(self):
+        header = format_tool_chip_header(
+            "Bash",
+            {"command": "ls -la"},
+            "a\nb\nc",
+            is_error=False,
+        )
+        assert header.startswith("Bash ✓")
+        assert "ls -la" in header
+        assert "3 lines" in header
+
+    def test_success_grep(self):
+        header = format_tool_chip_header(
+            "Grep",
+            {"pattern": "TODO", "path": "src/"},
+            "a.py\nb.py",
+            is_error=False,
+        )
+        assert header.startswith("Grep ✓")
+        assert "TODO" in header
+        assert "2 matches" in header
+
+    def test_success_glob(self):
+        header = format_tool_chip_header(
+            "Glob",
+            {"pattern": "**/*.py", "path": "src/"},
+            "x.py\ny.py\nz.py",
+            is_error=False,
+        )
+        assert header.startswith("Glob ✓")
+        assert "**/*.py" in header
+        assert "3 files" in header
+
+    def test_failure_read_includes_error_preview(self):
+        header = format_tool_chip_header(
+            "Read",
+            {"file_path": "missing.py"},
+            {"is_error": True, "content": "ENOENT: no such file or directory"},
+            is_error=True,
+        )
+        assert header.startswith("Read ✗")
+        assert "missing.py" in header
+        assert "ENOENT" in header
+        assert "✓" not in header
+
+    def test_failure_truncates_long_error(self):
+        long_err = "x" * 500
+        header = format_tool_chip_header(
+            "Read",
+            {"file_path": "f.py"},
+            {"is_error": True, "content": long_err},
+            is_error=True,
+        )
+        assert header.startswith("Read ✗")
+        # error preview must be truncated (not 500 chars of x)
+        assert len(header) < 200
+
+    def test_failure_unknown_tool(self):
+        header = format_tool_chip_header(
+            "MysteryTool",
+            {"key": "val"},
+            "boom",
+            is_error=True,
+        )
+        assert header.startswith("MysteryTool ✗")
+        assert "boom" in header
+
+    def test_success_unknown_tool_falls_back(self):
+        header = format_tool_chip_header(
+            "MysteryTool",
+            {"key": "val"},
+            "ok",
+            is_error=False,
+        )
+        assert header.startswith("MysteryTool ✓")
+
+    def test_no_brackets_in_header(self):
+        # Chip header must NOT carry the surrounding [ ] — that's the frontend's job
+        header = format_tool_chip_header(
+            "Read",
+            {"file_path": "f.py"},
+            "line",
+            is_error=False,
+        )
+        assert not header.startswith("[")
+        assert not header.endswith("]")
+
+
+# ---------------------------------------------------------------------------
+# build_tool_detail_payload
+# ---------------------------------------------------------------------------
+
+class TestDetailPayloadEdit:
+    def test_edit_diff_kind_and_fields(self):
+        payload = build_tool_detail_payload(
+            "Edit",
+            {
+                "file_path": "src/main.py",
+                "old_string": "hello\nworld\n",
+                "new_string": "hello\nthere\nworld\n",
+            },
+            "✓ edited",
+        )
+        assert payload["kind"] == "edit_diff"
+        assert payload["file_path"] == "src/main.py"
+        assert "hello" in payload["diff"]
+        assert "+there" in payload["diff"]
+        # Hunk start parsed from "@@ -<a>,<b> +<c>,<d> @@"
+        assert payload["old_start_line"] is not None
+        assert payload["new_start_line"] is not None
+        assert payload["truncated"] is False
+
+    def test_edit_diff_identical_strings(self):
+        payload = build_tool_detail_payload(
+            "Edit",
+            {"file_path": "f.py", "old_string": "same", "new_string": "same"},
+            "done",
+        )
+        assert payload["kind"] == "edit_diff"
+        assert payload["diff"] == ""
+        # No hunks → both line numbers None
+        assert payload["old_start_line"] is None
+        assert payload["new_start_line"] is None
+
+
+class TestDetailPayloadWrite:
+    def test_write_full_kind_when_old_content_none(self):
+        payload = build_tool_detail_payload(
+            "Write",
+            {"file_path": "new.py", "content": "line1\nline2\n"},
+            "Created new.py",
+            old_content=None,
+        )
+        assert payload["kind"] == "write_full"
+        assert payload["file_path"] == "new.py"
+        assert "line1" in payload["content"]
+        assert payload["start_line"] == 1
+        assert payload["truncated"] is False
+
+    def test_write_diff_kind_when_old_content_provided(self):
+        payload = build_tool_detail_payload(
+            "Write",
+            {"file_path": "existing.py", "content": "new\nline\n"},
+            "Wrote existing.py",
+            old_content="old\nline\n",
+        )
+        assert payload["kind"] == "write_diff"
+        assert "-old" in payload["diff"]
+        assert "+new" in payload["diff"]
+        assert payload["old_start_line"] is not None
+        assert payload["new_start_line"] is not None
+
+
+class TestDetailPayloadRead:
+    def test_read_text_kind(self):
+        payload = build_tool_detail_payload(
+            "Read",
+            {"file_path": "f.py", "offset": 100, "limit": 50},
+            "a\nb\nc\n",
+        )
+        assert payload["kind"] == "read_text"
+        assert payload["file_path"] == "f.py"
+        assert payload["text"] == "a\nb\nc\n"
+        # offset → start_line is 1-based
+        assert payload["start_line"] == 101
+        assert payload["truncated"] is False
+
+    def test_read_zero_offset_starts_at_line_1(self):
+        payload = build_tool_detail_payload(
+            "Read",
+            {"file_path": "f.py"},
+            "line\n",
+        )
+        assert payload["start_line"] == 1
+
+
+class TestDetailPayloadBash:
+    def test_bash_output_kind_carries_command_and_stdout(self):
+        payload = build_tool_detail_payload(
+            "Bash",
+            {"command": "ls -la"},
+            "a\nb\nc",
+        )
+        assert payload["kind"] == "bash_output"
+        assert payload["command"] == "ls -la"
+        assert payload["stdout"] == "a\nb\nc"
+        assert payload["stderr"] == ""
+        assert payload["truncated"] is False
+
+    def test_bash_split_stdout_stderr_when_dict(self):
+        payload = build_tool_detail_payload(
+            "Bash",
+            {"command": "false"},
+            {"stdout": "ok", "stderr": "boom"},
+        )
+        assert payload["stdout"] == "ok"
+        assert payload["stderr"] == "boom"
+
+
+class TestDetailPayloadGrep:
+    def test_grep_matches_list(self):
+        payload = build_tool_detail_payload(
+            "Grep",
+            {"pattern": "TODO", "path": "src/"},
+            "file1.py\nfile2.py\nfile3.py",
+        )
+        assert payload["kind"] == "grep_matches"
+        assert payload["pattern"] == "TODO"
+        assert payload["path"] == "src/"
+        assert payload["matches"] == ["file1.py", "file2.py", "file3.py"]
+        assert payload["truncated"] is False
+
+
+class TestDetailPayloadGlob:
+    def test_glob_matches_list(self):
+        payload = build_tool_detail_payload(
+            "Glob",
+            {"pattern": "**/*.py", "path": "src/"},
+            "a.py\nb.py",
+        )
+        assert payload["kind"] == "glob_matches"
+        assert payload["files"] == ["a.py", "b.py"]
+        assert payload["truncated"] is False
+
+
+class TestDetailPayloadTextFallback:
+    def test_unregistered_tool_returns_text_kind(self):
+        payload = build_tool_detail_payload(
+            "MysteryTool",
+            {"prompt": "do something"},
+            "the result",
+        )
+        assert payload["kind"] == "text"
+        assert payload["text"] == "the result"
+        assert payload["truncated"] is False
+
+    def test_text_payload_handles_dict_result(self):
+        payload = build_tool_detail_payload(
+            "MysteryTool",
+            {},
+            {"content": [{"type": "text", "text": "nested"}]},
+        )
+        assert payload["kind"] == "text"
+        assert "nested" in payload["text"]
+
+
+class TestDetailPayloadTruncation:
+    def test_long_read_text_truncated(self):
+        long_text = "x" * (TOOL_DETAIL_PAYLOAD_MAX_CHARS + 1000)
+        payload = build_tool_detail_payload(
+            "Read",
+            {"file_path": "big.txt"},
+            long_text,
+        )
+        assert payload["truncated"] is True
+        assert len(payload["text"]) == TOOL_DETAIL_PAYLOAD_MAX_CHARS
+
+    def test_long_write_full_truncated(self):
+        long_content = "y" * (TOOL_DETAIL_PAYLOAD_MAX_CHARS + 500)
+        payload = build_tool_detail_payload(
+            "Write",
+            {"file_path": "big.txt", "content": long_content},
+            "Created big.txt",
+            old_content=None,
+        )
+        assert payload["truncated"] is True
+        assert len(payload["content"]) == TOOL_DETAIL_PAYLOAD_MAX_CHARS
+
+    def test_too_many_grep_matches_truncated(self):
+        text = "\n".join(f"match{i}" for i in range(2000))
+        payload = build_tool_detail_payload(
+            "Grep",
+            {"pattern": "x", "path": "."},
+            text,
+        )
+        assert payload["truncated"] is True
+        assert len(payload["matches"]) == 1000
+
+    def test_too_many_glob_files_truncated(self):
+        text = "\n".join(f"file{i}.py" for i in range(2000))
+        payload = build_tool_detail_payload(
+            "Glob",
+            {"pattern": "**/*.py", "path": "."},
+            text,
+        )
+        assert payload["truncated"] is True
+        assert len(payload["files"]) == 1000
+
+
+class TestDetailPayloadJsonSafe:
+    def test_all_payloads_are_json_serializable(self):
+        cases = [
+            ("Edit", {"file_path": "f.py", "old_string": "a", "new_string": "b"}, "ok", None),
+            ("Write", {"file_path": "f.py", "content": "x"}, "ok", None),
+            ("Write", {"file_path": "f.py", "content": "x"}, "ok", "y"),
+            ("Read", {"file_path": "f.py", "offset": 0}, "line", None),
+            ("Bash", {"command": "ls"}, "out", None),
+            ("Grep", {"pattern": "p", "path": "."}, "a\nb", None),
+            ("Glob", {"pattern": "*", "path": "."}, "x", None),
+            ("MysteryTool", {"k": "v"}, "ok", None),
+        ]
+        for tool, use, result, old in cases:
+            payload = build_tool_detail_payload(tool, use, result, old_content=old)
+            # Must round-trip through JSON
+            blob = json.dumps(payload)
+            restored = json.loads(blob)
+            assert restored["kind"] == payload["kind"]

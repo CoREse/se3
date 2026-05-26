@@ -206,6 +206,10 @@ def record_stream_progress(
     raw_obj: Any,
     attempt: int,
     timestamp: Optional[str] = None,
+    *,
+    tool_use_id: Optional[str] = None,
+    is_error: Optional[bool] = None,
+    tool_detail: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Append a single in-progress (partial) stream line to the step jsonl.
 
@@ -231,6 +235,16 @@ def record_stream_progress(
     whole-line ``write`` (so a half-written final line cannot corrupt earlier
     lines) wrapped in an ``OSError`` guard so a write failure never breaks the
     in-flight LLM call.
+
+    Optional tool-event fields (``tool_use_id`` / ``is_error`` /
+    ``tool_detail``) carry per-chip state for the frontend's single-chip
+    state machine: an in-flight chip emitted on ``tool_use`` carries the id
+    with ``tool_detail=None``; the terminal chip emitted on ``tool_result``
+    carries the same id plus ``is_error`` and a structured ``tool_detail``
+    payload (built by ``tool_formatters.build_tool_detail_payload``). When
+    all three fields are at their defaults (``None``) the written record is
+    byte-identical to the pre-extension schema, so legacy jsonl readers and
+    narrative-text progress lines are unaffected.
     """
     record = {
         "type": "stream_progress",
@@ -242,6 +256,12 @@ def record_stream_progress(
         "attempt": attempt,
         "partial": True,
     }
+    if tool_use_id is not None:
+        record["tool_use_id"] = tool_use_id
+    if is_error is not None:
+        record["is_error"] = bool(is_error)
+    if tool_detail is not None:
+        record["tool_detail"] = tool_detail
     path = _history_file(project_root, flow_id, step_id)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)

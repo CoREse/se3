@@ -223,6 +223,9 @@ def clear_phase1_cache(project_root: Path, flow_id: str, step_id: str) -> None:
 
 
 from .tool_formatters import (
+    build_tool_detail_payload,
+    format_tool_chip_header,
+    format_tool_chip_in_flight_header,
     format_tool_diff,
     format_tool_result_preview,
     format_tool_use_preview,
@@ -293,16 +296,40 @@ class StreamJSONTracker:
     def _progress_enabled(self) -> bool:
         return bool(self._flow_id and self._step_id)
 
-    def _emit_progress(self, content: str, raw_obj: Any) -> None:
+    def _emit_progress(
+        self,
+        content: str,
+        raw_obj: Any,
+        *,
+        tool_use_id: Optional[str] = None,
+        is_error: Optional[bool] = None,
+        tool_detail: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Append one in-progress line to the step jsonl (best-effort).
 
         No-op unless flow context is set. A write failure is swallowed so the
         in-flight LLM stream is never disrupted by history I/O.
+
+        Optional ``tool_use_id`` / ``is_error`` / ``tool_detail`` kwargs feed
+        the frontend's single-chip state machine: an in-flight tool chip
+        carries ``tool_use_id`` with ``tool_detail=None``; the terminal chip
+        carries the same id plus ``is_error`` and the structured detail
+        payload. They are forwarded to ``record_stream_progress`` only when
+        non-default so narrative-text progress lines stay byte-identical to
+        the legacy schema.
         """
         if not self._progress_enabled or not content:
             return
         try:
             from .chat_history import record_stream_progress
+
+            extra: Dict[str, Any] = {}
+            if tool_use_id is not None:
+                extra["tool_use_id"] = tool_use_id
+            if is_error is not None:
+                extra["is_error"] = is_error
+            if tool_detail is not None:
+                extra["tool_detail"] = tool_detail
 
             record_stream_progress(
                 self._project_root or Path.cwd(),
@@ -312,6 +339,7 @@ class StreamJSONTracker:
                 content,
                 raw_obj,
                 self._attempt,
+                **extra,
             )
         except Exception:  # pragma: no cover - defensive; never break the stream
             logger.debug("Failed to record stream progress", exc_info=True)
@@ -340,33 +368,83 @@ class StreamJSONTracker:
 
         Shared by both the legacy top-level tool_result format and the
         newer type='user' nested format.
+
+        Emits exactly one terminal ``stream_progress`` record for the chip
+        keyed by ``tool_use_id`` — content is the merged
+        ``format_tool_chip_header`` (success ``✓`` or failure ``✗``) wrapped
+        in ``[...]`` so the frontend's ``TOOL_MARKER_RE`` matches both live
+        and final state with the same grammar. The record carries the
+        structured ``tool_detail`` payload (built from cached use input + old
+        content) so the chip's collapsible detail panel can render an
+        equivalent CLI-style view (Edit diff with line numbers, Read text,
+        Bash stdout/stderr, etc.) without a second round-trip.
+
+        CLI stdout (the ``✅`` / ``❌`` emoji lines) is unchanged.
         """
         self.tool_results.append(tool_use_id)
         tool_name = self._tool_use_id_to_name.get(tool_use_id, '')
 
         # Flush pending text first so the recorded progress order matches stdout.
         self._flush_progress_text()
+
+        # Pop the per-id caches up front so the terminal-chip emit and the
+        # CLI diff renderer see the same snapshot of use_input / old_content.
+        cached_input = self._tool_use_id_to_input.pop(tool_use_id, None)
+        old_content = self._tool_use_id_to_old_content.pop(tool_use_id, None)
+
         if is_error:
             error_preview = truncate_preview(str(content)) if content else "Unknown error"
             print(f"  {self.stream_prefix}[llm-stream] ❌ Tool error: {error_preview}...")
             if tool_name:
-                self._emit_progress(f"[{tool_name} ✗ {error_preview}]", None)
+                header = format_tool_chip_header(
+                    tool_name, cached_input, content, is_error=True
+                )
+                chip_content = f"[{header}]"
+                detail = build_tool_detail_payload(
+                    tool_name, cached_input, content, old_content=old_content
+                )
             else:
-                self._emit_progress(f"[Tool error: {error_preview}]", None)
-            # Clean up caches for failed tool calls to prevent leaks
-            self._tool_use_id_to_input.pop(tool_use_id, None)
-            self._tool_use_id_to_old_content.pop(tool_use_id, None)
-            self._tool_use_id_to_name.pop(tool_use_id, None)
+                # Unknown tool (orphan tool_result) — fall back to the
+                # frontend-friendly "[Tool error: ...]" marker; no per-tool
+                # detail payload is meaningful here.
+                chip_content = f"[Tool error: {error_preview}]"
+                detail = None
+            self._emit_progress(
+                chip_content,
+                None,
+                tool_use_id=tool_use_id or None,
+                is_error=True,
+                tool_detail=detail,
+            )
         else:
             preview = format_tool_result_preview(tool_name, content)
             print(f"  {self.stream_prefix}[llm-stream] ✅ {preview}...")
-            self._emit_progress(f"[{preview}]", None)
-            # Render diff for Edit/Write tools
-            cached_input = self._tool_use_id_to_input.pop(tool_use_id, None)
-            old_content = self._tool_use_id_to_old_content.pop(tool_use_id, None)
+            if tool_name:
+                header = format_tool_chip_header(
+                    tool_name, cached_input, content, is_error=False
+                )
+                chip_content = f"[{header}]"
+                detail = build_tool_detail_payload(
+                    tool_name, cached_input, content, old_content=old_content
+                )
+            else:
+                # Unknown tool — keep the legacy single-preview marker (no
+                # detail builder available) so the frontend regex still
+                # matches.
+                chip_content = f"[{preview}]"
+                detail = None
+            self._emit_progress(
+                chip_content,
+                None,
+                tool_use_id=tool_use_id or None,
+                is_error=False,
+                tool_detail=detail,
+            )
+            # Render diff for Edit/Write tools (CLI stdout only).
             if cached_input and tool_name in ("Edit", "Write"):
                 format_tool_diff(tool_name, cached_input, content, old_content=old_content)
-            self._tool_use_id_to_name.pop(tool_use_id, None)
+
+        self._tool_use_id_to_name.pop(tool_use_id, None)
         self._last_ended_with_newline = True
 
     def process_line(self, line: str) -> None:
@@ -415,24 +493,29 @@ class StreamJSONTracker:
                             self.tool_calls.append(name)
                             if tool_use_id:
                                 self._tool_use_id_to_name[tool_use_id] = name
-                                if name in ("Edit", "Write"):
-                                    self._tool_use_id_to_input[tool_use_id] = tool_input
-                                    # For Write tools, cache the current file content for diff
-                                    if name == "Write":
-                                        file_path = tool_input.get("file_path", "")
-                                        if file_path:
-                                            try:
-                                                self._tool_use_id_to_old_content[tool_use_id] = Path(file_path).read_text(encoding="utf-8")
-                                            except (OSError, UnicodeDecodeError):
-                                                self._tool_use_id_to_old_content[tool_use_id] = None
-                                        else:
+                                # Cache every tool's input so the terminal-chip
+                                # emit on tool_result can build a merged header
+                                # (input summary + result summary) and a
+                                # structured detail payload via
+                                # build_tool_detail_payload. The Write-tool
+                                # old-content snapshot remains specific to
+                                # diff rendering.
+                                self._tool_use_id_to_input[tool_use_id] = tool_input
+                                if name == "Write":
+                                    file_path = tool_input.get("file_path", "")
+                                    if file_path:
+                                        try:
+                                            self._tool_use_id_to_old_content[tool_use_id] = Path(file_path).read_text(encoding="utf-8")
+                                        except (OSError, UnicodeDecodeError):
                                             self._tool_use_id_to_old_content[tool_use_id] = None
-                                    # Evict oldest entries if cache exceeds limit
-                                    if len(self._tool_use_id_to_input) > self._MAX_CACHE_SIZE:
-                                        oldest = next(iter(self._tool_use_id_to_input))
-                                        self._tool_use_id_to_input.pop(oldest, None)
-                                        self._tool_use_id_to_old_content.pop(oldest, None)
-                                        self._tool_use_id_to_name.pop(oldest, None)
+                                    else:
+                                        self._tool_use_id_to_old_content[tool_use_id] = None
+                                # Evict oldest entries if cache exceeds limit
+                                if len(self._tool_use_id_to_input) > self._MAX_CACHE_SIZE:
+                                    oldest = next(iter(self._tool_use_id_to_input))
+                                    self._tool_use_id_to_input.pop(oldest, None)
+                                    self._tool_use_id_to_old_content.pop(oldest, None)
+                                    self._tool_use_id_to_name.pop(oldest, None)
                             # Record touched file paths for dependency tracking
                             if name == 'Read':
                                 fp = tool_input.get('file_path', '')
@@ -453,7 +536,16 @@ class StreamJSONTracker:
                             # the same order the user sees on stdout, then record
                             # the tool_use as its own semantic progress line.
                             self._flush_progress_text()
-                            self._emit_progress(f"[{preview}]", item)
+                            in_flight = format_tool_chip_in_flight_header(name, tool_input)
+                            self._emit_progress(
+                                f"[{in_flight}]",
+                                item,
+                                tool_use_id=tool_use_id or None,
+                                # tool_detail=None marks the in-flight state for
+                                # the frontend chip state machine; the matching
+                                # terminal emit on tool_result fills it in.
+                                tool_detail=None,
+                            )
 
             elif msg_type == 'tool_result':
                 # Legacy top-level tool_result format (backward compat)

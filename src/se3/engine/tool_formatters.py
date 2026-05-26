@@ -14,10 +14,28 @@ import difflib
 import json
 import logging
 import os
+import re
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
+
+from .truncation import TOOL_DETAIL_PAYLOAD_MAX_CHARS
 
 logger = logging.getLogger(__name__)
+
+__all__ = [
+    "TOOL_FORMATTERS",
+    "build_tool_detail_payload",
+    "format_tool_chip_header",
+    "format_tool_chip_in_flight_header",
+    "format_tool_diff",
+    "format_tool_result_preview",
+    "format_tool_use_preview",
+    "generate_edit_diff",
+    "get_project_root",
+    "set_project_root",
+    "truncate_path",
+    "truncate_preview",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +467,343 @@ def generate_edit_diff(old_string: str, new_string: str, file_path: str) -> list
         n=3,
     )
     return [line.rstrip("\n") for line in diff]
+
+
+# ---------------------------------------------------------------------------
+# Chip header — single-chip in-flight / success / failure
+# ---------------------------------------------------------------------------
+
+def format_tool_chip_in_flight_header(tool_name: str, use_input: dict) -> str:
+    """Return the chip header string for an in-flight tool call.
+
+    Delegates to the existing ``_format_*_use`` registry; output looks like
+    ``Read: path:0-200``. The returned string is the chip header *only* — it
+    does NOT carry surrounding ``[`` / ``]`` brackets, since the chip frame is
+    drawn by the frontend.
+    """
+    return format_tool_use_preview(tool_name, use_input or {})
+
+
+def _error_preview(result_data: Any, max_length: int = 80) -> str:
+    """Extract a short error description from a tool_result payload."""
+    text = _extract_text(result_data) or ""
+    if not text and isinstance(result_data, dict):
+        text = str(result_data.get("error") or result_data.get("message") or "")
+    return truncate_preview(text, max_length=max_length)
+
+
+def _success_combined_edit(use_input: dict, result_data: Any) -> str:
+    file_path = use_input.get("file_path", "?")
+    old_lines = len(use_input.get("old_string", "").splitlines())
+    new_lines = len(use_input.get("new_string", "").splitlines())
+    return f"{truncate_path(file_path)} ({old_lines} lines → {new_lines} lines)"
+
+
+def _success_combined_write(use_input: dict, result_data: Any) -> str:
+    file_path = use_input.get("file_path", "?")
+    n_lines = len(use_input.get("content", "").splitlines())
+    return f"{truncate_path(file_path)} ({n_lines} lines)"
+
+
+def _success_combined_read(use_input: dict, result_data: Any) -> str:
+    file_path = use_input.get("file_path", "?")
+    text = _extract_text(result_data)
+    n_lines = len(text.splitlines()) if text else 0
+    offset = use_input.get("offset")
+    limit = use_input.get("limit")
+    range_part = ""
+    if offset is not None and limit is not None:
+        range_part = f":{offset}-{offset + limit}"
+    elif offset is not None:
+        range_part = f":{offset}-"
+    return f"{truncate_path(file_path)}{range_part} · {n_lines} lines"
+
+
+def _success_combined_bash(use_input: dict, result_data: Any) -> str:
+    command = truncate_preview(use_input.get("command", ""), max_length=50)
+    text = _extract_text(result_data)
+    n_lines = len(text.splitlines()) if text else 0
+    return f"{command} · {n_lines} lines output"
+
+
+def _success_combined_grep(use_input: dict, result_data: Any) -> str:
+    pattern = truncate_preview(use_input.get("pattern", "?"), max_length=30)
+    path = truncate_path(use_input.get("path", "."))
+    text = _extract_text(result_data)
+    n = len(text.splitlines()) if text else 0
+    return f"/{pattern}/ in {path} · {n} matches"
+
+
+def _success_combined_glob(use_input: dict, result_data: Any) -> str:
+    pattern = truncate_preview(use_input.get("pattern", "?"), max_length=30)
+    path = truncate_path(use_input.get("path", "."))
+    text = _extract_text(result_data)
+    n = len(text.splitlines()) if text else 0
+    return f"{pattern} in {path} · {n} files"
+
+
+_SUCCESS_COMBINED: Dict[str, Callable[[dict, Any], str]] = {
+    "Edit": _success_combined_edit,
+    "Write": _success_combined_write,
+    "Read": _success_combined_read,
+    "Bash": _success_combined_bash,
+    "Grep": _success_combined_grep,
+    "Glob": _success_combined_glob,
+}
+
+
+def _failure_use_body(tool_name: str, use_input: dict) -> str:
+    """Return the use-side summary body for a failure-state chip (no prefix)."""
+    full = format_tool_use_preview(tool_name, use_input or {})
+    prefix = f"{tool_name}: "
+    if full.startswith(prefix):
+        return full[len(prefix):]
+    # Generic fallback: strip "Tool: <name> | Input: " framing
+    generic_prefix = f"Tool: {tool_name} | Input: "
+    if full.startswith(generic_prefix):
+        return full[len(generic_prefix):]
+    return full
+
+
+def format_tool_chip_header(
+    tool_name: str,
+    use_input: Optional[dict],
+    result_data: Any,
+    is_error: bool,
+) -> str:
+    """Return the merged chip header for a settled tool call.
+
+    Success path produces ``"<tool> ✓ <input-summary> · <result-summary>"``
+    (e.g. ``"Read ✓ src/app.py:0-200 · 87 lines"``); failure path
+    produces ``"<tool> ✗ <input-summary> · <error-preview>"`` (e.g.
+    ``"Read ✗ src/missing.py · ENOENT: no such file"``).
+
+    The returned string is the chip header *only* — no surrounding
+    ``[`` / ``]`` brackets are added.
+    """
+    use_input = use_input or {}
+    if is_error:
+        body = _failure_use_body(tool_name, use_input)
+        err = _error_preview(result_data)
+        if body and err:
+            return f"{tool_name} ✗ {body} · {err}"
+        if body:
+            return f"{tool_name} ✗ {body}"
+        if err:
+            return f"{tool_name} ✗ {err}"
+        return f"{tool_name} ✗"
+    combiner = _SUCCESS_COMBINED.get(tool_name)
+    if combiner is not None:
+        try:
+            body = combiner(use_input, result_data)
+        except Exception:
+            logger.debug("Chip header combiner failed for %s", tool_name, exc_info=True)
+            body = _failure_use_body(tool_name, use_input)
+    else:
+        # Unregistered tool — use generic body + result summary
+        body_use = _failure_use_body(tool_name, use_input)
+        result_summary = truncate_preview(_extract_text(result_data) or "", max_length=60)
+        body = f"{body_use} · {result_summary}" if body_use and result_summary else (body_use or result_summary)
+    return f"{tool_name} ✓ {body}" if body else f"{tool_name} ✓"
+
+
+# ---------------------------------------------------------------------------
+# Structured detail payload — feeds the web chip's collapsible panel
+# ---------------------------------------------------------------------------
+
+_HUNK_RE = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def _parse_first_hunk_start(diff_lines: list[str]) -> Tuple[Optional[int], Optional[int]]:
+    for line in diff_lines:
+        m = _HUNK_RE.match(line)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    return None, None
+
+
+def _maybe_truncate_text(
+    text: str, max_chars: int = TOOL_DETAIL_PAYLOAD_MAX_CHARS
+) -> Tuple[str, bool]:
+    if not text:
+        return text or "", False
+    if len(text) <= max_chars:
+        return text, False
+    return text[:max_chars], True
+
+
+def _maybe_truncate_lines(
+    lines: list[str], max_items: int = 1000
+) -> Tuple[list[str], bool]:
+    if len(lines) <= max_items:
+        return lines, False
+    return lines[:max_items], True
+
+
+def _build_edit_detail(use_input: dict, result_data: Any, old_content: Optional[str]) -> dict:
+    file_path = use_input.get("file_path", "?")
+    old_string = use_input.get("old_string", "")
+    new_string = use_input.get("new_string", "")
+    diff_lines = generate_edit_diff(old_string, new_string, file_path)
+    diff_text = "\n".join(diff_lines)
+    old_start, new_start = _parse_first_hunk_start(diff_lines)
+    truncated_text, truncated = _maybe_truncate_text(diff_text)
+    return {
+        "kind": "edit_diff",
+        "file_path": file_path,
+        "diff": truncated_text,
+        "old_start_line": old_start,
+        "new_start_line": new_start,
+        "truncated": truncated,
+    }
+
+
+def _build_write_detail(use_input: dict, result_data: Any, old_content: Optional[str]) -> dict:
+    file_path = use_input.get("file_path", "?")
+    content = use_input.get("content", "")
+    if old_content is None:
+        truncated_text, truncated = _maybe_truncate_text(content)
+        return {
+            "kind": "write_full",
+            "file_path": file_path,
+            "content": truncated_text,
+            "start_line": 1,
+            "truncated": truncated,
+        }
+    diff_lines = generate_edit_diff(old_content, content, file_path)
+    diff_text = "\n".join(diff_lines)
+    old_start, new_start = _parse_first_hunk_start(diff_lines)
+    truncated_text, truncated = _maybe_truncate_text(diff_text)
+    return {
+        "kind": "write_diff",
+        "file_path": file_path,
+        "diff": truncated_text,
+        "old_start_line": old_start,
+        "new_start_line": new_start,
+        "truncated": truncated,
+    }
+
+
+def _build_read_detail(use_input: dict, result_data: Any, old_content: Optional[str]) -> dict:
+    file_path = use_input.get("file_path", "?")
+    offset = use_input.get("offset") or 0
+    try:
+        offset_int = int(offset)
+    except (TypeError, ValueError):
+        offset_int = 0
+    text = _extract_text(result_data) or ""
+    truncated_text, truncated = _maybe_truncate_text(text)
+    return {
+        "kind": "read_text",
+        "file_path": file_path,
+        "text": truncated_text,
+        "start_line": offset_int + 1 if offset_int else 1,
+        "truncated": truncated,
+    }
+
+
+def _build_bash_detail(use_input: dict, result_data: Any, old_content: Optional[str]) -> dict:
+    command = use_input.get("command", "")
+    # Claude CLI bash tool returns combined output in result_data text content.
+    # If the result is a dict with explicit stdout/stderr fields, prefer those.
+    stdout = ""
+    stderr = ""
+    if isinstance(result_data, dict) and (
+        "stdout" in result_data or "stderr" in result_data
+    ):
+        stdout = str(result_data.get("stdout", "") or "")
+        stderr = str(result_data.get("stderr", "") or "")
+    else:
+        stdout = _extract_text(result_data) or ""
+    truncated_stdout, t1 = _maybe_truncate_text(stdout)
+    truncated_stderr, t2 = _maybe_truncate_text(stderr)
+    return {
+        "kind": "bash_output",
+        "command": command,
+        "stdout": truncated_stdout,
+        "stderr": truncated_stderr,
+        "truncated": t1 or t2,
+    }
+
+
+def _build_grep_detail(use_input: dict, result_data: Any, old_content: Optional[str]) -> dict:
+    text = _extract_text(result_data) or ""
+    matches = text.splitlines() if text else []
+    matches, items_truncated = _maybe_truncate_lines(matches)
+    # Also guard against an individual match line being absurdly long
+    joined_truncated = sum(len(m) for m in matches) > TOOL_DETAIL_PAYLOAD_MAX_CHARS
+    return {
+        "kind": "grep_matches",
+        "pattern": use_input.get("pattern", ""),
+        "path": use_input.get("path", "."),
+        "matches": matches,
+        "truncated": items_truncated or joined_truncated,
+    }
+
+
+def _build_glob_detail(use_input: dict, result_data: Any, old_content: Optional[str]) -> dict:
+    text = _extract_text(result_data) or ""
+    files = text.splitlines() if text else []
+    files, items_truncated = _maybe_truncate_lines(files)
+    return {
+        "kind": "glob_matches",
+        "pattern": use_input.get("pattern", ""),
+        "path": use_input.get("path", "."),
+        "files": files,
+        "truncated": items_truncated,
+    }
+
+
+def _build_generic_text_detail(use_input: dict, result_data: Any, old_content: Optional[str]) -> dict:
+    text = _extract_text(result_data) or ""
+    truncated_text, truncated = _maybe_truncate_text(text)
+    return {
+        "kind": "text",
+        "text": truncated_text,
+        "truncated": truncated,
+    }
+
+
+_DETAIL_BUILDERS: Dict[str, Callable[[dict, Any, Optional[str]], dict]] = {
+    "Edit": _build_edit_detail,
+    "Write": _build_write_detail,
+    "Read": _build_read_detail,
+    "Bash": _build_bash_detail,
+    "Grep": _build_grep_detail,
+    "Glob": _build_glob_detail,
+}
+
+
+def build_tool_detail_payload(
+    tool_name: str,
+    use_input: Optional[dict],
+    result_data: Any,
+    old_content: Optional[str] = None,
+) -> dict:
+    """Build a JSON-safe structured detail dict for the web chip's panel.
+
+    The returned dict always carries a ``kind`` discriminator drawn from:
+    ``edit_diff`` / ``write_full`` / ``write_diff`` / ``read_text`` /
+    ``bash_output`` / ``grep_matches`` / ``glob_matches`` / ``text``.
+
+    Per-tool builders return a richer shape than the 60-char preview so the
+    frontend can render diffs with line numbers, full file content, command
+    output, or match lists without re-running the tool. Oversize bodies are
+    tail-truncated to ``TOOL_DETAIL_PAYLOAD_MAX_CHARS`` and flagged via
+    ``truncated: True``.
+
+    Unregistered tools fall back to ``kind="text"`` carrying the extracted
+    result text.
+    """
+    use_input = use_input or {}
+    builder = _DETAIL_BUILDERS.get(tool_name)
+    if builder is None:
+        return _build_generic_text_detail(use_input, result_data, old_content)
+    try:
+        return builder(use_input, result_data, old_content)
+    except Exception:
+        logger.debug("Detail builder failed for %s", tool_name, exc_info=True)
+        return _build_generic_text_detail(use_input, result_data, old_content)
 
 
 def format_tool_diff(
