@@ -90,10 +90,31 @@ class SpawnedProcess:
 def _resolve_se3_command() -> List[str]:
     """Return the argv prefix that invokes the ``se3`` CLI.
 
-    Prefers the installed ``se3`` console script; falls back to
-    ``python -m se3`` so the daemon works even when the script directory is
-    not on ``PATH``.
+    Resolution priority is *same-prefix first* with a three-level fallback,
+    so a daemon spawned from one Python environment never accidentally picks
+    up a different environment's ``se3`` console script via ``PATH``:
+
+    1. ``Path(sys.executable).parent / 'se3'`` (and ``se3.exe`` on Windows).
+       Using the console script that lives next to the daemon's own
+       interpreter guarantees the child runs the same wheel / same version
+       as the daemon — the core contract of the daemon when it spawns
+       ``se3 run`` / ``se3 init`` on behalf of a remote caller.
+    2. ``[sys.executable, '-m', 'se3']``. When no console script is present
+       next to the interpreter (broken install, renamed script), running
+       ``-m se3`` still loads the ``se3`` package via the same interpreter
+       and therefore the same site-packages — bypassing ``PATH`` entirely.
+    3. ``shutil.which('se3')`` as a last-resort fallback for exotic
+       packagings where neither of the above is available.
     """
+    if sys.executable:
+        bin_dir = Path(sys.executable).parent
+        candidates = [bin_dir / "se3"]
+        if os.name == "nt":
+            candidates.append(bin_dir / "se3.exe")
+        for candidate in candidates:
+            if candidate.is_file():
+                return [str(candidate)]
+        return [sys.executable, "-m", "se3"]
     script = shutil.which("se3")
     if script:
         return [script]

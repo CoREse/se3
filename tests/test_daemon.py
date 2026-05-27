@@ -140,6 +140,53 @@ class TestSupervisor:
 # --------------------------------------------------------------------------
 
 
+class TestResolveSe3Command:
+    """Same-prefix-first resolution of the ``se3`` argv prefix.
+
+    The daemon may be installed in a Python environment whose bin dir is
+    not first on ``PATH``; relying on ``shutil.which('se3')`` would then
+    spawn ``se3 run`` / ``se3 init`` children from an unrelated environment,
+    silently mismatching versions. ``_resolve_se3_command`` therefore
+    prefers the console script sitting next to ``sys.executable`` and falls
+    back to ``[sys.executable, '-m', 'se3']``.
+    """
+
+    def test_prefers_sys_executable_prefix(self, tmp_path, monkeypatch):
+        fake_python = tmp_path / "python"
+        fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
+        fake_se3 = tmp_path / "se3"
+        fake_se3.write_text("#!/bin/sh\n", encoding="utf-8")
+        unrelated = tmp_path / "other" / "se3"
+        unrelated.parent.mkdir()
+        unrelated.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        monkeypatch.setattr(spawner_mod.sys, "executable", str(fake_python))
+        monkeypatch.setattr(
+            spawner_mod.shutil, "which", lambda name: str(unrelated)
+        )
+
+        assert spawner_mod._resolve_se3_command() == [str(fake_se3)]
+
+    def test_falls_back_to_module_form(self, tmp_path, monkeypatch):
+        fake_python = tmp_path / "python"
+        fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
+        # No sibling `se3` placed under tmp_path on purpose.
+        unrelated = tmp_path / "other" / "se3"
+        unrelated.parent.mkdir()
+        unrelated.write_text("#!/bin/sh\n", encoding="utf-8")
+
+        monkeypatch.setattr(spawner_mod.sys, "executable", str(fake_python))
+        monkeypatch.setattr(
+            spawner_mod.shutil, "which", lambda name: str(unrelated)
+        )
+
+        assert spawner_mod._resolve_se3_command() == [
+            str(fake_python),
+            "-m",
+            "se3",
+        ]
+
+
 @pytest.fixture
 def fake_se3(tmp_path, monkeypatch):
     """Replace the ``se3`` command with a fake NDJSON-emitting script."""
