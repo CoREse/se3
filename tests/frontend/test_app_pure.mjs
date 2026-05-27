@@ -2688,7 +2688,14 @@ function resetHistoryListFixture() {
   app.state.selectedHistoryId = null;
 }
 
-check("renderHistoryList: multi-project renders tab bar with first bucket active", () => {
+// Helper: collect the <option> children of a history-project-select dropdown.
+function projectSelectOptions(list) {
+  const select = findOne(list, "history-project-select");
+  if (!select) return [];
+  return select.children.filter((c) => c.tagName === "OPTION");
+}
+
+check("renderHistoryList: multi-project renders select dropdown with first bucket as default", () => {
   resetHistoryListFixture();
   app.state.historySessions = [
     { flow_id: "f1", task_description: "newer A", project_root: "/proj/a",
@@ -2698,23 +2705,22 @@ check("renderHistoryList: multi-project renders tab bar with first bucket active
   ];
   app.renderHistoryList();
   const list = document.getElementById("history-list");
-  const bar = findOne(list, "history-project-tabs");
-  assert.ok(bar, "tab bar should render with >= 2 buckets");
-  const tabs = findAll(list, "history-project-tab");
-  assert.equal(tabs.length, 2, "one tab per bucket");
+  const select = findOne(list, "history-project-select");
+  assert.ok(select, "select dropdown should render with >= 2 buckets");
+  const options = projectSelectOptions(list);
+  assert.equal(options.length, 2, "one option per bucket");
   // /proj/a is more recent so it ranks first and is the default selection.
-  assert.equal(tabs[0].dataset.projectRoot, "/proj/a");
-  assert.ok(tabs[0].classList.contains("active"));
-  assert.equal(tabs[1].dataset.projectRoot, "/proj/b");
-  assert.ok(!tabs[1].classList.contains("active"));
-  // Only the active bucket's card is rendered.
+  assert.equal(options[0].value, "/proj/a");
+  assert.equal(options[1].value, "/proj/b");
+  assert.equal(select.value, "/proj/a");
+  // Only the selected bucket's card is rendered.
   const items = findAll(list, "history-item");
   assert.equal(items.length, 1);
   assert.ok(items[0].textContent.includes("newer A"));
   assert.equal(app.state.historySelectedProjectRoot, "/proj/a");
 });
 
-check("renderHistoryList: clicking a tab swaps the visible cards", () => {
+check("renderHistoryList: changing the select value swaps the visible cards", () => {
   resetHistoryListFixture();
   app.state.historySessions = [
     { flow_id: "f1", task_description: "card A", project_root: "/proj/a",
@@ -2724,38 +2730,34 @@ check("renderHistoryList: clicking a tab swaps the visible cards", () => {
   ];
   app.renderHistoryList();
   const list = document.getElementById("history-list");
-  // /proj/b tab is the second one (older bucket).
-  const bTab = findAll(list, "history-project-tab")
-    .find((t) => t.dataset.projectRoot === "/proj/b");
-  assert.ok(bTab, "expected a /proj/b tab to click");
-  bTab.dispatch("click");
-  // After click, only /proj/b's card is visible and its tab is active.
+  const select = findOne(list, "history-project-select");
+  assert.ok(select, "expected a history-project-select to change");
+  select.value = "/proj/b";
+  select.dispatch("change");
+  // After change, only /proj/b's card is visible and the select reflects it.
   const list2 = document.getElementById("history-list");
   const items = findAll(list2, "history-item");
   assert.equal(items.length, 1);
   assert.ok(items[0].textContent.includes("card B"));
-  const activeTabs = findAll(list2, "history-project-tab")
-    .filter((t) => t.classList.contains("active"));
-  assert.equal(activeTabs.length, 1);
-  assert.equal(activeTabs[0].dataset.projectRoot, "/proj/b");
+  const select2 = findOne(list2, "history-project-select");
+  assert.equal(select2.value, "/proj/b");
   assert.equal(app.state.historySelectedProjectRoot, "/proj/b");
 });
 
-check("renderHistoryList: UNKNOWN tab appears only when a session lacks project_root", () => {
+check("renderHistoryList: UNKNOWN option appears only when a session lacks project_root", () => {
   resetHistoryListFixture();
-  // No falsy project_root sessions: no UNKNOWN tab.
+  // No falsy project_root sessions: no UNKNOWN option.
   app.state.historySessions = [
     { flow_id: "f1", project_root: "/proj/a", updated_at: 200 },
     { flow_id: "f2", project_root: "/proj/b", updated_at: 100 },
   ];
   app.renderHistoryList();
   let list = document.getElementById("history-list");
-  const tabsNoUnknown = findAll(list, "history-project-tab")
-    .map((t) => t.dataset.projectRoot);
-  assert.ok(!tabsNoUnknown.includes(app.UNKNOWN_PROJECT_ROOT),
-    "UNKNOWN tab must not appear when every session has a project_root");
+  const optsNoUnknown = projectSelectOptions(list).map((o) => o.value);
+  assert.ok(!optsNoUnknown.includes(app.UNKNOWN_PROJECT_ROOT),
+    "UNKNOWN option must not appear when every session has a project_root");
 
-  // Now add a legacy session with no project_root — the UNKNOWN tab appears,
+  // Now add a legacy session with no project_root — the UNKNOWN option appears,
   // labeled 未知项目, and is pinned to the tail.
   resetHistoryListFixture();
   app.state.historySessions = [
@@ -2765,14 +2767,14 @@ check("renderHistoryList: UNKNOWN tab appears only when a session lacks project_
   ];
   app.renderHistoryList();
   list = document.getElementById("history-list");
-  const tabs = findAll(list, "history-project-tab");
-  assert.equal(tabs.length, 3);
-  assert.equal(tabs[tabs.length - 1].dataset.projectRoot,
-    app.UNKNOWN_PROJECT_ROOT);
-  assert.equal(tabs[tabs.length - 1].textContent, app.UNKNOWN_PROJECT_ROOT_LABEL);
+  const opts = projectSelectOptions(list);
+  assert.equal(opts.length, 3);
+  assert.equal(opts[opts.length - 1].value, app.UNKNOWN_PROJECT_ROOT);
+  assert.equal(opts[opts.length - 1].textContent,
+    app.UNKNOWN_PROJECT_ROOT_LABEL);
 });
 
-check("renderHistoryList: single project does not render the tab bar", () => {
+check("renderHistoryList: single project does not render the select dropdown", () => {
   resetHistoryListFixture();
   app.state.historySessions = [
     { flow_id: "f1", task_description: "only one", project_root: "/proj/a",
@@ -2780,8 +2782,8 @@ check("renderHistoryList: single project does not render the tab bar", () => {
   ];
   app.renderHistoryList();
   const list = document.getElementById("history-list");
-  assert.equal(findOne(list, "history-project-tabs"), null,
-    "tab bar must be suppressed with a single bucket");
+  assert.equal(findOne(list, "history-project-select"), null,
+    "select dropdown must be suppressed with a single bucket");
   // The lone session still renders.
   assert.equal(findAll(list, "history-item").length, 1);
 });

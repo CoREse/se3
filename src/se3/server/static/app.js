@@ -1281,22 +1281,24 @@ function pickDefaultHistoryProjectRoot(buckets, currentSelected) {
   return buckets[0].project_root;
 }
 
-// Build the horizontal project tab bar shown above the history items. One tab
-// per bucket; clicking a tab updates `state.historySelectedProjectRoot` and
-// re-renders the list. Caller decides whether to render at all (callers skip
-// when buckets.length < 2 to avoid a visually-redundant single-tab strip).
-function renderHistoryProjectTabs(buckets, selected, onSelect) {
-  const bar = el("div", "history-project-tabs");
+// Build the project select dropdown shown above the history items. One option
+// per bucket; change events update `state.historySelectedProjectRoot` and
+// re-render the list. Caller decides whether to render at all (callers skip
+// when buckets.length < 2 to avoid a visually-redundant single-option control).
+function renderHistoryProjectSelect(buckets, selected, onSelect) {
+  const row = el("label", "history-project-select-row");
+  row.append(el("span", "history-project-select-label", "项目"));
+  const select = el("select", "history-project-select");
   for (const b of buckets) {
-    const tab = el("button", "history-project-tab", b.label);
-    tab.type = "button";
-    tab.title = b.label;
-    tab.dataset.projectRoot = b.project_root;
-    if (b.project_root === selected) tab.classList.add("active");
-    tab.addEventListener("click", () => onSelect(b.project_root));
-    bar.appendChild(tab);
+    const opt = el("option", null, b.label);
+    opt.value = b.project_root;
+    opt.title = b.label;
+    select.appendChild(opt);
   }
-  return bar;
+  select.value = selected;
+  select.addEventListener("change", () => onSelect(select.value));
+  row.appendChild(select);
+  return row;
 }
 
 function renderHistoryList() {
@@ -1335,10 +1337,10 @@ function renderHistoryList() {
     buckets, state.historySelectedProjectRoot);
   state.historySelectedProjectRoot = selected;
 
-  // >= 2 buckets: show the tab bar. A single-bucket strip would add visual
-  // weight without offering a real choice, so we suppress it in that case.
+  // >= 2 buckets: show the select dropdown. A single-option control would add
+  // visual weight without offering a real choice, so we suppress it in that case.
   if (buckets.length >= 2) {
-    list.appendChild(renderHistoryProjectTabs(buckets, selected, (root) => {
+    list.appendChild(renderHistoryProjectSelect(buckets, selected, (root) => {
       if (state.historySelectedProjectRoot === root) return;
       state.historySelectedProjectRoot = root;
       renderHistoryList();

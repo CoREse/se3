@@ -721,39 +721,33 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 
 .history-list { display: flex; flex-direction: column; gap: 8px; }
 
-/* Horizontal project tab bar prepended to the history list when sessions
- * span multiple project_roots. Tabs lay out left-to-right; the strip scrolls
- * horizontally if the project labels (absolute paths) overflow the pane. */
-.history-project-tabs {
+/* Project select dropdown prepended to the history list when sessions span
+ * multiple project_roots. A single horizontal row with a label and a native
+ * <select>, styled to match the New Task form's Project dropdown. */
+.history-project-select-row {
   display: flex;
   flex-direction: row;
-  flex-wrap: nowrap;
-  gap: 6px;
-  max-width: 100%;
-  overflow-x: auto;
+  align-items: center;
+  gap: 8px;
   padding-bottom: 6px;
   margin-bottom: 4px;
   border-bottom: 1px solid var(--border);
 }
-.history-project-tab {
-  flex: 0 0 auto;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 11px;
+.history-project-select-label {
+  font-size: 12px;
   color: var(--fg-dim);
-  white-space: nowrap;
-  max-width: 240px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: pointer;
+  flex: 0 0 auto;
 }
-.history-project-tab:hover { border-color: var(--accent); color: var(--fg); }
-.history-project-tab.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #fff;
+.history-project-select {
+  flex: 1 1 auto;
+  max-width: 100%;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 8px;
+  font-family: inherit;
+  font-size: 13px;
 }
 
 /* Lightweight "refreshing" bar prepended to a non-empty list while the
