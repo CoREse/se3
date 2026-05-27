@@ -2522,4 +2522,281 @@ check("live partial with bracket-format generic 'Tool error' renders as .tool-ma
 const chipMod = await import("./tool_chip_state.test.mjs");
 chipMod.registerToolChipStateTests({ app, check, findOne, findAll });
 
+// ---------------------------------------------------------------------------
+// groupHistorySessionsByProjectRoot + pickDefaultHistoryProjectRoot (pure)
+// ---------------------------------------------------------------------------
+//
+// The History view groups its session cards by `project_root`, with a tab bar
+// at the top of the list. These two pure helpers do the work the renderer
+// builds on:
+//   * groupHistorySessionsByProjectRoot folds a flat session list into
+//     ordered buckets (recency-desc, UNKNOWN pinned to the tail), preserving
+//     the original session order within each bucket.
+//   * pickDefaultHistoryProjectRoot resolves "which tab is selected now"
+//     across re-renders: preserve the user's choice if it still exists,
+//     else fall back to the most-recently-active bucket, else null.
+
+const sess = (project_root, updated_at, extra) => Object.assign(
+  { flow_id: "f-" + Math.random().toString(36).slice(2), project_root, updated_at },
+  extra || {},
+);
+
+check("groupHistorySessionsByProjectRoot returns [] for empty / non-array input", () => {
+  assert.deepEqual(app.groupHistorySessionsByProjectRoot([]), []);
+  assert.deepEqual(app.groupHistorySessionsByProjectRoot(null), []);
+  assert.deepEqual(app.groupHistorySessionsByProjectRoot(undefined), []);
+  assert.deepEqual(app.groupHistorySessionsByProjectRoot("nope"), []);
+});
+
+check("groupHistorySessionsByProjectRoot folds one project into a single bucket", () => {
+  const buckets = app.groupHistorySessionsByProjectRoot([
+    sess("/proj/a", 100),
+    sess("/proj/a", 200),
+  ]);
+  assert.equal(buckets.length, 1);
+  assert.equal(buckets[0].project_root, "/proj/a");
+  assert.equal(buckets[0].label, "/proj/a");
+  assert.equal(buckets[0].sessions.length, 2);
+});
+
+check("groupHistorySessionsByProjectRoot orders buckets by recency desc", () => {
+  // /proj/c is touched most recently (ts=300), then /proj/a (ts=250),
+  // then /proj/b (ts=100). Order: c, a, b.
+  const buckets = app.groupHistorySessionsByProjectRoot([
+    sess("/proj/a", 200),
+    sess("/proj/b", 100),
+    sess("/proj/c", 300),
+    sess("/proj/a", 250),
+  ]);
+  assert.deepEqual(
+    buckets.map((b) => b.project_root),
+    ["/proj/c", "/proj/a", "/proj/b"],
+  );
+});
+
+check("groupHistorySessionsByProjectRoot preserves input order within a bucket", () => {
+  const s1 = sess("/proj/a", 100);
+  const s2 = sess("/proj/a", 300);
+  const s3 = sess("/proj/a", 200);
+  const buckets = app.groupHistorySessionsByProjectRoot([s1, s2, s3]);
+  assert.equal(buckets.length, 1);
+  // bucket.sessions follow the original input order (not re-sorted by ts).
+  assert.deepEqual(buckets[0].sessions, [s1, s2, s3]);
+});
+
+check("groupHistorySessionsByProjectRoot falls back to created_at when no updated_at", () => {
+  // /proj/a has only created_at; /proj/b has updated_at. The bucket with the
+  // larger recency wins the top spot.
+  const buckets = app.groupHistorySessionsByProjectRoot([
+    { project_root: "/proj/a", created_at: 500 },
+    { project_root: "/proj/b", updated_at: 100 },
+  ]);
+  assert.equal(buckets[0].project_root, "/proj/a");
+  assert.equal(buckets[1].project_root, "/proj/b");
+});
+
+check("groupHistorySessionsByProjectRoot folds falsy project_root into UNKNOWN bucket", () => {
+  const buckets = app.groupHistorySessionsByProjectRoot([
+    { flow_id: "f1", updated_at: 100 },                      // missing
+    { flow_id: "f2", project_root: null, updated_at: 200 },  // null
+    { flow_id: "f3", project_root: "", updated_at: 300 },    // empty
+    { flow_id: "f4", project_root: undefined, updated_at: 400 },
+  ]);
+  assert.equal(buckets.length, 1);
+  assert.equal(buckets[0].project_root, app.UNKNOWN_PROJECT_ROOT);
+  assert.equal(buckets[0].label, "未知项目");
+  assert.equal(buckets[0].sessions.length, 4);
+});
+
+check("groupHistorySessionsByProjectRoot pins UNKNOWN bucket to the tail", () => {
+  // Even though UNKNOWN has the most recent session (ts=999), it must still
+  // sit at the tail of the bucket list.
+  const buckets = app.groupHistorySessionsByProjectRoot([
+    sess("/proj/a", 100),
+    sess("/proj/b", 50),
+    { flow_id: "fx", updated_at: 999 },          // UNKNOWN
+  ]);
+  assert.deepEqual(
+    buckets.map((b) => b.project_root),
+    ["/proj/a", "/proj/b", app.UNKNOWN_PROJECT_ROOT],
+  );
+});
+
+check("groupHistorySessionsByProjectRoot omits UNKNOWN bucket when no falsy sessions", () => {
+  const buckets = app.groupHistorySessionsByProjectRoot([
+    sess("/proj/a", 100),
+    sess("/proj/b", 200),
+  ]);
+  assert.equal(buckets.some((b) => b.project_root === app.UNKNOWN_PROJECT_ROOT), false);
+});
+
+check("groupHistorySessionsByProjectRoot exposes a numeric latestTs per bucket", () => {
+  const buckets = app.groupHistorySessionsByProjectRoot([
+    sess("/proj/a", 100),
+    sess("/proj/a", 250),
+    sess("/proj/a", 200),
+  ]);
+  assert.equal(buckets[0].project_root, "/proj/a");
+  assert.equal(typeof buckets[0].latestTs, "number");
+  // tsValue(250) — epoch seconds < 1e12 are scaled to ms.
+  assert.equal(buckets[0].latestTs, app.tsValue(250));
+});
+
+// -- pickDefaultHistoryProjectRoot -----------------------------------------
+
+check("pickDefaultHistoryProjectRoot returns null for empty / non-array buckets", () => {
+  assert.equal(app.pickDefaultHistoryProjectRoot([], null), null);
+  assert.equal(app.pickDefaultHistoryProjectRoot([], "/proj/a"), null);
+  assert.equal(app.pickDefaultHistoryProjectRoot(null, "/proj/a"), null);
+  assert.equal(app.pickDefaultHistoryProjectRoot(undefined, "/proj/a"), null);
+});
+
+check("pickDefaultHistoryProjectRoot preserves currentSelected when still present", () => {
+  const buckets = [
+    { project_root: "/proj/a" },
+    { project_root: "/proj/b" },
+  ];
+  assert.equal(app.pickDefaultHistoryProjectRoot(buckets, "/proj/b"), "/proj/b");
+});
+
+check("pickDefaultHistoryProjectRoot falls back to buckets[0] when currentSelected vanished", () => {
+  const buckets = [
+    { project_root: "/proj/a" },
+    { project_root: "/proj/b" },
+  ];
+  // The selected key no longer exists in the bucket list — fall back to the
+  // first (most-recently-active) bucket rather than leaving a dead reference.
+  assert.equal(app.pickDefaultHistoryProjectRoot(buckets, "/proj/gone"), "/proj/a");
+});
+
+check("pickDefaultHistoryProjectRoot falls back to buckets[0] when currentSelected is null", () => {
+  const buckets = [{ project_root: "/proj/a" }, { project_root: "/proj/b" }];
+  assert.equal(app.pickDefaultHistoryProjectRoot(buckets, null), "/proj/a");
+  assert.equal(app.pickDefaultHistoryProjectRoot(buckets, undefined), "/proj/a");
+});
+
+// -- renderHistoryList: project tabs + filtering ----------------------------
+// Helper to install a fresh #history-list container and reset the bits of
+// shared state these tests touch, so ordering doesn't leak between cases.
+function resetHistoryListFixture() {
+  _elementsById["history-list"] = new FakeNode("div");
+  app.state.historySessions = [];
+  app.state.historyIndexLoading = false;
+  app.state.historyIndexConfirmed = true;
+  app.state.machines = [{ machine_id: "m1", online: true }];
+  app.state.historySelectedProjectRoot = null;
+  app.state.selectedHistoryId = null;
+}
+
+check("renderHistoryList: multi-project renders tab bar with first bucket active", () => {
+  resetHistoryListFixture();
+  app.state.historySessions = [
+    { flow_id: "f1", task_description: "newer A", project_root: "/proj/a",
+      updated_at: 200 },
+    { flow_id: "f2", task_description: "older B", project_root: "/proj/b",
+      updated_at: 100 },
+  ];
+  app.renderHistoryList();
+  const list = document.getElementById("history-list");
+  const bar = findOne(list, "history-project-tabs");
+  assert.ok(bar, "tab bar should render with >= 2 buckets");
+  const tabs = findAll(list, "history-project-tab");
+  assert.equal(tabs.length, 2, "one tab per bucket");
+  // /proj/a is more recent so it ranks first and is the default selection.
+  assert.equal(tabs[0].dataset.projectRoot, "/proj/a");
+  assert.ok(tabs[0].classList.contains("active"));
+  assert.equal(tabs[1].dataset.projectRoot, "/proj/b");
+  assert.ok(!tabs[1].classList.contains("active"));
+  // Only the active bucket's card is rendered.
+  const items = findAll(list, "history-item");
+  assert.equal(items.length, 1);
+  assert.ok(items[0].textContent.includes("newer A"));
+  assert.equal(app.state.historySelectedProjectRoot, "/proj/a");
+});
+
+check("renderHistoryList: clicking a tab swaps the visible cards", () => {
+  resetHistoryListFixture();
+  app.state.historySessions = [
+    { flow_id: "f1", task_description: "card A", project_root: "/proj/a",
+      updated_at: 200 },
+    { flow_id: "f2", task_description: "card B", project_root: "/proj/b",
+      updated_at: 100 },
+  ];
+  app.renderHistoryList();
+  const list = document.getElementById("history-list");
+  // /proj/b tab is the second one (older bucket).
+  const bTab = findAll(list, "history-project-tab")
+    .find((t) => t.dataset.projectRoot === "/proj/b");
+  assert.ok(bTab, "expected a /proj/b tab to click");
+  bTab.dispatch("click");
+  // After click, only /proj/b's card is visible and its tab is active.
+  const list2 = document.getElementById("history-list");
+  const items = findAll(list2, "history-item");
+  assert.equal(items.length, 1);
+  assert.ok(items[0].textContent.includes("card B"));
+  const activeTabs = findAll(list2, "history-project-tab")
+    .filter((t) => t.classList.contains("active"));
+  assert.equal(activeTabs.length, 1);
+  assert.equal(activeTabs[0].dataset.projectRoot, "/proj/b");
+  assert.equal(app.state.historySelectedProjectRoot, "/proj/b");
+});
+
+check("renderHistoryList: UNKNOWN tab appears only when a session lacks project_root", () => {
+  resetHistoryListFixture();
+  // No falsy project_root sessions: no UNKNOWN tab.
+  app.state.historySessions = [
+    { flow_id: "f1", project_root: "/proj/a", updated_at: 200 },
+    { flow_id: "f2", project_root: "/proj/b", updated_at: 100 },
+  ];
+  app.renderHistoryList();
+  let list = document.getElementById("history-list");
+  const tabsNoUnknown = findAll(list, "history-project-tab")
+    .map((t) => t.dataset.projectRoot);
+  assert.ok(!tabsNoUnknown.includes(app.UNKNOWN_PROJECT_ROOT),
+    "UNKNOWN tab must not appear when every session has a project_root");
+
+  // Now add a legacy session with no project_root — the UNKNOWN tab appears,
+  // labeled 未知项目, and is pinned to the tail.
+  resetHistoryListFixture();
+  app.state.historySessions = [
+    { flow_id: "f1", project_root: "/proj/a", updated_at: 200 },
+    { flow_id: "f2", project_root: "/proj/b", updated_at: 100 },
+    { flow_id: "f3", updated_at: 50 },
+  ];
+  app.renderHistoryList();
+  list = document.getElementById("history-list");
+  const tabs = findAll(list, "history-project-tab");
+  assert.equal(tabs.length, 3);
+  assert.equal(tabs[tabs.length - 1].dataset.projectRoot,
+    app.UNKNOWN_PROJECT_ROOT);
+  assert.equal(tabs[tabs.length - 1].textContent, app.UNKNOWN_PROJECT_ROOT_LABEL);
+});
+
+check("renderHistoryList: single project does not render the tab bar", () => {
+  resetHistoryListFixture();
+  app.state.historySessions = [
+    { flow_id: "f1", task_description: "only one", project_root: "/proj/a",
+      updated_at: 200 },
+  ];
+  app.renderHistoryList();
+  const list = document.getElementById("history-list");
+  assert.equal(findOne(list, "history-project-tabs"), null,
+    "tab bar must be suppressed with a single bucket");
+  // The lone session still renders.
+  assert.equal(findAll(list, "history-item").length, 1);
+});
+
+check("pickDefaultHistoryProjectRoot preserves UNKNOWN selection when bucket exists", () => {
+  // The user explicitly switched to the 未知项目 tab — re-renders must not
+  // bump them off it just because a real project bucket is more recent.
+  const buckets = [
+    { project_root: "/proj/a" },
+    { project_root: app.UNKNOWN_PROJECT_ROOT },
+  ];
+  assert.equal(
+    app.pickDefaultHistoryProjectRoot(buckets, app.UNKNOWN_PROJECT_ROOT),
+    app.UNKNOWN_PROJECT_ROOT,
+  );
+});
+
 console.log(`\n${passed} checks passed.`);

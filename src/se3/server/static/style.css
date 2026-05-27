@@ -721,6 +721,41 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 
 .history-list { display: flex; flex-direction: column; gap: 8px; }
 
+/* Horizontal project tab bar prepended to the history list when sessions
+ * span multiple project_roots. Tabs lay out left-to-right; the strip scrolls
+ * horizontally if the project labels (absolute paths) overflow the pane. */
+.history-project-tabs {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  gap: 6px;
+  max-width: 100%;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.history-project-tab {
+  flex: 0 0 auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.history-project-tab:hover { border-color: var(--accent); color: var(--fg); }
+.history-project-tab.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 /* Lightweight "refreshing" bar prepended to a non-empty list while the
  * /api/history round-trip is in flight (the empty-list case reuses .empty). */
 .history-refreshing {

@@ -37,6 +37,10 @@ const state = {
                                 // before any daemon pushed its index.
   selectedHistoryId: null,// flow whose records are shown in the history detail
   historyRecords: [],     // records currently rendered in the history detail
+  // project_root key of the currently-selected History tab; null lets
+  // pickDefaultHistoryProjectRoot pick the most-recently-active project. Reset
+  // by closeHistory() so the next openHistory() recomputes the default.
+  historySelectedProjectRoot: null,
   connStale: false,       // true while the WS is down — data may be stale
   detailLoaded: false,    // true once the open flow's detail has rendered
   detailFetchFailures: 0, // consecutive /api/flows/{id} failures for the view
@@ -1092,6 +1096,7 @@ function closeHistory() {
   $("history-view").classList.add("hidden");
   state.selectedHistoryId = null;
   state.historyRecords = [];
+  state.historySelectedProjectRoot = null;
 }
 
 async function fetchHistoryIndex() {
@@ -1211,6 +1216,89 @@ function historyListEmptyState({ sessions, loading, daemonConnected, indexConfir
   return "empty-confirmed";
 }
 
+// Sentinel key for the bucket of sessions that carry no `project_root` field
+// (legacy archived sessions written before the field existed). Chosen so it
+// cannot collide with any real absolute path; the visible label rendered for
+// this bucket is "未知项目".
+const UNKNOWN_PROJECT_ROOT = "__se3_unknown_project__";
+const UNKNOWN_PROJECT_ROOT_LABEL = "未知项目";
+
+// Group history sessions by their `project_root` field. Pure: no DOM, no
+// state. Returns an array of `{ project_root, label, sessions, latestTs }`
+// buckets where:
+//   * sessions are deduplicated by project_root (real absolute paths kept as-is;
+//     empty / null / undefined / non-string falsy values fold into the
+//     UNKNOWN_PROJECT_ROOT bucket)
+//   * sessions inside a bucket keep their input relative order
+//   * buckets are sorted by `latestTs` (the max of each session's
+//     `updated_at || created_at`) in descending order
+//   * the UNKNOWN bucket, when it exists, is always pinned at the tail
+function groupHistorySessionsByProjectRoot(sessions) {
+  if (!Array.isArray(sessions) || sessions.length === 0) return [];
+  const byKey = new Map();
+  for (const s of sessions) {
+    if (!s || typeof s !== "object") continue;
+    const raw = s.project_root;
+    const key = typeof raw === "string" && raw ? raw : UNKNOWN_PROJECT_ROOT;
+    let bucket = byKey.get(key);
+    if (!bucket) {
+      bucket = {
+        project_root: key,
+        label: key === UNKNOWN_PROJECT_ROOT ? UNKNOWN_PROJECT_ROOT_LABEL : key,
+        sessions: [],
+        latestTs: 0,
+      };
+      byKey.set(key, bucket);
+    }
+    bucket.sessions.push(s);
+    const ts = tsValue(s.updated_at != null ? s.updated_at : s.created_at);
+    if (typeof ts === "number" && ts > bucket.latestTs) bucket.latestTs = ts;
+  }
+  const buckets = Array.from(byKey.values());
+  buckets.sort((a, b) => {
+    const aUnknown = a.project_root === UNKNOWN_PROJECT_ROOT;
+    const bUnknown = b.project_root === UNKNOWN_PROJECT_ROOT;
+    if (aUnknown !== bUnknown) return aUnknown ? 1 : -1;
+    return (b.latestTs || 0) - (a.latestTs || 0);
+  });
+  return buckets;
+}
+
+// Pick the project_root key the History view should select by default. Pure.
+// Fallback chain:
+//   1. `currentSelected` if it still corresponds to a bucket — preserves the
+//      user's manual tab choice across re-renders
+//   2. otherwise the first bucket's key (which, after the sort in
+//      groupHistorySessionsByProjectRoot, is the most-recently-active project)
+//   3. otherwise null (no buckets at all)
+function pickDefaultHistoryProjectRoot(buckets, currentSelected) {
+  if (!Array.isArray(buckets) || buckets.length === 0) return null;
+  if (currentSelected != null) {
+    for (const b of buckets) {
+      if (b && b.project_root === currentSelected) return currentSelected;
+    }
+  }
+  return buckets[0].project_root;
+}
+
+// Build the horizontal project tab bar shown above the history items. One tab
+// per bucket; clicking a tab updates `state.historySelectedProjectRoot` and
+// re-renders the list. Caller decides whether to render at all (callers skip
+// when buckets.length < 2 to avoid a visually-redundant single-tab strip).
+function renderHistoryProjectTabs(buckets, selected, onSelect) {
+  const bar = el("div", "history-project-tabs");
+  for (const b of buckets) {
+    const tab = el("button", "history-project-tab", b.label);
+    tab.type = "button";
+    tab.title = b.label;
+    tab.dataset.projectRoot = b.project_root;
+    if (b.project_root === selected) tab.classList.add("active");
+    tab.addEventListener("click", () => onSelect(b.project_root));
+    bar.appendChild(tab);
+  }
+  return bar;
+}
+
 function renderHistoryList() {
   const list = $("history-list");
   list.innerHTML = "";
@@ -1237,12 +1325,38 @@ function renderHistoryList() {
     }
     return;
   }
+
+  // Group sessions by project_root and resolve the active tab. The default
+  // selection is recomputed on every render so a project that disappears from
+  // the index (its sessions were archived elsewhere) does not leave a dead key
+  // in `state.historySelectedProjectRoot` that would filter out everything.
+  const buckets = groupHistorySessionsByProjectRoot(sessions);
+  const selected = pickDefaultHistoryProjectRoot(
+    buckets, state.historySelectedProjectRoot);
+  state.historySelectedProjectRoot = selected;
+
+  // >= 2 buckets: show the tab bar. A single-bucket strip would add visual
+  // weight without offering a real choice, so we suppress it in that case.
+  if (buckets.length >= 2) {
+    list.appendChild(renderHistoryProjectTabs(buckets, selected, (root) => {
+      if (state.historySelectedProjectRoot === root) return;
+      state.historySelectedProjectRoot = root;
+      renderHistoryList();
+    }));
+  }
+
   // Have sessions: when a refresh is in flight, prepend a lightweight bar so
   // the user knows the list is being updated without hiding existing entries.
   if (state.historyIndexLoading) {
     list.appendChild(el("p", "history-refreshing", "正在刷新历史…"));
   }
-  for (const s of sessions) {
+
+  // Render only the cards belonging to the selected bucket. An out-of-band
+  // selected key (no matching bucket) collapses to an empty session list
+  // rather than leaking unrelated cards.
+  const visibleBucket = buckets.find((b) => b.project_root === selected);
+  const visibleSessions = visibleBucket ? visibleBucket.sessions : [];
+  for (const s of visibleSessions) {
     const card = el("div", "history-item");
     if (s.flow_id === state.selectedHistoryId) card.classList.add("selected");
 
@@ -5148,6 +5262,10 @@ if (typeof module !== "undefined" && module.exports) {
     renderHistoryList,
     historyListEmptyState,
     daemonConnected,
+    UNKNOWN_PROJECT_ROOT,
+    UNKNOWN_PROJECT_ROOT_LABEL,
+    groupHistorySessionsByProjectRoot,
+    pickDefaultHistoryProjectRoot,
     state,
   };
 }
