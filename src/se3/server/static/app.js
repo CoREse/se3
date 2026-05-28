@@ -2507,27 +2507,32 @@ function setChipHeader(chip, name, header, status) {
   // Build header inside `chip` from scratch — keeps detail panel children
   // attached as siblings, only the head row is regenerated.
   while (chip.firstChild) {
-    // Stop once we hit the appended detail panel; the head is always the
-    // initial set of `<span>` children.
+    // Stop once we hit the right-aligned toggle or the appended detail
+    // panel; the head is always the initial set of `<span>` children, and
+    // the toggle / panel are siblings appended later by attachChipDetail.
     const child = chip.firstChild;
-    if (child.classList && child.classList.contains("tool-marker-details")) {
+    if (child.classList && (
+      child.classList.contains("tool-marker-toggle") ||
+      child.classList.contains("tool-marker-details")
+    )) {
       break;
     }
     chip.removeChild(child);
   }
   const glyph = status === "success" ? "✓"
     : status === "failure" ? "✗" : "";
-  // Insert head as the first children, ahead of any details panel.
+  // Insert head as the first children, ahead of any toggle / details panel.
+  // Head row order is: name → detail → glyph → (toggle, panel).
   const refNode = chip.firstChild;
-  if (glyph) {
-    const g = el("span", "tool-marker-glyph", glyph);
-    chip.insertBefore(g, refNode);
-  }
   const n = el("span", "tool-marker-name", name);
   chip.insertBefore(n, refNode);
   if (header) {
     const d = el("span", "tool-marker-detail", header);
     chip.insertBefore(d, refNode);
+  }
+  if (glyph) {
+    const g = el("span", "tool-marker-glyph", glyph);
+    chip.insertBefore(g, refNode);
   }
 }
 
@@ -2558,13 +2563,18 @@ function upgradeChipToFailure(chip, header, detail) {
 }
 
 function attachChipDetail(chip, detail, expanded) {
-  // Remove any prior details panel so an upgrade replaces, not duplicates.
+  // Remove any prior toggle + details panel so an upgrade replaces them
+  // rather than duplicating (the chip head row is rebuilt by setChipHeader
+  // which already leaves any later siblings — the toggle / panel — alone).
   const old = Array.from(chip.children).filter(
-    (c) => c.classList && c.classList.contains("tool-marker-details"));
+    (c) => c.classList && (
+      c.classList.contains("tool-marker-details") ||
+      c.classList.contains("tool-marker-toggle")
+    ));
   for (const o of old) chip.removeChild(o);
   if (!detail) return;
   const panel = el("div", "tool-marker-details" + (expanded ? " expanded" : " folded"));
-  const toggle = el("button", "tool-marker-details-toggle",
+  const toggle = el("button", "tool-marker-toggle",
     expanded ? "hide details" : "details");
   toggle.type = "button";
   const body = el("div", "tool-marker-details-body");
@@ -2586,7 +2596,11 @@ function attachChipDetail(chip, detail, expanded) {
       catch (_) { /* RAF / DOM optional in test env */ }
     }
   });
-  panel.append(toggle, body);
+  panel.appendChild(body);
+  // toggle sits as a direct child of the chip head row (right-aligned via
+  // .tool-marker-toggle's `margin-left:auto`); the details panel follows it
+  // and wraps to its own row via flex-basis:100%.
+  chip.appendChild(toggle);
   chip.appendChild(panel);
 }
 

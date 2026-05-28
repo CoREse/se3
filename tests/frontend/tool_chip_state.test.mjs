@@ -295,6 +295,131 @@ export function registerToolChipStateTests(ctx) {
       "Edit detail panel does NOT fall back to the raw result string");
   });
 
+  // (f) -------------------------------------------------------------------
+  // Toggle reposition: the details toggle button MUST sit as a direct child
+  // of the chip's head row (right-aligned via `.tool-marker-toggle`'s
+  // `margin-left:auto` rule), and appear BEFORE the `.tool-marker-details`
+  // panel. The old layout buried the toggle inside the panel as a
+  // `.tool-marker-details-toggle`, producing a lonely second-row "details"
+  // button under a dashed separator.
+  check("(f) details toggle is a chip-head sibling positioned before .tool-marker-details", () => {
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      partialRecord("[Read: src/foo.py:0-200]", 1, "s1", "implement", 0, {
+        tool_use_id: "tu_f",
+      }),
+      partialRecord("[Read ✓ src/foo.py:0-200 · 3 lines]", 2, "s1", "implement", 0, {
+        tool_use_id: "tu_f",
+        is_error: false,
+        tool_detail: {
+          kind: "read_text",
+          file_path: "src/foo.py",
+          text: "a\nb\nc",
+          start_line: 1,
+          truncated: false,
+        },
+      }),
+    ], false);
+    const chips = findAll(container, "tool-marker");
+    assert.equal(chips.length, 1);
+    const chip = chips[0];
+    // Toggle is a DIRECT child of the chip (not nested inside details panel).
+    const toggle = chip.children.find(
+      (c) => c.classList && c.classList.contains("tool-marker-toggle"));
+    assert.ok(toggle, "toggle is a direct chip child");
+    // Legacy class name must not be used at the chip layer.
+    const legacyToggle = findOne(chip, "tool-marker-details-toggle");
+    assert.equal(legacyToggle, null,
+      "old .tool-marker-details-toggle class must be retired");
+    // The details panel is a sibling of the toggle, also a direct chip child.
+    const panel = chip.children.find(
+      (c) => c.classList && c.classList.contains("tool-marker-details"));
+    assert.ok(panel, "details panel is a direct chip child");
+    // DOM order: toggle appears BEFORE the details panel in the chip's
+    // children list so the chip-head row terminates with the right-aligned
+    // toggle and the panel wraps to its own row underneath.
+    const toggleIdx = chip.children.indexOf(toggle);
+    const panelIdx = chip.children.indexOf(panel);
+    assert.ok(toggleIdx >= 0 && panelIdx >= 0);
+    assert.ok(toggleIdx < panelIdx,
+      `toggle must precede details panel in chip children, got toggle=${toggleIdx} panel=${panelIdx}`);
+    // Head DOM order: name → detail header → glyph → toggle → panel.
+    const name = chip.children.find(
+      (c) => c.classList && c.classList.contains("tool-marker-name"));
+    const detail = chip.children.find(
+      (c) => c.classList && c.classList.contains("tool-marker-detail"));
+    const glyph = chip.children.find(
+      (c) => c.classList && c.classList.contains("tool-marker-glyph"));
+    const nameIdx = chip.children.indexOf(name);
+    const detailIdx = chip.children.indexOf(detail);
+    const glyphIdx = chip.children.indexOf(glyph);
+    assert.ok(nameIdx >= 0 && detailIdx >= 0 && glyphIdx >= 0);
+    assert.ok(nameIdx < detailIdx && detailIdx < glyphIdx && glyphIdx < toggleIdx,
+      "head row order is name → detail → glyph → toggle");
+    // The panel body still occupies the wrapping second row; toggle no
+    // longer lives inside the panel.
+    const body = findOne(panel, "tool-marker-details-body");
+    assert.ok(body, "panel still hosts the details body");
+    assert.equal(findOne(panel, "tool-marker-toggle"), null,
+      "toggle is NOT nested inside the details panel anymore");
+  });
+
+  // (f2) ------------------------------------------------------------------
+  // Successive upgrades (in-flight → success → failure) must NOT leave behind
+  // old toggles or details panels. attachChipDetail wipes both before
+  // re-appending fresh nodes.
+  check("(f2) re-upgrade replaces toggle and details panel without duplicates", () => {
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      partialRecord("[Edit: src/bar.py]", 1, "s1", "implement", 0, {
+        tool_use_id: "tu_re",
+      }),
+      partialRecord("[Edit ✓ src/bar.py (3 lines → 3 lines)]", 2, "s1", "implement", 0, {
+        tool_use_id: "tu_re",
+        is_error: false,
+        tool_detail: {
+          kind: "text", text: "first result",
+        },
+      }),
+      partialRecord("[Edit ✗ ENOENT src/bar.py]", 3, "s1", "implement", 0, {
+        tool_use_id: "tu_re",
+        is_error: true,
+        tool_detail: { kind: "text", text: "ENOENT: no such file" },
+      }),
+    ], false);
+    const chips = findAll(container, "tool-marker");
+    assert.equal(chips.length, 1);
+    const chip = chips[0];
+    const toggles = chip.children.filter(
+      (c) => c.classList && c.classList.contains("tool-marker-toggle"));
+    const panels = chip.children.filter(
+      (c) => c.classList && c.classList.contains("tool-marker-details"));
+    assert.equal(toggles.length, 1,
+      "exactly one toggle remains after successive upgrades");
+    assert.equal(panels.length, 1,
+      "exactly one details panel remains after successive upgrades");
+    // Final state is failure → panel default-expanded.
+    assert.equal(panels[0].classList.contains("expanded"), true);
+  });
+
+  // (f3) ------------------------------------------------------------------
+  // In-flight chips have no detail data, so no toggle should appear.
+  check("(f3) in-flight chip without detail renders no toggle", () => {
+    const container = document.createElement("div");
+    app.renderConversation(container, [
+      partialRecord("[Read: src/foo.py:0-200]", 1, "s1", "implement", 0, {
+        tool_use_id: "tu_inflight",
+      }),
+    ], false);
+    const chips = findAll(container, "tool-marker");
+    assert.equal(chips.length, 1);
+    const chip = chips[0];
+    assert.equal(findOne(chip, "tool-marker-toggle"), null,
+      "no toggle when there is no detail to disclose");
+    assert.equal(findOne(chip, "tool-marker-details"), null,
+      "no details panel when there is no detail to disclose");
+  });
+
   // (e2) ------------------------------------------------------------------
   check("(e2) final raw_json with mismatched / orphan tool_result still produces one chip per id", () => {
     // Defensive shape: a tool_result with no preceding tool_use becomes its own
