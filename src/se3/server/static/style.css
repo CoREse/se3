@@ -1511,6 +1511,20 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   flex: 1 1 auto;
   min-width: 0;
 }
+/* Nested dict inside a kv row: indented one level, rendered as another
+ * column of kv rows so a `step.outputs` field that is itself a dict
+ * still reads as fields rather than a single multi-line JSON literal.
+ * `flex-basis:100%` forces a wrap so the nested block starts on its own
+ * line below the key, rather than competing for horizontal space with it. */
+.step-report__kv-nested {
+  flex-basis: 100%;
+  margin-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-left: 1px dashed rgba(160, 160, 160, 0.25);
+  padding-left: 8px;
+}
 
 .step-report__group-id {
   font-weight: 700;

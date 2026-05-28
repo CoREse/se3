@@ -4114,6 +4114,19 @@ function renderAssistantProcessInline(content, norm) {
   return inline;
 }
 
+// True for any non-empty plain object (dict). Used by the unregistered-step
+// fallback below to detect a `step.outputs` payload the LLM pasted as a JSON
+// region in the assistant body — for confirm / project_summary and any other
+// step type not registered in `STEP_ASSISTANT_RENDERERS`, the body has no
+// per-step field schema we could match, so the only signal is "looks like an
+// outputs dict". Arrays and scalars are rejected so a top-level tool-call
+// arg array does not get folded into a kv card.
+function isPlainOutputsDict(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  for (const _ in value) return true;
+  return false;
+}
+
 function renderAssistantBubble(content, norm) {
   const frag = document.createDocumentFragment();
   const stepType = String(norm.stepType || "").toLowerCase();
@@ -4140,11 +4153,46 @@ function renderAssistantBubble(content, norm) {
     resultWrap.appendChild(structured);
     frag.appendChild(resultWrap);
     frag.appendChild(makeAssistantRawToggle(content, norm));
-  } else {
-    // No result JSON this turn (or the body could not be structured): keep the
-    // full thinking process shown inline, never folded or contracted to empty.
-    frag.appendChild(renderAssistantProcessInline(content, norm));
+    return frag;
   }
+
+  // Generic fallback for step types NOT registered in STEP_ASSISTANT_RENDERERS
+  // (confirm / project_summary / etc.). Without this branch the body — which
+  // for these steps is a structured `step.outputs` dict the LLM emitted as a
+  // ```json``` fence — falls through to renderAssistantProcessInline →
+  // renderMarkdown and surfaces as a raw JSON code block, burying field names
+  // inside JSON syntax. By scoping the fallback to !renderer we preserve the
+  // existing "registered step + structured null = inline thinking" behavior
+  // (a turn whose only JSON is tool calls must not be folded into an empty
+  // toggle), so the fix does not overlap with structured rendering.
+  if (!renderer) {
+    const extracted = extractResultJson(content, isPlainOutputsDict);
+    if (extracted) {
+      const body = renderGenericOutputs(extracted.value);
+      if (body && body.childNodes && body.childNodes.length) {
+        const resultWrap = el("div", "assistant-result assistant-result--generic");
+        // Narrative prose (every JSON region already excised) goes above the
+        // rendered fields; tool-marker chips are preserved via the shared
+        // narrative helper.
+        if (extracted.narrative) {
+          const narWrap = el("div", "assistant-narrative");
+          for (const node of renderNarrativeNodes(extracted.narrative, norm)) {
+            narWrap.appendChild(node);
+          }
+          if (narWrap.childNodes.length) resultWrap.appendChild(narWrap);
+        }
+        resultWrap.appendChild(body);
+        frag.appendChild(resultWrap);
+        // Single "查看原始" entry holds this turn's original record.
+        frag.appendChild(makeAssistantRawToggle(content, norm));
+        return frag;
+      }
+    }
+  }
+
+  // No result JSON this turn (or the body could not be structured): keep the
+  // full thinking process shown inline, never folded or contracted to empty.
+  frag.appendChild(renderAssistantProcessInline(content, norm));
   return frag;
 }
 
@@ -4510,34 +4558,75 @@ function reportList(items, formatItem) {
   return ul;
 }
 
+// -- generic outputs renderer (parity with step_renderers.py:_default_render) -
+//
+// Render an arbitrary `step.outputs` dict as field-by-field key/value rows:
+//   * string > 300 chars → preview(first 200, newlines→spaces) + " (N chars)"
+//     suffix (matches the CLI _default_render behavior so the user sees the
+//     same head-of-line truncation across CLI and web).
+//   * nested dict → recursively rendered indented one level via a
+//     `.step-report__kv-nested` wrapper, so the user can read the shape
+//     instead of staring at a single multi-line JSON literal.
+//   * everything else → safeStringify.
+// Returns a DocumentFragment carrying either a `.step-report__kv` block or
+// nothing when `outputs` is empty / not a plain object — the caller decides
+// how to surface "empty" so the same helper can back both `renderDefaultReport`
+// (which prefers a "(step produced no outputs)" hint) and the assistant-bubble
+// fallback (which never falls in here without a non-empty dict).
+function renderGenericOutputs(outputs) {
+  const frag = document.createDocumentFragment();
+  if (!outputs || typeof outputs !== "object" || Array.isArray(outputs)) return frag;
+  const entries = Object.entries(outputs);
+  if (!entries.length) return frag;
+  const kv = el("div", "step-report__kv");
+  for (const [k, v] of entries) {
+    kv.appendChild(renderGenericKvRow(k, v));
+  }
+  frag.appendChild(kv);
+  return frag;
+}
+
+function renderGenericKvRow(k, v) {
+  const r = el("div", "step-report__kv-row");
+  r.append(el("span", "step-report__kv-k", k));
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    // Nested dict — render one indented level of key/value rows so the user
+    // can read field names instead of a flat JSON dump.
+    const nested = el("div", "step-report__kv-nested");
+    const subEntries = Object.entries(v);
+    if (subEntries.length) {
+      for (const [nk, nv] of subEntries) {
+        nested.appendChild(renderGenericKvRow(nk, nv));
+      }
+    }
+    r.appendChild(nested);
+  } else {
+    const valEl = el("span", "step-report__kv-v");
+    if (typeof v === "string" && v.length > 300) {
+      valEl.textContent = v.slice(0, 200).replace(/\n/g, " ") + `… (${v.length} chars)`;
+      valEl.title = `${v.length} chars`;
+    } else if (typeof v === "string") {
+      valEl.textContent = v;
+    } else {
+      valEl.textContent = safeStringify(v);
+    }
+    r.appendChild(valEl);
+  }
+  return r;
+}
+
 // -- default fallback (parity with step_renderers.py:_default_render) -------
 
 function renderDefaultReport(step, outputs) {
   const frag = document.createDocumentFragment();
-  const entries = outputs && typeof outputs === "object"
-    ? Object.entries(outputs) : [];
-  if (!entries.length) {
+  const hasFields = outputs && typeof outputs === "object" &&
+    !Array.isArray(outputs) && Object.keys(outputs).length > 0;
+  if (!hasFields) {
     frag.appendChild(reportEmpty("(step produced no outputs)"));
   } else {
-    const kv = el("div", "step-report__kv");
-    for (const [k, v] of entries) {
-      const r = el("div", "step-report__kv-row");
-      r.append(el("span", "step-report__kv-k", k));
-      const valEl = el("span", "step-report__kv-v");
-      if (typeof v === "string" && v.length > 300) {
-        valEl.textContent = v.slice(0, 200).replace(/\n/g, " ") + "…";
-        valEl.title = `${v.length} chars`;
-      } else if (typeof v === "string") {
-        valEl.textContent = v;
-      } else {
-        valEl.textContent = safeStringify(v);
-      }
-      r.appendChild(valEl);
-      kv.appendChild(r);
-    }
-    frag.appendChild(kv);
+    frag.appendChild(renderGenericOutputs(outputs));
   }
-  const status = step.status && String(step.status).toLowerCase();
+  const status = step && step.status && String(step.status).toLowerCase();
   if (status && status !== "completed" && status !== "running") {
     frag.appendChild(el("div", "step-report__muted", "Status: " + status));
   }
@@ -5374,6 +5463,9 @@ if (typeof module !== "undefined" && module.exports) {
     renderDiscoveryAssistant,
     makeStructuredAssistantRenderer,
     renderAssistantBubble,
+    renderGenericOutputs,
+    renderDefaultReport,
+    isPlainOutputsDict,
     extractStructuredJson,
     extractResultJson,
     collectJsonRegions,

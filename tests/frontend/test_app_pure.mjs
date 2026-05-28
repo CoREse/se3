@@ -1861,6 +1861,118 @@ check("assistant no-result turn shows thinking inline, not folded, no toggles", 
     "查看原始 must not show for a no-result turn — thinking is shown inline");
 });
 
+// -- Q1 fallback: unregistered step types (confirm / project_summary / …) --
+// Without the fallback, step types NOT in STEP_ASSISTANT_RENDERERS fall through
+// to renderAssistantProcessInline → renderMarkdown, which turns a ```json fence
+// in the body into a raw code block — burying field names inside JSON syntax.
+// The fix routes such bodies through `renderGenericOutputs` so the user sees
+// `key: value` rows just like the CLI `_default_render`.
+
+check("Q1 generic fallback: confirm step renders kv rows, not a raw json fence", () => {
+  const outputs = {
+    decision: "approved",
+    reasoning: "All checks passed and the plan looks correct.",
+  };
+  const content = "Reviewing the plan now.\n```json\n" +
+    JSON.stringify(outputs) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "confirm"));
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "expected an assistant-result wrapper for the confirm fallback");
+  assert.ok(result.classList.contains("assistant-result--generic"),
+    "the generic-fallback variant class is applied");
+  // Field rows present.
+  const rows = findAll(result, "step-report__kv-row");
+  assert.ok(rows.length >= 2, `expected ≥2 kv rows, got ${rows.length}`);
+  const keys = findAll(result, "step-report__kv-k").map((n) => n.textContent);
+  assert.ok(keys.includes("decision"));
+  assert.ok(keys.includes("reasoning"));
+  // The ```json fence body must NOT have surfaced as a raw markdown code
+  // block under the bubble.
+  assert.equal(findOne(row, "md-code"), null,
+    "unregistered step must not render the outputs as a raw ```json fence");
+  // Narrative is preserved above the kv block.
+  assert.ok(result.textContent.includes("Reviewing the plan now."),
+    "narrative prose above the JSON is kept");
+  // Single 查看原始 fold is still attached so the original record is reachable.
+  assert.ok(findOne(row, "raw-toggle"), "查看原始 fold present for fallback path");
+});
+
+check("Q1 generic fallback: registered analyze step is NOT routed through fallback", () => {
+  // analyze IS in STEP_RESULT_FIELDS; a body with no matching result field
+  // (pure tool-call) must keep the existing inline thinking behavior. The
+  // fallback's `!renderer` guard prevents it from re-rendering the tool call
+  // as kv rows.
+  const content = "Let me list files.\n```json\n" +
+    JSON.stringify({ command: "ls -la", description: "list files" }) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "analyze"));
+  assert.equal(findOne(row, "assistant-result"), null,
+    "fallback must not fire for registered analyze step");
+  assert.equal(findOne(row, "raw-toggle"), null,
+    "no 查看原始 for a registered-step tool-call-only turn");
+  const inline = findOne(row, "assistant-process-inline");
+  assert.ok(inline, "thinking inline preserved for registered step");
+});
+
+check("Q1 generic fallback: prose-only unregistered step keeps thinking inline", () => {
+  // No JSON region in the body → fallback returns null → inline thinking
+  // is shown, never a kv card.
+  const content = "Just discussing the change. No JSON here.";
+  const row = app.renderConversationRecord(asstNorm(content, "confirm"));
+  assert.equal(findOne(row, "assistant-result"), null,
+    "no kv card without a JSON region");
+  const inline = findOne(row, "assistant-process-inline");
+  assert.ok(inline, "inline thinking is rendered");
+  assert.ok(inline.textContent.includes("Just discussing"),
+    "narrative is preserved");
+});
+
+// -- Q1 renderGenericOutputs unit checks ------------------------------------
+
+check("Q1 renderGenericOutputs: long string preview includes char count", () => {
+  const longStr = "x".repeat(450);
+  const frag = app.renderGenericOutputs({ field: longStr });
+  const valEl = findOne(frag, "step-report__kv-v");
+  assert.ok(valEl, "value element rendered");
+  assert.ok(valEl.textContent.includes("(450 chars)"),
+    "preview suffix shows the original length");
+  assert.ok(valEl.textContent.length < longStr.length,
+    "the long value was previewed, not fully inlined");
+});
+
+check("Q1 renderGenericOutputs: nested dict expands one indented level", () => {
+  const frag = app.renderGenericOutputs({
+    top: "scalar",
+    nested: { inner_a: "v1", inner_b: 42 },
+  });
+  const nested = findOne(frag, "step-report__kv-nested");
+  assert.ok(nested, "nested-dict wrapper rendered");
+  const innerKeys = findAll(nested, "step-report__kv-k").map((n) => n.textContent);
+  assert.ok(innerKeys.includes("inner_a"));
+  assert.ok(innerKeys.includes("inner_b"));
+});
+
+check("Q1 renderGenericOutputs: empty / non-dict input produces no rows", () => {
+  assert.equal(findOne(app.renderGenericOutputs({}), "step-report__kv-row"), null);
+  assert.equal(findOne(app.renderGenericOutputs(null), "step-report__kv-row"), null);
+  assert.equal(findOne(app.renderGenericOutputs([1, 2]), "step-report__kv-row"), null);
+});
+
+check("Q1 renderDefaultReport reuses renderGenericOutputs for non-empty outputs", () => {
+  const step = { step_type: "confirm", status: "completed" };
+  const frag = app.renderDefaultReport(step, { decision: "approve" });
+  // Empty hint must not surface — outputs are non-empty.
+  assert.equal(findOne(frag, "step-report__empty"), null);
+  // Field rows came from renderGenericOutputs.
+  const keys = findAll(frag, "step-report__kv-k").map((n) => n.textContent);
+  assert.deepEqual(keys, ["decision"]);
+});
+
+check("Q1 renderDefaultReport still shows empty hint for empty outputs", () => {
+  const frag = app.renderDefaultReport({ step_type: "unknown" }, {});
+  assert.ok(findOne(frag, "step-report__empty"),
+    "empty-outputs hint preserved");
+});
+
 // ---------------------------------------------------------------------------
 // Message-paradigm §2: in-progress (2a/2c) vs. final (2b) assistant turns
 // ---------------------------------------------------------------------------
