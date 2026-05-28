@@ -44,6 +44,30 @@ const state = {
   connStale: false,       // true while the WS is down — data may be stale
   detailLoaded: false,    // true once the open flow's detail has rendered
   detailFetchFailures: 0, // consecutive /api/flows/{id} failures for the view
+
+  // ---- Send-button settle-after-ws bookkeeping ----
+  // After a successful Send POST, the textarea stays enabled but the Send
+  // button stays disabled until a ws-pushed flowDetail snapshot proves the
+  // backend saw the submission (pending_calls diff or a matching
+  // interjection_event). The 8s fallback timer below force-unlocks if no ws
+  // update lands in that window — UX degrades to "you can press Send again,
+  // but the daemon may already have queued the prior submit".
+  pendingSendSettleKey: null,        // identifier of the in-flight Send
+  pendingSendTimer: null,            // 8s fallback timer id
+  pendingSendBaselineCallIds: null,  // Set of call_ids at send time
+  // Synthetic interject chip: held in `pending` visual state from Send press
+  // through to the moment the real interjection chip materializes (then it
+  // is replaced) or the 8s fallback fires.
+  flowSyntheticInterjectPending: false,
+
+  // ---- interjection_event lifecycle tracking ----
+  // Per-call_id phase ("pending" | "consumed") learned from ws
+  // `interjection_event` messages. Chips read this to apply
+  // `.state-pending` / `.state-consumed` visual states. Toasts dedup against
+  // `interjectionToastsSeen` so a STATUS_UPDATE that re-emits the same phase
+  // (e.g. on reconnect replay) does not spam the user.
+  interjectionPhases: {},
+  interjectionToastsSeen: {},
 };
 
 let ws = null;
@@ -207,6 +231,8 @@ function connect() {
       applyHistoryIndex(msg.sessions);
     } else if (msg.type === "history_data" && msg.flow_id) {
       applyHistoryData(msg);
+    } else if (msg.type === "interjection_event" && msg.call_id && msg.phase) {
+      applyInterjectionEvent(msg);
     }
   };
 
@@ -233,6 +259,107 @@ function scheduleReconnect() {
 // ---------------------------------------------------------------------------
 // State application
 // ---------------------------------------------------------------------------
+
+// Handle a ws-pushed `interjection_event`. Two phases are emitted by the
+// server: `pending` when an interjection call file first appears in a flow's
+// pending_calls; `consumed` when it disappears (run loop drained it).
+// We record the phase per call_id so chip rendering can show pending /
+// consumed visual states, dedup toasts against `interjectionToastsSeen`,
+// and settle a pending Send if it was waiting on this very call_id.
+function applyInterjectionEvent(msg) {
+  const callId = String(msg.call_id || "");
+  const phase = String(msg.phase || "");
+  if (!callId || !phase) return;
+  // Only events for the open flow are user-visible; toasts for other flows
+  // would be spurious. Still record the phase though — switching to another
+  // flow tab later should reflect the latest phase state.
+  state.interjectionPhases[callId] = phase;
+
+  const isOpenFlow = !!(msg.flow_id && state.selectedFlowId === msg.flow_id);
+
+  // Dedup: one toast per (call_id, phase) — phase transitions only fire
+  // once each, but a STATUS_UPDATE replay on reconnect would otherwise
+  // double-toast.
+  const toastKey = callId + ":" + phase;
+  if (isOpenFlow && !state.interjectionToastsSeen[toastKey]) {
+    state.interjectionToastsSeen[toastKey] = true;
+    if (phase === "pending") {
+      showToast("info", "插话已送达,等待 flow 消费");
+    } else if (phase === "consumed") {
+      showToast("success", "插话已被消费");
+    }
+  }
+
+  // Either phase confirms the daemon side observed our work — settle a
+  // matching pending Send. We match on call_id (a real call's id), and we
+  // also settle synthetic interject submissions as soon as a pending event
+  // fires for any interjection in this flow (the synthetic "id" never
+  // matches a real call_id, so use that broader trigger).
+  if (isOpenFlow) {
+    if (state.pendingSendSettleKey) {
+      if (
+        state.pendingSendSettleKey === callId ||
+        (state.pendingSendSettleKey === "synthetic-interject" &&
+          phase === "pending")
+      ) {
+        settlePendingSend();
+      }
+    }
+    // The real chip has materialized via this `pending` event — drop the
+    // synthetic placeholder so the user sees the real one in its place.
+    if (phase === "pending" && state.flowSyntheticInterjectPending) {
+      state.flowSyntheticInterjectPending = false;
+      state.flowInterjectRequested = false;
+      if (state.flowReplyTargetId === "interjection:new") {
+        state.flowReplyTargetId = null;
+      }
+    }
+  }
+
+  // Re-render so the chip picks up the new state-pending / state-consumed
+  // class. `state.flowDetail` may be null right after open/reset; in that
+  // case the next refreshFlowDetail will rebuild from scratch.
+  if (isOpenFlow && state.flowDetail) {
+    renderInterventions(state.flowDetail);
+  }
+}
+
+// Clear pending-Send bookkeeping and re-enable the Send button via a
+// renderInterventions pass. Safe to call when no send is pending (no-op).
+function settlePendingSend() {
+  if (!state.pendingSendSettleKey && !state.pendingSendTimer) return;
+  state.pendingSendSettleKey = null;
+  state.pendingSendBaselineCallIds = null;
+  if (state.pendingSendTimer) {
+    clearTimeout(state.pendingSendTimer);
+    state.pendingSendTimer = null;
+  }
+  if (state.flowDetail) renderInterventions(state.flowDetail);
+}
+
+// Called on every ws-driven refresh of `state.flowDetail`. Compares the
+// fresh pending_calls call_id set against the baseline captured at Send
+// time; any diff means the backend has observed the submission and we can
+// release the Send button.
+function maybeSettleViaPendingCallsDiff(freshFlow) {
+  if (!state.pendingSendSettleKey || !state.pendingSendBaselineCallIds) return;
+  const fresh = new Set(
+    (freshFlow && freshFlow.pending_calls ? freshFlow.pending_calls : [])
+      .map((c) => c && c.call_id)
+      .filter(Boolean),
+  );
+  const baseline = state.pendingSendBaselineCallIds;
+  if (fresh.size !== baseline.size) {
+    settlePendingSend();
+    return;
+  }
+  for (const id of fresh) {
+    if (!baseline.has(id)) {
+      settlePendingSend();
+      return;
+    }
+  }
+}
 
 function applyMachines(machines) {
   state.machines = machines;
@@ -524,6 +651,9 @@ async function refreshFlowDetail() {
     state.detailLoaded = true;
     state.flowDetail = data.flow;
     state.flowMachineId = data.machine_id || null;
+    // Settle a Send waiting on ws confirmation BEFORE rendering, so the
+    // chip-bar rebuild reflects the unlocked state in one pass.
+    maybeSettleViaPendingCallsDiff(data.flow);
     renderFlowSidebar(data.flow, data.machine_id);
     renderInterventions(data.flow);
   } catch (_) {
