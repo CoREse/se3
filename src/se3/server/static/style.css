@@ -1042,17 +1042,18 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
 .tool-marker.failure .tool-marker-name,
 .tool-marker.failure .tool-marker-glyph { color: #e55858; }
 
-/* Detail panel (collapsible). `details` toggle button toggles `.expanded`
- * vs `.folded`. Failure chips default to `.expanded` so the error is
- * visible without an extra click. */
+/* Detail panel (collapsible). The toggle button is a chip-head sibling
+ * (right-aligned via `margin-left:auto`); the panel itself sits on its own
+ * row underneath via `flex-basis:100%`. Failure chips default to
+ * `.expanded` so the error is visible without an extra click. */
 .tool-marker-details {
   flex-basis: 100%;
   margin-top: 4px;
-  border-top: 1px dashed rgba(160, 160, 160, 0.3);
-  padding-top: 4px;
 }
 .tool-marker-details.folded .tool-marker-details-body { display: none; }
-.tool-marker-details-toggle {
+.tool-marker-toggle {
+  margin-left: auto;
+  flex-shrink: 0;
   background: transparent;
   border: 1px solid rgba(160, 160, 160, 0.4);
   border-radius: 3px;
@@ -1062,9 +1063,8 @@ select:focus, textarea:focus { outline: 1px solid var(--accent); }
   font-size: 10.5px;
   padding: 1px 6px;
 }
-.tool-marker-details-toggle:hover { color: var(--fg); }
+.tool-marker-toggle:hover { color: var(--fg); }
 .tool-marker-details-body {
-  margin-top: 4px;
   font-size: 11.5px;
 }
 .tool-marker-details-fallback {
