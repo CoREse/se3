@@ -270,6 +270,12 @@ def _handle_confirm_pause(
     Returns:
         True if response was written, None if user chose to exit.
     """
+    # Drain any web-pushed interjections that arrived while this confirm gate
+    # was waiting. The structured approve/feedback JSON payload is left
+    # unchanged — the history-write + task_description recompose performed
+    # inside the drain is what makes the interjection visible to later steps.
+    _drain_pending_interjections(flow, project_root, persistence)
+
     step_to_review_id = current_step.inputs.get("step_to_review_id")
     step_to_review_type = current_step.inputs.get("step_to_review_type", "unknown")
 
@@ -505,15 +511,27 @@ def _drain_pending_interjections(
     flow: FlowInstance,
     project_root: Path,
     persistence: PersistenceManager,
-) -> None:
-    """Consume daemon-queued interjection call files at a step boundary.
+) -> List[str]:
+    """Consume daemon-queued interjection call files.
 
     The web console pushes mid-flow instructions through the server as
     ``MSG_INTERJECT_FLOW``; the daemon turns each into an ``interjection``-kind
-    call file under ``se3/calls/``. Here, at the top of the run loop, those
-    files are drained and folded into ``flow.state.context["user_interjections"]``
-    using the same entry shape as a Ctrl-C interjection, then the current
-    step's ``task_description`` is recomposed so the instruction takes effect.
+    call file under ``se3/calls/``. This function drains those files and:
+
+    * folds each into ``flow.state.context["user_interjections"]`` using the
+      same entry shape as a Ctrl-C interjection;
+    * recomposes the current step's ``task_description`` so the instruction
+      takes effect on the next run / iteration;
+    * writes a ``{role: 'user', kind: 'interjection', ...}`` line into the
+      current step's history jsonl so ``se3 history show`` and the web
+      console see the user's bubble at the point the interjection arrived;
+    * when the current step is PAUSED (waiting on a prompt response), also
+      buffers each drained text into
+      ``flow.state.context['_pending_paused_interjections']`` so the reply
+      path can prefix it onto the next user message to the LLM.
+
+    Returns the list of drained text strings (oldest first); callers can use
+    the return value to gate display / log messages.
     """
     from ..engine import interaction_calls
 
@@ -521,12 +539,13 @@ def _drain_pending_interjections(
         drained = interaction_calls.drain_interjection_requests(project_root)
     except Exception:  # pragma: no cover - defensive; never break the flow
         logger.exception("Failed to drain pending interjection requests")
-        return
+        return []
     if not drained:
-        return
+        return []
 
     from datetime import datetime
 
+    from ..engine.chat_history import record_user_interjection
     from ..engine.state_machine import _effective_task_description_base
     from ..engine.task_description import compose_task_description_with_interjections
 
@@ -534,6 +553,8 @@ def _drain_pending_interjections(
     current_step = flow.state.get_current_step()
     step_id = ""
     step_type_value = ""
+    attempt = 0
+    is_paused = False
     if current_step is not None:
         step_id = current_step.step_id
         step_type_value = (
@@ -541,20 +562,59 @@ def _drain_pending_interjections(
             if hasattr(current_step.step_type, "value")
             else str(current_step.step_type)
         )
+        try:
+            attempt = int(current_step.inputs.get("retry_count", 0) or 0)
+        except (TypeError, ValueError):
+            attempt = 0
+        is_paused = current_step.status == StepStatus.PAUSED
 
+    # The PAUSED reply-prefix buffer is only populated while the flow is
+    # actively waiting on a prompt response. Non-PAUSED steps already pick up
+    # interjections via the task_description recomposition below, so buffering
+    # them here would double-inject as a ``[interjection: ...]`` prefix on a
+    # later unrelated PAUSED step.
+    paused_buffer: Optional[List[str]] = (
+        flow.state.context.setdefault("_pending_paused_interjections", [])
+        if is_paused
+        else None
+    )
+
+    drained_texts: List[str] = []
     for item in drained:
+        text = item["text"]
+        drained_texts.append(text)
         interjections.append(
             {
-                "text": item["text"],
+                "text": text,
                 "step_id": step_id,
                 "step_type": step_type_value,
                 "timestamp": datetime.now().isoformat(),
                 "source": "web-console",
             }
         )
+        if paused_buffer is not None:
+            paused_buffer.append(text)
+        # Persist the user's bubble to the per-step jsonl so history viewers
+        # and the web console see the interjection in chronological order
+        # alongside the LLM turns.
+        if step_id:
+            try:
+                record_user_interjection(
+                    project_root=project_root,
+                    flow_id=flow.flow_id,
+                    step_id=step_id,
+                    step_type=step_type_value,
+                    text=text,
+                    attempt=attempt,
+                    source="web-console",
+                )
+            except Exception:  # pragma: no cover - never break the flow
+                logger.exception(
+                    "Failed to write user interjection to history jsonl"
+                )
         get_console().print(
             f"[dim]Interjection received from web console: "
-            f"{item['text'][:80]}[/dim]"
+            f"{text[:80]}[/dim]"
         )
 
     if current_step is not None:
@@ -565,6 +625,34 @@ def _drain_pending_interjections(
             )
         )
     persistence.save_flow(flow)
+    return drained_texts
+
+
+def _consume_paused_interjection_prefix(flow: FlowInstance) -> str:
+    """Return + clear the buffered ``[interjection: ...]\\n`` prefix.
+
+    PAUSED reply paths (discovery continue, etc.) call this just before
+    handing the user's reply to the LLM as the next user turn. The buffer is
+    populated by :func:`_drain_pending_interjections` only when the current
+    step is PAUSED; entries are joined in arrival order, each rendered as a
+    ``[interjection: <text>]`` line. An empty buffer (or a flow that has no
+    ``state.context`` shape, such as a unit-test stub) yields the empty
+    string so the reply is unchanged.
+    """
+    try:
+        context = flow.state.context
+    except AttributeError:
+        return ""
+    buffer = context.get("_pending_paused_interjections")
+    if not buffer:
+        return ""
+    lines = [f"[interjection: {text}]" for text in buffer if str(text).strip()]
+    # Clear the buffer regardless — even an all-whitespace queue should not
+    # carry over into the next reply.
+    context["_pending_paused_interjections"] = []
+    if not lines:
+        return ""
+    return "\n".join(lines) + "\n"
 
 
 def handle_resume_interactive(project_root: Path) -> Optional[str]:
@@ -822,6 +910,7 @@ def _await_terminal_or_web(
     history: Any = None,
     strip: bool = True,
     poll_interval: float = 0.4,
+    tick_callback: Optional[Callable[[], None]] = None,
 ) -> Tuple[str, Optional[str]]:
     """Wait for whichever comes first: a terminal answer or a web response.
 
@@ -885,6 +974,7 @@ def _await_terminal_or_web(
         history=history,
         strip=strip,
         poll_interval=poll_interval,
+        tick_callback=tick_callback,
     )
 
 
@@ -896,6 +986,7 @@ def _await_terminal_or_web_interactive(
     history: Any,
     strip: bool,
     poll_interval: float,
+    tick_callback: Optional[Callable[[], None]] = None,
 ) -> Tuple[str, Optional[str]]:
     """TTY dual-wait: a prompt_toolkit read raced against a web-response poller.
 
@@ -942,6 +1033,17 @@ def _await_terminal_or_web_interactive(
 
         def _poll() -> None:
             while not stop.is_set():
+                # Every poll tick: drain any web-pushed interjections that
+                # arrived while the operator was at the prompt, so they are
+                # persisted to history + buffered for the LLM prefix without
+                # waiting for the user to type a reply.
+                if tick_callback is not None:
+                    try:
+                        tick_callback()
+                    except Exception:  # pragma: no cover - never break the wait
+                        logger.exception(
+                            "Interjection tick callback raised; ignoring"
+                        )
                 resp = _read_discovery_response(call_file)
                 if resp is not None:
                     web_holder["value"] = resp
@@ -1040,6 +1142,15 @@ def _handle_discovery_pause(
         title="Discovery Pause"
     )
 
+    # Drain on entry so any interjection queued before this pause is folded
+    # in immediately, ahead of the dual-wait that blocks the operator.
+    if project_root is not None:
+        _drain_pending_interjections(flow, project_root, persistence)
+
+    def _tick() -> None:
+        if project_root is not None:
+            _drain_pending_interjections(flow, project_root, persistence)
+
     call_file = _maybe_write_discovery_call(flow, current_step, project_root)
     try:
         while True:
@@ -1049,6 +1160,7 @@ def _handle_discovery_pause(
                 prompt_message="Enter your response (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
                 history=prompt_history,
                 strip=True,
+                tick_callback=_tick,
             )
 
             if source == _DISCOVERY_SRC_CANCEL:
@@ -1068,6 +1180,17 @@ def _handle_discovery_pause(
                 )
                 continue
 
+            # Prefix any buffered interjections (collected by drain ticks while
+            # we waited) onto this user reply so the next LLM call sees them
+            # ahead of the actual reply text.
+            prefix = (
+                _consume_paused_interjection_prefix(flow)
+                if project_root is not None
+                else ""
+            )
+            if prefix:
+                persistence.save_flow(flow)
+                return prefix + value
             return value
     finally:
         _cleanup_discovery_call(call_file)
@@ -1116,6 +1239,13 @@ def _handle_discovery_programmatic_confirm(
     """
     # The confirmation panel was already displayed by the discovery handler
     # or _restore_discovery_display.
+    if project_root is not None:
+        _drain_pending_interjections(flow, project_root, persistence)
+
+    def _tick() -> None:
+        if project_root is not None:
+            _drain_pending_interjections(flow, project_root, persistence)
+
     call_file = _maybe_write_discovery_call(flow, current_step, project_root)
     try:
         while True:
@@ -1125,6 +1255,7 @@ def _handle_discovery_programmatic_confirm(
                 prompt_message="Type 1 to confirm and proceed, or type your questions/feedback to continue discovery (Ctrl+D or Esc+Enter to finish, Ctrl+C to cancel):",
                 history=prompt_history,
                 strip=False,
+                tick_callback=_tick,
             )
 
             if source == _DISCOVERY_SRC_CANCEL:
@@ -1177,6 +1308,14 @@ def _handle_discovery_programmatic_confirm(
             get_console().print(
                 "[dim]Captured input — continuing discovery with your feedback.[/dim]"
             )
+            prefix = (
+                _consume_paused_interjection_prefix(flow)
+                if project_root is not None
+                else ""
+            )
+            if prefix:
+                persistence.save_flow(flow)
+                return prefix + user_input
             return user_input
     finally:
         _cleanup_discovery_call(call_file)
@@ -1320,6 +1459,12 @@ def _handle_discovery_pause_noninteractive(
     sentinel, or :data:`_DISCOVERY_AWAITING` when the flow must pause to wait
     for a web response.
     """
+    # Drain any queued interjections regardless of whether a response has
+    # landed yet. This is the non-interactive path's only opportunity to
+    # consume an interjection before the flow exits PAUSED — the main run
+    # loop's drain only fires on the next --resume.
+    _drain_pending_interjections(flow, project_root, persistence)
+
     call_path = current_step.outputs.get("discovery_call_file")
     if call_path:
         call_file = Path(call_path)
@@ -1350,6 +1495,12 @@ def _handle_discovery_pause_noninteractive(
                 return _PROGRAMMATIC_CONFIRM
             # Any other answer keeps refining the requirements.
             current_step.outputs.pop("awaiting_programmatic_confirm", None)
+        # Prefix any buffered interjections onto the user reply before it
+        # becomes the next LLM user message.
+        prefix = _consume_paused_interjection_prefix(flow)
+        if prefix:
+            persistence.save_flow(flow)
+            return prefix + response
         return response
     # No outstanding call — write one and pause for a web response.
     call_file = _write_discovery_call(flow, current_step, project_root)

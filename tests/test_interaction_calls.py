@@ -319,6 +319,75 @@ def test_drain_missing_calls_dir_returns_empty(tmp_path: Path):
     assert interaction_calls.drain_interjection_requests(tmp_path) == []
 
 
+def test_drain_unlinks_call_file_and_writes_served_sibling(tmp_path: Path):
+    """Drain seals each consumed call via write-response-then-delete:
+    a sibling .response is written first, then the .json file is unlinked.
+    """
+    calls = tmp_path / "se3" / "calls"
+    interaction_calls.write_interjection_request(
+        calls, "do the thing", flow_id="f1", call_id="ij_remove"
+    )
+    call_path = calls / "ij_remove.json"
+    response_path = calls / "ij_remove.response"
+    assert call_path.exists()
+    assert not response_path.exists()
+
+    drained = interaction_calls.drain_interjection_requests(tmp_path)
+    assert len(drained) == 1
+    # Call file is gone; sibling .response remains as the consumed marker.
+    assert not call_path.exists()
+    assert response_path.exists()
+    body = json.loads(response_path.read_text(encoding="utf-8"))
+    assert body.get("consumed") is True
+    assert body.get("served_by") == "run_loop"
+    assert "served_at" in body
+
+
+def test_drain_returns_step_id_and_step_type_when_present(tmp_path: Path):
+    """Drained entries surface step_id / step_type from the call context."""
+    calls = tmp_path / "se3" / "calls"
+    interaction_calls.write_call(
+        calls,
+        kind=interaction_calls.CALL_KIND_INTERJECTION,
+        prompt="add a log line",
+        text="add a log line",
+        context={"flow_id": "f1", "step_id": "04_impl_abc", "step_type": "implement"},
+        call_id="ij_ctx",
+    )
+    drained = interaction_calls.drain_interjection_requests(tmp_path)
+    assert len(drained) == 1
+    item = drained[0]
+    assert item["text"] == "add a log line"
+    assert item["step_id"] == "04_impl_abc"
+    assert item["step_type"] == "implement"
+    assert "created_at" in item
+
+
+def test_drain_legacy_call_without_context_step_fields_empty(tmp_path: Path):
+    """Legacy interjection calls (no context.step_id) still drain cleanly."""
+    calls = tmp_path / "se3" / "calls"
+    interaction_calls.write_interjection_request(
+        calls, "legacy text", flow_id="", call_id="ij_legacy"
+    )
+    drained = interaction_calls.drain_interjection_requests(tmp_path)
+    assert len(drained) == 1
+    assert drained[0]["text"] == "legacy text"
+    assert drained[0]["step_id"] == ""
+    assert drained[0]["step_type"] == ""
+
+
+def test_drain_second_pass_is_idempotent_after_unlink(tmp_path: Path):
+    """A second drain pass finds nothing — the unlink ensures non-repeat."""
+    calls = tmp_path / "se3" / "calls"
+    interaction_calls.write_interjection_request(
+        calls, "once", flow_id="f1", call_id="ij_once"
+    )
+    first = interaction_calls.drain_interjection_requests(tmp_path)
+    assert len(first) == 1
+    second = interaction_calls.drain_interjection_requests(tmp_path)
+    assert second == []
+
+
 # --------------------------------------------------------------------------
 # interaction_calls: write_retry_decision_call
 # --------------------------------------------------------------------------

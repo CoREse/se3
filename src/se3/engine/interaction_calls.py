@@ -208,13 +208,29 @@ def write_interjection_request(
 
 
 def drain_interjection_requests(project_root: Any) -> List[Dict[str, Any]]:
-    """``se3 run`` step-boundary consumer for queued interjections.
+    """``se3 run`` consumer for queued interjections (any-time, not only at
+    step boundaries).
 
     Scans ``se3/calls/`` for unanswered :data:`CALL_KIND_INTERJECTION` call
-    files, returns their entries (oldest first, each a dict with ``text`` and
-    ``call_id``), and marks every consumed file by writing a sibling
-    ``.response`` so it is never drained twice. Empty-text requests are
-    consumed and skipped rather than returned.
+    files and returns one dict per drained item (oldest first) carrying
+    ``text`` / ``call_id`` / ``step_id`` / ``step_type`` / ``created_at``.
+    ``step_id`` / ``step_type`` come from the call file's ``context`` (or
+    legacy top-level fields) when the producer populated them; otherwise
+    they degrade to empty strings. ``created_at`` is the original call-file
+    timestamp so downstream history writers can preserve the chronological
+    order in which the user interjected.
+
+    Each consumed call file is sealed using a *write-response-then-delete*
+    protocol: a sibling ``.response`` carrying
+    ``{consumed: True, served_at: <ts>, served_by: 'run_loop'}`` is written
+    first so the daemon aggregator's sibling-response judgement immediately
+    classifies it as consumed during the brief window both files coexist;
+    then the original ``.json`` call file is unlinked so a subsequent
+    enumeration cannot find it again. The protocol is idempotent — once
+    unlinked, a re-drain is a no-op; if a previous drain crashed between
+    the write and the unlink, the next drain finishes the unlink half and
+    skips. Empty-text requests follow the same path with a
+    ``skipped: 'empty'`` marker.
     """
     directory = calls_dir_for(project_root)
     if not directory.is_dir():
@@ -227,15 +243,58 @@ def drain_interjection_requests(project_root: Any) -> List[Dict[str, Any]]:
         if data is None or classify_kind(data) != CALL_KIND_INTERJECTION:
             continue
         if read_response(path) is not None:
-            continue  # already consumed
-        text = str(data.get("text") or data.get("prompt") or "").strip()
-        if not text:
-            write_response(path, {"consumed": True, "skipped": "empty"})
+            # Sibling response already present (a prior drain crashed mid-
+            # protocol, or the daemon answered out-of-band): finish the
+            # unlink half so the aggregator no longer enumerates the call.
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
             continue
+        text = str(data.get("text") or data.get("prompt") or "").strip()
+        context = data.get("context") if isinstance(data.get("context"), dict) else {}
+        if not text:
+            write_response(
+                path,
+                {
+                    "consumed": True,
+                    "skipped": "empty",
+                    "served_at": time.time(),
+                    "served_by": "run_loop",
+                },
+            )
+            try:
+                Path(path).unlink()
+            except OSError:
+                pass
+            continue
+        step_id = context.get("step_id") or data.get("step_id") or ""
+        step_type = context.get("step_type") or data.get("step_type") or ""
         drained.append(
-            {"text": text, "call_id": data.get("call_id") or path.stem}
+            {
+                "text": text,
+                "call_id": data.get("call_id") or path.stem,
+                "step_id": str(step_id) if step_id else "",
+                "step_type": str(step_type) if step_type else "",
+                "created_at": data.get("created_at"),
+            }
         )
-        write_response(path, {"consumed": True, "consumed_at": time.time()})
+        # Write the sibling .response BEFORE unlinking the call file so the
+        # aggregator's sibling-response check classifies it as consumed during
+        # the brief window both files coexist; then unlink the call file so a
+        # second drain pass cannot re-enumerate it.
+        write_response(
+            path,
+            {
+                "consumed": True,
+                "served_at": time.time(),
+                "served_by": "run_loop",
+            },
+        )
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
     return drained
 
 
