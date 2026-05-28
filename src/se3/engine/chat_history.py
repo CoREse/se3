@@ -58,6 +58,12 @@ class ChatMessage:
     # ``fix_iteration=0``. ``format_history_for_retry`` treats 0 as a
     # wildcard so legacy jsonl is not filtered out after upgrade.
     fix_iteration: int = 0
+    # Optional record kind tag. Empty for normal LLM user/assistant turns;
+    # set to ``"interjection"`` by :func:`record_user_interjection` to mark
+    # mid-flow user inserts that ``se3 history show`` keeps visible as user
+    # bubbles but ``format_history_for_retry`` skips so they are not
+    # re-fed to the LLM as part of the retry prompt.
+    kind: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -152,6 +158,69 @@ def record_response(
         fix_iteration=fix_iteration,
     )
     _append_message(project_root, flow_id, step_id, msg)
+
+
+def record_user_interjection(
+    project_root: Path,
+    flow_id: str,
+    step_id: str,
+    step_type: str,
+    text: str,
+    attempt: int = 0,
+    source: str = "webui",
+) -> None:
+    """Record a user interjection (mid-flow inserted instruction).
+
+    Appends a single ``{role: 'user', kind: 'interjection', ...}`` JSON line
+    to ``se3/history/{flow_id}/{step_id}.jsonl``. Schema-wise the line is a
+    superset of :class:`ChatMessage` plus the extra ``source`` field, so
+    :func:`get_step_history` deserializes it back into a regular user
+    ChatMessage (with ``kind == "interjection"``) and ``se3 history show``
+    renders it as a user bubble; :func:`format_history_for_retry` explicitly
+    skips ``kind == "interjection"`` records so the LLM retry prompt does
+    not re-ingest user interjections as additional `[User Prompt]:` turns.
+
+    Missing ``flow_id`` or ``step_id`` is treated as a soft no-op (logged at
+    warning level) rather than raising — callers in the daemon / engine
+    cannot always guarantee both are populated yet at write time.
+
+    Uses :func:`record_step_event` / :func:`record_stream_progress` style
+    semantics: ``mkdir`` + a single whole-line ``write`` so a concurrent
+    append cannot interleave bytes mid-line, wrapped in an ``OSError`` guard
+    so a write failure never breaks the calling step.
+    """
+    if not flow_id or not step_id:
+        logger.warning(
+            "record_user_interjection: missing flow_id=%r or step_id=%r; "
+            "dropping interjection of length %d",
+            flow_id,
+            step_id,
+            len(text or ""),
+        )
+        return
+    record = {
+        "role": "user",
+        "kind": "interjection",
+        "content": text,
+        "raw_json": [],
+        "source": source,
+        "step_id": step_id,
+        "step_type": step_type,
+        "timestamp": datetime.now().isoformat(),
+        "attempt": attempt,
+    }
+    path = _history_file(project_root, flow_id, step_id)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except OSError as exc:
+        logger.warning(
+            "Failed to record user interjection for %s/%s: %s",
+            flow_id,
+            step_id,
+            exc,
+        )
 
 
 def record_step_event(
@@ -741,11 +810,22 @@ def format_history_for_retry(
     # Filter by fix-iteration boundary. ``fix_iteration == 0`` is a wildcard
     # match (covers legacy data and non-fix-loop callers); otherwise must
     # match the in-flight iteration exactly.
+    #
+    # Also skip user-interjection records (``kind == "interjection"``):
+    # these are mid-flow user inserts written by
+    # :func:`record_user_interjection`. They are kept in the on-disk jsonl
+    # so ``se3 history show`` and the web console can render them as user
+    # bubbles, but they MUST NOT be re-fed into the LLM as additional
+    # ``[User Prompt]:`` turns in the retry context — the interjection
+    # has already been composed into the current step's effective
+    # ``task_description`` via the user-interjection-handling subsystem,
+    # so re-injecting it here would duplicate the instruction.
     filtered = [
         m for m in session.messages
-        if m.fix_iteration == 0
-        or current_fix_iteration == 0
-        or m.fix_iteration == current_fix_iteration
+        if (m.fix_iteration == 0
+            or current_fix_iteration == 0
+            or m.fix_iteration == current_fix_iteration)
+        and getattr(m, "kind", "") != "interjection"
     ]
     if not filtered:
         return None
