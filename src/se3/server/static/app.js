@@ -44,7 +44,42 @@ const state = {
   connStale: false,       // true while the WS is down — data may be stale
   detailLoaded: false,    // true once the open flow's detail has rendered
   detailFetchFailures: 0, // consecutive /api/flows/{id} failures for the view
+
+  // ---- Send-button settle-after-ws bookkeeping ----
+  // After a successful Send POST, the textarea stays enabled but the Send
+  // button stays disabled until a ws-pushed flowDetail snapshot proves the
+  // backend saw the submission (pending_calls diff or a matching
+  // interjection_event). The 8s fallback timer below force-unlocks if no ws
+  // update lands in that window — UX degrades to "you can press Send again,
+  // but the daemon may already have queued the prior submit".
+  pendingSendSettleKey: null,        // identifier of the in-flight Send
+  pendingSendTimer: null,            // 8s fallback timer id
+  pendingSendBaselineCallIds: null,  // Set of call_ids at send time
+  // Synthetic interject chip: held in `pending` visual state from Send press
+  // through to the moment the real interjection chip materializes (then it
+  // is replaced) or the 8s fallback fires.
+  flowSyntheticInterjectPending: false,
+
+  // ---- interjection_event lifecycle tracking ----
+  // Per-call_id phase ("pending" | "consumed") learned from ws
+  // `interjection_event` messages. Chips read this to apply
+  // `.state-pending` / `.state-consumed` visual states. Toasts dedup against
+  // `interjectionToastsSeen` so a STATUS_UPDATE that re-emits the same phase
+  // (e.g. on reconnect replay) does not spam the user.
+  interjectionPhases: {},
+  interjectionToastsSeen: {},
+  // Consumed afterimages: when an interjection chip transitions to
+  // `consumed` it normally also vanishes from `pending_calls` on the same
+  // ws cycle, so the user never gets to see the consumed visual state.
+  // We keep a tiny `{call_id, prompt, until_ts}` record around for a few
+  // seconds so `computeInterventions` can re-inject a faded consumed chip
+  // — the user gets a brief pending → consumed transition before the chip
+  // disappears for good.
+  interjectionConsumedAfterimages: [],
 };
+
+// Lifetime of a consumed-state afterimage chip in milliseconds.
+const INTERJECTION_CONSUMED_AFTERIMAGE_MS = 3000;
 
 let ws = null;
 let reconnectAttempts = 0;
@@ -207,6 +242,8 @@ function connect() {
       applyHistoryIndex(msg.sessions);
     } else if (msg.type === "history_data" && msg.flow_id) {
       applyHistoryData(msg);
+    } else if (msg.type === "interjection_event" && msg.call_id && msg.phase) {
+      applyInterjectionEvent(msg);
     }
   };
 
@@ -233,6 +270,133 @@ function scheduleReconnect() {
 // ---------------------------------------------------------------------------
 // State application
 // ---------------------------------------------------------------------------
+
+// Handle a ws-pushed `interjection_event`. Two phases are emitted by the
+// server: `pending` when an interjection call file first appears in a flow's
+// pending_calls; `consumed` when it disappears (run loop drained it).
+// We record the phase per call_id so chip rendering can show pending /
+// consumed visual states, dedup toasts against `interjectionToastsSeen`,
+// and settle a pending Send if it was waiting on this very call_id.
+function applyInterjectionEvent(msg) {
+  const callId = String(msg.call_id || "");
+  const phase = String(msg.phase || "");
+  if (!callId || !phase) return;
+  // Only events for the open flow are user-visible; toasts for other flows
+  // would be spurious. Still record the phase though — switching to another
+  // flow tab later should reflect the latest phase state.
+  state.interjectionPhases[callId] = phase;
+
+  const isOpenFlow = !!(msg.flow_id && state.selectedFlowId === msg.flow_id);
+
+  // Dedup: one toast per (call_id, phase) — phase transitions only fire
+  // once each, but a STATUS_UPDATE replay on reconnect would otherwise
+  // double-toast.
+  const toastKey = callId + ":" + phase;
+  if (isOpenFlow && !state.interjectionToastsSeen[toastKey]) {
+    state.interjectionToastsSeen[toastKey] = true;
+    if (phase === "pending") {
+      showToast("info", "插话已送达,等待 flow 消费");
+    } else if (phase === "consumed") {
+      showToast("success", "插话已被消费");
+    }
+  }
+
+  // On `consumed`, register a brief afterimage so the chip visually
+  // transitions through `state-consumed` before vanishing. The chip is
+  // about to drop out of `pending_calls` on the next STATUS_UPDATE; without
+  // this the user would see the chip flicker away with no transition.
+  if (phase === "consumed" && isOpenFlow) {
+    state.interjectionConsumedAfterimages = (
+      state.interjectionConsumedAfterimages || []
+    ).filter((a) => a.callId !== callId);
+    state.interjectionConsumedAfterimages.push({
+      callId: callId,
+      prompt: String(msg.text || ""),
+      untilTs: Date.now() + INTERJECTION_CONSUMED_AFTERIMAGE_MS,
+    });
+    // Schedule a re-render after the afterimage expires so the chip is
+    // removed even if no further ws message arrives in the interim.
+    setTimeout(() => {
+      if (state.selectedFlowId !== msg.flow_id) return;
+      // Drop expired afterimages.
+      const now = Date.now();
+      state.interjectionConsumedAfterimages = (
+        state.interjectionConsumedAfterimages || []
+      ).filter((a) => a.untilTs > now);
+      if (state.flowDetail) renderInterventions(state.flowDetail);
+    }, INTERJECTION_CONSUMED_AFTERIMAGE_MS + 100);
+  }
+
+  // Either phase confirms the daemon side observed our work — settle a
+  // matching pending Send. We match on call_id (a real call's id), and we
+  // also settle synthetic interject submissions as soon as a pending event
+  // fires for any interjection in this flow (the synthetic "id" never
+  // matches a real call_id, so use that broader trigger).
+  if (isOpenFlow) {
+    if (state.pendingSendSettleKey) {
+      if (
+        state.pendingSendSettleKey === callId ||
+        (state.pendingSendSettleKey === "synthetic-interject" &&
+          phase === "pending")
+      ) {
+        settlePendingSend();
+      }
+    }
+    // The real chip has materialized via this `pending` event — drop the
+    // synthetic placeholder so the user sees the real one in its place.
+    if (phase === "pending" && state.flowSyntheticInterjectPending) {
+      state.flowSyntheticInterjectPending = false;
+      state.flowInterjectRequested = false;
+      if (state.flowReplyTargetId === "interjection:new") {
+        state.flowReplyTargetId = null;
+      }
+    }
+  }
+
+  // Re-render so the chip picks up the new state-pending / state-consumed
+  // class. `state.flowDetail` may be null right after open/reset; in that
+  // case the next refreshFlowDetail will rebuild from scratch.
+  if (isOpenFlow && state.flowDetail) {
+    renderInterventions(state.flowDetail);
+  }
+}
+
+// Clear pending-Send bookkeeping and re-enable the Send button via a
+// renderInterventions pass. Safe to call when no send is pending (no-op).
+function settlePendingSend() {
+  if (!state.pendingSendSettleKey && !state.pendingSendTimer) return;
+  state.pendingSendSettleKey = null;
+  state.pendingSendBaselineCallIds = null;
+  if (state.pendingSendTimer) {
+    clearTimeout(state.pendingSendTimer);
+    state.pendingSendTimer = null;
+  }
+  if (state.flowDetail) renderInterventions(state.flowDetail);
+}
+
+// Called on every ws-driven refresh of `state.flowDetail`. Compares the
+// fresh pending_calls call_id set against the baseline captured at Send
+// time; any diff means the backend has observed the submission and we can
+// release the Send button.
+function maybeSettleViaPendingCallsDiff(freshFlow) {
+  if (!state.pendingSendSettleKey || !state.pendingSendBaselineCallIds) return;
+  const fresh = new Set(
+    (freshFlow && freshFlow.pending_calls ? freshFlow.pending_calls : [])
+      .map((c) => c && c.call_id)
+      .filter(Boolean),
+  );
+  const baseline = state.pendingSendBaselineCallIds;
+  if (fresh.size !== baseline.size) {
+    settlePendingSend();
+    return;
+  }
+  for (const id of fresh) {
+    if (!baseline.has(id)) {
+      settlePendingSend();
+      return;
+    }
+  }
+}
 
 function applyMachines(machines) {
   state.machines = machines;
@@ -380,6 +544,15 @@ function openFlowView(flowId) {
   state.flowReplyTargetId = null;
   state.flowInterjectRequested = false;
   state.flowInterjectFlowId = flowId;
+  state.flowSyntheticInterjectPending = false;
+  if (state.pendingSendTimer) {
+    clearTimeout(state.pendingSendTimer);
+    state.pendingSendTimer = null;
+  }
+  state.pendingSendSettleKey = null;
+  state.pendingSendBaselineCallIds = null;
+  state.interjectionPhases = {};
+  state.interjectionToastsSeen = {};
   state.detailLoaded = false;
   state.detailFetchFailures = 0;
 
@@ -424,6 +597,18 @@ function doCloseFlowView() {
   state.flowReplyTargetId = null;
   state.flowInterjectRequested = false;
   state.flowInterjectFlowId = null;
+  // Reset all Send-lifecycle bookkeeping so the next opened flow starts
+  // fresh — a stale pendingSendSettleKey could otherwise leave Send
+  // disabled the moment a chip appears in the next flow.
+  state.flowSyntheticInterjectPending = false;
+  if (state.pendingSendTimer) {
+    clearTimeout(state.pendingSendTimer);
+    state.pendingSendTimer = null;
+  }
+  state.pendingSendSettleKey = null;
+  state.pendingSendBaselineCallIds = null;
+  state.interjectionPhases = {};
+  state.interjectionToastsSeen = {};
   $("flow-view").classList.add("hidden");
   if (detailPollTimer) {
     clearInterval(detailPollTimer);
@@ -524,6 +709,9 @@ async function refreshFlowDetail() {
     state.detailLoaded = true;
     state.flowDetail = data.flow;
     state.flowMachineId = data.machine_id || null;
+    // Settle a Send waiting on ws confirmation BEFORE rendering, so the
+    // chip-bar rebuild reflects the unlocked state in one pass.
+    maybeSettleViaPendingCallsDiff(data.flow);
     renderFlowSidebar(data.flow, data.machine_id);
     renderInterventions(data.flow);
   } catch (_) {
@@ -660,22 +848,39 @@ function normalizeKind(kind) {
 function computeInterventions(flow) {
   const entries = pendingCalls(flow).map((c, i) => {
     const kind = normalizeKind(c.kind);
+    const callId = String(c.call_id || "");
+    // The interjection lifecycle phase comes from ws `interjection_event`
+    // messages tracked in `state.interjectionPhases`. Default phase: a
+    // freshly-aggregated pending_calls entry is implicitly `pending` so the
+    // chip picks up the pending visual state even before the matching
+    // event arrives (e.g. on a slow server).
+    let phase = null;
+    if (kind === "interjection") {
+      phase = state.interjectionPhases[callId] || "pending";
+    }
     return {
-      id: "call:" + (c.call_id || ("idx" + i)),
+      id: "call:" + (callId || ("idx" + i)),
       kind: kind,
-      callId: String(c.call_id || ""),
+      callId: callId,
       prompt: String(c.prompt || c.message || ""),
       context: c.context != null ? c.context : null,
       options: Array.isArray(c.options) ? c.options : [],
       synthetic: false,
+      phase: phase,
     };
   });
   const hasInterjection = entries.some((e) => e.kind === "interjection");
-  if (
-    state.flowInterjectRequested &&
+  // Render the synthetic interjection chip when:
+  //   - the user has opted into interject mode (clicked the ✎ button), OR
+  //   - a synthetic chip is held in pending state after a Send press while
+  //     we wait for the real interjection chip to materialize via ws.
+  // Either way it is suppressed once a real interjection already exists in
+  // pending_calls (the real chip displaces it).
+  const wantSynthetic =
+    (state.flowInterjectRequested || state.flowSyntheticInterjectPending) &&
     isActiveFlow(flow) &&
-    !hasInterjection
-  ) {
+    !hasInterjection;
+  if (wantSynthetic) {
     entries.push({
       id: "interjection:new",
       kind: "interjection",
@@ -684,6 +889,31 @@ function computeInterventions(flow) {
       context: null,
       options: [],
       synthetic: true,
+      phase: state.flowSyntheticInterjectPending ? "pending" : null,
+    });
+  }
+  // Re-inject brief afterimage chips for interjections that were just
+  // consumed and dropped from pending_calls. They render with
+  // `.state-consumed` so the user sees a pending → consumed transition.
+  // The afterimage is skipped when the same call_id is somehow still in
+  // pending_calls (defensive) so we never duplicate.
+  const existingCallIds = new Set(
+    entries.map((e) => e.callId).filter(Boolean),
+  );
+  const now = Date.now();
+  for (const a of state.interjectionConsumedAfterimages || []) {
+    if (a.untilTs <= now) continue;
+    if (existingCallIds.has(a.callId)) continue;
+    entries.push({
+      id: "call:" + a.callId,
+      kind: "interjection",
+      callId: a.callId,
+      prompt: a.prompt || "",
+      context: null,
+      options: [],
+      synthetic: false,
+      phase: "consumed",
+      afterimage: true,
     });
   }
   return entries;
@@ -702,8 +932,12 @@ function computeInterventions(flow) {
 function reconcileReplyTarget(entries, currentTargetId) {
   if (!Array.isArray(entries) || !entries.length) return null;
   if (entries.some((e) => e.id === currentTargetId)) return currentTargetId;
-  const firstCall = entries.find((e) => !e.synthetic);
-  return (firstCall || entries[0]).id || null;
+  // Afterimage chips (consumed-state transitional placeholders) are not
+  // targetable — they exist purely for the visual transition.
+  const firstCall = entries.find((e) => !e.synthetic && !e.afterimage);
+  const firstActive = entries.find((e) => !e.afterimage);
+  const fallback = firstCall || firstActive;
+  return fallback ? fallback.id : null;
 }
 
 // Rebuild the intervention chip-bar (sits inside the docked reply form, above
@@ -790,6 +1024,12 @@ function renderInterventionChip(entry) {
   const chip = el("button", "intervention-chip kind-" + entry.kind);
   chip.type = "button";
   if (entry.id === state.flowReplyTargetId) chip.classList.add("selected");
+  // Interjection chips carry a lifecycle phase (`pending` or `consumed`)
+  // learned from ws `interjection_event` messages — and a synthetic chip
+  // that is currently mid-send is also marked pending. The class is purely
+  // visual; selection, click, and reply targeting all still work normally.
+  if (entry.phase === "pending") chip.classList.add("state-pending");
+  else if (entry.phase === "consumed") chip.classList.add("state-consumed");
 
   chip.append(
     el("span", "intervention-chip-icon", meta.icon),
@@ -803,13 +1043,19 @@ function renderInterventionChip(entry) {
     chip.title = entry.callId;
   }
 
-  chip.addEventListener("click", (e) => {
-    e.preventDefault();
-    if (state.flowReplyTargetId === entry.id) return;
-    state.flowReplyTargetId = entry.id;
-    if (state.flowDetail) renderInterventions(state.flowDetail);
-    $("flow-reply-input").focus();
-  });
+  // Afterimage chips (consumed-state visual transition placeholders) are
+  // not interactive — they are about to vanish on their own.
+  if (entry.afterimage) {
+    chip.disabled = true;
+  } else {
+    chip.addEventListener("click", (e) => {
+      e.preventDefault();
+      if (state.flowReplyTargetId === entry.id) return;
+      state.flowReplyTargetId = entry.id;
+      if (state.flowDetail) renderInterventions(state.flowDetail);
+      $("flow-reply-input").focus();
+    });
+  }
 
   return chip;
 }
@@ -849,6 +1095,9 @@ function updateReplyBox(flow) {
     // Textarea stays enabled so the user can always draft text — Send is the
     // gate. The placeholder reminds them they need a target to send.
     input.disabled = false;
+    // No target means Send is unconditionally disabled regardless of the
+    // pending-Send bookkeeping; an in-flight submission would have kept its
+    // target around in `entries` while it was still pending.
     submit.disabled = true;
     input.placeholder = isActiveFlow(flow)
       ? "暂无待处理项 — 你可以先草拟回复,或点击 ✎ 插话…"
@@ -870,7 +1119,10 @@ function updateReplyBox(flow) {
   const meta = KIND_META[target.kind] || KIND_META.call;
 
   input.disabled = false;
-  submit.disabled = false;
+  // Send is gated by both target presence and the ws-settle bookkeeping —
+  // a Send already in flight stays locked here even though the chip remains
+  // selected. `settlePendingSend()` (or the 8s fallback) clears the gate.
+  submit.disabled = !!state.pendingSendSettleKey;
   input.placeholder = target.kind === "interjection"
     ? "输入要插入运行流程的指令…"
     : "输入你的回复…";
@@ -998,10 +1250,48 @@ async function sendReply(flowId, target, text) {
   if (!flowId || !target || !text) return;
   const submit = $("flow-reply-submit");
   const input = $("flow-reply-input");
+  // Only the Send button locks — the textarea stays enabled at all times so
+  // the user can keep editing / drafting a follow-up while the request is in
+  // flight. Locking the textarea would block the docked-chat UX the spec
+  // calls for. Repeated Send clicks are debounced by the disabled button.
   submit.disabled = true;
-  // Lock the textarea while the request is in flight so the user does not
-  // edit a draft that is mid-send. Restored in the finally block.
-  input.disabled = true;
+
+  // Capture the call_id set as it stood at submit time. The Send button
+  // re-enables only after `maybeSettleViaPendingCallsDiff` sees a delta on
+  // a subsequent ws-driven refresh (or an `interjection_event` matches),
+  // proving the daemon has observed the submission. The 8s fallback below
+  // catches a stuck ws so the UI does not stall forever.
+  const flow = state.flowDetail;
+  state.pendingSendBaselineCallIds = new Set(
+    (flow && flow.pending_calls ? flow.pending_calls : [])
+      .map((c) => c && c.call_id)
+      .filter(Boolean),
+  );
+  state.pendingSendSettleKey =
+    target.kind === "interjection" && target.synthetic
+      ? "synthetic-interject"
+      : String(target.callId || target.id || "send");
+
+  if (state.pendingSendTimer) clearTimeout(state.pendingSendTimer);
+  state.pendingSendTimer = setTimeout(() => {
+    // ws delayed past 8s — force-unlock and tell the user the next press is
+    // possible but the daemon may already have queued the first one.
+    if (state.pendingSendSettleKey) {
+      showToast("info", "ws delayed, retry possible");
+    }
+    // Clear synthetic-pending visual state too — without ws confirmation
+    // we cannot tell if the real chip will ever arrive, so let the user
+    // start a fresh interject if they want.
+    if (state.flowSyntheticInterjectPending) {
+      state.flowSyntheticInterjectPending = false;
+      state.flowInterjectRequested = false;
+      if (state.flowReplyTargetId === "interjection:new") {
+        state.flowReplyTargetId = null;
+      }
+    }
+    settlePendingSend();
+  }, 8000);
+
   try {
     let resp;
     if (target.kind === "interjection") {
@@ -1019,12 +1309,15 @@ async function sendReply(flowId, target, text) {
     }
     if (resp.ok) {
       if (state.selectedFlowId === flowId) $("flow-reply-input").value = "";
-      // The interject opt-in is consumed by a successful send; the reply box
-      // should disarm until the user opts in again (or a new pending call
-      // arrives), matching the CLI parity contract.
+      // Keep the synthetic interject chip visible in `pending` visual state
+      // until the real interjection chip materializes (via ws push) — that
+      // gives the user immediate feedback that the submission is in flight
+      // without re-pinning the now-empty textarea to a fresh synthetic chip.
+      // The chip is replaced when `pending_calls` gains the real entry or
+      // when an `interjection_event` consumed event arrives; the 8s fallback
+      // above releases it if neither lands.
       if (target.kind === "interjection" && target.synthetic) {
-        state.flowInterjectRequested = false;
-        state.flowReplyTargetId = null;
+        state.flowSyntheticInterjectPending = true;
       }
       appendLocalReply(flowId, target, text);
       showToast("success", target.kind === "interjection"
@@ -1034,21 +1327,19 @@ async function sendReply(flowId, target, text) {
       const detail = await resp.json().catch(() => ({}));
       const message = detail.detail || `Server returned ${resp.status}.`;
       showToast("error", `Could not send: ${message}`);
+      // Error path — settle immediately so the user can retry without
+      // waiting on a ws update that will never come for this failed POST.
+      settlePendingSend();
     }
   } catch (_) {
     showToast("error", "Could not send — network error reaching the server.");
+    settlePendingSend();
   } finally {
-    // Re-sync the reply box: textarea returns to enabled (drafts always allowed),
-    // submit reflects whether a target still exists, and the inline Interject
-    // button refreshes its visibility/active state.
+    // Re-render so the chip-bar reflects the freshly-set
+    // `flowSyntheticInterjectPending` pending visual state; the Send button
+    // stays locked until `settlePendingSend()` clears `pendingSendSettleKey`.
     if (state.selectedFlowId === flowId && state.flowDetail) {
       renderInterventions(state.flowDetail);
-    } else {
-      // No flow detail to re-derive a target from (different flow selected, or
-      // detail not yet loaded). Drafts are always allowed, but Send must stay
-      // disabled because we cannot prove a sendable target exists.
-      input.disabled = false;
-      submit.disabled = true;
     }
   }
 }
