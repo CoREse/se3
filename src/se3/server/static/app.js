@@ -4667,6 +4667,179 @@ function renderAnalyzeReport(step, outputs) {
 
 // -- plan (parity with step_renderers.py:_render_plan) ----------------------
 
+// Field-by-field proposal renderer. Mirrors the CLI display.render_proposal
+// field order — summary / files_to_modify / files_to_create / rationale —
+// and expands per-item dicts (path/reason for modify, path/purpose for create)
+// into readable bullets instead of a single JSON pre block. Any leftover keys
+// fall through renderGenericOutputs so nothing is dropped.
+function renderProposalFields(proposal) {
+  const frag = document.createDocumentFragment();
+  if (!proposal || typeof proposal !== "object" || Array.isArray(proposal)) {
+    return frag;
+  }
+  const known = new Set();
+
+  const summary = proposal.summary;
+  if (typeof summary === "string" && summary) {
+    frag.appendChild(reportSection("Summary", summary));
+    known.add("summary");
+  }
+
+  const filesToModify = proposal.files_to_modify;
+  if (Array.isArray(filesToModify) && filesToModify.length) {
+    frag.appendChild(reportSection(
+      `Files to Modify (${filesToModify.length})`,
+      reportList(filesToModify, (f) => renderProposalFileItem(f, "reason")),
+    ));
+    known.add("files_to_modify");
+  }
+
+  const filesToCreate = proposal.files_to_create;
+  if (Array.isArray(filesToCreate) && filesToCreate.length) {
+    frag.appendChild(reportSection(
+      `Files to Create (${filesToCreate.length})`,
+      reportList(filesToCreate, (f) => renderProposalFileItem(f, "purpose")),
+    ));
+    known.add("files_to_create");
+  }
+
+  const rationale = proposal.rationale;
+  if (typeof rationale === "string" && rationale) {
+    frag.appendChild(reportSection("Rationale", rationale));
+    known.add("rationale");
+  }
+
+  const rest = {};
+  for (const [k, v] of Object.entries(proposal)) {
+    if (!known.has(k) && v !== null && v !== undefined && v !== "") {
+      rest[k] = v;
+    }
+  }
+  if (Object.keys(rest).length) {
+    frag.appendChild(reportSection("Other Fields", renderGenericOutputs(rest)));
+  }
+  return frag;
+}
+
+function renderProposalFileItem(f, descKey) {
+  if (f && typeof f === "object" && !Array.isArray(f)) {
+    const path = f.path || "";
+    const desc = f[descKey] || "";
+    const wrap = el("span", "step-report__file-row");
+    wrap.appendChild(el("span", "step-report__file-path", String(path)));
+    if (desc) {
+      wrap.appendChild(el("span", "step-report__muted", ` — ${desc}`));
+    }
+    return wrap;
+  }
+  return document.createTextNode(String(f));
+}
+
+// Field-by-field design renderer. Mirrors the CLI display.render_design
+// field order — overview / components / interfaces / decisions — expanding
+// list-of-dicts into name+description / name+signature+description /
+// decision+reason rows.
+function renderDesignFields(design) {
+  const frag = document.createDocumentFragment();
+  if (!design || typeof design !== "object" || Array.isArray(design)) {
+    return frag;
+  }
+  const known = new Set();
+
+  const overview = design.overview;
+  if (typeof overview === "string" && overview) {
+    frag.appendChild(reportSection("Overview", overview));
+    known.add("overview");
+  }
+
+  const components = design.components;
+  if (Array.isArray(components) && components.length) {
+    frag.appendChild(reportSection(
+      `Components (${components.length})`,
+      reportList(components, renderDesignComponentItem),
+    ));
+    known.add("components");
+  }
+
+  const interfaces = design.interfaces;
+  if (Array.isArray(interfaces) && interfaces.length) {
+    frag.appendChild(reportSection(
+      `Interfaces (${interfaces.length})`,
+      reportList(interfaces, renderDesignInterfaceItem),
+    ));
+    known.add("interfaces");
+  }
+
+  const decisions = design.decisions;
+  if (Array.isArray(decisions) && decisions.length) {
+    frag.appendChild(reportSection(
+      `Key Decisions (${decisions.length})`,
+      reportList(decisions, renderDesignDecisionItem),
+    ));
+    known.add("decisions");
+  }
+
+  const rest = {};
+  for (const [k, v] of Object.entries(design)) {
+    if (!known.has(k) && v !== null && v !== undefined && v !== "") {
+      rest[k] = v;
+    }
+  }
+  if (Object.keys(rest).length) {
+    frag.appendChild(reportSection("Other Fields", renderGenericOutputs(rest)));
+  }
+  return frag;
+}
+
+function renderDesignComponentItem(c) {
+  if (c && typeof c === "object" && !Array.isArray(c)) {
+    const wrap = el("span", "step-report__design-item");
+    const name = c.name || "";
+    if (name) wrap.appendChild(el("span", "step-report__design-name", String(name)));
+    const desc = c.description || c.responsibilities || "";
+    if (desc) {
+      wrap.appendChild(el("span", "step-report__muted",
+        (name ? " — " : "") + String(desc)));
+    }
+    return wrap;
+  }
+  return document.createTextNode(String(c));
+}
+
+function renderDesignInterfaceItem(i) {
+  if (i && typeof i === "object" && !Array.isArray(i)) {
+    const wrap = el("span", "step-report__design-item");
+    const name = i.name || "";
+    if (name) wrap.appendChild(el("span", "step-report__design-name", String(name)));
+    const sig = i.signature || "";
+    if (sig) {
+      wrap.appendChild(el("span", "step-report__design-sig", ` ${sig}`));
+    }
+    const desc = i.description || "";
+    if (desc) {
+      wrap.appendChild(el("span", "step-report__muted",
+        ((name || sig) ? " — " : "") + String(desc)));
+    }
+    return wrap;
+  }
+  return document.createTextNode(String(i));
+}
+
+function renderDesignDecisionItem(d) {
+  if (d && typeof d === "object" && !Array.isArray(d)) {
+    const wrap = el("span", "step-report__design-item");
+    const decision = d.decision || "";
+    if (decision) wrap.appendChild(el("span", "step-report__design-name", String(decision)));
+    const reason = d.reason || "";
+    if (reason) {
+      wrap.appendChild(el("span", "step-report__muted",
+        (decision ? " — " : "Reason: ") + String(reason)));
+    }
+    return wrap;
+  }
+  return document.createTextNode(String(d));
+}
+
 function renderPlanReport(step, outputs) {
   const frag = document.createDocumentFragment();
   const plan = outputs.plan && typeof outputs.plan === "object"
@@ -4675,13 +4848,25 @@ function renderPlanReport(step, outputs) {
   const design = plan.design;
   const groups = Array.isArray(outputs.task_groups) ? outputs.task_groups : [];
 
-  if (proposal && typeof proposal === "object") {
-    frag.appendChild(reportSection("Proposal", renderStructured(proposal)));
+  if (proposal && typeof proposal === "object" && !Array.isArray(proposal)) {
+    const body = renderProposalFields(proposal);
+    if (body.childNodes.length) {
+      frag.appendChild(reportSection("Proposal", body));
+    } else {
+      // Empty-object proposal: keep the section header so the user still sees
+      // it was present, but show the generic empty hint instead of a blank.
+      frag.appendChild(reportSection("Proposal", renderStructured(proposal)));
+    }
   } else if (typeof proposal === "string" && proposal) {
     frag.appendChild(reportSection("Proposal", proposal));
   }
-  if (design && typeof design === "object") {
-    frag.appendChild(reportSection("Design", renderStructured(design)));
+  if (design && typeof design === "object" && !Array.isArray(design)) {
+    const body = renderDesignFields(design);
+    if (body.childNodes.length) {
+      frag.appendChild(reportSection("Design", body));
+    } else {
+      frag.appendChild(reportSection("Design", renderStructured(design)));
+    }
   } else if (typeof design === "string" && design) {
     frag.appendChild(reportSection("Design", design));
   }
@@ -5458,6 +5643,9 @@ if (typeof module !== "undefined" && module.exports) {
     stepHeaderLabel,
     hasRawPayload,
     STEP_REPORT_RENDERERS,
+    renderProposalFields,
+    renderDesignFields,
+    renderPlanReport,
     STEP_ASSISTANT_RENDERERS,
     registerAssistantRenderer,
     renderDiscoveryAssistant,

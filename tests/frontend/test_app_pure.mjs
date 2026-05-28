@@ -1973,6 +1973,143 @@ check("Q1 renderDefaultReport still shows empty hint for empty outputs", () => {
     "empty-outputs hint preserved");
 });
 
+// -- G2: plan report inner proposal/design field-by-field rendering ---------
+// Prior renderer dumped plan.proposal / plan.design as a single
+// `pre.step-report__json` blob, burying summary / files_to_modify / overview /
+// components inside JSON syntax. The field-by-field path mirrors the CLI
+// display.render_proposal / render_design output so web and CLI users see the
+// same structured fields.
+
+check("G2 renderPlanReport: proposal renders as field sections, not raw json pre", () => {
+  const outputs = {
+    plan: {
+      proposal: {
+        summary: "Refactor the engine to support X.",
+        files_to_modify: [
+          { path: "src/engine/a.py", reason: "wire new option" },
+          { path: "src/engine/b.py", reason: "thread context" },
+        ],
+        files_to_create: [
+          { path: "src/engine/c.py", purpose: "new helper" },
+        ],
+        rationale: "Decouples A from B.",
+      },
+      design: {
+        overview: "High-level design.",
+        components: [
+          { name: "CompA", description: "owns state" },
+        ],
+        interfaces: [
+          { name: "iface1", signature: "f(x) -> y", description: "the iface" },
+        ],
+        decisions: [
+          { decision: "use option Z", reason: "simpler" },
+        ],
+      },
+    },
+    task_groups: [
+      { group_id: "G1", name: "core", tasks: [{ estimated_loc: 30 }], depends_on: [] },
+    ],
+  };
+  const step = { step_type: "plan", status: "completed" };
+  const frag = app.renderPlanReport(step, outputs);
+
+  // The proposal must NOT render as a raw `pre.step-report__json` dump.
+  const jsonPres = findAll(frag, "step-report__json");
+  assert.equal(jsonPres.length, 0,
+    "no `pre.step-report__json` blobs — fields replaced the raw JSON dump");
+
+  const sectionTitles = findAll(frag, "step-report__section-title")
+    .map((n) => n.textContent);
+  // Proposal field-section titles.
+  assert.ok(sectionTitles.includes("Summary"), "Summary field section present");
+  assert.ok(sectionTitles.some((t) => t.startsWith("Files to Modify")),
+    "Files to Modify section present");
+  assert.ok(sectionTitles.some((t) => t.startsWith("Files to Create")),
+    "Files to Create section present");
+  assert.ok(sectionTitles.includes("Rationale"), "Rationale field section present");
+  // Design field-section titles.
+  assert.ok(sectionTitles.includes("Overview"), "Overview field section present");
+  assert.ok(sectionTitles.some((t) => t.startsWith("Components")),
+    "Components section present");
+  assert.ok(sectionTitles.some((t) => t.startsWith("Interfaces")),
+    "Interfaces section present");
+  assert.ok(sectionTitles.some((t) => t.startsWith("Key Decisions")),
+    "Key Decisions section present");
+
+  // Per-item dict expansion: path/reason and component name surface as text.
+  const text = frag.textContent;
+  assert.ok(text.includes("src/engine/a.py"));
+  assert.ok(text.includes("wire new option"));
+  assert.ok(text.includes("src/engine/c.py"));
+  assert.ok(text.includes("new helper"));
+  assert.ok(text.includes("CompA"));
+  assert.ok(text.includes("owns state"));
+  assert.ok(text.includes("iface1"));
+  assert.ok(text.includes("f(x) -> y"));
+  assert.ok(text.includes("use option Z"));
+  assert.ok(text.includes("simpler"));
+
+  // Task groups still render unchanged (parity with the prior contract).
+  assert.ok(text.includes("G1"));
+  assert.ok(text.includes("core"));
+});
+
+check("G2 renderProposalFields: string proposal falls through plan path", () => {
+  const outputs = { plan: { proposal: "just a string proposal text" } };
+  const step = { step_type: "plan", status: "completed" };
+  const frag = app.renderPlanReport(step, outputs);
+  const titles = findAll(frag, "step-report__section-title")
+    .map((n) => n.textContent);
+  assert.ok(titles.includes("Proposal"), "string proposal still gets its section");
+  // The string path renders the value as a paragraph, not as a pre.json blob
+  // and not via the field expander.
+  assert.equal(findOne(frag, "step-report__json"), null);
+  assert.ok(frag.textContent.includes("just a string proposal text"));
+});
+
+check("G2 renderProposalFields: unknown fields fall back via renderGenericOutputs", () => {
+  const frag = app.renderProposalFields({
+    summary: "main summary",
+    risks: ["r1", "r2"],
+    extra_field: "leftover value",
+  });
+  // The "Other Fields" section captures unknown keys via renderGenericOutputs
+  // so nothing is silently dropped.
+  const titles = findAll(frag, "step-report__section-title")
+    .map((n) => n.textContent);
+  assert.ok(titles.includes("Summary"));
+  assert.ok(titles.includes("Other Fields"),
+    "unknown keys fall through the generic-outputs bucket");
+  const keys = findAll(frag, "step-report__kv-k").map((n) => n.textContent);
+  assert.ok(keys.includes("risks"));
+  assert.ok(keys.includes("extra_field"));
+});
+
+check("G2 renderDesignFields: unknown fields fall back via renderGenericOutputs", () => {
+  const frag = app.renderDesignFields({
+    overview: "the overview",
+    data_flow: "request → engine → store",
+  });
+  const titles = findAll(frag, "step-report__section-title")
+    .map((n) => n.textContent);
+  assert.ok(titles.includes("Overview"));
+  assert.ok(titles.includes("Other Fields"));
+  const keys = findAll(frag, "step-report__kv-k").map((n) => n.textContent);
+  assert.ok(keys.includes("data_flow"));
+});
+
+check("G2 renderPlanReport: only proposal present, design omitted -> only proposal section", () => {
+  const outputs = {
+    plan: { proposal: { summary: "S", files_to_modify: [{ path: "a.py" }] } },
+  };
+  const step = { step_type: "plan", status: "completed" };
+  const frag = app.renderPlanReport(step, outputs);
+  const titles = findAll(frag, "step-report__section-title").map((n) => n.textContent);
+  assert.ok(titles.includes("Proposal"));
+  assert.ok(!titles.includes("Design"), "no Design section without design data");
+});
+
 // ---------------------------------------------------------------------------
 // Message-paradigm §2: in-progress (2a/2c) vs. final (2b) assistant turns
 // ---------------------------------------------------------------------------
