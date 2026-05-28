@@ -3253,20 +3253,27 @@ function registerAssistantRenderer(stepType, renderer) {
   STEP_ASSISTANT_RENDERERS[String(stepType).toLowerCase()] = renderer;
 }
 
-// --- structured JSON extraction (frontend mirror of parse_json_response) ---
+// --- structured JSON extraction ----------------------------------------------
 //
-// The backend `parse_json_response` accepts JSON in two shapes:
-//   1. inside a fenced ```json … ``` (or unlabeled ``` … ```) block, and
-//   2. as a trailing bare object — `{ … }` that runs to the end of the text,
-//      possibly preceded by narrative.
-// It also recovers from common LLM quirks: trailing commas, code-fenced
-// blocks accidentally embedded inside string values, unescaped ASCII double
-// quotes. We approximate that lenient behavior in JS with two passes:
-//   (a) try strict JSON.parse,
-//   (b) on failure, retry after stripping trailing commas before `}` / `]`.
-// If both fail the helper returns null and the caller falls back to the
-// generic renderer — keeping the raw text visible to the reader rather than
-// silently mangling it.
+// The frontend has its own multi-region JSON extractor (`collectJsonRegions`
+// + `extractResultJson`) that intentionally exceeds the CLI's
+// `json_parser.py` in capability: it collects ALL top-level JSON regions in
+// one assistant turn, lets a per-step predicate pick the real result among
+// possibly several tool-call JSON segments, and excises every region from
+// the narrative so intermediate tool-call JSON never leaks into the Layer-1
+// view. The extractor is a JSON-string-aware brace/bracket-balanced scanner,
+// NOT a fence regex — fence boundaries are literal-character-level while
+// JSON string boundaries are lexical, and the two cannot be reconciled in a
+// regex. See `collectJsonRegions` below for the algorithm.
+//
+// `tryParseJsonLenient` is the per-slice parser: strict JSON first, then a
+// repair pass that strips a single trailing comma before `}` / `]` (the
+// most common LLM quirk that strict `JSON.parse` rejects). If both passes
+// fail the helper returns undefined; the scanner advances one character and
+// continues, so a stray `{` in prose never derails extraction. The legacy
+// single-shot helpers `extractFencedJson` / `extractTrailingBareJson` /
+// `extractStructuredJson` remain exported as compatibility surface but are
+// no longer consumed internally by `collectJsonRegions`.
 
 // Try parsing `text` as JSON, returning the parsed value or `undefined` on
 // failure. A small repair pass strips a single trailing comma before `}` /
@@ -3393,45 +3400,119 @@ function isStepResultDict(stepType, value) {
   return false;
 }
 
-// Collect every parseable JSON region in `text`: each fenced ```json``` block
-// (in document order) plus a trailing bare object/array that is not already
-// covered by a fence. Each entry is `{value, startIndex, endIndex}` (slice
-// indices into `text`) so the caller can compute the narrative by removing the
-// chosen region. This is the multi-segment generalization of the single-shot
-// `extractStructuredJson`, used to find a *result* JSON among several tool-call
-// JSON segments in one turn.
+// Walk forward from a `{` or `[` at `start` looking for the matching closer
+// while honoring JSON string state (so `{`, `}`, `[`, `]`, and backticks that
+// happen to sit inside a JSON string field value never affect the depth count
+// or terminate the region). Returns the index of the matching closer, or -1
+// if the input runs out before a match is found. Standalone helper, used only
+// by `collectJsonRegions`; not exported.
+function findBalancedJsonEnd(text, start) {
+  const open = text[start];
+  const close = open === "{" ? "}" : "]";
+  if (open !== "{" && open !== "[") return -1;
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escape) {
+        escape = false;
+      } else if (ch === "\\") {
+        escape = true;
+      } else if (ch === '"') {
+        inString = false;
+      }
+    } else if (ch === '"') {
+      inString = true;
+    } else if (ch === "{" || ch === "[") {
+      depth++;
+    } else if (ch === "}" || ch === "]") {
+      depth--;
+      if (depth === 0) {
+        return ch === close ? i : -1;
+      }
+    }
+  }
+  return -1;
+}
+
+// Collect every TOP-LEVEL parseable JSON region in `text`. Implemented as a
+// JSON-string-aware brace/bracket-balanced scanner: walk character by
+// character; whenever we hit an unenclosed `{` or `[`, try to find the
+// matching closer (string-state aware, so JSON string contents — including
+// ` ``` `, `{`, `}`, `[`, `]` — never bleed into depth counting or terminate
+// the region) and run the slice through `tryParseJsonLenient`. A successful
+// parse registers a region and the scanner resumes immediately past the
+// closer (so nested objects/arrays are NOT registered as independent
+// regions); a parse failure simply advances the cursor by one and the scan
+// continues.
+//
+// This intentionally replaces the older fence-regex + `lastFenceEnd` guard
+// approach: fence regexes cannot be made compatible with JSON string state
+// (fence boundaries are literal-character-level, JSON string boundaries are
+// lexical), and any fix that returns to fence regexes only moves the bug —
+// embedded ` ``` ` inside a discovery `content` field, prose-only ` ``` `
+// fences interleaved with bare JSON, and other structural shapes all reduce
+// to the same root cause.
+//
+// Adjacent ```json / ``` fence markers are opportunistically absorbed into a
+// region's `startIndex` / `endIndex` so the caller's narrative excision does
+// not retain stray fence fragments. The absorption is tight: only an
+// immediately-adjacent opening fence (allowing a small amount of whitespace
+// / a single newline between fence and `{` / `[`) is pulled into
+// `startIndex`, and only an immediately-adjacent closing fence into
+// `endIndex`. `extractTrailingBareJson` and `extractFencedJson` are no
+// longer consulted by this function; they remain exported as compatibility
+// helpers.
 function collectJsonRegions(text) {
   const regions = [];
   if (typeof text !== "string" || !text) return regions;
-  const re = /```(?:json)?\s*\n?([\s\S]*?)\n?```/gi;
-  let m;
-  let lastFenceEnd = 0;
-  while ((m = re.exec(text)) !== null) {
-    const value = tryParseJsonLenient(m[1]);
-    if (value !== undefined) {
-      regions.push({
-        value: value,
-        startIndex: m.index,
-        endIndex: m.index + m[0].length,
-      });
-      // Only fences whose body parsed as JSON shift the trailing-bare guard;
-      // a ``` block embedded inside the string field of a bare JSON object
-      // (prose, e.g. a discovery `content` field carrying a markdown sample)
-      // is not a region of its own and must not push lastFenceEnd past the
-      // bare object that actually contains it.
-      lastFenceEnd = m.index + m[0].length;
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "{" || ch === "[") {
+      const end = findBalancedJsonEnd(text, i);
+      if (end !== -1) {
+        const slice = text.slice(i, end + 1);
+        const value = tryParseJsonLenient(slice);
+        if (value !== undefined) {
+          // Detect tight delimitation: an immediately-adjacent ```json /
+          // ``` fence on either side, OR the JSON sitting at the trailing
+          // end of the text (only whitespace after it). A region must be
+          // delimited at least one way to be registered, so stray `[0]` /
+          // `{}` snippets embedded in prose are never mistaken for JSON
+          // payloads. Allow horizontal whitespace + at most one newline +
+          // horizontal whitespace between fence and JSON open/close, so a
+          // fence from far earlier in the text never gets pulled in.
+          const beforeMatch = text
+            .slice(0, i)
+            .match(/```(?:json)?[ \t]*\n?[ \t]*$/i);
+          const afterMatch = text
+            .slice(end + 1)
+            .match(/^[ \t]*\n?[ \t]*```/);
+          const isTrailing = text.slice(end + 1).trim() === "";
+          if (beforeMatch || afterMatch || isTrailing) {
+            let startIndex = i;
+            let endIndex = end + 1;
+            if (beforeMatch) startIndex -= beforeMatch[0].length;
+            if (afterMatch) endIndex += afterMatch[0].length;
+            regions.push({
+              value: value,
+              startIndex: startIndex,
+              endIndex: endIndex,
+            });
+            // Resume past the JSON closer (NOT past the absorbed trailing
+            // fence) so a stray subsequent ``` cannot be misread as
+            // opening a new region. The regions list stays sorted by
+            // startIndex by construction because i increases monotonically.
+            i = end + 1;
+            continue;
+          }
+        }
+      }
     }
-  }
-  // A trailing bare object/array only counts if it sits after the last fence
-  // we recognized as a JSON region — otherwise it is the inside of a fenced
-  // block we already captured.
-  const bare = extractTrailingBareJson(text);
-  if (bare && bare.startIndex >= lastFenceEnd) {
-    regions.push({
-      value: bare.value,
-      startIndex: bare.startIndex,
-      endIndex: text.length,
-    });
+    i++;
   }
   return regions;
 }

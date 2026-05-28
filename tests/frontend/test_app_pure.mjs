@@ -2893,4 +2893,216 @@ check("collectJsonRegions: multiple JSON segments — tool-call(s) + final resul
   assert.equal(got.narrative.includes("trailing line"), true);
 });
 
+// -- collectJsonRegions / extractResultJson: structural robustness ---------
+// Regression guards for the structural shapes enumerated in the bugfix task
+// for `collectJsonRegions`: any assistant text that ends with a legal result
+// JSON must yield a region whose value is selected by the discovery
+// predicate, regardless of (a) whether the JSON is fence-wrapped, (b) what
+// other ``` / ` references the prose contains, or (c) how many tool-call
+// JSON segments precede it. Pure-prose input must yield zero regions and a
+// null result without raising.
+
+check("collectJsonRegions: trailing bare JSON, no outer fence, prose in front", () => {
+  const text = [
+    "Looking up the discovery context, then drafting the proposal.",
+    "",
+    '{"content": "draft markdown", "refined_description": "do thing", "questions": []}',
+  ].join("\n");
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 1);
+  assert.equal(regions[0].value.refined_description, "do thing");
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got);
+  assert.equal(got.value.refined_description, "do thing");
+  assert.equal(got.narrative.includes("refined_description"), false);
+  assert.equal(got.narrative.includes("```json"), false);
+  assert.equal(got.narrative.includes("Looking up the discovery context"), true);
+});
+
+check("collectJsonRegions: ```json wrapped JSON with prose in front", () => {
+  const text = [
+    "Here is the proposed task description.",
+    "```json",
+    '{"content": "x", "refined_description": "y", "questions": ["q1"]}',
+    "```",
+  ].join("\n");
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 1);
+  assert.equal(regions[0].startIndex, text.indexOf("```json"));
+  assert.equal(regions[0].endIndex, text.length);
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got);
+  assert.equal(got.value.refined_description, "y");
+  assert.equal(got.narrative, "Here is the proposed task description.");
+  assert.equal(got.narrative.includes("```json"), false);
+  assert.equal(got.narrative.endsWith("```"), false);
+});
+
+check("collectJsonRegions: prose with non-JSON markdown code fence + trailing JSON", () => {
+  // Prose contains a fenced code block whose body is plain shell prose
+  // (NOT JSON); a real result JSON follows at the end inside its own
+  // ```json fence. Earlier impl was vulnerable to fences whose body did
+  // not parse pushing the trailing-bare guard past the real region.
+  const text = [
+    "First I will list the directory:",
+    "```",
+    "ls -la /tmp",
+    "```",
+    "Then propose the fix.",
+    "```json",
+    '{"content": "fix steps", "refined_description": "fix the bug", "questions": []}',
+    "```",
+  ].join("\n");
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 1, "non-JSON ``` block must not register as a region");
+  assert.equal(regions[0].value.refined_description, "fix the bug");
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got);
+  assert.equal(got.value.refined_description, "fix the bug");
+  // The non-JSON ``` block remains in the narrative (it is real prose);
+  // only the result fence is excised.
+  assert.equal(got.narrative.includes("```json"), false);
+  assert.equal(got.narrative.includes("refined_description"), false);
+  assert.equal(got.narrative.includes("ls -la /tmp"), true);
+});
+
+check("collectJsonRegions: ```json wrapped JSON whose content embeds literal triple backticks", () => {
+  // The exact new-bug-session trigger: a fenced ```json block whose JSON
+  // object has a `content` string field literally embedding ``` triple
+  // backticks (prose, not JSON). A fence-regex scanner truncates the
+  // body at the first inner ```; a string-state-aware scanner does not.
+  const inner = '{"mode": "synthesis", "content": "see ```\\nlike-this\\n``` for an example", ' +
+    '"refined_description": "do thing", "questions": []}';
+  const text = "Prelude prose.\n```json\n" + inner + "\n```";
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 1, "string-state-aware scanner must collect the fenced region");
+  assert.equal(regions[0].value.refined_description, "do thing");
+  assert.equal(regions[0].value.content.includes("```"), true,
+    "inner content must preserve the embedded triple backticks");
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got, "extractResultJson must not return null on the new-bug shape");
+  assert.equal(got.value.refined_description, "do thing");
+  assert.equal(got.narrative, "Prelude prose.");
+  assert.equal(got.narrative.includes("```json"), false);
+  assert.equal(got.narrative.includes("```"), false);
+});
+
+check("collectJsonRegions: bare JSON whose content embeds literal triple backticks", () => {
+  // Variant of the new-bug shape: same JSON object content but emitted as
+  // BARE JSON (no outer ```json wrapper). The trailing-bare detection
+  // must still register the region, and the embedded ``` inside the
+  // string value must not split the scan.
+  const text = '{\n  "mode": "synthesis",\n  "content": "intro\\n\\n```\\nuser-facing prose, not JSON\\n```\\nend",\n  "refined_description": "do bare thing",\n  "questions": []\n}';
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 1);
+  assert.equal(regions[0].value.refined_description, "do bare thing");
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got);
+  assert.equal(got.value.refined_description, "do bare thing");
+  assert.equal(got.narrative, "");
+});
+
+check("collectJsonRegions: prose with inline ` and unpaired ``` + trailing JSON", () => {
+  // Prose carries inline single backticks (e.g. `varName`) and an unpaired
+  // ``` string reference (a stray triple-backtick mentioned in text but
+  // not actually opening a fence). The trailing bare JSON must still
+  // register; neither the inline backticks nor the stray triple-backtick
+  // should derail the scanner.
+  const text = [
+    "Discussion: `parse_json_response` differs from frontend `collectJsonRegions`.",
+    "Note also that ``` is not always balanced in prose.",
+    "Here is the final result:",
+    "",
+    '{"content": "final", "refined_description": "ship it", "questions": []}',
+  ].join("\n");
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 1);
+  assert.equal(regions[0].value.refined_description, "ship it");
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got);
+  assert.equal(got.value.refined_description, "ship it");
+  assert.equal(got.narrative.includes("refined_description"), false);
+  assert.equal(got.narrative.includes("parse_json_response"), true);
+});
+
+check("collectJsonRegions: two tool-call JSON fences + one trailing result fence", () => {
+  // Three JSON segments in one turn: two tool-call fences (Bash + Edit
+  // arguments) followed by the discovery result. Tool calls do NOT carry
+  // discovery result fields; the predicate must pick the last fence.
+  const text = [
+    "Plan: list directory, edit file, then propose.",
+    "```json",
+    '{"command": "ls /tmp", "description": "list /tmp"}',
+    "```",
+    "Now edit:",
+    "```json",
+    '{"file_path": "/tmp/x", "old_string": "a", "new_string": "b"}',
+    "```",
+    "Done. Proposal:",
+    "```json",
+    '{"content": "proposal text", "refined_description": "do many things", "questions": []}',
+    "```",
+  ].join("\n");
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 3, "expected three fenced JSON regions");
+  assert.equal(isDiscoveryResultLike(regions[0].value), false);
+  assert.equal(isDiscoveryResultLike(regions[1].value), false);
+  assert.equal(isDiscoveryResultLike(regions[2].value), true);
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got, "must pick the last fence as the discovery result");
+  assert.equal(got.value.refined_description, "do many things");
+  // Every JSON region — both tool-call fences and the result fence —
+  // must be excised so intermediate tool-call JSON never leaks into the
+  // visible narrative.
+  assert.equal(got.narrative.includes("```json"), false);
+  assert.equal(got.narrative.includes('"command"'), false);
+  assert.equal(got.narrative.includes('"file_path"'), false);
+  assert.equal(got.narrative.includes('"refined_description"'), false);
+  assert.equal(got.narrative.includes("Plan: list directory"), true);
+  assert.equal(got.narrative.includes("Now edit:"), true);
+  assert.equal(got.narrative.includes("Done. Proposal:"), true);
+});
+
+check("collectJsonRegions: pure prose returns [] and extractResultJson returns null", () => {
+  // No JSON at all — the helper must return an empty regions array, and
+  // extractResultJson must return null without raising, so the caller
+  // falls back to the renderToolMarkers + markdown path per
+  // running-flow-console *Three-Tier Progressive Disclosure*.
+  const text = "Just some thoughts about the work, no JSON here.\n\nReally, none.";
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 0);
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.equal(got, null);
+});
+
+check("collectJsonRegions: real fixture from new bug session (record 36 shape)", () => {
+  // Mirror of the new-bug-session record 36 final assistant content shape:
+  // a short prelude carrying a tool marker, then a ```json fence whose
+  // JSON object's content/refined_description fields embed real backticks
+  // and prose. This is the concrete shape the previous regex-based
+  // collector silently dropped.
+  const innerJson = JSON.stringify({
+    mode: "synthesis",
+    content: "CLI `_extract_json_string` uses `text.find('{')` -> `text.rfind('}')`; " +
+      "frontend `collectJsonRegions` instead collects all top-level regions. " +
+      "Sample inline: ```not-a-real-fence```. End.",
+    refined_description: "fix se3 web UI assistant rendering structural robustness bug",
+    questions: [],
+  });
+  const text = "[Read: src/se3/server/static/app.js:3380-3500]\n```json\n" +
+    innerJson + "\n```";
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 1, "real-shape fixture must yield exactly one region");
+  assert.equal(typeof regions[0].value.refined_description, "string");
+  assert.equal(regions[0].value.refined_description.length > 0, true,
+    "refined_description must be a non-empty string");
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got, "extractResultJson must select the result on real-shape fixture");
+  assert.equal(got.value.refined_description.startsWith("fix se3 web UI"), true);
+  assert.equal(got.narrative.includes("```json"), false);
+  assert.equal(got.narrative.includes("refined_description"), false);
+  assert.equal(got.narrative.endsWith("```"), false);
+  assert.equal(got.narrative.startsWith("[Read:"), true);
+});
+
 console.log(`\n${passed} checks passed.`);

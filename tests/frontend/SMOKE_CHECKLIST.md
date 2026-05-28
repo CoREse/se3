@@ -151,6 +151,21 @@ chain hop-by-hop; the manual pass confirms the rendered result matches.
       (`test_summarize_records_user_and_assistant_to_jsonl`,
       `test_summarize_records_incrementally_readable_in_frontend_shape`).
 
+## Bugfix smoke (collectJsonRegions structural robustness)
+
+- [ ] **Discovery / structured-step assistant rendering — load a session
+      whose final assistant turn embeds literal triple backticks inside a
+      JSON `content` field.** Reload the new-bug session jsonl
+      (`se3/history/20260528-095903_5b477d97/01_discovery_*.jsonl`) in the
+      web History view and confirm the last assistant turn renders as
+      Markdown prose followed by the structured *Proposed Task Description*
+      card — NOT as one raw ```json``` blob. Repeat for any structured step
+      (analyze / plan / implement / verify_spec / …) whose body parses via
+      `makeStructuredAssistantRenderer`.
+      *Backed by:* `tests/frontend/test_app_pure.mjs`
+      `collectJsonRegions: …` regression cases (9 new shapes, incl. the new
+      bug session fixture, plus the original 3 already-covered shapes).
+
 ## Regression
 
 - [ ] `pytest` (full suite, `testpaths = ["tests"]`) passes — see

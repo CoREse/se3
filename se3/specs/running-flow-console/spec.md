@@ -962,28 +962,49 @@ still counts. An intermediate tool-call JSON (Bash / Edit / Grep / … arguments
 carries none of those keys and is therefore NOT a result.
 
 Because a single turn may interleave several JSON regions, the renderer MUST
-collect **every** parseable JSON region — each fenced ```` ```json ... ````
-block in document order plus a trailing bare object/array that follows the last
-fence whose body was itself parsed as a JSON region — and select the **last**
-region satisfying the result predicate as the turn's result (a result
-conventionally follows the tool calls that produced it). The Layer-1 narrative
-is then the body with **all** JSON regions removed (not just the chosen one), so
-intermediate tool-call JSON never leaks into the clean default view while the
-full original body — every JSON region included — stays reachable through the
-assistant's single "查看原始" fold. When **no** region satisfies the result
-predicate — including a turn carrying two or more tool-call JSON segments — the
-renderer MUST return no result so the caller keeps the thinking process inline
-per *Three-Tier Progressive Disclosure*, never folding it into any empty toggle.
+collect **every** parseable JSON region the body contains — both fenced
+```` ```json ... ```` blocks and bare top-level JSON objects/arrays that appear
+without an outer fence — and select the **last** region satisfying the result
+predicate as the turn's result (a result conventionally follows the tool calls
+that produced it). The Layer-1 narrative is then the body with **all** JSON
+regions removed (not just the chosen one), so intermediate tool-call JSON never
+leaks into the clean default view while the full original body — every JSON
+region included — stays reachable through the assistant's single "查看原始" fold.
+When **no** region satisfies the result predicate — including a turn carrying
+two or more tool-call JSON segments — the renderer MUST return no result so the
+caller keeps the thinking process inline per *Three-Tier Progressive
+Disclosure*, never folding it into any empty toggle.
 
-**Trailing-bare-JSON guard scope.** The "follows the last fence" position used
-to gate the trailing bare object MUST advance ONLY for fences whose body was
-successfully parsed as a JSON region. A ```` ``` ```` code fence whose body is
-prose (i.e. cannot be repaired into JSON) — including a fence that appears
-**inside a string field value of a surrounding bare JSON object** because the
-bare object itself was emitted without an outer ```` ```json ```` wrapper —
-MUST NOT push the guard past the bare object's start. Otherwise the trailing
-bare object would be wrongly rejected and the renderer would degrade to dumping
-the raw JSON literal as the visible surface, in violation of this requirement.
+**JSON-string-aware region collection.** Region collection MUST be performed by
+a JSON-string-aware brace/bracket-balanced scanner that walks the body
+character-by-character, NOT by a fence-regex partitioner. The scanner enters a
+JSON-string state on an unescaped `"` and, while inside that state, treats
+every `{`, `}`, `[`, `]`, ```` ` ```` (single or triple), and fence-like marker
+as inert literal content — they MUST NOT open a new region, close an open
+region, or otherwise affect partitioning. Outside string state, the scanner
+balances `{`/`}` and `[`/`]` to delimit candidate regions and validates each
+candidate via the lenient JSON parser before registering it. Fence markers
+(```` ```json ```` / ```` ``` ````) are opportunistically absorbed as a
+region's optional decorative shell when one wraps a registered region, so the
+narrative stays clean; they are NOT used as the primary partitioning mechanism.
+This is required because fence boundaries are a character-layer construct while
+JSON string boundaries are a lexical-layer construct: any approach that
+partitions by fence regex first and then tries to repair edge cases will
+mis-classify at least one of the trigger shapes enumerated below.
+
+**Structural robustness invariant.** The combined collection + predicate +
+narrative-removal pipeline MUST correctly extract the final result JSON (when
+one exists) and produce a JSON-stripped narrative (when none exists) for every
+one of the following trigger shapes, without any shape regressing the others:
+(1) trailing bare JSON with no outer ```` ```json ```` fence; (2) a trailing
+```` ```json ```` fence-wrapped JSON; (3) prose containing one or more markdown
+code fences whose bodies are non-JSON; (4) prose containing inline backticks or
+unpaired ```` ``` ```` triple-backtick runs; (5) a JSON string field value that
+literally contains a ```` ``` ```` triple-backtick or other fence-like
+substring; (6) a single turn carrying multiple JSON regions (e.g. several
+tool-call JSON segments followed by a final result JSON). When the assistant
+text contains no JSON region at all (pure prose), the entire body MUST render
+as markdown without raising and without producing an empty result card.
 
 #### Scenario: Tool-call-only turn is not mistaken for a final result
 - **GIVEN** an assistant turn whose body carries one or more JSON regions that
@@ -1014,15 +1035,47 @@ the raw JSON literal as the visible surface, in violation of this requirement.
   ```` ``` ```` code fence whose body is prose (not JSON) — e.g. a discovery
   `content` field whose markdown embeds a prompt example code block
 - **WHEN** the structured renderer evaluates the turn
-- **THEN** the embedded prose fence does NOT advance the trailing-bare-JSON
-  guard past the bare object's start position, so the bare object is still
-  collected as a JSON region and chosen as the turn's result
+- **THEN** the JSON-string-aware scanner treats the embedded fence as inert
+  string content, the bare object is still collected as a JSON region and
+  chosen as the turn's result
 - **AND** the default view renders the structured fields (e.g. the discovery
   `content` markdown plus the Proposed Task Description card) rather than
   degrading to a raw-JSON dump
 - **AND** this behavior holds uniformly for every step type whose assistant
   message flows through the shared multi-region collection path (`discovery`,
   `analyze`, `plan`, `implement`, `verify_spec`, …), not for `discovery` alone
+
+#### Scenario: JSON string value containing a literal triple-backtick is still extracted
+- **GIVEN** an assistant turn whose body is a single bare JSON object carrying
+  one of its step type's result fields, where one string field value literally
+  contains a ```` ``` ```` triple-backtick run (e.g. an example prompt the LLM
+  is quoting back inside the `content` field)
+- **WHEN** the structured renderer evaluates the turn
+- **THEN** the JSON-string-aware scanner does not interpret the in-string
+  triple-backticks as a markdown fence boundary, the bare object is collected
+  as one balanced JSON region, and the result predicate selects it
+- **AND** the default view renders the structured fields rather than dumping
+  the raw JSON literal
+
+#### Scenario: Prose with inline backticks or unpaired triple-backticks does not break extraction
+- **GIVEN** an assistant turn whose narrative prose contains inline single
+  backticks (e.g. `` `foo()` ``) and/or an unpaired ```` ``` ```` triple-backtick
+  run that never closes, followed by a final result JSON region (either bare or
+  fence-wrapped) carrying at least one of its step type's result fields
+- **WHEN** the structured renderer evaluates the turn
+- **THEN** the unpaired / inline backticks do NOT cause the scanner to
+  misclassify the surrounding text as a fence body, the final result JSON
+  region is still collected and chosen
+- **AND** the Layer-1 narrative renders the prose as markdown with the result
+  JSON removed, without dropping any prose content
+
+#### Scenario: Pure prose with no JSON region renders as markdown without an empty card
+- **GIVEN** an assistant turn whose body contains no JSON region at all (free
+  markdown prose, possibly with inline backticks or non-JSON fenced code blocks)
+- **WHEN** the structured renderer evaluates the turn
+- **THEN** the renderer returns no result so the caller keeps the thinking
+  process inline per *Three-Tier Progressive Disclosure*
+- **AND** no empty result card is rendered and no exception is raised
 
 #### Scenario: Discovery assistant message renders structured fields
 - **GIVEN** an assistant record with `step_type = "discovery"` whose body
