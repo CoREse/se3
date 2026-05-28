@@ -379,6 +379,27 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   max-width: 12ch;
 }
 
+/* Interjection lifecycle phases (G4 task 2). Driven by `interjection_event`
+ * pushes from the server. `state-pending` is the active "waiting for the
+ * flow to consume" state — a subtle dashed border + faint pulse animation;
+ * `state-consumed` is a final "the flow has consumed this" state — muted
+ * fill so the just-consumed chip lingers visibly for a frame before the
+ * snapshot drops it. */
+@keyframes interjection-pending-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.72; }
+}
+.intervention-chip.state-pending {
+  border-style: dashed;
+  animation: interjection-pending-pulse 1.4s ease-in-out infinite;
+}
+.intervention-chip.state-consumed {
+  opacity: 0.55;
+  filter: grayscale(0.55);
+  text-decoration: line-through;
+  text-decoration-color: rgba(0, 0, 0, 0.35);
+}
+
 /* -- docked reply box ----------------------------------------------- */
 
 .flow-reply {

@@ -915,6 +915,7 @@ class FakeNode {
     return node;
   }
   removeChild(node) { this._detach(node); return node; }
+  remove() { if (this.parentNode) this.parentNode._detach(this); }
   addEventListener(type, fn) {
     (this._listeners[type] = this._listeners[type] || []).push(fn);
   }
@@ -3699,6 +3700,170 @@ check("G4(c): createInFlightChip + upgradeChipToSuccess place toggle before .too
   assert.equal(chip2.children.find(
     (c) => c.classList && c.classList.contains("tool-marker-details")), undefined,
     "no details panel when attachChipDetail is given a null detail");
+});
+
+// ---------------------------------------------------------------------------
+// G4: local interjection lifecycle helpers
+// ---------------------------------------------------------------------------
+//
+// computeInterventions now folds three sources together: real pending calls,
+// frontend-tracked `localInterjections` entries (one per submitted synthetic
+// interjection), and the standby synthetic chip while the user is drafting.
+// bindLocalInterjectionToCallId binds the oldest unmatched local entry to a
+// just-pending real call_id (FIFO); consumeLocalInterjectionByCallId removes
+// the matching local entry when the consumed event fires.
+function resetG4State() {
+  app.state.localInterjections = [];
+  app.state.interjectionPhases = {};
+  app.state.interjectionEventSeen = {};
+  app.state.flowInterjectRequested = false;
+  app.state.selectedFlowId = null;
+  app.state.flowDetail = null;
+  app.state.pendingSendSettleKey = null;
+}
+
+check("G4 local entries render with state-pending phase", () => {
+  resetG4State();
+  app.state.localInterjections.push({
+    localId: 1, text: "first", callId: null, phase: "pending", submittedAt: 0,
+  });
+  const entries = app.computeInterventions({
+    status: "running", pending_calls: [],
+  });
+  // One synthetic chip from the localInterjection entry.
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].kind, "interjection");
+  assert.equal(entries[0].synthetic, true);
+  assert.equal(entries[0].localId, 1);
+  assert.equal(entries[0].phase, "pending");
+  resetG4State();
+});
+
+check("G4 standby + local entries coexist (multi-interjection)", () => {
+  resetG4State();
+  app.state.localInterjections.push({
+    localId: 1, text: "first", callId: null, phase: "pending", submittedAt: 0,
+  });
+  app.state.flowInterjectRequested = true;
+  const entries = app.computeInterventions({
+    status: "running", pending_calls: [],
+  });
+  // local entry + standby chip.
+  assert.equal(entries.length, 2);
+  // Standby chip is last and has no localId.
+  assert.equal(entries[1].id, "interjection:new");
+  assert.equal(entries[1].localId, null);
+  resetG4State();
+});
+
+check("G4 bindLocalInterjectionToCallId binds FIFO", () => {
+  resetG4State();
+  app.state.localInterjections.push(
+    { localId: 1, text: "a", callId: null, phase: "pending", submittedAt: 1 },
+    { localId: 2, text: "b", callId: null, phase: "pending", submittedAt: 2 },
+  );
+  app.bindLocalInterjectionToCallId("call-A");
+  assert.equal(app.state.localInterjections[0].callId, "call-A");
+  assert.equal(app.state.localInterjections[1].callId, null);
+  // Binding the same call_id twice is a no-op.
+  app.bindLocalInterjectionToCallId("call-A");
+  assert.equal(app.state.localInterjections[0].callId, "call-A");
+  assert.equal(app.state.localInterjections[1].callId, null);
+  resetG4State();
+});
+
+check("G4 consumeLocalInterjectionByCallId drops the bound entry", () => {
+  resetG4State();
+  app.state.localInterjections.push(
+    { localId: 1, text: "a", callId: "call-A", phase: "pending", submittedAt: 1 },
+    { localId: 2, text: "b", callId: null, phase: "pending", submittedAt: 2 },
+  );
+  app.consumeLocalInterjectionByCallId("call-A");
+  assert.equal(app.state.localInterjections.length, 1);
+  assert.equal(app.state.localInterjections[0].localId, 2);
+  resetG4State();
+});
+
+check("G4 bound local entry hides the duplicate real chip", () => {
+  resetG4State();
+  app.state.localInterjections.push({
+    localId: 1, text: "a", callId: "call-A", phase: "pending", submittedAt: 0,
+  });
+  const entries = app.computeInterventions({
+    flow_id: "F1",
+    status: "running",
+    pending_calls: [{
+      call_id: "call-A",
+      kind: "interjection",
+      prompt: "a",
+      context: { flow_id: "F1" },
+    }],
+  });
+  // Only the local entry's chip — the real pending_call is suppressed so we
+  // don't render the same interjection twice.
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].synthetic, true);
+  assert.equal(entries[0].localId, 1);
+  resetG4State();
+});
+
+check("G4 applyInterjectionEvent pending → consumed lifecycle", () => {
+  resetG4State();
+  app.state.selectedFlowId = "F1";
+  app.state.flowDetail = null;  // skip renderInterventions DOM work
+  app.state.localInterjections.push({
+    localId: 1, text: "draft", callId: null, phase: "pending", submittedAt: 0,
+  });
+
+  app.applyInterjectionEvent({
+    type: "interjection_event",
+    flow_id: "F1",
+    call_id: "call-X",
+    phase: "pending",
+    ts: 0,
+  });
+  assert.equal(app.state.interjectionPhases["call-X"], "pending");
+  assert.equal(app.state.localInterjections[0].callId, "call-X");
+
+  app.applyInterjectionEvent({
+    type: "interjection_event",
+    flow_id: "F1",
+    call_id: "call-X",
+    phase: "consumed",
+    ts: 1,
+  });
+  assert.equal(app.state.interjectionPhases["call-X"], "consumed");
+  assert.equal(app.state.localInterjections.length, 0);
+
+  // (call_id, phase) dedup — replaying the same phase is a no-op.
+  app.applyInterjectionEvent({
+    type: "interjection_event",
+    flow_id: "F1",
+    call_id: "call-X",
+    phase: "consumed",
+    ts: 2,
+  });
+  assert.equal(app.state.localInterjections.length, 0);
+  resetG4State();
+});
+
+check("G4 applyInterjectionEvent for another flow does not touch open flow", () => {
+  resetG4State();
+  app.state.selectedFlowId = "F1";
+  app.state.localInterjections.push({
+    localId: 1, text: "draft", callId: null, phase: "pending", submittedAt: 0,
+  });
+  app.applyInterjectionEvent({
+    type: "interjection_event",
+    flow_id: "F2",
+    call_id: "call-Y",
+    phase: "pending",
+    ts: 0,
+  });
+  // Different flow → no phase recorded, no local entry bound.
+  assert.equal(app.state.interjectionPhases["call-Y"], undefined);
+  assert.equal(app.state.localInterjections[0].callId, null);
+  resetG4State();
 });
 
 console.log(`\n${passed} checks passed.`);

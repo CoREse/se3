@@ -68,6 +68,20 @@ const state = {
   // (e.g. on reconnect replay) does not spam the user.
   interjectionPhases: {},
   interjectionToastsSeen: {},
+  // (call_id, phase) dedup set for `interjection_event` ws messages. Prevents
+  // a STATUS_UPDATE replay or duplicate broadcast from double-applying the
+  // same phase transition (e.g. consuming a local entry twice).
+  interjectionEventSeen: {},
+  // Frontend-tracked synthetic interjections: one entry per Send the user
+  // pressed for an interject submission, kept around until the matching real
+  // `pending_calls` entry materializes (binding the local entry's `callId`)
+  // and then is consumed via the `interjection_event` consumed phase. Each
+  // entry is `{localId, text, callId, phase, submittedAt}`. `callId` starts
+  // `null` and becomes the real call_id once `bindLocalInterjectionToCallId`
+  // FIFO-binds it on the next pending event. Multiple submissions can sit
+  // here at once so the user can press Interject → Send repeatedly without
+  // losing prior drafts.
+  localInterjections: [],
   // Consumed afterimages: when an interjection chip transitions to
   // `consumed` it normally also vanishes from `pending_calls` on the same
   // ws cycle, so the user never gets to see the consumed visual state.
@@ -271,6 +285,31 @@ function scheduleReconnect() {
 // State application
 // ---------------------------------------------------------------------------
 
+// FIFO-bind the oldest unbound local interjection entry to a real call_id.
+// Used by `applyInterjectionEvent` on the `pending` phase: when the daemon
+// reports a new interjection call file, we assume the oldest unbound local
+// entry corresponds to it (a Send press created the file). Idempotent: if
+// the `callId` is already bound to some local entry the call is a no-op,
+// so a duplicate event or a STATUS_UPDATE replay never re-binds.
+function bindLocalInterjectionToCallId(callId) {
+  if (!callId) return;
+  const list = state.localInterjections || [];
+  if (list.some((e) => e.callId === callId)) return;
+  const target = list.find((e) => !e.callId);
+  if (target) target.callId = callId;
+}
+
+// Drop the local interjection entry that was bound to `callId`. Used by
+// `applyInterjectionEvent` on the `consumed` phase: once the run loop has
+// drained the interjection there is nothing left to display, so the local
+// entry is removed and its synthetic chip disappears on the next render.
+function consumeLocalInterjectionByCallId(callId) {
+  if (!callId) return;
+  state.localInterjections = (state.localInterjections || []).filter(
+    (e) => e.callId !== callId,
+  );
+}
+
 // Handle a ws-pushed `interjection_event`. Two phases are emitted by the
 // server: `pending` when an interjection call file first appears in a flow's
 // pending_calls; `consumed` when it disappears (run loop drained it).
@@ -281,12 +320,26 @@ function applyInterjectionEvent(msg) {
   const callId = String(msg.call_id || "");
   const phase = String(msg.phase || "");
   if (!callId || !phase) return;
-  // Only events for the open flow are user-visible; toasts for other flows
-  // would be spurious. Still record the phase though — switching to another
-  // flow tab later should reflect the latest phase state.
+  const isOpenFlow = !!(msg.flow_id && state.selectedFlowId === msg.flow_id);
+  // Phase recording, local-entry binding/consumption, and toasts are all
+  // scoped to the open flow — an `interjection_event` for some other flow
+  // is irrelevant to this tab's intervention bar and must not silently
+  // mutate the open flow's local bookkeeping.
+  if (!isOpenFlow) return;
+  // (call_id, phase) dedup: a STATUS_UPDATE replay on reconnect or a
+  // duplicate broadcast would otherwise re-apply the consumed phase to
+  // already-removed local entries, or re-bind an already-bound call_id.
+  const seenKey = callId + ":" + phase;
+  if (state.interjectionEventSeen[seenKey]) return;
+  state.interjectionEventSeen[seenKey] = true;
+
   state.interjectionPhases[callId] = phase;
 
-  const isOpenFlow = !!(msg.flow_id && state.selectedFlowId === msg.flow_id);
+  if (phase === "pending") {
+    bindLocalInterjectionToCallId(callId);
+  } else if (phase === "consumed") {
+    consumeLocalInterjectionByCallId(callId);
+  }
 
   // Dedup: one toast per (call_id, phase) — phase transitions only fire
   // once each, but a STATUS_UPDATE replay on reconnect would otherwise
@@ -846,30 +899,60 @@ function normalizeKind(kind) {
 // there is no real interjection already pending. Pure: depends only on
 // `flow` and `state.flowInterjectRequested`.
 function computeInterventions(flow) {
-  const entries = pendingCalls(flow).map((c, i) => {
-    const kind = normalizeKind(c.kind);
-    const callId = String(c.call_id || "");
-    // The interjection lifecycle phase comes from ws `interjection_event`
-    // messages tracked in `state.interjectionPhases`. Default phase: a
-    // freshly-aggregated pending_calls entry is implicitly `pending` so the
-    // chip picks up the pending visual state even before the matching
-    // event arrives (e.g. on a slow server).
-    let phase = null;
-    if (kind === "interjection") {
-      phase = state.interjectionPhases[callId] || "pending";
-    }
-    return {
-      id: "call:" + (callId || ("idx" + i)),
-      kind: kind,
-      callId: callId,
-      prompt: String(c.prompt || c.message || ""),
-      context: c.context != null ? c.context : null,
-      options: Array.isArray(c.options) ? c.options : [],
-      synthetic: false,
-      phase: phase,
-    };
-  });
-  const hasInterjection = entries.some((e) => e.kind === "interjection");
+  // Local synthetic chips come first: each `localInterjections` entry the
+  // user has Send-submitted gets one chip. Once bound to a real call_id via
+  // `bindLocalInterjectionToCallId`, the real `pending_calls` entry with
+  // the same id is suppressed below so we never render the same
+  // interjection twice (the local chip continues to represent it through
+  // the consumed transition).
+  const localList = state.localInterjections || [];
+  const localEntries = localList.map((e) => ({
+    id: e.callId ? "local-call:" + e.callId : "local:" + e.localId,
+    kind: "interjection",
+    callId: e.callId || "",
+    prompt: String(e.text || ""),
+    context: null,
+    options: [],
+    synthetic: true,
+    localId: e.localId,
+    phase: e.phase || "pending",
+  }));
+  const localBoundCallIds = new Set(
+    localList.map((e) => e.callId).filter(Boolean),
+  );
+
+  const realEntries = pendingCalls(flow)
+    .filter((c) => !localBoundCallIds.has(String(c.call_id || "")))
+    .map((c, i) => {
+      const kind = normalizeKind(c.kind);
+      const callId = String(c.call_id || "");
+      // The interjection lifecycle phase comes from ws `interjection_event`
+      // messages tracked in `state.interjectionPhases`. Default phase: a
+      // freshly-aggregated pending_calls entry is implicitly `pending` so the
+      // chip picks up the pending visual state even before the matching
+      // event arrives (e.g. on a slow server).
+      let phase = null;
+      if (kind === "interjection") {
+        phase = state.interjectionPhases[callId] || "pending";
+      }
+      return {
+        id: "call:" + (callId || ("idx" + i)),
+        kind: kind,
+        callId: callId,
+        prompt: String(c.prompt || c.message || ""),
+        context: c.context != null ? c.context : null,
+        options: Array.isArray(c.options) ? c.options : [],
+        synthetic: false,
+        phase: phase,
+      };
+    });
+
+  const entries = [...localEntries, ...realEntries];
+  // Only a REAL pending interjection in `pending_calls` should suppress the
+  // standby "interjection:new" chip — local synthetic entries represent
+  // already-submitted drafts and must coexist with the standby chip so the
+  // user can immediately draft another while previous ones are in flight.
+  const hasInterjection = realEntries.some((e) => e.kind === "interjection");
   // Render the synthetic interjection chip when:
   //   - the user has opted into interject mode (clicked the ✎ button), OR
   //   - a synthetic chip is held in pending state after a Send press while
@@ -889,6 +972,7 @@ function computeInterventions(flow) {
       context: null,
       options: [],
       synthetic: true,
+      localId: null,
       phase: state.flowSyntheticInterjectPending ? "pending" : null,
     });
   }
@@ -6009,6 +6093,11 @@ if (typeof module !== "undefined" && module.exports) {
     UNKNOWN_PROJECT_ROOT_LABEL,
     groupHistorySessionsByProjectRoot,
     pickDefaultHistoryProjectRoot,
+    // Local interjection lifecycle helpers (G4) — exposed for the DOM-free
+    // tests in tests/frontend/test_app_pure.mjs.
+    bindLocalInterjectionToCallId,
+    consumeLocalInterjectionByCallId,
+    applyInterjectionEvent,
     state,
   };
 }
