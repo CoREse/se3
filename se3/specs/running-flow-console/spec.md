@@ -988,9 +988,51 @@ The registry MUST remain open for future step types without re-architecting
 the dispatch path. Every step type listed above MUST have a registered
 renderer so an assistant turn defaults to structured fields rather than a raw
 ```` ```json ```` blob; a step type with no registered entry — or a registered
-renderer that cannot parse the body — degrades gracefully through the shared
-`renderToolMarkers` + markdown / foldable fallback path, and no assistant
+renderer that cannot parse the body — degrades gracefully and no assistant
 message is ever dropped.
+
+**Generic-fallback rendering for unregistered step types.** When the
+`STEP_ASSISTANT_RENDERERS` lookup misses (or its registered renderer returns no
+structured result) **and** the body's last result-region produces a plain
+`step.outputs`-shaped dict (per the same multi-region collection path described
+below), the renderer MUST route that dict to a **generic field-style fallback
+renderer** that is the web counterpart of the CLI's
+`step_renderers._default_render` — it MUST NOT dump the entire dict as a bare
+```` ```json ```` fence inside the assistant bubble. The generic fallback walks
+the dict in declaration order, emits one `key: value` row per field, previews
+long string values (truncated to ~200 characters with a `(N chars)` suffix
+matching the CLI threshold of ~300 chars), and expands nested dicts at least
+one level by indentation. The narrative section is still rendered through the
+shared `renderNarrativeNodes` helper above the field rows, and the assistant's
+single "查看原始" fold (per *Three-Tier Progressive Disclosure*) still carries
+the unmodified original record. This generic fallback applies **only** to the
+step.outputs dict the dispatch path hands to the assistant renderer — it MUST
+NOT alter the rendering of ```` ```json ```` code fences embedded inside
+free-form assistant prose (e.g. an assistant turn whose deliverable is a JSON
+example or whose narrative quotes a JSON snippet), which continue to render
+through the standard markdown path. Step types that are never registered in
+`STEP_ASSISTANT_RENDERERS` (e.g. `confirm`, `project_summary`, and any future
+step the orchestrator emits without a dedicated renderer) therefore surface
+their `step.outputs` as field rows aligned with the CLI display, not as a raw
+JSON dump.
+
+When neither a registered renderer nor the generic fallback can extract a
+structured-outputs dict (e.g. the body is pure prose, or contains only
+intermediate tool-call JSON), the renderer MUST still fall back to the shared
+`renderToolMarkers` + markdown / foldable path so no assistant message is ever
+dropped.
+
+**Plan proposal / design field expansion.** The `plan` step type's
+`STEP_ASSISTANT_RENDERERS` / `STEP_REPORT_RENDERERS` entry MUST expand its
+inner `proposal` and `design` dicts into the same field-level structure the
+CLI `display.render_proposal` / `display.render_design` panels show — at least
+`summary`, `files_to_modify`, `files_to_create`, and `rationale` for
+`proposal`, and `overview`, `components`, `interfaces`, and `key_decisions`
+(or the equivalent `decisions` field) for `design`. These nested dicts MUST
+NOT be re-dumped as a single ```` ```json ```` blob inside the plan report or
+the plan assistant bubble; unknown / unenumerated fields fall back through the
+same generic field-style rendering so nothing inside the nested dicts is
+dropped.
 
 **Result-vs-tool-call identification.** A structured renderer MUST surface a
 Layer-1 result (and thereby let *Three-Tier Progressive Disclosure* render the
@@ -1187,6 +1229,48 @@ as markdown without raising and without producing an empty result card.
 - **AND** the chips are visually indistinguishable from the chips the same
   turn would produce if it had no result JSON, so the narrative tool-call
   rendering does not visually degrade just because the turn also has a result
+
+#### Scenario: Unregistered step type renders step.outputs as generic field rows
+- **GIVEN** an assistant turn for a step type that has NO entry in
+  `STEP_ASSISTANT_RENDERERS` (e.g. `confirm`, `project_summary`, or any step
+  the orchestrator emits without a dedicated renderer) whose body carries a
+  `step.outputs`-shaped result dict
+- **WHEN** the turn is rendered in `#flow-view`
+- **THEN** the dispatch routes the result dict to the generic field-style
+  fallback renderer (the web counterpart of CLI
+  `step_renderers._default_render`) which emits one `key: value` row per field
+  in declaration order, previewing long string values (truncated with a
+  `(N chars)` suffix) and indenting one level into nested dicts
+- **AND** the assistant bubble does NOT contain a single bare ```` ```json ````
+  fence dumping the entire dict as raw JSON
+- **AND** the narrative section above the field rows still renders through the
+  shared `renderNarrativeNodes` helper and the assistant's single "查看原始"
+  fold still carries the unmodified original record
+
+#### Scenario: Embedded ```json code fence in assistant prose still renders as markdown
+- **GIVEN** an assistant turn (registered renderer or not) whose narrative
+  prose embeds a ```` ```json ... ```` code fence that is part of the
+  deliverable text itself (e.g. a JSON example the assistant is showing) and
+  is NOT the dispatch path's step.outputs dict
+- **WHEN** the turn is rendered
+- **THEN** that embedded fence continues to render through the standard
+  markdown path — the generic field-style fallback only re-routes the
+  step.outputs dict the dispatch layer hands the assistant renderer, not
+  every JSON code block that happens to appear inside narrative prose
+
+#### Scenario: Plan proposal and design dicts render as field rows, not a JSON blob
+- **GIVEN** a `plan` step's assistant turn or report card carrying a
+  `proposal` dict with at least `summary` / `files_to_modify` /
+  `files_to_create` / `rationale` and a `design` dict with at least
+  `overview` / `components` / `interfaces` / `key_decisions`
+- **WHEN** the plan renderer expands its inner `proposal` and `design`
+- **THEN** each nested dict is rendered as a field-level section mirroring
+  the CLI `display.render_proposal` / `display.render_design` panels — each
+  enumerated field surfaces as its own labeled row (or sub-card), in CLI
+  field order
+- **AND** neither nested dict is re-dumped as a single ```` ```json ```` blob
+- **AND** unknown / unenumerated fields inside the nested dicts fall through
+  the same generic field-style rendering so no field is dropped
 
 #### Scenario: Structured-renderer narrative falls back to bracket chips without raw_json
 - **GIVEN** an assistant turn routed to a structured renderer whose body
@@ -1418,6 +1502,17 @@ visible without an extra click. Fold-state changes follow the same
 `scrollIntoView({block: "nearest"})`-on-expand, no-scroll-on-collapse
 behavior used elsewhere in the view.
 
+**Toggle-button placement in the chip head.** When a chip carries a detail
+payload, its expand/collapse toggle button MUST sit **inline with the chip
+head** as the rightmost sibling of the name / header / glyph nodes
+(right-aligned via `margin-left: auto` or an equivalent rule), NOT in a
+secondary row below the head separated by a dashed border. The detail body
+panel still wraps onto its own row (e.g. via `flex-basis: 100%`) when
+expanded, but the row carrying the detail body MUST NOT introduce a top
+border / top padding visual divider above the toggle. A chip whose terminal
+event carries no detail payload MUST NOT render a toggle button at all (the
+chip head stays a single uncluttered row).
+
 **Single rendering pipeline for live and final views.** The chip state
 machine runs over both data sources without branching: the live path
 consumes `stream_progress` records (each carrying `tool_use_id` /
@@ -1483,6 +1578,25 @@ adjacent zombie chips, never a thrown exception. New records with the
 - **AND** the chip's detail panel is **expanded by default** so the error
   detail (rendered from the terminal event's `tool_detail` payload) is
   visible without an extra click
+
+#### Scenario: Toggle button sits inline with the chip head
+- **GIVEN** a settled tool chip in the success or in-flight state whose
+  terminal event carries a non-empty detail payload
+- **WHEN** the chip is rendered in `#flow-view`
+- **THEN** the expand/collapse toggle button is a direct sibling of the chip
+  head's name / header / glyph nodes, right-aligned at the end of the head
+  row (e.g. via `margin-left: auto`)
+- **AND** the toggle is NOT rendered in a secondary row below the head
+  separated by a dashed top border / top padding divider
+- **AND** when the user expands the detail panel, the detail body wraps onto
+  its own row beneath the head (e.g. via `flex-basis: 100%`) without
+  reintroducing the top-border divider
+
+#### Scenario: Chip with no detail payload renders no toggle button
+- **GIVEN** a tool chip whose terminal event produced no detail payload
+- **WHEN** the chip is rendered
+- **THEN** the chip head row contains no toggle button, keeping the chip a
+  single uncluttered line
 
 #### Scenario: Legacy no-id records degrade to a single in-flight chip
 - **GIVEN** a settled assistant turn read from history whose body contains
