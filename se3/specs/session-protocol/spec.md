@@ -223,9 +223,11 @@ When a step transitions to `StepStatus.FAILED`, the orchestrator SHALL obtain a 
 3. If `retry_count >= 3`:
    - The operator is informed that max retries have been reached.
    - The flow is **auto-failed** (no prompt): `flow.status` is set to `FlowStatus.FAILED`, state is persisted, and the process exits with code 1.
-4. If `retry_count < 3`, the recovery decision is sourced according to whether the process owns a terminal (`sys.stdin.isatty()`):
-   - **On a TTY (interactive):** the operator is shown a choice prompt: **"Retry this step"** / **"Skip to next step"** / **"Abort flow"**.
+4. If `retry_count < 3`, the recovery decision is sourced according to whether the process owns a terminal (`sys.stdin.isatty()`). The TTY and non-TTY decision channels MUST behave as a **mutually exclusive pair**: once either side answers, the other side must be left with no stale call file and no stale web-console chip. Concretely:
+   - **On a TTY (interactive):** the orchestrator first probes for an out-of-band webui answer at the deterministic `retry_decision_{step_id}.json` call file (typical when a daemon-spawned flow paused on a prior failure and the operator later resumes from a TTY). If a sibling `.response` / `.response.json` file is present, its `decision` value is adopted and the call file plus both sibling response variants are removed — no CLI prompt is shown. If no answer is waiting, the orchestrator shows a choice prompt: **"Retry this step"** / **"Skip to next step"** / **"Abort flow"** WITHOUT writing a new call file (the interactive path stays free of any webui chip while the operator types). After the CLI prompt returns a choice, the orchestrator best-effort unlinks the same `retry_decision_{step_id}.json` call file and both sibling response variants — identically for all three choices — so that any webui chip raised in the typing window (e.g. a daemon under the same project root re-surfaced an older retry_decision artifact, or a concurrent webui answer raced the CLI) disappears as soon as the CLI side commits to a decision.
    - **Off a TTY (daemon-spawned `se3 run --output-format json`, CI, a pipe):** there is no operator to host a blocking prompt, so the decision is externalized as a `retry_decision`-kind call file under `se3/calls/` (written via `interaction_calls.write_retry_decision_call`, embedding the failed step's id/type, the error message, and the current retry count). If no sibling response file exists yet, the flow is set to `FlowStatus.PAUSED`, a `FLOW_PAUSED` event is emitted, state is persisted, and the process returns — the decision is made out-of-band (e.g. through the web console) and applied on the next `se3 run --resume`. If a sibling response file is already present (a resumed run), its `decision` value (`retry` / `skip` / `abort`, defaulting to `abort` when missing or unrecognized) is consumed and the call file plus both `.response` / `.response.json` siblings are removed so a later failure of the same step writes a fresh call.
+
+The shared filename and cleanup behavior is owned by two helpers in `src/se3/commands/run.py`: `_retry_decision_call_path(project_root, step_id)` returns the deterministic `retry_decision_{step_id}.json` path that both ends of the channel address, and `_cleanup_retry_decision_artifacts(call_path)` is the best-effort unlink of that call file plus its `.response` / `.response.json` siblings. Both the interactive sibling-response probe, the non-interactive resumed-decision consumer, and the post-CLI-prompt mutual-exclusion cleanup route through these helpers so the two channels never disagree on which file to clear.
 
 **Choice Outcomes:**
 
@@ -297,6 +299,26 @@ The `retry_count` on the step model is distinct from the `inputs["retry_count"]`
 - **THEN** the recorded decision is applied with the same Retry/Skip/Abort outcomes as the interactive prompt
 - **AND** the call file and both `.response` / `.response.json` siblings are removed so a later failure of the same step writes a fresh call
 - **AND** a missing or unrecognized `decision` value defaults to `abort`
+
+#### Scenario: Interactive failure adopts a pre-existing webui answer
+- **GIVEN** a daemon-spawned earlier run wrote a `retry_decision_{step_id}.json` call for the same failed step, the webui operator answered it (writing a sibling `.response` / `.response.json`), and the flow is now being processed on a TTY
+- **WHEN** the orchestrator reaches the Retry/Skip/Abort decision point with `retry_count < 3`
+- **THEN** the sibling response is consumed and its decision is applied with the same Retry/Skip/Abort outcomes as the interactive prompt
+- **AND** the call file and both `.response` / `.response.json` siblings are removed so a later failure of the same step writes a fresh call
+- **AND** no Retry/Skip/Abort prompt is shown to the operator
+
+#### Scenario: Interactive prompt does not create a new retry_decision call
+- **GIVEN** a step fails on a TTY with `retry_count < 3` and no `retry_decision_{step_id}.json` call file exists
+- **WHEN** the orchestrator reaches the decision point
+- **THEN** the operator is shown the Retry/Skip/Abort prompt directly
+- **AND** no new `retry_decision`-kind call file is written under `se3/calls/` for that failure (the interactive path stays free of any webui chip while the operator types)
+
+#### Scenario: CLI decision cleans up any concurrent webui artifacts
+- **GIVEN** a step fails on a TTY, the operator is shown the Retry/Skip/Abort prompt, and during the typing window a webui-side `retry_decision_{step_id}.json` call file (and possibly a sibling response) exists for the same step
+- **WHEN** the operator submits any of the three choices (Retry / Skip / Abort)
+- **THEN** the call file and both `.response` / `.response.json` siblings for that step are best-effort unlinked after the prompt returns
+- **AND** the cleanup happens identically for all three choices (it is keyed on the decision having been taken on the CLI side, not on which decision was picked)
+- **AND** any webui chip for that step disappears from the docked reply bar so the operator is not asked to answer the same decision again on the other channel
 
 ### Requirement: CONFIRM Steps and REVISION_NEEDED Transitions
 

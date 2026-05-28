@@ -484,10 +484,26 @@ already-answered-by-sibling-file check can never clear it and the stale "待回�
 chip would otherwise persist for the entire run. To close this, the aggregator
 (`DaemonAggregator._enumerate_calls` / `_snapshot_for_root`) MUST treat a call
 as no longer pending when its owning `context.step_id` is no longer the flow's
-current step (or that step has already reached a COMPLETED / REVISION-handled
-status), and drop it from the flow's `pending_calls` even when no sibling
-response file exists. Calls whose step is still the current, unanswered step
-remain pending and continue to surface as chips.
+current step (or that step has already reached a COMPLETED / FAILED /
+REVISION-handled status), and drop it from the flow's `pending_calls` even
+when no sibling response file exists. Calls whose step is still the current,
+unanswered step remain pending and continue to surface as chips.
+
+**FAILED-status exemption for decision-class kinds.** The "step in a processed
+status implies stale call" rule MUST exempt call kinds whose entire purpose is
+to surface a decision *because* the step failed. These kinds exist only on a
+FAILED step by construction, and treating FAILED as already-handled would
+filter the chip out the instant the flow paused — hiding the very interaction
+the human needs to answer. The exemption is implemented in
+`DaemonAggregator._filter_stale_calls` against a module-level kind set
+(`_FAILED_EXEMPT_CALL_KINDS`, currently `{retry_decision}`): for a call whose
+`kind` is in the set, the processed-status set is judged with `"failed"`
+removed; for every other kind the processed set is unchanged. The exemption is
+keyed on call *kind* (not step type) so a future decision-class kind
+(`partial_decision`, etc.) joins the set without re-touching the filter body,
+and `step_id != current_step_id` plus the remaining processed statuses
+(`completed` / `partial` / `revision_needed`) still drop the chip when the
+flow has genuinely advanced past the failed step.
 
 Pending calls are additionally **deduplicated per `(flow_id, step_id)`, newest
 wins** (`DaemonAggregator._dedup_calls_by_step`). An interactive discovery flow
@@ -555,6 +571,25 @@ against one another.
   run, not only after the flow archives
 - **AND** a call whose step is still the current, unanswered step remains
   pending and continues to surface as a chip
+
+#### Scenario: retry_decision chip stays visible while its step is FAILED
+- **GIVEN** a daemon-spawned flow `F1` whose current step `S` has just
+  transitioned to FAILED with `retry_count < 3` and the orchestrator has
+  written a `retry_decision`-kind call file keyed to `(F1, S)`
+- **WHEN** the aggregator enumerates `F1`'s `pending_calls` while `S` is still
+  the current step and its `status` is `failed`
+- **THEN** the `retry_decision` call is reported as pending and surfaces as a
+  decision chip in `F1`'s docked reply bar immediately on pause — the
+  FAILED-status staleness rule does not apply to call kinds in the FAILED
+  exemption set (currently `{retry_decision}`)
+- **AND** the chip clears in the usual way once the operator answers it (the
+  resume path consumes the sibling response and deletes the call file) or
+  once the flow moves past step `S` for any other reason (e.g. `S` reaches
+  `completed` / `partial` / `revision_needed`, or a different step becomes
+  the current step)
+- **AND** the exemption is keyed on call `kind` rather than the step's type,
+  so calls of every other kind still drop the moment their step reaches a
+  `failed` status
 
 ### Requirement: Role-Based Message Collapse
 

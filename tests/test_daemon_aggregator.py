@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from se3.daemon import protocol
 from se3.daemon.aggregator import DaemonAggregator, PendingCall
 
 
@@ -318,6 +319,91 @@ def test_machine_status_project_roots_sorted_and_unique(tmp_path: Path) -> None:
 
     assert status.project_roots == sorted(set(status.project_roots))
     assert status.project_roots.count(str(proj_a.resolve())) == 1
+
+
+# ---- _filter_stale_calls: FAILED-as-stale exemption by call kind ----------
+
+
+def _stale_call(
+    call_id: str,
+    *,
+    kind: str = protocol.CALL_KIND_CALL,
+    step_id: str = "s1",
+) -> PendingCall:
+    return PendingCall(
+        call_id=call_id,
+        path=f"/tmp/{call_id}.json",
+        project_root="/tmp",
+        kind=kind,
+        context={"step_id": step_id, "flow_id": "flow-1"},
+    )
+
+
+def _state_with_step_status(step_id: str, status: str) -> dict:
+    return {
+        "current_step_id": step_id,
+        "steps": {step_id: {"step_type": "implement", "status": status}},
+    }
+
+
+def test_filter_stale_keeps_retry_decision_on_failed_current_step() -> None:
+    """A retry_decision call on the FAILED current step stays pending.
+
+    The retry_decision chip exists *because* the step failed; without the
+    FAILED-as-stale exemption the daemon would filter it out the instant
+    the flow paused, hiding the very interaction the human needs to answer.
+    """
+    state = _state_with_step_status("s1", "failed")
+    calls = [_stale_call("rd1", kind=protocol.CALL_KIND_RETRY_DECISION)]
+    result = DaemonAggregator._filter_stale_calls(calls, state)
+    assert [c.call_id for c in result] == ["rd1"]
+
+
+def test_filter_stale_drops_plain_call_on_failed_step() -> None:
+    """Non-exempt kinds (kind=call) keep the original FAILED-as-stale rule."""
+    state = _state_with_step_status("s1", "failed")
+    calls = [_stale_call("c1", kind=protocol.CALL_KIND_CALL)]
+    result = DaemonAggregator._filter_stale_calls(calls, state)
+    assert result == []
+
+
+def test_filter_stale_drops_retry_decision_on_non_failed_processed_status() -> None:
+    """The exemption ONLY removes ``failed`` — completed / partial /
+    revision_needed still count as processed for retry_decision."""
+    for status in ("completed", "partial", "revision_needed"):
+        state = _state_with_step_status("s1", status)
+        calls = [_stale_call("rd1", kind=protocol.CALL_KIND_RETRY_DECISION)]
+        result = DaemonAggregator._filter_stale_calls(calls, state)
+        assert result == [], (
+            f"retry_decision should be stale on status={status}"
+        )
+
+
+def test_filter_stale_drops_retry_decision_when_flow_moved_past_step() -> None:
+    """Exemption is scoped to ``step_id == current_step_id``."""
+    state = {
+        "current_step_id": "s2",
+        "steps": {
+            "s1": {"step_type": "implement", "status": "failed"},
+            "s2": {"step_type": "verify_spec", "status": "running"},
+        },
+    }
+    calls = [
+        _stale_call("rd1", kind=protocol.CALL_KIND_RETRY_DECISION, step_id="s1"),
+    ]
+    result = DaemonAggregator._filter_stale_calls(calls, state)
+    assert result == []
+
+
+def test_filter_stale_mixed_kinds_on_failed_step() -> None:
+    """Mixed batch: retry_decision survives, plain call is filtered out."""
+    state = _state_with_step_status("s1", "failed")
+    calls = [
+        _stale_call("rd1", kind=protocol.CALL_KIND_RETRY_DECISION),
+        _stale_call("c1", kind=protocol.CALL_KIND_CALL),
+    ]
+    result = DaemonAggregator._filter_stale_calls(calls, state)
+    assert [c.call_id for c in result] == ["rd1"]
 
 
 def test_machine_status_pending_calls_unfiltered(tmp_path: Path) -> None:

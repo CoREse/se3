@@ -21,7 +21,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Set
+from typing import Any, Callable, Dict, FrozenSet, Iterable, List, Optional, Set
 
 from . import protocol
 from .history import enumerate_historical_project_roots
@@ -30,6 +30,23 @@ from .history import enumerate_historical_project_roots
 logger = logging.getLogger(__name__)
 
 DEFAULT_POLL_INTERVAL = 2.0
+
+# Call kinds that are *exempt* from the ``status == "failed"`` staleness rule
+# applied by :meth:`DaemonAggregator._filter_stale_calls`. A call of one of
+# these kinds keyed to the flow's current step stays pending even when that
+# step is itself in the FAILED state — it exists *because* the step failed and
+# is the operator's decision channel for what to do about it. Without the
+# exemption the chip would be filtered out the instant the flow paused, hiding
+# the very interaction the human needs to answer.
+#
+# The exemption is keyed on call *kind* (not step type): call kind is the
+# semantic identity of the interaction, retry_decision exists only on a FAILED
+# step by construction, and routing it this way keeps step / kind decoupled so
+# a future decision-class kind (``partial_decision`` etc.) joins this set
+# without re-touching the filter body.
+_FAILED_EXEMPT_CALL_KINDS: FrozenSet[str] = frozenset(
+    {protocol.CALL_KIND_RETRY_DECISION}
+)
 
 
 @dataclass
@@ -464,6 +481,14 @@ class DaemonAggregator:
         status (``completed`` / ``partial`` / ``failed`` / ``revision_needed``).
         Such calls are dropped.
 
+        A call whose ``kind`` is in :data:`_FAILED_EXEMPT_CALL_KINDS`
+        (currently the ``retry_decision`` kind) is judged against the
+        processed set with ``"failed"`` removed: the retry-decision chip is
+        precisely the FAILED-step decision channel and MUST stay visible while
+        the step is in that state. The exemption is keyed on call kind rather
+        than hard-coding ``retry_decision`` so a future decision-class kind
+        joins the set without re-touching the filter body.
+
         A call whose step cannot be resolved (no ``step_id``, or a ``step_id``
         absent from ``state.steps``) is kept untouched, so a genuinely pending
         interaction is never lost to an over-eager progress heuristic.
@@ -487,7 +512,12 @@ class DaemonAggregator:
             status = ""
             if isinstance(step, dict):
                 status = str(step.get("status") or "").lower()
-            if step_id != current_step_id or status in processed:
+            processed_for_call = (
+                processed - {"failed"}
+                if call.kind in _FAILED_EXEMPT_CALL_KINDS
+                else processed
+            )
+            if step_id != current_step_id or status in processed_for_call:
                 # The flow has walked past this step (or already finished it) —
                 # the call is stale; do not surface it as pending.
                 continue

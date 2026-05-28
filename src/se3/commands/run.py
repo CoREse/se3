@@ -383,6 +383,38 @@ def _stdin_is_interactive() -> bool:
         return False
 
 
+def _retry_decision_call_path(project_root: Path, step_id: str) -> Path:
+    """Path of the deterministic ``retry_decision_{step_id}.json`` call file.
+
+    Shared helper used by both :func:`_resolve_step_failure_action` (to probe
+    for an out-of-band webui answer at the interactive entry point) and the
+    post-CLI-prompt cleanup at the failure-handling call site, so both ends of
+    the mutual-exclusion pair agree on a single filename.
+    """
+    from ..engine import interaction_calls
+
+    return interaction_calls.calls_dir_for(project_root) / f"retry_decision_{step_id}.json"
+
+
+def _cleanup_retry_decision_artifacts(call_path: Path) -> None:
+    """Best-effort unlink of a retry_decision call file and its sibling
+    response files (``.response`` / ``.response.json``).
+
+    Used on both the consume-an-out-of-band-answer path and the
+    interactive-CLI-answered path to make sure no stale webui chip lingers
+    after a decision has been taken.
+    """
+    for stale in (
+        call_path,
+        call_path.with_name(call_path.stem + ".response"),
+        call_path.with_name(call_path.stem + ".response.json"),
+    ):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+
+
 def _resolve_step_failure_action(
     project_root: Path,
     flow: FlowInstance,
@@ -393,20 +425,56 @@ def _resolve_step_failure_action(
 ) -> Tuple[str, Any]:
     """Decide how a FAILED step should be handled, branching on a TTY.
 
-    On an interactive terminal this returns ``("prompt", None)`` and the
-    caller runs the Retry/Skip/Abort prompt unchanged. Off a terminal there is
-    no operator, so a :data:`~se3.engine.interaction_calls.CALL_KIND_RETRY_DECISION`
+    Interactive (TTY) and non-interactive (daemon-spawn / CI / pipe) failures
+    are two independent decision channels that must finish *mutually
+    exclusively* — once either side answers, the other must not be left with
+    a stale chip or stale call file. This function is one half of that
+    coupling; the post-prompt cleanup at the CLI failure-handling call site is
+    the other (it catches the ``webui answered while CLI was still typing``
+    window).
+
+    On an interactive terminal the function first probes for an existing
+    webui answer at the deterministic ``retry_decision_{step_id}`` call file.
+    If a sibling response is already present (webui has already answered),
+    the decision is consumed and the call file plus both sibling response
+    variants are removed; the function returns
+    ``("decision", "retry"|"skip"|"abort")``. Otherwise it returns
+    ``("prompt", None)`` and the caller runs the CLI Retry/Skip/Abort prompt
+    unchanged (no new call file is written).
+
+    Off a terminal a :data:`~se3.engine.interaction_calls.CALL_KIND_RETRY_DECISION`
     call file is written under ``se3/calls/`` and:
 
     * ``("pause", call_path)`` is returned when no response exists yet — the
       caller pauses the flow so the decision can be made out-of-band; or
     * ``("decision", "retry"|"skip"|"abort")`` is returned when a sibling
-      response file is already present (a resume / out-of-band answer).
+      response file is already present (a resume / out-of-band answer); the
+      call file and both sibling responses are removed so a later failure of
+      the same step writes a fresh call.
     """
-    if interactive:
-        return ("prompt", None)
-
     from ..engine import interaction_calls
+
+    if interactive:
+        # Sibling-response probe: if the webui has already answered an
+        # earlier retry_decision call (typical when a daemon-spawned flow
+        # paused on FAILURE and the operator later resumes from a TTY), adopt
+        # that answer and clean up the artifacts. Crucially, when no answer is
+        # waiting we return ``("prompt", None)`` WITHOUT writing a new call —
+        # the interactive path stays free of any webui chip until the CLI
+        # actually answers.
+        existing_call = _retry_decision_call_path(
+            project_root, current_step.step_id
+        )
+        response = interaction_calls.read_response(existing_call)
+        if response is None:
+            return ("prompt", None)
+        decision = str(
+            response.get("decision") or response.get("response") or "abort"
+        ).strip().lower()
+        if decision not in ("retry", "skip", "abort"):
+            decision = "abort"
+        _cleanup_retry_decision_artifacts(existing_call)
+        return ("decision", decision)
 
     call_path = interaction_calls.write_retry_decision_call(
         project_root,
@@ -429,16 +497,7 @@ def _resolve_step_failure_action(
     # same step would otherwise re-read this stale response and silently
     # re-apply it. Remove the call file and both sibling response variants so
     # the next failure writes a fresh call and pauses for a new human answer.
-    call_path = Path(call_path)
-    for stale in (
-        call_path,
-        call_path.with_name(call_path.stem + ".response"),
-        call_path.with_name(call_path.stem + ".response.json"),
-    ):
-        try:
-            stale.unlink()
-        except OSError:
-            pass
+    _cleanup_retry_decision_artifacts(Path(call_path))
     return ("decision", decision)
 
 
@@ -1827,6 +1886,18 @@ def _run_flow_impl(
                 # Interactive terminal — ask the operator to retry/skip/abort.
                 options = ["Retry this step", "Skip to next step", "Abort flow"]
                 choice = prompt_user_choice("What would you like to do?", options)
+                # CLI just answered — wipe any retry_decision artifacts left
+                # behind so the webui chip for this step disappears too. This
+                # closes the ``webui-answered-while-CLI-was-typing`` race that
+                # the interactive sibling-response probe at the top of
+                # _resolve_step_failure_action cannot reach (the probe runs
+                # *before* the prompt; this cleanup runs *after*). The unlink
+                # is best-effort and identical for all three choices since the
+                # goal is solely to make the chip vanish, independent of which
+                # decision the CLI picked.
+                _cleanup_retry_decision_artifacts(
+                    _retry_decision_call_path(project_root, current_step.step_id)
+                )
 
             if choice == 0:
                 # Reset step status and retry from where it left off
