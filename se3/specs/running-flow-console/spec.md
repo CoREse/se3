@@ -949,9 +949,22 @@ report; it is the worked example below:
    blocks and any trailing bare JSON object after the last narrative line are
    stripped (matching the backend's `parse_json_response` lenient repair
    chain). Tool-use markers (e.g. `[Read: ...]`) embedded in the narrative
-   stay intact and are rendered via the same `renderToolMarkers` helper used
-   elsewhere; the resulting narrative text is rendered as markdown at the top
-   of the bubble.
+   MUST be routed through the **same shared narrative-rendering helper** the
+   no-result assistant path uses (`renderNarrativeNodes(text, norm)`), so that
+   when the turn's `raw_json` carries paired `tool_use` / `tool_result` content
+   blocks the chip pipeline (see *Tool Call Chip State Machine*) renders the
+   narrative's tool calls as full rich chips — solid border with the ✓ / ✗
+   glyph, merged success/failure header, and a per-kind collapsible detail
+   panel — visually identical to the chips the same turn would produce on the
+   no-result assistant path. When `raw_json` is unavailable (legacy records, or
+   `extractAssistantChipEvents` returns an empty event stream), the helper
+   degrades to the bracket-only `renderToolMarkers` form. The resulting
+   narrative nodes are rendered at the top of the bubble. The same helper MUST
+   be reused by every structured-renderer narrative slot (`renderDiscoveryAssistant`,
+   the shared `makeStructuredAssistantRenderer`, and the no-result inline path)
+   so the three call sites never structurally drift; an `assistant` turn that
+   carries both narrative tool calls and a final result JSON renders its
+   narrative chips identically to a turn whose body is thinking process only.
 2. Parse the JSON object. If parsing succeeds, render the fields in this
    order, skipping any that are absent or empty:
    - `content` — rendered as a markdown block.
@@ -1156,6 +1169,34 @@ as markdown without raising and without producing an empty result card.
 - **WHEN** the user opens the per-record `view raw` toggle
 - **THEN** the original unrendered assistant body (including the JSON
   literal and the underlying NDJSON envelope) is shown unchanged
+
+#### Scenario: Structured-renderer narrative tool calls render as rich chips when raw_json is available
+- **GIVEN** an assistant turn routed to a structured renderer (e.g. a
+  `discovery` turn carrying `refined_description`, or any `analyze` / `plan` /
+  `implement` / `test` / etc. turn whose body carries a final result JSON)
+  whose body also carries narrative text with bracketed tool-call markers and
+  whose `norm.raw.raw_json` contains paired `tool_use` / `tool_result` content
+  blocks for those calls
+- **WHEN** the turn is rendered in `#flow-view`
+- **THEN** the narrative section above the structured-result fields renders
+  each tool call as a full rich chip — solid border with the ✓ / ✗ glyph,
+  the merged success/failure header, and a per-kind collapsible detail panel
+  — produced by the same chip pipeline that drives the no-result assistant
+  path (`extractAssistantChipEvents` → `renderChipEvents`), via the shared
+  `renderNarrativeNodes` helper
+- **AND** the chips are visually indistinguishable from the chips the same
+  turn would produce if it had no result JSON, so the narrative tool-call
+  rendering does not visually degrade just because the turn also has a result
+
+#### Scenario: Structured-renderer narrative falls back to bracket chips without raw_json
+- **GIVEN** an assistant turn routed to a structured renderer whose body
+  carries narrative with bracketed tool-call markers, but whose
+  `norm.raw.raw_json` is absent, non-iterable, or yields no chip events
+- **WHEN** the turn is rendered
+- **THEN** the `renderNarrativeNodes` helper degrades to the bracket-only
+  `renderToolMarkers` rendering for the narrative section so the legacy
+  in-flight bracket chip is still shown, the structured-result fields below
+  it still render, and no exception is raised
 
 ### Requirement: Live Per-Turn Stream Accumulation
 

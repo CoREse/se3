@@ -2523,6 +2523,235 @@ const chipMod = await import("./tool_chip_state.test.mjs");
 chipMod.registerToolChipStateTests({ app, check, findOne, findAll });
 
 // ---------------------------------------------------------------------------
+// Narrative chip rendering inside structured-result assistant turns
+// ---------------------------------------------------------------------------
+//
+// A result-JSON assistant turn (discovery with `refined_description`, plan with
+// `task_groups`, …) whose narrative prefix carries inline `[Tool: …]` bracket
+// markers must, when `norm.raw.raw_json` is available, render those tool calls
+// as the same RICH chip the thinking-only assistant path produces: ✓/✗ glyph,
+// collapsible detail panel, success-state class. Otherwise the chip-events
+// pipeline must be skipped and the narrative falls back to the bare bracket
+// chip from `renderToolMarkers`.
+//
+// Regression context: prior to G1 the structured assistant renderers piped the
+// narrative directly through `renderToolMarkers`, which parses the bracket
+// header and produces an in-flight `.tool-marker` chip with no terminal
+// upgrade. So within the same session, thinking-only turns showed rich chips
+// while result-JSON turns showed bare brackets — visually inconsistent.
+
+// Build the `raw_json` shape Claude CLI emits for a finished tool_use +
+// tool_result pair, so the chip-events pipeline can fold them into a single
+// upgraded chip.
+const toolBlocksRawJson = (blocks) => [
+  { type: "assistant", message: { content: blocks } },
+];
+
+check("renderDiscoveryAssistant: narrative renders rich chips when raw_json carries tool pair", () => {
+  const blocks = [
+    { type: "tool_use", id: "tu_1", name: "Read",
+      input: { file_path: "src/foo.py", offset: 0, limit: 200 } },
+    { type: "tool_result", tool_use_id: "tu_1",
+      content: [{ type: "text", text: "ok" }], is_error: false },
+  ];
+  const norm = { raw: { raw_json: toolBlocksRawJson(blocks), raw_ndjson: null } };
+  const content =
+    "[Read: src/foo.py:0-200]\n\n" +
+    "```json\n" +
+    JSON.stringify({
+      refined_description: "Do the thing",
+      questions: ["q1?"],
+    }) +
+    "\n```";
+  const frag = app.renderDiscoveryAssistant(content, norm);
+  assert.ok(frag, "renderer returns a fragment when a discovery result is present");
+  const wrap = document.createElement("div");
+  wrap.appendChild(frag);
+  const narrative = findOne(wrap, "assistant-narrative");
+  assert.ok(narrative, "narrative wrapper rendered above the result fields");
+  const chips = findAll(narrative, "tool-marker");
+  assert.equal(chips.length, 1,
+    "exactly one chip in the narrative — paired in place by tool_use_id");
+  assert.equal(chips[0].classList.contains("success"), true,
+    "narrative tool chip carries the ✓ success state from the paired tool_result");
+  assert.equal(chips[0].classList.contains("in-flight"), false);
+  const panel = findOne(chips[0], "tool-marker-details");
+  assert.ok(panel,
+    "success chip carries a collapsible detail panel (was missing on bracket-only path)");
+  // Proposed Task Description card still renders from the JSON region.
+  assert.ok(findOne(wrap, "step-report--proposed-task"),
+    "Proposed Task Description card still renders alongside the rich chip");
+});
+
+check("makeStructuredAssistantRenderer: narrative renders rich chips when raw_json carries tool pair", () => {
+  const blocks = [
+    { type: "tool_use", id: "tu_2", name: "Read",
+      input: { file_path: "src/bar.py", offset: 0, limit: 200 } },
+    { type: "tool_result", tool_use_id: "tu_2",
+      content: [{ type: "text", text: "ok" }], is_error: false },
+  ];
+  const norm = { raw: { raw_json: toolBlocksRawJson(blocks), raw_ndjson: null } };
+  // `analyze` flows through `makeStructuredAssistantRenderer`. We pick a result
+  // field the analyze STEP_RESULT_FIELDS predicate accepts so a result region
+  // is identified (the render-path under test runs only on result turns).
+  // We don't pin the exact analyze field set — we ask the registry which keys
+  // count for `analyze` and pick the first one with a non-null value.
+  const analyzeFields = app.STEP_RESULT_FIELDS && app.STEP_RESULT_FIELDS.analyze;
+  assert.ok(Array.isArray(analyzeFields) && analyzeFields.length,
+    "STEP_RESULT_FIELDS.analyze is non-empty");
+  const result = {};
+  // Best-effort sentinel values for common analyze fields; isStepResultDict
+  // accepts presence (non-null), not non-empty.
+  for (const key of analyzeFields) result[key] = "x";
+  const renderer = app.makeStructuredAssistantRenderer("analyze");
+  const content =
+    "[Read: src/bar.py:0-200]\n\n" +
+    "```json\n" + JSON.stringify(result) + "\n```";
+  const frag = renderer(content, norm);
+  assert.ok(frag, "renderer returns a fragment when an analyze result is present");
+  const wrap = document.createElement("div");
+  wrap.appendChild(frag);
+  const narrative = findOne(wrap, "assistant-narrative");
+  assert.ok(narrative, "narrative wrapper rendered above the result");
+  const chips = findAll(narrative, "tool-marker");
+  assert.equal(chips.length, 1,
+    "exactly one chip in the narrative");
+  assert.equal(chips[0].classList.contains("success"), true,
+    "narrative tool chip is upgraded to success via the chip-events pipeline");
+  const panel = findOne(chips[0], "tool-marker-details");
+  assert.ok(panel,
+    "success chip carries the collapsible detail panel from the chip-events path");
+});
+
+check("renderDiscoveryAssistant: narrative falls back to bare bracket chip when raw_json is unavailable", () => {
+  // No norm.raw / no raw_json → renderNarrativeNodes must fall back to
+  // renderToolMarkers, producing an in-flight bare chip (no detail panel, no
+  // success class) — the legacy behavior, preserved for backward compatibility.
+  const content =
+    "[Read: src/foo.py:0-200]\n\n" +
+    "```json\n" +
+    JSON.stringify({
+      refined_description: "Do the thing",
+      questions: ["q1?"],
+    }) +
+    "\n```";
+  for (const norm of [
+    {},                          // no raw at all
+    { raw: null },               // raw is null
+    { raw: { raw_json: null } }, // raw present but raw_json missing
+    { raw: { raw_json: "not an array" } },
+  ]) {
+    const frag = app.renderDiscoveryAssistant(content, norm);
+    assert.ok(frag, "renderer still returns a fragment");
+    const wrap = document.createElement("div");
+    wrap.appendChild(frag);
+    const narrative = findOne(wrap, "assistant-narrative");
+    assert.ok(narrative, "narrative wrapper still rendered");
+    const chips = findAll(narrative, "tool-marker");
+    assert.equal(chips.length, 1, "fallback path renders exactly one bracket chip");
+    assert.equal(chips[0].classList.contains("in-flight"), true,
+      "fallback bracket chip stays in the in-flight state (no terminal upgrade)");
+    assert.equal(chips[0].classList.contains("success"), false);
+    assert.equal(findOne(chips[0], "tool-marker-details"), null,
+      "fallback bracket chip has no detail panel (no tool_use_id pairing)");
+  }
+});
+
+check("makeStructuredAssistantRenderer: narrative falls back to bare bracket chip when raw_json is unavailable", () => {
+  const analyzeFields = app.STEP_RESULT_FIELDS && app.STEP_RESULT_FIELDS.analyze;
+  assert.ok(Array.isArray(analyzeFields) && analyzeFields.length);
+  const result = {};
+  for (const key of analyzeFields) result[key] = "x";
+  const renderer = app.makeStructuredAssistantRenderer("analyze");
+  const content =
+    "[Read: src/bar.py:0-200]\n\n" +
+    "```json\n" + JSON.stringify(result) + "\n```";
+  const frag = renderer(content, { raw: { raw_json: null } });
+  assert.ok(frag);
+  const wrap = document.createElement("div");
+  wrap.appendChild(frag);
+  const narrative = findOne(wrap, "assistant-narrative");
+  assert.ok(narrative);
+  const chips = findAll(narrative, "tool-marker");
+  assert.equal(chips.length, 1);
+  assert.equal(chips[0].classList.contains("in-flight"), true,
+    "fallback bare bracket chip stays in-flight");
+  assert.equal(findOne(chips[0], "tool-marker-details"), null,
+    "fallback bare bracket chip has no detail panel");
+});
+
+// Production-shape regression: in real history records the assistant message's
+// raw_json content is a single `text` block carrying the FULL assistant body
+// (narrative prose + the trailing ```json fenced result literal), with NO
+// inner tool_use / tool_result blocks (see e.g.
+// se3/history/20260518-090652_6f11df31/01_discovery_65ee0848.jsonl). Earlier
+// the narrative helper piped chip-event text events through `renderToolMarkers`
+// which then re-rendered the embedded ```json fence as a markdown
+// `<code class="language-json">` block — duplicating the JSON the structured
+// renderer already shows below as Proposed Task Description + Questions.
+// The narrative wrapper MUST contain only JSON-stripped prose for this shape.
+check("renderDiscoveryAssistant: narrative does NOT duplicate result JSON when raw_json text block carries full body", () => {
+  const resultObj = {
+    refined_description: "Do the thing",
+    questions: ["q1?"],
+  };
+  const bodyText =
+    "Narrative prose explaining the plan.\n" +
+    "```json\n" + JSON.stringify(resultObj) + "\n```";
+  // Production shape: a single `text` block with no tool_use / tool_result.
+  const rawJson = [{ type: "assistant", message: { content: [
+    { type: "text", text: bodyText },
+  ] } }];
+  const norm = { raw: { raw_json: rawJson, raw_ndjson: null } };
+  // The `content` arg the structured renderer sees mirrors the raw text body.
+  const frag = app.renderDiscoveryAssistant(bodyText, norm);
+  assert.ok(frag, "renderer returns a fragment");
+  const wrap = document.createElement("div");
+  wrap.appendChild(frag);
+  const narrative = findOne(wrap, "assistant-narrative");
+  assert.ok(narrative, "narrative wrapper renders");
+  // Critical: no ```json fence leaks into the narrative as a code block, and
+  // no duplicate of the result JSON literal appears.
+  const codeBlocks = findAll(narrative, "md-code");
+  assert.equal(codeBlocks.length, 0,
+    "narrative must NOT carry a fenced code block (md-code)");
+  const narrativeText = narrative.textContent || "";
+  assert.equal(narrativeText.indexOf("refined_description"), -1,
+    "narrative must NOT contain the result JSON's field names");
+  // The structured card still renders the result as before.
+  assert.ok(findOne(wrap, "step-report--proposed-task"),
+    "Proposed Task Description card still renders alongside the clean narrative");
+});
+
+check("makeStructuredAssistantRenderer: narrative does NOT duplicate result JSON when raw_json text block carries full body", () => {
+  const analyzeFields = app.STEP_RESULT_FIELDS && app.STEP_RESULT_FIELDS.analyze;
+  assert.ok(Array.isArray(analyzeFields) && analyzeFields.length);
+  const resultObj = {};
+  for (const key of analyzeFields) resultObj[key] = "x";
+  const bodyText =
+    "Some analysis narrative.\n" +
+    "```json\n" + JSON.stringify(resultObj) + "\n```";
+  const rawJson = [{ type: "assistant", message: { content: [
+    { type: "text", text: bodyText },
+  ] } }];
+  const norm = { raw: { raw_json: rawJson, raw_ndjson: null } };
+  const renderer = app.makeStructuredAssistantRenderer("analyze");
+  const frag = renderer(bodyText, norm);
+  assert.ok(frag);
+  const wrap = document.createElement("div");
+  wrap.appendChild(frag);
+  const narrative = findOne(wrap, "assistant-narrative");
+  assert.ok(narrative);
+  assert.equal(findAll(narrative, "md-code").length, 0,
+    "narrative must NOT carry a fenced code block (md-code)");
+  const narrativeText = narrative.textContent || "";
+  for (const key of analyzeFields) {
+    assert.equal(narrativeText.indexOf(key), -1,
+      `narrative must NOT contain the result field name "${key}"`);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // groupHistorySessionsByProjectRoot + pickDefaultHistoryProjectRoot (pure)
 // ---------------------------------------------------------------------------
 //

@@ -3574,7 +3574,7 @@ function isDiscoveryResultDict(value) {
   return false;
 }
 
-function renderDiscoveryAssistant(content, _norm) {
+function renderDiscoveryAssistant(content, norm) {
   // Result identification: only surface a structured result (Layer 1) when this
   // turn parsed a real discovery result (content / refined_description /
   // questions). A turn whose only JSON is a tool call — including 2+ such
@@ -3646,10 +3646,13 @@ function renderDiscoveryAssistant(content, _norm) {
   if (!resultFrag.childNodes.length) return null;
 
   const frag = document.createDocumentFragment();
-  // narrative prefix (only with a real result present)
+  // narrative prefix (only with a real result present) — routed through the
+  // shared `renderNarrativeNodes` helper so when raw_json is available the
+  // narrative's tool calls render as the same rich chips (✓/✗ + details) the
+  // thinking-only assistant path produces, instead of bare bracket chips.
   if (extracted.narrative) {
     const narWrap = el("div", "assistant-narrative");
-    for (const node of renderToolMarkers(extracted.narrative)) {
+    for (const node of renderNarrativeNodes(extracted.narrative, norm)) {
       narWrap.appendChild(node);
     }
     if (narWrap.childNodes.length) frag.appendChild(narWrap);
@@ -3692,7 +3695,7 @@ function reportRendererFor(stepType) {
 //      renderer → return null (full fallback) so a partial structured render
 //      never strands the assistant text.
 function makeStructuredAssistantRenderer(stepType) {
-  return function (content, _norm) {
+  return function (content, norm) {
     const reportRenderer = reportRendererFor(stepType);
     if (!reportRenderer) return null;
     // Result identification: pick the JSON region carrying a real result field
@@ -3731,10 +3734,12 @@ function makeStructuredAssistantRenderer(stepType) {
 
     const frag = document.createDocumentFragment();
     // narrative prefix (tool markers preserved) — surfaced only alongside the
-    // real result, so a narrative-only turn never folds.
+    // real result, so a narrative-only turn never folds. Routed through the
+    // shared `renderNarrativeNodes` helper so raw_json-backed turns get rich
+    // chips (✓/✗ + details) instead of bare bracket chips.
     if (extracted.narrative) {
       const narWrap = el("div", "assistant-narrative");
-      for (const node of renderToolMarkers(extracted.narrative)) {
+      for (const node of renderNarrativeNodes(extracted.narrative, norm)) {
         narWrap.appendChild(node);
       }
       if (narWrap.childNodes.length) frag.appendChild(narWrap);
@@ -4028,22 +4033,84 @@ function makeUserPromptToggle(split, norm) {
 // content out identically to the final no-result assistant turn it collapses
 // into — partials never carry result JSON, so the final form is always this
 // inline-process shape.
+// Render a narrative text region's tool-call markers using the richest path
+// available. When `norm.raw.raw_json` carries tool_use / tool_result blocks for
+// the turn, pull the rich chip events (paired by tool_use_id, with ✓/✗ glyph
+// and collapsible detail panel) out of raw_json and interleave them in order
+// with the bracket markers found in `text`: each bracket position is replaced
+// by the next rich chip, prose between markers renders as markdown. Drops the
+// text events `extractAssistantChipEvents` emits — those carry the raw text
+// content blocks from raw_json, which in production hold the FULL assistant
+// body (narrative + the trailing ```json fenced result literal). Rendering them
+// through `renderToolMarkers` would re-emit the JSON code block as markdown
+// even though the caller already stripped it from `text` and is rendering the
+// parsed result as structured fields below — the user would see the JSON
+// twice. Using `text` as the prose source (which the structured renderers pass
+// pre-stripped) keeps the narrative clean.
+//
+// When raw_json is unavailable (legacy records, no `raw` field, non-array) OR
+// when raw_json carries no chip events at all (e.g. a single text block, the
+// dominant production shape for a no-tool turn), fall back to
+// `renderToolMarkers(text)`: that path parses the bracketed `[Name: …]`
+// markers in `text` and produces a bare in-flight chip per marker. Returns
+// Node[], matching `renderToolMarkers`'s shape so callers can
+// `for (const node of …) wrap.appendChild(node)` without branching.
+//
+// Excess chips (more chips in raw_json than bracket markers in `text`) are
+// appended after the prose so an assistant turn whose displayed content is
+// empty — the final-raw_json test shape, `content: ""` plus tool blocks in
+// raw_json — still renders one chip per tool call. The duplication this whole
+// rewrite prevents is the *text* events from raw_json being re-rendered as
+// markdown; chip events themselves carry only header + detail payload, never
+// the JSON literal, so tail-appending excess chips is safe.
+function renderNarrativeNodes(text, norm) {
+  const rawJson = norm && norm.raw && norm.raw.raw_json;
+  const chipEvents = Array.isArray(rawJson)
+    ? (extractAssistantChipEvents(rawJson) || []).filter(
+        (e) => e && e.kind === "chip")
+    : [];
+  if (!chipEvents.length) return renderToolMarkers(text);
+
+  const buildChip = (evt) => {
+    const chip = createInFlightChip(evt.name, evt.header);
+    if (evt.toolUseId) chip.dataset && (chip.dataset.toolUseId = evt.toolUseId);
+    if (evt.status === "success") upgradeChipToSuccess(chip, evt.header, evt.detail);
+    else if (evt.status === "failure") upgradeChipToFailure(chip, evt.header, evt.detail);
+    return chip;
+  };
+
+  const src = String(text == null ? "" : text);
+  const nodes = [];
+  let last = 0;
+  let chipIdx = 0;
+  let m;
+  TOOL_MARKER_RE.lastIndex = 0;
+  while ((m = TOOL_MARKER_RE.exec(src)) !== null) {
+    if (m.index > last) {
+      const chunk = src.slice(last, m.index);
+      if (chunk.trim()) nodes.push(renderMarkdown(chunk));
+    }
+    if (chipIdx < chipEvents.length) {
+      nodes.push(buildChip(chipEvents[chipIdx++]));
+    } else {
+      nodes.push(renderToolBlock(m[1], m[0]));
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) {
+    const chunk = src.slice(last);
+    if (chunk.trim()) nodes.push(renderMarkdown(chunk));
+  }
+  while (chipIdx < chipEvents.length) {
+    nodes.push(buildChip(chipEvents[chipIdx++]));
+  }
+  if (!nodes.length) nodes.push(renderMarkdown(src));
+  return nodes;
+}
+
 function renderAssistantProcessInline(content, norm) {
   const inline = el("div", "assistant-process-inline");
-  // Prefer the structured chip-event pipeline whenever raw_json carries tool
-  // blocks — final assistant turns paired with their tool_result blocks render
-  // through the same chip state machine the live partial bubble uses, so
-  // live→final transitions produce the same chip structure (no zombie second
-  // chip, no visual contraction).
-  const rawJson = norm && norm.raw && norm.raw.raw_json;
-  if (Array.isArray(rawJson)) {
-    const events = extractAssistantChipEvents(rawJson);
-    if (events && events.length) {
-      for (const node of renderChipEvents(events)) inline.appendChild(node);
-      return inline;
-    }
-  }
-  for (const node of renderToolMarkers(content)) inline.appendChild(node);
+  for (const node of renderNarrativeNodes(content, norm)) inline.appendChild(node);
   return inline;
 }
 
@@ -5327,6 +5394,7 @@ if (typeof module !== "undefined" && module.exports) {
     renderToolDetailPanel,
     extractAssistantChipEvents,
     renderChipEvents,
+    renderNarrativeNodes,
     applyFragmentToBubble,
     buildPartialBubble,
     appendPartialFragment,
