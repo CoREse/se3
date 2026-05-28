@@ -343,6 +343,26 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .intervention-chip.kind-discovery_confirm.selected {
   box-shadow: 0 0 0 2px rgba(76, 175, 106, 0.55);
 }
+/* Lifecycle states for interjection chips: `pending` (interjection has been
+ * sent to the daemon and is queued for the running flow to drain) and
+ * `consumed` (the running flow has drained it). Driven by ws
+ * `interjection_event` phase messages — see applyInterjectionEvent in app.js.
+ * Both states are purely visual; click + selection still work normally. */
+.intervention-chip.state-pending {
+  border-style: dashed;
+  background: rgba(76, 141, 255, 0.22);
+  animation: chip-pending-pulse 1.6s ease-in-out infinite;
+}
+.intervention-chip.state-consumed {
+  opacity: 0.55;
+  text-decoration: line-through;
+  background: rgba(76, 175, 106, 0.14);
+  border-color: var(--green);
+}
+@keyframes chip-pending-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(76, 141, 255, 0.25); }
+  50%      { box-shadow: 0 0 0 4px rgba(76, 141, 255, 0.10); }
+}
 .intervention-chip-icon { font-size: 13px; }
 .intervention-chip-label {
   font-weight: 600;
