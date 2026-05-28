@@ -2801,4 +2801,96 @@ check("pickDefaultHistoryProjectRoot preserves UNKNOWN selection when bucket exi
   );
 });
 
+// -- collectJsonRegions / extractResultJson: embedded-fence guard ----------
+// Regression guard for the bug where a bare JSON object whose string field
+// values embed markdown code fences caused `collectJsonRegions` to push
+// `lastFenceEnd` past the bare object's start, which in turn made
+// `extractTrailingBareJson` discard the bare object as "already inside a
+// fenced block". The fix: only fences whose body actually parsed as JSON
+// shift the trailing-bare guard.
+
+// Mirror of the per-step result-field predicate the discovery renderer uses;
+// duplicated here so the test does not depend on the renderer's own
+// `isDiscoveryResultDict` (which it does, but the rule is the predicate's
+// shape: presence of any result key with a non-null value counts).
+const isDiscoveryResultLike = (v) =>
+  !!v && typeof v === "object" && !Array.isArray(v) && (
+    v.content != null ||
+    v.refined_description != null ||
+    (Array.isArray(v.questions) && v.questions.length > 0)
+  );
+
+check("collectJsonRegions: bare JSON with embedded markdown fence in a string value", () => {
+  // Real-world synthesis sample shape: a bare JSON object (no outer
+  // ```json``` wrapper) whose `content` string value carries an embedded
+  // markdown code fence (prose, not JSON). The embedded fence MUST NOT
+  // shift `lastFenceEnd` past the bare object's start, otherwise
+  // extractTrailingBareJson is dropped and `collectJsonRegions` returns [].
+  const text = '{\n  "mode": "synthesis",\n  "content": "intro\\n\\n```\\nuser-facing prose code block, not JSON\\n```\\n",\n  "refined_description": "Generate a square 1024x1024 app icon.",\n  "questions": []\n}';
+  const regions = app.collectJsonRegions(text);
+  assert.ok(regions.length >= 1, "expected at least one region for the bare JSON object");
+  // The chosen region must be the bare object, carrying the result fields.
+  const bareRegion = regions[regions.length - 1];
+  assert.equal(typeof bareRegion.value, "object");
+  assert.equal(bareRegion.value.mode, "synthesis");
+  assert.equal(bareRegion.value.refined_description.startsWith("Generate a square"), true);
+
+  // And the discovery result predicate must select it.
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got, "extractResultJson must return a result, not null");
+  assert.equal(got.value.refined_description.startsWith("Generate a square"), true);
+});
+
+check("collectJsonRegions: pure ```json``` fence with no embedded fence still parses", () => {
+  // Regression baseline: the common "well-formed ```json``` envelope" path
+  // must keep working — exactly one region whose indices wrap the fence,
+  // and `extractResultJson` produces a clean empty narrative.
+  const text = '```json\n{"content": "hi", "questions": []}\n```';
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 1);
+  assert.equal(regions[0].startIndex, 0);
+  assert.equal(regions[0].endIndex, text.length);
+
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got);
+  assert.equal(got.value.content, "hi");
+  assert.equal(got.narrative, "");
+});
+
+check("collectJsonRegions: multiple JSON segments — tool-call(s) + final result", () => {
+  // A single turn carrying two ```json``` fences: the first is a Bash
+  // tool-call JSON (no result fields), the second is the discovery result.
+  // `extractResultJson` must pick the last region satisfying the result
+  // predicate and the narrative must have BOTH regions removed.
+  const text = [
+    "Looking up the project.",
+    "```json",
+    '{"command": "ls", "description": "list files"}',
+    "```",
+    "Now drafting the proposal:",
+    "```json",
+    '{"content": "draft", "refined_description": "do X", "questions": []}',
+    "```",
+    "trailing line",
+  ].join("\n");
+
+  const regions = app.collectJsonRegions(text);
+  assert.equal(regions.length, 2, "expected two JSON regions");
+  // Tool-call region does NOT satisfy the discovery result predicate.
+  assert.equal(isDiscoveryResultLike(regions[0].value), false);
+  assert.equal(isDiscoveryResultLike(regions[1].value), true);
+
+  const got = app.extractResultJson(text, isDiscoveryResultLike);
+  assert.ok(got, "must pick the second (result) region");
+  assert.equal(got.value.refined_description, "do X");
+  // Narrative has BOTH JSON regions removed — no tool-call JSON leaks
+  // into the visible Layer-1 view.
+  assert.equal(got.narrative.includes("```json"), false);
+  assert.equal(got.narrative.includes('"command"'), false);
+  assert.equal(got.narrative.includes('"refined_description"'), false);
+  assert.equal(got.narrative.includes("Looking up the project."), true);
+  assert.equal(got.narrative.includes("Now drafting the proposal:"), true);
+  assert.equal(got.narrative.includes("trailing line"), true);
+});
+
 console.log(`\n${passed} checks passed.`);

@@ -964,16 +964,26 @@ carries none of those keys and is therefore NOT a result.
 Because a single turn may interleave several JSON regions, the renderer MUST
 collect **every** parseable JSON region — each fenced ```` ```json ... ````
 block in document order plus a trailing bare object/array that follows the last
-fence — and select the **last** region satisfying the result predicate as the
-turn's result (a result conventionally follows the tool calls that produced it).
-The Layer-1 narrative is then the body with **all** JSON regions removed (not
-just the chosen one), so intermediate tool-call JSON never leaks into the clean
-default view while the full original body — every JSON region included — stays
-reachable through the assistant's single "查看原始" fold. When **no** region
-satisfies the result predicate — including a turn carrying two or more tool-call
-JSON segments — the renderer MUST return no result so the caller keeps the
-thinking process inline per *Three-Tier Progressive Disclosure*, never folding it
-into any empty toggle.
+fence whose body was itself parsed as a JSON region — and select the **last**
+region satisfying the result predicate as the turn's result (a result
+conventionally follows the tool calls that produced it). The Layer-1 narrative
+is then the body with **all** JSON regions removed (not just the chosen one), so
+intermediate tool-call JSON never leaks into the clean default view while the
+full original body — every JSON region included — stays reachable through the
+assistant's single "查看原始" fold. When **no** region satisfies the result
+predicate — including a turn carrying two or more tool-call JSON segments — the
+renderer MUST return no result so the caller keeps the thinking process inline
+per *Three-Tier Progressive Disclosure*, never folding it into any empty toggle.
+
+**Trailing-bare-JSON guard scope.** The "follows the last fence" position used
+to gate the trailing bare object MUST advance ONLY for fences whose body was
+successfully parsed as a JSON region. A ```` ``` ```` code fence whose body is
+prose (i.e. cannot be repaired into JSON) — including a fence that appears
+**inside a string field value of a surrounding bare JSON object** because the
+bare object itself was emitted without an outer ```` ```json ```` wrapper —
+MUST NOT push the guard past the bare object's start. Otherwise the trailing
+bare object would be wrongly rejected and the renderer would degrade to dumping
+the raw JSON literal as the visible surface, in violation of this requirement.
 
 #### Scenario: Tool-call-only turn is not mistaken for a final result
 - **GIVEN** an assistant turn whose body carries one or more JSON regions that
@@ -996,6 +1006,23 @@ into any empty toggle.
 - **AND** the Layer-1 narrative has every JSON region (the tool calls and the
   result literal) removed, while the unmodified body remains reachable behind
   the assistant's single "查看原始" fold
+
+#### Scenario: Bare JSON with embedded markdown fence still renders structured fields
+- **GIVEN** an assistant turn whose body is a bare JSON object (no outer
+  ```` ```json ```` wrapper) carrying one of its step type's result fields,
+  where one of the object's string field values literally contains a markdown
+  ```` ``` ```` code fence whose body is prose (not JSON) — e.g. a discovery
+  `content` field whose markdown embeds a prompt example code block
+- **WHEN** the structured renderer evaluates the turn
+- **THEN** the embedded prose fence does NOT advance the trailing-bare-JSON
+  guard past the bare object's start position, so the bare object is still
+  collected as a JSON region and chosen as the turn's result
+- **AND** the default view renders the structured fields (e.g. the discovery
+  `content` markdown plus the Proposed Task Description card) rather than
+  degrading to a raw-JSON dump
+- **AND** this behavior holds uniformly for every step type whose assistant
+  message flows through the shared multi-region collection path (`discovery`,
+  `analyze`, `plan`, `implement`, `verify_spec`, …), not for `discovery` alone
 
 #### Scenario: Discovery assistant message renders structured fields
 - **GIVEN** an assistant record with `step_type = "discovery"` whose body

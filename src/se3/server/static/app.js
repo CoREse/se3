@@ -3414,11 +3414,17 @@ function collectJsonRegions(text) {
         startIndex: m.index,
         endIndex: m.index + m[0].length,
       });
+      // Only fences whose body parsed as JSON shift the trailing-bare guard;
+      // a ``` block embedded inside the string field of a bare JSON object
+      // (prose, e.g. a discovery `content` field carrying a markdown sample)
+      // is not a region of its own and must not push lastFenceEnd past the
+      // bare object that actually contains it.
+      lastFenceEnd = m.index + m[0].length;
     }
-    lastFenceEnd = m.index + m[0].length;
   }
-  // A trailing bare object/array only counts if it sits after the last fence —
-  // otherwise it is the inside of a fenced block we already captured.
+  // A trailing bare object/array only counts if it sits after the last fence
+  // we recognized as a JSON region — otherwise it is the inside of a fenced
+  // block we already captured.
   const bare = extractTrailingBareJson(text);
   if (bare && bare.startIndex >= lastFenceEnd) {
     regions.push({
