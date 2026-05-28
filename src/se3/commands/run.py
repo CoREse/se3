@@ -568,14 +568,15 @@ def _drain_pending_interjections(
             attempt = 0
         is_paused = current_step.status == StepStatus.PAUSED
 
-    # The PAUSED reply-prefix buffer is only populated while the flow is
-    # actively waiting on a prompt response. Non-PAUSED steps already pick up
-    # interjections via the task_description recomposition below, so buffering
-    # them here would double-inject as a ``[interjection: ...]`` prefix on a
-    # later unrelated PAUSED step.
+    # The PAUSED reply-prefix buffer is only populated for DISCOVERY-paused
+    # steps — only discovery reply paths call _consume_paused_interjection_prefix
+    # to read + clear it. CONFIRM-paused interjections already reach the LLM via
+    # task_description recomposition (user_interjections list); buffering them
+    # here would leak into a later DISCOVERY pause's LLM call as a stale prefix.
+    is_discovery_paused = is_paused and current_step.step_type == StepType.DISCOVERY
     paused_buffer: Optional[List[str]] = (
         flow.state.context.setdefault("_pending_paused_interjections", [])
-        if is_paused
+        if is_discovery_paused
         else None
     )
 

@@ -103,6 +103,36 @@ def test_drain_does_not_buffer_for_running_step(tmp_path: Path):
     assert not flow.state.context.get("_pending_paused_interjections")
 
 
+def test_drain_does_not_buffer_for_confirm_paused_step(tmp_path: Path):
+    """CONFIRM-paused steps do NOT populate the prefix buffer.
+
+    The buffer is consumed only by discovery reply paths. Populating it during
+    a CONFIRM pause would leak stale interjections into a later DISCOVERY pause's
+    LLM call. Interjections during CONFIRM pauses still reach the LLM via the
+    user_interjections list + task_description recomposition.
+    """
+    step = _make_step(
+        step_id="02_confirm_abc",
+        step_type=StepType.CONFIRM,
+        status=StepStatus.PAUSED,
+    )
+    flow = _make_flow(step=step)
+    persistence = _RecordingPersistence()
+
+    interaction_calls.write_interjection_request(
+        tmp_path / "se3" / "calls", "confirm interject", flow_id=flow.flow_id, call_id="iC"
+    )
+    drained = run_mod._drain_pending_interjections(flow, tmp_path, persistence)
+    assert drained == ["confirm interject"]
+    # Prefix buffer MUST NOT be populated for CONFIRM-paused steps.
+    assert not flow.state.context.get("_pending_paused_interjections")
+    # user_interjections list is still populated (normal task_description path).
+    items = flow.state.context["user_interjections"]
+    assert len(items) == 1
+    assert items[0]["text"] == "confirm interject"
+    assert items[0]["source"] == "web-console"
+
+
 def test_drain_writes_history_jsonl(tmp_path: Path):
     """Each drained interjection lands as a user/interjection jsonl line."""
     step = _make_step(

@@ -152,12 +152,48 @@ stacked parts, all sitting below the conversation:
    default is not allowed.
 
 The reply **textarea is always enabled** so the user can draft text at any
-time — like an ordinary chat application. The **send button** is the gate:
-it is disabled while no target chip is selected (the draft has no
-destination) and enabled the instant any chip (real or synthetic) becomes
-the selected target. While a submission is in flight both controls are
-disabled to prevent edit-during-send, then re-synced when the request
-settles.
+time — like an ordinary chat application; the textarea MUST NOT be disabled
+even while a submission is in flight (the user must remain free to keep
+drafting / correcting). The **send button** is the gate: it is disabled
+while no target chip is selected (the draft has no destination) and enabled
+the instant any chip (real or synthetic) becomes the selected target. While
+a submission is in flight, only the **send button** is disabled — and it
+remains disabled until the **ws-pushed `flowDetail` snapshot has reflected
+the submission's effect** (e.g. the targeted `pending_calls` entry has
+flipped to consumed / disappeared, or an `interjection_event` lifecycle
+event for the just-sent submission has arrived). The send button MUST NOT
+re-enable on the local `fetch` `finally` alone, because that would unlock
+the button before the server / daemon has acknowledged the submission and
+allow a stale second click against the same target. To survive ws jitter,
+a bounded fallback timeout (currently 8 seconds) MUST also re-enable the
+send button if no ws acknowledgement arrives in time. Client-side dedup
+of interjection submissions is explicitly NOT used as a substitute for
+this gate — the gate is the source of truth for "submission settled".
+
+#### Scenario: Send is disabled while waiting for ws settle, textarea stays editable
+- **GIVEN** the user submits a reply (a call response or an interjection)
+  through the docked send button
+- **WHEN** the local `fetch` returns (success or HTTP-level failure) but the
+  daemon has not yet pushed a new `flowDetail` snapshot reflecting the
+  submission
+- **THEN** the **send button stays disabled**
+- **AND** the **textarea remains editable** (the user can keep typing / correcting)
+- **AND** the send button re-enables only once the ws snapshot diff shows
+  the targeted `pending_calls` entry consumed / removed, or the matching
+  `interjection_event` lifecycle event arrives
+- **AND** if neither signal arrives within the 8-second fallback window the
+  send button re-enables anyway, so a transient ws outage cannot deadlock
+  the reply UI
+
+#### Scenario: No client-side dedup of interjection submissions
+- **WHEN** the user opts into interjection and submits more than one
+  interjection in quick succession against the same running flow
+- **THEN** the client MUST NOT filter / merge / suppress duplicate
+  interjection submissions on its own — each successful Send corresponds to
+  exactly one POST and one daemon call file
+- **AND** the protection against double-submit against the **same** target
+  comes from the send-button settle gate above, not from a client-side dedup
+  cache
 
 #### Scenario: Reply box is always present
 - **WHEN** `#flow-view` is shown for any running flow
@@ -359,6 +395,74 @@ untouched.
   substrings `MCP`, `call_id`, or the pattern `call <hex-id>`
 - **AND** any preserved call identifier appears only on the chip's
   `data-call-id` attribute or `title` tooltip, never in visible text
+
+### Requirement: Interjection Lifecycle Events
+
+A web-console interjection's full lifecycle — **pending** (call file just
+written by the daemon, not yet drained by the run loop) and **consumed**
+(drained by the run loop, the call file gone) — MUST be observable to the
+frontend through the `/ws/ui` channel, so the operator gets visible
+feedback for every interjection they send instead of a silent "did it
+work?" gap.
+
+The lifecycle is carried as a lightweight UI-side event, `interjection_event`,
+broadcast by the server's `/ws/ui` channel and derived from the daemon's
+`STATUS_UPDATE` `pending_calls` diff (no new daemon↔server protocol message
+type is added — see `base` spec's *Daemon Modules* / *Server Modules*
+requirements). Each event carries at least `flow_id`, `call_id`, and a
+`phase` field whose value is one of `pending` or `consumed`. The diff
+detection happens in `ws.py` (the `STATUS_UPDATE` handling path), so an
+upstream daemon that has not been upgraded still produces consistent
+events as long as it reports current `pending_calls`.
+
+To make the diff itself responsive — instead of waiting for the daemon's
+~5-second `status_interval` tick — the daemon's interjection write path
+and consumption-detection path MUST trigger an out-of-band immediate
+status push (`_fast_push_event` in `DaemonClient` or equivalent) so the
+lifecycle event reaches `/ws/ui` within ~1 second of either the call file
+appearing or its sibling `.response` being written / the call file being
+unlinked.
+
+The frontend MUST deduplicate `interjection_event`s per
+`(call_id, phase)` to ensure each lifecycle transition triggers exactly
+one toast / chip state change. The chip's visible state and the toast
+text MUST track the real lifecycle: a freshly written interjection
+appears as a `pending` chip with a "waiting for the flow to drain"
+phrasing; a `consumed` event flips the chip into a consumed visual state
+(or removes it, matched against the history-jsonl interjection record
+that the run loop now also writes) and updates the toast accordingly.
+The toast MUST NOT claim the interjection "took effect" earlier than the
+`consumed` event arrives.
+
+#### Scenario: Pending event surfaces on the chip bar
+- **GIVEN** the user submits an interjection through the docked reply box
+  for a running flow
+- **WHEN** the daemon writes the `interjection`-kind call file under that
+  flow's `se3/calls/` and triggers an immediate status push
+- **THEN** the `/ws/ui` channel broadcasts an `interjection_event` whose
+  `phase` is `pending` and whose `flow_id` / `call_id` identify the call
+- **AND** the frontend shows the pending interjection in the chip bar and
+  surfaces a toast acknowledging that the interjection is queued
+
+#### Scenario: Consumed event reflects run-loop drain
+- **GIVEN** a `pending` interjection event for `(flow_id, call_id)` is
+  already on screen
+- **WHEN** the run loop drains the call file (writing the sibling
+  `.response` then unlinking) and the daemon fast-pushes the resulting
+  `pending_calls` diff
+- **THEN** the `/ws/ui` channel broadcasts a second `interjection_event`
+  for the same `(flow_id, call_id)` with `phase = consumed`
+- **AND** the frontend transitions the chip to a consumed state (or
+  removes it) and updates the toast to reflect that the interjection was
+  taken in by the flow
+
+#### Scenario: Frontend dedupes events by (call_id, phase)
+- **WHEN** the daemon emits two `STATUS_UPDATE`s in quick succession that
+  both diff to the same `interjection_event` for `(call_id, phase)`
+- **THEN** the frontend MUST apply exactly one chip / toast transition
+  for that `(call_id, phase)` pair, not one per `STATUS_UPDATE`
+- **AND** the dedup MUST NOT swallow the **next** phase event for the
+  same `call_id` (e.g. a later `consumed` after a `pending`)
 
 ### Requirement: Conversation Strict Chronological Order
 

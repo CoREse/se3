@@ -438,8 +438,13 @@ User-typed instructions captured during a Ctrl+C interrupt SHALL persist across 
 - The step is reset to `StepStatus.PENDING` and state is persisted before the re-run.
 
 **Web-Console Interjections** (`_drain_pending_interjections` in `src/se3/commands/run.py`):
-- A mid-flow instruction typed into the web console is delivered to the running flow out-of-band: the server sends `MSG_INTERJECT_FLOW`, the daemon writes an `interjection`-kind call file under the flow's `se3/calls/`, and the `se3 run` process drains it at the top of the run loop (a step boundary) via `interaction_calls.drain_interjection_requests`.
+- A mid-flow instruction typed into the web console is delivered to the running flow out-of-band: the server sends `MSG_INTERJECT_FLOW`, the daemon writes an `interjection`-kind call file under the flow's `se3/calls/`, and the `se3 run` process drains it via `interaction_calls.drain_interjection_requests`.
+- The drain MUST happen **continuously**, not only at step boundaries. The run loop calls `_drain_pending_interjections` (a) at each step boundary in the normal run loop, AND (b) at every poll tick of the PAUSED waiting loops — currently `_handle_confirm_pause` / `_handle_discovery_pause` / `_handle_discovery_pause_noninteractive` / the programmatic-confirm wait — so an interjection typed while the flow is paused waiting for a confirm or a discovery clarification reply is consumed within roughly one poll tick instead of being held until the user resumes the flow at the CLI. To shorten that tick, the daemon side MUST also fire an immediate out-of-band status push (`_fast_push_event` in `DaemonClient`) when it writes an `interjection`-kind call file, so the run loop's polling-driven drain wakes within ~1 second of the write.
 - Each drained instruction is appended to `flow.state.context["user_interjections"]` using the same entry shape as a Ctrl+C interjection (`text`, `step_id`, `step_type`, ISO `timestamp`), additionally tagged with `source: "web-console"`, and the current step's `task_description` is recomposed via `compose_task_description_with_interjections` so the instruction takes effect — identical to the Ctrl+C path.
+- In addition to the `flow.state.context` append, each drained interjection MUST be **persisted to the current step's chat-history jsonl** as a record shaped `{role: "user", kind: "interjection", text, step_id, step_type, timestamp, attempt}` via `chat_history.record_user_interjection`. The record is written for every drained item so `se3 history show <flow_id>` and the web-console history-replay surface both show every interjection the user typed, in chronological order with the surrounding step's messages. To avoid double-feeding the LLM, the retry-context reconstruction path (`chat_history.format_history_for_retry`) MUST skip these `kind: "interjection"` records — they enter the prompt only via the injection rules below, not by being replayed as plain `user` messages.
+- The drained interjection MUST also be injected into the next LLM call the flow makes, on both the normal-run and PAUSED-reply paths:
+  - On the **PAUSED-discovery reply path** (`_handle_discovery_pause` / `_handle_discovery_pause_noninteractive`), the reply handler MUST consume the drained interjection text via `_consume_paused_interjection_prefix` and prepend it to the user's reply as a `[interjection: <text>]\n<user reply>` prefix before that combined string is sent to the LLM. This guarantees that an interjection typed while the flow is paused waiting on a discovery clarification reaches the same LLM turn the user is about to answer, instead of being deferred to a later step.
+  - On the **non-PAUSED (normal run) path**, the drained interjection takes effect through the existing `task_description` recomposition: the next step / next retry the LLM sees carries the full `## Additional Instructions (added during run)` section composed from the `user_interjections` list, so no extra injection is needed.
 
 **Downstream Propagation:**
 - Subsequently constructed steps pick up the same interjection list at construction time via the engine's step-input builder (`state_machine._build_step_inputs`), which composes interjections onto every new step's `task_description`. The interrupt handler does NOT mutate already-constructed downstream step inputs; propagation happens because downstream steps are built later and read the live `flow.state.context["user_interjections"]`.
@@ -463,11 +468,25 @@ User-typed instructions captured during a Ctrl+C interrupt SHALL persist across 
 - **THEN** no entry is appended to `user_interjections`
 - **AND** the current step is reset to `PENDING` and re-runs unchanged
 
-#### Scenario: Web-console interjection drained at a step boundary
+#### Scenario: Web-console interjection drained at step boundaries and during PAUSED waits
 - **GIVEN** the daemon has written one or more `interjection`-kind call files for the running flow (from a `MSG_INTERJECT_FLOW`)
-- **WHEN** the run loop reaches a step boundary and drains pending interjection requests
-- **THEN** each instruction is appended to `flow.state.context["user_interjections"]` with `text`, `step_id`, `step_type`, ISO `timestamp`, and `source: "web-console"`
+- **WHEN** the run loop reaches a step boundary OR is polling inside a PAUSED waiting loop (e.g. `_handle_confirm_pause`, `_handle_discovery_pause`, `_handle_discovery_pause_noninteractive`, the programmatic-confirm wait)
+- **THEN** `_drain_pending_interjections` runs on that tick and each instruction is appended to `flow.state.context["user_interjections"]` with `text`, `step_id`, `step_type`, ISO `timestamp`, and `source: "web-console"`
 - **AND** the current step's `task_description` is recomposed via `compose_task_description_with_interjections` so the instruction takes effect
+- **AND** the daemon's out-of-band fast-push for `interjection`-kind writes causes that drain to happen within ~1s of the call file appearing, even while the flow is PAUSED
+
+#### Scenario: Drained interjection is persisted to the step's history jsonl
+- **GIVEN** a web-console interjection has just been drained by `_drain_pending_interjections`
+- **WHEN** the drain handler processes that item
+- **THEN** `chat_history.record_user_interjection` writes a `{role: "user", kind: "interjection", text, step_id, step_type, timestamp, attempt}` record to the current step's per-step jsonl
+- **AND** `se3 history show <flow_id>` and the web-console history view both surface that record alongside the surrounding step's messages
+- **AND** `chat_history.format_history_for_retry` SKIPs records whose `kind` is `interjection`, so the LLM never sees them re-played as plain user messages on a retry
+
+#### Scenario: PAUSED-discovery reply prefixes drained interjections to the user reply
+- **GIVEN** the flow is paused inside `_handle_discovery_pause` (or its non-interactive variant) waiting for the user's reply to a discovery clarification, AND one or more interjections have been drained during the wait
+- **WHEN** the user (CLI or web console) submits the reply
+- **THEN** the reply handler consumes the drained interjection text via `_consume_paused_interjection_prefix` and prepends it as `[interjection: <text>]\n` (one line per drained item) ahead of the user's reply text
+- **AND** the combined string is the single user message sent to the LLM on the next call, so the interjection reaches the very same turn the user is answering rather than being deferred
 
 ### Requirement: Session Commit Cadence
 
