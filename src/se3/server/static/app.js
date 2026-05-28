@@ -5660,6 +5660,7 @@ if (typeof module !== "undefined" && module.exports) {
     renderProposalFields,
     renderDesignFields,
     renderPlanReport,
+    renderStepReport,
     STEP_ASSISTANT_RENDERERS,
     registerAssistantRenderer,
     renderDiscoveryAssistant,

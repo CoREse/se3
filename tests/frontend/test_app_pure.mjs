@@ -3583,4 +3583,122 @@ check("collectJsonRegions: real fixture from new bug session (record 36 shape)",
   assert.equal(got.narrative.startsWith("[Read:"), true);
 });
 
+// ---------------------------------------------------------------------------
+// G4: dedicated test coverage for the three webui rendering fixes
+// ---------------------------------------------------------------------------
+//
+// G4 is the pure-logic test group for the bundle of fixes implemented in G1/G2/G3.
+// Each check below pins one of the three acceptance criteria with explicit DOM
+// assertions through the public render entry points — confirm assistant fallback,
+// renderStepReport plan field expansion, and the tool-chip toggle DOM order.
+
+// G4(a): a confirm step assistant record carrying a ```json fence outputs dict
+// MUST surface field-by-field kv rows (Q1 generic fallback), not a raw markdown
+// ```json``` code block. Goes through renderConversationRecord — the same entry
+// point real history records pass through.
+check("G4(a): confirm assistant outputs render as kv rows via renderConversationRecord", () => {
+  const outputs = { decision: "approved", note: "looks good" };
+  const content = "Reviewing.\n```json\n" + JSON.stringify(outputs) + "\n```";
+  const row = app.renderConversationRecord(asstNorm(content, "confirm"));
+  const result = findOne(row, "assistant-result");
+  assert.ok(result, "confirm fallback wraps outputs in .assistant-result");
+  assert.ok(result.classList.contains("assistant-result--generic"),
+    "generic-fallback variant marker present on the wrapper");
+  // No raw ```json``` markdown code block leaks under the bubble.
+  assert.equal(findOne(row, "md-code"), null,
+    "outputs must not render as a raw ```json``` markdown code block");
+  // Field-style kv rows exist for each outputs key.
+  const keys = findAll(result, "step-report__kv-k").map((n) => n.textContent);
+  assert.ok(keys.includes("decision"), "decision field surfaced as kv row");
+  assert.ok(keys.includes("note"), "note field surfaced as kv row");
+});
+
+// G4(b): a plan step_completed record whose outputs.plan.proposal carries
+// summary / files_to_modify MUST render those as independent field sections
+// via renderStepReport, never as a single `pre.step-report__json` blob.
+check("G4(b): renderStepReport for plan step surfaces proposal fields, not a json pre", () => {
+  const step = {
+    step_id: "04_plan_abc",
+    step_type: "plan",
+    status: "completed",
+    outputs: {
+      plan: {
+        proposal: {
+          summary: "Restructure the renderer.",
+          files_to_modify: [
+            { path: "src/x.py", reason: "wire the new field" },
+            { path: "src/y.py", reason: "thread context" },
+          ],
+        },
+      },
+      task_groups: [
+        { group_id: "G1", name: "core", tasks: [{ estimated_loc: 10 }], depends_on: [] },
+      ],
+    },
+  };
+  const card = app.renderStepReport(step);
+  assert.ok(card, "renderStepReport returns a card for a plan step");
+  // No single `pre.step-report__json` blob in the rendered report.
+  assert.equal(findOne(card, "step-report__json"), null,
+    "plan report must not dump the proposal/design as a raw JSON pre");
+  // Independent field-section titles for the proposal fields present.
+  const titles = findAll(card, "step-report__section-title").map((n) => n.textContent);
+  assert.ok(titles.includes("Summary"),
+    "independent Summary field section present");
+  assert.ok(titles.some((t) => t.startsWith("Files to Modify")),
+    "independent Files to Modify field section present");
+  // Per-item dict fields expanded so each file path/reason is reachable.
+  const text = card.textContent;
+  assert.ok(text.includes("src/x.py"));
+  assert.ok(text.includes("wire the new field"));
+});
+
+// G4(c): the tool-chip details toggle must be a direct child of the chip
+// (right-aligned via CSS `margin-left:auto`) and must come BEFORE the
+// `.tool-marker-details` panel. When `attachChipDetail` (here driven via
+// `upgradeChipToSuccess`) is invoked with no detail, no toggle is created.
+check("G4(c): createInFlightChip + upgradeChipToSuccess place toggle before .tool-marker-details; null detail → no toggle", () => {
+  // Case 1: with a non-empty detail, toggle + panel appear as direct chip
+  // children in the right DOM order.
+  const chip = app.createInFlightChip("Read", "src/foo.py:0-200");
+  assert.equal(chip.classList.contains("in-flight"), true);
+  // No toggle on the in-flight chip yet (no detail attached).
+  assert.equal(chip.children.find(
+    (c) => c.classList && c.classList.contains("tool-marker-toggle")), undefined,
+    "in-flight chip has no toggle before any detail is attached");
+
+  app.upgradeChipToSuccess(chip, "src/foo.py:0-200 · 3 lines", {
+    kind: "read_text", file_path: "src/foo.py",
+    text: "a\nb\nc", start_line: 1, truncated: false,
+  });
+  assert.equal(chip.classList.contains("success"), true);
+  const toggle = chip.children.find(
+    (c) => c.classList && c.classList.contains("tool-marker-toggle"));
+  const panel = chip.children.find(
+    (c) => c.classList && c.classList.contains("tool-marker-details"));
+  assert.ok(toggle, "toggle is a direct chip child after upgrade");
+  assert.ok(panel, "details panel is a direct chip child after upgrade");
+  const toggleIdx = chip.children.indexOf(toggle);
+  const panelIdx = chip.children.indexOf(panel);
+  assert.ok(toggleIdx < panelIdx,
+    `toggle must precede .tool-marker-details, got toggle=${toggleIdx} panel=${panelIdx}`);
+  // Legacy nested toggle class must not appear.
+  assert.equal(findOne(chip, "tool-marker-details-toggle"), null,
+    "old .tool-marker-details-toggle nested-inside-panel layout is gone");
+  // Toggle is NOT nested inside the panel.
+  assert.equal(findOne(panel, "tool-marker-toggle"), null,
+    "toggle is not nested inside .tool-marker-details");
+
+  // Case 2: a fresh chip whose upgrade carries a null detail must NOT gain a
+  // toggle — attachChipDetail's early-return path keeps the chip head clean.
+  const chip2 = app.createInFlightChip("Read", "src/bar.py");
+  app.upgradeChipToSuccess(chip2, "src/bar.py · 0 lines", null);
+  assert.equal(chip2.children.find(
+    (c) => c.classList && c.classList.contains("tool-marker-toggle")), undefined,
+    "no toggle when attachChipDetail is given a null detail");
+  assert.equal(chip2.children.find(
+    (c) => c.classList && c.classList.contains("tool-marker-details")), undefined,
+    "no details panel when attachChipDetail is given a null detail");
+});
+
 console.log(`\n${passed} checks passed.`);
