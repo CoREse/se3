@@ -43,6 +43,7 @@ from .ws import (
     ConnectionManager,
     HistoryRequestRegistry,
     IndexRefreshRegistry,
+    InterjectionEventTracker,
     UiHub,
     broadcast_index_refresh,
     handle_daemon_connection,
@@ -104,19 +105,27 @@ def create_app() -> FastAPI:
     ui_hub = UiHub()
     history_registry = HistoryRequestRegistry()
     index_refresh_registry = IndexRefreshRegistry()
+    interjection_tracker = InterjectionEventTracker()
     # Expose for tests / introspection.
     app.state.server_state = state
     app.state.connection_manager = manager
     app.state.ui_hub = ui_hub
     app.state.history_registry = history_registry
     app.state.index_refresh_registry = index_refresh_registry
+    app.state.interjection_tracker = interjection_tracker
 
     # -- daemon WebSocket endpoint -----------------------------------------
 
     @app.websocket("/ws")
     async def daemon_ws(websocket: WebSocket) -> None:
         await handle_daemon_connection(
-            websocket, manager, state, ui_hub, history_registry, index_refresh_registry
+            websocket,
+            manager,
+            state,
+            ui_hub,
+            history_registry,
+            index_refresh_registry,
+            interjection_tracker,
         )
 
     # -- web-frontend WebSocket endpoint -----------------------------------

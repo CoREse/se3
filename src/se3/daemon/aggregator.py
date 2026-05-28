@@ -319,6 +319,53 @@ class DaemonAggregator:
             logger.exception("aggregator: enumerate_historical_project_roots failed")
         return sorted(merged)
 
+    def pending_calls_signature(self) -> Dict[str, Any]:
+        """Return a cheap stat-based fingerprint of every ``se3/calls/`` file.
+
+        For each registered project root, the fingerprint lists every regular
+        file under ``se3/calls/`` as ``(name, mtime, size)``. Listing the
+        directory and stat-ing each entry is dramatically cheaper than the
+        full :meth:`get_snapshot` pass (no JSON parsing, no per-flow
+        decoration), so the daemon client can call this on a tight cadence
+        and only run the heavy snapshot when the signature actually moves.
+
+        The signature is intentionally **kind-agnostic** — it changes for an
+        interjection file *as well as* a retry-decision / cli-confirm /
+        discovery-confirm file appearing or disappearing. Reading the JSON
+        body of every file to filter on ``kind`` would defeat the "cheap
+        polling" point; the actual interjection-vs-other classification
+        happens in the server's WebSocket diff layer, which already inspects
+        the full ``pending_calls`` list.
+
+        Pairing mtime with byte size mirrors :func:`_safe_stat`'s reasoning
+        in the history reader: two writes inside the filesystem's mtime
+        resolution still flip the signature via the size delta. A directory
+        that cannot be listed is skipped silently — it shows up as "absent",
+        which is the same as "no pending calls", and the next successful
+        scan picks the change up correctly.
+        """
+        signature: Dict[str, Any] = {}
+        for root in self._project_roots:
+            calls_dir = root / "se3" / "calls"
+            try:
+                entries = sorted(calls_dir.iterdir())
+            except OSError:
+                continue
+            parts: List[Any] = []
+            for entry in entries:
+                name = entry.name
+                if name.startswith("."):
+                    continue
+                try:
+                    if not entry.is_file():
+                        continue
+                except OSError:  # pragma: no cover - racy unlink
+                    continue
+                mtime, size = _safe_stat(entry)
+                parts.append((name, mtime, size))
+            signature[str(root)] = tuple(parts)
+        return signature
+
     def _merge_project_roots(self) -> List[str]:
         """Produce the snapshot's ``project_roots`` field.
 
@@ -659,6 +706,20 @@ def _safe_mtime(path: Path) -> Optional[float]:
         return path.stat().st_mtime
     except OSError:
         return None
+
+
+def _safe_stat(path: Path) -> tuple:
+    """Return *path*'s ``(mtime, size)``, or ``(0.0, 0)`` when unreadable.
+
+    Pairing mtime with byte size makes a signature change on every append
+    even when two writes land inside the filesystem's mtime resolution. The
+    history reader uses the same idea — see ``se3.daemon.history._safe_stat``.
+    """
+    try:
+        st = path.stat()
+        return (st.st_mtime, st.st_size)
+    except OSError:
+        return (0.0, 0)
 
 
 def _read_json(path: Path) -> Optional[dict]:

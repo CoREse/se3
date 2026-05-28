@@ -25,6 +25,20 @@ from se3.daemon import protocol
 
 from .state import ServerState
 
+#: WS event type pushed to ``/ws/ui`` clients when an interjection chip's
+#: lifecycle phase changes. Older frontends that do not recognise this type
+#: simply ignore it (the standard "unknown ``type`` -> no-op" rule for the
+#: ``/ws/ui`` channel), so introducing the event is backward-compatible.
+UI_EVENT_INTERJECTION = "interjection_event"
+
+#: Lifecycle phases emitted on :data:`UI_EVENT_INTERJECTION`. ``pending`` is
+#: the moment the interjection call file appears in ``se3/calls/`` (the
+#: server saw a brand-new interjection-kind ``call_id`` in a flow's
+#: ``pending_calls`` snapshot); ``consumed`` is the moment that ``call_id``
+#: disappears (the running ``se3 run`` drained the file).
+INTERJECTION_PHASE_PENDING = "pending"
+INTERJECTION_PHASE_CONSUMED = "consumed"
+
 logger = logging.getLogger(__name__)
 
 # Heartbeat tuning (seconds).
@@ -220,6 +234,147 @@ async def request_history(
     return await manager.send_to(machine_id, message)
 
 
+class InterjectionEventTracker:
+    """Per-machine differ that emits ``interjection_event`` lifecycle events.
+
+    Holds the last-known set of interjection-kind ``call_id`` values seen in
+    each ``(machine_id, flow_id)`` slot of the most recent STATUS_UPDATE.
+    On every fresh snapshot we compute the diff against that set:
+
+    * call_ids present **now** but absent before fire :data:`INTERJECTION_PHASE_PENDING`;
+    * call_ids present **before** but absent now fire :data:`INTERJECTION_PHASE_CONSUMED`.
+
+    Each ``(machine_id, flow_id, call_id, phase)`` tuple is emitted **exactly
+    once** — once a chip flips into ``pending`` it cannot fire ``pending``
+    again without first being consumed, and a chip's ``consumed`` event
+    cannot recur for a call_id the daemon never resurrects (drained call
+    files are unlinked, never re-created with the same id). Per-machine
+    bookkeeping makes a reconnecting daemon's first post-reconnect snapshot
+    correctly emit ``pending`` events for whatever interjections are still
+    on disk, instead of silently treating them as already-known.
+
+    Held purely in process memory; nothing here ever hits disk.
+    """
+
+    def __init__(self) -> None:
+        # machine_id -> flow_id -> {call_id: prompt_text}
+        # The prompt is kept so the consumed event can carry a short label
+        # back to the UI ("interjection 'fix the typo' was just consumed")
+        # without the UI having to remember it.
+        self._seen: Dict[str, Dict[str, Dict[str, str]]] = {}
+
+    def reset_machine(self, machine_id: str) -> None:
+        """Forget *machine_id*'s tracked state (e.g. on disconnect)."""
+        self._seen.pop(machine_id, None)
+
+    def diff_machine(
+        self, machine_id: str, snapshot: Dict[str, Any]
+    ) -> list:
+        """Return the new :data:`UI_EVENT_INTERJECTION` events to broadcast.
+
+        *snapshot* is the daemon's per-machine status dict (the same one
+        :meth:`ServerState.update_status` receives). The diff is computed
+        against the tracker's previous state for *machine_id* and the
+        previous state is then replaced atomically — so two concurrent
+        snapshots arriving back-to-back produce disjoint event sets and no
+        duplicates.
+        """
+        prev = self._seen.get(machine_id, {})
+        current: Dict[str, Dict[str, str]] = {}
+        events: list = []
+        now = time.time()
+        flows = snapshot.get("flows") if isinstance(snapshot, dict) else None
+        for flow_raw in flows or []:
+            if not isinstance(flow_raw, dict):
+                continue
+            flow_id = flow_raw.get("flow_id")
+            if not flow_id:
+                continue
+            flow_id_str = str(flow_id)
+            chips: Dict[str, str] = {}
+            for call in flow_raw.get("pending_calls") or []:
+                if not isinstance(call, dict):
+                    continue
+                if call.get("kind") != protocol.CALL_KIND_INTERJECTION:
+                    continue
+                call_id = call.get("call_id")
+                if not call_id:
+                    continue
+                prompt = call.get("prompt")
+                chips[str(call_id)] = str(prompt) if isinstance(prompt, str) else ""
+            current[flow_id_str] = chips
+            prev_chips = prev.get(flow_id_str, {})
+            for call_id, prompt in chips.items():
+                if call_id in prev_chips:
+                    continue
+                events.append(
+                    _make_interjection_event(
+                        machine_id,
+                        flow_id_str,
+                        call_id,
+                        INTERJECTION_PHASE_PENDING,
+                        text=prompt,
+                        ts=now,
+                    )
+                )
+            for call_id, prompt in prev_chips.items():
+                if call_id in chips:
+                    continue
+                events.append(
+                    _make_interjection_event(
+                        machine_id,
+                        flow_id_str,
+                        call_id,
+                        INTERJECTION_PHASE_CONSUMED,
+                        text=prompt,
+                        ts=now,
+                    )
+                )
+        # Any flow that vanished from the snapshot drops every chip it owned —
+        # those drops are consumed events too, so the UI cleans up stale chips
+        # even if a flow object disappears mid-life (e.g. on a fast-archived
+        # flow that finished between two ticks).
+        for flow_id_str, prev_chips in prev.items():
+            if flow_id_str in current:
+                continue
+            for call_id, prompt in prev_chips.items():
+                events.append(
+                    _make_interjection_event(
+                        machine_id,
+                        flow_id_str,
+                        call_id,
+                        INTERJECTION_PHASE_CONSUMED,
+                        text=prompt,
+                        ts=now,
+                    )
+                )
+        self._seen[machine_id] = current
+        return events
+
+
+def _make_interjection_event(
+    machine_id: str,
+    flow_id: str,
+    call_id: str,
+    phase: str,
+    *,
+    text: str = "",
+    ts: float,
+) -> Dict[str, Any]:
+    """Build one :data:`UI_EVENT_INTERJECTION` payload (no I/O)."""
+    payload: Dict[str, Any] = {
+        "type": UI_EVENT_INTERJECTION,
+        "machine_id": machine_id,
+        "flow_id": flow_id,
+        "call_id": call_id,
+        "phase": phase,
+        "ts": ts,
+    }
+    if text:
+        payload["text"] = text
+    return payload
+
+
 class UiHub:
     """Fan-out hub for web-frontend WebSocket clients.
 
@@ -337,6 +492,7 @@ async def handle_daemon_connection(
     hub: Optional["UiHub"] = None,
     registry: Optional["HistoryRequestRegistry"] = None,
     index_registry: Optional["IndexRefreshRegistry"] = None,
+    interjection_tracker: Optional["InterjectionEventTracker"] = None,
 ) -> None:
     """Serve one daemon WebSocket connection end to end.
 
@@ -389,7 +545,14 @@ async def handle_daemon_connection(
         await _push_state(hub, state, "status_update")
 
         await _serve_loop(
-            websocket, manager, state, machine_id, hub, registry, index_registry
+            websocket,
+            manager,
+            state,
+            machine_id,
+            hub,
+            registry,
+            index_registry,
+            interjection_tracker,
         )
     except Exception:  # WebSocketDisconnect and friends
         logger.debug("Daemon connection ended", exc_info=True)
@@ -398,6 +561,12 @@ async def handle_daemon_connection(
             await manager.disconnect(machine_id, websocket)
             await state.mark_offline(machine_id)
             await _push_state(hub, state, "status_update")
+            if interjection_tracker is not None:
+                # A reconnecting daemon's first STATUS_UPDATE should be
+                # treated as a brand-new state — drop the per-machine
+                # bookkeeping so genuinely-still-pending interjections re-emit
+                # ``pending`` events instead of being silently skipped.
+                interjection_tracker.reset_machine(machine_id)
 
 
 async def _serve_loop(
@@ -408,6 +577,7 @@ async def _serve_loop(
     hub: Optional["UiHub"] = None,
     registry: Optional["HistoryRequestRegistry"] = None,
     index_registry: Optional["IndexRefreshRegistry"] = None,
+    interjection_tracker: Optional["InterjectionEventTracker"] = None,
 ) -> None:
     """Run the receive loop alongside a heartbeat loop; stop when either ends."""
     last_seen = {"ts": time.time()}
@@ -422,7 +592,13 @@ async def _serve_loop(
                 logger.warning("Dropping malformed frame from %s: %s", machine_id, exc)
                 continue
             await _handle_message(
-                message, state, machine_id, hub, registry, index_registry
+                message,
+                state,
+                machine_id,
+                hub,
+                registry,
+                index_registry,
+                interjection_tracker,
             )
 
     async def heartbeat() -> None:
@@ -465,6 +641,7 @@ async def _handle_message(
     hub: Optional["UiHub"] = None,
     registry: Optional["HistoryRequestRegistry"] = None,
     index_registry: Optional["IndexRefreshRegistry"] = None,
+    interjection_tracker: Optional["InterjectionEventTracker"] = None,
 ) -> None:
     """Apply one inbound daemon message to the server state."""
     if message.type == protocol.MSG_STATUS_UPDATE:
@@ -472,6 +649,15 @@ async def _handle_message(
         if isinstance(snapshot, dict):
             await state.update_status(machine_id, snapshot)
             await _push_state(hub, state, "status_update")
+            # After the cache has been refreshed and the broadcast has fired,
+            # compute the interjection-kind chip diff and emit one
+            # lightweight ``interjection_event`` per phase transition. Older
+            # frontends ignore the unknown ``type`` so this is fully
+            # backward-compatible.
+            if interjection_tracker is not None and hub is not None:
+                events = interjection_tracker.diff_machine(machine_id, snapshot)
+                for event in events:
+                    await hub.broadcast(event)
     elif message.type == protocol.MSG_PONG:
         await state.touch(machine_id)
     elif message.type == protocol.MSG_CALL_NOTIFICATION:

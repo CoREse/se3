@@ -267,6 +267,7 @@ class Daemon:
             ensure_handler=self._handle_ensure_request,
             respond_handler=self._handle_respond_request,
             history_provider=self.history_reader,
+            calls_signature_provider=self.aggregator.pending_calls_signature,
             history_poll_interval=self.config.history_poll_interval,
         )
         self._client = client

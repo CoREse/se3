@@ -67,6 +67,12 @@ RespondHandler = Callable[[str, str, Any], Any]
 #: Type of the history provider — a :class:`~se3.daemon.history.DaemonHistoryReader`
 #: (or any object exposing ``build_index`` / ``read_flow`` / ``read_active_flows``).
 HistoryProvider = Any
+#: Type of the pending-calls signature provider — zero-arg callable returning a
+#: cheap stat-based fingerprint dict of every ``se3/calls/`` file under every
+#: tracked project root. Used by the push loop to fast-push a STATUS_UPDATE the
+#: moment a call file appears or disappears (e.g. when an interjection file is
+#: written or drained), without waiting for the steady 5 s status tick.
+CallsSignatureProvider = Callable[[], Dict[str, Any]]
 
 
 def _normalize_ws_url(server_url: str) -> str:
@@ -119,6 +125,7 @@ class DaemonClient:
         ensure_handler: Optional[EnsureHandler] = None,
         respond_handler: Optional[RespondHandler] = None,
         history_provider: Optional[HistoryProvider] = None,
+        calls_signature_provider: Optional[CallsSignatureProvider] = None,
         status_interval: float = _STATUS_INTERVAL,
         history_poll_interval: float = _HISTORY_POLL_INTERVAL,
     ) -> None:
@@ -144,6 +151,14 @@ class DaemonClient:
                 used to report the history index, push active-flow increments
                 and answer HISTORY_REQUEST pulls. When ``None`` history support
                 is disabled and the client behaves as before.
+            calls_signature_provider: Zero-arg callable returning a cheap
+                stat-based fingerprint dict of every ``se3/calls/`` file under
+                every tracked project root. When provided, the push loop checks
+                it on the fast tick and fires an immediate STATUS_UPDATE the
+                moment the signature changes — so an interjection file being
+                written or drained is reflected on the web within one fast tick
+                instead of waiting a full ``status_interval``. When ``None``
+                no extra polling happens and the client behaves as before.
             status_interval: Seconds between STATUS_UPDATE pushes.
             history_poll_interval: Fast cadence (seconds) at which the push loop
                 samples the active-flow disk signature to decide whether to push
@@ -162,6 +177,7 @@ class DaemonClient:
         self._respond_handler = respond_handler or _default_respond_handler
         self._interject_handler = _default_interject_handler
         self._history_provider = history_provider
+        self._calls_signature_provider = calls_signature_provider
         self.status_interval = max(0.5, float(status_interval))
         self.history_poll_interval = max(
             0.1, min(float(history_poll_interval), self.status_interval)
@@ -177,6 +193,17 @@ class DaemonClient:
         # Last active-flow disk signature seen by the push loop; an unchanged
         # signature means there is nothing new to push (debounce).
         self._last_history_signature: Dict[str, Any] = {}
+        # Last ``se3/calls/`` file signature seen by the push loop. An unchanged
+        # signature means no call file appeared or disappeared since the previous
+        # tick (debounce); a change drives an immediate STATUS_UPDATE so the web
+        # console sees pending / consumed interjection chips within ~1 s.
+        self._last_calls_signature: Dict[str, Any] = {}
+        # Event used to wake the push loop *immediately* (bypassing the fast
+        # tick) when a server-delivered interjection has just hit disk, so the
+        # pending chip appears in the web within ~1 s of the API call. Created
+        # lazily inside :meth:`_session` because :class:`asyncio.Event` must
+        # bind to a running event loop.
+        self._fast_push_event: Optional[asyncio.Event] = None
 
     # -- introspection -----------------------------------------------------
 
@@ -253,6 +280,10 @@ class DaemonClient:
             self._last_index = None
             self._history_cursors = {}
             self._last_history_signature = {}
+            self._last_calls_signature = {}
+            # Bind the fast-push event to *this* session's running loop; the
+            # previous session's event (if any) is dropped along with it.
+            self._fast_push_event = asyncio.Event()
             # Announce ourselves, then push a full snapshot immediately so a
             # freshly (re)connected server has state before the first tick.
             await self._send(ws, protocol.make_hello(self.machine_id, self.hostname, self.se3_version))
@@ -261,6 +292,7 @@ class DaemonClient:
             # Prime the signature so the fast push loop only fires on the *next*
             # disk change rather than immediately re-pushing what we just sent.
             self._history_changed()
+            self._calls_changed()
             logger.info("Connected to central server; HELLO sent")
 
             recv_task = asyncio.create_task(self._receive_loop(ws, stop_event))
@@ -293,14 +325,19 @@ class DaemonClient:
     async def _push_loop(self, ws: Any, stop_event: asyncio.Event) -> None:
         """Drive status + history pushes on a single loop until shutdown.
 
-        The loop wakes on the fast ``history_poll_interval`` cadence. A
-        STATUS_UPDATE is sent on the steady ``status_interval`` heartbeat. A
-        HISTORY push fires whenever the active-flow disk signature changed since
-        the last check — so a CLI step that advances ``engine.json`` / appends a
-        jsonl line reaches the web within one fast tick instead of waiting a
-        whole status interval — and also on every status tick as a backstop in
-        case a change is ever missed. When nothing changed, the history check is
-        a cheap stat-only scan and no frame is sent (debounce).
+        The loop wakes on the fast ``history_poll_interval`` cadence, on the
+        ``_fast_push_event`` (set the moment a server-delivered interjection
+        hits disk), or on shutdown — whichever fires first. A STATUS_UPDATE is
+        sent on the steady ``status_interval`` heartbeat AND whenever the
+        ``se3/calls/`` directory signature changed since the previous tick (so
+        a freshly-written interjection or a freshly-drained call surfaces on
+        the web within one fast tick instead of waiting the full status
+        interval). A HISTORY push fires whenever the active-flow disk
+        signature changed since the last check — so a CLI step that advances
+        ``engine.json`` / appends a jsonl line reaches the web within one fast
+        tick — and also on every status tick as a backstop in case a change is
+        ever missed. When nothing changed, the signature checks are cheap
+        stat-only scans and no frame is sent (debounce).
 
         Both pushes share this one coroutine so their ``ws.send`` calls never
         interleave (which two independent loops racing on the same socket could
@@ -308,22 +345,110 @@ class DaemonClient:
         """
         last_status = time.monotonic()
         while not stop_event.is_set():
+            woke_for_fast_push = await self._wait_next_tick(stop_event)
+            if stop_event.is_set():
+                break
+            now = time.monotonic()
+            status_due = (now - last_status) >= self.status_interval
+            # A genuine call-file change drives an immediate STATUS_UPDATE so
+            # the web sees the new / drained interjection chip within ~1 s.
+            calls_changed = self._calls_changed()
+            # ``woke_for_fast_push`` is set by ``_handle_interject`` the
+            # instant a server-delivered interjection has hit disk — push now
+            # rather than waiting for the next ``has_changes``-style scan to
+            # notice it on the next tick.
+            push_status = status_due or calls_changed or woke_for_fast_push
+            if push_status:
+                last_status = now
+                await self._push_status(ws)
+            # Push history on a real disk change, or on the status tick (backstop).
+            if status_due or self._history_changed():
+                await self._push_history(ws)
+
+    async def _wait_next_tick(self, stop_event: asyncio.Event) -> bool:
+        """Wait one fast tick, returning whether the fast-push event woke us.
+
+        Races the fast-tick timeout against the stop event AND the
+        ``_fast_push_event`` so a server-delivered interjection can drive an
+        immediate push instead of waiting up to ``history_poll_interval``.
+        The fast-push event is cleared inside the locked window so a
+        concurrent ``set`` between two ticks still wakes the *next* tick.
+        Returns ``True`` only when the fast-push event actually triggered the
+        wakeup, so the caller can force a STATUS_UPDATE on that tick.
+        """
+        event = self._fast_push_event
+        if event is None:  # pragma: no cover - defensive (set in _session)
             try:
                 await asyncio.wait_for(
                     stop_event.wait(), timeout=self.history_poll_interval
                 )
             except asyncio.TimeoutError:
                 pass
-            else:
-                break
-            now = time.monotonic()
-            status_due = (now - last_status) >= self.status_interval
-            if status_due:
-                last_status = now
-                await self._push_status(ws)
-            # Push history on a real disk change, or on the status tick (backstop).
-            if status_due or self._history_changed():
-                await self._push_history(ws)
+            return False
+        stop_task = asyncio.create_task(stop_event.wait())
+        push_task = asyncio.create_task(event.wait())
+        try:
+            done, pending = await asyncio.wait(
+                {stop_task, push_task},
+                timeout=self.history_poll_interval,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in (stop_task, push_task):
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await task
+                    except (asyncio.CancelledError, Exception):  # pragma: no cover
+                        pass
+        woke_for_fast_push = push_task in done and event.is_set()
+        if event.is_set():
+            event.clear()
+        return woke_for_fast_push
+
+    def _calls_changed(self) -> bool:
+        """Return whether the ``se3/calls/`` directory signature changed.
+
+        Updates :attr:`_last_calls_signature` as a side effect. Returns
+        ``False`` when no calls-signature provider is configured, so a client
+        wired without one keeps its prior behavior. A signature lookup failure
+        conservatively reports a change so the next push still runs.
+
+        The provider's signature is intentionally kind-agnostic — it captures
+        every file under ``se3/calls/`` so that both an interjection file
+        landing on disk (new chip → ``pending``) and any call file disappearing
+        from disk (drain → ``consumed``) flip the signature. The downstream
+        diff that classifies the chip kind happens in the server's WS layer.
+        """
+        provider = self._calls_signature_provider
+        if provider is None:
+            return False
+        try:
+            signature = provider()
+        except Exception:
+            logger.debug(
+                "calls_signature_provider failed; forcing a status push",
+                exc_info=True,
+            )
+            return True
+        changed = signature != self._last_calls_signature
+        self._last_calls_signature = signature
+        return changed
+
+    def _trigger_fast_push(self) -> None:
+        """Wake the push loop immediately for an out-of-band STATUS_UPDATE.
+
+        Used when the client has just performed a side-effect that the web
+        console needs to see *now* (e.g. writing an interjection call file
+        from :meth:`_handle_interject`). The event is sticky until the push
+        loop consumes it inside :meth:`_wait_next_tick`, so a fast-push set
+        while the loop is already pushing is honored on the next tick rather
+        than lost. A no-op when the event has not been bound to a running
+        loop yet (between the constructor and the first ``_session``).
+        """
+        event = self._fast_push_event
+        if event is not None:
+            event.set()
 
     def _history_changed(self) -> bool:
         """Return whether any active flow's disk signature changed since last check.
@@ -445,9 +570,16 @@ class DaemonClient:
             return
         try:
             self._interject_handler(flow_id, project_root, text)
-            logger.info("INTERJECT_FLOW handled for flow %s", flow_id)
         except Exception:
             logger.exception("INTERJECT_FLOW handler failed")
+            return
+        # The interjection file is on disk: wake the push loop so the
+        # web-side ``pending`` chip surfaces within ~1 s rather than waiting
+        # for the next steady status tick. The aggregator picks the new file
+        # up the moment it is asked for a snapshot, so we just need to
+        # trigger that snapshot now.
+        self._trigger_fast_push()
+        logger.info("INTERJECT_FLOW handled for flow %s", flow_id)
 
     def _resolve_interject_root(self, flow_id: str) -> str:
         """Resolve a flow's project root from the current machine snapshot.
