@@ -234,6 +234,11 @@ class SpecDiscovery:
             relevant_files=", ".join(relevant_files) if relevant_files else "(none listed)",
         )
 
+        # New specs are written by this path — honor spec_language so the
+        # generated spec body is in the configured language. No-op when unset.
+        from .context_builder import get_spec_language_instruction
+        prompt += get_spec_language_instruction(self.project_root)
+
         try:
             spec_content = self.llm_caller.call(
                 prompt=prompt,

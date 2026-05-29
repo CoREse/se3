@@ -42,9 +42,13 @@ def get_step_language_instruction(step_type: str, project_root: Path) -> str:
 
     lang_config = load_language_config(project_root)
 
-    # Check spec steps first
+    # Check spec steps first. Spec-writing steps honor spec_language and use the
+    # spec-flavored instruction (technical symbols preserved, spec_language
+    # authoritative) so the written spec body is unambiguously in spec_language.
     if step_type in SPEC_STEPS:
-        return get_language_instruction(lang_config.spec_language, step_type)
+        return get_language_instruction(
+            lang_config.spec_language, step_type, for_spec=True,
+        )
 
     # Check human-facing steps
     if step_type in HUMAN_FACING_STEPS:
@@ -59,7 +63,35 @@ def get_step_language_instruction(step_type: str, project_root: Path) -> str:
         if step_type == "confirm_llm_review":
             return get_language_instruction(lang_config.language, step_type)
 
+    # Intentional non-injection for analyze / implement / verify_spec (and
+    # plan/test/commit when unconfirmed): per the se3-config "Language
+    # Configuration" requirement these steps let the LLM choose its own
+    # language. Language is forced ONLY on (a) human-facing steps and (b)
+    # spec-writing paths. analyze/verify_spec are read-only and implement
+    # writes code, not spec, so none of them is a spec-writing path — there is
+    # no gap to fill here. The genuine spec-writing gap lived in the sync_*
+    # modules (see get_spec_language_instruction), not in this step mapping.
     return ""
+
+
+def get_spec_language_instruction(project_root: Path) -> str:
+    """Language instruction for spec-writing paths outside the run engine.
+
+    The ``sync_*`` modules (``sync_engine`` / ``sync_discovery`` /
+    ``sync_analyzer``) write or regenerate spec files but are NOT ``se3 run``
+    state-machine steps, so they cannot route through
+    :func:`get_step_language_instruction`. This helper gives them the same
+    spec-flavored instruction ``update_spec`` receives, driven by
+    ``language.spec_language``.
+
+    Returns the instruction string (technical symbols preserved, spec_language
+    authoritative), or ``""`` when ``spec_language`` is unset — preserving the
+    "no config → no injection" contract so existing sync behavior is unchanged.
+    """
+    from ..config import load_language_config, get_language_instruction
+
+    lang_config = load_language_config(project_root)
+    return get_language_instruction(lang_config.spec_language, for_spec=True)
 
 
 # Steps explicitly forbidden from issue discovery injection

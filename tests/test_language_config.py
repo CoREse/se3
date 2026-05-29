@@ -296,3 +296,192 @@ class TestConstants:
     def test_spec_steps(self):
         assert "update_spec" in SPEC_STEPS
         assert "implement" not in SPEC_STEPS
+
+
+# --- Strengthened language-instruction wording (G4 task 1) ---
+
+
+class TestLanguageInstructionWording:
+    """Technical-symbol preservation and spec_language authority wording."""
+
+    def test_technical_symbols_clause_present(self):
+        """Every language-restricted instruction declares symbols not translated."""
+        result = get_language_instruction("zh-CN")
+        assert "do NOT translate" in result
+        assert "code identifiers" in result
+        assert "command names" in result
+        assert "API names" in result
+
+    def test_none_still_returns_empty_with_for_spec(self):
+        """language=None returns empty string even when for_spec=True (contract)."""
+        assert get_language_instruction(None, for_spec=True) == ""
+        assert get_language_instruction("", for_spec=True) == ""
+
+    def test_for_spec_marks_spec_language_authoritative(self):
+        """for_spec instruction states spec_language is authoritative."""
+        result = get_language_instruction("en", for_spec=True)
+        assert "en" in result
+        assert "spec" in result.lower()
+        assert "authoritative" in result
+
+    def test_non_spec_instruction_omits_authority_clause(self):
+        """Human-facing (non-spec) instruction has no spec-authority clause."""
+        result = get_language_instruction("zh-CN", "summarize")
+        assert "authoritative" not in result
+        # but still carries the technical-symbols clause
+        assert "do NOT translate" in result
+
+    def test_update_spec_instruction_is_spec_flavored(self, tmp_path):
+        """update_spec step routes through the for_spec variant."""
+        (tmp_path / "se3.yaml").write_text(
+            "language:\n  language: zh-CN\n  spec_language: en\n"
+        )
+        result = get_step_language_instruction("update_spec", tmp_path)
+        assert "authoritative" in result
+        assert "en" in result
+        assert "zh-CN" not in result
+
+
+# --- Spec-language instruction for sync_* write paths (G4 task 2/3) ---
+
+
+class TestSpecLanguageInstructionHelper:
+    """Tests for get_spec_language_instruction (sync_* entry point)."""
+
+    def test_returns_instruction_when_spec_language_set(self, tmp_path):
+        from se3.engine.context_builder import get_spec_language_instruction
+        (tmp_path / "se3.yaml").write_text(
+            "language:\n  language: zh-CN\n  spec_language: en\n"
+        )
+        result = get_spec_language_instruction(tmp_path)
+        assert "en" in result
+        assert "authoritative" in result
+        # general language must not leak into the spec instruction
+        assert "zh-CN" not in result
+
+    def test_empty_when_spec_language_unset(self, tmp_path):
+        from se3.engine.context_builder import get_spec_language_instruction
+        (tmp_path / "se3.yaml").write_text(
+            "language:\n  language: zh-CN\n  spec_language: null\n"
+        )
+        assert get_spec_language_instruction(tmp_path) == ""
+
+    def test_empty_when_no_config(self, tmp_path):
+        from se3.engine.context_builder import get_spec_language_instruction
+        assert get_spec_language_instruction(tmp_path) == ""
+
+
+class _PromptCapturingCaller:
+    """Minimal LLMCaller stand-in that records prompts passed to call()."""
+
+    def __init__(self, response: str = "") -> None:
+        self.captured_prompts: list[str] = []
+        self._response = response
+        self.last_touched_files: list[str] = []
+        self.step_id = None
+        self.step_type = None
+
+    def call(self, prompt: str, **kwargs):
+        self.captured_prompts.append(prompt)
+        return self._response
+
+
+class TestSyncLanguageInjection:
+    """sync_* write paths inject the spec_language instruction (G4 task 2)."""
+
+    def _write_spec_lang(self, tmp_path, spec_language="en"):
+        value = spec_language if spec_language else "null"
+        (tmp_path / "se3.yaml").write_text(
+            f"language:\n  language: null\n  spec_language: {value}\n"
+        )
+
+    def test_analyzer_analysis_prompt_injects_spec_language(self, tmp_path):
+        from se3.engine.sync_analyzer import SyncAnalyzer
+        self._write_spec_lang(tmp_path, "en")
+        analyzer = SyncAnalyzer(tmp_path, _PromptCapturingCaller())
+        prompt = analyzer._build_analysis_prompt(
+            "flow-engine", "spec body", "ctx",
+        )
+        assert "authoritative" in prompt
+        assert "do NOT translate" in prompt
+
+    def test_analyzer_analysis_prompt_no_injection_when_unset(self, tmp_path):
+        from se3.engine.sync_analyzer import SyncAnalyzer
+        self._write_spec_lang(tmp_path, None)
+        analyzer = SyncAnalyzer(tmp_path, _PromptCapturingCaller())
+        prompt = analyzer._build_analysis_prompt(
+            "flow-engine", "spec body", "ctx",
+        )
+        assert "authoritative" not in prompt
+
+    def test_discovery_spec_generation_injects_spec_language(self, tmp_path):
+        from se3.engine.sync_discovery import SpecDiscovery
+        self._write_spec_lang(tmp_path, "en")
+        caller = _PromptCapturingCaller(response="")
+        discovery = SpecDiscovery(tmp_path, caller)
+        discovery.generate_spec_for_subsystem(
+            {"name": "demo", "description": "d", "relevant_files": []}
+        )
+        assert caller.captured_prompts
+        assert "authoritative" in caller.captured_prompts[0]
+
+    def test_engine_drift_update_injects_spec_language(self, tmp_path):
+        from se3.engine.sync_engine import SyncEngine, SpecDiff, DiffType
+        self._write_spec_lang(tmp_path, "en")
+        spec_dir = tmp_path / "se3" / "specs" / "flow-engine"
+        spec_dir.mkdir(parents=True)
+        spec_path = spec_dir / "spec.md"
+        spec_path.write_text("<!-- spec-format: v1 -->\n# flow-engine Specification\n")
+
+        engine = SyncEngine(tmp_path)
+        engine._specs = {
+            "flow-engine": {"content": spec_path.read_text(), "path": str(spec_path)}
+        }
+        caller = _PromptCapturingCaller(response="")
+        diff = SpecDiff(
+            diff_type=DiffType.CONFLICT,
+            spec_name="flow-engine",
+            description="desc",
+        )
+        engine._apply_spec_drift_update(diff, caller)
+        assert caller.captured_prompts
+        assert "authoritative" in caller.captured_prompts[0]
+
+    def test_engine_drift_update_no_injection_when_unset(self, tmp_path):
+        from se3.engine.sync_engine import SyncEngine, SpecDiff, DiffType
+        self._write_spec_lang(tmp_path, None)
+        spec_dir = tmp_path / "se3" / "specs" / "flow-engine"
+        spec_dir.mkdir(parents=True)
+        spec_path = spec_dir / "spec.md"
+        spec_path.write_text("<!-- spec-format: v1 -->\n# flow-engine Specification\n")
+
+        engine = SyncEngine(tmp_path)
+        engine._specs = {
+            "flow-engine": {"content": spec_path.read_text(), "path": str(spec_path)}
+        }
+        caller = _PromptCapturingCaller(response="")
+        diff = SpecDiff(
+            diff_type=DiffType.GAP,
+            spec_name="flow-engine",
+            description="desc",
+        )
+        engine._apply_spec_drift_update(diff, caller)
+        assert caller.captured_prompts
+        assert "authoritative" not in caller.captured_prompts[0]
+
+
+class TestUnconfirmedStepsNoLanguageInjection:
+    """analyze/implement/verify_spec are intentionally not language-injected.
+
+    Per the se3-config Language Configuration requirement, these steps let the
+    LLM choose its own language — language is forced only on human-facing and
+    spec-writing paths. This documents the G4 task-3 judgment as a regression
+    guard.
+    """
+
+    def test_no_injection_for_llm_choice_steps(self, tmp_path):
+        (tmp_path / "se3.yaml").write_text(
+            "language:\n  language: zh-CN\n  spec_language: en\n"
+        )
+        for step in ("analyze", "implement", "verify_spec"):
+            assert get_step_language_instruction(step, tmp_path) == "", step

@@ -1842,20 +1842,49 @@ def load_language_config(project_root: Optional[Path] = None) -> "LanguageConfig
     return LanguageConfig.load(project_root)
 
 
-def get_language_instruction(language: Optional[str], context: str = "") -> str:
+def get_language_instruction(
+    language: Optional[str],
+    context: str = "",
+    *,
+    for_spec: bool = False,
+) -> str:
     """Get a language instruction string for LLM prompts.
 
     Args:
         language: Language code (e.g., 'zh-CN', 'en'). None means no restriction.
         context: Optional context description for the instruction.
+        for_spec: When True, the instruction is tailored for a spec-writing
+            path: it states that the configured spec language is authoritative
+            for the written spec (prose + SHALL/MUST requirement statements).
+            Used by ``update_spec`` and the ``sync_*`` write paths.
 
     Returns:
         Prompt instruction string when language is set, empty string when None.
+        The contract that ``language is None``/empty returns ``""`` is
+        preserved regardless of ``for_spec``.
     """
     if not language:
         return ""
     ctx = f" in the {context} step" if context else ""
-    return f"\n\nIMPORTANT: You MUST respond in {language}{ctx}."
+    parts = [f"\n\nIMPORTANT: You MUST respond in {language}{ctx}."]
+    # Technical symbols must survive translation verbatim — a translated
+    # identifier / command / API name would break the spec or the code it
+    # documents. This clause applies to every language-restricted prompt.
+    parts.append(
+        "Preserve all technical symbols verbatim in their original form — do "
+        "NOT translate code identifiers, function/class names, command names, "
+        "API names, file paths, or literal config keys/values."
+    )
+    if for_spec:
+        # Spec-writing context: spec_language is the single authority for the
+        # written spec body. Make that explicit so the agent does not mirror
+        # the source code's incidental language.
+        parts.append(
+            f"This content is written into a spec file: the configured spec "
+            f"language ({language}) is authoritative. Write all prose and "
+            f"every SHALL/MUST requirement statement in {language}."
+        )
+    return " ".join(parts)
 
 
 def is_chinese_language(language: str) -> bool:

@@ -789,6 +789,11 @@ class SyncEngine:
             label_prefix = "modified"
             llm_label = "conflict"
 
+        # Inject the spec-language instruction (Way A edits + Way B rewrites
+        # both produce spec body text). No-op when spec_language is unset.
+        from .context_builder import get_spec_language_instruction
+        prompt += get_spec_language_instruction(self.project_root)
+
         if self._update_spec_via_llm(diff.spec_name, prompt, llm_caller, llm_label):
             return True, f"{label_prefix}: {diff.description}"
         return False, ""
