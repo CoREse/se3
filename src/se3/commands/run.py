@@ -421,6 +421,50 @@ def _cleanup_retry_decision_artifacts(call_path: Path) -> None:
             pass
 
 
+# Source markers + decision vocabulary for the failure-decision dual channel —
+# the selection-mode sibling of the discovery ``_DISCOVERY_SRC_*`` markers.
+_FAILURE_SRC_TERMINAL = "terminal"
+_FAILURE_SRC_WEB = "web"
+_FAILURE_SRC_CANCEL = "cancel"
+
+# Retry / Skip / Abort, in the 0 / 1 / 2 order the failure-handling call site
+# (and the historical prompt_user_choice menu) expects.
+_FAILURE_DECISIONS = ("retry", "skip", "abort")
+
+
+def _normalize_failure_decision(raw: Any) -> str:
+    """Coerce a raw decision payload to ``retry`` / ``skip`` / ``abort``.
+
+    Anything unrecognized (or missing) is taken as ``abort`` — the safe
+    default that never silently re-runs or skips work.
+    """
+    decision = str(raw if raw is not None else "abort").strip().lower()
+    return decision if decision in _FAILURE_DECISIONS else "abort"
+
+
+def _failure_decision_to_choice(decision: str) -> int:
+    """Map a (raw or normalized) decision to its 0 / 1 / 2 choice index."""
+    return _FAILURE_DECISIONS.index(_normalize_failure_decision(decision))
+
+
+def _read_failure_response_decision(call_file: Path) -> Optional[str]:
+    """Return the normalized decision from a retry_decision response, or ``None``.
+
+    Recognises both ``.response`` and ``.response.json`` siblings via
+    :func:`interaction_calls.read_response`; the answer may live under a
+    ``decision`` or ``response`` key. Returns ``None`` when no answer is on
+    disk yet.
+    """
+    from ..engine import interaction_calls
+
+    response = interaction_calls.read_response(call_file)
+    if response is None:
+        return None
+    return _normalize_failure_decision(
+        response.get("decision") or response.get("response")
+    )
+
+
 def _resolve_step_failure_action(
     project_root: Path,
     flow: FlowInstance,
@@ -429,82 +473,232 @@ def _resolve_step_failure_action(
     *,
     interactive: bool,
 ) -> Tuple[str, Any]:
-    """Decide how a FAILED step should be handled, branching on a TTY.
+    """Decide how a FAILED step should be handled — a *dual-channel* pause.
+
+    Regardless of whether the process owns a terminal, a
+    :data:`~se3.engine.interaction_calls.CALL_KIND_RETRY_DECISION` call file is
+    written under ``se3/calls/`` so a webui bystander sees the failure as a
+    Retry/Skip/Abort chip and can answer it. This is what makes the CLI and
+    the web console *equivalent* on the failure-decision path (it fixes both
+    "webui can't see the failure" and "webui can't retry").
 
     Interactive (TTY) and non-interactive (daemon-spawn / CI / pipe) failures
-    are two independent decision channels that must finish *mutually
-    exclusively* — once either side answers, the other must not be left with
-    a stale chip or stale call file. This function is one half of that
-    coupling; the post-prompt cleanup at the CLI failure-handling call site is
-    the other (it catches the ``webui answered while CLI was still typing``
-    window).
+    are two decision channels that must finish *mutually exclusively* — once
+    either side answers, the other must be left with no stale chip or call
+    file. This function and the race helper / post-prompt cleanup at the
+    failure-handling call site together enforce that.
 
-    On an interactive terminal the function first probes for an existing
-    webui answer at the deterministic ``retry_decision_{step_id}`` call file.
-    If a sibling response is already present (webui has already answered),
-    the decision is consumed and the call file plus both sibling response
-    variants are removed; the function returns
-    ``("decision", "retry"|"skip"|"abort")``. Otherwise it returns
-    ``("prompt", None)`` and the caller runs the CLI Retry/Skip/Abort prompt
-    unchanged (no new call file is written).
+    Returns one of:
 
-    Off a terminal a :data:`~se3.engine.interaction_calls.CALL_KIND_RETRY_DECISION`
-    call file is written under ``se3/calls/`` and:
-
-    * ``("pause", call_path)`` is returned when no response exists yet — the
-      caller pauses the flow so the decision can be made out-of-band; or
-    * ``("decision", "retry"|"skip"|"abort")`` is returned when a sibling
-      response file is already present (a resume / out-of-band answer); the
-      call file and both sibling responses are removed so a later failure of
-      the same step writes a fresh call.
+    * ``("decision", "retry"|"skip"|"abort")`` — a sibling response is already
+      on disk (a resume after a prior pause, or the webui answered before we
+      got here); the answer is consumed and the call file plus both sibling
+      response variants are removed. Returned on **both** channels.
+    * ``("race", call_path)`` — interactive, no answer yet: the caller runs the
+      *dual-channel race* (CLI Retry/Skip/Abort prompt vs. the webui response
+      poller) — whoever answers first wins.
+    * ``("pause", call_path)`` — non-interactive, no answer yet: the caller
+      pauses the flow so the decision can be made out-of-band and applied on
+      the next ``se3 run --resume`` (unchanged from the prior behavior).
     """
     from ..engine import interaction_calls
 
-    if interactive:
-        # Sibling-response probe: if the webui has already answered an
-        # earlier retry_decision call (typical when a daemon-spawned flow
-        # paused on FAILURE and the operator later resumes from a TTY), adopt
-        # that answer and clean up the artifacts. Crucially, when no answer is
-        # waiting we return ``("prompt", None)`` WITHOUT writing a new call —
-        # the interactive path stays free of any webui chip until the CLI
-        # actually answers.
-        existing_call = _retry_decision_call_path(
-            project_root, current_step.step_id
+    # Unconditionally (re)write the retry_decision call file — in BOTH the
+    # interactive and non-interactive cases — so the web console surfaces the
+    # failure as a chip. The ``call_id`` is derived from the step id, so a
+    # later failure of the same step reuses the same file rather than piling
+    # up duplicates.
+    call_path = Path(
+        interaction_calls.write_retry_decision_call(
+            project_root,
+            flow_id=flow.flow_id,
+            step_id=current_step.step_id,
+            step_type=current_step.step_type.value,
+            error=error_msg,
+            retry_count=current_step.retry_count,
         )
-        response = interaction_calls.read_response(existing_call)
-        if response is None:
-            return ("prompt", None)
-        decision = str(
-            response.get("decision") or response.get("response") or "abort"
-        ).strip().lower()
-        if decision not in ("retry", "skip", "abort"):
-            decision = "abort"
-        _cleanup_retry_decision_artifacts(existing_call)
+    )
+
+    # If an answer is already waiting on disk, consume it directly — identical
+    # on both channels. The deterministic call_id means a stale response would
+    # otherwise be silently re-applied on a later failure, so we clean up.
+    decision = _read_failure_response_decision(call_path)
+    if decision is not None:
+        _cleanup_retry_decision_artifacts(call_path)
         return ("decision", decision)
 
-    call_path = interaction_calls.write_retry_decision_call(
-        project_root,
-        flow_id=flow.flow_id,
-        step_id=current_step.step_id,
-        step_type=current_step.step_type.value,
-        error=error_msg,
-        retry_count=current_step.retry_count,
+    if interactive:
+        # TTY: race the CLI prompt against the webui response poller.
+        return ("race", call_path)
+
+    # Non-interactive: pause and let the decision be made out-of-band.
+    return ("pause", call_path)
+
+
+def _await_terminal_or_web_choice(
+    call_file: Optional[Path],
+    *,
+    message: str,
+    options: List[str],
+    poll_interval: float = 0.4,
+) -> Tuple[str, Optional[int]]:
+    """Race a CLI Retry/Skip/Abort choice against a webui retry_decision answer.
+
+    The selection-mode sibling of :func:`_await_terminal_or_web`. Returns a
+    ``(source, choice)`` tuple where *choice* is the 0-based option index:
+
+    * ``(_FAILURE_SRC_WEB, idx)``      — a web response was already on disk or
+      arrived first; the call file and both sibling responses are removed so
+      it can never be read twice.
+    * ``(_FAILURE_SRC_TERMINAL, idx)`` — the operator answered at the terminal;
+      any concurrent webui call/response is best-effort torn down so the chip
+      vanishes.
+    * ``(_FAILURE_SRC_CANCEL, None)``  — Ctrl+C / EOF with no web answer; the
+      caller treats this as abort.
+
+    With no ``call_file`` (or no TTY) there is no web channel to race, so it
+    degrades to a plain :func:`prompt_user_choice` — behavior equivalent to the
+    pre-dual-channel path.
+    """
+    # No web channel — terminal only (backward compatible / no call_file).
+    if call_file is None:
+        return (_FAILURE_SRC_TERMINAL, prompt_user_choice(message, options))
+
+    # Deterministic priority: an answer already waiting on disk wins outright.
+    early = _read_failure_response_decision(call_file)
+    if early is not None:
+        _cleanup_retry_decision_artifacts(call_file)
+        return (_FAILURE_SRC_WEB, _failure_decision_to_choice(early))
+
+    # No interactive terminal to race against (piped stdin / no TTY): block on
+    # the plain choice, then re-check the web file once so a response that
+    # landed during the read is still preferred. Either way clean up so the
+    # chip does not linger.
+    if not sys.stdin.isatty():
+        choice = prompt_user_choice(message, options)
+        late = _read_failure_response_decision(call_file)
+        if late is not None:
+            _cleanup_retry_decision_artifacts(call_file)
+            return (_FAILURE_SRC_WEB, _failure_decision_to_choice(late))
+        _cleanup_retry_decision_artifacts(call_file)
+        return (_FAILURE_SRC_TERMINAL, choice)
+
+    # Interactive TTY: race the prompt against a background web-response poller.
+    return _await_terminal_or_web_choice_interactive(
+        call_file,
+        message=message,
+        options=options,
+        poll_interval=poll_interval,
     )
-    response = interaction_calls.read_response(call_path)
-    if response is None:
-        return ("pause", call_path)
-    decision = str(
-        response.get("decision") or response.get("response") or "abort"
-    ).strip().lower()
-    if decision not in ("retry", "skip", "abort"):
-        decision = "abort"
-    # Consume the answered decision: the call file uses a deterministic
-    # ``call_id`` of ``retry_decision_{step_id}``, so a later failure of the
-    # same step would otherwise re-read this stale response and silently
-    # re-apply it. Remove the call file and both sibling response variants so
-    # the next failure writes a fresh call and pauses for a new human answer.
-    _cleanup_retry_decision_artifacts(Path(call_path))
-    return ("decision", decision)
+
+
+def _await_terminal_or_web_choice_interactive(
+    call_file: Path,
+    *,
+    message: str,
+    options: List[str],
+    poll_interval: float,
+) -> Tuple[str, Optional[int]]:
+    """TTY dual-wait for the failure decision: a choice prompt raced against a
+    web-response poller.
+
+    Mirrors :func:`_await_terminal_or_web_interactive` but reads a numeric
+    Retry/Skip/Abort choice instead of free text. A daemon thread polls
+    ``call_file`` for a sibling response and cancels the prompt the instant one
+    appears (re-scheduling ``app.exit`` until the app is actually running to
+    close the build-race window). Whichever side answers first wins; the loser
+    is torn down without consuming anything twice. Any unexpected failure
+    degrades to a plain :func:`prompt_user_choice`.
+    """
+    import asyncio
+    import threading
+
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.patch_stdout import patch_stdout
+
+    # Render the choice menu (same shape as prompt_user_choice).
+    print(f"\n{message}")
+    for i, opt in enumerate(options, 1):
+        print(f"  {i}. {opt}")
+
+    session = PromptSession(message="\nSelect (number): ")
+    web_sentinel = object()
+
+    async def _race() -> Tuple[str, Optional[int]]:
+        loop = asyncio.get_running_loop()
+        stop = threading.Event()
+        web_holder: Dict[str, Optional[str]] = {"value": None}
+
+        def _cancel_prompt() -> None:
+            app = session.app
+            if app is not None and app.is_running:
+                app.exit(result=web_sentinel)
+
+        def _poll() -> None:
+            while not stop.is_set():
+                decision = _read_failure_response_decision(call_file)
+                if decision is not None:
+                    web_holder["value"] = decision
+                    # The app may not be running yet on the first try; keep
+                    # scheduling the cancel until the prompt tears down.
+                    while not stop.is_set():
+                        loop.call_soon_threadsafe(_cancel_prompt)
+                        if stop.wait(poll_interval):
+                            break
+                    return
+                stop.wait(poll_interval)
+
+        poller = threading.Thread(target=_poll, daemon=True)
+        poller.start()
+        try:
+            with patch_stdout():
+                while True:
+                    result = await session.prompt_async()
+                    if result is web_sentinel:
+                        break
+                    try:
+                        idx = int(str(result).strip()) - 1
+                    except (ValueError, TypeError):
+                        idx = -1
+                    if 0 <= idx < len(options):
+                        return (_FAILURE_SRC_TERMINAL, idx)
+                    print(
+                        f"Please enter a number between 1 and {len(options)}"
+                    )
+        except (KeyboardInterrupt, EOFError):
+            pass
+        finally:
+            stop.set()
+
+        # Web won (sentinel) or the prompt was cancelled — a web answer may
+        # also have landed during teardown.
+        if web_holder["value"] is not None:
+            _cleanup_retry_decision_artifacts(call_file)
+            return (_FAILURE_SRC_WEB, _failure_decision_to_choice(web_holder["value"]))
+        return (_FAILURE_SRC_CANCEL, None)
+
+    try:
+        source, choice = asyncio.run(_race())
+    except KeyboardInterrupt:
+        return (_FAILURE_SRC_CANCEL, None)
+    except Exception:  # pragma: no cover - defensive: fall back to plain choice
+        logger.exception(
+            "Interactive failure dual-wait failed; using a plain choice prompt"
+        )
+        choice = prompt_user_choice(message, options)
+        late = _read_failure_response_decision(call_file)
+        if late is not None:
+            _cleanup_retry_decision_artifacts(call_file)
+            return (_FAILURE_SRC_WEB, _failure_decision_to_choice(late))
+        _cleanup_retry_decision_artifacts(call_file)
+        return (_FAILURE_SRC_TERMINAL, choice)
+
+    # The CLI committed to a choice — best-effort tear down any concurrent
+    # webui call/response so the chip disappears (mirrors the post-prompt
+    # cleanup the non-dual-channel path used to do).
+    if source == _FAILURE_SRC_TERMINAL:
+        _cleanup_retry_decision_artifacts(call_file)
+    return (source, choice)
 
 
 def _drain_pending_interjections(
@@ -2009,19 +2203,32 @@ def _run_flow_impl(
                 display_error(
                     f"Max retries ({max_retries}) reached for step {current_step.step_type.value}"
                 )
-                # Auto-fail: exit without asking user
+                # Auto-fail: exit without asking user (no FLOW_PAUSED, no
+                # decision chip, no prompt — unchanged from the prior behavior).
                 flow.status = FlowStatus.FAILED
                 persistence.save_flow(flow)
                 return 1
 
-            # Branch on whether there is an interactive terminal. With a TTY
-            # the operator answers a Retry/Skip/Abort prompt directly; without
-            # one, the decision is externalised as a retry_decision call file
-            # so the web console (or any responder) can answer it out-of-band.
+            # Dual-channel failure pause. _resolve_step_failure_action
+            # unconditionally writes the retry_decision call file (so the web
+            # console shows a Retry/Skip/Abort chip), then routes:
+            #   * "decision" — an answer is already on disk (resume / webui);
+            #   * "race"     — interactive: race the CLI prompt vs. the webui
+            #                  response (whoever answers first wins);
+            #   * "pause"    — non-interactive: pause for an out-of-band answer.
             action, info = _resolve_step_failure_action(
                 project_root, flow, current_step, error_msg,
                 interactive=_stdin_is_interactive(),
             )
+
+            # The step has failed with retries remaining — surface a paused
+            # state to webui/daemon regardless of channel, so a bystander sees
+            # the failure (and the decision chip) rather than nothing.
+            emitter.emit(new_event(
+                EventType.FLOW_PAUSED, flow_id=flow.flow_id,
+                step_id=current_step.step_id, step_type=step_type_value,
+            ))
+
             if action == "pause":
                 get_console().print(
                     "[yellow]Step failed with no interactive terminal — wrote "
@@ -2033,23 +2240,21 @@ def _run_flow_impl(
                 persistence.save_flow(flow)
                 return 0
             if action == "decision":
-                choice = {"retry": 0, "skip": 1, "abort": 2}[info]
+                choice = _failure_decision_to_choice(info)
             else:
-                # Interactive terminal — ask the operator to retry/skip/abort.
+                # Interactive terminal ("race"): race the CLI Retry/Skip/Abort
+                # prompt against the webui retry_decision response. Whoever
+                # answers first wins; the losing side is torn down by the race
+                # helper (poller cancelled + artifacts cleaned), so the chip
+                # vanishes and the answer is never consumed twice.
                 options = ["Retry this step", "Skip to next step", "Abort flow"]
-                choice = prompt_user_choice("What would you like to do?", options)
-                # CLI just answered — wipe any retry_decision artifacts left
-                # behind so the webui chip for this step disappears too. This
-                # closes the ``webui-answered-while-CLI-was-typing`` race that
-                # the interactive sibling-response probe at the top of
-                # _resolve_step_failure_action cannot reach (the probe runs
-                # *before* the prompt; this cleanup runs *after*). The unlink
-                # is best-effort and identical for all three choices since the
-                # goal is solely to make the chip vanish, independent of which
-                # decision the CLI picked.
-                _cleanup_retry_decision_artifacts(
-                    _retry_decision_call_path(project_root, current_step.step_id)
+                _source, choice = _await_terminal_or_web_choice(
+                    info, message="What would you like to do?", options=options,
                 )
+                if choice is None:
+                    # Ctrl+C / EOF with no answer — treat as abort, matching the
+                    # historical prompt_user_choice non-interactive default.
+                    choice = len(options) - 1
 
             if choice == 0:
                 # Reset step status and retry from where it left off
