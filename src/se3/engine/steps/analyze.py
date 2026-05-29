@@ -25,6 +25,7 @@ from ..models import FlowInstance, Step, StepStatus, StepType, get_default_step_
 from ..project_context import ProjectContextCollector, list_spec_names
 from ..prompt_markers import inject_boundary
 from ..spec_index import load_or_build
+from ..spec_role import SPEC_ROLE_DEFINITION
 from ..spec_loader import load_for_step
 from ..utils.json_parser import parse_json_response
 from ...config import apply_step_config, insert_confirmation_steps
@@ -144,6 +145,13 @@ def analyze_handler(step: Step, flow: FlowInstance) -> StepStatus:
     runtime_env = get_runtime_environment_injection("analyze", project_root)
     if runtime_env:
         prompt += runtime_env
+
+    # Reinforce the code-first / spec-assistant role using the single
+    # authoritative wording from ``engine.spec_role``: the specs selected here
+    # are a read-only reference to the code's current state, not architectural
+    # contracts the task must be aligned to, and analyze must not propose
+    # creating or rewriting spec files.
+    prompt += "\n\n" + SPEC_ROLE_DEFINITION
 
     logger.info(f"Analyzing task: {task_description[:60]}...")
 

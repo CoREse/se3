@@ -8,7 +8,7 @@
 
 ### Requirement: Project Identity
 - 项目名称: SE3 Framework
-- 简述: SE 3.0 规范驱动开发框架 —— 纯 CLI 流程引擎，通过 spec 驱动 AI agent 的软件工程工作流
+- 简述: SE 3.0 code-first 软件工程流程引擎 —— 纯 CLI 流程引擎；代码具有第一性，spec 是代码现状的文档化快照（spec-assistant），由 `se3 sync` 从代码刷新
 - 主要语言/框架: Python 3.8+, Typer (CLI), PyYAML, Rich, prompt-toolkit
 
 ### Requirement: Directory Structure

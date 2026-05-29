@@ -39,6 +39,9 @@ PLAN_PROMPT_HEADER = """You are an expert software engineering assistant. Create
 {scope}
 
 ## Relevant Specifications
+The specifications below are a read-only reference to how the code currently
+behaves, not contracts the plan must be aligned to. `se3` is code-first: the
+code is authoritative and specs are its documented snapshot.
 {spec_content}
 
 {revision_section}
